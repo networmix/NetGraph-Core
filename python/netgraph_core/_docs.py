@@ -16,17 +16,33 @@ import numpy as np
 
 
 class EdgeSelect(Enum):
+    """Edge selection policies for shortest-path traversal.
+
+    Mirrors netgraph.core.types.EdgeSelect (C++ enum).
+    """
+
     ALL_MIN_COST = 1
     SINGLE_MIN_COST = 2
     ALL_MIN_COST_WITH_CAP_REMAINING = 3
+    ALL_ANY_COST_WITH_CAP_REMAINING = 4
+    SINGLE_MIN_COST_WITH_CAP_REMAINING = 5
+    SINGLE_MIN_COST_WITH_CAP_REMAINING_LOAD_FACTORED = 6
+    USER_DEFINED = 99
 
 
 class FlowPlacement(Enum):
+    """How to place flow across equal-cost predecessors during augmentation."""
+
     PROPORTIONAL = 1
     EQUAL_BALANCED = 2
 
 
 class PredDAG:
+    """Compact predecessor DAG representation.
+
+    Arrays are int32; offsets has length N+1.
+    """
+
     parent_offsets: np.ndarray
     parents: np.ndarray
     via_edges: np.ndarray
@@ -52,6 +68,26 @@ def spf(
 ):
     """Shortest paths wrapper.
 
+    Returns: (dist: float64[N], pred: PredDAG)
+    """
+    ...
+
+
+def spf_residual(
+    g: "StrictMultiDiGraph",
+    src: int,
+    dst: Optional[int] = None,
+    *,
+    edge_select: EdgeSelect = EdgeSelect.ALL_MIN_COST_WITH_CAP_REMAINING,
+    multipath: bool = True,
+    eps: float = 1e-12,
+    residual: np.ndarray | list[float] = ...,
+    node_mask: Optional[np.ndarray] = None,
+    edge_mask: Optional[np.ndarray] = None,
+):
+    """Residual-aware shortest paths wrapper.
+
+    Uses per-edge residual capacities to filter/select edges.
     Returns: (dist: float64[N], pred: PredDAG)
     """
     ...
@@ -83,3 +119,42 @@ def calc_max_flow(
     node_mask: Optional[np.ndarray] = None,
     edge_mask: Optional[np.ndarray] = None,
 ): ...
+
+
+@dataclass(frozen=True)
+class CostBucket:
+    cost: float
+    share: float
+
+
+@dataclass(frozen=True)
+class CostDistribution:
+    buckets: list[CostBucket]
+
+
+@dataclass(frozen=True)
+class MinCut:
+    edges: list[int]
+
+
+@dataclass(frozen=True)
+class FlowSummary:
+    total_flow: float
+    min_cut: MinCut
+    cost_distribution: CostDistribution
+    edge_flows: list[float]
+
+
+def batch_max_flow(
+    g: "StrictMultiDiGraph",
+    pairs: np.ndarray,
+    *,
+    flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
+    shortest_path: bool = False,
+    eps: float = 1e-10,
+    with_edge_flows: bool = False,
+    threads: Optional[int] = None,
+    seed: Optional[int] = None,
+    node_masks: Optional[list[np.ndarray]] = None,
+    edge_masks: Optional[list[np.ndarray]] = None,
+) -> list[FlowSummary]: ...

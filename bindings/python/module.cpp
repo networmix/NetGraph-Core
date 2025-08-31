@@ -31,7 +31,11 @@ PYBIND11_MODULE(_netgraph_core, m) {
   py::enum_<EdgeSelect>(m, "EdgeSelect")
       .value("ALL_MIN_COST", EdgeSelect::AllMinCost)
       .value("SINGLE_MIN_COST", EdgeSelect::SingleMinCost)
-      .value("ALL_MIN_COST_WITH_CAP_REMAINING", EdgeSelect::AllMinCostWithCapRemaining);
+      .value("ALL_MIN_COST_WITH_CAP_REMAINING", EdgeSelect::AllMinCostWithCapRemaining)
+      .value("ALL_ANY_COST_WITH_CAP_REMAINING", EdgeSelect::AllAnyCostWithCapRemaining)
+      .value("SINGLE_MIN_COST_WITH_CAP_REMAINING", EdgeSelect::SingleMinCostWithCapRemaining)
+      .value("SINGLE_MIN_COST_WITH_CAP_REMAINING_LOAD_FACTORED", EdgeSelect::SingleMinCostWithCapRemainingLoadFactored)
+      .value("USER_DEFINED", EdgeSelect::UserDefined);
 
   py::enum_<FlowPlacement>(m, "FlowPlacement")
       .value("PROPORTIONAL", FlowPlacement::Proportional)
@@ -176,19 +180,6 @@ PYBIND11_MODULE(_netgraph_core, m) {
           return py::make_tuple(std::move(dist_arr), res.second);
         }, py::arg("g"), py::arg("src"), py::arg("dst") = py::none(), py::kw_only(), py::arg("edge_select") = EdgeSelect::AllMinCost, py::arg("multipath") = true, py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none(), py::arg("eps") = 1e-10);
 
-  py::class_<Path>(m, "Path")
-      .def_property_readonly("nodes", [](const Path& p){
-        py::array_t<std::int32_t> arr(p.nodes.size());
-        std::memcpy(arr.mutable_data(), p.nodes.data(), p.nodes.size()*sizeof(std::int32_t));
-        return arr;
-      })
-      .def_property_readonly("edges", [](const Path& p){
-        py::array_t<std::int32_t> arr(p.edges.size());
-        std::memcpy(arr.mutable_data(), p.edges.data(), p.edges.size()*sizeof(std::int32_t));
-        return arr;
-      })
-      .def_readonly("cost", &Path::cost);
-
   m.def("ksp",
         [](const StrictMultiDiGraph& g, std::int32_t src, std::int32_t dst,
            int k, py::object max_cost_factor, bool unique, py::object node_mask, py::object edge_mask, double eps) {
@@ -209,9 +200,17 @@ PYBIND11_MODULE(_netgraph_core, m) {
             if (static_cast<std::size_t>(buf.shape[0]) != static_cast<std::size_t>(g.num_edges())) throw py::type_error("edge_mask length must equal num_edges");
           }
           py::gil_scoped_release release;
-          auto paths = k_shortest_paths(g, src, dst, k, mcf, unique, eps);
+          auto items = k_shortest_paths(g, src, dst, k, mcf, unique, eps);
           py::gil_scoped_acquire acquire;
-          return paths;
+          // Convert to list of (dist ndarray, PredDAG)
+          py::list out;
+          for (auto& pr : items) {
+            auto& dist = pr.first;
+            py::array_t<double> dist_arr(dist.size());
+            std::memcpy(dist_arr.mutable_data(), dist.data(), dist.size()*sizeof(double));
+            out.append(py::make_tuple(std::move(dist_arr), pr.second));
+          }
+          return out;
         }, py::arg("g"), py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("k"), py::arg("max_cost_factor") = py::none(), py::arg("unique") = true, py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none(), py::arg("eps") = 1e-10);
 
   py::class_<MinCut>(m, "MinCut")
@@ -255,6 +254,49 @@ PYBIND11_MODULE(_netgraph_core, m) {
           py::gil_scoped_acquire acquire;
           return res;
         }, py::arg("g"), py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false, py::arg("eps") = 1e-10, py::arg("with_edge_flows") = false, py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none());
+
+  // Residual-aware SPF (exposes selection variants requiring capacity/flow)
+  m.def("spf_residual",
+        [](const StrictMultiDiGraph& g, std::int32_t src, py::object dst,
+           EdgeSelect policy, bool multipath, double eps,
+           py::array residual, py::object node_mask, py::object edge_mask) {
+          std::optional<std::int32_t> dst_opt;
+          if (!dst.is_none()) dst_opt = py::cast<std::int32_t>(dst);
+          // residual must be 1-D float64 of length num_edges
+          if (!(py::isinstance<py::array_t<double>>(residual))) {
+            throw py::type_error("residual must be a numpy float64 array");
+          }
+          if (!(residual.flags() & py::array::c_style)) {
+            throw py::type_error("residual must be C-contiguous (np.ascontiguousarray)");
+          }
+          auto rbuf = residual.request();
+          if (rbuf.ndim != 1 || static_cast<std::size_t>(rbuf.shape[0]) != static_cast<std::size_t>(g.num_edges())) {
+            throw py::type_error("residual length must equal num_edges");
+          }
+          std::vector<double> residual_vec(static_cast<std::size_t>(rbuf.shape[0]));
+          std::memcpy(residual_vec.data(), rbuf.ptr, residual_vec.size()*sizeof(double));
+          const bool* node_ptr = nullptr; const bool* edge_ptr = nullptr; py::array node_arr, edge_arr;
+          if (!node_mask.is_none()) {
+            node_arr = py::cast<py::array>(node_mask);
+            auto b = node_arr.request();
+            if (b.ndim != 1 || b.format != py::format_descriptor<bool>::format() || static_cast<std::size_t>(b.shape[0]) != static_cast<std::size_t>(g.num_nodes())) {
+              throw py::type_error("node_mask must be 1-D bool and length=num_nodes");
+            }
+            node_ptr = static_cast<const bool*>(b.ptr);
+          }
+          if (!edge_mask.is_none()) {
+            edge_arr = py::cast<py::array>(edge_mask);
+            auto b = edge_arr.request();
+            if (b.ndim != 1 || b.format != py::format_descriptor<bool>::format() || static_cast<std::size_t>(b.shape[0]) != static_cast<std::size_t>(g.num_edges())) {
+              throw py::type_error("edge_mask must be 1-D bool and length=num_edges");
+            }
+            edge_ptr = static_cast<const bool*>(b.ptr);
+          }
+          py::gil_scoped_release rel;
+          auto res = shortest_paths_with_residual(g, src, dst_opt, policy, multipath, eps, residual_vec, node_ptr, edge_ptr);
+          py::gil_scoped_acquire acq;
+          return res;
+        }, py::arg("g"), py::arg("src"), py::arg("dst") = py::none(), py::arg("edge_select") = EdgeSelect::AllMinCostWithCapRemaining, py::arg("multipath") = true, py::arg("eps") = 1e-12, py::arg("residual"), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none());
 
   m.def("max_flow",
         [](const StrictMultiDiGraph& g, std::int32_t src, std::int32_t dst,

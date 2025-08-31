@@ -13,7 +13,11 @@ using Cap    = double;
 enum class EdgeSelect {
   AllMinCost = 1,
   SingleMinCost = 2,
-  AllMinCostWithCapRemaining = 3
+  AllMinCostWithCapRemaining = 3,
+  AllAnyCostWithCapRemaining = 4,
+  SingleMinCostWithCapRemaining = 5,
+  SingleMinCostWithCapRemainingLoadFactored = 6,
+  UserDefined = 99
 };
 
 enum class FlowPlacement {

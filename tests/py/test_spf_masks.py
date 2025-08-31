@@ -3,18 +3,7 @@ import numpy as np
 import netgraph_core as ngc
 
 
-def build_graph(num_nodes, edges):
-    src = np.array([e[0] for e in edges], dtype=np.int32)
-    dst = np.array([e[1] for e in edges], dtype=np.int32)
-    cost = np.array([float(e[2]) for e in edges], dtype=np.float64)
-    cap = np.array([float(e[3]) for e in edges], dtype=np.float64)
-    link_ids = np.array([int(e[4]) for e in edges], dtype=np.int64)
-    return ngc.StrictMultiDiGraph.from_arrays(
-        num_nodes, src, dst, cap, cost, link_ids, add_reverse=False
-    )
-
-
-def test_node_mask_blocks_path():
+def test_node_mask_blocks_path(build_graph):
     # A=0 -> B=1 -> C=2, all cost=1
     edges = [
         (0, 1, 1, 1, 0),
@@ -38,7 +27,7 @@ def test_node_mask_blocks_path():
     assert off[2] == off[3]
 
 
-def test_edge_mask_filters_parallel_edges():
+def test_edge_mask_filters_parallel_edges(build_graph):
     # A=0 -> B=1 with two parallel edges of different costs; only cheap edge should be allowed
     edges = [
         (0, 1, 1, 1, 10),
@@ -64,3 +53,9 @@ def test_edge_mask_filters_parallel_edges():
     # Map via edge id -> link id and check it's the first edge (link_id 10)
     e = int(via[start])
     assert int(g.link_id_of(e)) == 10
+
+
+"""SPF masks.
+
+Behavior of node_mask and edge_mask in shortest-path routines.
+"""

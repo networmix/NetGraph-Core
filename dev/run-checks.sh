@@ -108,6 +108,9 @@ echo ""
 
 # Run Python tests (with coverage if available)
 echo "🧪 Running Python tests..."
+# Ensure the extension is built for the active Python and importable
+echo "🔧 Installing project in editable mode for current Python..."
+"$PYTHON" -m pip install -e . >/dev/null
 if "$PYTHON" -c "import pytest_cov" >/dev/null 2>&1; then
     "$PYTHON" -m pytest --cov=netgraph_core --cov-report=term-missing
 else

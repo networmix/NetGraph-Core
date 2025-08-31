@@ -1,17 +1,21 @@
+"""Graph structure tests.
+
+Validate StrictMultiDiGraph compaction (deterministic ordering and grouping)
+and CSR/reverse CSR integrity at a basic level.
+"""
+
 import numpy as np
 
-import netgraph_core as ngc
 
-
-def test_compaction_sorts_and_groups_parallel_edges():
+def test_compaction_sorts_and_groups_parallel_edges(build_graph):
     # Nodes: 0->1 with mixed order edges; 0->2; expect CSR row for 0 sorted by col and grouped
-    src = np.array([0, 0, 0, 1], dtype=np.int32)
-    dst = np.array([2, 1, 1, 2], dtype=np.int32)
-    cap = np.array([1.0, 1.0, 2.0, 1.0], dtype=np.float64)
-    cost = np.array([2.0, 1.0, 1.5, 1.0], dtype=np.float64)
-    g = ngc.StrictMultiDiGraph.from_arrays(
-        3, src, dst, cap, cost, link_ids=None, add_reverse=False
-    )
+    edges = [
+        (0, 2, 2.0, 1.0),
+        (0, 1, 1.0, 1.0),
+        (0, 1, 1.5, 2.0),
+        (1, 2, 1.0, 1.0),
+    ]
+    g = build_graph(3, edges)
     row = np.asarray(g.row_offsets_view())
     col = np.asarray(g.col_indices_view())
     # Row for node 0 spans [row[0], row[1]) and should be non-decreasing by col

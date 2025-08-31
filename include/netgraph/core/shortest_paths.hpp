@@ -31,4 +31,16 @@ shortest_paths(const StrictMultiDiGraph& g, NodeId src,
                const bool* node_mask = nullptr,
                const bool* edge_mask = nullptr);
 
+// Residual-aware shortest paths: like shortest_paths but considers per-edge
+// residual capacities (residual[e] = remaining capacity). Some EdgeSelect
+// policies require residual/capacity/load (e.g., load-factored). When residual
+// is provided, edges with residual < MIN_CAP are excluded.
+std::pair<std::vector<double>, PredDAG>
+shortest_paths_with_residual(const StrictMultiDiGraph& g, NodeId src,
+                             std::optional<NodeId> dst,
+                             EdgeSelect policy, bool multipath, double eps,
+                             const std::vector<double>& residual,
+                             const bool* node_mask = nullptr,
+                             const bool* edge_mask = nullptr);
+
 } // namespace netgraph::core

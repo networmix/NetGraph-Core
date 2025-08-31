@@ -25,78 +25,7 @@ struct DinicEdge {
   std::int32_t group; // index into groups (-1 if none)
 };
 
-// Capacity-aware SPF using residual capacities (if provided). Returns distances and PredDAG.
-static std::pair<std::vector<double>, PredDAG>
-spf_with_residual(const StrictMultiDiGraph& g, NodeId src, std::optional<NodeId> dst,
-                  bool multipath, double eps, const std::vector<double>* residual,
-                  const bool* node_mask, const bool* edge_mask) {
-  const auto N = g.num_nodes();
-  const auto row = g.row_offsets_view();
-  const auto col = g.col_indices_view();
-  const auto aei = g.adj_edge_index_view();
-  const auto cost = g.cost_view();
-  std::vector<double> dist(static_cast<std::size_t>(N), std::numeric_limits<double>::infinity());
-  if (src >= 0 && src < N && (!node_mask || node_mask[static_cast<std::size_t>(src)])) {
-    dist[static_cast<std::size_t>(src)] = 0.0;
-  }
-  std::vector<std::vector<std::pair<NodeId, std::vector<EdgeId>>>> pred_lists(static_cast<std::size_t>(N));
-  pred_lists[static_cast<std::size_t>(src)] = {};
-  using QItem = std::pair<double, NodeId>;
-  auto cmp = [](const QItem& a, const QItem& b) { return a.first > b.first; };
-  std::priority_queue<QItem, std::vector<QItem>, decltype(cmp)> pq(cmp);
-  pq.emplace(0.0, src);
-  double best_dst_cost = std::numeric_limits<double>::infinity();
-  bool have_best_dst = false;
-  const bool early_exit = dst.has_value();
-  const NodeId dst_node = dst.value_or(-1);
-  auto nearly_equal = [&](double a, double b){ return std::abs(a-b) <= eps; };
-  while (!pq.empty()) {
-    auto [d_u, u] = pq.top(); pq.pop();
-    if (d_u > dist[static_cast<std::size_t>(u)] + eps) continue;
-    if (early_exit && u == dst_node && !have_best_dst) { best_dst_cost = d_u; have_best_dst = true; }
-    if (early_exit && u == dst_node) { if (pq.empty() || pq.top().first > best_dst_cost + eps) break; else continue; }
-    auto start = static_cast<std::size_t>(row[static_cast<std::size_t>(u)]);
-    auto end   = static_cast<std::size_t>(row[static_cast<std::size_t>(u)+1]);
-    std::size_t i = start;
-    while (i < end) {
-      NodeId v = col[i];
-      if (node_mask && !node_mask[static_cast<std::size_t>(v)]) {
-        // skip all u->v entries
-        std::size_t j_skip = i;
-        while (j_skip < end && col[j_skip] == v) ++j_skip;
-        i = j_skip;
-        continue;
-      }
-      double min_edge_cost = std::numeric_limits<double>::infinity();
-      std::vector<EdgeId> selected_edges;
-      std::size_t j = i;
-      for (; j < end && col[j] == v; ++j) {
-        auto e = static_cast<std::size_t>(aei[j]);
-        if (edge_mask && !edge_mask[e]) continue;
-        double rem = residual ? (*residual)[e] : std::numeric_limits<double>::infinity();
-        if (rem < kMinCap) continue;
-        double ecost = cost[e];
-        if (ecost + eps < min_edge_cost) { min_edge_cost = ecost; selected_edges.clear(); selected_edges.push_back(static_cast<EdgeId>(aei[j])); }
-        else if (nearly_equal(ecost, min_edge_cost) && multipath) { selected_edges.push_back(static_cast<EdgeId>(aei[j])); }
-      }
-      if (!selected_edges.empty()) {
-        double new_cost = d_u + min_edge_cost;
-        auto v_idx = static_cast<std::size_t>(v);
-        if (new_cost + eps < dist[v_idx]) { dist[v_idx] = new_cost; pred_lists[v_idx].clear(); pred_lists[v_idx].push_back({u, std::move(selected_edges)}); pq.emplace(new_cost, v); }
-        else if (multipath && nearly_equal(new_cost, dist[v_idx])) { pred_lists[v_idx].push_back({u, std::move(selected_edges)}); }
-      }
-      i = j;
-    }
-    if (have_best_dst) { if (pq.empty() || pq.top().first > best_dst_cost + eps) break; }
-  }
-  PredDAG dag; dag.parent_offsets.assign(static_cast<std::size_t>(N+1), 0);
-  for (std::int32_t v=0; v<N; ++v) { std::size_t c=0; for (auto const& pe: pred_lists[static_cast<std::size_t>(v)]) c += pe.second.size(); dag.parent_offsets[static_cast<std::size_t>(v+1)] = static_cast<std::int32_t>(c); }
-  for (std::size_t k=1; k<dag.parent_offsets.size(); ++k) dag.parent_offsets[k] += dag.parent_offsets[k-1];
-  dag.parents.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
-  dag.via_edges.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
-  for (std::int32_t v=0; v<N; ++v) { auto base = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v)]); std::size_t k=0; for (auto const& pe: pred_lists[static_cast<std::size_t>(v)]) { for (auto e: pe.second) { dag.parents[base+k] = pe.first; dag.via_edges[base+k] = e; ++k; } } }
-  return {std::move(dist), std::move(dag)};
-}
+// Use public shortest_paths_with_residual from shortest_paths.cpp
 
 struct FlowWorkspace {
   std::vector<std::vector<DinicEdge>> adj; // reversed residual graph for proportional mode
@@ -311,7 +240,7 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId s, NodeId t,
   std::unordered_map<double,double> cost_dist;
 
   while (true) {
-    auto [dist, dag] = spf_with_residual(g, s, t, /*multipath*/ true, /*eps*/ 1e-12, &residual, node_mask, edge_mask);
+    auto [dist, dag] = shortest_paths_with_residual(g, s, t, EdgeSelect::AllMinCostWithCapRemaining, /*multipath*/ true, /*eps*/ 1e-12, residual, node_mask, edge_mask);
     if (static_cast<std::size_t>(t) >= dag.parent_offsets.size()-1 || dag.parent_offsets[static_cast<std::size_t>(t)] == dag.parent_offsets[static_cast<std::size_t>(t)+1]) {
       break; // no path
     }

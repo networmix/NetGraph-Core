@@ -1,23 +1,12 @@
+"""SPF basics.
+
+Core shortest-path semantics: distances, predecessor DAG equivalence, output
+shapes/offsets, and destination early-exit behavior.
+"""
+
 import numpy as np
 
 import netgraph_core as ngc
-
-
-def build_graph(num_nodes, edges):
-    """Build StrictMultiDiGraph from an iterable of (src, dst, cost, cap, link_id).
-
-    - src, dst: int32
-    - cost, cap: float64
-    - link_id: int64 (used to match NetGraph expectations)
-    """
-    src = np.array([e[0] for e in edges], dtype=np.int32)
-    dst = np.array([e[1] for e in edges], dtype=np.int32)
-    cost = np.array([float(e[2]) for e in edges], dtype=np.float64)
-    cap = np.array([float(e[3]) for e in edges], dtype=np.float64)
-    link_ids = np.array([int(e[4]) for e in edges], dtype=np.int64)
-    return ngc.StrictMultiDiGraph.from_arrays(
-        num_nodes, src, dst, cap, cost, link_ids, add_reverse=False
-    )
 
 
 def dag_to_pred_map(g: ngc.StrictMultiDiGraph, dag: ngc.PredDAG):
@@ -54,44 +43,23 @@ def run_spf(
     return dist, dag_to_pred_map(g, dag)
 
 
-def test_spf_line1_all_min_cost():
-    # Nodes: A=0, B=1, C=2
-    edges = [
-        (0, 1, 1, 5, 0),  # A->B key 0
-        (1, 2, 1, 1, 2),  # B->C key 2
-        (1, 2, 1, 3, 4),  # B->C key 4
-        (1, 2, 2, 7, 6),  # B->C key 6
-    ]
-    g = build_graph(3, edges)
+def test_spf_line1_all_min_cost(line1_graph):
+    g = line1_graph
     dist, pred = run_spf(g, 0)
     assert np.allclose(dist, np.array([0.0, 1.0, 2.0]))
     assert pred == {0: {}, 1: {0: [0]}, 2: {1: [2, 4]}}
 
 
-def test_spf_square1_all_min_cost():
-    # A=0, B=1, C=2, D=3
-    edges = [
-        (0, 1, 1, 1, 0),  # A->B key 0
-        (1, 2, 1, 1, 1),  # B->C key 1
-        (0, 3, 2, 2, 2),  # A->D key 2
-        (3, 2, 2, 2, 3),  # D->C key 3
-    ]
-    g = build_graph(4, edges)
+def test_spf_square1_all_min_cost(square1_graph):
+    g = square1_graph
     dist, pred = run_spf(g, 0)
     expected_costs = np.array([0.0, 1.0, 2.0, 2.0])
     assert np.allclose(dist, expected_costs)
     assert pred == {0: {}, 1: {0: [0]}, 3: {0: [2]}, 2: {1: [1]}}
 
 
-def test_spf_square2_all_min_cost():
-    # A=0, B=1, C=2, D=3
-    edges = [
-        (0, 1, 1, 1, 0),  # A->B key 0
-        (1, 2, 1, 1, 1),  # B->C key 1
-        (0, 3, 1, 2, 2),  # A->D key 2
-        (3, 2, 1, 2, 3),  # D->C key 3
-    ]
-    g = build_graph(4, edges)
+def test_spf_square2_all_min_cost(square2_graph):
+    g = square2_graph
     dist, pred = run_spf(g, 0)
     assert np.isclose(dist[0], 0.0)
     assert np.isclose(dist[1], 1.0)
@@ -100,23 +68,8 @@ def test_spf_square2_all_min_cost():
     assert pred == {0: {}, 1: {0: [0]}, 3: {0: [2]}, 2: {1: [1], 3: [3]}}
 
 
-def test_spf_graph3_all_min_cost_and_single():
-    # A=0, B=1, C=2, D=3, E=4, F=5
-    edges = [
-        (0, 1, 1, 2, 0),  # A->B cost 1 (parallels)
-        (0, 1, 1, 4, 1),
-        (0, 1, 1, 6, 2),
-        (1, 2, 1, 1, 3),  # B->C parallels
-        (1, 2, 1, 2, 4),
-        (1, 2, 1, 3, 5),
-        (2, 3, 2, 3, 6),  # C->D cost 2
-        (0, 4, 1, 5, 7),  # A->E cost 1
-        (4, 2, 1, 4, 8),  # E->C cost 1
-        (0, 3, 4, 2, 9),  # A->D cost 4
-        (2, 5, 1, 1, 10),  # C->F cost 1
-        (5, 3, 1, 2, 11),  # F->D cost 1
-    ]
-    g = build_graph(6, edges)
+def test_spf_graph3_all_min_cost_and_single(graph3):
+    g = graph3
     # ALL_MIN_COST, multipath=True
     dist, pred = run_spf(g, 0, edge_select=ngc.EdgeSelect.ALL_MIN_COST, multipath=True)
     assert np.isclose(dist[0], 0.0)
@@ -148,13 +101,8 @@ def test_spf_graph3_all_min_cost_and_single():
     }
 
 
-def test_spf_capacity_filter_all_min_cost_with_cap_remaining():
-    # A=0, B=1
-    edges = [
-        (0, 1, 1, 0.0, 0),  # insufficient capacity
-        (0, 1, 1, 1.0, 1),  # sufficient
-    ]
-    g = build_graph(2, edges)
+def test_spf_capacity_filter_all_min_cost_with_cap_remaining(build_graph):
+    g = build_graph(2, [(0, 1, 1, 0.0, 0), (0, 1, 1, 1.0, 1)])
     dist, pred = run_spf(
         g, 0, edge_select=ngc.EdgeSelect.ALL_MIN_COST_WITH_CAP_REMAINING
     )
@@ -162,16 +110,30 @@ def test_spf_capacity_filter_all_min_cost_with_cap_remaining():
     assert pred == {0: {}, 1: {0: [1]}}
 
 
-def test_spf_with_dst_early_exit_equivalence():
-    # Use square2 and check dst early-exit produces same result
-    edges = [
-        (0, 1, 1, 1, 0),  # A->B key 0
-        (1, 2, 1, 1, 1),  # B->C key 1
-        (0, 3, 1, 2, 2),  # A->D key 2
-        (3, 2, 1, 2, 3),  # D->C key 3
-    ]
-    g = build_graph(4, edges)
+def test_spf_with_dst_early_exit_equivalence(square2_graph):
+    g = square2_graph
     dist1, pred1 = run_spf(g, 0)
     dist2, pred2 = run_spf(g, 0, dst=2)
     assert np.allclose(dist1, dist2)
     assert pred1 == pred2
+
+
+def test_spf_pred_dag_shapes_and_monotonic_offsets(square2_graph):
+    g = square2_graph
+    dist, dag = ngc.spf(
+        g, 0, 2, edge_select=ngc.EdgeSelect.ALL_MIN_COST, multipath=True, eps=1e-12
+    )
+    # Distances shape
+    assert isinstance(dist, np.ndarray)
+    assert dist.shape == (g.num_nodes(),)
+    # PredDAG arrays
+    off = np.asarray(dag.parent_offsets)
+    par = np.asarray(dag.parents)
+    via = np.asarray(dag.via_edges)
+    # Offsets length and monotonicity
+    assert off.shape == (g.num_nodes() + 1,)
+    assert np.all(off[:-1] <= off[1:])
+    # Parents/via sizes match total entries
+    total = int(off[-1])
+    assert par.shape == (total,)
+    assert via.shape == (total,)

@@ -3,22 +3,11 @@ import numpy as np
 import netgraph_core as ngc
 
 
-def build_graph(num_nodes, edges):
-    src = np.array([e[0] for e in edges], dtype=np.int32)
-    dst = np.array([e[1] for e in edges], dtype=np.int32)
-    cost = np.array([float(e[2]) for e in edges], dtype=np.float64)
-    cap = np.array([float(e[3]) for e in edges], dtype=np.float64)
-    link_ids = np.array([int(e[4]) for e in edges], dtype=np.int64)
-    return ngc.StrictMultiDiGraph.from_arrays(
-        num_nodes, src, dst, cap, cost, link_ids, add_reverse=False
-    )
-
-
 def dist_to_dict(summary):
     return {float(b.cost): float(b.share) for b in summary.cost_distribution.buckets}
 
 
-def test_cost_distribution_multiple_paths():
+def test_cost_distribution_multiple_paths(build_graph):
     # S=0, A=1, B=2, T=3
     # Path1: S->A->T cost=2, cap=5; Path2: S->B->T cost=4, cap=3
     edges = [
@@ -43,7 +32,7 @@ def test_cost_distribution_multiple_paths():
     assert np.isclose(d[4.0], 3.0)
 
 
-def test_cost_distribution_single_path():
+def test_cost_distribution_single_path(build_graph):
     # A=0, B=1, C=2; cost=3+2=5; cap=10
     edges = [
         (0, 1, 3, 10, 0),
@@ -64,7 +53,7 @@ def test_cost_distribution_single_path():
     assert np.isclose(d[5.0], 10.0)
 
 
-def test_cost_distribution_equal_cost_paths():
+def test_cost_distribution_equal_cost_paths(build_graph):
     # S=0, A=1, B=2, T=3; two paths both cost=2, caps 4 and 6
     edges = [
         (0, 1, 1, 4, 0),
@@ -87,7 +76,7 @@ def test_cost_distribution_equal_cost_paths():
     assert np.isclose(d[2.0], 10.0)
 
 
-def test_cost_distribution_three_tiers():
+def test_cost_distribution_three_tiers(build_graph):
     # S=0, A=1, B=2, C=3, T=4
     # Tier1: cost=1 cap=2 (0->1 cost1, 1->4 cost0)
     # Tier2: cost=3 cap=4 (0->2 cost2, 2->4 cost1)
@@ -117,7 +106,7 @@ def test_cost_distribution_three_tiers():
     assert np.isclose(d[6.0], 3.0)
 
 
-def test_cost_distribution_no_flow():
+def test_cost_distribution_no_flow(build_graph):
     g = build_graph(2, [])  # No edges
     total, summary = ngc.calc_max_flow(
         g,
@@ -132,7 +121,7 @@ def test_cost_distribution_no_flow():
     assert len(summary.cost_distribution.buckets) == 0
 
 
-def test_cost_distribution_shortest_path_mode():
+def test_cost_distribution_shortest_path_mode(build_graph):
     # Two paths: cost=2 cap=5; cost=4 cap=3; shortest_path=True -> only first tier
     edges = [
         (0, 1, 1, 5, 0),
@@ -156,7 +145,7 @@ def test_cost_distribution_shortest_path_mode():
     assert np.isclose(d[2.0], 5.0)
 
 
-def test_cost_distribution_capacity_bottleneck():
+def test_cost_distribution_capacity_bottleneck(build_graph):
     # Cheap path bottlenecked at 2 (cost 1); expensive path cost 3 cap 5
     edges = [
         (0, 1, 1, 10, 0),

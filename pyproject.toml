@@ -14,7 +14,7 @@ version = "0.1.0"
 description = "Native C++ engine for NetGraph with Python bindings (CPU today, GPU-ready)"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { file = "LICENSE" }
+license = "AGPL-3.0-or-later"
 authors = [{ name = "NetGraph Contributors" }]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -22,7 +22,6 @@ classifiers = [
     "Programming Language :: C++",
     "Programming Language :: Python :: Implementation :: CPython",
     "Operating System :: OS Independent",
-    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
 ]
 dependencies = ["numpy>=1.22"]
 

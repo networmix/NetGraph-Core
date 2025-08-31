@@ -1,17 +1,12 @@
+"""Max-flow end-to-end.
+
+Validates proportional/equal-balanced placement, multi-tier augmentation,
+shortest_path (single augmentation) vs full, per-edge flows, and min-cut.
+"""
+
 import numpy as np
 
 import netgraph_core as ngc
-
-
-def build_graph(num_nodes, edges):
-    src = np.array([e[0] for e in edges], dtype=np.int32)
-    dst = np.array([e[1] for e in edges], dtype=np.int32)
-    cost = np.array([float(e[2]) for e in edges], dtype=np.float64)
-    cap = np.array([float(e[3]) for e in edges], dtype=np.float64)
-    link_ids = np.array([int(e[4]) for e in edges], dtype=np.int64)
-    return ngc.StrictMultiDiGraph.from_arrays(
-        num_nodes, src, dst, cap, cost, link_ids, add_reverse=False
-    )
 
 
 def flows_by_link_id(g: ngc.StrictMultiDiGraph, edge_flows: list[float]):
@@ -22,15 +17,8 @@ def flows_by_link_id(g: ngc.StrictMultiDiGraph, edge_flows: list[float]):
     return out
 
 
-def test_max_flow_square1_proportional_with_edge_flows():
-    # A=0, B=1, C=2, D=3
-    edges = [
-        (0, 1, 1, 1, 0),  # A->B
-        (1, 2, 1, 1, 1),  # B->C
-        (0, 3, 2, 2, 2),  # A->D
-        (3, 2, 2, 2, 3),  # D->C
-    ]
-    g = build_graph(4, edges)
+def test_max_flow_square1_proportional_with_edge_flows(square1_graph):
+    g = square1_graph
     total, summary = ngc.calc_max_flow(
         g,
         0,
@@ -54,15 +42,8 @@ def test_max_flow_square1_proportional_with_edge_flows():
     assert np.isclose(d[4.0], 2.0)
 
 
-def test_square1_equal_balanced_min_cut_and_distribution():
-    # A=0, B=1, C=2, D=3 (same as square1)
-    edges = [
-        (0, 1, 1, 1, 0),
-        (1, 2, 1, 1, 1),
-        (0, 3, 2, 2, 2),
-        (3, 2, 2, 2, 3),
-    ]
-    g = build_graph(4, edges)
+def test_square1_equal_balanced_min_cut_and_distribution(square1_graph):
+    g = square1_graph
     total, summary = ngc.calc_max_flow(
         g,
         0,
@@ -83,15 +64,8 @@ def test_square1_equal_balanced_min_cut_and_distribution():
     assert np.isclose(d[4.0], 2.0)
 
 
-def test_max_flow_line1_proportional_full_and_shortest():
-    # A=0, B=1, C=2
-    edges = [
-        (0, 1, 1, 5, 0),  # A->B cap 5
-        (1, 2, 1, 1, 2),  # B->C cap 1 (min-cost)
-        (1, 2, 1, 3, 4),  # B->C cap 3 (min-cost)
-        (1, 2, 2, 7, 6),  # B->C cap 7 (higher cost)
-    ]
-    g = build_graph(3, edges)
+def test_max_flow_line1_proportional_full_and_shortest(line1_graph):
+    g = line1_graph
     total_full, _ = ngc.calc_max_flow(
         g,
         0,
@@ -114,18 +88,10 @@ def test_max_flow_line1_proportional_full_and_shortest():
     assert np.isclose(total_sp, 4.0)
 
 
-def test_max_flow_graph5_proportional_full_and_shortest():
+def test_max_flow_graph5_proportional_full_and_shortest(fully_connected_graph):
     # Fully connected graph with 5 nodes (A..E), capacity 1 per edge
     # Build: nodes 0..4 fully connected excluding self
-    edges = []
-    lid = 0
-    for s in range(5):
-        for d in range(5):
-            if s == d:
-                continue
-            edges.append((s, d, 1, 1, lid))
-            lid += 1
-    g = build_graph(5, edges)
+    g = fully_connected_graph(5, cost=1.0, cap=1.0)
     total_full, _ = ngc.calc_max_flow(
         g,
         0,
@@ -148,15 +114,8 @@ def test_max_flow_graph5_proportional_full_and_shortest():
     assert np.isclose(total_sp, 1.0)
 
 
-def test_max_flow_square1_shortest_path_single_augmentation():
-    # Same graph as above
-    edges = [
-        (0, 1, 1, 1, 0),
-        (1, 2, 1, 1, 1),
-        (0, 3, 2, 2, 2),
-        (3, 2, 2, 2, 3),
-    ]
-    g = build_graph(4, edges)
+def test_max_flow_square1_shortest_path_single_augmentation(square1_graph):
+    g = square1_graph
     total, summary = ngc.calc_max_flow(
         g,
         0,
@@ -175,16 +134,8 @@ def test_max_flow_square1_shortest_path_single_augmentation():
     assert np.isclose(fb[3], 0.0)
 
 
-def test_max_flow_line1_equal_balanced():
-    # A=0, B=1, C=2
-    # Two min-cost edges from B->C (keys 2 and 4), one more expensive (key 6)
-    edges = [
-        (0, 1, 1, 5, 0),  # A->B cap 5
-        (1, 2, 1, 1, 2),  # B->C cap 1 (min-cost)
-        (1, 2, 1, 3, 4),  # B->C cap 3 (min-cost)
-        (1, 2, 2, 7, 6),  # B->C cap 7 (higher cost)
-    ]
-    g = build_graph(3, edges)
+def test_max_flow_line1_equal_balanced(line1_graph):
+    g = line1_graph
     total, summary = ngc.calc_max_flow(
         g,
         0,
@@ -204,23 +155,9 @@ def test_max_flow_line1_equal_balanced():
     assert np.isclose(fb[6], 1.0)
 
 
-def test_max_flow_graph3_proportional_parallel_distribution():
+def test_max_flow_graph3_proportional_parallel_distribution(graph3):
     # A=0, B=1, C=2, D=3, E=4, F=5
-    edges = [
-        (0, 1, 1, 2, 0),  # A->B cost 1 (parallels)
-        (0, 1, 1, 4, 1),
-        (0, 1, 1, 6, 2),
-        (1, 2, 1, 1, 3),  # B->C parallels
-        (1, 2, 1, 2, 4),
-        (1, 2, 1, 3, 5),
-        (2, 3, 2, 3, 6),  # C->D cost 2
-        (0, 4, 1, 5, 7),  # A->E cost 1
-        (4, 2, 1, 4, 8),  # E->C cost 1
-        (0, 3, 4, 2, 9),  # A->D cost 4
-        (2, 5, 1, 1, 10),  # C->F cost 1
-        (5, 3, 1, 2, 11),  # F->D cost 1
-    ]
-    g = build_graph(6, edges)
+    g = graph3
     total, summary = ngc.calc_max_flow(
         g,
         0,
@@ -247,16 +184,12 @@ def test_max_flow_graph3_proportional_parallel_distribution():
     assert np.isclose(fb[7], 4.0)
 
 
-def test_max_flow_two_disjoint_shortest_routes_proportional():
+def test_max_flow_two_disjoint_shortest_routes_proportional(
+    two_disjoint_shortest_graph,
+):
     # S=0, A=1, B=2, T=3
     # Two disjoint shortest paths S->A->T and S->B->T with equal total cost
-    edges = [
-        (0, 1, 1, 3, 0),  # S->A cap 3
-        (1, 3, 1, 2, 1),  # A->T cap 2
-        (0, 2, 1, 4, 2),  # S->B cap 4
-        (2, 3, 1, 1, 3),  # B->T cap 1
-    ]
-    g = build_graph(4, edges)
+    g = two_disjoint_shortest_graph
     total, summary = ngc.calc_max_flow(
         g,
         0,
@@ -277,3 +210,25 @@ def test_max_flow_two_disjoint_shortest_routes_proportional():
     d = {float(b.cost): float(b.share) for b in summary.cost_distribution.buckets}
     assert len(d) == 1
     assert np.isclose(d[2.0], 3.0)
+
+
+def test_max_flow_square4_full_and_shortest_proportional(square4_graph):
+    g = square4_graph
+    total_full, _ = ngc.calc_max_flow(
+        g,
+        0,
+        1,
+        flow_placement=ngc.FlowPlacement.PROPORTIONAL,
+        shortest_path=False,
+        eps=1e-12,
+    )
+    total_sp, _ = ngc.calc_max_flow(
+        g,
+        0,
+        1,
+        flow_placement=ngc.FlowPlacement.PROPORTIONAL,
+        shortest_path=True,
+        eps=1e-12,
+    )
+    assert np.isclose(total_full, 350.0)
+    assert np.isclose(total_sp, 100.0)
