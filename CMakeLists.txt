@@ -1,0 +1,104 @@
+cmake_minimum_required(VERSION 3.23)
+project(netgraph_core LANGUAGES CXX)
+# Optional C++ tests
+option(NETGRAPH_CORE_BUILD_TESTS "Build C++ unit tests" OFF)
+if(NETGRAPH_CORE_BUILD_TESTS)
+  include(FetchContent)
+  FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  )
+  FetchContent_MakeAvailable(googletest)
+  enable_testing()
+  add_executable(netgraph_core_tests tests/cpp/smoke_test.cpp)
+  target_link_libraries(netgraph_core_tests PRIVATE netgraph_core GTest::gtest_main)
+  if(NETGRAPH_CORE_COVERAGE AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
+    target_compile_options(netgraph_core_tests PRIVATE -O0 -g --coverage)
+    target_link_options(netgraph_core_tests PRIVATE --coverage)
+  endif()
+  include(GoogleTest)
+  gtest_discover_tests(netgraph_core_tests)
+endif()
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# Dependencies
+find_package(pybind11 CONFIG QUIET)
+if(NOT pybind11_FOUND)
+  message(STATUS "pybind11 not found via config; using FetchContent")
+  include(FetchContent)
+  FetchContent_Declare(
+    pybind11
+    GIT_REPOSITORY https://github.com/pybind/pybind11.git
+    GIT_TAG v2.12.0
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  )
+  FetchContent_MakeAvailable(pybind11)
+endif()
+
+add_library(netgraph_core STATIC
+  src/strict_multidigraph.cpp
+  src/shortest_paths.cpp
+  src/k_shortest_paths.cpp
+  src/max_flow.cpp
+  src/cpu_backend.cpp
+)
+target_include_directories(netgraph_core PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_compile_definitions(netgraph_core PRIVATE _USE_MATH_DEFINES)
+## C++ standard is set globally above.
+target_compile_features(netgraph_core PUBLIC cxx_std_20)
+
+# Warnings
+if(MSVC)
+  target_compile_options(netgraph_core PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(netgraph_core PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# Python extension
+pybind11_add_module(_netgraph_core bindings/python/module.cpp)
+target_link_libraries(_netgraph_core PRIVATE netgraph_core)
+target_compile_features(_netgraph_core PRIVATE cxx_std_20)
+
+# Optional coverage instrumentation for GCC/Clang
+option(NETGRAPH_CORE_COVERAGE "Enable C++ coverage instrumentation" OFF)
+if(NETGRAPH_CORE_COVERAGE)
+  message(STATUS "Enabling coverage instrumentation for C++ targets")
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    foreach(tgt netgraph_core _netgraph_core)
+      # Use no optimizations and include debug info for accurate line mapping
+      target_compile_options(${tgt} PRIVATE -O0 -g --coverage)
+      # Link coverage runtime
+      target_link_options(${tgt} PRIVATE --coverage)
+    endforeach()
+  else()
+    message(WARNING "NETGRAPH_CORE_COVERAGE is set but compiler '${CMAKE_CXX_COMPILER_ID}' is not supported")
+  endif()
+endif()
+
+# Optional sanitizers for debug testing
+option(NETGRAPH_CORE_SANITIZE "Enable Address/Undefined sanitizers" OFF)
+if(NETGRAPH_CORE_SANITIZE)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(SAN_FLAGS "-fsanitize=address,undefined -fno-omit-frame-pointer")
+    foreach(tgt netgraph_core _netgraph_core)
+      target_compile_options(${tgt} PRIVATE ${SAN_FLAGS})
+      target_link_options(${tgt} PRIVATE ${SAN_FLAGS})
+    endforeach()
+  else()
+    message(WARNING "NETGRAPH_CORE_SANITIZE is set but compiler '${CMAKE_CXX_COMPILER_ID}' is not supported")
+  endif()
+endif()
+
+# Install
+install(TARGETS _netgraph_core
+  LIBRARY DESTINATION .
+  RUNTIME DESTINATION .
+)

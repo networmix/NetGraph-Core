@@ -51,6 +51,13 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# Consolidated coverage artifacts
+build/coverage/
+
+# CTest output if created in project root
+Testing/
+CTestTestfile.cmake
+
 # Translations
 *.mo
 *.pot
@@ -182,11 +189,11 @@ cython_debug/
 .abstra/
 
 # Visual Studio Code
-#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
+#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore
 #  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#  and can be added to the global gitignore or merged into this file. However, if you prefer, 
+#  and can be added to the global gitignore or merged into this file. However, if you prefer,
 #  you could uncomment the following to ignore the entire vscode folder
-# .vscode/
+.vscode/
 
 # Ruff stuff:
 .ruff_cache/
@@ -200,6 +207,13 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# OS-specific
+.DS_Store
+
+# IDEs
+.idea/
+*.code-workspace
 
 # Marimo
 marimo/_static/

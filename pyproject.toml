@@ -1,0 +1,97 @@
+[build-system]
+requires = [
+    "scikit-build-core>=0.10",
+    "pybind11>=2.12",
+    "numpy>=1.22",
+    "cmake>=3.23",
+    "ninja",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "netgraph-core"
+version = "0.1.0"
+description = "Native C++ engine for NetGraph with Python bindings (CPU today, GPU-ready)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "NetGraph Contributors" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: OS Independent",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+]
+dependencies = ["numpy>=1.22"]
+
+[tool.setuptools]
+packages = []
+
+[tool.setuptools.package-data]
+"netgraph_core" = ["py.typed"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov",
+    "pytest-benchmark",
+    "gcovr>=7",
+    "ruff==0.11.13",
+    "pyright==1.1.401",
+    "pre-commit",
+    "cmake>=3.23",
+    "ninja",
+    "build",
+    "twine",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/netgraph-core"
+
+[tool.scikit-build]
+wheel.expand-macos-universal-tags = true
+build-dir = "build/{wheel_tag}"
+cmake.minimum-version = "3.23"
+
+# Include Python sources from the "python/" directory
+wheel.packages = ["python/netgraph_core"]
+
+[tool.scikit-build.cmake.define]
+# No optional backends yet; defaults are built-in CPU-only
+
+[tool.pytest.ini_options]
+addopts = "--maxfail=1 -q"
+
+[tool.ruff]
+line-length = 88
+indent-width = 4
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "B", "I"]
+ignore = ["E501"]
+fixable = ["ALL"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["netgraph_core"]
+
+[tool.ruff.format]
+quote-style = "double"
+skip-magic-trailing-comma = false
+
+[tool.pyright]
+typeCheckingMode = "standard"
+pythonVersion = "3.11"
+exclude = [
+    "venv/**",
+    "tests/**",
+    "build/**",
+    "dist/**",
+    "**/__pycache__/**",
+    "**/*.egg-info/**",
+]
+reportMissingTypeStubs = "warning"
+reportUnknownMemberType = "none"
+reportUnknownVariableType = "none"
+reportUnknownArgumentType = "none"

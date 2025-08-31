@@ -1,0 +1,58 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  test:
+    name: Unit tests (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-13]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install deps
+        run: |
+          python -m pip install -U pip wheel
+          python -m pip install -e .[dev]
+      - name: Run CI checks (lint + C++/Python tests)
+        run: make check-ci
+
+  coverage:
+    name: Coverage (ubuntu, py3.11)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install -U pip wheel
+          python -m pip install -e .[dev]
+      - name: Generate coverage (Python + C++)
+        run: make cov
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            build/coverage/coverage-python.xml
+            build/coverage/coverage-cpp.xml
+            build/coverage/coverage-combined.html
+      # - name: Upload to Codecov
+      #   uses: codecov/codecov-action@v4
+      #   with:
+      #     files: |
+      #       coverage-python.xml
+      #       coverage-cpp.xml
+      #     token: ${{ secrets.CODECOV_TOKEN }}
+      #     fail_ci_if_error: false

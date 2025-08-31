@@ -1,0 +1,28 @@
+name: Build wheels
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+
+jobs:
+  build_wheels:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, macos-13]
+        py: ['cp310', 'cp311', 'cp312', 'cp313']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pypa/cibuildwheel@v2.21.3
+        env:
+          CIBW_BUILD: ${{ matrix.py }}-*
+          CIBW_SKIP: pp* *-musllinux_*
+          CIBW_ARCHS_MACOS: universal2
+          CIBW_TEST_COMMAND: python -c "import netgraph_core; print(netgraph_core.__version__)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.py }}
+          path: wheelhouse/*.whl
