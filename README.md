@@ -1,10 +1,10 @@
 NetGraph-Core
 
-High-performance C++ core for NetGraph with Python bindings. CPU-first, GPU-ready.
+C++ core with Python bindings.
 
 - Native C++ kernels for shortest paths, k-shortest paths, and max-flow
 - Deterministic, thread-parallel, batch execution with GIL released
-- Clean Python API compatible with NetGraph’s public surface
+- Python API with a stable, well-documented surface
 
 Development
 

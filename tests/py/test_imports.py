@@ -5,3 +5,5 @@ def test_imports():
     assert hasattr(ngc, "spf")
     assert hasattr(ngc, "ksp")
     assert hasattr(ngc, "max_flow")
+    assert hasattr(ngc, "EdgeSelection")
+    assert hasattr(ngc, "EdgeTieBreak")

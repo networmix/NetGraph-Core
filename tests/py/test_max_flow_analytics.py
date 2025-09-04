@@ -17,13 +17,12 @@ def test_cost_distribution_multiple_paths(build_graph):
         (2, 3, 2, 3, 3),
     ]
     g = build_graph(4, edges)
-    total, summary = ngc.calc_max_flow(
+    total, summary = ngc.max_flow(
         g,
         0,
         3,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
-        eps=1e-12,
         with_edge_flows=False,
     )
     assert np.isclose(total, 8.0)
@@ -39,13 +38,12 @@ def test_cost_distribution_single_path(build_graph):
         (1, 2, 2, 10, 1),
     ]
     g = build_graph(3, edges)
-    total, summary = ngc.calc_max_flow(
+    total, summary = ngc.max_flow(
         g,
         0,
         2,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
-        eps=1e-12,
         with_edge_flows=False,
     )
     assert np.isclose(total, 10.0)
@@ -62,13 +60,12 @@ def test_cost_distribution_equal_cost_paths(build_graph):
         (2, 3, 1, 6, 3),
     ]
     g = build_graph(4, edges)
-    total, summary = ngc.calc_max_flow(
+    total, summary = ngc.max_flow(
         g,
         0,
         3,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
-        eps=1e-12,
         with_edge_flows=False,
     )
     assert np.isclose(total, 10.0)
@@ -90,13 +87,12 @@ def test_cost_distribution_three_tiers(build_graph):
         (3, 4, 3, 3, 5),
     ]
     g = build_graph(5, edges)
-    total, summary = ngc.calc_max_flow(
+    total, summary = ngc.max_flow(
         g,
         0,
         4,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
-        eps=1e-12,
         with_edge_flows=False,
     )
     assert np.isclose(total, 9.0)
@@ -108,13 +104,12 @@ def test_cost_distribution_three_tiers(build_graph):
 
 def test_cost_distribution_no_flow(build_graph):
     g = build_graph(2, [])  # No edges
-    total, summary = ngc.calc_max_flow(
+    total, summary = ngc.max_flow(
         g,
         0,
         1,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
-        eps=1e-12,
         with_edge_flows=False,
     )
     assert np.isclose(total, 0.0)
@@ -130,13 +125,12 @@ def test_cost_distribution_shortest_path_mode(build_graph):
         (2, 3, 2, 3, 3),
     ]
     g = build_graph(4, edges)
-    total, summary = ngc.calc_max_flow(
+    total, summary = ngc.max_flow(
         g,
         0,
         3,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=True,
-        eps=1e-12,
         with_edge_flows=False,
     )
     assert np.isclose(total, 5.0)
@@ -154,13 +148,12 @@ def test_cost_distribution_capacity_bottleneck(build_graph):
         (2, 3, 1, 5, 3),
     ]
     g = build_graph(4, edges)
-    total, summary = ngc.calc_max_flow(
+    total, summary = ngc.max_flow(
         g,
         0,
         3,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
-        eps=1e-12,
         with_edge_flows=False,
     )
     assert np.isclose(total, 7.0)

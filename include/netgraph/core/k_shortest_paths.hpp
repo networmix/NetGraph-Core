@@ -1,3 +1,4 @@
+/* Yen-like K-shortest paths with SPF-compatible outputs per-path. */
 #pragma once
 
 #include <optional>
@@ -14,9 +15,11 @@ namespace netgraph::core {
 // Distances are float64[N], PredDAG encodes one concrete path with single parent
 // per node along the path; other nodes have no parents and dist=inf.
 // Deterministic tie-breaking across equal-cost edges uses compacted edge order.
-std::vector<std::pair<std::vector<double>, PredDAG>> k_shortest_paths(
-    const StrictMultiDiGraph& g, NodeId s, NodeId t,
+std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
+    const StrictMultiDiGraph& g, NodeId src, NodeId dst,
     int k, std::optional<double> max_cost_factor,
-    bool unique, double eps);
+    bool unique,
+    const bool* node_mask = nullptr,
+    const bool* edge_mask = nullptr);
 
 } // namespace netgraph::core

@@ -1,23 +1,39 @@
+/*
+  CPU ExecutionBackend — thin adapter that delegates to in-process algorithms.
+*/
 #include "netgraph/core/backend.hpp"
+#include "netgraph/core/k_shortest_paths.hpp"
 
 namespace netgraph::core {
 
 namespace {
 class CpuBackend final : public ExecutionBackend {
 public:
-  std::pair<std::vector<double>, PredDAG> shortest_paths(
+  std::pair<std::vector<Cost>, PredDAG> shortest_paths(
       const StrictMultiDiGraph& g, NodeId src, std::optional<NodeId> dst,
-      EdgeSelect policy, bool multipath, double eps) override {
-    return netgraph::core::shortest_paths(g, src, dst, policy, multipath, eps);
+      const EdgeSelection& selection,
+      std::span<const Cap> residual,
+      const bool* node_mask,
+      const bool* edge_mask) override {
+    return netgraph::core::shortest_paths(g, src, dst, selection, residual, node_mask, edge_mask);
   }
 
-  std::pair<double, FlowSummary> calc_max_flow(
-      const StrictMultiDiGraph& g, NodeId s, NodeId t,
+  std::pair<Flow, FlowSummary> calc_max_flow(
+      const StrictMultiDiGraph& g, NodeId src, NodeId dst,
       FlowPlacement placement, bool shortest_path,
-      double eps, bool with_edge_flows,
+      bool with_edge_flows,
       const bool* node_mask = nullptr,
       const bool* edge_mask = nullptr) override {
-    return netgraph::core::calc_max_flow(g, s, t, placement, shortest_path, eps, with_edge_flows, node_mask, edge_mask);
+    return netgraph::core::calc_max_flow(g, src, dst, placement, shortest_path, with_edge_flows, node_mask, edge_mask);
+  }
+
+  std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
+      const StrictMultiDiGraph& g, NodeId s, NodeId t,
+      int k, std::optional<double> max_cost_factor,
+      bool unique,
+      const bool* node_mask,
+      const bool* edge_mask) override {
+    return netgraph::core::k_shortest_paths(g, s, t, k, max_cost_factor, unique, node_mask, edge_mask);
   }
 };
 } // namespace

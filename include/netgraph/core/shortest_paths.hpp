@@ -1,6 +1,8 @@
+/* Shortest paths (Dijkstra) with multipath predecessor DAG support. */
 #pragma once
 
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -16,31 +18,20 @@ namespace netgraph::core {
 // multiple entries with the same parent.
 struct PredDAG {
   std::vector<std::int32_t> parent_offsets;
-  std::vector<std::int32_t> parents;
-  std::vector<std::int32_t> via_edges;
+  std::vector<NodeId> parents;
+  std::vector<EdgeId> via_edges;
 };
 
 // Optional node/edge masks:
 // - node_mask[v] == true means node v is allowed; false excludes it from search.
 // - edge_mask[e] == true means edge e is allowed; false excludes it from search.
 // If masks are nullptr, they are ignored.
-std::pair<std::vector<double>, PredDAG>
+std::pair<std::vector<Cost>, PredDAG>
 shortest_paths(const StrictMultiDiGraph& g, NodeId src,
                std::optional<NodeId> dst,
-               EdgeSelect policy, bool multipath, double eps,
+               const EdgeSelection& selection,
+               std::span<const Cap> residual = {},
                const bool* node_mask = nullptr,
                const bool* edge_mask = nullptr);
-
-// Residual-aware shortest paths: like shortest_paths but considers per-edge
-// residual capacities (residual[e] = remaining capacity). Some EdgeSelect
-// policies require residual/capacity/load (e.g., load-factored). When residual
-// is provided, edges with residual < MIN_CAP are excluded.
-std::pair<std::vector<double>, PredDAG>
-shortest_paths_with_residual(const StrictMultiDiGraph& g, NodeId src,
-                             std::optional<NodeId> dst,
-                             EdgeSelect policy, bool multipath, double eps,
-                             const std::vector<double>& residual,
-                             const bool* node_mask = nullptr,
-                             const bool* edge_mask = nullptr);
 
 } // namespace netgraph::core

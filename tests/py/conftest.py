@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for NetGraph-Core tests.
+"""Shared pytest fixtures for the test suite.
 
 Provides small, reusable builders to reduce repetition across tests.
 
@@ -27,7 +27,7 @@ def build_graph():
 
     The returned function accepts:
       - num_nodes: int
-      - edges: list of tuples (src, dst, cost, cap[, link_id])
+      - edges: list of tuples (src, dst, cost, cap[, ext_id])
       - add_reverse: bool (default False)
     """
 
@@ -42,20 +42,15 @@ def build_graph():
                 np.empty((0,), dtype=np.int32),
                 np.empty((0,), dtype=np.float64),
                 np.empty((0,), dtype=np.float64),
-                link_ids=None,
                 add_reverse=add_reverse,
             )
-        has_link_ids = len(edges[0]) == 5
         src = np.array([e[0] for e in edges], dtype=np.int32)
         dst = np.array([e[1] for e in edges], dtype=np.int32)
         cost = np.array([float(e[2]) for e in edges], dtype=np.float64)
         cap = np.array([float(e[3]) for e in edges], dtype=np.float64)
-        if has_link_ids:
-            link_ids = np.array([int(e[4]) for e in edges], dtype=np.int64)
-        else:
-            link_ids = None
+        # External ids at this layer are ignored by core and used only in tests
         return ngc.StrictMultiDiGraph.from_arrays(
-            num_nodes, src, dst, cap, cost, link_ids, add_reverse=add_reverse
+            num_nodes, src, dst, cap, cost, add_reverse=add_reverse
         )
 
     return _builder
@@ -156,10 +151,103 @@ def square4_graph(build_graph):
 
 
 @pytest.fixture
-def fully_connected_graph(build_graph):
+def triangle1_graph(build_graph):
+    """Triangle graph with higher capacities on A<->B and B<->C; lower on A<->C.
+
+    Nodes: 0(A), 1(B), 2(C)
+    Edges directed both ways to match the fixture used across tests.
+    """
+
+    edges = [
+        (0, 1, 1, 15, 0),
+        (1, 0, 1, 15, 1),
+        (1, 2, 1, 15, 2),
+        (2, 1, 1, 15, 3),
+        (0, 2, 1, 5, 4),
+        (2, 0, 1, 5, 5),
+    ]
+    return build_graph(3, edges)
+
+
+@pytest.fixture
+def square3_graph(build_graph):
+    """Square with cross-links B<->D and mixed capacities.
+
+    Nodes: 0(A),1(B),2(C),3(D)
+    """
+
+    edges = [
+        (0, 1, 1, 100, 0),
+        (1, 2, 1, 125, 1),
+        (0, 3, 1, 75, 2),
+        (3, 2, 1, 50, 3),
+        (1, 3, 1, 50, 4),
+        (3, 1, 1, 50, 5),
+    ]
+    return build_graph(4, edges)
+
+
+@pytest.fixture
+def graph1_graph(build_graph):
+    """Small five-node graph with cross edges between B and C.
+
+    Nodes: 0(A),1(B),2(C),3(D),4(E)
+    """
+
+    edges = [
+        (0, 1, 1, 1, 0),
+        (0, 2, 1, 1, 1),
+        (1, 3, 1, 1, 2),
+        (2, 3, 1, 1, 3),
+        (1, 2, 1, 1, 4),
+        (2, 1, 1, 1, 5),
+        (3, 4, 1, 1, 6),
+    ]
+    return build_graph(5, edges)
+
+
+@pytest.fixture
+def graph2_graph(build_graph):
+    """Branched five-node graph with C/D to E.
+
+    Nodes: 0(A),1(B),2(C),3(D),4(E)
+    """
+
+    edges = [
+        (0, 1, 1, 1, 0),
+        (1, 2, 1, 1, 1),
+        (1, 3, 1, 1, 2),
+        (2, 3, 1, 1, 3),
+        (3, 2, 1, 1, 4),
+        (2, 4, 1, 1, 5),
+        (3, 4, 1, 1, 6),
+    ]
+    return build_graph(5, edges)
+
+
+@pytest.fixture
+def graph4_graph(build_graph):
+    """Graph with three parallel branches from A to C of increasing cost/capacity.
+
+    Nodes: 0(A),1(B),2(B1),3(B2),4(C)
+    """
+
+    edges = [
+        (0, 1, 1, 1, 0),
+        (1, 4, 1, 1, 1),
+        (0, 2, 2, 2, 2),
+        (2, 4, 2, 2, 3),
+        (0, 3, 3, 3, 4),
+        (3, 4, 3, 3, 5),
+    ]
+    return build_graph(5, edges)
+
+
+@pytest.fixture
+def make_fully_connected_graph(build_graph):
     """Return a builder for fully-connected directed graphs (no self-loops).
 
-    Usage: fully_connected_graph(n, cost=1.0, cap=1.0)
+    Usage: make_fully_connected_graph(n, cost=1.0, cap=1.0)
     """
 
     def _build(
@@ -176,6 +264,34 @@ def fully_connected_graph(build_graph):
         return build_graph(n, edges)
 
     return _build
+
+
+@pytest.fixture
+def dag_to_pred_map():
+    """Return a converter from PredDAG to {node: {parent: [EdgeId...]}} mapping."""
+
+    def _convert(g: ngc.StrictMultiDiGraph, dag: ngc.PredDAG):
+        pred: dict[int, dict[int, list[int]]] = {}
+        offsets = np.asarray(dag.parent_offsets)
+        parents = np.asarray(dag.parents)
+        via = np.asarray(dag.via_edges)
+        n = g.num_nodes()
+        for v in range(n):
+            start = int(offsets[v])
+            end = int(offsets[v + 1])
+            if start == end:
+                continue
+            group: dict[int, list[int]] = {}
+            for i in range(start, end):
+                p = int(parents[i])
+                e = int(via[i])
+                group.setdefault(p, []).append(e)
+            pred[v] = group
+        if 0 not in pred and n > 0:
+            pred[0] = {}
+        return pred
+
+    return _convert
 
 
 @pytest.fixture
@@ -211,7 +327,7 @@ def graph5(build_graph):
 
 @pytest.fixture
 def square5_graph(build_graph):
-    """Five-node 'square5' topology used in NetGraph KSP tests.
+    """Five-node 'square5' topology used in KSP tests.
 
     Nodes: 0(A),1(B),2(C),3(D),4(E)
     Edges: A->B, A->C, B->D, C->D, B->C, C->B; E is isolated for negative tests.

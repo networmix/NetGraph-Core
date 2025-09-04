@@ -1,9 +1,15 @@
+/*
+  ExecutionBackend interface — abstracts SP/MaxFlow/KSP implementations.
+
+  The default CPU backend delegates to in-process algorithm implementations.
+*/
 #pragma once
 
 #include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
+#include <span>
 
 #include "netgraph/core/max_flow.hpp"
 #include "netgraph/core/shortest_paths.hpp"
@@ -14,14 +20,24 @@ namespace netgraph::core {
 class ExecutionBackend {
 public:
   virtual ~ExecutionBackend() = default;
-  virtual std::pair<std::vector<double>, PredDAG> shortest_paths(
+  virtual std::pair<std::vector<Cost>, PredDAG> shortest_paths(
       const StrictMultiDiGraph& g, NodeId src, std::optional<NodeId> dst,
-      EdgeSelect policy, bool multipath, double eps) = 0;
+      const EdgeSelection& selection,
+      std::span<const Cap> residual = {},
+      const bool* node_mask = nullptr,
+      const bool* edge_mask = nullptr) = 0;
 
-  virtual std::pair<double, FlowSummary> calc_max_flow(
-      const StrictMultiDiGraph& g, NodeId s, NodeId t,
+  virtual std::pair<Flow, FlowSummary> calc_max_flow(
+      const StrictMultiDiGraph& g, NodeId src, NodeId dst,
       FlowPlacement placement, bool shortest_path,
-      double eps, bool with_edge_flows,
+      bool with_edge_flows,
+      const bool* node_mask = nullptr,
+      const bool* edge_mask = nullptr) = 0;
+
+  virtual std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
+      const StrictMultiDiGraph& g, NodeId s, NodeId t,
+      int k, std::optional<double> max_cost_factor,
+      bool unique,
       const bool* node_mask = nullptr,
       const bool* edge_mask = nullptr) = 0;
 };

@@ -55,6 +55,7 @@ install:
 	@echo "📦 Installing package (editable)"
 	@$(PIP) install -e .
 
+
 check:
 	@PYTHON=$(PYTHON) bash dev/run-checks.sh
 	@$(MAKE) lint
@@ -118,7 +119,7 @@ cpp-test:
 
 cov:
 	@echo "📦 Reinstalling with C++ coverage instrumentation..."
-	@$(PIP) install -U scikit-build-core pybind11
+	@$(PIP) install -U scikit-build-core "pybind11>=3"
 	@PIP_NO_BUILD_ISOLATION=1 CMAKE_ARGS="-DNETGRAPH_CORE_COVERAGE=ON" $(PIP) install -e .[dev]
 	@echo "🧪 Running Python tests with coverage..."
 	@mkdir -p build/coverage

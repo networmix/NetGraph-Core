@@ -1,7 +1,7 @@
 [build-system]
 requires = [
     "scikit-build-core>=0.10",
-    "pybind11>=2.12",
+    "pybind11>=3",
     "numpy>=1.22",
     "cmake>=3.23",
     "ninja",
@@ -11,11 +11,11 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "netgraph-core"
 version = "0.1.0"
-description = "Native C++ engine for NetGraph with Python bindings (CPU today, GPU-ready)"
+description = "C++ core with Python bindings for path and flow algorithms"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "AGPL-3.0-or-later"
-authors = [{ name = "NetGraph Contributors" }]
+authors = [{ name = "Project Contributors" }]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",

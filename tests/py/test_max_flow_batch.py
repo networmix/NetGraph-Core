@@ -11,26 +11,23 @@ def test_batch_max_flow_matches_individuals_proportional(square1_graph):
         pairs,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
-        eps=1e-12,
         with_edge_flows=False,
     )
     # Individual calculations
-    v1, _ = ngc.calc_max_flow(
+    v1, _ = ngc.max_flow(
         g,
         0,
         2,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
-        eps=1e-12,
         with_edge_flows=False,
     )
-    v2, _ = ngc.calc_max_flow(
+    v2, _ = ngc.max_flow(
         g,
         0,
         3,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
-        eps=1e-12,
         with_edge_flows=False,
     )
     assert len(out) == 2
@@ -46,25 +43,22 @@ def test_batch_max_flow_matches_individuals_equal_balanced(line1_graph):
         pairs,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
         shortest_path=False,
-        eps=1e-12,
         with_edge_flows=False,
     )
-    v1, _ = ngc.calc_max_flow(
+    v1, _ = ngc.max_flow(
         g,
         0,
         2,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
         shortest_path=False,
-        eps=1e-12,
         with_edge_flows=False,
     )
-    v2, _ = ngc.calc_max_flow(
+    v2, _ = ngc.max_flow(
         g,
         1,
         2,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
         shortest_path=False,
-        eps=1e-12,
         with_edge_flows=False,
     )
     assert len(out) == 2

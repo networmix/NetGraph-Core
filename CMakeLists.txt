@@ -11,7 +11,7 @@ if(NETGRAPH_CORE_BUILD_TESTS)
   )
   FetchContent_MakeAvailable(googletest)
   enable_testing()
-  add_executable(netgraph_core_tests tests/cpp/smoke_test.cpp)
+  add_executable(netgraph_core_tests tests/cpp/smoke_test.cpp tests/cpp/flow_policy_tests.cpp)
   target_link_libraries(netgraph_core_tests PRIVATE netgraph_core GTest::gtest_main)
   if(NETGRAPH_CORE_COVERAGE AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
     target_compile_options(netgraph_core_tests PRIVATE -O0 -g --coverage)
@@ -27,14 +27,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Dependencies
-find_package(pybind11 CONFIG QUIET)
+find_package(pybind11 3 CONFIG QUIET)
 if(NOT pybind11_FOUND)
   message(STATUS "pybind11 not found via config; using FetchContent")
   include(FetchContent)
   FetchContent_Declare(
     pybind11
     GIT_REPOSITORY https://github.com/pybind/pybind11.git
-    GIT_TAG v2.12.0
+    GIT_TAG v3.0.0
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
   )
   FetchContent_MakeAvailable(pybind11)
@@ -45,6 +45,9 @@ add_library(netgraph_core STATIC
   src/shortest_paths.cpp
   src/k_shortest_paths.cpp
   src/max_flow.cpp
+  src/flow_state.cpp
+  src/flow_graph.cpp
+  src/flow_policy.cpp
   src/cpu_backend.cpp
 )
 target_include_directories(netgraph_core PUBLIC
