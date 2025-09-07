@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <stdexcept>
 
 #include "netgraph/core/flow.hpp"
 #include "netgraph/core/flow_graph.hpp"
@@ -49,26 +50,27 @@ public:
       throw std::invalid_argument("max_flow_count must be set for EQUAL_BALANCED placement.");
     }
   }
+  ~FlowPolicy() noexcept = default;
 
-  int flow_count() const { return static_cast<int>(flows_.size()); }
-  double placed_demand() const;
+  [[nodiscard]] int flow_count() const noexcept { return static_cast<int>(flows_.size()); }
+  [[nodiscard]] double placed_demand() const noexcept;
 
   // Core operations
-  std::pair<double,double> place_demand(FlowGraph& fg,
+  [[nodiscard]] std::pair<double,double> place_demand(FlowGraph& fg,
                                         NodeId src, NodeId dst,
                                         std::int32_t flowClass,
                                         double volume,
                                         std::optional<double> target_per_flow = std::nullopt,
                                         std::optional<double> min_flow = std::nullopt);
 
-  std::pair<double,double> rebalance_demand(FlowGraph& fg,
+  [[nodiscard]] std::pair<double,double> rebalance_demand(FlowGraph& fg,
                                             NodeId src, NodeId dst,
                                             std::int32_t flowClass,
                                             double target_per_flow);
 
   void remove_demand(FlowGraph& fg);
 
-  const std::unordered_map<FlowIndex, FlowRecord, FlowIndexHash>& flows() const { return flows_; }
+  [[nodiscard]] const std::unordered_map<FlowIndex, FlowRecord, FlowIndexHash>& flows() const noexcept { return flows_; }
 
   // Configure static paths to be used for flow creation (if endpoints match).
   // Each entry is (src, dst, dag, cost). If provided, max_flow_count must be
@@ -77,12 +79,12 @@ public:
 
 private:
   // Helpers
-  std::optional<std::pair<PredDAG, Cost>> get_path_bundle(const FlowGraph& fg,
+  [[nodiscard]] std::optional<std::pair<PredDAG, Cost>> get_path_bundle(const FlowGraph& fg,
                                                           NodeId src, NodeId dst,
                                                           std::optional<double> min_flow);
-  FlowRecord* create_flow(FlowGraph& fg, NodeId src, NodeId dst, std::int32_t flowClass,
+  [[nodiscard]] FlowRecord* create_flow(FlowGraph& fg, NodeId src, NodeId dst, std::int32_t flowClass,
                     std::optional<double> min_flow);
-  FlowRecord* reoptimize_flow(FlowGraph& fg, const FlowIndex& idx, double headroom);
+  [[nodiscard]] FlowRecord* reoptimize_flow(FlowGraph& fg, const FlowIndex& idx, double headroom);
 
   // Config
   PathAlg path_alg_ { PathAlg::SPF };

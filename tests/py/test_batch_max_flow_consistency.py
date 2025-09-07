@@ -1,3 +1,5 @@
+"""Batch max-flow consistency with per-pair max_flow results."""
+
 import numpy as np
 
 import netgraph_core as ngc

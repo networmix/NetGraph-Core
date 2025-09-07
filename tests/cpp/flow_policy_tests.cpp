@@ -174,6 +174,7 @@ TEST(FlowPolicyCore, DiminishingReturnsCutoff) {
   FlowPolicy policy(PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
                     /*min_flow_count=*/1, /*max_flow_count=*/1000000,
                     /*max_path_cost=*/std::nullopt, /*max_path_cost_factor=*/std::nullopt,
+                    /*shortest_path=*/false,
                     /*reoptimize*/false, /*max_no_progress*/100, /*max_total_iters*/10000,
                     /*dim_enabled*/true, /*dim_window*/8, /*dim_eps*/1e-3);
   auto res = policy.place_demand(fg, 0, 2, 0, 7.0);

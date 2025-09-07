@@ -1,9 +1,13 @@
+"""SPF edge selection variants: capacity-aware and residual-aware tie-breaking."""
+
 import numpy as np
 
 import netgraph_core as ngc
 
 
-def test_spf_all_min_cost_with_cap_remaining_selects_all_equal_cost_edges(build_graph):
+def test_spf_all_min_cost_with_cap_remaining_selects_all_equal_cost_edges(
+    build_graph, assert_pred_dag_integrity
+):
     # Two parallel equal-cost edges; both have capacity > 0
     edges = [
         (0, 1, 1.0, 5.0, 10),
@@ -22,10 +26,12 @@ def test_spf_all_min_cost_with_cap_remaining_selects_all_equal_cost_edges(build_
     s, e = int(off[1]), int(off[2])
     assert e - s == 2
     assert {int(via[i]) for i in range(s, e)}.issubset(set(range(g.num_edges())))
+    assert_pred_dag_integrity(g, dag)
 
 
 def test_spf_single_min_cost_with_cap_remaining_selects_one_deterministically(
     build_graph,
+    assert_pred_dag_integrity,
 ):
     # Two parallel min-cost edges; expect exactly one chosen (deterministic by compaction)
     edges = [
@@ -43,9 +49,10 @@ def test_spf_single_min_cost_with_cap_remaining_selects_one_deterministically(
     s, e = int(off[1]), int(off[2])
     assert e - s == 1
     assert int(via[s]) in range(g.num_edges())
+    assert_pred_dag_integrity(g, dag)
 
 
-def test_spf_all_min_cost_parallel_edges(build_graph):
+def test_spf_all_min_cost_parallel_edges(build_graph, assert_pred_dag_integrity):
     # Two min-cost parallels and one higher-cost; expect both min-cost edges selected
     edges = [
         (0, 1, 1.0, 5.0, 10),
@@ -61,9 +68,10 @@ def test_spf_all_min_cost_parallel_edges(build_graph):
     off = np.asarray(dag.parent_offsets)
     s, e = int(off[1]), int(off[2])
     assert e - s == 2
+    assert_pred_dag_integrity(g, dag)
 
 
-def test_spf_single_min_cost_parallel_edges(build_graph):
+def test_spf_single_min_cost_parallel_edges(build_graph, assert_pred_dag_integrity):
     # Two min-cost parallels; expect deterministic single edge selection
     edges = [
         (0, 1, 1.0, 5.0, 20),
@@ -82,9 +90,12 @@ def test_spf_single_min_cost_parallel_edges(build_graph):
     s, e = int(off[1]), int(off[2])
     assert e - s == 1
     assert int(via[s]) in range(g.num_edges())
+    assert_pred_dag_integrity(g, dag)
 
 
-def test_spf_all_min_cost_with_cap_remaining_filters_zero_cap(build_graph):
+def test_spf_all_min_cost_with_cap_remaining_filters_zero_cap(
+    build_graph, assert_pred_dag_integrity
+):
     # Two min-cost parallels; one has zero capacity and must be excluded
     edges = [
         (0, 1, 1.0, 0.0, 10),
@@ -101,9 +112,12 @@ def test_spf_all_min_cost_with_cap_remaining_filters_zero_cap(build_graph):
     s, e = int(off[1]), int(off[2])
     assert e - s == 1
     assert int(via[s]) in range(g.num_edges())
+    assert_pred_dag_integrity(g, dag)
 
 
-def test_spf_residual_single_min_cost_with_cap_remaining_load_factored(build_graph):
+def test_spf_residual_single_min_cost_with_cap_remaining_load_factored(
+    build_graph, assert_pred_dag_integrity
+):
     # Two min-cost parallels with different load; prefer lower-load (higher residual)
     edges = [
         (0, 1, 1.0, 10.0, 100),  # edge A
@@ -125,10 +139,4 @@ def test_spf_residual_single_min_cost_with_cap_remaining_load_factored(build_gra
     s, e = int(off[1]), int(off[2])
     assert e - s == 1
     assert int(via[s]) in range(g.num_edges())
-
-
-"""SPF edge selection variants.
-
-Covers EdgeSelection combinations including capacity-aware and residual-aware
-tie-breaking. Ensures deterministic tie-breaking via compacted ordering.
-"""
+    assert_pred_dag_integrity(g, dag)

@@ -1,3 +1,151 @@
+/* Implementation helpers for shortest_paths.hpp extras. */
+#include "netgraph/core/shortest_paths.hpp"
+
+#include <algorithm>
+#include <optional>
+#include <stack>
+#include <utility>
+#include <vector>
+
+namespace netgraph::core {
+
+static inline void group_parents(const PredDAG& dag, NodeId v,
+                                 std::vector<std::pair<NodeId, std::vector<EdgeId>>>& out) {
+  out.clear();
+  const auto start = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v)]);
+  const auto end   = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v) + 1]);
+  if (start >= end) return;
+  // Collect entries, grouping by parent id
+  // PredDAG does not guarantee sorted by parent; aggregate via map-like linear scan
+  for (std::size_t i = start; i < end; ++i) {
+    auto p = dag.parents[i];
+    auto e = dag.via_edges[i];
+    // find or append group
+    bool found = false;
+    for (auto& pr : out) {
+      if (pr.first == p) { pr.second.push_back(e); found = true; break; }
+    }
+    if (!found) out.emplace_back(p, std::vector<EdgeId>{e});
+  }
+}
+
+std::vector<std::vector<std::pair<NodeId, std::vector<EdgeId>>>>
+resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
+                 bool split_parallel_edges,
+                 std::optional<std::int64_t> max_paths) {
+  std::vector<std::vector<std::pair<NodeId, std::vector<EdgeId>>>> paths;
+  if (src == dst) {
+    // Trivial path: ((src, ()))
+    std::vector<std::pair<NodeId, std::vector<EdgeId>>> p;
+    p.emplace_back(src, std::vector<EdgeId>{});
+    paths.push_back(std::move(p));
+    return paths;
+  }
+  if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size() - 1) return paths;
+  if (dag.parent_offsets[static_cast<std::size_t>(dst)] == dag.parent_offsets[static_cast<std::size_t>(dst) + 1]) return paths;
+
+  // Iterative DFS stack: each frame holds current node and index into its parent-groups.
+  struct Frame { NodeId node; std::size_t idx; std::vector<std::pair<NodeId, std::vector<EdgeId>>> groups; };
+  std::vector<Frame> stack;
+  stack.reserve(16);
+  // start from dst
+  Frame start; start.node = dst; start.idx = 0; group_parents(dag, dst, start.groups);
+  stack.push_back(std::move(start));
+
+  std::vector<std::pair<NodeId, std::vector<EdgeId>>> current; // reversed path accum
+
+  while (!stack.empty()) {
+    auto& top = stack.back();
+    if (top.idx >= top.groups.size()) {
+      // backtrack
+      stack.pop_back();
+      if (!current.empty()) current.pop_back();
+      continue;
+    }
+    auto [parent, edges] = top.groups[top.idx++];
+    current.emplace_back(top.node, std::move(edges));
+    if (parent == src) {
+      // reached src; build forward segments: for each hop prev->next store (next, edges)
+      std::vector<std::pair<NodeId, std::vector<EdgeId>>> segments;
+      segments.reserve(current.size());
+      for (auto it = current.rbegin(); it != current.rend(); ++it) {
+        segments.emplace_back(it->first, it->second);
+      }
+      // Build path tuples: (src, edges for src->n1), (n1, edges for n1->n2), ..., (dst, ())
+      std::vector<std::pair<NodeId, std::vector<EdgeId>>> path;
+      path.reserve(segments.size() + 1);
+      if (!segments.empty()) {
+        // src element
+        path.emplace_back(src, segments[0].second);
+        // intermediate elements (attach next hop's edges to current node)
+        for (std::size_t j = 1; j < segments.size(); ++j) {
+          path.emplace_back(segments[j - 1].first, segments[j].second);
+        }
+        // dst element
+        path.emplace_back(segments.back().first, std::vector<EdgeId>{});
+      } else {
+        // Degenerate: src==dst should be handled earlier, but keep form
+        path.emplace_back(src, std::vector<EdgeId>{});
+      }
+      if (!split_parallel_edges) {
+        paths.push_back(std::move(path));
+      } else {
+        // expand cartesian product over edge sets excluding last (dst has empty edges)
+        // collect ranges
+        std::vector<std::size_t> idxs(path.size(), 0);
+        // Enumerate over all elements except the final dst (which has empty edges)
+        const std::size_t start_i = 0;
+        const std::size_t end_i = path.size() - 2; // last index before dst
+        // initialize counters
+        bool done = false;
+        while (!done) {
+          // build one concrete path
+          std::vector<std::pair<NodeId, std::vector<EdgeId>>> concrete;
+          concrete.reserve(path.size());
+          for (std::size_t i = start_i; i <= end_i; ++i) {
+            const auto& node = path[i].first;
+            const auto& eds = path[i].second;
+            if (!eds.empty()) {
+              std::size_t sel = std::min(idxs[i], eds.size() - 1);
+              concrete.emplace_back(node, std::vector<EdgeId>{ eds[sel] });
+            } else {
+              concrete.emplace_back(node, std::vector<EdgeId>{});
+            }
+          }
+          // append dst with empty edges
+          concrete.emplace_back(path.back().first, std::vector<EdgeId>{});
+          paths.push_back(std::move(concrete));
+          if (max_paths && static_cast<std::int64_t>(paths.size()) >= *max_paths) return paths;
+          // increment counters (mixed radix)
+          std::size_t k = end_i;
+          while (k >= start_i) {
+            if (path[k].second.empty()) { --k; continue; }
+            idxs[k]++;
+            if (idxs[k] < path[k].second.size()) break;
+            idxs[k] = 0; if (k == start_i) { done = true; break; } --k;
+          }
+          if (k < start_i) done = true;
+        }
+      }
+      if (max_paths && static_cast<std::int64_t>(paths.size()) >= *max_paths) return paths;
+      current.pop_back();
+      continue;
+    }
+    // descend
+    Frame next; next.node = parent; next.idx = 0; group_parents(dag, parent, next.groups);
+    if (next.groups.empty()) {
+      // dead end, backtrack
+      current.pop_back();
+      continue;
+    }
+    stack.push_back(std::move(next));
+  }
+
+  return paths;
+}
+
+} // namespace netgraph::core
+
 /*
   shortest_paths — Dijkstra over a StrictMultiDiGraph with flexible selection.
 

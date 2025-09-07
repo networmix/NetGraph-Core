@@ -40,8 +40,6 @@ dev = [
     "ruff==0.11.13",
     "pyright==1.1.401",
     "pre-commit",
-    "cmake>=3.23",
-    "ninja",
     "build",
     "twine",
 ]
@@ -61,7 +59,7 @@ wheel.packages = ["python/netgraph_core"]
 # No optional backends yet; defaults are built-in CPU-only
 
 [tool.pytest.ini_options]
-addopts = "--maxfail=1 -q"
+addopts = "-q"
 
 [tool.ruff]
 line-length = 88
@@ -81,7 +79,7 @@ skip-magic-trailing-comma = false
 
 [tool.pyright]
 typeCheckingMode = "standard"
-pythonVersion = "3.11"
+pythonVersion = "3.13"
 exclude = [
     "venv/**",
     "tests/**",

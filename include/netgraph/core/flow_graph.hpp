@@ -20,18 +20,19 @@ namespace netgraph::core {
 class FlowGraph {
 public:
   explicit FlowGraph(const StrictMultiDiGraph& g);
+  ~FlowGraph() noexcept = default;
 
   // Views
-  std::span<const Cap> capacity_view() const noexcept { return fs_.capacity_view(); }
-  std::span<const Cap> residual_view() const noexcept { return fs_.residual_view(); }
-  std::span<const Flow> edge_flow_view() const noexcept { return fs_.edge_flow_view(); }
+  [[nodiscard]] std::span<const Cap> capacity_view() const noexcept { return fs_.capacity_view(); }
+  [[nodiscard]] std::span<const Cap> residual_view() const noexcept { return fs_.residual_view(); }
+  [[nodiscard]] std::span<const Flow> edge_flow_view() const noexcept { return fs_.edge_flow_view(); }
 
   // Access underlying graph (const)
-  const StrictMultiDiGraph& graph() const noexcept { return *g_; }
+  [[nodiscard]] const StrictMultiDiGraph& graph() const noexcept { return *g_; }
 
   // Placement: applies placement and records per-edge deltas for this flow.
   // Returns placed amount.
-  Flow place(const FlowIndex& idx, NodeId src, NodeId dst,
+  [[nodiscard]] Flow place(const FlowIndex& idx, NodeId src, NodeId dst,
              const PredDAG& dag, Flow amount,
              FlowPlacement placement, bool shortest_path = false);
 
@@ -42,15 +43,15 @@ public:
   void remove_by_class(std::int32_t flowClass);
 
   // Reset all state to initial capacity and clear ledger.
-  void reset();
+  void reset() noexcept;
 
   // Inspect: return a copy of the flow's edges and amounts.
-  std::vector<std::pair<EdgeId, Flow>> get_flow_edges(const FlowIndex& idx) const;
+  [[nodiscard]] std::vector<std::pair<EdgeId, Flow>> get_flow_edges(const FlowIndex& idx) const;
 
   // Attempt to reconstruct a single path (LSP) for this flow from the ledger.
   // Returns empty vector if the flow does not correspond to a unique simple path
   // (e.g., when placed with multipath/proportional splitting).
-  std::vector<EdgeId> get_flow_path(const FlowIndex& idx) const;
+  [[nodiscard]] std::vector<EdgeId> get_flow_path(const FlowIndex& idx) const;
 
 private:
   const StrictMultiDiGraph* g_ {nullptr};

@@ -1,6 +1,6 @@
 # NetGraph-Core Development Makefile
 
-.PHONY: help venv clean-venv dev install check check-ci lint format test qt clean build info hooks cov cpp-test
+.PHONY: help venv clean-venv dev install check check-ci lint format test qt clean build info hooks cov cpp-test rebuild
 
 .DEFAULT_GOAL := help
 
@@ -11,6 +11,11 @@ PIP = $(PYTHON) -m pip
 PYTEST = $(PYTHON) -m pytest
 RUFF = $(PYTHON) -m ruff
 PRECOMMIT = $(PYTHON) -m pre_commit
+
+# Prefer Apple Command Line Tools compilers to avoid Homebrew libc++ ABI mismatches
+APPLE_CLANG := $(shell xcrun --find clang 2>/dev/null)
+APPLE_CLANGXX := $(shell xcrun --find clang++ 2>/dev/null)
+DEFAULT_MACOSX := 15.0
 
 help:
 	@echo "🔧 NetGraph-Core Development Commands"
@@ -28,6 +33,14 @@ help:
 	@echo "  make clean      - Clean build artifacts"
 	@echo "  make hooks      - Run pre-commit on all files"
 	@echo "  make info       - Show tool versions"
+	@echo "  make rebuild    - Clean and rebuild using Apple Clang (respects CMAKE_ARGS)"
+
+# Allow callers to pass CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET consistently
+ENV_MACOS := $(if $(MACOSX_DEPLOYMENT_TARGET),MACOSX_DEPLOYMENT_TARGET=$(MACOSX_DEPLOYMENT_TARGET),MACOSX_DEPLOYMENT_TARGET=$(DEFAULT_MACOSX))
+ENV_CC := $(if $(APPLE_CLANG),CC=$(APPLE_CLANG),)
+ENV_CXX := $(if $(APPLE_CLANGXX),CXX=$(APPLE_CLANGXX),)
+ENV_CMAKE := $(if $(APPLE_CLANGXX),CMAKE_ARGS="$(strip $(CMAKE_ARGS) -DCMAKE_C_COMPILER=$(APPLE_CLANG) -DCMAKE_CXX_COMPILER=$(APPLE_CLANGXX))",$(if $(CMAKE_ARGS),CMAKE_ARGS="$(CMAKE_ARGS)",))
+DEV_ENV := $(ENV_MACOS) $(ENV_CC) $(ENV_CXX) $(ENV_CMAKE)
 
 dev:
 	@echo "🚀 Setting up development environment..."
@@ -37,7 +50,7 @@ dev:
 		$(VENV_BIN)/python -m pip install -U pip wheel; \
 	fi
 	@echo "📦 Installing dev dependencies..."
-	@$(VENV_BIN)/python -m pip install -e .[dev]
+	@$(DEV_ENV) $(VENV_BIN)/python -m pip install -e .'[dev]'
 	@echo "🔗 Installing pre-commit hooks..."
 	@$(VENV_BIN)/python -m pre_commit install --install-hooks
 	@echo "✅ Dev environment ready. Activate with: source venv/bin/activate"
@@ -53,7 +66,7 @@ clean-venv:
 
 install:
 	@echo "📦 Installing package (editable)"
-	@$(PIP) install -e .
+	@$(DEV_ENV) $(PIP) install -e .
 
 
 check:
@@ -120,7 +133,7 @@ cpp-test:
 cov:
 	@echo "📦 Reinstalling with C++ coverage instrumentation..."
 	@$(PIP) install -U scikit-build-core "pybind11>=3"
-	@PIP_NO_BUILD_ISOLATION=1 CMAKE_ARGS="-DNETGRAPH_CORE_COVERAGE=ON" $(PIP) install -e .[dev]
+	@PIP_NO_BUILD_ISOLATION=1 CMAKE_ARGS="-DNETGRAPH_CORE_COVERAGE=ON" $(PIP) install -e .'[dev]'
 	@echo "🧪 Running Python tests with coverage..."
 	@mkdir -p build/coverage
 	@$(PYTEST) --cov=netgraph_core --cov-report=term-missing --cov-report=xml:build/coverage/coverage-python.xml
@@ -155,3 +168,7 @@ sanitize-test:
 		cmake -S . -B "$$BUILD_DIR" -DNETGRAPH_CORE_BUILD_TESTS=ON -DNETGRAPH_CORE_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug $$GEN_ARGS; \
 		cmake --build "$$BUILD_DIR" --config Debug -j; \
 		ASAN_OPTIONS=detect_leaks=1 ctest --test-dir "$$BUILD_DIR" --output-on-failure || true
+
+# Clean + reinstall in dev mode (respects CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET)
+rebuild: clean
+	@$(DEV_ENV) $(PIP) install -e .'[dev]'

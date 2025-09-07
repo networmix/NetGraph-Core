@@ -1,8 +1,6 @@
 # Re-export types from extension
 # pyright: reportMissingImports=false
 from _netgraph_core import (
-    CostBucket,
-    CostDistribution,
     EdgeSelection,
     EdgeTieBreak,
     FlowGraph,
@@ -18,6 +16,7 @@ from _netgraph_core import (
     batch_max_flow,
     ksp,
     max_flow,
+    resolve_to_paths,
     spf,
 )
 
@@ -29,8 +28,6 @@ try:  # pragma: no cover - typing-only import
 
     if _TYPE_CHECKING:  # noqa: SIM108
         from ._docs import (  # noqa: I001
-            CostBucket as CostBucket,
-            CostDistribution as CostDistribution,
             EdgeSelection as EdgeSelection,
             EdgeTieBreak as EdgeTieBreak,
             FlowPlacement as FlowPlacement,
@@ -59,7 +56,6 @@ __all__ = [
     "FlowState",
     "FlowPolicy",
     "MinCut",
-    "CostBucket",
-    "CostDistribution",
     "FlowSummary",
+    "resolve_to_paths",
 ]

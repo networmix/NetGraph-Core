@@ -29,6 +29,8 @@ std::pair<Flow, FlowSummary>
 calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
               FlowPlacement placement, bool shortest_path,
               bool with_edge_flows,
+              bool with_reachable,
+              bool with_residuals,
               const bool* node_mask, const bool* edge_mask) {
   FlowSummary summary;
   const auto N = g.num_nodes();
@@ -42,7 +44,7 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
   // Use FlowState for residual tracking and per-edge placement
   FlowState fs(g);
   Flow total = static_cast<Flow>(0.0);
-  std::vector<std::pair<Cost,Flow>> cost_dist; // (cost, share)
+  std::vector<std::pair<Cost,Flow>> cost_dist; // (cost, flow)
 
   // Iterate tiers: SPF over current residual -> place on DAG -> accumulate stats
   while (true) {
@@ -75,14 +77,69 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
     auto ef = fs.edge_flow_view();
     summary.edge_flows.assign(ef.begin(), ef.end());
   }
+  if (with_residuals) {
+    auto res = fs.residual_view();
+    summary.residual_capacity.resize(static_cast<std::size_t>(g.num_edges()));
+    for (std::size_t i = 0; i < summary.residual_capacity.size(); ++i) {
+      summary.residual_capacity[i] = static_cast<Cap>(res[i]);
+    }
+  }
   if (!cost_dist.empty()) {
     std::sort(cost_dist.begin(), cost_dist.end(), [](auto const& a, auto const& b){ return a.first < b.first; });
-    for (auto const& pr : cost_dist) { CostBucket b; b.cost = pr.first; b.share = pr.second; summary.cost_distribution.buckets.push_back(b); }
+    summary.costs.reserve(cost_dist.size());
+    summary.flows.reserve(cost_dist.size());
+    for (auto const& pr : cost_dist) { summary.costs.push_back(pr.first); summary.flows.push_back(pr.second); }
   }
   // Min-cut extraction (proportional/equal-balanced): compute reachability in final residual graph
   // Residual graph has forward residual = residual[e], reverse residual = flow[e] (capacity - residual)
   if (total >= kMinFlow) {
-    summary.min_cut = fs.compute_min_cut(src, node_mask, edge_mask);
+    auto mc = fs.compute_min_cut(src, node_mask, edge_mask);
+    summary.min_cut = mc;
+    if (with_reachable) {
+      // Reconstruct reachable set as a boolean vector of size N from min-cut computation
+      // FlowState::compute_min_cut records only cut edges; recompute reachability quickly
+      summary.reachable_nodes.assign(static_cast<std::size_t>(g.num_nodes()), 0u);
+      // BFS over residual graph using FlowState views
+      auto residual = fs.residual_view();
+      auto capv = fs.capacity_view();
+      const auto N = static_cast<std::size_t>(g.num_nodes());
+      std::vector<std::int32_t> stack;
+      stack.reserve(N);
+      stack.push_back(src);
+      while (!stack.empty()) {
+        auto n = static_cast<std::size_t>(stack.back());
+        stack.pop_back();
+        if (summary.reachable_nodes[n]) continue;
+        summary.reachable_nodes[n] = 1u;
+        // Forward residual arcs
+        auto ro = g.row_offsets_view();
+        auto ci = g.col_indices_view();
+        auto ae = g.adj_edge_index_view();
+        auto s = static_cast<std::size_t>(ro[n]);
+        auto e = static_cast<std::size_t>(ro[n+1]);
+        for (std::size_t p = s; p < e; ++p) {
+          auto v = static_cast<std::size_t>(ci[p]);
+          auto eid = static_cast<std::size_t>(ae[p]);
+          if (residual[eid] > kMinCap && !summary.reachable_nodes[v]) {
+            stack.push_back(static_cast<std::int32_t>(v));
+          }
+        }
+        // Reverse residual arcs (flow > 0)
+        auto iro = g.in_row_offsets_view();
+        auto ici = g.in_col_indices_view();
+        auto iae = g.in_adj_edge_index_view();
+        auto rs = static_cast<std::size_t>(iro[n]);
+        auto re = static_cast<std::size_t>(iro[n+1]);
+        for (std::size_t p = rs; p < re; ++p) {
+          auto u = static_cast<std::size_t>(ici[p]);
+          auto eid = static_cast<std::size_t>(iae[p]);
+          auto flow = capv[eid] - residual[eid];
+          if (flow > kMinFlow && !summary.reachable_nodes[u]) {
+            stack.push_back(static_cast<std::int32_t>(u));
+          }
+        }
+      }
+    }
   }
   return {summary.total_flow, std::move(summary)};
 }
@@ -92,6 +149,8 @@ batch_max_flow(const StrictMultiDiGraph& g,
                const std::vector<std::pair<NodeId,NodeId>>& pairs,
                FlowPlacement placement, bool shortest_path,
                bool with_edge_flows,
+               bool with_reachable,
+               bool with_residuals,
                const std::vector<const bool*>& node_masks,
                const std::vector<const bool*>& edge_masks) {
   std::vector<FlowSummary> out;
@@ -100,7 +159,12 @@ batch_max_flow(const StrictMultiDiGraph& g,
     auto pr = pairs[i];
     const bool* nm = (i < node_masks.size() ? node_masks[i] : nullptr);
     const bool* em = (i < edge_masks.size() ? edge_masks[i] : nullptr);
-    auto [val, summary] = calc_max_flow(g, pr.first, pr.second, placement, shortest_path, with_edge_flows, nm, em);
+    auto [val, summary] = calc_max_flow(g, pr.first, pr.second,
+                                        placement, shortest_path,
+                                        with_edge_flows,
+                                        with_reachable,
+                                        with_residuals,
+                                        nm, em);
     out.push_back(std::move(summary));
   }
   return out;

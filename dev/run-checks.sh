@@ -18,6 +18,17 @@ if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
     export PATH="$VIRTUAL_ENV/bin:$PATH"
 fi
 
+# Prefer Apple Command Line Tools compilers to avoid Homebrew libc++ ABI mismatches
+APPLE_CLANG=$(xcrun --find clang 2>/dev/null || true)
+APPLE_CLANGXX=$(xcrun --find clang++ 2>/dev/null || true)
+DEFAULT_MACOSX=15.0
+if [ -n "$APPLE_CLANG" ] && [ -n "$APPLE_CLANGXX" ]; then
+    export CC="$APPLE_CLANG"
+    export CXX="$APPLE_CLANGXX"
+    export CMAKE_ARGS="${CMAKE_ARGS:-} -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX"
+fi
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-$DEFAULT_MACOSX}"
+
 # Ensure required tools are present
 if ! "$PYTHON" -m pre_commit --version &> /dev/null; then
     echo "❌ pre-commit is not installed. Please run 'make dev' first."

@@ -20,6 +20,103 @@ import pytest
 
 import netgraph_core as ngc
 
+# Centralized helper fixtures and shared assertions for tests
+
+
+@pytest.fixture
+def t_cost():
+    """Return a function to extract distance to a target node as float."""
+
+    def _t_cost(dist: np.ndarray, node: int) -> float:
+        return float(dist[int(node)])
+
+    return _t_cost
+
+
+@pytest.fixture
+def flows_by_eid():
+    """Return a function mapping EdgeId -> edge flow value for a graph."""
+
+    def _flows_by_eid(
+        g: ngc.StrictMultiDiGraph, edge_flows: np.ndarray
+    ) -> dict[int, float]:
+        arr = np.asarray(edge_flows, dtype=float)
+        return {int(eid): float(arr[eid]) for eid in range(g.num_edges())}
+
+    return _flows_by_eid
+
+
+@pytest.fixture
+def cost_dist_dict():
+    """Return a function converting FlowSummary (costs, flows) to a dict."""
+
+    def _to_dict(summary) -> dict[float, float]:
+        costs = np.asarray(getattr(summary, "costs", []), dtype=float)
+        flows = np.asarray(getattr(summary, "flows", []), dtype=float)
+        return {float(c): float(f) for c, f in zip(costs, flows)}
+
+    return _to_dict
+
+
+@pytest.fixture
+def assert_pred_dag_integrity():
+    """Return an assertion helper to validate PredDAG shapes and id ranges."""
+
+    def _assert(g: ngc.StrictMultiDiGraph, dag: ngc.PredDAG) -> None:
+        off = np.asarray(dag.parent_offsets)
+        par = np.asarray(dag.parents)
+        via = np.asarray(dag.via_edges)
+        # Offsets length and monotonicity
+        assert off.shape == (g.num_nodes() + 1,)
+        assert np.all(off[:-1] <= off[1:])
+        total = int(off[-1])
+        # Parents/via sizes match total entries
+        assert par.shape == (total,)
+        assert via.shape == (total,)
+        if total > 0:
+            # Id ranges
+            assert int(par.min()) >= 0 and int(par.max()) < g.num_nodes()
+            assert int(via.min()) >= 0 and int(via.max()) < g.num_edges()
+
+    return _assert
+
+
+@pytest.fixture
+def assert_edge_flows_shape():
+    """Return an assertion helper to validate edge_flows presence/shape.
+
+    expected_present=True means summary.edge_flows must exist and be length N.
+    If False, allow either empty list or omitted; if present, allow 0 or N.
+    """
+
+    def _assert(
+        g: ngc.StrictMultiDiGraph, summary, expected_present: bool = True
+    ) -> None:
+        edge_flows = getattr(summary, "edge_flows", None)
+        if expected_present:
+            assert edge_flows is not None
+            arr = np.asarray(edge_flows)
+            assert arr.shape == (g.num_edges(),)
+        else:
+            if edge_flows is not None:
+                arr = np.asarray(edge_flows)
+                assert arr.size in (0, g.num_edges())
+
+    return _assert
+
+
+@pytest.fixture
+def assert_valid_min_cut():
+    """Return an assertion helper to validate MinCut edge ids are unique and valid."""
+
+    def _assert(g: ngc.StrictMultiDiGraph, min_cut) -> None:
+        edges = [int(e) for e in getattr(min_cut, "edges", [])]
+        assert len(edges) == len(set(edges))
+        for e in edges:
+            assert 0 <= e < g.num_edges()
+
+    return _assert
+
 
 @pytest.fixture
 def build_graph():
@@ -292,6 +389,57 @@ def dag_to_pred_map():
         return pred
 
     return _convert
+
+
+@pytest.fixture
+def make_pred_map(dag_to_pred_map):
+    """Alias fixture for converting PredDAG to {node: {parent: [EdgeId]}}.
+
+    Provided to make intent clearer at call sites.
+    """
+
+    return dag_to_pred_map
+
+
+@pytest.fixture
+def assert_paths_concrete():
+    """Validate path tuples returned by resolve_to_paths.
+
+    Ensures structure is ((node, (edge_ids...)), ..., (dst, ())).
+    If expect_split=True, each hop (except src/dst) must have exactly one edge id.
+    If False, hops must have >=1 edge id.
+    """
+
+    def _assert(paths, src: int, dst: int, expect_split: bool) -> None:
+        for path in paths:
+            # path should be a tuple/list of elements
+            assert isinstance(path, (tuple, list)) and len(path) >= 2
+            # First element is (src, ())
+            first = path[0]
+            assert isinstance(first, (tuple, list)) and len(first) == 2
+            assert int(first[0]) == int(src)
+            assert isinstance(first[1], (tuple, list)) and len(first[1]) >= 1
+            if expect_split:
+                assert len(first[1]) == 1
+            # Last element is (dst, ())
+            last = path[-1]
+            assert isinstance(last, (tuple, list)) and len(last) == 2
+            assert int(last[0]) == int(dst)
+            assert isinstance(last[1], (tuple, list)) and len(last[1]) == 0
+            # Intermediate hops
+            for elem in path[1:-1]:
+                assert isinstance(elem, (tuple, list)) and len(elem) == 2
+                node, edges = elem
+                # node id is int
+                assert isinstance(int(node), int)
+                # edges is tuple/list of ints
+                assert isinstance(edges, (tuple, list)) and len(edges) >= 1
+                if expect_split:
+                    assert len(edges) == 1
+                for e in edges:
+                    assert isinstance(int(e), int)
+
+    return _assert
 
 
 @pytest.fixture

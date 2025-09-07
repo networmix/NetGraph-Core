@@ -1,22 +1,13 @@
-"""Max-flow end-to-end.
-
-Validates proportional/equal-balanced placement, multi-tier augmentation,
-shortest_path (single augmentation) vs full, per-edge flows, and min-cut.
-"""
+"""Max-flow end-to-end: placement modes, augmentation depth, and min-cut."""
 
 import numpy as np
 
 import netgraph_core as ngc
 
 
-def flows_by_eid(g: ngc.StrictMultiDiGraph, edge_flows: list[float]):
-    out = {}
-    for eid in range(g.num_edges()):
-        out[int(eid)] = edge_flows[eid]
-    return out
-
-
-def test_max_flow_square1_proportional_with_edge_flows(square1_graph):
+def test_max_flow_square1_proportional_with_edge_flows(
+    square1_graph, flows_by_eid, assert_edge_flows_shape, assert_valid_min_cut
+):
     g = square1_graph
     total, summary = ngc.max_flow(
         g,
@@ -28,20 +19,20 @@ def test_max_flow_square1_proportional_with_edge_flows(square1_graph):
     )
     # Multi-tier: cost 2 path carries 1, then cost 4 path carries 2 => total 3
     assert np.isclose(total, 3.0)
+    assert_edge_flows_shape(g, summary, expected_present=True)
+    assert_valid_min_cut(g, summary.min_cut)
     fb = flows_by_eid(g, summary.edge_flows)
     # Check totals on 4 edges in this small graph (order is deterministic by compaction)
     assert len(fb) == g.num_edges()
     # Edge flows are per-edge amounts; summing across all edges counts each unit once per edge
     # along its path. For two-edge paths with total 3, the sum is 2 * 3 = 6.
-    assert np.isclose(sum(summary.edge_flows), 6.0)
-    # Cost distribution: {2.0: 1.0, 4.0: 2.0}
-    d = {float(b.cost): float(b.share) for b in summary.cost_distribution.buckets}
-    assert len(d) == 2
-    assert np.isclose(d[2.0], 1.0)
-    assert np.isclose(d[4.0], 2.0)
+    assert np.isclose(np.asarray(summary.edge_flows).sum(), 6.0)
+    # Cost distribution checks live in test_max_flow_cost_distribution.py
 
 
-def test_square1_equal_balanced_min_cut_and_distribution(square1_graph):
+def test_square1_equal_balanced_min_cut_and_distribution(
+    square1_graph, assert_edge_flows_shape, assert_valid_min_cut
+):
     g = square1_graph
     total, summary = ngc.max_flow(
         g,
@@ -57,10 +48,9 @@ def test_square1_equal_balanced_min_cut_and_distribution(square1_graph):
     # Min-cut returns EdgeIds now; ensure it has size 2 and corresponds to cut around source or sink
     mc = set(map(int, summary.min_cut.edges))
     assert len(mc) == 2
-    # Cost distribution by path cost: 2.0 -> 1, 4.0 -> 2
-    d = {float(b.cost): float(b.share) for b in summary.cost_distribution.buckets}
-    assert np.isclose(d[2.0], 1.0)
-    assert np.isclose(d[4.0], 2.0)
+    assert_valid_min_cut(g, summary.min_cut)
+    assert_edge_flows_shape(g, summary, expected_present=True)
+    # Cost distribution checks live in test_max_flow_cost_distribution.py
 
 
 def test_max_flow_line1_proportional_full_and_shortest(line1_graph):
@@ -109,7 +99,9 @@ def test_max_flow_graph5_proportional_full_and_shortest(make_fully_connected_gra
     assert np.isclose(total_sp, 1.0)
 
 
-def test_max_flow_square1_shortest_path_single_augmentation(square1_graph):
+def test_max_flow_square1_shortest_path_single_augmentation(
+    square1_graph, flows_by_eid, assert_edge_flows_shape, assert_valid_min_cut
+):
     g = square1_graph
     total, summary = ngc.max_flow(
         g,
@@ -120,6 +112,8 @@ def test_max_flow_square1_shortest_path_single_augmentation(square1_graph):
         with_edge_flows=True,
     )
     assert np.isclose(total, 1.0)
+    assert_edge_flows_shape(g, summary, expected_present=True)
+    assert_valid_min_cut(g, summary.min_cut)
     fb = flows_by_eid(g, summary.edge_flows)
     # Should augment along A->B->C only once
     assert np.isclose(fb[0], 1.0)
@@ -128,7 +122,9 @@ def test_max_flow_square1_shortest_path_single_augmentation(square1_graph):
     assert np.isclose(fb[3], 0.0)
 
 
-def test_max_flow_line1_equal_balanced(line1_graph):
+def test_max_flow_line1_equal_balanced(
+    line1_graph, flows_by_eid, assert_edge_flows_shape, assert_valid_min_cut
+):
     g = line1_graph
     total, summary = ngc.max_flow(
         g,
@@ -140,6 +136,8 @@ def test_max_flow_line1_equal_balanced(line1_graph):
     )
     # Equal-balanced across tiers: limited by A->B capacity => total 5
     assert np.isclose(total, 5.0)
+    assert_edge_flows_shape(g, summary, expected_present=True)
+    assert_valid_min_cut(g, summary.min_cut)
     fb = flows_by_eid(g, summary.edge_flows)
     # Expect 2 across min-cost tier (1 + 1), then remaining 3 on min/higher edges by successive tiers
     assert np.isclose(fb[0], 5.0)  # A->B carries all
@@ -149,7 +147,9 @@ def test_max_flow_line1_equal_balanced(line1_graph):
     assert np.isclose(fb[3], 1.0)
 
 
-def test_max_flow_graph3_proportional_parallel_distribution(graph3):
+def test_max_flow_graph3_proportional_parallel_distribution(
+    graph3, flows_by_eid, assert_edge_flows_shape, assert_valid_min_cut
+):
     # A=0, B=1, C=2, D=3, E=4, F=5
     g = graph3
     total, summary = ngc.max_flow(
@@ -162,6 +162,8 @@ def test_max_flow_graph3_proportional_parallel_distribution(graph3):
     )
     # Incoming to C via min-cost parents: from B (cap 1+2+3=6) and from E (cap 4) => total 10
     assert np.isclose(total, 10.0)
+    assert_edge_flows_shape(g, summary, expected_present=True)
+    assert_valid_min_cut(g, summary.min_cut)
     fb = flows_by_eid(g, summary.edge_flows)
     # B->C parallels proportional to capacity: 1:2:3 over total 6 => 1,2,3
     assert np.isclose(fb[4], 1.0)
@@ -174,11 +176,14 @@ def test_max_flow_graph3_proportional_parallel_distribution(graph3):
     assert np.isclose(fb[1], 2.0)
     assert np.isclose(fb[2], 3.0)
     # A->E carries 4
-    assert np.isclose(fb[8], 4.0)
+    assert np.isclose(fb[3], 4.0)
 
 
 def test_max_flow_two_disjoint_shortest_routes_proportional(
     two_disjoint_shortest_graph,
+    flows_by_eid,
+    assert_edge_flows_shape,
+    assert_valid_min_cut,
 ):
     # S=0, A=1, B=2, T=3
     # Two disjoint shortest paths S->A->T and S->B->T with equal total cost
@@ -193,15 +198,14 @@ def test_max_flow_two_disjoint_shortest_routes_proportional(
     )
     # Bottlenecks along S->A->T = min(3,2)=2 and S->B->T = min(4,1)=1 => total 3
     assert np.isclose(total, 3.0)
+    assert_edge_flows_shape(g, summary, expected_present=True)
+    assert_valid_min_cut(g, summary.min_cut)
     fb = flows_by_eid(g, summary.edge_flows)
     assert np.isclose(fb[0], 2.0)  # S->A
     assert np.isclose(fb[2], 2.0)  # A->T
     assert np.isclose(fb[1], 1.0)  # S->B
     assert np.isclose(fb[3], 1.0)  # B->T
-    # Cost distribution: all path costs equal (2.0) => single bucket with total
-    d = {float(b.cost): float(b.share) for b in summary.cost_distribution.buckets}
-    assert len(d) == 1
-    assert np.isclose(d[2.0], 3.0)
+    # Cost distribution checks live in test_max_flow_cost_distribution.py
 
 
 def test_max_flow_square4_full_and_shortest_proportional(square4_graph):

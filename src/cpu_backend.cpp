@@ -22,18 +22,26 @@ public:
       const StrictMultiDiGraph& g, NodeId src, NodeId dst,
       FlowPlacement placement, bool shortest_path,
       bool with_edge_flows,
+      bool with_reachable,
+      bool with_residuals,
       const bool* node_mask = nullptr,
       const bool* edge_mask = nullptr) override {
-    return netgraph::core::calc_max_flow(g, src, dst, placement, shortest_path, with_edge_flows, node_mask, edge_mask);
+    return netgraph::core::calc_max_flow(
+        g, src, dst,
+        placement, shortest_path,
+        with_edge_flows,
+        with_reachable,
+        with_residuals,
+        node_mask, edge_mask);
   }
 
   std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
-      const StrictMultiDiGraph& g, NodeId s, NodeId t,
+      const StrictMultiDiGraph& g, NodeId src, NodeId dst,
       int k, std::optional<double> max_cost_factor,
       bool unique,
       const bool* node_mask,
       const bool* edge_mask) override {
-    return netgraph::core::k_shortest_paths(g, s, t, k, max_cost_factor, unique, node_mask, edge_mask);
+    return netgraph::core::k_shortest_paths(g, src, dst, k, max_cost_factor, unique, node_mask, edge_mask);
   }
 };
 } // namespace

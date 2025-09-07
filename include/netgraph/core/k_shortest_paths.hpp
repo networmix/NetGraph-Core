@@ -12,10 +12,11 @@ namespace netgraph::core {
 
 // Compute up to k shortest paths from s to t (Yen-like) and return
 // SPF-compatible outputs per path: (distances, predecessor DAG).
-// Distances are float64[N], PredDAG encodes one concrete path with single parent
-// per node along the path; other nodes have no parents and dist=inf.
+// Distances are Cost[N] (int64); unreachable entries are set to
+// std::numeric_limits<Cost>::max(). PredDAG encodes one concrete path with a
+// single parent per node along the path; other nodes have no parents.
 // Deterministic tie-breaking across equal-cost edges uses compacted edge order.
-std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
+[[nodiscard]] std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
     const StrictMultiDiGraph& g, NodeId src, NodeId dst,
     int k, std::optional<double> max_cost_factor,
     bool unique,

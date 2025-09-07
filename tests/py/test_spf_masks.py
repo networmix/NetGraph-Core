@@ -1,3 +1,5 @@
+"""SPF masks: behavior of node_mask and edge_mask in shortest-path routines."""
+
 import numpy as np
 
 import netgraph_core as ngc
@@ -43,9 +45,3 @@ def test_edge_mask_filters_parallel_edges(build_graph):
     # Map via edge id -> ensure it's a valid edge id
     e = int(via[start])
     assert 0 <= e < g.num_edges()
-
-
-"""SPF masks.
-
-Behavior of node_mask and edge_mask in shortest-path routines.
-"""

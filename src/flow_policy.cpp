@@ -24,7 +24,7 @@
 
 namespace netgraph::core {
 
-double FlowPolicy::placed_demand() const {
+double FlowPolicy::placed_demand() const noexcept {
   double s = 0.0;
   for (auto const& kv : flows_) s += kv.second.placed_flow;
   return s;
@@ -374,7 +374,7 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
       // Limit to matching src/dst
       for (auto const& t : static_paths_) {
         if (std::get<0>(t) == src && std::get<1>(t) == dst) {
-          create_flow(fg, src, dst, flowClass, std::nullopt);
+          [[maybe_unused]] auto* created = create_flow(fg, src, dst, flowClass, std::nullopt);
         } else {
           throw std::invalid_argument("Source and destination nodes of static paths do not match demand.");
         }
@@ -388,8 +388,9 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
       }
       for (int i=0;i<initial;++i) {
         // Seed flows using per-target as minimum per-edge residual requirement
-        create_flow(fg, src, dst, flowClass,
-                    (flow_placement_ == FlowPlacement::EqualBalanced && max_flow_count_.has_value()) ? std::optional<double>(per_target) : std::nullopt);
+        [[maybe_unused]] auto* created = create_flow(
+            fg, src, dst, flowClass,
+            (flow_placement_ == FlowPlacement::EqualBalanced && max_flow_count_.has_value()) ? std::optional<double>(per_target) : std::nullopt);
       }
     }
   }
@@ -505,8 +506,12 @@ std::pair<double,double> FlowPolicy::rebalance_demand(FlowGraph& fg,
 /* Remove all placed flows for this policy from the FlowGraph and reset
    per-flow placed volumes. */
 void FlowPolicy::remove_demand(FlowGraph& fg) {
-  for (auto const& kv : flows_) fg.remove(kv.first);
-  for (auto& kv : flows_) kv.second.placed_flow = 0.0;
+  for (auto const& kv : flows_) {
+    fg.remove(kv.first);
+  }
+  flows_.clear();
+  best_path_cost_ = 0;
+  locked_uv_edge_.clear();
 }
 
 /* Configure static paths to be used instead of dynamic SPF selection. If

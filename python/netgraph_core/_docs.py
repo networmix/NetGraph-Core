@@ -79,6 +79,7 @@ class FlowPolicy:
         max_flow_count: Optional[int] = None,
         max_path_cost: Optional[int] = None,
         max_path_cost_factor: Optional[float] = None,
+        shortest_path: bool = False,
         reoptimize_flows_on_each_placement: bool = False,
         max_no_progress_iterations: int = 100,
         max_total_iterations: int = 10000,
@@ -155,6 +156,16 @@ def ksp(
 ): ...
 
 
+def resolve_to_paths(
+    dag: PredDAG,
+    src: int,
+    dst: int,
+    *,
+    split_parallel_edges: bool = False,
+    max_paths: Optional[int] = None,
+) -> list[tuple[tuple[int, tuple[int, ...]], ...]]: ...
+
+
 def max_flow(
     g: "StrictMultiDiGraph",
     src: int,
@@ -163,20 +174,14 @@ def max_flow(
     flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
     shortest_path: bool = False,
     with_edge_flows: bool = False,
+    with_reachable: bool = False,
+    with_residuals: bool = False,
     node_mask: Optional[np.ndarray] = None,
     edge_mask: Optional[np.ndarray] = None,
 ): ...
 
 
-@dataclass(frozen=True)
-class CostBucket:
-    cost: int
-    share: float
-
-
-@dataclass(frozen=True)
-class CostDistribution:
-    buckets: list[CostBucket]
+# Cost buckets removed. Use FlowSummary.costs and FlowSummary.flows arrays.
 
 
 @dataclass(frozen=True)
@@ -188,8 +193,11 @@ class MinCut:
 class FlowSummary:
     total_flow: float
     min_cut: MinCut
-    cost_distribution: CostDistribution
-    edge_flows: list[float]
+    costs: "np.ndarray"  # int64[K]
+    flows: "np.ndarray"  # float64[K]
+    edge_flows: "np.ndarray"
+    residual_capacity: "np.ndarray"
+    reachable_nodes: "np.ndarray"
 
 
 def batch_max_flow(
@@ -199,6 +207,8 @@ def batch_max_flow(
     flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
     shortest_path: bool = False,
     with_edge_flows: bool = False,
+    with_reachable: bool = False,
+    with_residuals: bool = False,
     node_masks: Optional[list[np.ndarray]] = None,
     edge_masks: Optional[list[np.ndarray]] = None,
 ) -> list[FlowSummary]: ...

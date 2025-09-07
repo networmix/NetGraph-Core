@@ -60,7 +60,7 @@ void FlowGraph::remove_by_class(std::int32_t flowClass) {
   for (auto const& idx : to_rm) remove(idx);
 }
 
-void FlowGraph::reset() {
+void FlowGraph::reset() noexcept {
   fs_.reset();
   ledger_.clear();
 }

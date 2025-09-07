@@ -25,19 +25,20 @@ class FlowState {
 public:
   explicit FlowState(const StrictMultiDiGraph& g);
   FlowState(const StrictMultiDiGraph& g, std::span<const Cap> residual_init);
+  ~FlowState() noexcept = default;
 
   // Reset residual to the graph's initial capacities and clear edge_flow.
-  void reset();
+  void reset() noexcept;
   void reset(std::span<const Cap> residual_init);
 
   // Views over internal buffers (length == g.num_edges()).
-  std::span<const Cap> capacity_view() const noexcept { return g_->capacity_view(); }
-  std::span<const Cap> residual_view() const noexcept { return residual_; }
-  std::span<const Flow> edge_flow_view() const noexcept { return edge_flow_; }
+  [[nodiscard]] std::span<const Cap> capacity_view() const noexcept { return g_->capacity_view(); }
+  [[nodiscard]] std::span<const Cap> residual_view() const noexcept { return residual_; }
+  [[nodiscard]] std::span<const Flow> edge_flow_view() const noexcept { return edge_flow_; }
 
   // Mutating placement along a given PredDAG tier between src and dst.
   // requested_flow may be +inf. Returns the amount actually placed.
-  Flow place_on_dag(NodeId src, NodeId dst,
+  [[nodiscard]] Flow place_on_dag(NodeId src, NodeId dst,
                     const PredDAG& dag,
                     Flow requested_flow,
                     FlowPlacement placement,
@@ -47,21 +48,21 @@ public:
 
   // Convenience: run repeated placements until exhaustion (or single tier when
   // shortest_path=true). Returns total placed flow. Uses internal residual.
-  Flow place_max_flow(NodeId src, NodeId dst,
+  [[nodiscard]] Flow place_max_flow(NodeId src, NodeId dst,
                       FlowPlacement placement,
                       bool shortest_path = false);
 
   // Compute min-cut with respect to current residual state, starting reachability
   // from source s on the residual graph (forward arcs: residual>MIN; reverse arcs:
   // positive flow). Honors optional masks.
-  MinCut compute_min_cut(NodeId src,
+  [[nodiscard]] MinCut compute_min_cut(NodeId src,
                          const bool* node_mask = nullptr,
                          const bool* edge_mask = nullptr) const;
 
   // Apply or revert a set of edge flow deltas directly.
   // When add==true, treats each (eid, flow) as additional placed flow on the edge.
   // When add==false, removes previously placed flow (reverts), clamping to [0, capacity].
-  void apply_deltas(std::span<const std::pair<EdgeId, Flow>> deltas, bool add);
+  void apply_deltas(std::span<const std::pair<EdgeId, Flow>> deltas, bool add) noexcept;
 
 private:
   const StrictMultiDiGraph* g_ {nullptr};

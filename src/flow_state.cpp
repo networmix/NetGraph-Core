@@ -179,7 +179,7 @@ FlowState::FlowState(const StrictMultiDiGraph& g, std::span<const Cap> residual_
   edge_flow_.assign(static_cast<std::size_t>(g.num_edges()), 0.0);
 }
 
-void FlowState::reset() {
+void FlowState::reset() noexcept {
   auto cap = g_->capacity_view();
   for (std::size_t i=0;i<residual_.size();++i) residual_[i] = cap[i];
   std::fill(edge_flow_.begin(), edge_flow_.end(), 0.0);
@@ -396,7 +396,7 @@ MinCut FlowState::compute_min_cut(NodeId src, const bool* node_mask, const bool*
   return out;
 }
 
-void FlowState::apply_deltas(std::span<const std::pair<EdgeId, Flow>> deltas, bool add) {
+void FlowState::apply_deltas(std::span<const std::pair<EdgeId, Flow>> deltas, bool add) noexcept {
   const auto cap = g_->capacity_view();
   for (const auto& pr : deltas) {
     std::size_t eid = static_cast<std::size_t>(pr.first);

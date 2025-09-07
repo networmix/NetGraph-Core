@@ -26,6 +26,23 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# macOS: enforce consistent deployment target and architecture for wheels/builds
+if(APPLE)
+  # Allow environment to override, otherwise choose a sensible default
+  if(DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "$ENV{MACOSX_DEPLOYMENT_TARGET}" CACHE STRING "" FORCE)
+  elseif(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    # Default matches Homebrew Python's target in this workspace
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "" FORCE)
+  endif()
+  if(NOT DEFINED CMAKE_OSX_ARCHITECTURES)
+    # Default to arm64 on Apple Silicon hosts
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+      set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "" FORCE)
+    endif()
+  endif()
+endif()
+
 # Dependencies
 find_package(pybind11 3 CONFIG QUIET)
 if(NOT pybind11_FOUND)
@@ -69,6 +86,11 @@ endif()
 pybind11_add_module(_netgraph_core bindings/python/module.cpp)
 target_link_libraries(_netgraph_core PRIVATE netgraph_core)
 target_compile_features(_netgraph_core PRIVATE cxx_std_20)
+if(APPLE)
+  # Prefer maximum runtime compatibility for libc++ on macOS
+  target_compile_definitions(netgraph_core PUBLIC _LIBCPP_DISABLE_AVAILABILITY=1 _LIBCPP_ABI_VERSION=1)
+  target_compile_definitions(_netgraph_core PRIVATE _LIBCPP_DISABLE_AVAILABILITY=1 _LIBCPP_ABI_VERSION=1)
+endif()
 
 # Optional coverage instrumentation for GCC/Clang
 option(NETGRAPH_CORE_COVERAGE "Enable C++ coverage instrumentation" OFF)

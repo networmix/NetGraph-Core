@@ -27,22 +27,33 @@ def run_spf(
     return dist, (_conv or (lambda gg, dd: dd))(g, dag)
 
 
-def test_spf_line1_all_min_cost(line1_graph, dag_to_pred_map):
+def test_spf_line1_all_min_cost(
+    line1_graph, dag_to_pred_map, assert_pred_dag_integrity
+):
     g = line1_graph
     dist, pred = run_spf(g, 0, _conv=dag_to_pred_map)
     assert np.allclose(dist, np.array([0.0, 1.0, 2.0]))
     assert pred == {0: {}, 1: {0: [0]}, 2: {1: [1, 2]}}
+    # Validate raw DAG integrity from a direct call
+    dist2, dag2 = ngc.spf(g, 0)
+    assert_pred_dag_integrity(g, dag2)
 
 
-def test_spf_square1_all_min_cost(square1_graph, dag_to_pred_map):
+def test_spf_square1_all_min_cost(
+    square1_graph, dag_to_pred_map, assert_pred_dag_integrity
+):
     g = square1_graph
     dist, pred = run_spf(g, 0, _conv=dag_to_pred_map)
     expected_costs = np.array([0.0, 1.0, 2.0, 2.0])
     assert np.allclose(dist, expected_costs)
     assert pred == {0: {}, 1: {0: [0]}, 3: {0: [2]}, 2: {1: [1]}}
+    dist2, dag2 = ngc.spf(g, 0)
+    assert_pred_dag_integrity(g, dag2)
 
 
-def test_spf_square2_all_min_cost(square2_graph, dag_to_pred_map):
+def test_spf_square2_all_min_cost(
+    square2_graph, dag_to_pred_map, assert_pred_dag_integrity
+):
     g = square2_graph
     dist, pred = run_spf(g, 0, _conv=dag_to_pred_map)
     assert np.isclose(dist[0], 0.0)
@@ -50,9 +61,13 @@ def test_spf_square2_all_min_cost(square2_graph, dag_to_pred_map):
     assert np.isclose(dist[3], 1.0)
     assert np.isclose(dist[2], 2.0)
     assert pred == {0: {}, 1: {0: [0]}, 3: {0: [1]}, 2: {1: [2], 3: [3]}}
+    dist2, dag2 = ngc.spf(g, 0)
+    assert_pred_dag_integrity(g, dag2)
 
 
-def test_spf_graph3_all_min_cost_and_single(graph3, dag_to_pred_map):
+def test_spf_graph3_all_min_cost_and_single(
+    graph3, dag_to_pred_map, assert_pred_dag_integrity
+):
     g = graph3
     # ALL_MIN_COST, multipath=True
     sel = ngc.EdgeSelection(
@@ -89,10 +104,15 @@ def test_spf_graph3_all_min_cost_and_single(graph3, dag_to_pred_map):
         5: {2: [7]},
         3: {0: [11]},
     }
+    # Validate integrity of returned DAGs
+    dist_all, dag_all = ngc.spf(g, 0, selection=sel)
+    assert_pred_dag_integrity(g, dag_all)
+    dist_single, dag_single = ngc.spf(g, 0, selection=sel2)
+    assert_pred_dag_integrity(g, dag_single)
 
 
 def test_spf_capacity_filter_all_min_cost_with_cap_remaining(
-    build_graph, dag_to_pred_map
+    build_graph, dag_to_pred_map, assert_pred_dag_integrity
 ):
     g = build_graph(2, [(0, 1, 1, 0.0, 0), (0, 1, 1, 1.0, 1)])
     sel = ngc.EdgeSelection(
@@ -101,14 +121,22 @@ def test_spf_capacity_filter_all_min_cost_with_cap_remaining(
     dist, pred = run_spf(g, 0, selection=sel, _conv=dag_to_pred_map)
     assert np.allclose(dist, np.array([0.0, 1.0]))
     assert pred == {0: {}, 1: {0: [1]}}
+    dist2, dag2 = ngc.spf(g, 0, selection=sel)
+    assert_pred_dag_integrity(g, dag2)
 
 
-def test_spf_with_dst_early_exit_equivalence(square2_graph, dag_to_pred_map):
+def test_spf_with_dst_early_exit_equivalence(
+    square2_graph, dag_to_pred_map, assert_pred_dag_integrity
+):
     g = square2_graph
     dist1, pred1 = run_spf(g, 0, _conv=dag_to_pred_map)
     dist2, pred2 = run_spf(g, 0, dst=2, _conv=dag_to_pred_map)
     assert np.allclose(dist1, dist2)
     assert pred1 == pred2
+    d1, dag1 = ngc.spf(g, 0)
+    d2, dag2 = ngc.spf(g, 0, dst=2)
+    assert_pred_dag_integrity(g, dag1)
+    assert_pred_dag_integrity(g, dag2)
 
 
 def test_spf_pred_dag_shapes_and_monotonic_offsets(square2_graph):
