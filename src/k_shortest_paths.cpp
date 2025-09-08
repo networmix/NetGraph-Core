@@ -149,8 +149,8 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
     const StrictMultiDiGraph& g, NodeId src, NodeId dst,
     int k, std::optional<double> max_cost_factor,
     bool unique,
-    const bool* node_mask,
-    const bool* edge_mask) {
+    std::span<const bool> node_mask,
+    std::span<const bool> edge_mask) {
   std::vector<Path> paths;
   if (k <= 0) return {};
   if (src < 0 || dst < 0 || src >= g.num_nodes() || dst >= g.num_nodes()) return {};
@@ -160,12 +160,12 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
   std::vector<unsigned char> edge_mask_vec;
   const std::vector<unsigned char>* nm_ptr = nullptr;
   const std::vector<unsigned char>* em_ptr = nullptr;
-  if (node_mask) {
+  if (node_mask.size() == static_cast<std::size_t>(g.num_nodes())) {
     node_mask_vec.assign(static_cast<std::size_t>(g.num_nodes()), static_cast<unsigned char>(1));
     for (std::size_t i=0;i<node_mask_vec.size();++i) node_mask_vec[i] = node_mask[i] ? 1u : 0u;
     nm_ptr = &node_mask_vec;
   }
-  if (edge_mask) {
+  if (edge_mask.size() == static_cast<std::size_t>(g.num_edges())) {
     edge_mask_vec.assign(static_cast<std::size_t>(g.num_edges()), static_cast<unsigned char>(1));
     for (std::size_t i=0;i<edge_mask_vec.size();++i) edge_mask_vec[i] = edge_mask[i] ? 1u : 0u;
     em_ptr = &edge_mask_vec;
@@ -255,23 +255,18 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
         for (std::size_t idx=0; idx<edge_mask_local.size(); ++idx) edge_mask_local[idx] = (edge_mask_local[idx] && (*em_ptr)[idx]) ? 1u : 0u;
       }
       // Multipath spur PredDAG from spur_node -> t
-      std::unique_ptr<bool[]> nm_buf;
-      std::unique_ptr<bool[]> em_buf;
-      const bool* nm = nullptr;
-      const bool* em = nullptr;
+      std::unique_ptr<bool[]> nm_buf2;
+      std::unique_ptr<bool[]> em_buf2;
+      std::span<const bool> nm, em;
       if (!node_mask_local.empty()) {
-        nm_buf = std::unique_ptr<bool[]>(new bool[static_cast<std::size_t>(g.num_nodes())]);
-        for (std::size_t idx = 0; idx < static_cast<std::size_t>(g.num_nodes()); ++idx) {
-          nm_buf[idx] = node_mask_local[idx] != 0;
-        }
-        nm = nm_buf.get();
+        nm_buf2 = std::unique_ptr<bool[]>(new bool[static_cast<std::size_t>(g.num_nodes())]);
+        for (std::size_t idx = 0; idx < static_cast<std::size_t>(g.num_nodes()); ++idx) nm_buf2[idx] = (node_mask_local[idx] != 0);
+        nm = std::span<const bool>(nm_buf2.get(), static_cast<std::size_t>(g.num_nodes()));
       }
       if (!edge_mask_local.empty()) {
-        em_buf = std::unique_ptr<bool[]>(new bool[static_cast<std::size_t>(g.num_edges())]);
-        for (std::size_t idx = 0; idx < static_cast<std::size_t>(g.num_edges()); ++idx) {
-          em_buf[idx] = edge_mask_local[idx] != 0;
-        }
-        em = em_buf.get();
+        em_buf2 = std::unique_ptr<bool[]>(new bool[static_cast<std::size_t>(g.num_edges())]);
+        for (std::size_t idx = 0; idx < static_cast<std::size_t>(g.num_edges()); ++idx) em_buf2[idx] = (edge_mask_local[idx] != 0);
+        em = std::span<const bool>(em_buf2.get(), static_cast<std::size_t>(g.num_edges()));
       }
       EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
       auto [dist_spur, dag_spur] = shortest_paths(g, spur_node, dst, /*multipath=*/true, sel, std::span<const Cap>(), nm, em);

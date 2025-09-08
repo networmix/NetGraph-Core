@@ -25,15 +25,15 @@ struct PredDAG {
 // Optional node/edge masks:
 // - node_mask[v] == true means node v is allowed; false excludes it from search.
 // - edge_mask[e] == true means edge e is allowed; false excludes it from search.
-// If masks are nullptr, they are ignored.
+// Empty mask spans are ignored.
 [[nodiscard]] std::pair<std::vector<Cost>, PredDAG>
 shortest_paths(const StrictMultiDiGraph& g, NodeId src,
                std::optional<NodeId> dst,
                bool multipath,
                const EdgeSelection& selection,
                std::span<const Cap> residual = {},
-               const bool* node_mask = nullptr,
-               const bool* edge_mask = nullptr);
+               std::span<const bool> node_mask = {},
+               std::span<const bool> edge_mask = {});
 
 // Enumerate concrete paths represented by a PredDAG from src to dst.
 // Each path is returned as a sequence of (node_id, (edge_ids...)) pairs ending with (dst, ()).

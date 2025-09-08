@@ -472,22 +472,22 @@ PYBIND11_MODULE(_netgraph_core, m) {
         py::gil_scoped_release rel; auto total = fs.place_max_flow(src, dst, placement, shortest_path); py::gil_scoped_acquire acq; return total;
       }, py::arg("src"), py::arg("dst"), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false)
       .def("compute_min_cut", [](const FlowState& fs, std::int32_t src, py::object node_mask, py::object edge_mask){
-        const bool* node_ptr = nullptr; const bool* edge_ptr = nullptr; py::array node_arr, edge_arr;
+        std::span<const bool> node_span, edge_span; py::array node_arr, edge_arr;
         if (!node_mask.is_none()) {
           node_arr = py::cast<py::array>(node_mask);
           if (!(node_arr.flags() & py::array::c_style)) throw py::type_error("node_mask must be C-contiguous (np.ascontiguousarray)");
           auto b = node_arr.request();
           if (b.ndim != 1 || b.format != py::format_descriptor<bool>::format()) throw py::type_error("node_mask must be 1-D bool");
-          node_ptr = static_cast<const bool*>(b.ptr);
+          node_span = std::span<const bool>(static_cast<const bool*>(b.ptr), static_cast<std::size_t>(b.shape[0]));
         }
         if (!edge_mask.is_none()) {
           edge_arr = py::cast<py::array>(edge_mask);
           if (!(edge_arr.flags() & py::array::c_style)) throw py::type_error("edge_mask must be C-contiguous (np.ascontiguousarray)");
           auto b = edge_arr.request();
           if (b.ndim != 1 || b.format != py::format_descriptor<bool>::format()) throw py::type_error("edge_mask must be 1-D bool");
-          edge_ptr = static_cast<const bool*>(b.ptr);
+          edge_span = std::span<const bool>(static_cast<const bool*>(b.ptr), static_cast<std::size_t>(b.shape[0]));
         }
-        py::gil_scoped_release rel; auto mc = fs.compute_min_cut(src, node_ptr, edge_ptr); py::gil_scoped_acquire acq; return mc;
+        py::gil_scoped_release rel; auto mc = fs.compute_min_cut(src, node_span, edge_span); py::gil_scoped_acquire acq; return mc;
       }, py::arg("src"), py::kw_only(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none());
 
   // FlowIndex and FlowGraph bindings

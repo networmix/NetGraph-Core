@@ -31,14 +31,16 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
               bool with_edge_flows,
               bool with_reachable,
               bool with_residuals,
-              const bool* node_mask, const bool* edge_mask) {
+              std::span<const bool> node_mask, std::span<const bool> edge_mask) {
   FlowSummary summary;
   const auto N = g.num_nodes();
   if (src < 0 || src >= N || dst < 0 || dst >= N || src == dst) {
     return {0.0, std::move(summary)};
   }
-  if ((node_mask && !node_mask[static_cast<std::size_t>(src)]) ||
-      (node_mask && !node_mask[static_cast<std::size_t>(dst)])) {
+  const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(g.num_nodes()));
+  const bool use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(g.num_edges()));
+  if ((use_node_mask && !node_mask[static_cast<std::size_t>(src)]) ||
+      (use_node_mask && !node_mask[static_cast<std::size_t>(dst)])) {
     return {0.0, std::move(summary)};
   }
   // Use FlowState for residual tracking and per-edge placement
@@ -54,7 +56,8 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
         /*multipath=*/true,
         sel,
         fs.residual_view(),
-        node_mask, edge_mask);
+        use_node_mask ? node_mask : std::span<const bool>{},
+        use_edge_mask ? edge_mask : std::span<const bool>{});
 
     // No path if t has no parents in DAG
     if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size() - 1 ||
@@ -152,14 +155,14 @@ batch_max_flow(const StrictMultiDiGraph& g,
                bool with_edge_flows,
                bool with_reachable,
                bool with_residuals,
-               const std::vector<const bool*>& node_masks,
-               const std::vector<const bool*>& edge_masks) {
+               const std::vector<std::span<const bool>>& node_masks,
+               const std::vector<std::span<const bool>>& edge_masks) {
   std::vector<FlowSummary> out;
   out.reserve(pairs.size());
   for (std::size_t i = 0; i < pairs.size(); ++i) {
     auto pr = pairs[i];
-    const bool* nm = (i < node_masks.size() ? node_masks[i] : nullptr);
-    const bool* em = (i < edge_masks.size() ? edge_masks[i] : nullptr);
+    std::span<const bool> nm = (i < node_masks.size() ? node_masks[i] : std::span<const bool>{});
+    std::span<const bool> em = (i < edge_masks.size() ? edge_masks[i] : std::span<const bool>{});
     auto [val, summary] = calc_max_flow(g, pr.first, pr.second,
                                         placement, shortest_path,
                                         with_edge_flows,

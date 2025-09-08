@@ -175,8 +175,8 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
                     bool multipath_arg,
                     const EdgeSelection& selection,
                     std::span<const Cap> residual,
-                    const bool* node_mask,
-                    const bool* edge_mask) {
+                    std::span<const bool> node_mask,
+                    std::span<const bool> edge_mask) {
   const auto N = g.num_nodes();
   const auto row = g.row_offsets_view();
   const auto col = g.col_indices_view();
@@ -185,7 +185,9 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
   const auto cap  = g.capacity_view();
 
   std::vector<Cost> dist(static_cast<std::size_t>(N), std::numeric_limits<Cost>::max());
-  if (src >= 0 && src < N && (!node_mask || node_mask[static_cast<std::size_t>(src)])) {
+  const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(g.num_nodes()));
+  const bool use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(g.num_edges()));
+  if (src >= 0 && src < N && (!use_node_mask || node_mask[static_cast<std::size_t>(src)])) {
     dist[static_cast<std::size_t>(src)] = static_cast<Cost>(0);
   }
   std::vector<std::vector<std::pair<NodeId, std::vector<EdgeId>>>> pred_lists(static_cast<std::size_t>(N));
@@ -218,7 +220,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
     std::size_t i = start;
     while (i < end) {
       NodeId v = col[i];
-      if (node_mask && !node_mask[static_cast<std::size_t>(v)]) {
+      if (use_node_mask && !node_mask[static_cast<std::size_t>(v)]) {
         std::size_t j_skip = i; while (j_skip < end && col[j_skip] == v) ++j_skip; i = j_skip; continue;
       }
       Cost min_edge_cost = std::numeric_limits<Cost>::max();
@@ -228,7 +230,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
       int best_edge_id = -1;
       for (; j < end && col[j] == v; ++j) {
         auto e = static_cast<std::size_t>(aei[j]);
-        if (edge_mask && !edge_mask[e]) continue;
+        if (use_edge_mask && !edge_mask[e]) continue;
         const Cap rem = has_residual ? residual[e] : cap[e];
         if (require_cap && rem < kMinCap) continue;
         const Cost ecost = static_cast<Cost>(cost[e]);
@@ -300,8 +302,8 @@ shortest_paths(const StrictMultiDiGraph& g, NodeId src,
                bool multipath,
                const EdgeSelection& selection,
                std::span<const Cap> residual,
-               const bool* node_mask,
-               const bool* edge_mask) {
+               std::span<const bool> node_mask,
+               std::span<const bool> edge_mask) {
   return shortest_paths_core(g, src, dst, multipath, selection, residual, node_mask, edge_mask);
 }
 

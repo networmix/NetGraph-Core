@@ -32,8 +32,8 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
               bool with_edge_flows,
               bool with_reachable,
               bool with_residuals,
-              const bool* node_mask = nullptr,
-              const bool* edge_mask = nullptr);
+              std::span<const bool> node_mask = {},
+              std::span<const bool> edge_mask = {});
 
 [[nodiscard]] std::vector<FlowSummary>
 batch_max_flow(const StrictMultiDiGraph& g,
@@ -42,7 +42,7 @@ batch_max_flow(const StrictMultiDiGraph& g,
                bool with_edge_flows,
                bool with_reachable,
                bool with_residuals,
-               const std::vector<const bool*>& node_masks = {},
-               const std::vector<const bool*>& edge_masks = {});
+               const std::vector<std::span<const bool>>& node_masks = {},
+               const std::vector<std::span<const bool>>& edge_masks = {});
 
 } // namespace netgraph::core

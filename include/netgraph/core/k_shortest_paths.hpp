@@ -20,7 +20,7 @@ namespace netgraph::core {
     const StrictMultiDiGraph& g, NodeId src, NodeId dst,
     int k, std::optional<double> max_cost_factor,
     bool unique,
-    const bool* node_mask = nullptr,
-    const bool* edge_mask = nullptr);
+    std::span<const bool> node_mask = {},
+    std::span<const bool> edge_mask = {});
 
 } // namespace netgraph::core

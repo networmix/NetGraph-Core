@@ -56,8 +56,8 @@ public:
   // from source s on the residual graph (forward arcs: residual>MIN; reverse arcs:
   // positive flow). Honors optional masks.
   [[nodiscard]] MinCut compute_min_cut(NodeId src,
-                         const bool* node_mask = nullptr,
-                         const bool* edge_mask = nullptr) const;
+                         std::span<const bool> node_mask = {},
+                         std::span<const bool> edge_mask = {}) const;
 
   // Apply or revert a set of edge flow deltas directly.
   // When add==true, treats each (eid, flow) as additional placed flow on the edge.

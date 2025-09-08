@@ -336,7 +336,7 @@ Flow FlowState::place_max_flow(NodeId src, NodeId dst, FlowPlacement placement, 
   return total;
 }
 
-MinCut FlowState::compute_min_cut(NodeId src, const bool* node_mask, const bool* edge_mask) const {
+MinCut FlowState::compute_min_cut(NodeId src, std::span<const bool> node_mask, std::span<const bool> edge_mask) const {
   MinCut out;
   const auto N = g_->num_nodes();
   const auto row = g_->row_offsets_view();
@@ -348,17 +348,19 @@ MinCut FlowState::compute_min_cut(NodeId src, const bool* node_mask, const bool*
   std::vector<char> visited(static_cast<std::size_t>(N), 0);
   std::queue<std::int32_t> q;
   if (src >= 0 && src < N) { visited[static_cast<std::size_t>(src)] = 1; q.push(src); }
+  const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(N));
+  const bool use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(g_->num_edges()));
   while (!q.empty()) {
     auto u = q.front(); q.pop();
-    if (node_mask && !node_mask[static_cast<std::size_t>(u)]) continue;
+    if (use_node_mask && !node_mask[static_cast<std::size_t>(u)]) continue;
     // Forward residual arcs
     auto start = static_cast<std::size_t>(row[static_cast<std::size_t>(u)]);
     auto end   = static_cast<std::size_t>(row[static_cast<std::size_t>(u)+1]);
     for (std::size_t j = start; j < end; ++j) {
       auto v = static_cast<std::int32_t>(col[j]);
       auto eid = static_cast<std::size_t>(aei[j]);
-      if (edge_mask && !edge_mask[eid]) continue;
-      if (node_mask && !node_mask[static_cast<std::size_t>(v)]) continue;
+      if (use_edge_mask && !edge_mask[eid]) continue;
+      if (use_node_mask && !node_mask[static_cast<std::size_t>(v)]) continue;
       if (residual_[eid] > kMinCap && !visited[static_cast<std::size_t>(v)]) {
         visited[static_cast<std::size_t>(v)] = 1;
         q.push(v);
@@ -370,8 +372,8 @@ MinCut FlowState::compute_min_cut(NodeId src, const bool* node_mask, const bool*
     for (std::size_t j = rs; j < re; ++j) {
       auto w = static_cast<std::int32_t>(in_col[j]);
       auto eid = static_cast<std::size_t>(in_aei[j]);
-      if (edge_mask && !edge_mask[eid]) continue;
-      if (node_mask && !node_mask[static_cast<std::size_t>(w)]) continue;
+      if (use_edge_mask && !edge_mask[eid]) continue;
+      if (use_node_mask && !node_mask[static_cast<std::size_t>(w)]) continue;
       double flow_e = g_->capacity_view()[eid] - residual_[eid];
       if (flow_e > kMinFlow && !visited[static_cast<std::size_t>(w)]) {
         visited[static_cast<std::size_t>(w)] = 1;
@@ -382,15 +384,15 @@ MinCut FlowState::compute_min_cut(NodeId src, const bool* node_mask, const bool*
   // Collect cut edges
   for (std::int32_t u = 0; u < N; ++u) {
     if (!visited[static_cast<std::size_t>(u)]) continue;
-    if (node_mask && !node_mask[static_cast<std::size_t>(u)]) continue;
+    if (use_node_mask && !node_mask[static_cast<std::size_t>(u)]) continue;
     auto s3 = static_cast<std::size_t>(row[static_cast<std::size_t>(u)]);
     auto e3 = static_cast<std::size_t>(row[static_cast<std::size_t>(u)+1]);
     for (std::size_t j = s3; j < e3; ++j) {
       auto v = static_cast<std::int32_t>(col[j]);
-      if (node_mask && !node_mask[static_cast<std::size_t>(v)]) continue;
+      if (use_node_mask && !node_mask[static_cast<std::size_t>(v)]) continue;
       if (visited[static_cast<std::size_t>(v)]) continue;
       auto eid = static_cast<std::size_t>(aei[j]);
-      if (edge_mask && !edge_mask[eid]) continue;
+      if (use_edge_mask && !edge_mask[eid]) continue;
       if (residual_[eid] <= kMinCap) {
         out.edges.push_back(static_cast<EdgeId>(eid));
       }
