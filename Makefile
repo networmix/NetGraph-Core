@@ -6,7 +6,8 @@
 
 VENV_BIN := $(PWD)/venv/bin
 # Use dynamic (recursive) assignment so a newly created venv is picked up
-PYTHON = $(if $(wildcard $(VENV_BIN)/python),$(VENV_BIN)/python,python3)
+PY_FIND := $(shell command -v python3.13 2>/dev/null || command -v python3 2>/dev/null)
+PYTHON = $(if $(wildcard $(VENV_BIN)/python),$(VENV_BIN)/python,$(PY_FIND))
 PIP = $(PYTHON) -m pip
 PYTEST = $(PYTHON) -m pytest
 RUFF = $(PYTHON) -m ruff
@@ -46,7 +47,7 @@ dev:
 	@echo "🚀 Setting up development environment..."
 	@if [ ! -x "$(VENV_BIN)/python" ]; then \
 		echo "🐍 Creating virtual environment in ./venv ..."; \
-		python3 -m venv venv; \
+		$(PY_FIND) -m venv venv; \
 		$(VENV_BIN)/python -m pip install -U pip wheel; \
 	fi
 	@echo "📦 Installing dev dependencies..."
@@ -57,7 +58,7 @@ dev:
 
 venv:
 	@echo "🐍 Creating virtual environment in ./venv ..."
-	@python3 -m venv venv
+	@$(PY_FIND) -m venv venv
 	@$(VENV_BIN)/python -m pip install -U pip wheel
 	@echo "✅ venv ready. Activate with: source venv/bin/activate"
 

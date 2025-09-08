@@ -172,6 +172,7 @@ namespace {
 static std::pair<std::vector<Cost>, PredDAG>
 shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
                     std::optional<NodeId> dst,
+                    bool multipath_arg,
                     const EdgeSelection& selection,
                     std::span<const Cap> residual,
                     const bool* node_mask,
@@ -201,7 +202,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
 
   const bool has_residual = (residual.size() == static_cast<std::size_t>(g.num_edges()));
   const bool require_cap = selection.require_capacity || has_residual;
-  const bool multipath = selection.multipath;
+  const bool multipath = multipath_arg;
 
   while (!pq.empty()) {
     auto [d_u, u] = pq.top(); pq.pop();
@@ -234,14 +235,14 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
         if (ecost < min_edge_cost) {
           min_edge_cost = ecost;
           selected_edges.clear();
-          if (multipath) {
+          if (selection.multi_edge) {
             selected_edges.push_back(static_cast<EdgeId>(aei[j]));
           } else {
             best_edge_id = static_cast<int>(e);
             best_rem_for_min_cost = static_cast<double>(rem);
           }
         } else if (ecost == min_edge_cost) {
-          if (multipath) {
+          if (selection.multi_edge) {
             selected_edges.push_back(static_cast<EdgeId>(aei[j]));
           } else {
             // tie-break among equal-cost edges
@@ -264,7 +265,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
           }
         }
       }
-      if (!multipath && best_edge_id >= 0) {
+      if (!selection.multi_edge && best_edge_id >= 0) {
         selected_edges.clear();
         selected_edges.push_back(static_cast<EdgeId>(best_edge_id));
       }
@@ -296,11 +297,12 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
 std::pair<std::vector<Cost>, PredDAG>
 shortest_paths(const StrictMultiDiGraph& g, NodeId src,
                std::optional<NodeId> dst,
+               bool multipath,
                const EdgeSelection& selection,
                std::span<const Cap> residual,
                const bool* node_mask,
                const bool* edge_mask) {
-  return shortest_paths_core(g, src, dst, selection, residual, node_mask, edge_mask);
+  return shortest_paths_core(g, src, dst, multipath, selection, residual, node_mask, edge_mask);
 }
 
 } // namespace netgraph::core

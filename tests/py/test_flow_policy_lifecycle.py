@@ -9,7 +9,7 @@ import netgraph_core as ngc
 
 def _make_sel():
     return ngc.EdgeSelection(
-        multipath=True,
+        multi_edge=True,
         require_capacity=True,
         tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
     )
@@ -25,10 +25,12 @@ def _small_graph(build_graph):
     return build_graph(3, edges)
 
 
-def test_flow_policy_place_rebalance_remove(build_graph):
+def test_flow_policy_place_rebalance_remove(build_graph, algs, to_handle):
     g = _small_graph(build_graph)
     fg = ngc.FlowGraph(g)
     policy = ngc.FlowPolicy(
+        algs,
+        to_handle(g),
         path_alg=ngc.PathAlg.SPF,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
         selection=_make_sel(),
@@ -58,11 +60,13 @@ def test_flow_policy_place_rebalance_remove(build_graph):
     assert policy.placed_demand() == pytest.approx(0.0, rel=0, abs=1e-12)
 
 
-def test_flow_policy_flow_count_bounds(build_graph):
+def test_flow_policy_flow_count_bounds(build_graph, algs, to_handle):
     g = _small_graph(build_graph)
     fg = ngc.FlowGraph(g)
     # Constrain to exactly 3 flows
     policy = ngc.FlowPolicy(
+        algs,
+        to_handle(g),
         path_alg=ngc.PathAlg.SPF,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
         selection=_make_sel(),

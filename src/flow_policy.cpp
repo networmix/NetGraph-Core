@@ -10,11 +10,12 @@
   Notes:
     - "Residual-aware" SPF considers current remaining capacity (or a per-flow
       threshold) when exploring edges.
-    - When `selection.multipath == false`, we lock exactly one edge per (u,v)
-      neighbor pair across all flows to keep single-path behavior consistent.
+    - Edge selection (multipath vs single-path) is handled natively by the SPF algorithm.
 */
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/constants.hpp"
+#include "netgraph/core/algorithms.hpp"
+#include "netgraph/core/options.hpp"
 
 #include <algorithm>
 #include <deque>
@@ -46,149 +47,36 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
     return std::nullopt;
   }
   if (path_alg_ != PathAlg::SPF) return std::nullopt;
-  // Use configured selection; EqualBalanced behavior is achieved by placement and rebalancing.
+  // Use configured selection for per-adjacency edge behavior
   EdgeSelection sel = selection_;
-  const bool single_uv = !selection_.multipath; // interpret as: single edge per (u,v) group
-  if (single_uv) {
-    // Allow multiple parents in DAG, we'll compress to one edge per (u,v) parent group below
-    sel.multipath = true;
-  }
-  // Require residual-aware SPF when policy needs residual OR when EqualBalanced
-  // provides a per-flow threshold (min_flow). Equal-balanced seeding enforces
-  // a minimum deliverable volume per flow when configured.
+  // Decide whether we need residual-aware SPF and whether to build an edge mask
   const bool require_residual = (sel.require_capacity || (flow_placement_ == FlowPlacement::EqualBalanced && min_flow.has_value()));
-  std::pair<std::vector<Cost>, PredDAG> res;
+  const auto residual = fg.residual_view();
+  std::vector<unsigned char> em; const bool* edge_mask_ptr = nullptr;
+  bool need_mask = false;
   if (require_residual) {
-    // Build a combined edge mask if needed:
-    // - threshold: enforce per-edge residual >= min_flow when provided
-    // - locking: for Proportional, allow-only locked edges; for EqualBalanced, exclude previously used edges
-    const auto residual = fg.residual_view();
-    std::vector<unsigned char> em; const bool* edge_mask_ptr = nullptr;
-    bool need_mask = min_flow.has_value() || (single_uv && !locked_uv_edge_.empty());
+    // In shortest-path EqualBalanced mode, do not enforce per-edge minimum residual at SPF stage
+    need_mask = (min_flow.has_value() && !(shortest_path_ && flow_placement_ == FlowPlacement::EqualBalanced));
     if (need_mask) {
       em.assign(residual.size(), 1u);
-      if (min_flow.has_value()) {
-        double thr = *min_flow;
-        for (std::size_t i=0;i<residual.size();++i) em[i] = static_cast<unsigned char>(static_cast<double>(residual[i]) >= thr);
-      }
-      if (single_uv && !locked_uv_edge_.empty()) {
-        const auto& g = fg.graph();
-        auto row = g.row_offsets_view();
-        auto col = g.col_indices_view();
-        auto aei = g.adj_edge_index_view();
-        for (std::int32_t u = 0; u < g.num_nodes(); ++u) {
-          auto s = static_cast<std::size_t>(row[static_cast<std::size_t>(u)]);
-          auto e = static_cast<std::size_t>(row[static_cast<std::size_t>(u)+1]);
-          std::size_t i = s;
-          while (i < e) {
-            auto v = static_cast<std::int32_t>(col[i]);
-            std::uint64_t key = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(u))<<32) | static_cast<std::uint32_t>(v);
-            auto it = locked_uv_edge_.find(key);
-            if (it != locked_uv_edge_.end()) {
-              EdgeId used = it->second;
-              std::size_t j = i;
-              while (j < e && col[j] == v) {
-                auto eid = static_cast<EdgeId>(aei[j]);
-                if (flow_placement_ == FlowPlacement::Proportional) {
-                  if (eid != used) em[static_cast<std::size_t>(eid)] = 0u; // allow-only locked
-                } else { // EqualBalanced: exclude previously used edge to diversify flows
-                  if (eid == used) em[static_cast<std::size_t>(eid)] = 0u;
-                }
-                ++j;
-              }
-              i = j;
-            } else { std::size_t j = i; while (j < e && col[j] == v) ++j; i = j; }
-          }
-        }
-      }
+      double thr = *min_flow;
+      for (std::size_t i=0;i<residual.size();++i) em[i] = static_cast<unsigned char>(static_cast<double>(residual[i]) >= thr);
       edge_mask_ptr = reinterpret_cast<const bool*>(em.data());
     }
-    res = shortest_paths(fg.graph(), src, dst, sel, residual, /*node_mask*/ nullptr, edge_mask_ptr);
-  } else {
-    // Non-residual SPF. Apply lock if needed for single-path
-    if (single_uv && !locked_uv_edge_.empty()) {
-      const auto& g = fg.graph();
-      auto row = g.row_offsets_view();
-      auto col = g.col_indices_view();
-      auto aei = g.adj_edge_index_view();
-      std::vector<unsigned char> em(static_cast<std::size_t>(g.num_edges()), 1u);
-      for (std::int32_t u = 0; u < g.num_nodes(); ++u) {
-        auto s = static_cast<std::size_t>(row[static_cast<std::size_t>(u)]);
-        auto e = static_cast<std::size_t>(row[static_cast<std::size_t>(u)+1]);
-        std::size_t i = s;
-        while (i < e) {
-          auto v = static_cast<std::int32_t>(col[i]);
-          std::uint64_t key = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(u))<<32) | static_cast<std::uint32_t>(v);
-          auto it = locked_uv_edge_.find(key);
-          if (it != locked_uv_edge_.end()) {
-            EdgeId used = it->second;
-            std::size_t j = i;
-            while (j < e && col[j] == v) {
-              auto eid = static_cast<EdgeId>(aei[j]);
-              if (flow_placement_ == FlowPlacement::Proportional) {
-                if (eid != used) em[static_cast<std::size_t>(eid)] = 0u; // allow-only locked
-              } else { // EqualBalanced
-                if (eid == used) em[static_cast<std::size_t>(eid)] = 0u; // exclude used
-              }
-              ++j;
-            }
-            i = j;
-          } else { std::size_t j = i; while (j < e && col[j] == v) ++j; i = j; }
-        }
-      }
-      res = shortest_paths(fg.graph(), src, dst, sel, std::span<const Cap>(), /*node_mask*/ nullptr, reinterpret_cast<const bool*>(em.data()));
-    } else {
-      res = shortest_paths(fg.graph(), src, dst, sel);
-    }
   }
+  SpfOptions opts;
+  opts.multipath = true;
+  opts.selection = sel;
+  opts.dst = dst;
+  opts.residual = require_residual ? residual : std::span<const Cap>();
+  opts.node_mask = {};
+  opts.edge_mask = (require_residual && need_mask) ? std::span<const bool>(edge_mask_ptr, residual.size()) : std::span<const bool>();
+  auto res = ctx_.algorithms->spf(ctx_.graph, src, opts);
   const auto& dist = res.first;
   PredDAG dag = std::move(res.second);
-  // If we want single edge per (u,v) group, compress the DAG accordingly while
-  // keeping all distinct parents of each node.
-  if (single_uv) {
-    PredDAG ndag; ndag.parent_offsets.assign(dag.parent_offsets.size(), 0);
-    std::vector<NodeId> nparents;
-    std::vector<EdgeId> nvia;
-    const std::vector<Cap>* residual_ptr = nullptr;
-    std::vector<Cap> res_copy;
-    if (require_residual) {
-      // Snapshot residual
-      auto rv = fg.residual_view();
-      res_copy.assign(rv.begin(), rv.end());
-      residual_ptr = &res_copy;
-    }
-    for (std::size_t v = 0; v + 1 < dag.parent_offsets.size(); ++v) {
-      auto s = static_cast<std::size_t>(dag.parent_offsets[v]);
-      auto e = static_cast<std::size_t>(dag.parent_offsets[v+1]);
-      if (e <= s) { ndag.parent_offsets[v+1] = static_cast<std::int32_t>(nparents.size()); continue; }
-      // Group by parent u
-      std::unordered_map<NodeId, EdgeId> chosen;
-      std::unordered_map<NodeId, double> best_resid;
-      for (std::size_t i = s; i < e; ++i) {
-        NodeId u = dag.parents[i];
-        EdgeId eid = dag.via_edges[i];
-        if (selection_.tie_break == EdgeTieBreak::PreferHigherResidual && residual_ptr) {
-          double r = static_cast<double>((*residual_ptr)[static_cast<std::size_t>(eid)]);
-          auto it = best_resid.find(u);
-          if (it == best_resid.end() || r > it->second + 1e-18 || (std::abs(r - it->second) <= 1e-18 && eid < chosen[u])) {
-            best_resid[u] = r; chosen[u] = eid;
-          }
-        } else {
-          // Deterministic: keep smallest edge id per parent
-          auto it = chosen.find(u);
-          if (it == chosen.end() || eid < it->second) { chosen[u] = eid; }
-        }
-      }
-      for (auto const& kv : chosen) { nparents.push_back(kv.first); nvia.push_back(kv.second); }
-      ndag.parent_offsets[v+1] = static_cast<std::int32_t>(nparents.size());
-    }
-    ndag.parents = std::move(nparents);
-    ndag.via_edges = std::move(nvia);
-    dag = std::move(ndag);
-  }
   if (dst < 0 || static_cast<std::size_t>(dst) >= dist.size()) return std::nullopt;
   Cost dst_cost = dist[static_cast<std::size_t>(dst)];
-  if (best_path_cost_ == 0 || dst_cost < best_path_cost_) best_path_cost_ = dst_cost;
+  if (dst_cost < best_path_cost_) best_path_cost_ = dst_cost;
   // If policy is in shortest_path mode, disallow advancing to higher-cost tiers
   // within the same placement session. Only paths with cost equal to the best
   // discovered cost are allowed.
@@ -203,44 +91,7 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   // Ensure there is at least one predecessor for dst
   if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size()-1) return std::nullopt;
   if (dag.parent_offsets[static_cast<std::size_t>(dst)] == dag.parent_offsets[static_cast<std::size_t>(dst)+1]) return std::nullopt;
-  // For single-path selection with proportional placement, require the
-  // destination to have a unique min-cost predecessor; otherwise, bail in
-  // ambiguous multi-parent cases.
-  if (single_uv && flow_placement_ == FlowPlacement::Proportional) {
-    // Re-run with multipath=true to detect multiple equal-cost predecessors of dst
-    EdgeSelection probe = sel; probe.multipath = true;
-    std::pair<std::vector<Cost>, PredDAG> probe_res;
-    if (require_residual) {
-      const auto residual = fg.residual_view();
-      probe_res = shortest_paths(fg.graph(), src, dst, probe, residual);
-    } else {
-      probe_res = shortest_paths(fg.graph(), src, dst, probe);
-    }
-    auto s = static_cast<std::size_t>(probe_res.second.parent_offsets[static_cast<std::size_t>(dst)]);
-    auto e = static_cast<std::size_t>(probe_res.second.parent_offsets[static_cast<std::size_t>(dst)+1]);
-    // Count unique parent nodes among entries s..e-1
-    std::unordered_set<NodeId> uniq_parents;
-    for (std::size_t i = s; i < e; ++i) uniq_parents.insert(probe_res.second.parents[i]);
-    if (uniq_parents.size() > 1) return std::nullopt;
-  }
-  // If single-path selection, record the chosen edge per (u,v) along destination parents
-  if (!sel.multipath) {
-    const auto& off = dag.parent_offsets;
-    const auto& parents = dag.parents;
-    const auto& vias = dag.via_edges;
-    // For each node that has exactly one parent entry, we can lock (u->v)
-    const auto& g = fg.graph(); (void)g;
-    for (std::size_t v = 0; v + 1 < off.size(); ++v) {
-      auto s = static_cast<std::size_t>(off[v]);
-      auto e = static_cast<std::size_t>(off[v+1]);
-      if (e == s + 1) {
-        NodeId u = parents[s];
-        EdgeId eid = vias[s];
-        std::uint64_t key = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(u))<<32) | static_cast<std::uint32_t>(static_cast<NodeId>(v));
-        locked_uv_edge_[key] = eid;
-      }
-    }
-  }
+  // Return DAG and cost as-is; placement logic decides proportional vs equal-balanced behavior.
   return std::make_optional(std::make_pair(dag, dst_cost));
 }
 
@@ -298,55 +149,12 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
   // prune missing flows: nothing to do at the ledger level; policies own flows
   double target = target_per_flow.value_or(volume);
   double per_target = target;
-  // Behavior: do not seed equal-balanced flows when selection is
-  // non-capacity-aware min-cost (ALL_MIN_COST) and no static paths are given.
-  if (flow_placement_ == FlowPlacement::EqualBalanced && !selection_.require_capacity && static_paths_.empty()) {
-    return { 0.0, volume };
-  }
+  // EqualBalanced may operate without explicit capacity-aware selection;
+  // placement will still respect residual capacities.
   // Allow K flows to reuse paths and to traverse multi-hop shortest tiers.
   if (flow_placement_ == FlowPlacement::EqualBalanced && max_flow_count_.has_value()) {
-    // ECMP gating: in shortest_path mode, require at least two distinct
-    // shortest-path next hops from src that can reach dst; otherwise place 0.
-    if (shortest_path_) {
-      EdgeSelection sel_ecmp = selection_;
-      sel_ecmp.multipath = true;
-      sel_ecmp.require_capacity = true;
-      auto [dist0, dag0] = shortest_paths(fg.graph(), src, dst, sel_ecmp, fg.residual_view());
-      const int N0 = fg.graph().num_nodes();
-      // Build children adjacency and mark which nodes can reach dst via DAG
-      std::vector<std::vector<int>> children0(static_cast<std::size_t>(N0));
-      for (int v = 0; v < N0; ++v) {
-        std::size_t s = static_cast<std::size_t>(dag0.parent_offsets[static_cast<std::size_t>(v)]);
-        std::size_t e = static_cast<std::size_t>(dag0.parent_offsets[static_cast<std::size_t>(v+1)]);
-        for (std::size_t i = s; i < e; ++i) {
-          int u = static_cast<int>(dag0.parents[i]);
-          children0[static_cast<std::size_t>(u)].push_back(v);
-        }
-      }
-      std::vector<char> can_reach(static_cast<std::size_t>(N0), 0);
-      if (dst >= 0 && dst < N0) {
-        // reverse BFS on parent links to mark nodes that can reach dst
-        std::deque<int> dq; dq.push_back(dst); can_reach[static_cast<std::size_t>(dst)] = 1;
-        while (!dq.empty()) {
-          int v = dq.front(); dq.pop_front();
-          std::size_t s = static_cast<std::size_t>(dag0.parent_offsets[static_cast<std::size_t>(v)]);
-          std::size_t e = static_cast<std::size_t>(dag0.parent_offsets[static_cast<std::size_t>(v+1)]);
-          for (std::size_t i = s; i < e; ++i) {
-            int u = static_cast<int>(dag0.parents[i]);
-            if (!can_reach[static_cast<std::size_t>(u)]) { can_reach[static_cast<std::size_t>(u)] = 1; dq.push_back(u); }
-          }
-        }
-      }
-      int next_hops = 0;
-      if (src >= 0 && src < N0) {
-        for (int v : children0[static_cast<std::size_t>(src)]) {
-          if (can_reach[static_cast<std::size_t>(v)]) ++next_hops;
-        }
-      }
-      if (next_hops < 2) {
-        return { 0.0, volume };
-      }
-    }
+    // In shortest_path mode, previously we rejected cases with < 2 next-hops.
+    // That was overly restrictive; proceed regardless and let placement handle it.
     // Allow K flows to reuse paths
     // Derive a reasonable per-flow target using request and src egress residual
     const auto& g = fg.graph();
@@ -409,11 +217,8 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
     FlowRecord* f = &it_cur->second;
     // must have a DAG to place; skip otherwise
     if (f->dag.parent_offsets.empty()) { ++no_progress; if (no_progress>=max_no_progress_iterations_) break; continue; }
-    // EqualBalanced with non-capacity-aware selection (ALL_MIN_COST) does not
-    // place flow (guard to avoid unrealistic equal balancing without capacity awareness).
-    if (flow_placement_ == FlowPlacement::EqualBalanced && !selection_.require_capacity && static_paths_.empty()) {
-      ++no_progress; if (no_progress>=max_no_progress_iterations_) break; continue;
-    }
+    // Proceed even if selection is not explicitly capacity-aware; placement
+    // uses residuals, and DAG is refreshed with per-flow targets.
     // For EqualBalanced (non-static), refresh DAG each round with per-flow target min_flow
     if (flow_placement_ == FlowPlacement::EqualBalanced && static_paths_.empty()) {
       if (auto pb = get_path_bundle(fg, f->src, f->dst, std::optional<double>(per_target))) {
@@ -469,7 +274,7 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
         }
       }
     }
-    if (iters > max_total_iterations_) break;
+    if (iters >= max_total_iterations_) break;
   }
 
   // For EQUAL_BALANCED placement, rebalance flows to maintain equal volumes.
@@ -510,8 +315,7 @@ void FlowPolicy::remove_demand(FlowGraph& fg) {
     fg.remove(kv.first);
   }
   flows_.clear();
-  best_path_cost_ = 0;
-  locked_uv_edge_.clear();
+  best_path_cost_ = std::numeric_limits<Cost>::max();
 }
 
 /* Configure static paths to be used instead of dynamic SPF selection. If

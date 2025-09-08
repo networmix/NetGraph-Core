@@ -1,9 +1,8 @@
 /*
-  ExecutionBackend interface — abstracts SP/MaxFlow/KSP implementations.
+  Backend interface — abstracts SPF/MaxFlow/KSP implementations.
 
   The default CPU backend delegates to in-process algorithm implementations.
-  Interfaces mirror the public helpers in headers (e.g., see max_flow.hpp)
-  including optional toggles for collecting additional outputs.
+  All execution flows through this interface via an explicit Algorithms façade.
 */
 #pragma once
 
@@ -13,39 +12,50 @@
 #include <vector>
 #include <span>
 
-#include "netgraph/core/max_flow.hpp"
-#include "netgraph/core/shortest_paths.hpp"
 #include "netgraph/core/strict_multidigraph.hpp"
+#include "netgraph/core/shortest_paths.hpp"
+#include "netgraph/core/max_flow.hpp"
+#include "netgraph/core/options.hpp"
 
 namespace netgraph::core {
 
-class ExecutionBackend {
-public:
-  virtual ~ExecutionBackend() noexcept = default;
-  [[nodiscard]] virtual std::pair<std::vector<Cost>, PredDAG> shortest_paths(
-      const StrictMultiDiGraph& g, NodeId src, std::optional<NodeId> dst,
-      const EdgeSelection& selection,
-      std::span<const Cap> residual = {},
-      const bool* node_mask = nullptr,
-      const bool* edge_mask = nullptr) = 0;
-
-  [[nodiscard]] virtual std::pair<Flow, FlowSummary> calc_max_flow(
-      const StrictMultiDiGraph& g, NodeId src, NodeId dst,
-      FlowPlacement placement, bool shortest_path,
-      bool with_edge_flows,
-      bool with_reachable,
-      bool with_residuals,
-      const bool* node_mask = nullptr,
-      const bool* edge_mask = nullptr) = 0;
-
-  [[nodiscard]] virtual std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
-      const StrictMultiDiGraph& g, NodeId src, NodeId dst,
-      int k, std::optional<double> max_cost_factor,
-      bool unique,
-      const bool* node_mask = nullptr,
-      const bool* edge_mask = nullptr) = 0;
+// Opaque handle to a backend-owned graph. Uses shared ownership to provide
+// safe lifetime management across API boundaries.
+struct GraphHandle {
+  std::shared_ptr<const StrictMultiDiGraph> graph {};
 };
 
-[[nodiscard]] std::unique_ptr<ExecutionBackend> make_cpu_backend();
+class Backend {
+public:
+  virtual ~Backend() noexcept = default;
+
+  // Prepare a backend-specific graph handle from an existing graph reference.
+  // CPU backend creates a non-owning shared_ptr with a no-op deleter.
+  [[nodiscard]] virtual GraphHandle build_graph(const StrictMultiDiGraph& g) = 0;
+
+  // Prepare a backend-specific graph handle that takes shared ownership of the
+  // provided graph instance.
+  [[nodiscard]] virtual GraphHandle build_graph(std::shared_ptr<const StrictMultiDiGraph> g) = 0;
+
+  [[nodiscard]] virtual std::pair<std::vector<Cost>, PredDAG> spf(
+      const GraphHandle& gh, NodeId src, const SpfOptions& opts) = 0;
+
+  [[nodiscard]] virtual std::pair<Flow, FlowSummary> max_flow(
+      const GraphHandle& gh, NodeId src, NodeId dst, const MaxFlowOptions& opts) = 0;
+
+  [[nodiscard]] virtual std::vector<std::pair<std::vector<Cost>, PredDAG>> ksp(
+      const GraphHandle& gh, NodeId src, NodeId dst, const KspOptions& opts) = 0;
+
+  [[nodiscard]] virtual std::vector<FlowSummary> batch_max_flow(
+      const GraphHandle& gh,
+      const std::vector<std::pair<NodeId,NodeId>>& pairs,
+      const MaxFlowOptions& opts,
+      const std::vector<std::span<const bool>>& node_masks = {},
+      const std::vector<std::span<const bool>>& edge_masks = {}) = 0;
+};
+
+using BackendPtr = std::shared_ptr<Backend>;
+
+[[nodiscard]] BackendPtr make_cpu_backend();
 
 } // namespace netgraph::core

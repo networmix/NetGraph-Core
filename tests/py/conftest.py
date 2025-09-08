@@ -20,6 +20,23 @@ import pytest
 
 import netgraph_core as ngc
 
+# Global Algorithms fixture (CPU backend) and helper to build graph handles
+
+
+@pytest.fixture
+def algs():
+    be = ngc.Backend.cpu()
+    return ngc.Algorithms(be)
+
+
+@pytest.fixture
+def to_handle(algs):
+    def _h(g: ngc.StrictMultiDiGraph):
+        return algs.build_graph(g)
+
+    return _h
+
+
 # Centralized helper fixtures and shared assertions for tests
 
 
@@ -138,12 +155,12 @@ def build_graph():
                 np.empty((0,), dtype=np.int32),
                 np.empty((0,), dtype=np.int32),
                 np.empty((0,), dtype=np.float64),
-                np.empty((0,), dtype=np.float64),
+                np.empty((0,), dtype=np.int64),
                 add_reverse=add_reverse,
             )
         src = np.array([e[0] for e in edges], dtype=np.int32)
         dst = np.array([e[1] for e in edges], dtype=np.int32)
-        cost = np.array([float(e[2]) for e in edges], dtype=np.float64)
+        cost = np.array([int(e[2]) for e in edges], dtype=np.int64)
         cap = np.array([float(e[3]) for e in edges], dtype=np.float64)
         # External ids at this layer are ignored by core and used only in tests
         return ngc.StrictMultiDiGraph.from_arrays(

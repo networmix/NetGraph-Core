@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 
 namespace netgraph::core {
 
@@ -26,11 +27,15 @@ struct FlowIndex {
 
 struct FlowIndexHash {
   std::size_t operator()(const FlowIndex& k) const noexcept {
-    // simple mix
-    std::size_t h = static_cast<std::size_t>(static_cast<std::uint64_t>(k.src) * 1469598103934665603ULL);
-    h ^= static_cast<std::size_t>(static_cast<std::uint32_t>(k.dst)) + 0x9e3779b97f4a7c15ULL + (h<<6) + (h>>2);
-    h ^= static_cast<std::size_t>(static_cast<std::uint32_t>(k.flowClass)) + 0x9e3779b97f4a7c15ULL + (h<<6) + (h>>2);
-    h ^= static_cast<std::size_t>(static_cast<std::uint64_t>(k.flowId)) + 0x9e3779b97f4a7c15ULL + (h<<6) + (h>>2);
+    std::size_t h = 0;
+    auto combine = [&h](std::size_t v) {
+      // Standard hash combine (boost-like)
+      h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    };
+    combine(std::hash<NodeId>{}(k.src));
+    combine(std::hash<NodeId>{}(k.dst));
+    combine(std::hash<std::int32_t>{}(k.flowClass));
+    combine(std::hash<std::int64_t>{}(k.flowId));
     return h;
   }
 };
@@ -43,7 +48,9 @@ enum class FlowPlacement {
 enum class EdgeTieBreak { Deterministic = 1, PreferHigherResidual = 2 };
 
 struct EdgeSelection {
-  bool multipath { true };
+  // When true, keep all equal-cost parallel edges per (u,v) adjacency.
+  // When false, pick a single edge per (u,v) according to tie_break.
+  bool multi_edge { true };
   bool require_capacity { false };
   EdgeTieBreak tie_break { EdgeTieBreak::Deterministic };
 };

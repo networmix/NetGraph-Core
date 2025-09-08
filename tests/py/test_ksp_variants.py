@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 
-import netgraph_core as ngc
-
 
 def _ksp_graph(build_graph):
     # 0->1 direct; 0->2->1; 0->3->2->1 to generate multiple paths
@@ -20,10 +18,10 @@ def _ksp_graph(build_graph):
 
 
 def test_ksp_unique_false_allows_alternative_enumeration(
-    build_graph, assert_pred_dag_integrity
+    build_graph, assert_pred_dag_integrity, algs, to_handle
 ):
     g = _ksp_graph(build_graph)
-    items = ngc.ksp(g, 0, 1, k=5, max_cost_factor=None, unique=False)
+    items = algs.ksp(to_handle(g), 0, 1, k=5, max_cost_factor=None, unique=False)
     assert len(items) >= 3
     # Costs should be nondecreasing among top items
     costs = [float(dist[1]) for dist, _ in items]
@@ -32,17 +30,17 @@ def test_ksp_unique_false_allows_alternative_enumeration(
         assert_pred_dag_integrity(g, dag)
 
 
-def test_ksp_respects_k_limit(build_graph):
+def test_ksp_respects_k_limit(build_graph, algs, to_handle):
     g = _ksp_graph(build_graph)
-    items = ngc.ksp(g, 0, 1, k=2, max_cost_factor=None, unique=True)
+    items = algs.ksp(to_handle(g), 0, 1, k=2, max_cost_factor=None, unique=True)
     assert len(items) == 2
 
 
-def test_ksp_with_masks(build_graph):
+def test_ksp_with_masks(build_graph, algs, to_handle):
     g = _ksp_graph(build_graph)
     node_mask = np.array([True, True, True, False], dtype=bool)  # block node 3
-    items = ngc.ksp(
-        g, 0, 1, k=5, max_cost_factor=None, unique=True, node_mask=node_mask
+    items = algs.ksp(
+        to_handle(g), 0, 1, k=5, max_cost_factor=None, unique=True, node_mask=node_mask
     )
     # Only direct and via-2 remain
     assert len(items) >= 2

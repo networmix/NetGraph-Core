@@ -1,6 +1,8 @@
 # Re-export types from extension
 # pyright: reportMissingImports=false
 from _netgraph_core import (
+    Algorithms,
+    Backend,
     EdgeSelection,
     EdgeTieBreak,
     FlowGraph,
@@ -13,11 +15,6 @@ from _netgraph_core import (
     PathAlg,
     PredDAG,
     StrictMultiDiGraph,
-    batch_max_flow,
-    ksp,
-    max_flow,
-    resolve_to_paths,
-    spf,
 )
 
 from ._version import __version__
@@ -43,10 +40,6 @@ __all__ = [
     "__version__",
     "StrictMultiDiGraph",
     "FlowGraph",
-    "spf",
-    "ksp",
-    "max_flow",
-    "batch_max_flow",
     "EdgeSelection",
     "EdgeTieBreak",
     "PathAlg",
@@ -57,5 +50,6 @@ __all__ = [
     "FlowPolicy",
     "MinCut",
     "FlowSummary",
-    "resolve_to_paths",
+    "Backend",
+    "Algorithms",
 ]

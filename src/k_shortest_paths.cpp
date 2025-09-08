@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <queue>
 #include <unordered_set>
@@ -272,8 +273,8 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
         }
         em = em_buf.get();
       }
-      EdgeSelection sel; sel.multipath = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
-      auto [dist_spur, dag_spur] = shortest_paths(g, spur_node, dst, sel, std::span<const Cap>(), nm, em);
+      EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
+      auto [dist_spur, dag_spur] = shortest_paths(g, spur_node, dst, /*multipath=*/true, sel, std::span<const Cap>(), nm, em);
       // If no spur parents for t, skip
       if (static_cast<std::size_t>(dst + 1) >= dag_spur.parent_offsets.size() ||
           dag_spur.parent_offsets[static_cast<std::size_t>(dst)] == dag_spur.parent_offsets[static_cast<std::size_t>(dst + 1)]) {

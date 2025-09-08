@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.23)
 project(netgraph_core LANGUAGES CXX)
+# Silence pybind11 FindPython compatibility warning by selecting the modern mode
+set(PYBIND11_FINDPYTHON NEW CACHE STRING "Use modern FindPython in pybind11")
 # Optional C++ tests
 option(NETGRAPH_CORE_BUILD_TESTS "Build C++ unit tests" OFF)
 if(NETGRAPH_CORE_BUILD_TESTS)
@@ -56,6 +58,7 @@ if(NOT pybind11_FOUND)
   )
   FetchContent_MakeAvailable(pybind11)
 endif()
+
 
 add_library(netgraph_core STATIC
   src/strict_multidigraph.cpp

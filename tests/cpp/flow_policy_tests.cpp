@@ -2,6 +2,8 @@
 
 #include "netgraph/core/flow_graph.hpp"
 #include "netgraph/core/flow_policy.hpp"
+#include "netgraph/core/backend.hpp"
+#include "netgraph/core/algorithms.hpp"
 #include "netgraph/core/strict_multidigraph.hpp"
 #include "netgraph/core/types.hpp"
 
@@ -99,8 +101,10 @@ void expect_edge_flows_by_uv(const FlowGraph& fg, std::initializer_list<std::tup
 TEST(FlowPolicyCore, Square1_Place1) {
   auto g = make_square1();
   FlowGraph fg(g);
-  EdgeSelection sel; sel.multipath = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
-  FlowPolicy policy(PathAlg::SPF, FlowPlacement::Proportional, sel);
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto be = make_cpu_backend(); Algorithms algs(be); auto gh = algs.build_graph(g);
+  ExecutionContext ctx(algs, gh);
+  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::Proportional, sel);
   auto res = policy.place_demand(fg, /*src=*/0, /*dst=*/2, /*flowClass=*/0, /*volume=*/1.0);
   EXPECT_NEAR(res.first, 1.0, 1e-9);
   EXPECT_NEAR(res.second, 0.0, 1e-9);
@@ -110,8 +114,10 @@ TEST(FlowPolicyCore, Square1_Place1) {
 TEST(FlowPolicyCore, Square1_Place2) {
   auto g = make_square1();
   FlowGraph fg(g);
-  EdgeSelection sel; sel.multipath = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
-  FlowPolicy policy(PathAlg::SPF, FlowPlacement::Proportional, sel);
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto be = make_cpu_backend(); Algorithms algs(be); auto gh = algs.build_graph(g);
+  ExecutionContext ctx(algs, gh);
+  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::Proportional, sel);
   auto res = policy.place_demand(fg, 0, 2, 0, 2.0);
   EXPECT_NEAR(res.first, 2.0, 1e-9);
   EXPECT_NEAR(res.second, 0.0, 1e-9);
@@ -121,9 +127,11 @@ TEST(FlowPolicyCore, Square1_Place2) {
 TEST(FlowPolicyCore, Square1_Place2_MaxOneFlow) {
   auto g = make_square1();
   FlowGraph fg(g);
-  EdgeSelection sel; sel.multipath = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
-  FlowPolicy policy(PathAlg::SPF, FlowPlacement::Proportional, sel,
-                    /*min_flow_count=*/1, /*max_flow_count=*/1);
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto be = make_cpu_backend(); Algorithms algs(be); auto gh = algs.build_graph(g);
+  ExecutionContext ctx(algs, gh);
+  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::Proportional, sel,
+                     /*min_flow_count=*/1, /*max_flow_count=*/1);
   auto res = policy.place_demand(fg, 0, 2, 0, 2.0);
   EXPECT_NEAR(res.first, 2.0, 1e-9);
   EXPECT_NEAR(res.second, 0.0, 1e-9);
@@ -133,8 +141,10 @@ TEST(FlowPolicyCore, Square1_Place2_MaxOneFlow) {
 TEST(FlowPolicyCore, Square1_Place5) {
   auto g = make_square1();
   FlowGraph fg(g);
-  EdgeSelection sel; sel.multipath = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
-  FlowPolicy policy(PathAlg::SPF, FlowPlacement::Proportional, sel);
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto be = make_cpu_backend(); Algorithms algs(be); auto gh = algs.build_graph(g);
+  ExecutionContext ctx(algs, gh);
+  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::Proportional, sel);
   auto res = policy.place_demand(fg, 0, 2, 0, 5.0);
   EXPECT_NEAR(res.first, 3.0, 1e-9);
   EXPECT_NEAR(res.second, 2.0, 1e-9);
@@ -144,9 +154,11 @@ TEST(FlowPolicyCore, Square1_Place5) {
 TEST(FlowPolicyCore, Line1_EqualBalanced_MinMaxFlows) {
   auto g = make_line1();
   FlowGraph fg(g);
-  EdgeSelection sel; sel.multipath = false; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
-  FlowPolicy policy(PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
-                    /*min_flow_count=*/2, /*max_flow_count=*/2);
+  EdgeSelection sel; sel.multi_edge = false; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto be = make_cpu_backend(); Algorithms algs(be); auto gh = algs.build_graph(g);
+  ExecutionContext ctx(algs, gh);
+  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
+                     /*min_flow_count=*/2, /*max_flow_count=*/2);
   auto res = policy.place_demand(fg, 0, 2, 0, 7.0);
   EXPECT_NEAR(res.first, 5.0, 1e-9);
   EXPECT_NEAR(res.second, 2.0, 1e-9);
@@ -157,9 +169,11 @@ TEST(FlowPolicyCore, Line1_EqualBalanced_MinMaxFlows) {
 TEST(FlowPolicyCore, Square3_EqualBalanced_ThreeFlows) {
   auto g = make_square3();
   FlowGraph fg(g);
-  EdgeSelection sel; sel.multipath = false; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
-  FlowPolicy policy(PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
-                    /*min_flow_count=*/3, /*max_flow_count=*/3);
+  EdgeSelection sel; sel.multi_edge = false; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto be = make_cpu_backend(); Algorithms algs(be); auto gh = algs.build_graph(g);
+  ExecutionContext ctx(algs, gh);
+  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
+                     /*min_flow_count=*/3, /*max_flow_count=*/3);
   auto res = policy.place_demand(fg, 0, 2, 0, 200.0);
   // Ensure some flow is placed and results are non-negative. Detailed balancing
   // behavior is covered by Python suite; C++ policy uses iterative placement.
@@ -170,13 +184,15 @@ TEST(FlowPolicyCore, Square3_EqualBalanced_ThreeFlows) {
 TEST(FlowPolicyCore, DiminishingReturnsCutoff) {
   auto g = make_line1();
   FlowGraph fg(g);
-  EdgeSelection sel; sel.multipath = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
-  FlowPolicy policy(PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
-                    /*min_flow_count=*/1, /*max_flow_count=*/1000000,
-                    /*max_path_cost=*/std::nullopt, /*max_path_cost_factor=*/std::nullopt,
-                    /*shortest_path=*/false,
-                    /*reoptimize*/false, /*max_no_progress*/100, /*max_total_iters*/10000,
-                    /*dim_enabled*/true, /*dim_window*/8, /*dim_eps*/1e-3);
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto be = make_cpu_backend(); Algorithms algs(be); auto gh = algs.build_graph(g);
+  ExecutionContext ctx(algs, gh);
+  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
+                     /*min_flow_count=*/1, /*max_flow_count=*/1000000,
+                     /*max_path_cost=*/std::nullopt, /*max_path_cost_factor=*/std::nullopt,
+                     /*shortest_path=*/false,
+                     /*reoptimize*/false, /*max_no_progress*/100, /*max_total_iters*/10000,
+                     /*dim_enabled*/true, /*dim_window*/8, /*dim_eps*/1e-3);
   auto res = policy.place_demand(fg, 0, 2, 0, 7.0);
   EXPECT_GE(res.first, 0.0);
   EXPECT_GE(res.second, 0.0);

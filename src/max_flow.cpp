@@ -48,9 +48,10 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
 
   // Iterate tiers: SPF over current residual -> place on DAG -> accumulate stats
   while (true) {
-    EdgeSelection sel; sel.multipath = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+    EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
     auto [dist, dag] = shortest_paths(
         g, src, dst,
+        /*multipath=*/true,
         sel,
         fs.residual_view(),
         node_mask, edge_mask);

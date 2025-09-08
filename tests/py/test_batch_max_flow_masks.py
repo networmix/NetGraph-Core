@@ -7,7 +7,7 @@ import numpy as np
 import netgraph_core as ngc
 
 
-def test_batch_max_flow_with_masks_and_edge_flows(square1_graph):
+def test_batch_max_flow_with_masks_and_edge_flows(square1_graph, algs, to_handle):
     g = square1_graph
     pairs = np.array([[0, 2], [0, 3]], dtype=np.int32)
     node_masks = [
@@ -19,8 +19,8 @@ def test_batch_max_flow_with_masks_and_edge_flows(square1_graph):
         np.ones(g.num_edges(), dtype=bool),
         np.array([True, True, False, False], dtype=bool),  # block the alt path edges
     ]
-    out = ngc.batch_max_flow(
-        g,
+    out = algs.batch_max_flow(
+        to_handle(g),
         pairs,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,

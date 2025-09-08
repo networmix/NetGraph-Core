@@ -5,7 +5,7 @@ import numpy as np
 import netgraph_core as ngc
 
 
-def test_node_mask_blocks_path(build_graph):
+def test_node_mask_blocks_path(build_graph, algs, to_handle):
     # A=0 -> B=1 -> C=2, all cost=1
     edges = [
         (0, 1, 1, 1, 0),
@@ -14,9 +14,11 @@ def test_node_mask_blocks_path(build_graph):
     g = build_graph(3, edges)
     node_mask = np.array([True, False, True], dtype=bool)
     sel = ngc.EdgeSelection(
-        multipath=True, require_capacity=False, tie_break=ngc.EdgeTieBreak.DETERMINISTIC
+        multi_edge=True,
+        require_capacity=False,
+        tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
     )
-    dist, dag = ngc.spf(g, 0, 2, selection=sel, node_mask=node_mask)
+    dist, dag = algs.spf(to_handle(g), 0, 2, selection=sel, node_mask=node_mask)
     # Destination unreachable because B is masked out
     assert np.isinf(dist[2])
     # No parents recorded for 2
@@ -24,7 +26,7 @@ def test_node_mask_blocks_path(build_graph):
     assert off[2] == off[3]
 
 
-def test_edge_mask_filters_parallel_edges(build_graph):
+def test_edge_mask_filters_parallel_edges(build_graph, algs, to_handle):
     # A=0 -> B=1 with two parallel edges of different costs; only cheap edge should be allowed
     edges = [
         (0, 1, 1, 1, 10),
@@ -33,9 +35,11 @@ def test_edge_mask_filters_parallel_edges(build_graph):
     g = build_graph(2, edges)
     edge_mask = np.array([True, False], dtype=bool)
     sel = ngc.EdgeSelection(
-        multipath=True, require_capacity=False, tie_break=ngc.EdgeTieBreak.DETERMINISTIC
+        multi_edge=True,
+        require_capacity=False,
+        tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
     )
-    dist, dag = ngc.spf(g, 0, 1, selection=sel, edge_mask=edge_mask)
+    dist, dag = algs.spf(to_handle(g), 0, 1, selection=sel, edge_mask=edge_mask)
     assert np.isclose(dist[1], 1.0)
     # Only one predecessor edge should appear
     offsets = np.asarray(dag.parent_offsets)

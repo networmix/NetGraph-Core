@@ -16,6 +16,7 @@
 #include "netgraph/core/constants.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <queue>
@@ -297,6 +298,8 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
       }
     }
     if (!std::isfinite(ratio)) ratio = 0.0;
+    // In shortest_path mode, cap the equal-balanced push by the requested amount;
+    // otherwise allow multiple tiers per iteration.
     Flow use = static_cast<Flow>(std::min(ratio, static_cast<double>(remaining)));
     if (use >= kMinFlow) {
       placed += use;
@@ -320,8 +323,8 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
 Flow FlowState::place_max_flow(NodeId src, NodeId dst, FlowPlacement placement, bool shortest_path) {
   Flow total = static_cast<Flow>(0.0);
   while (true) {
-    EdgeSelection sel; sel.multipath = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
-    auto [dist, dag] = shortest_paths(*g_, src, dst, sel, residual_);
+    EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+    auto [dist, dag] = shortest_paths(*g_, src, dst, /*multipath=*/true, sel, residual_);
     if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size()-1 || dag.parent_offsets[static_cast<std::size_t>(dst)] == dag.parent_offsets[static_cast<std::size_t>(dst)+1]) {
       break;
     }

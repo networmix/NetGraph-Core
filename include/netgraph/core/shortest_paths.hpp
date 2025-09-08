@@ -29,6 +29,7 @@ struct PredDAG {
 [[nodiscard]] std::pair<std::vector<Cost>, PredDAG>
 shortest_paths(const StrictMultiDiGraph& g, NodeId src,
                std::optional<NodeId> dst,
+               bool multipath,
                const EdgeSelection& selection,
                std::span<const Cap> residual = {},
                const bool* node_mask = nullptr,

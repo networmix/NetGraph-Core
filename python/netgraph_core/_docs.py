@@ -23,7 +23,7 @@ class EdgeTieBreak(Enum):
 
 @dataclass
 class EdgeSelection:
-    multipath: bool = True
+    multi_edge: bool = True
     require_capacity: bool = False
     tie_break: EdgeTieBreak = EdgeTieBreak.DETERMINISTIC
 
@@ -44,6 +44,15 @@ class PredDAG:
     parent_offsets: np.ndarray
     parents: np.ndarray
     via_edges: np.ndarray
+
+    def resolve_to_paths(
+        self,
+        src: int,
+        dst: int,
+        *,
+        split_parallel_edges: bool = False,
+        max_paths: Optional[int] = None,
+    ) -> list[tuple[tuple[int, tuple[int, ...]], ...]]: ...
 
 
 class PathAlg(Enum):
@@ -123,68 +132,6 @@ class Path:
     cost: float
 
 
-def spf(
-    g: "StrictMultiDiGraph",
-    src: int,
-    dst: Optional[int] = None,
-    *,
-    selection: Optional[EdgeSelection] = None,
-    residual: Optional[np.ndarray] = None,
-    node_mask: Optional[np.ndarray] = None,
-    edge_mask: Optional[np.ndarray] = None,
-):
-    """Shortest paths wrapper.
-
-    Returns: (dist: float64[N], pred: PredDAG)
-    """
-    ...
-
-
-# spf_residual removed; use spf(..., residual=...)
-
-
-def ksp(
-    g: "StrictMultiDiGraph",
-    src: int,
-    dst: int,
-    *,
-    k: int,
-    max_cost_factor: Optional[float] = None,
-    unique: bool = True,
-    node_mask: Optional[np.ndarray] = None,
-    edge_mask: Optional[np.ndarray] = None,
-): ...
-
-
-def resolve_to_paths(
-    dag: PredDAG,
-    src: int,
-    dst: int,
-    *,
-    split_parallel_edges: bool = False,
-    max_paths: Optional[int] = None,
-) -> list[tuple[tuple[int, tuple[int, ...]], ...]]: ...
-
-
-def max_flow(
-    g: "StrictMultiDiGraph",
-    src: int,
-    dst: int,
-    *,
-    flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
-    shortest_path: bool = False,
-    with_edge_flows: bool = False,
-    with_reachable: bool = False,
-    with_residuals: bool = False,
-    node_mask: Optional[np.ndarray] = None,
-    edge_mask: Optional[np.ndarray] = None,
-): ...
-
-
-# Cost buckets removed. Use FlowSummary.costs and FlowSummary.flows arrays.
-
-
-@dataclass(frozen=True)
 class MinCut:
     edges: list[int]
 
@@ -200,15 +147,54 @@ class FlowSummary:
     reachable_nodes: "np.ndarray"
 
 
-def batch_max_flow(
-    g: "StrictMultiDiGraph",
-    pairs: np.ndarray,
-    *,
-    flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
-    shortest_path: bool = False,
-    with_edge_flows: bool = False,
-    with_reachable: bool = False,
-    with_residuals: bool = False,
-    node_masks: Optional[list[np.ndarray]] = None,
-    edge_masks: Optional[list[np.ndarray]] = None,
-) -> list[FlowSummary]: ...
+class Algorithms:
+    def spf(
+        self,
+        graph: "FlowGraph",
+        src: int,
+        *,
+        dst: Optional[int] = None,
+        selection: Optional[EdgeSelection] = None,
+        residual: Optional["np.ndarray"] = None,
+        node_mask: Optional["np.ndarray"] = None,
+        edge_mask: Optional["np.ndarray"] = None,
+    ): ...
+    def ksp(
+        self,
+        graph: "FlowGraph",
+        src: int,
+        dst: int,
+        *,
+        k: int,
+        max_cost_factor: Optional[float] = None,
+        unique: bool = True,
+        node_mask: Optional["np.ndarray"] = None,
+        edge_mask: Optional["np.ndarray"] = None,
+    ): ...
+    def max_flow(
+        self,
+        graph: "FlowGraph",
+        src: int,
+        dst: int,
+        *,
+        flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
+        shortest_path: bool = False,
+        with_edge_flows: bool = False,
+        with_reachable: bool = False,
+        with_residuals: bool = False,
+        node_mask: Optional["np.ndarray"] = None,
+        edge_mask: Optional["np.ndarray"] = None,
+    ): ...
+    def batch_max_flow(
+        self,
+        graph: "FlowGraph",
+        pairs: "np.ndarray",
+        *,
+        node_masks: Optional[list["np.ndarray"]] = None,
+        edge_masks: Optional[list["np.ndarray"]] = None,
+        flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
+        shortest_path: bool = False,
+        with_edge_flows: bool = False,
+        with_reachable: bool = False,
+        with_residuals: bool = False,
+    ) -> list[FlowSummary]: ...

@@ -11,6 +11,7 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 #include <cstring>
+#include <memory>
 
 #include "netgraph/core/k_shortest_paths.hpp"
 #include "netgraph/core/max_flow.hpp"
@@ -21,9 +22,16 @@
 #include "netgraph/core/flow_graph.hpp"
 #include "netgraph/core/flow.hpp"
 #include "netgraph/core/flow_policy.hpp"
+#include "netgraph/core/backend.hpp"
+#include "netgraph/core/algorithms.hpp"
+#include "netgraph/core/options.hpp"
 
 namespace py = pybind11;
 using namespace netgraph::core;
+
+// Helper opaque wrappers (defined at file scope to ensure stable type identity)
+struct PyBackend { BackendPtr impl; };
+struct PyGraph { GraphHandle handle; py::object keep_alive; std::int32_t num_nodes; std::int32_t num_edges; };
 
 // Helpers to check NumPy arrays
 template <typename T>
@@ -47,14 +55,14 @@ PYBIND11_MODULE(_netgraph_core, m) {
 
   py::class_<EdgeSelection>(m, "EdgeSelection")
       .def(py::init<>())
-      .def(py::init([](bool multipath, bool require_capacity, EdgeTieBreak tie_break){
-        EdgeSelection s; s.multipath = multipath; s.require_capacity = require_capacity; s.tie_break = tie_break; return s;
+      .def(py::init([](bool multi_edge, bool require_capacity, EdgeTieBreak tie_break){
+        EdgeSelection s; s.multi_edge = multi_edge; s.require_capacity = require_capacity; s.tie_break = tie_break; return s;
       }),
         py::kw_only(),
-        py::arg("multipath") = true,
+        py::arg("multi_edge") = true,
         py::arg("require_capacity") = false,
         py::arg("tie_break") = EdgeTieBreak::Deterministic)
-      .def_readwrite("multipath", &EdgeSelection::multipath)
+      .def_readwrite("multi_edge", &EdgeSelection::multi_edge)
       .def_readwrite("require_capacity", &EdgeSelection::require_capacity)
       .def_readwrite("tie_break", &EdgeSelection::tie_break);
 
@@ -74,28 +82,13 @@ PYBIND11_MODULE(_netgraph_core, m) {
             auto dst_s = as_span<std::int32_t>(dst, "dst");
             if (src_s.size() != dst_s.size()) throw py::type_error("src and dst must have the same length");
             auto cap_s = as_span<double>(capacity, "capacity");
-            // Accept any numeric dtype for cost; if float, require finite values, then force-cast to int64
-            if (py::isinstance<py::array_t<double>>(cost)) {
-              auto carr = py::cast<py::array_t<double>>(cost);
-              if (!(carr.flags() & py::array::c_style)) {
-                throw py::type_error("cost: array must be C-contiguous (use np.ascontiguousarray)");
-              }
-              auto cbuf_d = carr.request();
-              if (cbuf_d.ndim != 1) throw py::type_error("cost must be a 1-D array");
-              const double* cd = static_cast<const double*>(cbuf_d.ptr);
-              for (ssize_t i = 0; i < cbuf_d.shape[0]; ++i) {
-                if (!std::isfinite(cd[i])) {
-                  throw py::value_error("cost values must be finite");
-                }
-              }
-            }
-            py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> cost_i64(cost);
-            auto cbuf = cost_i64.request();
-            std::span<const Cost> cost_s(static_cast<const Cost*>(cbuf.ptr), static_cast<std::size_t>(cbuf.size));
+            // Require cost dtype to be int64 for consistency
+            auto cost_s = as_span<std::int64_t>(cost, "cost");
+            std::span<const Cost> cost_cs(reinterpret_cast<const Cost*>(cost_s.data()), cost_s.size());
             return StrictMultiDiGraph::from_arrays(num_nodes,
                                                   src_s,
                                                   dst_s,
-                                                  cap_s, cost_s, add_reverse);
+                                                  cap_s, cost_cs, add_reverse);
           },
           py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"),
           py::kw_only(), py::arg("add_reverse") = false)
@@ -189,6 +182,172 @@ PYBIND11_MODULE(_netgraph_core, m) {
         return arr;
       });
 
+  // PredDAG properties already defined earlier at L200; avoid duplicate class registration
+
+  // Backend and Algorithms
+
+  // Opaque wrapper types
+  py::class_<PyBackend>(m, "Backend")
+      .def_static("cpu", [](){ return PyBackend{ make_cpu_backend() }; });
+
+  py::class_<PyGraph>(m, "Graph")
+      // opaque holder; constructed via Algorithms.build_graph / build_graph_from_arrays
+      ;
+
+  py::class_<Algorithms>(m, "Algorithms")
+      .def(py::init([](const PyBackend& b){ return Algorithms(b.impl); }))
+      .def("build_graph", [](const Algorithms& algs, py::object graph_obj){
+        const StrictMultiDiGraph& g = graph_obj.cast<const StrictMultiDiGraph&>();
+        auto gh = algs.build_graph(g);
+        // Keep the Python graph object alive alongside the handle when
+        // referencing a non-owned graph instance.
+        return PyGraph{ gh, graph_obj, g.num_nodes(), g.num_edges() };
+      }, py::arg("graph"))
+      .def("build_graph_from_arrays", [](const Algorithms& algs,
+                                          std::int32_t num_nodes,
+                                          py::array src, py::array dst,
+                                          py::array capacity, py::array cost,
+                                          bool add_reverse){
+        // Build graph by value, then move-assign into a shared_ptr to own it
+        StrictMultiDiGraph gv = StrictMultiDiGraph::from_arrays(
+            num_nodes,
+            as_span<std::int32_t>(src, "src"),
+            as_span<std::int32_t>(dst, "dst"),
+            as_span<double>(capacity, "capacity"),
+            as_span<std::int64_t>(cost, "cost"),
+            add_reverse);
+        auto sp = std::make_shared<StrictMultiDiGraph>();
+        *sp = std::move(gv);
+        auto gh = algs.build_graph(std::static_pointer_cast<const StrictMultiDiGraph>(sp));
+        // No need to keep a Python-side owner; GraphHandle holds shared ownership
+        return PyGraph{ gh, py::none(), sp->num_nodes(), sp->num_edges() };
+      }, py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"), py::kw_only(), py::arg("add_reverse") = false)
+      .def("spf", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src,
+                       py::object dst, py::object selection_obj, py::object residual_obj,
+                       py::object node_mask, py::object edge_mask, bool multipath){
+        if (src < 0 || src >= pg.num_nodes) throw py::value_error("src out of range");
+        SpfOptions opts; if (!selection_obj.is_none()) opts.selection = py::cast<EdgeSelection>(selection_obj);
+        if (!dst.is_none()) { auto d = py::cast<std::int32_t>(dst); if (d < 0 || d >= pg.num_nodes) throw py::value_error("dst out of range"); opts.dst = static_cast<NodeId>(d); }
+        std::vector<double> residual_vec;
+        if (!residual_obj.is_none()) {
+          auto arr = py::cast<py::array>(residual_obj);
+          if (!(arr.flags() & py::array::c_style)) throw py::type_error("residual must be C-contiguous (np.ascontiguousarray)");
+          auto buf = arr.request();
+          if (buf.ndim != 1 || buf.format != py::format_descriptor<double>::format()) throw py::type_error("residual must be 1-D float64");
+          residual_vec.resize(static_cast<std::size_t>(buf.shape[0]));
+          std::memcpy(residual_vec.data(), buf.ptr, residual_vec.size()*sizeof(double));
+          opts.residual = std::span<const double>(residual_vec.data(), residual_vec.size());
+        }
+        std::span<const bool> node_span, edge_span;
+        if (!node_mask.is_none()) {
+          auto arr = py::cast<py::array>(node_mask);
+          if (!(arr.flags() & py::array::c_style)) throw py::type_error("node_mask must be C-contiguous");
+          auto b = arr.request();
+          if (b.ndim!=1 || b.format!=py::format_descriptor<bool>::format()) throw py::type_error("node_mask must be 1-D bool");
+          if (static_cast<std::size_t>(b.shape[0]) != static_cast<std::size_t>(pg.num_nodes)) throw py::type_error("node_mask length must equal num_nodes");
+          node_span = std::span<const bool>(static_cast<const bool*>(b.ptr), static_cast<std::size_t>(b.shape[0]));
+        }
+        if (!edge_mask.is_none()) {
+          auto arr = py::cast<py::array>(edge_mask);
+          if (!(arr.flags() & py::array::c_style)) throw py::type_error("edge_mask must be C-contiguous");
+          auto b = arr.request();
+          if (b.ndim!=1 || b.format!=py::format_descriptor<bool>::format()) throw py::type_error("edge_mask must be 1-D bool");
+          if (static_cast<std::size_t>(b.shape[0]) != static_cast<std::size_t>(pg.num_edges)) throw py::type_error("edge_mask length must equal num_edges");
+          edge_span = std::span<const bool>(static_cast<const bool*>(b.ptr), static_cast<std::size_t>(b.shape[0]));
+        }
+        opts.multipath = multipath;
+        opts.node_mask = node_span; opts.edge_mask = edge_span;
+        py::gil_scoped_release rel; auto res = algs.spf(pg.handle, src, opts); py::gil_scoped_acquire acq;
+        py::array_t<double> dist_arr(res.first.size()); auto* out = dist_arr.mutable_data(); auto maxc = std::numeric_limits<Cost>::max();
+        for (std::size_t i=0;i<res.first.size();++i) out[i] = (res.first[i]==maxc) ? std::numeric_limits<double>::infinity() : static_cast<double>(res.first[i]);
+        return py::make_tuple(std::move(dist_arr), res.second);
+      }, py::arg("graph"), py::arg("src"), py::arg("dst") = py::none(), py::kw_only(), py::arg("selection") = py::none(), py::arg("residual") = py::none(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none(), py::arg("multipath") = true)
+      .def("ksp", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src, std::int32_t dst,
+                       int k, py::object max_cost_factor, bool unique, py::object node_mask, py::object edge_mask){
+        if (src < 0 || src >= pg.num_nodes || dst < 0 || dst >= pg.num_nodes) throw py::value_error("src/dst out of range");
+        if (k <= 0) throw py::value_error("k must be >= 1");
+        KspOptions opts; opts.k = k; opts.unique = unique; if (!max_cost_factor.is_none()) opts.max_cost_factor = py::cast<double>(max_cost_factor);
+        std::span<const bool> node_span, edge_span;
+        if (!node_mask.is_none()) {
+          auto arr = py::cast<py::array>(node_mask);
+          if (!(arr.flags() & py::array::c_style)) throw py::type_error("node_mask must be C-contiguous");
+          auto b = arr.request();
+          if (b.ndim!=1 || b.format!=py::format_descriptor<bool>::format()) throw py::type_error("node_mask must be 1-D bool");
+          if (static_cast<std::size_t>(b.shape[0]) != static_cast<std::size_t>(pg.num_nodes)) throw py::type_error("node_mask length must equal num_nodes");
+          node_span = std::span<const bool>(static_cast<const bool*>(b.ptr), static_cast<std::size_t>(b.shape[0]));
+        }
+        if (!edge_mask.is_none()) {
+          auto arr = py::cast<py::array>(edge_mask);
+          if (!(arr.flags() & py::array::c_style)) throw py::type_error("edge_mask must be C-contiguous");
+          auto b = arr.request();
+          if (b.ndim!=1 || b.format!=py::format_descriptor<bool>::format()) throw py::type_error("edge_mask must be 1-D bool");
+          if (static_cast<std::size_t>(b.shape[0]) != static_cast<std::size_t>(pg.num_edges)) throw py::type_error("edge_mask length must equal num_edges");
+          edge_span = std::span<const bool>(static_cast<const bool*>(b.ptr), static_cast<std::size_t>(b.shape[0]));
+        }
+        opts.node_mask = node_span; opts.edge_mask = edge_span;
+        py::gil_scoped_release rel; auto items = algs.ksp(pg.handle, src, dst, opts); py::gil_scoped_acquire acq;
+        py::list out; for (auto& pr : items) { auto& dist = pr.first; py::array_t<double> dist_arr(dist.size()); auto* outp = dist_arr.mutable_data(); auto maxc = std::numeric_limits<Cost>::max(); for (std::size_t i=0;i<dist.size();++i) outp[i] = (dist[i]==maxc) ? std::numeric_limits<double>::infinity() : static_cast<double>(dist[i]); out.append(py::make_tuple(std::move(dist_arr), pr.second)); }
+        return out;
+      }, py::arg("graph"), py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("k"), py::arg("max_cost_factor") = py::none(), py::arg("unique") = true, py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none())
+      .def("max_flow", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src, std::int32_t dst,
+                            FlowPlacement placement, bool shortest_path, bool with_edge_flows, bool with_reachable, bool with_residuals,
+                            py::object node_mask, py::object edge_mask){
+        if (src < 0 || src >= pg.num_nodes || dst < 0 || dst >= pg.num_nodes) throw py::value_error("src/dst out of range");
+        MaxFlowOptions o; o.placement = placement; o.shortest_path = shortest_path; o.with_edge_flows = with_edge_flows; o.with_reachable = with_reachable; o.with_residuals = with_residuals;
+        std::span<const bool> node_span, edge_span;
+        if (!node_mask.is_none()) {
+          auto arr = py::cast<py::array>(node_mask);
+          if (!(arr.flags() & py::array::c_style)) throw py::type_error("node_mask must be C-contiguous");
+          auto b = arr.request();
+          if (b.ndim!=1 || b.format!=py::format_descriptor<bool>::format()) throw py::type_error("node_mask must be 1-D bool");
+          if (static_cast<std::size_t>(b.shape[0]) != static_cast<std::size_t>(pg.num_nodes)) throw py::type_error("node_mask length must equal num_nodes");
+          node_span = std::span<const bool>(static_cast<const bool*>(b.ptr), static_cast<std::size_t>(b.shape[0]));
+        }
+        if (!edge_mask.is_none()) {
+          auto arr = py::cast<py::array>(edge_mask);
+          if (!(arr.flags() & py::array::c_style)) throw py::type_error("edge_mask must be C-contiguous");
+          auto b = arr.request();
+          if (b.ndim!=1 || b.format!=py::format_descriptor<bool>::format()) throw py::type_error("edge_mask must be 1-D bool");
+          if (static_cast<std::size_t>(b.shape[0]) != static_cast<std::size_t>(pg.num_edges)) throw py::type_error("edge_mask length must equal num_edges");
+          edge_span = std::span<const bool>(static_cast<const bool*>(b.ptr), static_cast<std::size_t>(b.shape[0]));
+        }
+        o.node_mask = node_span; o.edge_mask = edge_span;
+        py::gil_scoped_release rel; auto res = algs.max_flow(pg.handle, src, dst, o); py::gil_scoped_acquire acq; return res;
+      }, py::arg("graph"), py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false, py::arg("with_edge_flows") = false, py::arg("with_reachable") = false, py::arg("with_residuals") = false, py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none())
+      .def("batch_max_flow", [](const Algorithms& algs, const PyGraph& pg, py::array pairs,
+                                 py::object node_masks, py::object edge_masks,
+                                 FlowPlacement placement, bool shortest_path,
+                                 bool with_edge_flows, bool with_reachable, bool with_residuals){
+        auto buf = pairs.request();
+        if (buf.ndim != 2 || buf.shape[1] != 2) throw py::type_error("pairs must be shape [B,2]");
+        if (buf.format != py::format_descriptor<std::int32_t>::format()) throw py::type_error("pairs dtype must be int32");
+        const std::size_t B = static_cast<std::size_t>(buf.shape[0]);
+        std::vector<std::pair<NodeId,NodeId>> pp; pp.reserve(B);
+        auto* p = static_cast<const std::int32_t*>(buf.ptr);
+        for (std::size_t i=0;i<B;++i) { pp.emplace_back(p[2*i], p[2*i+1]); }
+        std::vector<std::span<const bool>> node_spans; std::vector<std::span<const bool>> edge_spans;
+        auto parse_mask_list_span = [&](py::object list_obj, std::size_t expected_len, const char* what, std::vector<std::span<const bool>>& out_spans, std::vector<py::array>& keep){
+          if (list_obj.is_none()) return;
+          auto seq = py::cast<py::sequence>(list_obj);
+          if (static_cast<std::size_t>(py::len(seq)) != B) throw py::type_error(std::string(what) + " length must equal number of pairs");
+          for (auto item: seq) {
+            auto arr = py::cast<py::array>(item);
+            if (!(arr.flags() & py::array::c_style)) throw py::type_error(std::string(what) + " arrays must be C-contiguous");
+            auto b = arr.request();
+            if (b.ndim != 1 || b.format != py::format_descriptor<bool>::format()) throw py::type_error(std::string(what) + " arrays must be 1-D bool");
+            if (static_cast<std::size_t>(b.shape[0]) != expected_len) throw py::type_error(std::string(what) + " array has wrong length");
+            keep.push_back(arr);
+            out_spans.emplace_back(static_cast<const bool*>(b.ptr), static_cast<std::size_t>(b.shape[0]));
+          }
+        };
+        std::vector<py::array> node_keep, edge_keep;
+        parse_mask_list_span(node_masks, static_cast<std::size_t>(pg.num_nodes), "node_masks", node_spans, node_keep);
+        parse_mask_list_span(edge_masks, static_cast<std::size_t>(pg.num_edges), "edge_masks", edge_spans, edge_keep);
+        MaxFlowOptions o; o.placement = placement; o.shortest_path = shortest_path; o.with_edge_flows = with_edge_flows; o.with_reachable = with_reachable; o.with_residuals = with_residuals;
+        py::gil_scoped_release rel; auto out = algs.batch_max_flow(pg.handle, pp, o, node_spans, edge_spans); py::gil_scoped_acquire acq; return out;
+      }, py::arg("graph"), py::arg("pairs"), py::kw_only(), py::arg("node_masks") = py::none(), py::arg("edge_masks") = py::none(), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false, py::arg("with_edge_flows") = false, py::arg("with_reachable") = false, py::arg("with_residuals") = false);
+
+  // resolve_to_paths now exposed as a PredDAG instance method
   py::class_<PredDAG>(m, "PredDAG")
       .def_property_readonly("parent_offsets", [](const PredDAG& d){
         py::array_t<std::int32_t> arr(d.parent_offsets.size());
@@ -204,139 +363,23 @@ PYBIND11_MODULE(_netgraph_core, m) {
         py::array_t<std::int32_t> arr(d.via_edges.size());
         std::memcpy(arr.mutable_data(), d.via_edges.data(), d.via_edges.size()*sizeof(std::int32_t));
         return arr;
-      });
-
-  m.def("spf",
-        [](const StrictMultiDiGraph& g, std::int32_t src, py::object dst,
-           py::object selection_obj, py::object residual_obj, py::object node_mask, py::object edge_mask) {
-          // Basic index validation
-          if (src < 0 || src >= g.num_nodes()) {
-            throw py::value_error("src out of range");
+      })
+      .def("resolve_to_paths", [](const PredDAG& dag, std::int32_t src, std::int32_t dst, bool split_parallel_edges, py::object max_paths){
+        std::optional<std::int64_t> mp;
+        if (!max_paths.is_none()) mp = py::cast<std::int64_t>(max_paths);
+        auto out = netgraph::core::resolve_to_paths(dag, src, dst, split_parallel_edges, mp);
+        py::list paths;
+        for (auto& path : out) {
+          py::list py_elems;
+          for (auto& pr : path) {
+            py::tuple edge_tuple(pr.second.size());
+            for (std::size_t i=0;i<pr.second.size();++i) edge_tuple[i] = py::int_(pr.second[i]);
+            py_elems.append(py::make_tuple(py::int_(pr.first), edge_tuple));
           }
-          std::optional<NodeId> dst_opt;
-          if (!dst.is_none()) {
-            auto dval = static_cast<NodeId>(py::cast<std::int32_t>(dst));
-            if (dval < 0 || dval >= g.num_nodes()) {
-              throw py::value_error("dst out of range");
-            }
-            dst_opt = dval;
-          }
-          // Parse selection
-          EdgeSelection selection;
-          if (!selection_obj.is_none()) {
-            selection = py::cast<EdgeSelection>(selection_obj);
-          }
-          // Parse optional residual
-          std::span<const double> residual_span;
-          std::vector<double> residual_vec;
-          if (!residual_obj.is_none()) {
-            auto arr = py::cast<py::array>(residual_obj);
-            if (!(arr.flags() & py::array::c_style)) throw py::type_error("residual must be C-contiguous (np.ascontiguousarray)");
-            auto buf = arr.request();
-            if (buf.ndim != 1) throw py::type_error("residual must be a 1-D array of float64");
-            if (buf.format != py::format_descriptor<double>::format()) throw py::type_error("residual must be dtype=float64");
-            if (static_cast<std::size_t>(buf.shape[0]) != static_cast<std::size_t>(g.num_edges())) throw py::type_error("residual length must equal num_edges");
-            residual_vec.resize(static_cast<std::size_t>(buf.shape[0]));
-            std::memcpy(residual_vec.data(), buf.ptr, residual_vec.size()*sizeof(double));
-            residual_span = std::span<const double>(residual_vec.data(), residual_vec.size());
-          }
-          // Validate masks and obtain raw pointers (optional)
-          const bool* node_ptr = nullptr;
-          const bool* edge_ptr = nullptr;
-          py::array node_arr;
-          py::array edge_arr;
-          if (!node_mask.is_none()) {
-            node_arr = py::cast<py::array>(node_mask);
-            if (!(node_arr.flags() & py::array::c_style)) throw py::type_error("node_mask must be C-contiguous (np.ascontiguousarray)");
-            auto buf = node_arr.request();
-            if (buf.ndim != 1) throw py::type_error("node_mask must be a 1-D array of bool");
-            if (buf.format != py::format_descriptor<bool>::format()) throw py::type_error("node_mask must be dtype=bool");
-            if (static_cast<std::size_t>(buf.shape[0]) != static_cast<std::size_t>(g.num_nodes())) throw py::type_error("node_mask length must equal num_nodes");
-            node_ptr = static_cast<const bool*>(buf.ptr);
-          }
-          if (!edge_mask.is_none()) {
-            edge_arr = py::cast<py::array>(edge_mask);
-            if (!(edge_arr.flags() & py::array::c_style)) throw py::type_error("edge_mask must be C-contiguous (np.ascontiguousarray)");
-            auto buf = edge_arr.request();
-            if (buf.ndim != 1) throw py::type_error("edge_mask must be a 1-D array of bool");
-            if (buf.format != py::format_descriptor<bool>::format()) throw py::type_error("edge_mask must be dtype=bool");
-            if (static_cast<std::size_t>(buf.shape[0]) != static_cast<std::size_t>(g.num_edges())) throw py::type_error("edge_mask length must equal num_edges");
-            edge_ptr = static_cast<const bool*>(buf.ptr);
-          }
-          py::gil_scoped_release release;
-          auto res = shortest_paths(g, src, dst_opt, selection, residual_span, node_ptr, edge_ptr);
-          py::gil_scoped_acquire acquire;
-          py::array_t<double> dist_arr(res.first.size());
-          auto* out = dist_arr.mutable_data();
-          auto maxc = std::numeric_limits<Cost>::max();
-          for (std::size_t i=0;i<res.first.size();++i) out[i] = (res.first[i]==maxc) ? std::numeric_limits<double>::infinity() : static_cast<double>(res.first[i]);
-          return py::make_tuple(std::move(dist_arr), res.second);
-        }, py::arg("g"), py::arg("src"), py::arg("dst") = py::none(), py::kw_only(), py::arg("selection") = py::none(), py::arg("residual") = py::none(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none());
-
-  m.def("ksp",
-        [](const StrictMultiDiGraph& g, std::int32_t src, std::int32_t dst,
-           int k, py::object max_cost_factor, bool unique, py::object node_mask, py::object edge_mask) {
-          if (src < 0 || src >= g.num_nodes()) throw py::value_error("src out of range");
-          if (dst < 0 || dst >= g.num_nodes()) throw py::value_error("dst out of range");
-          if (k <= 0) throw py::value_error("k must be >= 1");
-          std::optional<double> mcf;
-          if (!max_cost_factor.is_none()) mcf = py::cast<double>(max_cost_factor);
-          const bool* node_ptr = nullptr;
-          const bool* edge_ptr = nullptr;
-          py::array node_arr;
-          py::array edge_arr;
-          if (!node_mask.is_none()) {
-            auto arr = py::cast<py::array>(node_mask);
-            if (!(arr.flags() & py::array::c_style)) throw py::type_error("node_mask must be C-contiguous (np.ascontiguousarray)");
-            auto buf = arr.request();
-            if (buf.ndim != 1) throw py::type_error("node_mask must be a 1-D array of bool");
-            if (buf.format != py::format_descriptor<bool>::format()) throw py::type_error("node_mask must be dtype=bool");
-            if (static_cast<std::size_t>(buf.shape[0]) != static_cast<std::size_t>(g.num_nodes())) throw py::type_error("node_mask length must equal num_nodes");
-            node_arr = arr; node_ptr = static_cast<const bool*>(buf.ptr);
-          }
-          if (!edge_mask.is_none()) {
-            auto arr = py::cast<py::array>(edge_mask);
-            if (!(arr.flags() & py::array::c_style)) throw py::type_error("edge_mask must be C-contiguous (np.ascontiguousarray)");
-            auto buf = arr.request();
-            if (buf.ndim != 1) throw py::type_error("edge_mask must be a 1-D array of bool");
-            if (buf.format != py::format_descriptor<bool>::format()) throw py::type_error("edge_mask must be dtype=bool");
-            if (static_cast<std::size_t>(buf.shape[0]) != static_cast<std::size_t>(g.num_edges())) throw py::type_error("edge_mask length must equal num_edges");
-            edge_arr = arr; edge_ptr = static_cast<const bool*>(buf.ptr);
-          }
-          py::gil_scoped_release release;
-          auto items = k_shortest_paths(g, src, dst, k, mcf, unique, node_ptr, edge_ptr);
-          py::gil_scoped_acquire acquire;
-          // Convert to list of (dist ndarray, PredDAG)
-          py::list out;
-          for (auto& pr : items) {
-            auto& dist = pr.first;
-            py::array_t<double> dist_arr(dist.size());
-            auto* outp = dist_arr.mutable_data();
-            auto maxc = std::numeric_limits<Cost>::max();
-            for (std::size_t i=0;i<dist.size();++i) outp[i] = (dist[i]==maxc) ? std::numeric_limits<double>::infinity() : static_cast<double>(dist[i]);
-            out.append(py::make_tuple(std::move(dist_arr), pr.second));
-          }
-          return out;
-        }, py::arg("g"), py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("k"), py::arg("max_cost_factor") = py::none(), py::arg("unique") = true, py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none());
-
-  // resolve_to_paths: return list of paths; each path is list of (node, tuple(edge_ids...)) ending with (dst, ())
-  m.def("resolve_to_paths",
-        [](const PredDAG& dag, std::int32_t src, std::int32_t dst, bool split_parallel_edges, py::object max_paths){
-          std::optional<std::int64_t> mp;
-          if (!max_paths.is_none()) mp = py::cast<std::int64_t>(max_paths);
-          auto out = netgraph::core::resolve_to_paths(dag, src, dst, split_parallel_edges, mp);
-          py::list paths;
-          for (auto& path : out) {
-            py::list py_elems;
-            for (auto& pr : path) {
-              py::tuple edge_tuple(pr.second.size());
-              for (std::size_t i=0;i<pr.second.size();++i) edge_tuple[i] = py::int_(pr.second[i]);
-              py_elems.append(py::make_tuple(py::int_(pr.first), edge_tuple));
-            }
-            paths.append(py::tuple(py_elems));
-          }
-          return paths;
-        }, py::arg("dag"), py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("split_parallel_edges") = false, py::arg("max_paths") = py::none());
+          paths.append(py::tuple(py_elems));
+        }
+        return paths;
+      }, py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("split_parallel_edges") = false, py::arg("max_paths") = py::none());
 
   py::class_<MinCut>(m, "MinCut")
       .def_property_readonly("edges", [](const MinCut& mc){
@@ -380,82 +423,6 @@ PYBIND11_MODULE(_netgraph_core, m) {
 
   // spf_residual removed; unified spf accepts optional residual and EdgeSelection
 
-  m.def("max_flow",
-        [](const StrictMultiDiGraph& g, std::int32_t src, std::int32_t dst,
-           FlowPlacement placement, bool shortest_path, bool with_edge_flows,
-           bool with_reachable, bool with_residuals,
-           py::object node_mask, py::object edge_mask) {
-          const bool* node_ptr = nullptr;
-          const bool* edge_ptr = nullptr;
-          py::array node_arr, edge_arr;
-          if (!node_mask.is_none()) {
-            node_arr = py::cast<py::array>(node_mask);
-            if (!(node_arr.flags() & py::array::c_style)) throw py::type_error("node_mask must be C-contiguous (np.ascontiguousarray)");
-            auto buf = node_arr.request();
-            if (buf.ndim != 1) throw py::type_error("node_mask must be a 1-D array of bool");
-            if (buf.format != py::format_descriptor<bool>::format()) throw py::type_error("node_mask must be dtype=bool");
-            if (static_cast<std::size_t>(buf.shape[0]) != static_cast<std::size_t>(g.num_nodes())) throw py::type_error("node_mask length must equal num_nodes");
-            node_ptr = static_cast<const bool*>(buf.ptr);
-          }
-          if (!edge_mask.is_none()) {
-            edge_arr = py::cast<py::array>(edge_mask);
-            if (!(edge_arr.flags() & py::array::c_style)) throw py::type_error("edge_mask must be C-contiguous (np.ascontiguousarray)");
-            auto buf = edge_arr.request();
-            if (buf.ndim != 1) throw py::type_error("edge_mask must be a 1-D array of bool");
-            if (buf.format != py::format_descriptor<bool>::format()) throw py::type_error("edge_mask must be dtype=bool");
-            if (static_cast<std::size_t>(buf.shape[0]) != static_cast<std::size_t>(g.num_edges())) throw py::type_error("edge_mask length must equal num_edges");
-            edge_ptr = static_cast<const bool*>(buf.ptr);
-          }
-          py::gil_scoped_release release;
-          auto res = calc_max_flow(g, src, dst, placement, shortest_path, with_edge_flows, with_reachable, with_residuals, node_ptr, edge_ptr);
-          py::gil_scoped_acquire acquire;
-          return res;
-        }, py::arg("g"), py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false, py::arg("with_edge_flows") = false, py::arg("with_reachable") = false, py::arg("with_residuals") = false, py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none());
-
-  m.def("batch_max_flow",
-        [](const StrictMultiDiGraph& g, py::array pairs,
-           py::object node_masks, py::object edge_masks,
-           FlowPlacement placement, bool shortest_path, bool with_edge_flows,
-           bool with_reachable, bool with_residuals) {
-          auto buf = pairs.request();
-          if (buf.ndim != 2 || buf.shape[1] != 2) throw py::type_error("pairs must be shape [B,2]");
-          // accept int32 for pairs
-          if (buf.format != py::format_descriptor<std::int32_t>::format()) throw py::type_error("pairs dtype must be int32");
-          const std::size_t batch_size = static_cast<std::size_t>(buf.shape[0]);
-          std::vector<std::pair<NodeId,NodeId>> pp;
-          auto* ptr = static_cast<const std::int32_t*>(buf.ptr);
-          pp.reserve(batch_size);
-          for (ssize_t i=0;i<buf.shape[0];++i) {
-            if (ptr[2*i] < 0 || ptr[2*i+1] < 0) throw py::type_error("pairs must be non-negative indices");
-            pp.emplace_back(static_cast<std::int32_t>(ptr[2*i]), static_cast<std::int32_t>(ptr[2*i+1]));
-          }
-          // Parse mask lists if provided, collect raw pointers and keep arrays alive
-          auto parse_mask_list = [&](py::object list_obj, std::size_t expected_len, const char* what, std::vector<const bool*>& out_ptrs, std::vector<py::array>& keep){
-            if (list_obj.is_none()) return;
-            auto seq = py::cast<py::sequence>(list_obj);
-            if (static_cast<std::size_t>(py::len(seq)) != batch_size) throw py::type_error(std::string(what) + " length must equal number of pairs");
-            for (auto item: seq) {
-              auto arr = py::cast<py::array>(item);
-              if (!(arr.flags() & py::array::c_style)) throw py::type_error(std::string(what) + " arrays must be C-contiguous (np.ascontiguousarray)");
-              auto b = arr.request();
-              if (b.ndim != 1) throw py::type_error(std::string(what) + " must be a list of 1-D arrays");
-              if (b.format != py::format_descriptor<bool>::format()) throw py::type_error(std::string(what) + " arrays must be dtype=bool");
-              if (static_cast<std::size_t>(b.shape[0]) != expected_len) throw py::type_error(std::string(what) + " array has wrong length");
-              keep.push_back(arr);
-              out_ptrs.push_back(static_cast<const bool*>(b.ptr));
-            }
-          };
-          std::vector<const bool*> node_ptrs;
-          std::vector<const bool*> edge_ptrs;
-          std::vector<py::array> node_keep;
-          std::vector<py::array> edge_keep;
-          parse_mask_list(node_masks, static_cast<std::size_t>(g.num_nodes()), "node_masks", node_ptrs, node_keep);
-          parse_mask_list(edge_masks, static_cast<std::size_t>(g.num_edges()), "edge_masks", edge_ptrs, edge_keep);
-          py::gil_scoped_release release;
-          auto out = netgraph::core::batch_max_flow(g, pp, placement, shortest_path, with_edge_flows, with_reachable, with_residuals, node_ptrs, edge_ptrs);
-          py::gil_scoped_acquire acquire;
-          return out;
-        }, py::arg("g"), py::arg("pairs"), py::kw_only(), py::arg("node_masks") = py::none(), py::arg("edge_masks") = py::none(), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false, py::arg("with_edge_flows") = false, py::arg("with_reachable") = false, py::arg("with_residuals") = false);
 
   // FlowState bindings
   py::class_<FlowState>(m, "FlowState")
@@ -554,8 +521,99 @@ PYBIND11_MODULE(_netgraph_core, m) {
   py::enum_<PathAlg>(m, "PathAlg")
       .value("SPF", PathAlg::SPF);
 
+  py::class_<FlowPolicyConfig>(m, "FlowPolicyConfig")
+      .def(py::init<>())
+      .def(py::init([](PathAlg path_alg,
+                       FlowPlacement flow_placement,
+                       EdgeSelection selection,
+                       int min_flow_count,
+                       py::object max_flow_count,
+                       py::object max_path_cost,
+                       py::object max_path_cost_factor,
+                       bool shortest_path,
+                       bool reoptimize_flows_on_each_placement,
+                       int max_no_progress_iterations,
+                       int max_total_iterations,
+                       bool diminishing_returns_enabled,
+                       int diminishing_returns_window,
+                       double diminishing_returns_epsilon_frac){
+            FlowPolicyConfig cfg;
+            cfg.path_alg = path_alg;
+            cfg.flow_placement = flow_placement;
+            cfg.selection = selection;
+            cfg.min_flow_count = min_flow_count;
+            if (!max_flow_count.is_none()) cfg.max_flow_count = py::cast<int>(max_flow_count);
+            if (!max_path_cost.is_none()) cfg.max_path_cost = py::cast<Cost>(max_path_cost);
+            if (!max_path_cost_factor.is_none()) cfg.max_path_cost_factor = py::cast<double>(max_path_cost_factor);
+            cfg.shortest_path = shortest_path;
+            cfg.reoptimize_flows_on_each_placement = reoptimize_flows_on_each_placement;
+            cfg.max_no_progress_iterations = max_no_progress_iterations;
+            cfg.max_total_iterations = max_total_iterations;
+            cfg.diminishing_returns_enabled = diminishing_returns_enabled;
+            cfg.diminishing_returns_window = diminishing_returns_window;
+            cfg.diminishing_returns_epsilon_frac = diminishing_returns_epsilon_frac;
+            return cfg;
+          }),
+          py::kw_only(),
+          py::arg("path_alg") = PathAlg::SPF,
+          py::arg("flow_placement") = FlowPlacement::Proportional,
+          py::arg("selection") = EdgeSelection{},
+          py::arg("min_flow_count") = 1,
+          py::arg("max_flow_count") = py::none(),
+          py::arg("max_path_cost") = py::none(),
+          py::arg("max_path_cost_factor") = py::none(),
+          py::arg("shortest_path") = false,
+          py::arg("reoptimize_flows_on_each_placement") = false,
+          py::arg("max_no_progress_iterations") = 100,
+          py::arg("max_total_iterations") = 10000,
+          py::arg("diminishing_returns_enabled") = true,
+          py::arg("diminishing_returns_window") = 8,
+          py::arg("diminishing_returns_epsilon_frac") = 1e-3)
+      .def_readwrite("path_alg", &FlowPolicyConfig::path_alg)
+      .def_readwrite("flow_placement", &FlowPolicyConfig::flow_placement)
+      .def_readwrite("selection", &FlowPolicyConfig::selection)
+      .def_readwrite("min_flow_count", &FlowPolicyConfig::min_flow_count)
+      .def_readwrite("max_flow_count", &FlowPolicyConfig::max_flow_count)
+      .def_readwrite("max_path_cost", &FlowPolicyConfig::max_path_cost)
+      .def_readwrite("max_path_cost_factor", &FlowPolicyConfig::max_path_cost_factor)
+      .def_readwrite("shortest_path", &FlowPolicyConfig::shortest_path)
+      .def_readwrite("reoptimize_flows_on_each_placement", &FlowPolicyConfig::reoptimize_flows_on_each_placement)
+      .def_readwrite("max_no_progress_iterations", &FlowPolicyConfig::max_no_progress_iterations)
+      .def_readwrite("max_total_iterations", &FlowPolicyConfig::max_total_iterations)
+      .def_readwrite("diminishing_returns_enabled", &FlowPolicyConfig::diminishing_returns_enabled)
+      .def_readwrite("diminishing_returns_window", &FlowPolicyConfig::diminishing_returns_window)
+      .def_readwrite("diminishing_returns_epsilon_frac", &FlowPolicyConfig::diminishing_returns_epsilon_frac);
+
   py::class_<FlowPolicy>(m, "FlowPolicy")
-      .def(py::init<PathAlg, FlowPlacement, EdgeSelection, int, std::optional<int>, std::optional<Cost>, std::optional<double>, bool, bool, int, int, bool, int, double>(),
+      .def(py::init([](Algorithms& algs, const PyGraph& pg, const FlowPolicyConfig& cfg){
+            ExecutionContext ctx(algs, pg.handle);
+            return FlowPolicy(ctx, cfg);
+           }),
+           py::arg("algorithms"), py::arg("graph"), py::arg("config"))
+      .def(py::init([](Algorithms& algs, const PyGraph& pg,
+                       PathAlg path_alg,
+                       FlowPlacement flow_placement,
+                       EdgeSelection selection,
+                       int min_flow_count,
+                       std::optional<int> max_flow_count,
+                       std::optional<Cost> max_path_cost,
+                       std::optional<double> max_path_cost_factor,
+                       bool shortest_path,
+                       bool reoptimize_flows_on_each_placement,
+                       int max_no_progress_iterations,
+                       int max_total_iterations,
+                       bool diminishing_returns_enabled,
+                       int diminishing_returns_window,
+                       double diminishing_returns_epsilon_frac){
+            ExecutionContext ctx(algs, pg.handle);
+            return FlowPolicy(ctx, path_alg, flow_placement, selection,
+                               min_flow_count, max_flow_count, max_path_cost, max_path_cost_factor,
+                               shortest_path, reoptimize_flows_on_each_placement,
+                               max_no_progress_iterations, max_total_iterations,
+                               diminishing_returns_enabled, diminishing_returns_window,
+                               diminishing_returns_epsilon_frac);
+           }),
+           py::arg("algorithms"), py::arg("graph"),
            py::arg("path_alg") = PathAlg::SPF,
            py::arg("flow_placement") = FlowPlacement::Proportional,
            py::arg("selection") = EdgeSelection{},

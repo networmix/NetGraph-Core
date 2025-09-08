@@ -20,11 +20,11 @@ def _two_path_graph(build_graph):
 
 
 def test_flow_summary_shapes_and_min_cut_valid(
-    build_graph, assert_edge_flows_shape, assert_valid_min_cut
+    build_graph, assert_edge_flows_shape, assert_valid_min_cut, algs, to_handle
 ):
     g = _two_path_graph(build_graph)
-    total, summary = ngc.max_flow(
-        g,
+    total, summary = algs.max_flow(
+        to_handle(g),
         0,
         3,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
@@ -37,10 +37,12 @@ def test_flow_summary_shapes_and_min_cut_valid(
     # Cost distribution checked in test_max_flow_cost_distribution.py
 
 
-def test_flow_summary_without_edge_flows(build_graph, assert_edge_flows_shape):
+def test_flow_summary_without_edge_flows(
+    build_graph, assert_edge_flows_shape, algs, to_handle
+):
     g = _two_path_graph(build_graph)
-    total, summary = ngc.max_flow(
-        g,
+    total, summary = algs.max_flow(
+        to_handle(g),
         0,
         3,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,

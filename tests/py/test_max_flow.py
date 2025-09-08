@@ -6,11 +6,16 @@ import netgraph_core as ngc
 
 
 def test_max_flow_square1_proportional_with_edge_flows(
-    square1_graph, flows_by_eid, assert_edge_flows_shape, assert_valid_min_cut
+    square1_graph,
+    flows_by_eid,
+    assert_edge_flows_shape,
+    assert_valid_min_cut,
+    algs,
+    to_handle,
 ):
     g = square1_graph
-    total, summary = ngc.max_flow(
-        g,
+    total, summary = algs.max_flow(
+        to_handle(g),
         0,
         2,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
@@ -31,11 +36,11 @@ def test_max_flow_square1_proportional_with_edge_flows(
 
 
 def test_square1_equal_balanced_min_cut_and_distribution(
-    square1_graph, assert_edge_flows_shape, assert_valid_min_cut
+    square1_graph, assert_edge_flows_shape, assert_valid_min_cut, algs, to_handle
 ):
     g = square1_graph
-    total, summary = ngc.max_flow(
-        g,
+    total, summary = algs.max_flow(
+        to_handle(g),
         0,
         2,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
@@ -53,18 +58,18 @@ def test_square1_equal_balanced_min_cut_and_distribution(
     # Cost distribution checks live in test_max_flow_cost_distribution.py
 
 
-def test_max_flow_line1_proportional_full_and_shortest(line1_graph):
+def test_max_flow_line1_proportional_full_and_shortest(line1_graph, algs, to_handle):
     g = line1_graph
-    total_full, _ = ngc.max_flow(
-        g,
+    total_full, _ = algs.max_flow(
+        to_handle(g),
         0,
         2,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
         with_edge_flows=False,
     )
-    total_sp, _ = ngc.max_flow(
-        g,
+    total_sp, _ = algs.max_flow(
+        to_handle(g),
         0,
         2,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
@@ -75,20 +80,22 @@ def test_max_flow_line1_proportional_full_and_shortest(line1_graph):
     assert np.isclose(total_sp, 4.0)
 
 
-def test_max_flow_graph5_proportional_full_and_shortest(make_fully_connected_graph):
+def test_max_flow_graph5_proportional_full_and_shortest(
+    make_fully_connected_graph, algs, to_handle
+):
     # Fully connected graph with 5 nodes (A..E), capacity 1 per edge
     # Build: nodes 0..4 fully connected excluding self
     g = make_fully_connected_graph(5, cost=1.0, cap=1.0)
-    total_full, _ = ngc.max_flow(
-        g,
+    total_full, _ = algs.max_flow(
+        to_handle(g),
         0,
         1,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
         with_edge_flows=False,
     )
-    total_sp, _ = ngc.max_flow(
-        g,
+    total_sp, _ = algs.max_flow(
+        to_handle(g),
         0,
         1,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
@@ -100,11 +107,16 @@ def test_max_flow_graph5_proportional_full_and_shortest(make_fully_connected_gra
 
 
 def test_max_flow_square1_shortest_path_single_augmentation(
-    square1_graph, flows_by_eid, assert_edge_flows_shape, assert_valid_min_cut
+    square1_graph,
+    flows_by_eid,
+    assert_edge_flows_shape,
+    assert_valid_min_cut,
+    algs,
+    to_handle,
 ):
     g = square1_graph
-    total, summary = ngc.max_flow(
-        g,
+    total, summary = algs.max_flow(
+        to_handle(g),
         0,
         2,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
@@ -123,11 +135,16 @@ def test_max_flow_square1_shortest_path_single_augmentation(
 
 
 def test_max_flow_line1_equal_balanced(
-    line1_graph, flows_by_eid, assert_edge_flows_shape, assert_valid_min_cut
+    line1_graph,
+    flows_by_eid,
+    assert_edge_flows_shape,
+    assert_valid_min_cut,
+    algs,
+    to_handle,
 ):
     g = line1_graph
-    total, summary = ngc.max_flow(
-        g,
+    total, summary = algs.max_flow(
+        to_handle(g),
         0,
         2,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
@@ -148,12 +165,12 @@ def test_max_flow_line1_equal_balanced(
 
 
 def test_max_flow_graph3_proportional_parallel_distribution(
-    graph3, flows_by_eid, assert_edge_flows_shape, assert_valid_min_cut
+    graph3, flows_by_eid, assert_edge_flows_shape, assert_valid_min_cut, algs, to_handle
 ):
     # A=0, B=1, C=2, D=3, E=4, F=5
     g = graph3
-    total, summary = ngc.max_flow(
-        g,
+    total, summary = algs.max_flow(
+        to_handle(g),
         0,
         2,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
@@ -184,12 +201,14 @@ def test_max_flow_two_disjoint_shortest_routes_proportional(
     flows_by_eid,
     assert_edge_flows_shape,
     assert_valid_min_cut,
+    algs,
+    to_handle,
 ):
     # S=0, A=1, B=2, T=3
     # Two disjoint shortest paths S->A->T and S->B->T with equal total cost
     g = two_disjoint_shortest_graph
-    total, summary = ngc.max_flow(
-        g,
+    total, summary = algs.max_flow(
+        to_handle(g),
         0,
         3,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
@@ -208,17 +227,19 @@ def test_max_flow_two_disjoint_shortest_routes_proportional(
     # Cost distribution checks live in test_max_flow_cost_distribution.py
 
 
-def test_max_flow_square4_full_and_shortest_proportional(square4_graph):
+def test_max_flow_square4_full_and_shortest_proportional(
+    square4_graph, algs, to_handle
+):
     g = square4_graph
-    total_full, _ = ngc.max_flow(
-        g,
+    total_full, _ = algs.max_flow(
+        to_handle(g),
         0,
         1,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
     )
-    total_sp, _ = ngc.max_flow(
-        g,
+    total_sp, _ = algs.max_flow(
+        to_handle(g),
         0,
         1,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,

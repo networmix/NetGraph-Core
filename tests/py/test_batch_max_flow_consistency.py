@@ -5,27 +5,29 @@ import numpy as np
 import netgraph_core as ngc
 
 
-def test_batch_max_flow_matches_individuals_proportional(square1_graph):
+def test_batch_max_flow_matches_individuals_proportional(
+    square1_graph, algs, to_handle
+):
     g = square1_graph
     pairs = np.array([[0, 2], [0, 3]], dtype=np.int32)
-    out = ngc.batch_max_flow(
-        g,
+    out = algs.batch_max_flow(
+        to_handle(g),
         pairs,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
         with_edge_flows=False,
     )
     # Individual calculations
-    v1, _ = ngc.max_flow(
-        g,
+    v1, _ = algs.max_flow(
+        to_handle(g),
         0,
         2,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
         shortest_path=False,
         with_edge_flows=False,
     )
-    v2, _ = ngc.max_flow(
-        g,
+    v2, _ = algs.max_flow(
+        to_handle(g),
         0,
         3,
         flow_placement=ngc.FlowPlacement.PROPORTIONAL,
@@ -37,26 +39,28 @@ def test_batch_max_flow_matches_individuals_proportional(square1_graph):
     assert np.isclose(out[1].total_flow, v2)
 
 
-def test_batch_max_flow_matches_individuals_equal_balanced(line1_graph):
+def test_batch_max_flow_matches_individuals_equal_balanced(
+    line1_graph, algs, to_handle
+):
     g = line1_graph
     pairs = np.array([[0, 2], [1, 2]], dtype=np.int32)
-    out = ngc.batch_max_flow(
-        g,
+    out = algs.batch_max_flow(
+        to_handle(g),
         pairs,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
         shortest_path=False,
         with_edge_flows=False,
     )
-    v1, _ = ngc.max_flow(
-        g,
+    v1, _ = algs.max_flow(
+        to_handle(g),
         0,
         2,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
         shortest_path=False,
         with_edge_flows=False,
     )
-    v2, _ = ngc.max_flow(
-        g,
+    v2, _ = algs.max_flow(
+        to_handle(g),
         1,
         2,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,

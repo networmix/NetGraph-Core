@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -13,18 +14,64 @@
 
 #include "netgraph/core/flow.hpp"
 #include "netgraph/core/flow_graph.hpp"
-#include "netgraph/core/shortest_paths.hpp"
+#include "netgraph/core/algorithms.hpp"
+#include "netgraph/core/options.hpp"
 #include "netgraph/core/types.hpp"
 
 namespace netgraph::core {
 
 enum class PathAlg : std::int32_t { SPF = 1 };
 
+// Execution context bundles algorithms and graph handle for clear dependency injection
+struct ExecutionContext {
+  Algorithms* algorithms;
+  GraphHandle graph;
+
+  // Constructor with validation
+  ExecutionContext(Algorithms& algs, const GraphHandle& gh) noexcept
+      : algorithms(&algs), graph(gh) {}
+};
+
+// Configuration for FlowPolicy behavior. Mirrors the long-form constructor
+// parameters in a grouped, maintainable struct.
+struct FlowPolicyConfig {
+  PathAlg path_alg { PathAlg::SPF };
+  FlowPlacement flow_placement { FlowPlacement::Proportional };
+  EdgeSelection selection { EdgeSelection{} };
+  int min_flow_count { 1 };
+  std::optional<int> max_flow_count { std::nullopt };
+  std::optional<Cost> max_path_cost { std::nullopt };
+  std::optional<double> max_path_cost_factor { std::nullopt };
+  bool shortest_path { false };
+  bool reoptimize_flows_on_each_placement { false };
+  int max_no_progress_iterations { 100 };
+  int max_total_iterations { 10000 };
+  bool diminishing_returns_enabled { true };
+  int diminishing_returns_window { 8 };
+  double diminishing_returns_epsilon_frac { 1e-3 };
+};
+
 // FlowPolicy orchestrates flow creation, placement, reopt, and removal for a
 // single demand (src,dst,flowClass) on a shared FlowGraph.
 class FlowPolicy {
 public:
-  FlowPolicy(PathAlg path_alg,
+  // New config-based constructor
+  FlowPolicy(const ExecutionContext& ctx, const FlowPolicyConfig& cfg)
+    : ctx_(ctx),
+      path_alg_(cfg.path_alg), flow_placement_(cfg.flow_placement), selection_(cfg.selection),
+      shortest_path_(cfg.shortest_path),
+      min_flow_count_(cfg.min_flow_count), max_flow_count_(cfg.max_flow_count), max_path_cost_(cfg.max_path_cost),
+      max_path_cost_factor_(cfg.max_path_cost_factor), reoptimize_flows_on_each_placement_(cfg.reoptimize_flows_on_each_placement),
+      max_no_progress_iterations_(cfg.max_no_progress_iterations), max_total_iterations_(cfg.max_total_iterations),
+      diminishing_returns_enabled_(cfg.diminishing_returns_enabled), diminishing_returns_window_(cfg.diminishing_returns_window),
+      diminishing_returns_epsilon_frac_(cfg.diminishing_returns_epsilon_frac) {
+    if (flow_placement_ == FlowPlacement::EqualBalanced && !max_flow_count_.has_value()) {
+      throw std::invalid_argument("max_flow_count must be set for EQUAL_BALANCED placement.");
+    }
+  }
+
+  FlowPolicy(const ExecutionContext& ctx,
+             PathAlg path_alg,
              FlowPlacement flow_placement,
              EdgeSelection selection,
              int min_flow_count = 1,
@@ -38,7 +85,8 @@ public:
              bool diminishing_returns_enabled = true,
              int diminishing_returns_window = 8,
              double diminishing_returns_epsilon_frac = 1e-3)
-    : path_alg_(path_alg), flow_placement_(flow_placement), selection_(selection),
+    : ctx_(ctx),
+      path_alg_(path_alg), flow_placement_(flow_placement), selection_(selection),
       shortest_path_(shortest_path),
       min_flow_count_(min_flow_count), max_flow_count_(max_flow_count), max_path_cost_(max_path_cost),
       max_path_cost_factor_(max_path_cost_factor), reoptimize_flows_on_each_placement_(reoptimize_flows_on_each_placement),
@@ -87,6 +135,7 @@ private:
   [[nodiscard]] FlowRecord* reoptimize_flow(FlowGraph& fg, const FlowIndex& idx, double headroom);
 
   // Config
+  ExecutionContext ctx_;
   PathAlg path_alg_ { PathAlg::SPF };
   FlowPlacement flow_placement_ { FlowPlacement::Proportional };
   EdgeSelection selection_ { EdgeSelection{} };
@@ -104,13 +153,8 @@ private:
 
   // State
   std::unordered_map<FlowIndex, FlowRecord, FlowIndexHash> flows_;
-  Cost best_path_cost_ { 0 };
+  Cost best_path_cost_ { std::numeric_limits<Cost>::max() };
   std::int64_t next_flow_id_ { 0 };
-
-  // When selection_.multipath == false, freeze exactly one edge per neighbor
-  // pair (u,v) across all flows: subsequent path searches may only reuse the
-  // same chosen EdgeId for that (u,v). Key is (static_cast<uint64_t>(u)<<32)|v.
-  std::unordered_map<std::uint64_t, EdgeId> locked_uv_edge_;
 
   // Static paths (optional)
   std::vector<std::tuple<NodeId, NodeId, PredDAG, Cost>> static_paths_;
