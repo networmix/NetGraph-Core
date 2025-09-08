@@ -6,8 +6,9 @@
 
 VENV_BIN := $(PWD)/venv/bin
 # Use dynamic (recursive) assignment so a newly created venv is picked up
-PY_FIND := $(shell command -v python3.13 2>/dev/null || command -v python3 2>/dev/null)
-PYTHON = $(if $(wildcard $(VENV_BIN)/python),$(VENV_BIN)/python,$(PY_FIND))
+# Prefer the python3 on PATH (e.g., set by setup-python)
+PY_FIND := $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null)
+PYTHON ?= $(if $(wildcard $(VENV_BIN)/python),$(VENV_BIN)/python,$(PY_FIND))
 PIP = $(PYTHON) -m pip
 PYTEST = $(PYTHON) -m pytest
 RUFF = $(PYTHON) -m ruff
