@@ -1,7 +1,4 @@
-/*
-  FlowPolicy — policy engine managing flows for a single demand.
-  See src/flow_policy.cpp for detailed behavior notes.
-*/
+/* FlowPolicy manages flows for a single demand. */
 #pragma once
 
 #include <cstdint>
@@ -22,7 +19,7 @@ namespace netgraph::core {
 
 enum class PathAlg : std::int32_t { SPF = 1 };
 
-// Execution context bundles algorithms and graph handle for clear dependency injection
+// Execution context with algorithms and graph handle
 struct ExecutionContext {
   Algorithms* algorithms;
   GraphHandle graph;
@@ -32,8 +29,7 @@ struct ExecutionContext {
       : algorithms(&algs), graph(gh) {}
 };
 
-// Configuration for FlowPolicy behavior. Mirrors the long-form constructor
-// parameters in a grouped, maintainable struct.
+// Configuration struct for FlowPolicy behavior
 struct FlowPolicyConfig {
   PathAlg path_alg { PathAlg::SPF };
   FlowPlacement flow_placement { FlowPlacement::Proportional };
@@ -51,8 +47,7 @@ struct FlowPolicyConfig {
   double diminishing_returns_epsilon_frac { 1e-3 };
 };
 
-// FlowPolicy orchestrates flow creation, placement, reopt, and removal for a
-// single demand (src,dst,flowClass) on a shared FlowGraph.
+// FlowPolicy manages flow creation, placement, reoptimization for a single demand
 class FlowPolicy {
 public:
   // New config-based constructor
@@ -106,23 +101,22 @@ public:
   // Core operations
   [[nodiscard]] std::pair<double,double> place_demand(FlowGraph& fg,
                                         NodeId src, NodeId dst,
-                                        std::int32_t flowClass,
+                                        FlowClass flowClass,
                                         double volume,
                                         std::optional<double> target_per_flow = std::nullopt,
                                         std::optional<double> min_flow = std::nullopt);
 
   [[nodiscard]] std::pair<double,double> rebalance_demand(FlowGraph& fg,
                                             NodeId src, NodeId dst,
-                                            std::int32_t flowClass,
+                                            FlowClass flowClass,
                                             double target_per_flow);
 
   void remove_demand(FlowGraph& fg);
 
   [[nodiscard]] const std::unordered_map<FlowIndex, FlowRecord, FlowIndexHash>& flows() const noexcept { return flows_; }
 
-  // Configure static paths to be used for flow creation (if endpoints match).
-  // Each entry is (src, dst, dag, cost). If provided, max_flow_count must be
-  // equal to the number of static paths (or will be set to that number).
+// Configure static paths for flow creation. Each entry is (src, dst, dag, cost).
+// max_flow_count must equal the number of static paths if set.
   void set_static_paths(std::vector<std::tuple<NodeId, NodeId, PredDAG, Cost>> paths);
 
 private:
@@ -130,7 +124,7 @@ private:
   [[nodiscard]] std::optional<std::pair<PredDAG, Cost>> get_path_bundle(const FlowGraph& fg,
                                                           NodeId src, NodeId dst,
                                                           std::optional<double> min_flow);
-  [[nodiscard]] FlowRecord* create_flow(FlowGraph& fg, NodeId src, NodeId dst, std::int32_t flowClass,
+  [[nodiscard]] FlowRecord* create_flow(FlowGraph& fg, NodeId src, NodeId dst, FlowClass flowClass,
                     std::optional<double> min_flow);
   [[nodiscard]] FlowRecord* reoptimize_flow(FlowGraph& fg, const FlowIndex& idx, double headroom);
 
@@ -154,7 +148,7 @@ private:
   // State
   std::unordered_map<FlowIndex, FlowRecord, FlowIndexHash> flows_;
   Cost best_path_cost_ { std::numeric_limits<Cost>::max() };
-  std::int64_t next_flow_id_ { 0 };
+  FlowId next_flow_id_ { 0 };
 
   // Static paths (optional)
   std::vector<std::tuple<NodeId, NodeId, PredDAG, Cost>> static_paths_;

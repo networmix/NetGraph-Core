@@ -1,11 +1,9 @@
 /*
   Pybind11 module exposing NetGraph-Core C++ APIs to Python.
-
-  Notes:
-    - Accepts NumPy arrays (C-contiguous) and converts to spans for zero-copy
-      views where possible.
-    - Distances returned as float64 arrays with inf for unreachable.
-    - Edge/Node masks are validated for dtype=bool and length.
+  - Uses NumPy arrays with zero-copy spans where possible
+  - Returns distances as float64 arrays (inf for unreachable)
+  - Validates edge/node masks for bool dtype and length
+  - Array-returning view methods expose non-owning buffers over internal state; treat as read-only
 */
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -82,13 +80,12 @@ PYBIND11_MODULE(_netgraph_core, m) {
             auto dst_s = as_span<std::int32_t>(dst, "dst");
             if (src_s.size() != dst_s.size()) throw py::type_error("src and dst must have the same length");
             auto cap_s = as_span<double>(capacity, "capacity");
-            // Require cost dtype to be int64 for consistency
+            // Cost dtype must be int64 to match internal Cost type
             auto cost_s = as_span<std::int64_t>(cost, "cost");
-            std::span<const Cost> cost_cs(reinterpret_cast<const Cost*>(cost_s.data()), cost_s.size());
             return StrictMultiDiGraph::from_arrays(num_nodes,
                                                   src_s,
                                                   dst_s,
-                                                  cap_s, cost_cs, add_reverse);
+                                                  cap_s, cost_s, add_reverse);
           },
           py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"),
           py::kw_only(), py::arg("add_reverse") = false)
@@ -97,7 +94,7 @@ PYBIND11_MODULE(_netgraph_core, m) {
       // external link ids removed; EdgeId is the canonical id
       .def("capacity_view", [](py::object self_obj, const StrictMultiDiGraph& g){
         auto s = g.capacity_view();
-        return py::array(
+        py::array out(
             py::buffer_info(
                 const_cast<double*>(s.data()),
                 sizeof(double),
@@ -108,10 +105,11 @@ PYBIND11_MODULE(_netgraph_core, m) {
             ),
             self_obj
         );
+        return out;
       })
       .def("edge_src_view", [](py::object self_obj, const StrictMultiDiGraph& g){
         auto s = g.edge_src_view();
-        return py::array(
+        py::array out(
             py::buffer_info(
                 const_cast<std::int32_t*>(s.data()),
                 sizeof(std::int32_t),
@@ -122,10 +120,11 @@ PYBIND11_MODULE(_netgraph_core, m) {
             ),
             self_obj
         );
+        return out;
       })
       .def("edge_dst_view", [](py::object self_obj, const StrictMultiDiGraph& g){
         auto s = g.edge_dst_view();
-        return py::array(
+        py::array out(
             py::buffer_info(
                 const_cast<std::int32_t*>(s.data()),
                 sizeof(std::int32_t),
@@ -136,10 +135,11 @@ PYBIND11_MODULE(_netgraph_core, m) {
             ),
             self_obj
         );
+        return out;
       })
       .def("cost_view", [](py::object self_obj, const StrictMultiDiGraph& g){
         auto s = g.cost_view();
-        return py::array(
+        py::array out(
             py::buffer_info(
                 const_cast<Cost*>(s.data()),
                 sizeof(Cost),
@@ -150,6 +150,7 @@ PYBIND11_MODULE(_netgraph_core, m) {
             ),
             self_obj
         );
+        return out;
       })
       .def("row_offsets_view", [](const StrictMultiDiGraph& g){
         auto s = g.row_offsets_view();
@@ -446,24 +447,18 @@ PYBIND11_MODULE(_netgraph_core, m) {
       })
       .def("capacity_view", [](py::object self_obj, const FlowState& fs){
         auto s = fs.capacity_view();
-        return py::array(
-            py::buffer_info(
-                const_cast<double*>(s.data()), sizeof(double), py::format_descriptor<double>::format(), 1, { s.size() }, { sizeof(double) }
-            ), self_obj);
+        py::array out(py::buffer_info(const_cast<double*>(s.data()), sizeof(double), py::format_descriptor<double>::format(), 1, { s.size() }, { sizeof(double) }), self_obj);
+        return out;
       })
       .def("residual_view", [](py::object self_obj, const FlowState& fs){
         auto s = fs.residual_view();
-        return py::array(
-            py::buffer_info(
-                const_cast<double*>(s.data()), sizeof(double), py::format_descriptor<double>::format(), 1, { s.size() }, { sizeof(double) }
-            ), self_obj);
+        py::array out(py::buffer_info(const_cast<double*>(s.data()), sizeof(double), py::format_descriptor<double>::format(), 1, { s.size() }, { sizeof(double) }), self_obj);
+        return out;
       })
       .def("edge_flow_view", [](py::object self_obj, const FlowState& fs){
         auto s = fs.edge_flow_view();
-        return py::array(
-            py::buffer_info(
-                const_cast<double*>(s.data()), sizeof(double), py::format_descriptor<double>::format(), 1, { s.size() }, { sizeof(double) }
-            ), self_obj);
+        py::array out(py::buffer_info(const_cast<double*>(s.data()), sizeof(double), py::format_descriptor<double>::format(), 1, { s.size() }, { sizeof(double) }), self_obj);
+        return out;
       })
       .def("place_on_dag", [](FlowState& fs, std::int32_t src, std::int32_t dst, const PredDAG& dag, double requested_flow, FlowPlacement placement, bool shortest_path){
         py::gil_scoped_release rel; auto placed = fs.place_on_dag(src, dst, dag, requested_flow, placement, shortest_path); py::gil_scoped_acquire acq; return placed;
@@ -630,8 +625,8 @@ PYBIND11_MODULE(_netgraph_core, m) {
            py::arg("diminishing_returns_epsilon_frac") = 1e-3)
       .def("flow_count", &FlowPolicy::flow_count)
       .def("placed_demand", &FlowPolicy::placed_demand)
-      .def("place_demand", [](FlowPolicy& p, FlowGraph& fg, std::int32_t src, std::int32_t dst, std::int32_t flowClass, double volume, py::object target_per_flow, py::object min_flow){ std::optional<double> tpf; if (!target_per_flow.is_none()) tpf = py::cast<double>(target_per_flow); std::optional<double> mfl; if (!min_flow.is_none()) mfl = py::cast<double>(min_flow); py::gil_scoped_release rel; auto pr = p.place_demand(fg, src, dst, flowClass, volume, tpf, mfl); py::gil_scoped_acquire acq; return py::make_tuple(pr.first, pr.second); }, py::arg("flow_graph"), py::arg("src"), py::arg("dst"), py::arg("flowClass"), py::arg("volume"), py::arg("target_per_flow") = py::none(), py::arg("min_flow") = py::none())
-      .def("rebalance_demand", [](FlowPolicy& p, FlowGraph& fg, std::int32_t src, std::int32_t dst, std::int32_t flowClass, double target){ py::gil_scoped_release rel; auto pr = p.rebalance_demand(fg, src, dst, flowClass, target); py::gil_scoped_acquire acq; return py::make_tuple(pr.first, pr.second); },
+      .def("place_demand", [](FlowPolicy& p, FlowGraph& fg, std::int32_t src, std::int32_t dst, FlowClass flowClass, double volume, py::object target_per_flow, py::object min_flow){ std::optional<double> tpf; if (!target_per_flow.is_none()) tpf = py::cast<double>(target_per_flow); std::optional<double> mfl; if (!min_flow.is_none()) mfl = py::cast<double>(min_flow); py::gil_scoped_release rel; auto pr = p.place_demand(fg, src, dst, flowClass, volume, tpf, mfl); py::gil_scoped_acquire acq; return py::make_tuple(pr.first, pr.second); }, py::arg("flow_graph"), py::arg("src"), py::arg("dst"), py::arg("flowClass"), py::arg("volume"), py::arg("target_per_flow") = py::none(), py::arg("min_flow") = py::none())
+      .def("rebalance_demand", [](FlowPolicy& p, FlowGraph& fg, std::int32_t src, std::int32_t dst, FlowClass flowClass, double target){ py::gil_scoped_release rel; auto pr = p.rebalance_demand(fg, src, dst, flowClass, target); py::gil_scoped_acquire acq; return py::make_tuple(pr.first, pr.second); },
            py::arg("flow_graph"), py::arg("src"), py::arg("dst"), py::arg("flowClass"), py::arg("target"))
       .def("remove_demand", [](FlowPolicy& p, FlowGraph& fg){ py::gil_scoped_release rel; p.remove_demand(fg); py::gil_scoped_acquire acq; })
       .def_property_readonly("flows", [](const FlowPolicy& p){ py::dict out; for (auto const& kv : p.flows()) { const auto& idx = kv.first; const auto& f = kv.second; out[py::make_tuple(idx.src, idx.dst, idx.flowClass, idx.flowId)] = py::make_tuple(f.src, f.dst, f.cost, f.placed_flow); } return out; });

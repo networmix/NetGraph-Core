@@ -1,4 +1,4 @@
-/* Core type aliases and small helper structs used across the library. */
+/* Core type aliases and helper structs. */
 #pragma once
 
 #include <cstdint>
@@ -14,12 +14,16 @@ using Cap    = double;
 // Semantic alias for flow amounts (same unit as capacity)
 using Flow = double;
 
+// Aliases for flow classification and identifiers for consistency
+using FlowClass = std::int32_t;
+using FlowId = std::int64_t;
+
 // Identity of a flow: endpoints + class (priority bucket) + per-policy unique id
 struct FlowIndex {
   NodeId src;
   NodeId dst;
-  std::int32_t flowClass; // small priority bucket
-  std::int64_t flowId;    // per-policy unique id
+  FlowClass flowClass; // small priority bucket
+  FlowId    flowId;    // per-policy unique id
   friend bool operator==(const FlowIndex& a, const FlowIndex& b) noexcept {
     return a.src==b.src && a.dst==b.dst && a.flowClass==b.flowClass && a.flowId==b.flowId;
   }
@@ -34,8 +38,8 @@ struct FlowIndexHash {
     };
     combine(std::hash<NodeId>{}(k.src));
     combine(std::hash<NodeId>{}(k.dst));
-    combine(std::hash<std::int32_t>{}(k.flowClass));
-    combine(std::hash<std::int64_t>{}(k.flowId));
+    combine(std::hash<FlowClass>{}(k.flowClass));
+    combine(std::hash<FlowId>{}(k.flowId));
     return h;
   }
 };

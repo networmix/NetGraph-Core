@@ -230,7 +230,8 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
           if (e.group < 0) continue;
           double sent = e.init_cap - e.cap; if (sent < kMinFlow) continue;
           const auto& gr = groups[static_cast<std::size_t>(e.group)];
-          double denom = gr.sum_cap > 0.0 ? gr.sum_cap : 1.0;
+          // Guard against division by zero when group capacity is numerically zero
+          double denom = gr.sum_cap > kMinCap ? gr.sum_cap : 1.0;
           for (auto eid : gr.eids) {
             Cap base = residual_[static_cast<std::size_t>(eid)];
             double share = sent * (static_cast<double>(base) / denom);
@@ -283,6 +284,7 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
       if (split <= 0) continue;
       for (auto gi : succ[static_cast<std::size_t>(u)]) {
         const auto& gr = groups[gi]; if (gr.eids.empty()) continue;
+        // Guard split to avoid division by zero (already ensured split>0)
         double push = inflow * (static_cast<double>(gr.eids.size()) / static_cast<double>(split));
         if (push < kMinFlow) continue;
         assigned[gi] += push;
@@ -307,6 +309,7 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
         const auto& gr = groups[gi]; if (gr.eids.empty()) continue;
         double flow_scaled = assigned[gi] * static_cast<double>(use);
         if (flow_scaled < kMinFlow) continue;
+        // Guard against division by zero when no edges are present (already checked)
         double per_edge = flow_scaled / static_cast<double>(gr.eids.size());
         for (auto eid : gr.eids) {
           edge_flow_[static_cast<std::size_t>(eid)] += static_cast<Flow>(per_edge);

@@ -52,16 +52,16 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   // Decide whether we need residual-aware SPF and whether to build an edge mask
   const bool require_residual = (sel.require_capacity || (flow_placement_ == FlowPlacement::EqualBalanced && min_flow.has_value()));
   const auto residual = fg.residual_view();
-  std::vector<unsigned char> em; const bool* edge_mask_ptr = nullptr;
+  std::vector<unsigned char> em; std::unique_ptr<bool[]> em_bool; const bool* edge_mask_ptr = nullptr;  // Safe bool array for edge mask
   bool need_mask = false;
   if (require_residual) {
     // In shortest-path EqualBalanced mode, do not enforce per-edge minimum residual at SPF stage
     need_mask = (min_flow.has_value() && !(shortest_path_ && flow_placement_ == FlowPlacement::EqualBalanced));
     if (need_mask) {
-      em.assign(residual.size(), 1u);
+      em_bool.reset(new bool[residual.size()]);
       double thr = *min_flow;
-      for (std::size_t i=0;i<residual.size();++i) em[i] = static_cast<unsigned char>(static_cast<double>(residual[i]) >= thr);
-      edge_mask_ptr = reinterpret_cast<const bool*>(em.data());
+      for (std::size_t i=0;i<residual.size();++i) em_bool[i] = static_cast<double>(residual[i]) >= thr;
+      edge_mask_ptr = em_bool.get();
     }
   }
   SpfOptions opts;
@@ -99,7 +99,7 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
 
 /* Create a new flow using the current path bundle. Returns nullptr if no
    admissible path is available given constraints. */
-FlowRecord* FlowPolicy::create_flow(FlowGraph& fg, NodeId src, NodeId dst, std::int32_t flowClass,
+FlowRecord* FlowPolicy::create_flow(FlowGraph& fg, NodeId src, NodeId dst, FlowClass flowClass,
                               std::optional<double> min_flow) {
   FlowIndex idx{src, dst, flowClass, next_flow_id_++};
   auto pb = get_path_bundle(fg, src, dst, min_flow);
@@ -141,7 +141,7 @@ FlowRecord* FlowPolicy::reoptimize_flow(FlowGraph& fg, const FlowIndex& idx, dou
    Returns (total_placed, leftover). */
 std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
                                                   NodeId src, NodeId dst,
-                                                  std::int32_t flowClass,
+                                                  FlowClass flowClass,
                                                   double volume,
                                                   std::optional<double> target_per_flow,
                                                   std::optional<double> min_flow) {
@@ -301,7 +301,7 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
    `target_per_flow`. Internally removes and re-places the same total volume. */
 std::pair<double,double> FlowPolicy::rebalance_demand(FlowGraph& fg,
                                                       NodeId src, NodeId dst,
-                                                      std::int32_t flowClass,
+                                                      FlowClass flowClass,
                                                       double target_per_flow) {
   double vol = placed_demand();
   remove_demand(fg);

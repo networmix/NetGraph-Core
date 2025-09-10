@@ -53,7 +53,7 @@ void FlowGraph::remove(const FlowIndex& idx) {
   ledger_.erase(it);
 }
 
-void FlowGraph::remove_by_class(std::int32_t flowClass) {
+void FlowGraph::remove_by_class(FlowClass flowClass) {
   std::vector<FlowIndex> to_rm;
   to_rm.reserve(ledger_.size());
   for (auto const& kv : ledger_) if (kv.first.flowClass == flowClass) to_rm.push_back(kv.first);
