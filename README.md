@@ -1,14 +1,56 @@
-NetGraph-Core
+# NetGraph-Core
 
-C++ core with Python bindings.
+C++ implementation of graph algorithms for network flow analysis and traffic engineering with Python bindings.
 
-- Native C++ kernels for shortest paths, k-shortest paths, and max-flow
-- Deterministic, thread-parallel, batch execution with GIL released
-- Python API with a stable, well-documented surface
+## Features
 
-Development
+- **Algorithms:** Shortest paths (Dijkstra), K-shortest paths (Yen), max-flow (successive shortest paths)
+- **Graph representation:** Immutable directed multigraph with CSR adjacency
+- **Flow placement:** Tunable policies (proportional to capacity, equal-balanced across paths)
+- **Python bindings:** NumPy integration, GIL released during computation
+- **Deterministic:** Reproducible edge ordering by (cost, src, dst)
 
-- Setup: `make dev` (creates venv, installs dev deps, sets up pre-commit)
-- Local checks: `make check` (auto-fix with pre-commit, run C++/Python tests, then lint)
-- CI checks: `make check-ci` (strict, non-mutating: lint → C++ tests → Python tests)
-- Coverage: `make cov` (prints unified summary and writes XML + single-page HTML under build/coverage/)
+## Installation
+
+```bash
+pip install netgraph-core
+```
+
+Or from source:
+
+```bash
+pip install -e .
+```
+
+## Repository Structure
+
+```
+src/                    # C++ implementation
+include/netgraph/core/  # Public C++ headers
+bindings/python/        # pybind11 bindings
+python/netgraph_core/   # Python package
+tests/cpp/              # C++ tests (googletest)
+tests/py/               # Python tests (pytest)
+```
+
+## Development
+
+```bash
+make dev        # Setup: venv, dependencies, pre-commit hooks
+make check      # Run all tests and linting (auto-fix formatting)
+make check-ci   # Strict checks without auto-fix (for CI)
+make cpp-test   # C++ tests only
+make py-test    # Python tests only
+make cov        # Coverage report (C++ + Python)
+```
+
+## Requirements
+
+- **C++:** C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+)
+- **Python:** 3.9+
+- **Build:** CMake 3.15+, scikit-build-core
+- **Dependencies:** pybind11, NumPy
+
+## License
+
+AGPL-3.0-or-later

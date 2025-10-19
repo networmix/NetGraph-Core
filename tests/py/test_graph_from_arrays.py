@@ -8,15 +8,16 @@ import pytest
 import netgraph_core as ngc
 
 
-def test_from_arrays_basic_and_add_reverse():
+def test_from_arrays_basic_bidirectional_manual():
     n = 3
-    src = np.array([0, 1], dtype=np.int32)
-    dst = np.array([1, 2], dtype=np.int32)
-    cap = np.array([1.0, 2.0], dtype=np.float64)
-    cost = np.array([1, 1], dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(n, src, dst, cap, cost, add_reverse=True)
-    # Expect reverse edges present; at least 4 edges total
-    assert g.num_edges() >= 4
+    # Manually include reverse edges
+    src = np.array([0, 1, 1, 2], dtype=np.int32)
+    dst = np.array([1, 0, 2, 1], dtype=np.int32)
+    cap = np.array([1.0, 1.0, 2.0, 2.0], dtype=np.float64)
+    cost = np.array([1, 1, 1, 1], dtype=np.int64)
+    g = ngc.StrictMultiDiGraph.from_arrays(n, src, dst, cap, cost)
+    # Expect reverse edges present; 4 edges total
+    assert g.num_edges() == 4
 
 
 def test_from_arrays_mismatched_lengths_raise():

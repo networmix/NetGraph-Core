@@ -1,4 +1,10 @@
-/* Shortest paths (Dijkstra) with multipath predecessor DAG support. */
+/* Shortest paths (Dijkstra) with multipath predecessor DAG support.
+ *
+ * For Python developers:
+ * - std::pair<A, B>: tuple of two elements (like tuple[A, B])
+ * - std::optional<T>: nullable value (like T | None)
+ * - std::nullopt: None equivalent for std::optional
+ */
 #pragma once
 
 #include <optional>
@@ -11,21 +17,31 @@
 
 namespace netgraph::core {
 
-// Predecessor DAG: compact representation of all equal-cost predecessors.
-// For each node v, entries are stored in [parent_offsets[v], parent_offsets[v+1])
-// as pairs (parents[i], via_edges[i]) where via_edges[i] is the compacted EdgeId
-// used to reach v from parents[i]. Multiple parallel edges are represented by
-// multiple entries with the same parent. Offsets has length N+1.
+// PredDAG (Predecessor Directed Acyclic Graph): compact representation of all equal-cost
+// shortest paths from a source node. Similar to a defaultdict(list) in Python, but stored
+// in CSR format for efficiency.
+//
+// For each node v, predecessors are stored in parents[parent_offsets[v]:parent_offsets[v+1]]
+// with corresponding EdgeIds in via_edges[parent_offsets[v]:parent_offsets[v+1]].
+// Multiple parallel edges are represented by multiple entries with the same parent.
+// parent_offsets has length N+1 (like CSR row pointers).
 struct PredDAG {
-  std::vector<std::int32_t> parent_offsets;
-  std::vector<NodeId> parents;
-  std::vector<EdgeId> via_edges;
+  std::vector<std::int32_t> parent_offsets;  // Length N+1 (CSR row pointers)
+  std::vector<NodeId> parents;                // Predecessor node IDs
+  std::vector<EdgeId> via_edges;              // EdgeId used to reach node from predecessor
 };
 
-// Optional node/edge masks:
-// - node_mask[v] == true means node v is allowed; false excludes it from search.
-// - edge_mask[e] == true means edge e is allowed; false excludes it from search.
-// Empty mask spans are ignored.
+// Compute shortest paths from src using Dijkstra's algorithm.
+// Returns (distances, predecessor_dag) where distances[v] is the shortest cost to reach v
+// (or inf if unreachable), and predecessor_dag encodes all equal-cost paths.
+//
+// Parameters:
+// - dst: if provided, algorithm may exit early once destination is reached
+// - multipath: if true, keep all equal-cost predecessors; if false, keep only one per node
+// - selection: edge selection policy (multi-edge, capacity filtering, tie-breaking)
+// - residual: if provided, use these capacities instead of graph's original capacities
+// - node_mask: if provided, node_mask[v]==true means node v is allowed (false excludes it)
+// - edge_mask: if provided, edge_mask[e]==true means edge e is allowed (false excludes it)
 [[nodiscard]] std::pair<std::vector<Cost>, PredDAG>
 shortest_paths(const StrictMultiDiGraph& g, NodeId src,
                std::optional<NodeId> dst,

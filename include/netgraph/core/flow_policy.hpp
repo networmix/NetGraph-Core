@@ -50,7 +50,7 @@ struct FlowPolicyConfig {
 // FlowPolicy manages flow creation, placement, reoptimization for a single demand
 class FlowPolicy {
 public:
-  // New config-based constructor
+  // Constructor accepting configuration struct
   FlowPolicy(const ExecutionContext& ctx, const FlowPolicyConfig& cfg)
     : ctx_(ctx),
       path_alg_(cfg.path_alg), flow_placement_(cfg.flow_placement), selection_(cfg.selection),

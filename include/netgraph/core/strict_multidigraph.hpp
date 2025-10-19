@@ -1,4 +1,11 @@
-/* Immutable directed multigraph with CSR and reverse CSR adjacency. */
+/* Immutable directed multigraph with CSR and reverse CSR adjacency.
+ *
+ * For Python developers:
+ * - CSR (Compressed Sparse Row): efficient sparse graph format, like scipy.sparse.csr_matrix
+ * - std::span<const T>: read-only view over arrays (like memoryview, no copy)
+ * - [[nodiscard]]: C++ attribute meaning "don't ignore return value" (like @must_use)
+ * - noexcept: function never throws exceptions (optimization hint)
+ */
 #pragma once
 
 #include <cstdint>
@@ -9,12 +16,12 @@
 
 namespace netgraph::core {
 
-// Notes on edge identifiers:
-// - EdgeId refers to the index of an edge in the graph's internal, compacted
-//   representation. Edges are deterministically reordered during construction
-//   by (src, dst, cost) for stable traversal and performance.
-// - External link identifiers are managed at higher layers; inside core,
-//   the canonical edge identifier is EdgeId (compacted index).
+// Edge identifiers:
+// - EdgeId: index into the graph's internal edge arrays (0-based, like Python list index).
+//   Edges are reordered during construction by (cost, src, dst) for deterministic traversal.
+// - External edge IDs (ext_edge_ids): optional user-provided identifiers (e.g., your database IDs)
+//   that are reordered alongside edges, allowing results to reference edges using stable,
+//   application-level IDs instead of internal EdgeId indices.
 
 class StrictMultiDiGraph {
 public:
@@ -24,7 +31,7 @@ public:
       std::span<const std::int32_t> dst,
       std::span<const Cap> capacity,
       std::span<const Cost> cost,
-      bool add_reverse);
+      std::span<const std::int64_t> ext_edge_ids = {});
   ~StrictMultiDiGraph() noexcept = default;
 
   [[nodiscard]] std::int32_t num_nodes() const noexcept { return num_nodes_; }
@@ -34,10 +41,14 @@ public:
   [[nodiscard]] std::span<const Cost> cost_view() const noexcept { return cost_; }
   [[nodiscard]] std::span<const NodeId> edge_src_view() const noexcept { return src_; }
   [[nodiscard]] std::span<const NodeId> edge_dst_view() const noexcept { return dst_; }
+  [[nodiscard]] std::span<const std::int64_t> ext_edge_ids_view() const noexcept { return ext_edge_ids_; }
+  // CSR (Compressed Sparse Row) adjacency: for each node u, outgoing edges are in
+  // col_indices[row_offsets[u]:row_offsets[u+1]] with corresponding EdgeIds in adj_edge_index.
   [[nodiscard]] std::span<const std::int32_t> row_offsets_view() const noexcept { return row_offsets_; }
   [[nodiscard]] std::span<const NodeId> col_indices_view() const noexcept { return col_indices_; }
   [[nodiscard]] std::span<const EdgeId> adj_edge_index_view() const noexcept { return adj_edge_index_; }
-  // Reverse CSR (incoming edges): for each node v, incoming neighbors are stored
+  // Reverse CSR (incoming edges): for each node v, incoming edges are in
+  // in_col_indices[in_row_offsets[v]:in_row_offsets[v+1]] with EdgeIds in in_adj_edge_index.
   [[nodiscard]] std::span<const std::int32_t> in_row_offsets_view() const noexcept { return in_row_offsets_; }
   [[nodiscard]] std::span<const NodeId> in_col_indices_view() const noexcept { return in_col_indices_; }
   [[nodiscard]] std::span<const EdgeId> in_adj_edge_index_view() const noexcept { return in_adj_edge_index_; }
@@ -46,11 +57,11 @@ private:
   // Core storage (edges may be reordered in compact form)
   std::int32_t num_nodes_ {0};
   std::size_t edges_ {0};
-  // External link identifiers are no longer stored; EdgeId is the canonical id
   std::vector<Cap> capacity_ {};
   std::vector<Cost> cost_ {};
   std::vector<NodeId> src_ {};
   std::vector<NodeId> dst_ {};
+  std::vector<std::int64_t> ext_edge_ids_ {};  // External edge IDs (reordered with edges)
 
   // CSR adjacency for deterministic traversal (always built deterministically)
   std::vector<std::int32_t> row_offsets_ {};

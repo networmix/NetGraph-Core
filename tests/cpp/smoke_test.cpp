@@ -14,8 +14,7 @@ TEST(GraphSmoke, ConstructFromArrays) {
       std::span<const std::int32_t>(src, 2),
       std::span<const std::int32_t>(dst, 2),
       std::span<const double>(cap, 2),
-      std::span<const std::int64_t>(cost, 2),
-      false);
+      std::span<const std::int64_t>(cost, 2));
   EXPECT_EQ(g.num_nodes(), N);
   EXPECT_EQ(g.num_edges(), 2);
 }

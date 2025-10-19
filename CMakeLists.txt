@@ -13,8 +13,18 @@ if(NETGRAPH_CORE_BUILD_TESTS)
   )
   FetchContent_MakeAvailable(googletest)
   enable_testing()
-  add_executable(netgraph_core_tests tests/cpp/smoke_test.cpp tests/cpp/flow_policy_tests.cpp)
+  add_executable(netgraph_core_tests
+    tests/cpp/smoke_test.cpp
+    tests/cpp/flow_policy_tests.cpp
+    tests/cpp/strict_multidigraph_tests.cpp
+    tests/cpp/shortest_paths_tests.cpp
+    tests/cpp/flow_state_tests.cpp
+    tests/cpp/flow_graph_tests.cpp
+    tests/cpp/max_flow_tests.cpp
+    tests/cpp/k_shortest_paths_tests.cpp
+  )
   target_link_libraries(netgraph_core_tests PRIVATE netgraph_core GTest::gtest_main)
+  target_include_directories(netgraph_core_tests PRIVATE tests/cpp)
   if(NETGRAPH_CORE_COVERAGE AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
     target_compile_options(netgraph_core_tests PRIVATE -O0 -g --coverage)
     target_link_options(netgraph_core_tests PRIVATE --coverage)
@@ -34,7 +44,6 @@ if(APPLE)
   if(DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
     set(CMAKE_OSX_DEPLOYMENT_TARGET "$ENV{MACOSX_DEPLOYMENT_TARGET}" CACHE STRING "" FORCE)
   elseif(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
-    # Default matches Homebrew Python's target in this workspace
     set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "" FORCE)
   endif()
   if(NOT DEFINED CMAKE_OSX_ARCHITECTURES)

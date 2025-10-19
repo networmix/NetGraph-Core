@@ -18,9 +18,9 @@
 namespace netgraph::core {
 
 // FlowState maintains per-edge residual capacity and per-edge placed flow for a
-// given immutable StrictMultiDiGraph. It provides efficient placement on a
-// provided predecessor DAG (PredDAG) using either proportional or equal-balanced
-// strategies, updating internal residuals deterministically.
+// given immutable StrictMultiDiGraph. It places flow on a predecessor DAG (PredDAG)
+// using either proportional or equal-balanced strategies, updating internal
+// residuals deterministically.
 class FlowState {
 public:
   explicit FlowState(const StrictMultiDiGraph& g);

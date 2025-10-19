@@ -74,7 +74,7 @@ PYBIND11_MODULE(_netgraph_core, m) {
           [](std::int32_t num_nodes,
              py::array src, py::array dst,
              py::array capacity, py::array cost,
-             bool add_reverse) {
+             py::object ext_edge_ids_obj) {
             // public API: src/dst are int32; pass through as int32 to core
             auto src_s = as_span<std::int32_t>(src, "src");
             auto dst_s = as_span<std::int32_t>(dst, "dst");
@@ -82,75 +82,50 @@ PYBIND11_MODULE(_netgraph_core, m) {
             auto cap_s = as_span<double>(capacity, "capacity");
             // Cost dtype must be int64 to match internal Cost type
             auto cost_s = as_span<std::int64_t>(cost, "cost");
+            // Optional ext_edge_ids
+            std::span<const std::int64_t> ext_s;
+            if (!ext_edge_ids_obj.is_none()) {
+              py::array ext_arr = ext_edge_ids_obj.cast<py::array>();
+              ext_s = as_span<std::int64_t>(ext_arr, "ext_edge_ids");
+            }
             return StrictMultiDiGraph::from_arrays(num_nodes,
                                                   src_s,
                                                   dst_s,
-                                                  cap_s, cost_s, add_reverse);
+                                                  cap_s, cost_s, ext_s);
           },
           py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"),
-          py::kw_only(), py::arg("add_reverse") = false)
+          py::kw_only(), py::arg("ext_edge_ids") = py::none())
       .def("num_nodes", &StrictMultiDiGraph::num_nodes)
       .def("num_edges", &StrictMultiDiGraph::num_edges)
-      // external link ids removed; EdgeId is the canonical id
-      .def("capacity_view", [](py::object self_obj, const StrictMultiDiGraph& g){
+      .def("capacity_view", [](const StrictMultiDiGraph& g){
         auto s = g.capacity_view();
-        py::array out(
-            py::buffer_info(
-                const_cast<double*>(s.data()),
-                sizeof(double),
-                py::format_descriptor<double>::format(),
-                1,
-                { s.size() },
-                { sizeof(double) }
-            ),
-            self_obj
-        );
-        return out;
+        py::array_t<double> arr(s.size());
+        std::memcpy(arr.mutable_data(), s.data(), s.size()*sizeof(double));
+        return arr;
       })
-      .def("edge_src_view", [](py::object self_obj, const StrictMultiDiGraph& g){
+      .def("edge_src_view", [](const StrictMultiDiGraph& g){
         auto s = g.edge_src_view();
-        py::array out(
-            py::buffer_info(
-                const_cast<std::int32_t*>(s.data()),
-                sizeof(std::int32_t),
-                py::format_descriptor<std::int32_t>::format(),
-                1,
-                { s.size() },
-                { sizeof(std::int32_t) }
-            ),
-            self_obj
-        );
-        return out;
+        py::array_t<std::int32_t> arr(s.size());
+        std::memcpy(arr.mutable_data(), s.data(), s.size()*sizeof(std::int32_t));
+        return arr;
       })
-      .def("edge_dst_view", [](py::object self_obj, const StrictMultiDiGraph& g){
+      .def("edge_dst_view", [](const StrictMultiDiGraph& g){
         auto s = g.edge_dst_view();
-        py::array out(
-            py::buffer_info(
-                const_cast<std::int32_t*>(s.data()),
-                sizeof(std::int32_t),
-                py::format_descriptor<std::int32_t>::format(),
-                1,
-                { s.size() },
-                { sizeof(std::int32_t) }
-            ),
-            self_obj
-        );
-        return out;
+        py::array_t<std::int32_t> arr(s.size());
+        std::memcpy(arr.mutable_data(), s.data(), s.size()*sizeof(std::int32_t));
+        return arr;
       })
-      .def("cost_view", [](py::object self_obj, const StrictMultiDiGraph& g){
+      .def("ext_edge_ids_view", [](const StrictMultiDiGraph& g){
+        auto s = g.ext_edge_ids_view();
+        py::array_t<std::int64_t> arr(s.size());
+        std::memcpy(arr.mutable_data(), s.data(), s.size()*sizeof(std::int64_t));
+        return arr;
+      })
+      .def("cost_view", [](const StrictMultiDiGraph& g){
         auto s = g.cost_view();
-        py::array out(
-            py::buffer_info(
-                const_cast<Cost*>(s.data()),
-                sizeof(Cost),
-                py::format_descriptor<Cost>::format(),
-                1,
-                { s.size() },
-                { sizeof(Cost) }
-            ),
-            self_obj
-        );
-        return out;
+        py::array_t<std::int64_t> arr(s.size());
+        std::memcpy(arr.mutable_data(), s.data(), s.size()*sizeof(std::int64_t));
+        return arr;
       })
       .def("row_offsets_view", [](const StrictMultiDiGraph& g){
         auto s = g.row_offsets_view();
@@ -183,8 +158,6 @@ PYBIND11_MODULE(_netgraph_core, m) {
         return arr;
       });
 
-  // PredDAG properties already defined earlier at L200; avoid duplicate class registration
-
   // Backend and Algorithms
 
   // Opaque wrapper types
@@ -208,21 +181,26 @@ PYBIND11_MODULE(_netgraph_core, m) {
                                           std::int32_t num_nodes,
                                           py::array src, py::array dst,
                                           py::array capacity, py::array cost,
-                                          bool add_reverse){
+                                          py::object ext_edge_ids_obj){
         // Build graph by value, then move-assign into a shared_ptr to own it
+        std::span<const std::int64_t> ext_s;
+        if (!ext_edge_ids_obj.is_none()) {
+          py::array ext_arr = ext_edge_ids_obj.cast<py::array>();
+          ext_s = as_span<std::int64_t>(ext_arr, "ext_edge_ids");
+        }
         StrictMultiDiGraph gv = StrictMultiDiGraph::from_arrays(
             num_nodes,
             as_span<std::int32_t>(src, "src"),
             as_span<std::int32_t>(dst, "dst"),
             as_span<double>(capacity, "capacity"),
             as_span<std::int64_t>(cost, "cost"),
-            add_reverse);
+            ext_s);
         auto sp = std::make_shared<StrictMultiDiGraph>();
         *sp = std::move(gv);
         auto gh = algs.build_graph(std::static_pointer_cast<const StrictMultiDiGraph>(sp));
         // No need to keep a Python-side owner; GraphHandle holds shared ownership
         return PyGraph{ gh, py::none(), sp->num_nodes(), sp->num_edges() };
-      }, py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"), py::kw_only(), py::arg("add_reverse") = false)
+      }, py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"), py::kw_only(), py::arg("ext_edge_ids") = py::none())
       .def("spf", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src,
                        py::object dst, py::object selection_obj, py::object residual_obj,
                        py::object node_mask, py::object edge_mask, bool multipath){
@@ -348,7 +326,6 @@ PYBIND11_MODULE(_netgraph_core, m) {
         py::gil_scoped_release rel; auto out = algs.batch_max_flow(pg.handle, pp, o, node_spans, edge_spans); py::gil_scoped_acquire acq; return out;
       }, py::arg("graph"), py::arg("pairs"), py::kw_only(), py::arg("node_masks") = py::none(), py::arg("edge_masks") = py::none(), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false, py::arg("with_edge_flows") = false, py::arg("with_reachable") = false, py::arg("with_residuals") = false);
 
-  // resolve_to_paths now exposed as a PredDAG instance method
   py::class_<PredDAG>(m, "PredDAG")
       .def_property_readonly("parent_offsets", [](const PredDAG& d){
         py::array_t<std::int32_t> arr(d.parent_offsets.size());
@@ -390,7 +367,7 @@ PYBIND11_MODULE(_netgraph_core, m) {
         }
         return arr;
       });
-  // CostBucket/CostDistribution removed in favor of parallel arrays on FlowSummary
+
   py::class_<FlowSummary>(m, "FlowSummary")
       .def_readonly("total_flow", &FlowSummary::total_flow)
       .def_readonly("min_cut", &FlowSummary::min_cut)
@@ -421,9 +398,6 @@ PYBIND11_MODULE(_netgraph_core, m) {
         for (std::size_t i=0;i<s.reachable_nodes.size();++i) out[i] = static_cast<bool>(s.reachable_nodes[i]);
         return arr;
       });
-
-  // spf_residual removed; unified spf accepts optional residual and EdgeSelection
-
 
   // FlowState bindings
   py::class_<FlowState>(m, "FlowState")

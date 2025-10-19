@@ -2,7 +2,12 @@
   Backend interface — abstracts SPF/MaxFlow/KSP implementations.
 
   The default CPU backend delegates to in-process algorithm implementations.
-  All execution flows through this interface via an explicit Algorithms façade.
+  All execution flows through this interface via an Algorithms façade.
+
+  For Python developers:
+  - std::shared_ptr<T>: reference-counted pointer (like Python object references)
+  - virtual: method can be overridden in subclasses (like Python's inheritance)
+  - = 0: pure virtual (must be implemented by subclass, like @abstractmethod)
 */
 #pragma once
 
@@ -19,8 +24,8 @@
 
 namespace netgraph::core {
 
-// Opaque handle to a backend-owned graph. Uses shared ownership to provide
-// safe lifetime management across API boundaries.
+// GraphHandle: opaque handle to a backend-owned graph.
+// Uses shared_ptr for automatic lifetime management (like Python's reference counting).
 struct GraphHandle {
   std::shared_ptr<const StrictMultiDiGraph> graph {};
 };

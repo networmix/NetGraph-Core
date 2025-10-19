@@ -14,7 +14,7 @@ PYTEST = $(PYTHON) -m pytest
 RUFF = $(PYTHON) -m ruff
 PRECOMMIT = $(PYTHON) -m pre_commit
 
-# Prefer Apple Command Line Tools compilers to avoid Homebrew libc++ ABI mismatches
+# Detect Apple Command Line Tools compilers (prefer system toolchain on macOS)
 APPLE_CLANG := $(shell xcrun --find clang 2>/dev/null)
 APPLE_CLANGXX := $(shell xcrun --find clang++ 2>/dev/null)
 DEFAULT_MACOSX := 15.0

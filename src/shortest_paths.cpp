@@ -184,15 +184,21 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
   const auto cost = g.cost_view();
   const auto cap  = g.capacity_view();
 
+  // Initialize distance array to infinity (max value).
   std::vector<Cost> dist(static_cast<std::size_t>(N), std::numeric_limits<Cost>::max());
   const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(g.num_nodes()));
   const bool use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(g.num_edges()));
   if (src >= 0 && src < N && (!use_node_mask || node_mask[static_cast<std::size_t>(src)])) {
     dist[static_cast<std::size_t>(src)] = static_cast<Cost>(0);
   }
+
+  // pred_lists[v] stores predecessors for node v as (parent_node, [edges_from_parent]).
+  // In multipath mode, multiple parents with equal-cost paths are retained.
   std::vector<std::vector<std::pair<NodeId, std::vector<EdgeId>>>> pred_lists(static_cast<std::size_t>(N));
   if (src >= 0 && src < N) pred_lists[static_cast<std::size_t>(src)] = {};
 
+  // Priority queue for Dijkstra (min-heap by cost).
+  // QItem is (cost, node). Lambda comparator inverts comparison for min-heap.
   using QItem = std::pair<Cost, NodeId>;
   auto cmp = [](const QItem& a, const QItem& b) { return a.first > b.first; };
   std::priority_queue<QItem, std::vector<QItem>, decltype(cmp)> pq(cmp);
@@ -207,27 +213,40 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
   const bool multipath = multipath_arg;
 
   while (!pq.empty()) {
+    // Extract min-cost node from priority queue.
+    // Structured binding: auto [d_u, u] = ... destructures the pair.
     auto [d_u, u] = pq.top(); pq.pop();
     if (u < 0 || u >= N) continue;
+    // Skip stale entries (node already processed at a lower cost).
     if (d_u > dist[static_cast<std::size_t>(u)]) continue;
+
+    // Early exit optimization: record when we first reach destination.
     if (early_exit && u == dst_node && !have_best_dst) { best_dst_cost = d_u; have_best_dst = true; }
     if (early_exit && u == dst_node) {
       if (pq.empty() || pq.top().first > best_dst_cost) break; else continue;
     }
 
+    // Iterate over u's outgoing edges using CSR row offsets.
     auto start = static_cast<std::size_t>(row[static_cast<std::size_t>(u)]);
     auto end   = static_cast<std::size_t>(row[static_cast<std::size_t>(u)+1]);
     std::size_t i = start;
+    // Process edges grouped by destination node.
+    // Multigraph may have multiple edges (u, v); CSR clusters them together.
     while (i < end) {
       NodeId v = col[i];
+      // Skip masked nodes (skip entire neighbor group).
       if (use_node_mask && !node_mask[static_cast<std::size_t>(v)]) {
         std::size_t j_skip = i; while (j_skip < end && col[j_skip] == v) ++j_skip; i = j_skip; continue;
       }
+
+      // Select best edge(s) from u to v according to policy.
       Cost min_edge_cost = std::numeric_limits<Cost>::max();
       std::vector<EdgeId> selected_edges;
       double best_rem_for_min_cost = -1.0;
       std::size_t j = i;
       int best_edge_id = -1;
+
+      // Scan all parallel edges from u to v (they are consecutive in CSR).
       for (; j < end && col[j] == v; ++j) {
         auto e = static_cast<std::size_t>(aei[j]);
         if (use_edge_mask && !edge_mask[e]) continue;
@@ -271,26 +290,57 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
         selected_edges.clear();
         selected_edges.push_back(static_cast<EdgeId>(best_edge_id));
       }
+      // Update distance and predecessors if we found a better path.
       if (!selected_edges.empty()) {
         Cost new_cost = static_cast<Cost>(d_u + (min_edge_cost==std::numeric_limits<Cost>::max() ? 0 : min_edge_cost));
         auto v_idx = static_cast<std::size_t>(v);
-        if (new_cost < dist[v_idx]) { dist[v_idx] = new_cost; pred_lists[v_idx].clear(); pred_lists[v_idx].push_back({u, std::move(selected_edges)}); pq.emplace(new_cost, v); }
-        else if (multipath && new_cost == dist[v_idx]) { pred_lists[v_idx].push_back({u, std::move(selected_edges)}); }
+        // Relaxation: found shorter path to v.
+        if (new_cost < dist[v_idx]) {
+          dist[v_idx] = new_cost;
+          pred_lists[v_idx].clear();
+          pred_lists[v_idx].push_back({u, std::move(selected_edges)});
+          pq.emplace(new_cost, v);
+        }
+        // Multipath: found equal-cost alternative path to v.
+        else if (multipath && new_cost == dist[v_idx]) {
+          pred_lists[v_idx].push_back({u, std::move(selected_edges)});
+        }
       }
-      i = j;
+      i = j;  // Advance to next neighbor group
     }
     if (have_best_dst) { if (pq.empty() || pq.top().first > best_dst_cost) break; }
   }
 
-  PredDAG dag; dag.parent_offsets.assign(static_cast<std::size_t>(N+1), 0);
-  for (std::int32_t v=0; v<N; ++v) { std::size_t c=0; for (auto const& pe : pred_lists[static_cast<std::size_t>(v)]) c += pe.second.size(); dag.parent_offsets[static_cast<std::size_t>(v+1)] = static_cast<std::int32_t>(c); }
-  for (std::size_t k=1; k<dag.parent_offsets.size(); ++k) dag.parent_offsets[k] += dag.parent_offsets[k-1];
+  // Convert pred_lists to PredDAG using CSR-like layout.
+  // parent_offsets[v]:parent_offsets[v+1] gives the range in parents/via_edges for node v.
+  PredDAG dag;
+  dag.parent_offsets.assign(static_cast<std::size_t>(N+1), 0);
+
+  // Step 1: Count total predecessor entries per node.
+  for (std::int32_t v=0; v<N; ++v) {
+    std::size_t c=0;
+    for (auto const& pe : pred_lists[static_cast<std::size_t>(v)]) c += pe.second.size();
+    dag.parent_offsets[static_cast<std::size_t>(v+1)] = static_cast<std::int32_t>(c);
+  }
+
+  // Step 2: Convert counts to cumulative offsets (prefix sum).
+  for (std::size_t k=1; k<dag.parent_offsets.size(); ++k)
+    dag.parent_offsets[k] += dag.parent_offsets[k-1];
+
+  // Step 3: Fill parents and via_edges arrays.
   dag.parents.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
   dag.via_edges.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
   for (std::int32_t v=0; v<N; ++v) {
     auto base = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v)]);
     std::size_t k = 0;
-    for (auto const& pe : pred_lists[static_cast<std::size_t>(v)]) { NodeId p = pe.first; for (auto e : pe.second) { dag.parents[base+k] = p; dag.via_edges[base+k] = e; ++k; } }
+    for (auto const& pe : pred_lists[static_cast<std::size_t>(v)]) {
+      NodeId p = pe.first;
+      for (auto e : pe.second) {
+        dag.parents[base+k] = p;
+        dag.via_edges[base+k] = e;
+        ++k;
+      }
+    }
   }
   return {std::move(dist), std::move(dag)};
 }

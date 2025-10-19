@@ -142,12 +142,9 @@ def build_graph():
     The returned function accepts:
       - num_nodes: int
       - edges: list of tuples (src, dst, cost, cap[, ext_id])
-      - add_reverse: bool (default False)
     """
 
-    def _builder(
-        num_nodes: int, edges: list[tuple], *, add_reverse: bool = False
-    ) -> ngc.StrictMultiDiGraph:
+    def _builder(num_nodes: int, edges: list[tuple]) -> ngc.StrictMultiDiGraph:
         if not edges:
             # Build an empty graph quickly
             return ngc.StrictMultiDiGraph.from_arrays(
@@ -156,16 +153,13 @@ def build_graph():
                 np.empty((0,), dtype=np.int32),
                 np.empty((0,), dtype=np.float64),
                 np.empty((0,), dtype=np.int64),
-                add_reverse=add_reverse,
             )
         src = np.array([e[0] for e in edges], dtype=np.int32)
         dst = np.array([e[1] for e in edges], dtype=np.int32)
         cost = np.array([int(e[2]) for e in edges], dtype=np.int64)
         cap = np.array([float(e[3]) for e in edges], dtype=np.float64)
         # External ids at this layer are ignored by core and used only in tests
-        return ngc.StrictMultiDiGraph.from_arrays(
-            num_nodes, src, dst, cap, cost, add_reverse=add_reverse
-        )
+        return ngc.StrictMultiDiGraph.from_arrays(num_nodes, src, dst, cap, cost)
 
     return _builder
 

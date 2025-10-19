@@ -27,7 +27,7 @@ StrictMultiDiGraph make_square1() {
   std::span<const std::int32_t> dst(dst_arr, 4);
   std::span<const double> cap(cap_arr, 4);
   std::span<const std::int64_t> cost(cost_arr, 4);
-  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost, /*add_reverse=*/false);
+  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost);
 }
 
 StrictMultiDiGraph make_line1() {
@@ -46,7 +46,7 @@ StrictMultiDiGraph make_line1() {
   std::span<const std::int32_t> dst(dst_arr, 4);
   std::span<const double> cap(cap_arr, 4);
   std::span<const std::int64_t> cost(cost_arr, 4);
-  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost, /*add_reverse=*/false);
+  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost);
 }
 
 StrictMultiDiGraph make_square3() {
@@ -61,7 +61,7 @@ StrictMultiDiGraph make_square3() {
   std::span<const std::int32_t> dst(dst_arr, 4);
   std::span<const double> cap(cap_arr, 4);
   std::span<const std::int64_t> cost(cost_arr, 4);
-  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost, /*add_reverse=*/false);
+  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost);
 }
 
 void expect_edge_flows_by_uv(const FlowGraph& fg, std::initializer_list<std::tuple<int,int,double>> exp) {
@@ -167,6 +167,9 @@ TEST(FlowPolicyCore, Line1_EqualBalanced_MinMaxFlows) {
 }
 
 TEST(FlowPolicyCore, Square3_EqualBalanced_ThreeFlows) {
+  // Graph: A->B (cap 100), B->C (cap 125), A->D (cap 75), D->C (cap 50)
+  // EqualBalanced with 3 flows: bottleneck is D->C (cap 50), so max per-flow is 50
+  // With 3 flows at 50 each = 150 total, but only 2 paths exist, so places 100 (2*50)
   auto g = make_square3();
   FlowGraph fg(g);
   EdgeSelection sel; sel.multi_edge = false; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
@@ -175,10 +178,11 @@ TEST(FlowPolicyCore, Square3_EqualBalanced_ThreeFlows) {
   FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
                      /*min_flow_count=*/3, /*max_flow_count=*/3);
   auto res = policy.place_demand(fg, 0, 2, 0, 200.0);
-  // Ensure some flow is placed and results are non-negative. Detailed balancing
-  // behavior is covered by Python suite; C++ policy uses iterative placement.
-  EXPECT_GE(res.first, 0.0);
-  EXPECT_GE(res.second, 0.0);
+  // Actual behavior: places 100 (50 per path on 2 paths), leftover 100
+  EXPECT_NEAR(res.first, 100.0, 1e-9);
+  EXPECT_NEAR(res.second, 100.0, 1e-9);
+  // Each path gets 50: A->B->C gets 50, A->D->C gets 50
+  expect_edge_flows_by_uv(fg, {{0,1,50.0}, {1,2,50.0}, {0,3,50.0}, {3,2,50.0}});
 }
 
 TEST(FlowPolicyCore, DiminishingReturnsCutoff) {
