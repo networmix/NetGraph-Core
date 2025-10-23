@@ -230,7 +230,6 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
         if (pushed < kMinFlow) break;
         pushed_layer += static_cast<Flow>(pushed);
         remaining -= pushed;
-        if (shortest_path) break;
         if (remaining <= kMinFlow) break;
       }
       if (pushed_layer < kMinFlow) break;

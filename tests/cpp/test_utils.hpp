@@ -6,6 +6,7 @@
 #include "netgraph/core/strict_multidigraph.hpp"
 #include "netgraph/core/shortest_paths.hpp"
 #include "netgraph/core/flow_graph.hpp"
+#include "netgraph/core/max_flow.hpp"
 
 namespace netgraph::core::test {
 
@@ -85,6 +86,64 @@ inline StrictMultiDiGraph make_grid_graph(int rows, int cols) {
   return StrictMultiDiGraph::from_arrays(n, src, dst, cap, cost);
 }
 
+inline StrictMultiDiGraph make_n_disjoint_paths(int n, double capacity, std::int64_t cost = 1) {
+  // Create N disjoint equal-cost paths from source to sink
+  // Topology: 0 → [1..n] → (n+1)
+  // Each path has 2 hops with specified capacity and cost
+  int num_nodes = n + 2;  // source, n intermediates, sink
+  std::vector<std::int32_t> src, dst;
+  std::vector<double> cap;
+  std::vector<std::int64_t> cost_vec;
+
+  for (int i = 0; i < n; ++i) {
+    // First hop: 0 → (i+1)
+    src.push_back(0);
+    dst.push_back(i + 1);
+    cap.push_back(capacity);
+    cost_vec.push_back(cost);
+
+    // Second hop: (i+1) → (n+1)
+    src.push_back(i + 1);
+    dst.push_back(n + 1);
+    cap.push_back(capacity);
+    cost_vec.push_back(cost);
+  }
+
+  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost_vec);
+}
+
+inline StrictMultiDiGraph make_tiered_graph(double cap_tier1, double cap_tier2,
+                                             std::int64_t cost_tier1 = 1,
+                                             std::int64_t cost_tier2 = 2) {
+  // Create topology with two different-cost paths
+  // Path 1: 0→1→3 (tier1 cost and capacity)
+  // Path 2: 0→2→3 (tier2 cost and capacity)
+  std::int32_t src_arr[4] = {0, 1, 0, 2};
+  std::int32_t dst_arr[4] = {1, 3, 2, 3};
+  double cap_arr[4] = {cap_tier1, cap_tier1, cap_tier2, cap_tier2};
+  std::int64_t cost_arr[4] = {cost_tier1, cost_tier1, cost_tier2, cost_tier2};
+
+  return StrictMultiDiGraph::from_arrays(4,
+    std::span(src_arr, 4), std::span(dst_arr, 4),
+    std::span(cap_arr, 4), std::span(cost_arr, 4));
+}
+
+inline StrictMultiDiGraph make_shared_bottleneck_graph(double path_cap, double bottleneck_cap) {
+  // Create topology with shared bottleneck
+  // Two paths: 0→1→3 and 0→2→3, where edge 1→3 is shared
+  // Path 1: 0→1 (path_cap), 1→3 (bottleneck_cap)
+  // Path 2: 0→2 (path_cap), 2→3 (path_cap)
+  // Bottleneck: 1→3 limits total flow
+  std::int32_t src_arr[4] = {0, 1, 0, 2};
+  std::int32_t dst_arr[4] = {1, 3, 2, 3};
+  double cap_arr[4] = {path_cap, bottleneck_cap, path_cap, path_cap};
+  std::int64_t cost_arr[4] = {1, 1, 1, 1};
+
+  return StrictMultiDiGraph::from_arrays(4,
+    std::span(src_arr, 4), std::span(dst_arr, 4),
+    std::span(cap_arr, 4), std::span(cost_arr, 4));
+}
+
 // Assertion helpers
 inline void expect_csr_valid(const StrictMultiDiGraph& g) {
   auto row = g.row_offsets_view();
@@ -159,6 +218,47 @@ inline void expect_flow_conservation(const FlowGraph& fg, NodeId src, NodeId dst
     }
 
     EXPECT_NEAR(inflow, outflow, 1e-9) << "Flow not conserved at node " << u;
+  }
+}
+
+// FlowSummary validation helpers
+inline void validate_capacity_constraints(const StrictMultiDiGraph& g, const FlowSummary& summary) {
+  ASSERT_EQ(summary.edge_flows.size(), static_cast<std::size_t>(g.num_edges()))
+      << "Edge flow vector size mismatch";
+
+  auto caps = g.capacity_view();
+  for (std::size_t i = 0; i < summary.edge_flows.size(); ++i) {
+    EXPECT_GE(summary.edge_flows[i], 0.0)
+        << "Edge " << i << " has negative flow: " << summary.edge_flows[i];
+    EXPECT_LE(summary.edge_flows[i], caps[i] + 1e-9)
+        << "Edge " << i << " exceeds capacity: flow=" << summary.edge_flows[i]
+        << " cap=" << caps[i];
+  }
+}
+
+inline void validate_flow_conservation(const StrictMultiDiGraph& g, const FlowSummary& summary,
+                                       NodeId src, NodeId dst) {
+  auto row = g.row_offsets_view();
+  auto aei = g.adj_edge_index_view();
+  auto in_row = g.in_row_offsets_view();
+  auto in_aei = g.in_adj_edge_index_view();
+
+  for (std::int32_t u = 0; u < g.num_nodes(); ++u) {
+    if (u == src || u == dst) continue;  // Skip source and sink
+
+    double outflow = 0.0;
+    for (std::size_t j = row[u]; j < row[u + 1]; ++j) {
+      outflow += summary.edge_flows[aei[j]];
+    }
+
+    double inflow = 0.0;
+    for (std::size_t j = in_row[u]; j < in_row[u + 1]; ++j) {
+      inflow += summary.edge_flows[in_aei[j]];
+    }
+
+    EXPECT_NEAR(inflow, outflow, 1e-9)
+        << "Flow not conserved at node " << u
+        << ": inflow=" << inflow << " outflow=" << outflow;
   }
 }
 
