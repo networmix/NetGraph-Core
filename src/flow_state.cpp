@@ -257,7 +257,6 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
           }
         }
       }
-      if (shortest_path) break;
       // Rebuild groups for next tier using updated residual
       groups = build_groups_residual(*g_, dag, dst, residual_);
       build_reversed_residual(ws, N, groups);
