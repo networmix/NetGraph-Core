@@ -6,7 +6,10 @@
     - Proportional: distribute flow proportionally to residual capacity,
       processing nodes in topological order from source to destination.
     - EqualBalanced: distribute flow equally across available parallel edges,
-      respecting per-edge residual capacity constraints.
+      *single-pass ECMP admission* on a fixed DAG. We compute a single global
+      scale so no edge is oversubscribed, then return. Re-running on updated
+      residuals intentionally changes the allowed next-hop set (progressive/TE);
+      use place_max_flow() if you want that behavior.
 */
 #include "netgraph/core/flow_state.hpp"
 #include "netgraph/core/shortest_paths.hpp"
@@ -31,7 +34,7 @@ struct DinicEdge {
   std::int32_t to;        // destination node
   std::int32_t rev;       // index of reverse edge in adj[to]
   double cap;             // current residual capacity
-  double init_cap;        // initial capacity (snapshot before augmentation)
+  double init_cap;        // initial capacity (snapshot at augmentation start)
   std::int32_t group;     // index into groups array (-1 if reverse edge)
 };
 
@@ -101,12 +104,13 @@ struct EdgeGroup {
 
 // Build grouped edges by (parent u, child v) that can reach destination t,
 // using the current residual snapshot.
-static std::vector<EdgeGroup> build_groups_residual(const StrictMultiDiGraph& g, const PredDAG& dag, NodeId t,
+static std::vector<EdgeGroup> build_groups_residual(const StrictMultiDiGraph& g,
+                                                    const PredDAG& dag, NodeId t,
                                                     const std::vector<Cap>& residual) {
   std::vector<EdgeGroup> groups;
-  auto offsets = dag.parent_offsets;
-  auto parents = dag.parents;
-  auto via = dag.via_edges;
+  const auto& offsets = dag.parent_offsets;
+  const auto& parents = dag.parents;
+  const auto& via     = dag.via_edges;
   const auto N = g.num_nodes();
   // Compute reachability: BFS backward from destination t to identify nodes on SPF DAG.
   // Python developers: this is like a reverse BFS to find ancestors.
@@ -128,20 +132,23 @@ static std::vector<EdgeGroup> build_groups_residual(const StrictMultiDiGraph& g,
   // This creates one group per (u, v) pair, aggregating parallel edges.
   for (std::int32_t v = 0; v < N; ++v) {
     if (!reach[static_cast<std::size_t>(v)]) continue;
-    // Group edges by parent node (unordered_map is like Python dict).
-    std::unordered_map<std::int32_t, std::vector<std::int32_t>> by_parent;
-    std::size_t s = static_cast<std::size_t>(offsets[static_cast<std::size_t>(v)]);
-    std::size_t e = static_cast<std::size_t>(offsets[static_cast<std::size_t>(v + 1)]);
+    // Small linear grouping by parent (faster than a hash for typical degrees).
+    std::vector<std::pair<std::int32_t, std::vector<std::int32_t>>> by_parent;
+    const std::size_t s = static_cast<std::size_t>(offsets[static_cast<std::size_t>(v)]);
+    const std::size_t e = static_cast<std::size_t>(offsets[static_cast<std::size_t>(v + 1)]);
     for (std::size_t i = s; i < e; ++i) {
-      auto u = parents[i];
-      by_parent[u].push_back(via[i]);
+      const auto u = parents[i];
+      bool found = false;
+      for (auto& pr : by_parent) {
+        if (pr.first == u) { pr.second.push_back(via[i]); found = true; break; }
+      }
+      if (!found) by_parent.emplace_back(u, std::vector<std::int32_t>{ via[i] });
     }
     for (auto& kv : by_parent) {
       EdgeGroup gr; gr.from = v; gr.to = kv.first; gr.eids.clear();
       gr.sum_cap = static_cast<Cap>(0.0); gr.min_cap = std::numeric_limits<Cap>::infinity();
-      // Include only edges with residual >= kMinCap to match residual filtering.
       for (auto eid0 : kv.second) {
-        Cap c = residual[static_cast<std::size_t>(eid0)];
+        const Cap c = residual[static_cast<std::size_t>(eid0)];
         if (c >= kMinCap) {
           gr.eids.push_back(eid0);
           gr.sum_cap += c;
@@ -204,11 +211,9 @@ void FlowState::reset(std::span<const Cap> residual_init) {
 
 Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
                              Flow requested_flow, FlowPlacement placement,
-                             bool shortest_path,
                              std::vector<std::pair<EdgeId, Flow>>* trace) {
-  if (src == dst) return 0.0;
   const auto N = g_->num_nodes();
-  if (dst < 0 || dst >= N) return 0.0;
+  if (src < 0 || src >= N || dst < 0 || dst >= N || src == dst) return 0.0;
 
   // Build groups using current residual
   auto groups = build_groups_residual(*g_, dag, dst, residual_);
@@ -222,11 +227,9 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
     FlowWorkspace ws; build_reversed_residual(ws, N, groups);
     while (remaining > kMinFlow && ws.bfs(dst, src)) {
       std::fill(ws.it.begin(), ws.it.end(), 0);
-      // Always cap per-augment push by remaining requested amount
-      auto cap_push = [&](){ return shortest_path ? remaining : remaining; };
       Flow pushed_layer = static_cast<Flow>(0.0);
       while (true) {
-        double pushed = ws.dfs(dst, src, cap_push());
+        double pushed = ws.dfs(dst, src, remaining);
         if (pushed < kMinFlow) break;
         pushed_layer += static_cast<Flow>(pushed);
         remaining -= pushed;
@@ -251,9 +254,7 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
             double share = sent * (static_cast<double>(base) / denom);
             edge_flow_[static_cast<std::size_t>(eid)] += static_cast<Cap>(share);
             residual_[static_cast<std::size_t>(eid)] = std::max(static_cast<Cap>(0.0), static_cast<Cap>(base - share));
-            if (trace && share >= kMinFlow) {
-              trace->emplace_back(eid, static_cast<Flow>(share));
-            }
+            if (trace) { trace->emplace_back(eid, static_cast<Flow>(share)); }
           }
         }
       }
@@ -262,61 +263,89 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
       build_reversed_residual(ws, N, groups);
     }
   } else {
-    // EqualBalanced placement: split flow equally across parallel edges.
-    // This ensures uniform load distribution, limited by the min residual capacity.
+    // EqualBalanced placement: split flow equally across parallel edges, with
+    // topological accumulation to correctly handle reconvergent DAGs.
 
-    // Build reversed adjacency succ: parent u <- child v for each group.
+    // Build forward adjacency from parent u to child v for each group and
+    // compute aggregated reverse capacities per group.
     std::vector<std::vector<std::size_t>> succ(static_cast<std::size_t>(N));
     std::vector<double> rev_cap(groups.size(), 0.0);
     for (std::size_t gi = 0; gi < groups.size(); ++gi) {
       const auto& gr = groups[gi];
       if (gr.eids.empty()) continue;
-      // Find minimum residual capacity among parallel edges.
-      double min_c = std::numeric_limits<double>::infinity();
-      for (auto eid : gr.eids) {
-        double c = static_cast<double>(residual_[static_cast<std::size_t>(eid)]);
-        if (c < min_c) min_c = c;
-      }
-      if (!std::isfinite(min_c)) min_c = 0.0;
-      // Aggregate capacity for this group is min_cap * num_edges.
-      double cap_rev = min_c * static_cast<double>(gr.eids.size());
+      // EB: group admissible total = min_edge_residual * |edges|
+      const double cap_rev = static_cast<double>(gr.min_cap) * static_cast<double>(gr.eids.size());
       if (cap_rev >= kMinCap) {
-        succ[static_cast<std::size_t>(gr.to)].push_back(gi);
+        succ[static_cast<std::size_t>(gr.to)].push_back(gi); // u -> v (group index)
         rev_cap[gi] = cap_rev;
       }
     }
-    // Equal-split BFS from src over reversed graph.
-    // We compute a relative assignment for each group based on equal splitting.
-    std::vector<double> assigned(groups.size(), 0.0);
 
-    // Precompute total edge count per node (for equal splitting).
+    // Compute reachability from src on this succ graph (to ignore disconnected parts).
+    std::vector<char> reach(static_cast<std::size_t>(N), 0);
+    if (src >= 0 && src < N) {
+      std::queue<std::int32_t> q; q.push(src); reach[static_cast<std::size_t>(src)] = 1;
+      while (!q.empty()) {
+        auto u = q.front(); q.pop();
+        for (auto gi : succ[static_cast<std::size_t>(u)]) {
+          auto v = groups[gi].from;
+          if (!reach[static_cast<std::size_t>(v)]) { reach[static_cast<std::size_t>(v)] = 1; q.push(v); }
+        }
+      }
+    }
+
+    // Precompute total outgoing per-edge count per node for equal split.
     std::vector<int> node_split(static_cast<std::size_t>(N), 0);
     for (std::size_t u = 0; u < succ.size(); ++u) {
-      int s = 0; for (auto gi : succ[u]) s += static_cast<int>(groups[gi].eids.size());
+      if (!reach[u]) continue;
+      int s = 0;
+      for (auto gi : succ[u]) s += static_cast<int>(groups[gi].eids.size());
       node_split[u] = s;
     }
 
-    // BFS from src with a flow value of 1.0 (unit flow).
-    // Each node splits its inflow equally among all outgoing edges.
-    std::vector<char> visited(static_cast<std::size_t>(N), 0);
-    std::queue<std::pair<std::int32_t,double>> q2; q2.emplace(src, 1.0);
-    while (!q2.empty()) {
-      auto [u, inflow] = q2.front(); q2.pop();
-      if (inflow < kMinFlow) continue;
-      visited[static_cast<std::size_t>(u)] = 1;
+    // Topological accumulation: indegree counts over reachable subgraph.
+    std::vector<int> indeg(static_cast<std::size_t>(N), 0);
+    for (std::size_t u = 0; u < succ.size(); ++u) {
+      if (!reach[u]) continue;
+      for (auto gi : succ[u]) {
+        auto v = static_cast<std::size_t>(groups[gi].from);
+        if (reach[v]) indeg[v] += 1;
+      }
+    }
+
+    // Kahn's algorithm over reachable nodes starting from src.
+    std::queue<std::int32_t> q;
+    std::vector<double> inflow(static_cast<std::size_t>(N), 0.0);
+    std::vector<double> assigned(groups.size(), 0.0);
+    if (src >= 0 && src < N && reach[static_cast<std::size_t>(src)]) {
+      q.push(src);
+      inflow[static_cast<std::size_t>(src)] = 1.0; // unit flow
+    }
+
+    while (!q.empty()) {
+      auto u = q.front(); q.pop();
+      double f_in = inflow[static_cast<std::size_t>(u)];
+      if (f_in < kMinFlow) continue;
       int split = node_split[static_cast<std::size_t>(u)];
       if (split <= 0) continue;
       for (auto gi : succ[static_cast<std::size_t>(u)]) {
-        const auto& gr = groups[gi]; if (gr.eids.empty()) continue;
-        // Each parallel edge in this group gets an equal share.
-        double push = inflow * (static_cast<double>(gr.eids.size()) / static_cast<double>(split));
+        const auto& gr = groups[gi];
+        if (gr.eids.empty()) continue;
+        // Group share proportional to number of edges (equal per-edge split).
+        double push = f_in * (static_cast<double>(gr.eids.size()) / static_cast<double>(split));
         if (push < kMinFlow) continue;
         assigned[gi] += push;
-        if (!visited[static_cast<std::size_t>(gr.from)]) q2.emplace(gr.from, push);
+        auto v = static_cast<std::size_t>(gr.from);
+        inflow[v] += push;
+        // Decrement indegree and enqueue child when all parents processed.
+        if (--indeg[v] == 0) q.push(static_cast<std::int32_t>(v));
       }
     }
-    // Compute the bottleneck scaling ratio: max flow we can push without exceeding capacity.
-    // For each group, the ratio is (available_capacity / assigned_relative_flow).
+
+    // Single-pass ECMP admission: scale the unit assignment by the smallest
+    // per-group headroom so that no edge is oversubscribed under *fixed equal
+    // per-edge splits*. Any further injection with the same splits would violate
+    // the saturated group(s).
     double ratio = std::numeric_limits<double>::infinity();
     for (std::size_t gi = 0; gi < groups.size(); ++gi) {
       if (assigned[gi] > 0.0) {
@@ -326,23 +355,21 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
     }
     if (!std::isfinite(ratio)) ratio = 0.0;
 
-    // Scale the unit flow by the bottleneck ratio to get the actual flow to place.
-    // In shortest_path mode, cap by requested amount.
+    // Place up to requested amount.
     Flow use = static_cast<Flow>(std::min(ratio, static_cast<double>(remaining)));
     if (use >= kMinFlow) {
       placed += use;
-      // Apply scaled flow to each group, distributing equally among parallel edges.
+      // Apply scaled group assignments equally over parallel edges.
       for (std::size_t gi = 0; gi < groups.size(); ++gi) {
         const auto& gr = groups[gi]; if (gr.eids.empty()) continue;
         double flow_scaled = assigned[gi] * static_cast<double>(use);
         if (flow_scaled < kMinFlow) continue;
-        // Equal split: each edge in the group gets the same flow.
         double per_edge = flow_scaled / static_cast<double>(gr.eids.size());
         for (auto eid : gr.eids) {
           edge_flow_[static_cast<std::size_t>(eid)] += static_cast<Flow>(per_edge);
           double base = static_cast<double>(residual_[static_cast<std::size_t>(eid)]);
           residual_[static_cast<std::size_t>(eid)] = static_cast<Cap>(std::max(0.0, base - per_edge));
-          if (trace && per_edge >= kMinFlow) trace->emplace_back(eid, static_cast<Flow>(per_edge));
+          if (trace) trace->emplace_back(eid, static_cast<Flow>(per_edge));
         }
       }
     }
@@ -350,15 +377,25 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
   return placed;
 }
 
-Flow FlowState::place_max_flow(NodeId src, NodeId dst, FlowPlacement placement, bool shortest_path) {
+Flow FlowState::place_max_flow(NodeId src, NodeId dst, FlowPlacement placement, bool shortest_path, bool require_capacity) {
+  // require_capacity controls routing behavior:
+  //   - true: Require edges to have capacity, exclude saturated links (SDN/TE, progressive)
+  //   - false: Routes based on costs only, ignore capacity (IP/IGP, fixed routing)
+  //
+  // NOTE: With FlowPlacement::EqualBalanced + require_capacity=true, this behaves as a
+  // progressive "fill". For IP ECMP, use require_capacity=false + shortest_path=true.
   Flow total = static_cast<Flow>(0.0);
   while (true) {
-    EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
-    auto [dist, dag] = shortest_paths(*g_, src, dst, /*multipath=*/true, sel, residual_);
+    EdgeSelection sel;
+    sel.multi_edge = true;
+    sel.require_capacity = require_capacity;
+    sel.tie_break = EdgeTieBreak::Deterministic;
+    auto [dist, dag] = shortest_paths(*g_, src, dst, /*multipath=*/true, sel,
+                                      require_capacity ? residual_ : std::span<const Cap>{});
     if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size()-1 || dag.parent_offsets[static_cast<std::size_t>(dst)] == dag.parent_offsets[static_cast<std::size_t>(dst)+1]) {
       break;
     }
-    Flow placed = place_on_dag(src, dst, dag, std::numeric_limits<double>::infinity(), placement, shortest_path);
+    Flow placed = place_on_dag(src, dst, dag, std::numeric_limits<double>::infinity(), placement);
     if (placed < kMinFlow) break;
     total += placed;
     if (shortest_path) break;
@@ -375,11 +412,14 @@ MinCut FlowState::compute_min_cut(NodeId src, std::span<const bool> node_mask, s
   const auto in_row = g_->in_row_offsets_view();
   const auto in_col = g_->in_col_indices_view();
   const auto in_aei = g_->in_adj_edge_index_view();
-  std::vector<char> visited(static_cast<std::size_t>(N), 0);
-  std::queue<std::int32_t> q;
-  if (src >= 0 && src < N) { visited[static_cast<std::size_t>(src)] = 1; q.push(src); }
   const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(N));
   const bool use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(g_->num_edges()));
+  std::vector<char> visited(static_cast<std::size_t>(N), 0);
+  std::queue<std::int32_t> q;
+  if (src >= 0 && src < N && (!use_node_mask || node_mask[static_cast<std::size_t>(src)])) {
+    visited[static_cast<std::size_t>(src)] = 1;
+    q.push(src);
+  }
   while (!q.empty()) {
     auto u = q.front(); q.pop();
     if (use_node_mask && !node_mask[static_cast<std::size_t>(u)]) continue;
@@ -445,12 +485,11 @@ void FlowState::apply_deltas(std::span<const std::pair<EdgeId, Flow>> deltas, bo
       double new_res = std::max(0.0, static_cast<double>(cap[eid]) - edge_flow_[eid]);
       residual_[eid] = static_cast<Cap>(new_res);
     } else {
-      double new_flow = std::max(0.0, base_flow - df);
-      edge_flow_[eid] = static_cast<Flow>(new_flow);
-      double new_res = std::min(static_cast<double>(cap[eid]), static_cast<double>(cap[eid]) - new_flow);
-      // guard for numeric drift
-      if (new_res < kMinCap && (static_cast<double>(cap[eid]) - new_flow) < kMinCap) new_res = std::max(0.0, static_cast<double>(cap[eid]) - new_flow);
-      residual_[eid] = static_cast<Cap>(new_res);
+      // Clamp flow into [0, cap] and set residual accordingly.
+      double unclamped = base_flow - df;
+      double clamped = std::min(static_cast<double>(cap[eid]), std::max(0.0, unclamped));
+      edge_flow_[eid] = static_cast<Flow>(clamped);
+      residual_[eid] = static_cast<Cap>(std::max(0.0, static_cast<double>(cap[eid]) - clamped));
     }
   }
 }

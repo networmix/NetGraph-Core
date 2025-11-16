@@ -144,6 +144,142 @@ inline StrictMultiDiGraph make_shared_bottleneck_graph(double path_cap, double b
     std::span(cap_arr, 4), std::span(cost_arr, 4));
 }
 
+inline StrictMultiDiGraph make_3tier_clos_graph() {
+  /**
+   * Build a 3-tier Clos topology matching NetGraph scenario_3.yaml structure.
+   *
+   * Structure (replicates scenario_3 from NetGraph integration tests):
+   * - 2 Clos instances (clos1, clos2)
+   * - Each Clos has:
+   *   - 2 bricks (b1, b2)
+   *   - Each brick has:
+   *     - 4 T1 nodes (tier1/leaf layer)
+   *     - 4 T2 nodes (tier2/aggregation layer)
+   *     - Mesh: all T1->T2 edges within brick (100 Gbps, cost 1)
+   *   - 16 spine nodes (T3)
+   *   - Connections: Each brick's 4 T2 nodes connect one-to-one to 4 spines (400 Gbps, cost 1)
+   * - Inter-Clos: 16 spine-to-spine links (400 Gbps, cost 1)
+   *
+   * Node numbering:
+   * - Clos1:
+   *   - b1/t1: nodes 0-3
+   *   - b1/t2: nodes 4-7
+   *   - b2/t1: nodes 8-11
+   *   - b2/t2: nodes 12-15
+   *   - spine: nodes 16-31
+   * - Clos2:
+   *   - b1/t1: nodes 32-35
+   *   - b1/t2: nodes 36-39
+   *   - b2/t1: nodes 40-43
+   *   - b2/t2: nodes 44-47
+   *   - spine: nodes 48-63
+   *
+   * Total nodes: 64
+   *
+   * Expected max flow from clos1 T1 nodes to clos2 T1 nodes: 3200.0 Gbps
+   * (8 inter-clos spine links × 400 Gbps = 3200 Gbps bottleneck)
+   */
+
+  constexpr int num_nodes = 64;
+  std::vector<std::int32_t> src, dst;
+  std::vector<double> cap;
+  std::vector<std::int64_t> cost;
+
+  // Helper to add mesh connections between two groups
+  auto add_mesh = [&](int group1_start, int group1_count, int group2_start, int group2_count, double capacity) {
+    for (int i = 0; i < group1_count; ++i) {
+      for (int j = 0; j < group2_count; ++j) {
+        src.push_back(group1_start + i);
+        dst.push_back(group2_start + j);
+        cap.push_back(capacity);
+        cost.push_back(1);
+      }
+    }
+  };
+
+  // Helper to add one-to-one connections
+  auto add_one_to_one = [&](int group1_start, int group1_count, int group2_start, double capacity) {
+    for (int i = 0; i < group1_count; ++i) {
+      src.push_back(group1_start + i);
+      dst.push_back(group2_start + i);
+      cap.push_back(capacity);
+      cost.push_back(1);
+    }
+  };
+
+  // Clos1 brick1: T1 (0-3) mesh to T2 (4-7)
+  add_mesh(0, 4, 4, 4, 100.0);
+
+  // Clos1 brick2: T1 (8-11) mesh to T2 (12-15)
+  add_mesh(8, 4, 12, 4, 100.0);
+
+  // Clos1 b1/T2 (4-7) one-to-one to spine (16-19)
+  add_one_to_one(4, 4, 16, 400.0);
+
+  // Clos1 b2/T2 (12-15) one-to-one to spine (20-23)
+  add_one_to_one(12, 4, 20, 400.0);
+
+  // Inter-Clos: Clos1 spine (16-31) one-to-one to Clos2 spine (48-63)
+  add_one_to_one(16, 16, 48, 400.0);
+
+  // Clos2 spine (48-63) to b1/T2 (36-39) - only first 4 spines connect
+  add_one_to_one(48, 4, 36, 400.0);
+
+  // Clos2 spine (52-55) to b2/T2 (44-47)
+  add_one_to_one(52, 4, 44, 400.0);
+
+  // Clos2 brick1: T2 (36-39) mesh to T1 (32-35)
+  add_mesh(36, 4, 32, 4, 100.0);
+
+  // Clos2 brick2: T2 (44-47) mesh to T1 (40-43)
+  add_mesh(44, 4, 40, 4, 100.0);
+
+  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost);
+}
+
+inline StrictMultiDiGraph make_triangle_topology() {
+  /**
+   * Triangle topology from NetGraph solver tests.
+   * Used in test_maxflow_api.py::_triangle_network()
+   *
+   * Topology:
+   *   A(0) -> B(1) (cap 2)
+   *   B(1) -> C(2) (cap 1)
+   *   A(0) -> C(2) (cap 1)
+   *
+   * Expected max flow A->C: 2.0 (1 direct + 1 via B)
+   */
+  std::int32_t src_arr[3] = {0, 1, 0};
+  std::int32_t dst_arr[3] = {1, 2, 2};
+  double cap_arr[3] = {2.0, 1.0, 1.0};
+  std::int64_t cost_arr[3] = {1, 1, 1};
+
+  return StrictMultiDiGraph::from_arrays(3,
+    std::span(src_arr, 3), std::span(dst_arr, 3),
+    std::span(cap_arr, 3), std::span(cost_arr, 3));
+}
+
+inline StrictMultiDiGraph make_simple_parallel_paths_topology() {
+  /**
+   * Simple network with two disjoint parallel paths.
+   * From NetGraph solver tests: test_maxflow_api.py::_simple_network()
+   *
+   * Topology:
+   *   S(0) -> A(1) (cap 1) -> T(3) (cap 1)
+   *   S(0) -> B(2) (cap 1) -> T(3) (cap 1)
+   *
+   * Expected max flow S->T: 2.0
+   */
+  std::int32_t src_arr[4] = {0, 1, 0, 2};
+  std::int32_t dst_arr[4] = {1, 3, 2, 3};
+  double cap_arr[4] = {1.0, 1.0, 1.0, 1.0};
+  std::int64_t cost_arr[4] = {1, 1, 1, 1};
+
+  return StrictMultiDiGraph::from_arrays(4,
+    std::span(src_arr, 4), std::span(dst_arr, 4),
+    std::span(cap_arr, 4), std::span(cost_arr, 4));
+}
+
 // Assertion helpers
 inline void expect_csr_valid(const StrictMultiDiGraph& g) {
   auto row = g.row_offsets_view();

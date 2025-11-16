@@ -32,7 +32,7 @@ public:
 // Apply placement and record per-edge deltas for this flow. Returns placed amount.
   [[nodiscard]] Flow place(const FlowIndex& idx, NodeId src, NodeId dst,
              const PredDAG& dag, Flow amount,
-             FlowPlacement placement, bool shortest_path = false);
+             FlowPlacement placement);
 
   // Remove a specific flow, reverting its edge deltas from the ledger.
   void remove(const FlowIndex& idx);
@@ -55,6 +55,9 @@ private:
   FlowState fs_;
   // Per-flow ledger: stores only edges with non-zero flow
   std::unordered_map<FlowIndex, std::vector<std::pair<EdgeId, Flow>>, FlowIndexHash> ledger_;
+  // Cached EdgeId -> (src,dst) maps for faster path reconstruction
+  std::vector<NodeId> src_of_;
+  std::vector<NodeId> dst_of_;
 };
 
 } // namespace netgraph::core

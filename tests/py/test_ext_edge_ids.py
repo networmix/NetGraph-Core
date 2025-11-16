@@ -82,7 +82,7 @@ def test_ext_edge_ids_with_manual_reverse():
     assert len(set(ext_ids_view)) == 4, "ext_edge_ids should all be distinct"
 
     # Verify we can distinguish forward from reverse
-    # After sorting by cost, src, dst:
+    # In sorted order by cost, src, dst:
     # (0→1, cost=1, ext_id=0), (1→0, cost=1, ext_id=1), (1→2, cost=2, ext_id=2), (2→1, cost=2, ext_id=3)
     expected = [(0, 1, 0), (1, 0, 1), (1, 2, 2), (2, 1, 3)]
     for i, (exp_src, exp_dst, exp_ext_id) in enumerate(expected):

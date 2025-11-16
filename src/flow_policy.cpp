@@ -50,21 +50,27 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
 
   // Use configured selection for per-adjacency edge behavior (multi-edge, tie-breaking).
   EdgeSelection sel = selection_;
+  // For EqualBalanced, ensure we consider the full equal-cost next-hop set.
+  if (flow_placement_ == FlowPlacement::EqualBalanced) {
+    sel.multi_edge = true;
+  }
   // Decide whether we need residual-aware SPF and whether to build an edge mask.
-  // Residual awareness is needed if:
-  // - require_capacity is set (only consider edges with positive residual), OR
-  // - EqualBalanced mode with a minimum flow threshold.
-  const bool require_residual = (sel.require_capacity || (flow_placement_ == FlowPlacement::EqualBalanced && min_flow.has_value()));
+  // Residual awareness is controlled by require_capacity_:
+  //   - require_capacity=true: Require edges to have capacity, routes adapt to residuals (SDN/TE behavior)
+  //   - require_capacity=false: Routes based on costs only (IP/IGP behavior)
+  // Additionally, for EqualBalanced mode with minimum flow threshold, we use residuals.
+  const bool require_residual = (require_capacity_ || (flow_placement_ == FlowPlacement::EqualBalanced && min_flow.has_value()));
   const auto residual = fg.residual_view();
 
   // Edge mask: filter edges by minimum residual capacity threshold.
-  std::vector<unsigned char> em;
   std::unique_ptr<bool[]> em_bool;  // unique_ptr manages memory (like Python context manager)
   const bool* edge_mask_ptr = nullptr;
   bool need_mask = false;
   if (require_residual) {
-    // In shortest-path EqualBalanced mode, do not enforce per-edge minimum residual at SPF stage.
-    need_mask = (min_flow.has_value() && !(shortest_path_ && flow_placement_ == FlowPlacement::EqualBalanced));
+    // Do not enforce a per-target residual threshold for EqualBalanced.
+    // IP ECMP-style equalization should consider all equal-cost next-hops with any residual.
+    // Capacity gating is already honored by passing the residual span to SPF.
+    need_mask = (min_flow.has_value() && flow_placement_ != FlowPlacement::EqualBalanced);
     if (need_mask) {
       em_bool.reset(new bool[residual.size()]);  // allocate mask array
       double thr = *min_flow;
@@ -72,6 +78,8 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
       edge_mask_ptr = em_bool.get();
     }
   }
+  // Set require_capacity directly (no casting needed - same field name)
+  sel.require_capacity = require_capacity_;
   SpfOptions opts;
   opts.multipath = true;
   opts.selection = sel;
@@ -130,7 +138,7 @@ FlowRecord* FlowPolicy::create_flow(FlowGraph& fg, NodeId src, NodeId dst, FlowC
 }
 
 /* Re-select a path for an existing flow, requesting at least (current+headroom)
-   residual. On failure, restores the flow on its previous DAG.
+   residual. On failure, restores the flow on its original DAG.
 
    Reoptimization is useful when a flow's current path becomes suboptimal due to
    network changes or when seeking additional capacity. */
@@ -147,7 +155,7 @@ FlowRecord* FlowPolicy::reoptimize_flow(FlowGraph& fg, const FlowIndex& idx, dou
   auto pb = get_path_bundle(fg, cur.src, cur.dst, new_min);
   if (!pb.has_value()) {
     // Reoptimization failed: restore flow on original DAG.
-    Flow placed = fg.place(idx, cur.src, cur.dst, cur.dag, current, flow_placement_, false);
+    Flow placed = fg.place(idx, cur.src, cur.dst, cur.dag, current, flow_placement_);
     cur.placed_flow = placed; // may be slightly less if capacity changed; acceptable
     return nullptr;
   }
@@ -156,7 +164,7 @@ FlowRecord* FlowPolicy::reoptimize_flow(FlowGraph& fg, const FlowIndex& idx, dou
   auto [dag, cost] = std::move(pb.value());
   cur.dag = std::move(dag);
   cur.cost = cost;
-  Flow placed = fg.place(idx, cur.src, cur.dst, cur.dag, current, flow_placement_, false);
+  Flow placed = fg.place(idx, cur.src, cur.dst, cur.dag, current, flow_placement_);
   cur.placed_flow = placed;
   return &cur;
 }
@@ -170,7 +178,6 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
                                                   double volume,
                                                   std::optional<double> target_per_flow,
                                                   std::optional<double> min_flow) {
-  (void)min_flow; // reserved for future use; avoids unused parameter warning
 
   // Compute target flow per flow-record.
   // target: the volume to place per flow (or globally if target_per_flow is unset).
@@ -221,16 +228,14 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
     } else {
       // Dynamic paths: seed initial flows.
       int initial = min_flow_count_;
-      if (flow_placement_ == FlowPlacement::EqualBalanced && max_flow_count_.has_value()) {
-        // For equal-balanced placement, eagerly seed the requested number of flows
-        // up to the configured maximum to ensure balanced distribution from the start.
-        initial = std::min(min_flow_count_, *max_flow_count_);
+      if (max_flow_count_.has_value()) {
+        initial = std::min(initial, *max_flow_count_);
       }
       for (int i=0;i<initial;++i) {
-        // Seed flows using per-target as minimum per-edge residual requirement.
-        [[maybe_unused]] auto* created = create_flow(
-            fg, src, dst, flowClass,
-            (flow_placement_ == FlowPlacement::EqualBalanced && max_flow_count_.has_value()) ? std::optional<double>(per_target) : std::nullopt);
+        auto min_req = (flow_placement_ == FlowPlacement::EqualBalanced && max_flow_count_.has_value())
+                         ? std::optional<double>(per_target)
+                         : min_flow;
+        [[maybe_unused]] auto* created = create_flow(fg, src, dst, flowClass, min_req);
       }
     }
   }
@@ -260,7 +265,12 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
     }
     // Proceed even if selection is not explicitly capacity-aware; placement
     // uses residuals, and DAG is refreshed with per-flow targets.
-    // For EqualBalanced (non-static), refresh DAG each round with per-flow target min_flow
+    //
+    // EB note: we refresh the DAG each round using residual-aware SPF.
+    // This prunes saturated next-hops and *changes the equal-split set*
+    // (progressive behavior). This is useful for TE-like reoptimization,
+    // but it is not the one-shot ECMP admission semantics. Gate or disable
+    // this if strict single-pass ECMP on the initial DAG is required.
     if (flow_placement_ == FlowPlacement::EqualBalanced && static_paths_.empty()) {
       if (auto pb = get_path_bundle(fg, f->src, f->dst, std::optional<double>(per_target))) {
         f->dag = std::move(pb->first);
@@ -272,18 +282,22 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
       // When a per-flow target is specified (e.g., during rebalancing), cap by remaining per-flow target.
       need = std::max(0.0, target - f->placed_flow);
     } else if (flow_placement_ == FlowPlacement::EqualBalanced && max_flow_count_.has_value()) {
-      // During initial equal-balanced placement without per-target, allow each flow to place up to remaining volume.
-      need = volume;
+      // For EqualBalanced, request only the remaining deficit toward per-target for this flow.
+      need = std::max(0.0, per_target - f->placed_flow);
     } else {
       // Default behavior uses the global target amount.
       need = target;
     }
     const double request = std::min(need, volume);
-    Flow placed = fg.place(f->index, f->src, f->dst, f->dag, request, flow_placement_, /*shortest_path*/ shortest_path_);
+    Flow placed = fg.place(f->index, f->src, f->dst, f->dag, request, flow_placement_);
     f->placed_flow += placed;
     volume -= placed;
     total_placed += placed;
     ++iters;
+    // IP-like mode: perform a single augmentation over the current SPF DAG
+    if (shortest_path_) {
+      break;
+    }
     // track recent placements
     if (diminishing_returns_enabled_) {
       recent.push_back(placed);
@@ -301,10 +315,15 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
     } else {
       no_progress = 0;
     }
-    if (flow_placement_ == FlowPlacement::EqualBalanced && max_flow_count_.has_value()) {
-      // Keep adding flows until we reach the configured maximum for equal-balanced.
-      if (static_cast<int>(flows_.size()) < *max_flow_count_) {
-        if (auto* nf = create_flow(fg, src, dst, flowClass, std::optional<double>(per_target))) q.push_back(nf->index);
+    if (flow_placement_ == FlowPlacement::EqualBalanced) {
+      if (max_flow_count_.has_value()) {
+        // Bounded EB: add flows up to configured maximum.
+        if (static_cast<int>(flows_.size()) < *max_flow_count_) {
+          if (auto* nf = create_flow(fg, src, dst, flowClass, std::optional<double>(per_target))) q.push_back(nf->index);
+        }
+      } else {
+        // Unbounded EB: rely on a single flow to equalize over the DAG.
+        // Do not create additional flows implicitly.
       }
     } else {
       if (target - f->placed_flow >= kMinFlow) {

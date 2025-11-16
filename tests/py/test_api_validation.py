@@ -75,3 +75,65 @@ def test_batch_max_flow_masks_length_mismatch_raises(build_graph, algs, to_handl
     node_masks = [np.array([True, True], dtype=bool)]  # len 1, need 2
     with pytest.raises(TypeError):
         algs.batch_max_flow(to_handle(g), pairs, node_masks=node_masks)
+
+
+def test_flowstate_views_are_readonly():
+    """Verify that FlowState views return read-only arrays."""
+    g = ngc.StrictMultiDiGraph.from_arrays(
+        num_nodes=3,
+        src=np.array([0, 1], dtype=np.int32),
+        dst=np.array([1, 2], dtype=np.int32),
+        capacity=np.array([10.0, 10.0]),
+        cost=np.ones(2, dtype=np.int64),
+    )
+
+    fs = ngc.FlowState(g)
+
+    # Test capacity_view is read-only
+    capacity_view = fs.capacity_view()
+    assert not capacity_view.flags.writeable, "capacity_view should be read-only"
+    with pytest.raises((ValueError, RuntimeError)):
+        capacity_view[0] = 5.0
+
+    # Test residual_view is read-only
+    residual_view = fs.residual_view()
+    assert not residual_view.flags.writeable, "residual_view should be read-only"
+    with pytest.raises((ValueError, RuntimeError)):
+        residual_view[0] = 5.0
+
+    # Test edge_flow_view is read-only
+    edge_flow_view = fs.edge_flow_view()
+    assert not edge_flow_view.flags.writeable, "edge_flow_view should be read-only"
+    with pytest.raises((ValueError, RuntimeError)):
+        edge_flow_view[0] = 5.0
+
+
+def test_flowgraph_views_are_readonly():
+    """Verify that FlowGraph views return read-only arrays."""
+    g = ngc.StrictMultiDiGraph.from_arrays(
+        num_nodes=3,
+        src=np.array([0, 1], dtype=np.int32),
+        dst=np.array([1, 2], dtype=np.int32),
+        capacity=np.array([10.0, 10.0]),
+        cost=np.ones(2, dtype=np.int64),
+    )
+
+    fg = ngc.FlowGraph(g)
+
+    # Test capacity_view is read-only
+    capacity_view = fg.capacity_view()
+    assert not capacity_view.flags.writeable, "capacity_view should be read-only"
+    with pytest.raises((ValueError, RuntimeError)):
+        capacity_view[0] = 999.0
+
+    # Test residual_view is read-only
+    residual_view = fg.residual_view()
+    assert not residual_view.flags.writeable, "residual_view should be read-only"
+    with pytest.raises((ValueError, RuntimeError)):
+        residual_view[0] = 999.0
+
+    # Test edge_flow_view is read-only
+    edge_flow_view = fg.edge_flow_view()
+    assert not edge_flow_view.flags.writeable, "edge_flow_view should be read-only"
+    with pytest.raises((ValueError, RuntimeError)):
+        edge_flow_view[0] = 999.0

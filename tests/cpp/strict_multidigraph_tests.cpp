@@ -106,7 +106,7 @@ TEST(StrictMultiDiGraph, ExternalEdgeIdsPreserved) {
   auto ext_view = g.ext_edge_ids_view();
   EXPECT_EQ(ext_view.size(), 3);
 
-  // Edge with cost 1 (originally at index 1) should have ext_id 200
+  // Edge with cost 1 (input index 1) should have ext_id 200
   auto cost_view = g.cost_view();
   for (std::size_t i = 0; i < 3; ++i) {
     if (cost_view[i] == 1) {
@@ -179,7 +179,7 @@ TEST(StrictMultiDiGraph, ZeroCostEdges) {
     std::span(src, 2), std::span(dst, 2),
     std::span(cap, 2), std::span(cost, 2));
 
-  // Zero cost edge should come first after sorting
+  // Zero cost edge should be first in sorted order
   auto cost_view = g.cost_view();
   EXPECT_EQ(cost_view[0], 0);
   EXPECT_EQ(cost_view[1], 1);
@@ -308,7 +308,7 @@ TEST(StrictMultiDiGraph, MultipleCostTiers) {
     std::span(cap, 6), std::span(cost, 6));
 
   auto cost_view = g.cost_view();
-  // After sorting: costs should be [1, 1, 5, 5, 10, 10]
+  // Sorted costs should be [1, 1, 5, 5, 10, 10]
   EXPECT_EQ(cost_view[0], 1);
   EXPECT_EQ(cost_view[1], 1);
   EXPECT_EQ(cost_view[2], 5);

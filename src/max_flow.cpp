@@ -28,6 +28,7 @@ namespace {
 std::pair<Flow, FlowSummary>
 calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
               FlowPlacement placement, bool shortest_path,
+              bool require_capacity,
               bool with_edge_flows,
               bool with_reachable,
               bool with_residuals,
@@ -48,14 +49,19 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
   Flow total = static_cast<Flow>(0.0);
   std::vector<std::pair<Cost,Flow>> cost_dist; // (cost, flow)
 
-  // Iterate tiers: SPF over current residual -> place on DAG -> accumulate stats
+  // Iterate tiers: SPF over current residual or costs only
+  // require_capacity=true: Require edges to have capacity, exclude saturated links (SDN/TE behavior)
+  // require_capacity=false: Routes based on costs only, ignore capacity (IP/IGP behavior)
   while (true) {
-    EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+    EdgeSelection sel;
+    sel.multi_edge = true;
+    sel.require_capacity = require_capacity;
+    sel.tie_break = EdgeTieBreak::Deterministic;
     auto [dist, dag] = shortest_paths(
         g, src, dst,
         /*multipath=*/true,
         sel,
-        fs.residual_view(),
+        require_capacity ? fs.residual_view() : std::span<const Cap>{},
         use_node_mask ? node_mask : std::span<const bool>{},
         use_edge_mask ? edge_mask : std::span<const bool>{});
 
@@ -66,7 +72,7 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
     }
 
     Cost path_cost = dist[static_cast<std::size_t>(dst)];
-    Flow placed = fs.place_on_dag(src, dst, dag, std::numeric_limits<double>::infinity(), placement, shortest_path);
+    Flow placed = fs.place_on_dag(src, dst, dag, std::numeric_limits<double>::infinity(), placement);
     if (placed < kMinFlow) break;
     total += placed;
     // Merge by exact cost (integer)
@@ -100,12 +106,11 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
     auto mc = fs.compute_min_cut(src, node_mask, edge_mask);
     summary.min_cut = mc;
     if (with_reachable) {
-      // Reconstruct reachable set as a boolean vector of size N from min-cut computation
-      // FlowState::compute_min_cut records only cut edges; recompute reachability quickly
       summary.reachable_nodes.assign(static_cast<std::size_t>(g.num_nodes()), 0u);
-      // BFS over residual graph using FlowState views
       auto residual = fs.residual_view();
       auto capv = fs.capacity_view();
+      const bool reach_use_node_mask = (node_mask.size() == static_cast<std::size_t>(g.num_nodes()));
+      const bool reach_use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(g.num_edges()));
       const auto N = static_cast<std::size_t>(g.num_nodes());
       std::vector<std::int32_t> stack;
       stack.reserve(N);
@@ -114,8 +119,8 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
         auto n = static_cast<std::size_t>(stack.back());
         stack.pop_back();
         if (summary.reachable_nodes[n]) continue;
+        if (reach_use_node_mask && !node_mask[n]) continue;
         summary.reachable_nodes[n] = 1u;
-        // Forward residual arcs
         auto ro = g.row_offsets_view();
         auto ci = g.col_indices_view();
         auto ae = g.adj_edge_index_view();
@@ -124,11 +129,12 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
         for (std::size_t p = s; p < e; ++p) {
           auto v = static_cast<std::size_t>(ci[p]);
           auto eid = static_cast<std::size_t>(ae[p]);
+          if (reach_use_edge_mask && !edge_mask[eid]) continue;
+          if (reach_use_node_mask && !node_mask[v]) continue;
           if (residual[eid] > kMinCap && !summary.reachable_nodes[v]) {
             stack.push_back(static_cast<std::int32_t>(v));
           }
         }
-        // Reverse residual arcs (flow > 0)
         auto iro = g.in_row_offsets_view();
         auto ici = g.in_col_indices_view();
         auto iae = g.in_adj_edge_index_view();
@@ -137,6 +143,8 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
         for (std::size_t p = rs; p < re; ++p) {
           auto u = static_cast<std::size_t>(ici[p]);
           auto eid = static_cast<std::size_t>(iae[p]);
+          if (reach_use_edge_mask && !edge_mask[eid]) continue;
+          if (reach_use_node_mask && !node_mask[u]) continue;
           auto flow = capv[eid] - residual[eid];
           if (flow > kMinFlow && !summary.reachable_nodes[u]) {
             stack.push_back(static_cast<std::int32_t>(u));
@@ -152,6 +160,7 @@ std::vector<FlowSummary>
 batch_max_flow(const StrictMultiDiGraph& g,
                const std::vector<std::pair<NodeId,NodeId>>& pairs,
                FlowPlacement placement, bool shortest_path,
+               bool require_capacity,
                bool with_edge_flows,
                bool with_reachable,
                bool with_residuals,
@@ -165,6 +174,7 @@ batch_max_flow(const StrictMultiDiGraph& g,
     std::span<const bool> em = (i < edge_masks.size() ? edge_masks[i] : std::span<const bool>{});
     auto [val, summary] = calc_max_flow(g, pr.first, pr.second,
                                         placement, shortest_path,
+                                        require_capacity,
                                         with_edge_flows,
                                         with_reachable,
                                         with_residuals,

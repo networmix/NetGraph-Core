@@ -71,6 +71,9 @@ wheel.packages = ["python/netgraph_core"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
 
 [tool.ruff]
 line-length = 88

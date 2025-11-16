@@ -39,7 +39,12 @@ struct PredDAG {
 // - dst: if provided, algorithm may exit early once destination is reached
 // - multipath: if true, keep all equal-cost predecessors; if false, keep only one per node
 // - selection: edge selection policy (multi-edge, capacity filtering, tie-breaking)
-// - residual: if provided, use these capacities instead of graph's original capacities
+// - residual: if provided, use these capacities instead of graph's original capacities.
+//   Passing a non-empty 'residual' span forces capacity gating:
+//   edges with residual < kMinCap are excluded from exploration.
+//   For EB semantics this means re-running SPF on updated residuals
+//   will remove saturated next-hops and therefore *change* the fixed
+//   equal-split set (progressive behavior).
 // - node_mask: if provided, node_mask[v]==true means node v is allowed (false excludes it)
 // - edge_mask: if provided, edge_mask[e]==true means edge e is allowed (false excludes it)
 [[nodiscard]] std::pair<std::vector<Cost>, PredDAG>

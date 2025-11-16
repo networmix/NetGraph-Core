@@ -50,7 +50,7 @@ def test_square1_equal_balanced_min_cut_and_distribution(
     # Total flow should be 3 (1 along A->B->C and 2 along A->D->C)
     assert np.isclose(total, 3.0)
     # Min-cut may be edges out of A or into C; accept either set
-    # Min-cut returns EdgeIds now; ensure it has size 2 and corresponds to cut around source or sink
+    # Min-cut returns EdgeIds; ensure it has size 2 and corresponds to cut around source or sink
     mc = set(map(int, summary.min_cut.edges))
     assert len(mc) == 2
     assert_valid_min_cut(g, summary.min_cut)
@@ -162,6 +162,56 @@ def test_max_flow_line1_equal_balanced(
     assert np.isclose(fb[1], 1.0)
     assert np.isclose(fb[2], 3.0)
     assert np.isclose(fb[3], 1.0)
+
+
+def test_max_flow_ecmp3_equal_balanced(algs, to_handle):
+    # 0->{1,2,3}->{4}, all caps=5, equal costs
+    src = np.array([0, 0, 0, 1, 2, 3], dtype=np.int32)
+    dst = np.array([1, 2, 3, 4, 4, 4], dtype=np.int32)
+    cap = np.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0], dtype=np.float64)
+    cost = np.array([1, 1, 1, 1, 1, 1], dtype=np.int64)
+    g = ngc.StrictMultiDiGraph.from_arrays(5, src, dst, cap, cost)
+    total, summary = algs.max_flow(
+        to_handle(g),
+        0,
+        4,
+        flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
+        shortest_path=False,
+        with_edge_flows=True,
+    )
+    # Total is limited by downstream 3*5 = 15
+    assert np.isclose(total, 15.0)
+    fb = np.asarray(summary.edge_flows)
+    # First hop equalized: three edges out of 0 carry 5 each
+    assert np.allclose(fb[:3], [5.0, 5.0, 5.0])
+    # Second hop equalized: three edges into 4 carry 5 each
+    assert np.allclose(fb[3:], [5.0, 5.0, 5.0])
+
+
+def test_max_flow_downstream_equal_balanced(algs, to_handle):
+    # Downstream split: 0->1 (10), then 1->{2,3}(5 each), then to 4 (5 each)
+    src = np.array([0, 1, 1, 2, 3], dtype=np.int32)
+    dst = np.array([1, 2, 3, 4, 4], dtype=np.int32)
+    cap = np.array([10.0, 5.0, 5.0, 5.0, 5.0], dtype=np.float64)
+    cost = np.array([1, 1, 1, 1, 1], dtype=np.int64)
+    g = ngc.StrictMultiDiGraph.from_arrays(5, src, dst, cap, cost)
+    total, summary = algs.max_flow(
+        to_handle(g),
+        0,
+        4,
+        flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
+        shortest_path=False,
+        with_edge_flows=True,
+    )
+    assert np.isclose(total, 10.0)
+    fb = np.asarray(summary.edge_flows)
+    # First hop carries all 10
+    assert np.isclose(fb[0], 10.0)
+    # Downstream equal split 5/5
+    assert np.isclose(fb[1], 5.0)
+    assert np.isclose(fb[2], 5.0)
+    assert np.isclose(fb[3], 5.0)
+    assert np.isclose(fb[4], 5.0)
 
 
 def test_max_flow_graph3_proportional_parallel_distribution(

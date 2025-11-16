@@ -33,6 +33,9 @@ StrictMultiDiGraph StrictMultiDiGraph::from_arrays(
   StrictMultiDiGraph g;
   g.num_nodes_ = num_nodes;
   std::size_t m = src.size();
+  if (m > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+    throw std::invalid_argument("number of edges exceeds INT32_MAX");
+  }
 
   // Invariants: ids within [0, num_nodes), non-negative weights
   for (std::size_t i = 0; i < m; ++i) {
@@ -96,7 +99,7 @@ StrictMultiDiGraph StrictMultiDiGraph::from_arrays(
   }
 
   // Step 2: Convert counts to cumulative offsets (prefix sum).
-  // After this, row_offsets_[u] is the starting index for node u's adjacency list.
+  // row_offsets_[u] is the starting index for node u's adjacency list.
   for (std::size_t i = 1; i < g.row_offsets_.size(); ++i) {
     g.row_offsets_[i] += g.row_offsets_[i - 1];
   }

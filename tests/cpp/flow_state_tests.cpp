@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "netgraph/core/flow_state.hpp"
+#include <limits>
 #include "netgraph/core/shortest_paths.hpp"
 #include "netgraph/core/strict_multidigraph.hpp"
 #include "netgraph/core/constants.hpp"
@@ -34,7 +35,7 @@ TEST(FlowState, PlacementReducesResidual) {
   auto initial_residual = fs.residual_view()[0];
 
   // Place 0.5 units of flow
-  Flow placed = fs.place_on_dag(0, 2, dag, 0.5, FlowPlacement::Proportional, false);
+  Flow placed = fs.place_on_dag(0, 2, dag, 0.5, FlowPlacement::Proportional);
 
   EXPECT_GT(placed, 0.0);
 
@@ -63,7 +64,7 @@ TEST(FlowState, ProportionalDistribution) {
   auto [dist, dag] = shortest_paths(g, 0, std::nullopt, true, sel, {}, {}, {});
 
   // Place 10 units (should use both B->C edges proportionally)
-  Flow placed = fs.place_on_dag(0, 2, dag, 10.0, FlowPlacement::Proportional, false);
+  Flow placed = fs.place_on_dag(0, 2, dag, 10.0, FlowPlacement::Proportional);
 
   EXPECT_NEAR(placed, 10.0, 1e-9);
 
@@ -96,7 +97,7 @@ TEST(FlowState, EqualBalancedDistribution) {
   auto [dist, dag] = shortest_paths(g, 0, std::nullopt, true, sel, {}, {}, {});
 
   // Place 6 units with equal-balanced (limited by min capacity * 2 = 6)
-  Flow placed = fs.place_on_dag(0, 2, dag, 10.0, FlowPlacement::EqualBalanced, false);
+  Flow placed = fs.place_on_dag(0, 2, dag, 10.0, FlowPlacement::EqualBalanced);
 
   EXPECT_NEAR(placed, 6.0, 1e-9);
 
@@ -154,7 +155,7 @@ TEST(FlowState, ApplyDeltasSubtractive) {
   auto flow_after_add = fs.edge_flow_view()[0];
   auto residual_after_add = fs.residual_view()[0];
 
-  // Now subtract
+  // Subtract the same deltas to reverse the operation
   fs.apply_deltas(deltas, false);
 
   EXPECT_NEAR(fs.edge_flow_view()[0], flow_after_add - 0.5, 1e-9);
@@ -162,7 +163,7 @@ TEST(FlowState, ApplyDeltasSubtractive) {
 }
 
 TEST(FlowState, MinCutComputation) {
-  // Test min-cut computation after saturating max-flow on square graph.
+  // Validates min-cut computation on a saturated flow graph.
   // Square has two paths: 0->1->2 (cap 1, cost 2) and 0->3->2 (cap 2, cost 4).
   // Max flow is 3.0, and min-cut should separate source from sink with saturated edges.
   auto g = make_square_graph(1);
@@ -179,7 +180,7 @@ TEST(FlowState, MinCutComputation) {
     auto [dist, dag] = shortest_paths(g, 0, std::nullopt, true, sel, fs.residual_view(), {}, {});
     // Check if destination is reachable
     if (dag.parent_offsets[2] == dag.parent_offsets[3]) break; // No path to node 2
-    Flow placed = fs.place_on_dag(0, 2, dag, 10.0, FlowPlacement::Proportional, false);
+    Flow placed = fs.place_on_dag(0, 2, dag, 10.0, FlowPlacement::Proportional);
     if (placed < kMinFlow) break;
     total_placed += placed;
   }
@@ -190,8 +191,8 @@ TEST(FlowState, MinCutComputation) {
   // Compute min-cut from source
   auto min_cut = fs.compute_min_cut(0, {}, {});
 
-  // Min-cut must have at least one edge (separating source from sink)
-  EXPECT_GT(min_cut.edges.size(), 0) << "Min-cut should contain edges after flow saturation";
+  // Min-cut must have at least one edge separating source from sink
+  EXPECT_GT(min_cut.edges.size(), 0) << "Min-cut must contain saturated edges";
 
   // All cut edges should be saturated (residual <= kMinCap)
   auto residual = fs.residual_view();
@@ -220,7 +221,7 @@ TEST(FlowState, ResetRestoresCapacity) {
   sel.require_capacity = false;
   sel.tie_break = EdgeTieBreak::Deterministic;
   auto [dist, dag] = shortest_paths(g, 0, std::nullopt, true, sel, {}, {}, {});
-  Flow placed = fs.place_on_dag(0, 2, dag, 0.5, FlowPlacement::Proportional, false);
+  Flow placed = fs.place_on_dag(0, 2, dag, 0.5, FlowPlacement::Proportional);
   EXPECT_GT(placed, 0.0);
 
   EXPECT_GT(fs.edge_flow_view()[0], 0.0);
@@ -269,4 +270,110 @@ TEST(FlowState, ResetWithInvalidResidualThrows) {
   FlowState fs(g);
   std::vector<Cap> bad(static_cast<std::size_t>(g.num_edges() + 2), 1.0);
   EXPECT_THROW({ fs.reset(bad); }, std::invalid_argument);
+}
+
+TEST(FlowState, ApplyDeltasClampsWithinCapacityBounds) {
+  auto g = make_line_graph(3);
+  FlowState fs(g);
+  auto cap = g.capacity_view();
+  // Add some flow on edge 0
+  std::vector<std::pair<EdgeId, Flow>> add = {{0, 0.4}};
+  fs.apply_deltas(add, true);
+  // Subtract more than present; implementation should clamp to zero (no negative flows)
+  std::vector<std::pair<EdgeId, Flow>> sub = {{0, 1.0}};
+  fs.apply_deltas(sub, false);
+  EXPECT_GE(fs.edge_flow_view()[0], 0.0);
+  EXPECT_LE(fs.edge_flow_view()[0], cap[0]);
+  EXPECT_NEAR(fs.residual_view()[0], cap[0], 1e-12);
+}
+
+TEST(FlowState, EqualBalancedReconvergentDAGPlacesAll) {
+  // Graph: 0->1->3 and 0->2->3, all caps=1, costs=1
+  std::int32_t src[4] = {0, 1, 0, 2};
+  std::int32_t dst[4] = {1, 3, 2, 3};
+  double cap[4] = {1.0, 1.0, 1.0, 1.0};
+  std::int64_t cost[4] = {1, 1, 1, 1};
+  auto g = StrictMultiDiGraph::from_arrays(4,
+    std::span(src, 4), std::span(dst, 4),
+    std::span(cap, 4), std::span(cost, 4));
+  FlowState fs(g);
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto [dist, dag] = shortest_paths(g, 0, 3, /*multipath=*/true, sel, {}, {}, {});
+  Flow placed = fs.place_on_dag(0, 3, dag, std::numeric_limits<double>::infinity(), FlowPlacement::EqualBalanced);
+  EXPECT_NEAR(placed, 2.0, 1e-9);
+}
+
+TEST(FlowState, EqualBalanced_ECMP3_FirstHopEqualization) {
+  // Graph with three equal-cost next-hops: 0->{1,2,3}->{4}, all caps=5, costs=1
+  std::int32_t src[6]  = {0, 0, 0, 1, 2, 3};
+  std::int32_t dst[6]  = {1, 2, 3, 4, 4, 4};
+  double       cap[6]  = {5.0, 5.0, 5.0, 5.0, 5.0, 5.0};
+  std::int64_t cost[6] = {1,   1,   1,   1,   1,   1};
+  auto g = StrictMultiDiGraph::from_arrays(5,
+    std::span(src, 6), std::span(dst, 6),
+    std::span(cap, 6), std::span(cost, 6));
+  FlowState fs(g);
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto [dist, dag] = shortest_paths(g, 0, 4, /*multipath=*/true, sel, {}, {}, {});
+  // Request 3 units; expect 1 on each of the three paths
+  Flow placed = fs.place_on_dag(0, 4, dag, 3.0, FlowPlacement::EqualBalanced);
+  EXPECT_NEAR(placed, 3.0, 1e-9);
+  auto ef = fs.edge_flow_view();
+  // First-hop equalization
+  // Edges 0->1, 0->2, 0->3 are the first three edges by construction
+  EXPECT_NEAR(ef[0], 1.0, 1e-9);
+  EXPECT_NEAR(ef[1], 1.0, 1e-9);
+  EXPECT_NEAR(ef[2], 1.0, 1e-9);
+  // Second hop equalization
+  EXPECT_NEAR(ef[3], 1.0, 1e-9);
+  EXPECT_NEAR(ef[4], 1.0, 1e-9);
+  EXPECT_NEAR(ef[5], 1.0, 1e-9);
+}
+
+TEST(FlowState, EqualBalanced_MinFlowGating_DoesNotPruneValidParallelEdges) {
+  // Validates that EB placement doesn't prune paths where individual edges have
+  // residual < requested flow, but the parallel edge group collectively supports it.
+  // Graph: 0->1 cap 1.2; 1->2 has two parallel edges cap 0.6 each; all costs=1
+  // When placing 1.0, individual edges can't carry 1.0, but group of 2×0.6 can.
+  std::int32_t src[3]  = {0, 1, 1};
+  std::int32_t dst[3]  = {1, 2, 2};
+  double       cap[3]  = {1.2, 0.6, 0.6};
+  std::int64_t cost[3] = {1,   1,   1};
+  auto g = StrictMultiDiGraph::from_arrays(3,
+    std::span(src, 3), std::span(dst, 3),
+    std::span(cap, 3), std::span(cost, 3));
+  FlowState fs(g);
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto [dist, dag] = shortest_paths(g, 0, 2, /*multipath=*/true, sel, {}, {}, {});
+  // Request 1.0; group capacity is min(1.2, 0.6+0.6) = 1.2, so should place 1.0
+  Flow placed = fs.place_on_dag(0, 2, dag, 1.0, FlowPlacement::EqualBalanced);
+  EXPECT_GE(placed, 1.0 - 1e-9) << "Should place full 1.0 using parallel edge group";
+  auto ef = fs.edge_flow_view();
+  // Parallel edges should split the flow
+  EXPECT_NEAR(ef[1] + ef[2], 1.0, 1e-9) << "Parallel edges should carry the flow";
+}
+
+TEST(FlowState, EqualBalanced_DownstreamSplitEqualization) {
+  // Downstream equalization: 0->1 (cap 10) then 1->{2,3}->4 (each hop cap 5)
+  // Expect 10 placed, split 5 and 5 downstream.
+  std::int32_t src[5]  = {0, 1, 1, 2, 3};
+  std::int32_t dst[5]  = {1, 2, 3, 4, 4};
+  double       cap[5]  = {10.0, 5.0, 5.0, 5.0, 5.0};
+  std::int64_t cost[5] = {1,    1,   1,   1,   1};
+  auto g = StrictMultiDiGraph::from_arrays(5,
+    std::span(src, 5), std::span(dst, 5),
+    std::span(cap, 5), std::span(cost, 5));
+  FlowState fs(g);
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto [dist, dag] = shortest_paths(g, 0, 4, /*multipath=*/true, sel, {}, {}, {});
+  Flow placed = fs.place_on_dag(0, 4, dag, 10.0, FlowPlacement::EqualBalanced);
+  EXPECT_NEAR(placed, 10.0, 1e-9);
+  auto ef = fs.edge_flow_view();
+  // First hop carries all 10
+  EXPECT_NEAR(ef[0], 10.0, 1e-9);
+  // Downstream split equalization
+  EXPECT_NEAR(ef[1], 5.0, 1e-9); // 1->2
+  EXPECT_NEAR(ef[2], 5.0, 1e-9); // 1->3
+  EXPECT_NEAR(ef[3], 5.0, 1e-9); // 2->4
+  EXPECT_NEAR(ef[4], 5.0, 1e-9); // 3->4
 }

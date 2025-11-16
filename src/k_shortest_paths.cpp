@@ -126,8 +126,6 @@ static void dfs_spur_paths(NodeId spur, NodeId v,
     for (auto it = edges_rev.rbegin(); it != edges_rev.rend(); ++it) e.push_back(*it);
     out_nodes.push_back(std::move(n));
     out_edges.push_back(std::move(e));
-    // restore vectors for caller
-    out_nodes.back(); out_edges.back();
     return;
   }
   auto s = off[static_cast<std::size_t>(v)];
@@ -240,7 +238,7 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
       if (nm_ptr) {
         for (std::size_t idx=0; idx<node_mask_local.size(); ++idx) node_mask_local[idx] = (node_mask_local[idx] && (*nm_ptr)[idx]) ? 1u : 0u;
       }
-      // Edge mask: exclude next edges of previous accepted paths that share this prefix
+      // Edge mask: exclude next edges of already-accepted paths that share this prefix
       std::vector<unsigned char> edge_mask_local;
       edge_mask_local.assign(static_cast<std::size_t>(g.num_edges()), static_cast<unsigned char>(1));
       for (auto const& P : paths) {
@@ -302,7 +300,7 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
         B.push(Candidate{cand_cost, std::move(cand_nodes), std::move(cand_edges)});
       }
     }
-    // pick next best candidate not exceeding threshold
+    // Pick next best candidate not exceeding threshold
     if (B.empty()) break;
     bool accepted = false;
     while (!B.empty()) {

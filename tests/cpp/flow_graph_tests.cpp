@@ -29,7 +29,7 @@ TEST(FlowGraph, PlacementCreatesEntry) {
   auto [dist, dag] = shortest_paths(g, 0, std::nullopt, true, sel, {}, {}, {});
 
   FlowIndex idx{0, 2, 0, 0};
-  Flow placed = fg.place(idx, 0, 2, dag, 0.5, FlowPlacement::Proportional, false);
+  Flow placed = fg.place(idx, 0, 2, dag, 0.5, FlowPlacement::Proportional);
 
   EXPECT_GT(placed, 0.0);
 
@@ -48,7 +48,7 @@ TEST(FlowGraph, RemovalDeletesEntry) {
   auto [dist, dag] = shortest_paths(g, 0, std::nullopt, true, sel, {}, {}, {});
 
   FlowIndex idx{0, 2, 0, 0};
-  Flow placed = fg.place(idx, 0, 2, dag, 0.5, FlowPlacement::Proportional, false);
+  Flow placed = fg.place(idx, 0, 2, dag, 0.5, FlowPlacement::Proportional);
   EXPECT_GT(placed, 0.0);
 
   EXPECT_FALSE(fg.get_flow_edges(idx).empty());
@@ -73,9 +73,9 @@ TEST(FlowGraph, RemoveByClassFiltersCorrectly) {
   FlowIndex idx2{0, 2, 20, 1};
   FlowIndex idx3{0, 2, 10, 2};
 
-  (void)fg.place(idx1, 0, 2, dag, 0.5, FlowPlacement::Proportional, false);
-  (void)fg.place(idx2, 0, 2, dag, 0.5, FlowPlacement::Proportional, false);
-  (void)fg.place(idx3, 0, 2, dag, 0.5, FlowPlacement::Proportional, false);
+  (void)fg.place(idx1, 0, 2, dag, 0.5, FlowPlacement::Proportional);
+  (void)fg.place(idx2, 0, 2, dag, 0.5, FlowPlacement::Proportional);
+  (void)fg.place(idx3, 0, 2, dag, 0.5, FlowPlacement::Proportional);
 
   // Remove flows of class 10
   fg.remove_by_class(10);
@@ -99,7 +99,7 @@ TEST(FlowGraph, GetFlowEdgesReturnsDeltas) {
   auto [dist, dag] = shortest_paths(g, 0, std::nullopt, true, sel, {}, {}, {});
 
   FlowIndex idx{0, 2, 0, 0};
-  Flow placed = fg.place(idx, 0, 2, dag, 0.5, FlowPlacement::Proportional, false);
+  Flow placed = fg.place(idx, 0, 2, dag, 0.5, FlowPlacement::Proportional);
 
   auto edges = fg.get_flow_edges(idx);
 
@@ -126,7 +126,7 @@ TEST(FlowGraph, GetFlowPathForLinearFlow) {
   auto [dist, dag] = shortest_paths(g, 0, std::nullopt, true, sel, {}, {}, {});
 
   FlowIndex idx{0, 2, 0, 0};
-  Flow placed = fg.place(idx, 0, 2, dag, 0.5, FlowPlacement::Proportional, false);
+  Flow placed = fg.place(idx, 0, 2, dag, 0.5, FlowPlacement::Proportional);
   EXPECT_GT(placed, 0.0);
 
   auto path = fg.get_flow_path(idx);
@@ -158,7 +158,7 @@ TEST(FlowGraph, GetFlowPathForDAGReturnsEmpty) {
 
   FlowIndex idx{0, 2, 0, 0};
   // Place 2.0 units - should split across both paths (1.0 each)
-  Flow placed = fg.place(idx, 0, 2, dag, 2.0, FlowPlacement::Proportional, false);
+  Flow placed = fg.place(idx, 0, 2, dag, 2.0, FlowPlacement::Proportional);
   EXPECT_GT(placed, 0.0);
 
   auto path = fg.get_flow_path(idx);
@@ -188,7 +188,7 @@ TEST(FlowGraph, CoalescesDuplicateEdgeIds) {
   auto [dist, dag] = shortest_paths(g, 0, std::nullopt, true, sel, {}, {}, {});
 
   FlowIndex idx{0, 2, 0, 0};
-  (void)fg.place(idx, 0, 2, dag, 2.0, FlowPlacement::Proportional, false);
+  (void)fg.place(idx, 0, 2, dag, 2.0, FlowPlacement::Proportional);
 
   auto edges = fg.get_flow_edges(idx);
 
@@ -197,5 +197,70 @@ TEST(FlowGraph, CoalescesDuplicateEdgeIds) {
   for (const auto& [eid, flow] : edges) {
     EXPECT_EQ(seen.count(eid), 0) << "Duplicate EdgeId " << eid;
     seen.insert(eid);
+  }
+}
+
+TEST(FlowGraph, LedgerHistory_RemovalRestoresResidual) {
+  // edges: 0->1, 1->2 (both cap=1.0)
+  auto g = make_line_graph(3);
+  FlowGraph fg(g);
+
+  // Build DAG once
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto sp = shortest_paths(g, 0, 2, /*multipath=*/true, sel, {}, {}, {});
+  const PredDAG& dag = sp.second;
+
+  FlowIndex idx{0, 2, 42, 7};
+
+  // Two placements on same flow
+  Flow p1 = fg.place(idx, 0, 2, dag, 0.4, FlowPlacement::Proportional);
+  Flow p2 = fg.place(idx, 0, 2, dag, 0.5, FlowPlacement::Proportional);
+  ASSERT_GT(p1, 0.0);
+  ASSERT_GT(p2, 0.0);
+
+  // Remove the flow (should restore both p1 and p2 if ledger retained history)
+  fg.remove(idx);
+
+  auto cap = g.capacity_view();
+  auto res = fg.residual_view();
+  ASSERT_EQ(res.size(), static_cast<std::size_t>(g.num_edges()));
+
+  // Expect residual to be fully restored to capacity if removal undid entire history
+  for (std::size_t i = 0; i < res.size(); ++i) {
+    EXPECT_NEAR(res[i], cap[i], 1e-9) << "Residual not fully restored at edge " << i;
+  }
+}
+
+TEST(FlowGraph, LedgerMicroFlows_RemovalRestoresResidual) {
+  // Split 1.0 unit equally over many parallel edges so per-edge share is < kMinFlow.
+  const int parallel = 5000; // 1.0 / 5000 < kMinFlow (1/4096)
+  std::vector<std::int32_t> src(parallel), dst(parallel);
+  std::vector<double> cap(parallel, 1.0);
+  std::vector<std::int64_t> cost(parallel, 1);
+  for (int i = 0; i < parallel; ++i) { src[i] = 0; dst[i] = 1; }
+  auto g = StrictMultiDiGraph::from_arrays(2, src, dst, cap, cost);
+
+  FlowGraph fg(g);
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto sp = shortest_paths(g, 0, 1, /*multipath=*/true, sel, {}, {}, {});
+  const PredDAG& dag = sp.second;
+
+  FlowIndex idx{0, 1, 1, 1};
+
+  // Place 1.0 evenly across many parallels; per-edge contribution < kMinFlow
+  Flow placed = fg.place(idx, 0, 1, dag, 1.0, FlowPlacement::EqualBalanced);
+  ASSERT_NEAR(placed, 1.0, 1e-9);
+
+  // Ledger must record all deltas, including micro-flows smaller than kMinFlow
+  auto edges = fg.get_flow_edges(idx);
+  EXPECT_FALSE(edges.empty()) << "Ledger should record micro-deltas even when per-edge < kMinFlow";
+
+  // Removing the flow should fully restore residual capacity with no drift
+  auto capv = g.capacity_view();
+  fg.remove(idx);
+  auto res_after = fg.residual_view();
+  ASSERT_EQ(res_after.size(), static_cast<std::size_t>(g.num_edges()));
+  for (std::size_t i = 0; i < res_after.size(); ++i) {
+    EXPECT_NEAR(res_after[i], capv[i], 1e-9) << "Residual not restored at edge " << i;
   }
 }

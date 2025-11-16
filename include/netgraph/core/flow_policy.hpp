@@ -21,12 +21,12 @@ enum class PathAlg : std::int32_t { SPF = 1 };
 
 // Execution context with algorithms and graph handle
 struct ExecutionContext {
-  Algorithms* algorithms;
+  std::shared_ptr<Algorithms> algorithms;
   GraphHandle graph;
 
   // Constructor with validation
-  ExecutionContext(Algorithms& algs, const GraphHandle& gh) noexcept
-      : algorithms(&algs), graph(gh) {}
+  ExecutionContext(std::shared_ptr<Algorithms> algs, const GraphHandle& gh) noexcept
+      : algorithms(std::move(algs)), graph(gh) {}
 };
 
 // Configuration struct for FlowPolicy behavior
@@ -34,6 +34,8 @@ struct FlowPolicyConfig {
   PathAlg path_alg { PathAlg::SPF };
   FlowPlacement flow_placement { FlowPlacement::Proportional };
   EdgeSelection selection { EdgeSelection{} };
+  bool require_capacity { true };  // Require edges to have capacity (software-defined/traffic engineering).
+                                   // Set false for cost-only routing (traditional IP/IGP shortest-paths).
   int min_flow_count { 1 };
   std::optional<int> max_flow_count { std::nullopt };
   std::optional<Cost> max_path_cost { std::nullopt };
@@ -54,21 +56,18 @@ public:
   FlowPolicy(const ExecutionContext& ctx, const FlowPolicyConfig& cfg)
     : ctx_(ctx),
       path_alg_(cfg.path_alg), flow_placement_(cfg.flow_placement), selection_(cfg.selection),
-      shortest_path_(cfg.shortest_path),
+      require_capacity_(cfg.require_capacity), shortest_path_(cfg.shortest_path),
       min_flow_count_(cfg.min_flow_count), max_flow_count_(cfg.max_flow_count), max_path_cost_(cfg.max_path_cost),
       max_path_cost_factor_(cfg.max_path_cost_factor), reoptimize_flows_on_each_placement_(cfg.reoptimize_flows_on_each_placement),
       max_no_progress_iterations_(cfg.max_no_progress_iterations), max_total_iterations_(cfg.max_total_iterations),
       diminishing_returns_enabled_(cfg.diminishing_returns_enabled), diminishing_returns_window_(cfg.diminishing_returns_window),
-      diminishing_returns_epsilon_frac_(cfg.diminishing_returns_epsilon_frac) {
-    if (flow_placement_ == FlowPlacement::EqualBalanced && !max_flow_count_.has_value()) {
-      throw std::invalid_argument("max_flow_count must be set for EQUAL_BALANCED placement.");
-    }
-  }
+      diminishing_returns_epsilon_frac_(cfg.diminishing_returns_epsilon_frac) {}
 
   FlowPolicy(const ExecutionContext& ctx,
              PathAlg path_alg,
              FlowPlacement flow_placement,
              EdgeSelection selection,
+             bool require_capacity = true,
              int min_flow_count = 1,
              std::optional<int> max_flow_count = std::nullopt,
              std::optional<Cost> max_path_cost = std::nullopt,
@@ -82,17 +81,12 @@ public:
              double diminishing_returns_epsilon_frac = 1e-3)
     : ctx_(ctx),
       path_alg_(path_alg), flow_placement_(flow_placement), selection_(selection),
-      shortest_path_(shortest_path),
+      require_capacity_(require_capacity), shortest_path_(shortest_path),
       min_flow_count_(min_flow_count), max_flow_count_(max_flow_count), max_path_cost_(max_path_cost),
       max_path_cost_factor_(max_path_cost_factor), reoptimize_flows_on_each_placement_(reoptimize_flows_on_each_placement),
       max_no_progress_iterations_(max_no_progress_iterations), max_total_iterations_(max_total_iterations),
       diminishing_returns_enabled_(diminishing_returns_enabled), diminishing_returns_window_(diminishing_returns_window),
-      diminishing_returns_epsilon_frac_(diminishing_returns_epsilon_frac) {
-    // Constructor validations enforcing policy invariants
-    if (flow_placement_ == FlowPlacement::EqualBalanced && !max_flow_count_.has_value()) {
-      throw std::invalid_argument("max_flow_count must be set for EQUAL_BALANCED placement.");
-    }
-  }
+      diminishing_returns_epsilon_frac_(diminishing_returns_epsilon_frac) {}
   ~FlowPolicy() noexcept = default;
 
   [[nodiscard]] int flow_count() const noexcept { return static_cast<int>(flows_.size()); }
@@ -133,6 +127,7 @@ private:
   PathAlg path_alg_ { PathAlg::SPF };
   FlowPlacement flow_placement_ { FlowPlacement::Proportional };
   EdgeSelection selection_ { EdgeSelection{} };
+  bool require_capacity_ { true };
   bool shortest_path_ { false };
   int min_flow_count_ { 1 };
   std::optional<int> max_flow_count_ {};

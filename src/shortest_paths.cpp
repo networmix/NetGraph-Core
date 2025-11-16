@@ -117,14 +117,16 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
           paths.push_back(std::move(concrete));
           if (max_paths && static_cast<std::int64_t>(paths.size()) >= *max_paths) return paths;
           // increment counters (mixed radix)
-          std::size_t k = end_i;
-          while (k >= start_i) {
-            if (path[k].second.empty()) { --k; continue; }
-            idxs[k]++;
-            if (idxs[k] < path[k].second.size()) break;
-            idxs[k] = 0; if (k == start_i) { done = true; break; } --k;
+          std::ptrdiff_t k = static_cast<std::ptrdiff_t>(end_i);
+          while (k >= static_cast<std::ptrdiff_t>(start_i)) {
+            if (path[static_cast<std::size_t>(k)].second.empty()) { --k; continue; }
+            idxs[static_cast<std::size_t>(k)]++;
+            if (idxs[static_cast<std::size_t>(k)] < path[static_cast<std::size_t>(k)].second.size()) break;
+            idxs[static_cast<std::size_t>(k)] = 0;
+            if (k == static_cast<std::ptrdiff_t>(start_i)) { done = true; break; }
+            --k;
           }
-          if (k < start_i) done = true;
+          if (k < static_cast<std::ptrdiff_t>(start_i)) done = true;
         }
       }
       if (max_paths && static_cast<std::int64_t>(paths.size()) >= *max_paths) return paths;
@@ -268,10 +270,10 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
           } else {
             // tie-break among equal-cost edges
             if (selection.tie_break == EdgeTieBreak::PreferHigherResidual) {
-              if (static_cast<double>(rem) > best_rem_for_min_cost + 1e-18) {
+              if (static_cast<double>(rem) > best_rem_for_min_cost + kEpsilon) {
                 best_edge_id = static_cast<int>(e);
                 best_rem_for_min_cost = static_cast<double>(rem);
-              } else if (std::abs(static_cast<double>(rem) - best_rem_for_min_cost) <= 1e-18) {
+              } else if (std::abs(static_cast<double>(rem) - best_rem_for_min_cost) <= kEpsilon) {
                 // further tie-break deterministically by smaller edge id
                 if (best_edge_id < 0 || static_cast<int>(e) < best_edge_id) {
                   best_edge_id = static_cast<int>(e);
@@ -292,7 +294,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
       }
       // Update distance and predecessors if we found a better path.
       if (!selected_edges.empty()) {
-        Cost new_cost = static_cast<Cost>(d_u + (min_edge_cost==std::numeric_limits<Cost>::max() ? 0 : min_edge_cost));
+        Cost new_cost = static_cast<Cost>(d_u + min_edge_cost);
         auto v_idx = static_cast<std::size_t>(v);
         // Relaxation: found shorter path to v.
         if (new_cost < dist[v_idx]) {

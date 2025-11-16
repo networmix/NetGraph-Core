@@ -2,6 +2,9 @@
 #include <limits>
 #include "netgraph/core/shortest_paths.hpp"
 #include "netgraph/core/strict_multidigraph.hpp"
+#include "netgraph/core/backend.hpp"
+#include "netgraph/core/algorithms.hpp"
+#include "netgraph/core/options.hpp"
 #include "test_utils.hpp"
 
 using namespace netgraph::core;
@@ -253,7 +256,7 @@ TEST(ShortestPaths, ResolveToPathsWithMaxPathsLimit) {
   auto all_paths = resolve_to_paths(dag, 0, 3, false, std::nullopt);
   EXPECT_GE(all_paths.size(), 1u);
 
-  // With max_paths=1, should stop after first path
+  // With max_paths=1, enumeration should stop at first path
   auto limited = resolve_to_paths(dag, 0, 3, false, std::int64_t(1));
   EXPECT_EQ(limited.size(), 1u);
 }
@@ -271,4 +274,27 @@ TEST(ShortestPaths, LargeGraphStressTest) {
   // Bottom-right corner should be reachable with cost 38 (19 right + 19 down)
   EXPECT_DOUBLE_EQ(dist[399], 38.0);
   expect_pred_dag_valid(dag, g.num_nodes());
+}
+
+TEST(ShortestPaths, RejectsMaskLengthMismatch) {
+  // Simple line graph 0->1->2
+  auto g = make_line_graph(3);
+  auto be = make_cpu_backend();
+  Algorithms algs(be);
+  auto gh = algs.build_graph(g);
+  SpfOptions opts;
+  opts.multipath = true;
+  opts.dst = 2;
+  // Create node_mask with wrong length (N-1)
+  auto node_mask = make_bool_mask(static_cast<std::size_t>(g.num_nodes() - 1), true);
+  opts.node_mask = std::span<const bool>(node_mask.get(), static_cast<std::size_t>(g.num_nodes() - 1));
+  EXPECT_THROW({ (void)algs.spf(gh, 0, opts); }, std::invalid_argument);
+
+  // Edge mask wrong length (M-1)
+  SpfOptions opts2;
+  opts2.multipath = true;
+  opts2.dst = 2;
+  auto edge_mask = make_bool_mask(static_cast<std::size_t>(g.num_edges() - 1), true);
+  opts2.edge_mask = std::span<const bool>(edge_mask.get(), static_cast<std::size_t>(g.num_edges() - 1));
+  EXPECT_THROW({ (void)algs.spf(gh, 0, opts2); }, std::invalid_argument);
 }

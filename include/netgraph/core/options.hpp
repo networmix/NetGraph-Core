@@ -28,6 +28,7 @@ struct KspOptions {
 struct MaxFlowOptions {
   FlowPlacement placement { FlowPlacement::Proportional };
   bool shortest_path { false };
+  bool require_capacity { true };  // Require edges to have capacity (SDN/TE). Set false for cost-only routing (IP/IGP)
   bool with_edge_flows { false };
   bool with_reachable { false };
   bool with_residuals { false };

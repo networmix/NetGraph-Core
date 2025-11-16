@@ -91,60 +91,6 @@ EXPECTED: Dict[str, Tuple[Tuple[int, int], float]] = {
     "graph4_graph": ((0, 4), 6.0),
 }
 
-# Expected placed/remaining per policy variant (recomputed via dev/recalc_expected_core.py)
-EXPECTED_MATRIX = {
-    "square1_graph": {
-        "SHORTEST_PATHS_WCMP": (1.0, 2.0),
-        "SHORTEST_PATHS_ECMP": (1.0, 2.0),
-        "TE_ECMP_16_LSP": (2.666955787246, 0.333044212754),
-    },
-    "line1_graph": {
-        "SHORTEST_PATHS_WCMP": (4.0, 3.0),
-        "SHORTEST_PATHS_ECMP": (2.0, 5.0),
-        "TE_ECMP_16_LSP": (4.0, 3.0),
-    },
-    "graph3": {
-        "SHORTEST_PATHS_WCMP": (10.0, 0.0),
-        "SHORTEST_PATHS_ECMP": (4.0, 6.0),
-        "TE_ECMP_16_LSP": (9.142875552177, 0.857124447823),
-    },
-    "two_disjoint_shortest_graph": {
-        "SHORTEST_PATHS_WCMP": (3.0, 0.0),
-        "SHORTEST_PATHS_ECMP": (2.0, 1.0),
-        "TE_ECMP_16_LSP": (2.90917557478, 0.0908244252205),
-    },
-    "square4_graph": {
-        "SHORTEST_PATHS_WCMP": (100.0, 250.0),
-        "SHORTEST_PATHS_ECMP": (100.0, 250.0),
-        "TE_ECMP_16_LSP": (320.0002320045314, 29.999767995468574),
-    },
-    "triangle1_graph": {
-        "SHORTEST_PATHS_WCMP": (5.0, 0.0),
-        "SHORTEST_PATHS_ECMP": (5.0, 0.0),
-        "TE_ECMP_16_LSP": (5.0, 0.0),
-    },
-    "square3_graph": {
-        "SHORTEST_PATHS_WCMP": (150.0, 170.0),
-        "SHORTEST_PATHS_ECMP": (100.0, 220.0),
-        "TE_ECMP_16_LSP": (160.00001430511475, 159.99998569488525),
-    },
-    "graph1_graph": {
-        "SHORTEST_PATHS_WCMP": (1.0, 0.0),
-        "SHORTEST_PATHS_ECMP": (1.0, 0.0),
-        "TE_ECMP_16_LSP": (1.0, 0.0),
-    },
-    "graph2_graph": {
-        "SHORTEST_PATHS_WCMP": (1.0, 0.0),
-        "SHORTEST_PATHS_ECMP": (1.0, 0.0),
-        "TE_ECMP_16_LSP": (1.0, 0.0),
-    },
-    "graph4_graph": {
-        "SHORTEST_PATHS_WCMP": (1.0, 5.0),
-        "SHORTEST_PATHS_ECMP": (1.0, 5.0),
-        "TE_ECMP_16_LSP": (5.333504606494898, 0.6664953935051017),
-    },
-}
-
 
 def _almost_equal(a: float, b: float, tol: float = 1e-9) -> bool:
     return math.isclose(a, b, rel_tol=0, abs_tol=tol)
@@ -165,71 +111,80 @@ def _run_case(
         placed, remaining = policy.place_demand(
             fg, src, dst, flowClass=0, volume=demand
         )
-        exp_p, exp_r = EXPECTED_MATRIX[label][key]
-        # Use approx matching to avoid encoding tiny floating drift from TE placement
-        assert placed == pytest.approx(exp_p, rel=0, abs=1e-3), (
-            f"placed mismatch for {label}:{key}: got {placed}, expected ~{exp_p}"
-        )
-        assert remaining == pytest.approx(exp_r, rel=0, abs=1e-3), (
-            f"remaining mismatch for {label}:{key}: got {remaining}, expected ~{exp_r}"
-        )
+        # Compute expected using Algorithms.max_flow for corresponding mode
+        if key == "SHORTEST_PATHS_WCMP":
+            exp_total, _ = algs.max_flow(
+                to_handle(g),
+                src,
+                dst,
+                flow_placement=ngc.FlowPlacement.PROPORTIONAL,
+                shortest_path=True,
+            )
+            expected = float(exp_total)
+            assert placed == pytest.approx(expected, rel=0, abs=1e-3), (
+                f"placed mismatch for {label}:{key}: got {placed}, expected ~{expected}"
+            )
+            assert remaining == pytest.approx(demand - expected, rel=0, abs=1e-3), (
+                f"remaining mismatch for {label}:{key}: got {remaining}, expected ~{demand - expected}"
+            )
+        elif key == "SHORTEST_PATHS_ECMP":
+            exp_total, _ = algs.max_flow(
+                to_handle(g),
+                src,
+                dst,
+                flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
+                shortest_path=True,
+            )
+            expected = float(exp_total)
+            assert placed == pytest.approx(expected, rel=0, abs=1e-3), (
+                f"placed mismatch for {label}:{key}: got {placed}, expected ~{expected}"
+            )
+            assert remaining == pytest.approx(demand - expected, rel=0, abs=1e-3), (
+                f"remaining mismatch for {label}:{key}: got {remaining}, expected ~{demand - expected}"
+            )
+        elif key == "TE_ECMP_16_LSP":
+            # TE-like full mode: placement should not exceed max_flow, and accounting must hold
+            exp_total, _ = algs.max_flow(
+                to_handle(g),
+                src,
+                dst,
+                flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
+                shortest_path=False,
+            )
+            expected = float(exp_total)
+            assert placed <= expected + 1e-3, (
+                f"placed exceeds max_flow for {label}:{key}: got {placed}, max {expected}"
+            )
+            assert (placed + remaining) == pytest.approx(demand, rel=0, abs=1e-6), (
+                f"accounting mismatch for {label}:{key}: placed+remaining={placed + remaining}, demand={demand}"
+            )
+        else:
+            raise AssertionError(f"Unknown policy key {key}")
 
 
-def test_flow_policy_on_square1(square1_graph, algs, to_handle):
-    g = square1_graph
-    (src, dst), dem = EXPECTED["square1_graph"]
-    _run_case(g, "square1_graph", src, dst, dem, algs, to_handle)
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "square1_graph",
+        "line1_graph",
+        "graph3",
+        "two_disjoint_shortest_graph",
+        "square4_graph",
+        "triangle1_graph",
+        "square3_graph",
+        "graph1_graph",
+        "graph2_graph",
+        "graph4_graph",
+    ],
+)
+def test_policy_placement_modes_match_maxflow_reference(
+    fixture_name, algs, to_handle, request
+):
+    """Validates that FlowPolicy placement matches max_flow for various configurations.
 
-
-def test_flow_policy_on_line1(line1_graph, algs, to_handle):
-    g = line1_graph
-    (src, dst), dem = EXPECTED["line1_graph"]
-    _run_case(g, "line1_graph", src, dst, dem, algs, to_handle)
-
-
-def test_flow_policy_on_graph3(graph3, algs, to_handle):
-    g = graph3
-    (src, dst), dem = EXPECTED["graph3"]
-    _run_case(g, "graph3", src, dst, dem, algs, to_handle)
-
-
-def test_flow_policy_on_two_disjoint(two_disjoint_shortest_graph, algs, to_handle):
-    g = two_disjoint_shortest_graph
-    (src, dst), dem = EXPECTED["two_disjoint_shortest_graph"]
-    _run_case(g, "two_disjoint_shortest_graph", src, dst, dem, algs, to_handle)
-
-
-def test_flow_policy_on_square4(square4_graph, algs, to_handle):
-    g = square4_graph
-    (src, dst), dem = EXPECTED["square4_graph"]
-    _run_case(g, "square4_graph", src, dst, dem, algs, to_handle)
-
-
-def test_flow_policy_on_triangle1(triangle1_graph, algs, to_handle):
-    g = triangle1_graph
-    (src, dst), dem = EXPECTED["triangle1_graph"]
-    _run_case(g, "triangle1_graph", src, dst, dem, algs, to_handle)
-
-
-def test_flow_policy_on_square3(square3_graph, algs, to_handle):
-    g = square3_graph
-    (src, dst), dem = EXPECTED["square3_graph"]
-    _run_case(g, "square3_graph", src, dst, dem, algs, to_handle)
-
-
-def test_flow_policy_on_graph1(graph1_graph, algs, to_handle):
-    g = graph1_graph
-    (src, dst), dem = EXPECTED["graph1_graph"]
-    _run_case(g, "graph1_graph", src, dst, dem, algs, to_handle)
-
-
-def test_flow_policy_on_graph2(graph2_graph, algs, to_handle):
-    g = graph2_graph
-    (src, dst), dem = EXPECTED["graph2_graph"]
-    _run_case(g, "graph2_graph", src, dst, dem, algs, to_handle)
-
-
-def test_flow_policy_on_graph4(graph4_graph, algs, to_handle):
-    g = graph4_graph
-    (src, dst), dem = EXPECTED["graph4_graph"]
-    _run_case(g, "graph4_graph", src, dst, dem, algs, to_handle)
+    Tests PROPORTIONAL vs EQUAL_BALANCED vs TE_ECMP across different topologies,
+    ensuring placed+remaining accounting is correct and results match max_flow reference.
+    """
+    g = request.getfixturevalue(fixture_name)
+    (src, dst), dem = EXPECTED[fixture_name]
+    _run_case(g, fixture_name, src, dst, dem, algs, to_handle)

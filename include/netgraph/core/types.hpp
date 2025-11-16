@@ -53,9 +53,20 @@ struct FlowIndexHash {
 };
 
 // Flow placement strategy for distributing demand across multiple paths.
+//
+// IMPORTANT SEMANTICS:
+//
+// - EqualBalanced models *ECMP admission on a fixed SPF DAG* ("one-shot ECMP").
+//   We compute a single global scale so that no edge is oversubscribed under
+//   equal per-edge splits within each (u->v) group, place once, and stop.
+//   If you keep injecting after the first bottleneck saturates, you would
+//   change the split set (or oversubscribe and drop), which is intentionally
+//   out of scope for EqualBalanced.
+//
+// - Proportional may be used iteratively (e.g., for max-flow).
 enum class FlowPlacement {
   Proportional = 1,    // Distribute flow proportionally to residual capacity (like ECMP with weights)
-  EqualBalanced = 2    // Split flow equally across paths (strict equal-cost multipath)
+  EqualBalanced = 2    // Split equally per parallel edge on a fixed DAG (single-pass ECMP admission)
 };
 
 // Tie-breaking rule when multiple equal-cost edges exist between the same (u,v) pair.

@@ -1,6 +1,8 @@
 /*
   FlowState — per-edge residual/flow tracking and placement helpers.
-  Implements proportional and equal-balanced placements over SPF DAGs.
+  Implements proportional (WCMP-like) and equal-balanced (ECMP) placements
+  over shortest-path (Dijkstra) predecessor DAGs.
+  ECMP = Equal-Cost Multi-Path; WCMP = Weighted-Cost Multi-Path.
 */
 #pragma once
 
@@ -38,19 +40,39 @@ public:
 
   // Mutating placement along a given PredDAG tier between src and dst.
   // requested_flow may be +inf. Returns the amount actually placed.
+  //
+  // EqualBalanced semantics here are *single-pass ECMP admission*:
+  //  - Use the supplied DAG and fixed equal per-edge splits per (u->v) group.
+  //  - Compute one global scale:  min_g cap_rev[g] / assigned[g],
+  //      where cap_rev[g] = min_edge_residual(g) * |E_g|
+  //        (enforces equal per-edge shares),
+  //            assigned[g] = unit-demand load on group g under equal splits.
+  //  - Place once and return. We do NOT re-split/recompute after a bottleneck
+  //    saturates. Re-invoking this on the updated residuals changes the effective
+  //    next-hop set (progressive traffic-engineering behavior) and is outside
+  //    "single-pass ECMP admission".
   [[nodiscard]] Flow place_on_dag(NodeId src, NodeId dst,
                     const PredDAG& dag,
                     Flow requested_flow,
                     FlowPlacement placement,
-                    bool shortest_path = false,
                     // Optional trace collector to record per-edge deltas applied by this call
                     std::vector<std::pair<EdgeId, Flow>>* trace = nullptr);
 
   // Convenience: run repeated placements until exhaustion (or single tier when
   // shortest_path=true). Returns total placed flow. Uses internal residual.
+  //
+  // require_capacity: Whether to require edges to have capacity.
+  //   - true (default): Routes adapt to residuals (SDN/TE behavior).
+  //   - false: Routes based on costs only (IP/IGP behavior).
+  //
+  // NOTE: With FlowPlacement::EqualBalanced + require_capacity=true, this behaves as a
+  // progressive "fill": it recomputes the SPF DAG after each saturation. That is *not*
+  // the single-pass ECMP admission used by place_on_dag(). For IP ECMP, use
+  // require_capacity=false + shortest_path=true + EqualBalanced.
   [[nodiscard]] Flow place_max_flow(NodeId src, NodeId dst,
                       FlowPlacement placement,
-                      bool shortest_path = false);
+                      bool shortest_path = false,
+                      bool require_capacity = true);
 
   // Compute min-cut with respect to current residual state, starting reachability
   // from source s on the residual graph (forward arcs: residual>MIN; reverse arcs:
@@ -61,7 +83,7 @@ public:
 
   // Apply or revert a set of edge flow deltas directly.
   // When add==true, treats each (eid, flow) as additional placed flow on the edge.
-  // When add==false, removes previously placed flow (reverts), clamping to [0, capacity].
+  // When add==false, removes placed flow (reverts deltas), clamping to [0, capacity].
   void apply_deltas(std::span<const std::pair<EdgeId, Flow>> deltas, bool add) noexcept;
 
 private:

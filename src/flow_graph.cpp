@@ -12,23 +12,30 @@
 namespace netgraph::core {
 
 FlowGraph::FlowGraph(const StrictMultiDiGraph& g)
-  : g_(&g), fs_(g) {}
+  : g_(&g), fs_(g) {
+  // Precompute EdgeId -> (src,dst) directly from edge views
+  auto sv = g_->edge_src_view();
+  auto dv = g_->edge_dst_view();
+  src_of_.assign(sv.begin(), sv.end());
+  dst_of_.assign(dv.begin(), dv.end());
+}
 
 Flow FlowGraph::place(const FlowIndex& idx, NodeId src, NodeId dst,
                       const PredDAG& dag, Flow amount,
-                      FlowPlacement placement, bool shortest_path) {
+                      FlowPlacement placement) {
   if (amount <= 0.0) return 0.0;
 
-  // Get or create ledger entry for this flow. The ledger tracks per-edge deltas.
-  // Python developers: ledger_ is like a defaultdict(list).
+  // Get or create ledger entry for this flow. The ledger tracks per-edge
+  // cumulative amounts contributed by this flow (not just last placement).
+  // We append fresh deltas to the existing bucket, then coalesce by EdgeId.
   auto& bucket = ledger_[idx];
-  bucket.clear();
 
   // Delegate placement to FlowState, which returns the actual placed flow and
   // populates bucket with per-edge deltas (EdgeId, Flow) pairs.
-  Flow placed = fs_.place_on_dag(src, dst, dag, amount, placement, shortest_path, &bucket);
+  Flow placed = fs_.place_on_dag(src, dst, dag, amount, placement, &bucket);
 
-  // Coalesce and filter: drop tiny entries and merge duplicate EdgeIds.
+  // Coalesce and filter: merge duplicate EdgeIds. Keep any positive totals
+  // (do not drop sub-kMinFlow amounts) to preserve exact reversibility.
   if (!bucket.empty()) {
     std::vector<std::pair<EdgeId, Flow>> compact;
     compact.reserve(bucket.size());
@@ -38,7 +45,7 @@ Flow FlowGraph::place(const FlowIndex& idx, NodeId src, NodeId dst,
     for (std::size_t i=0;i<bucket.size();) {
       EdgeId e = bucket[i].first; double sum = 0.0; std::size_t j=i;
       while (j<bucket.size() && bucket[j].first==e) { sum += bucket[j].second; ++j; }
-      if (sum >= kMinFlow) compact.emplace_back(e, static_cast<Flow>(sum));
+      if (sum > 0.0) compact.emplace_back(e, static_cast<Flow>(sum));
       i=j;
     }
     bucket.swap(compact);  // replace bucket with compacted version
@@ -55,13 +62,10 @@ Flow FlowGraph::place(const FlowIndex& idx, NodeId src, NodeId dst,
 void FlowGraph::remove(const FlowIndex& idx) {
   auto it = ledger_.find(idx);
   if (it == ledger_.end()) return;  // flow not found
-  auto& deltas = it->second;
-
+  const auto& deltas = it->second;
   // Revert this flow's deltas from the FlowState by subtracting them.
-  // This restores residual capacity and removes the flow's contribution.
   if (!deltas.empty()) {
-    std::vector<std::pair<EdgeId, Flow>> neg(deltas.begin(), deltas.end());
-    fs_.apply_deltas(neg, /*add=*/false);  // false = subtract
+    fs_.apply_deltas(deltas, /*add=*/false);  // false = subtract
   }
   ledger_.erase(it);
 }
@@ -94,28 +98,11 @@ std::vector<EdgeId> FlowGraph::get_flow_path(const FlowIndex& idx) const {
 
   // Step 1: Build adjacency map from edges with positive flow.
   std::unordered_map<NodeId, std::vector<std::pair<NodeId, EdgeId>>> adj;
-  const auto& row = g_->row_offsets_view();
-  const auto& col = g_->col_indices_view();
-  const auto& aei = g_->adj_edge_index_view();
-
-  // Build reverse map: EdgeId -> (src, dst).
-  std::vector<NodeId> src_of(static_cast<std::size_t>(g_->num_edges()));
-  std::vector<NodeId> dst_of(static_cast<std::size_t>(g_->num_edges()));
-  for (std::int32_t u = 0; u < g_->num_nodes(); ++u) {
-    auto s = static_cast<std::size_t>(row[static_cast<std::size_t>(u)]);
-    auto e = static_cast<std::size_t>(row[static_cast<std::size_t>(u)+1]);
-    for (std::size_t j = s; j < e; ++j) {
-      auto v = static_cast<std::int32_t>(col[j]);
-      auto eid = static_cast<std::size_t>(aei[j]);
-      src_of[eid] = u; dst_of[eid] = v;
-    }
-  }
-
-  // Build adjacency list from deltas.
+  // Build adjacency list from deltas using cached src/dst.
   for (auto const& pr : deltas) {
     if (pr.second < kMinFlow) continue;
     auto eid = static_cast<std::size_t>(pr.first);
-    NodeId u = src_of[eid]; NodeId v = dst_of[eid];
+    NodeId u = src_of_[eid]; NodeId v = dst_of_[eid];
     adj[u].emplace_back(v, pr.first);
   }
 

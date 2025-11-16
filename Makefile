@@ -1,6 +1,6 @@
 # NetGraph-Core Development Makefile
 
-.PHONY: help venv clean-venv dev install check check-ci lint format test qt clean build info hooks cov cpp-test rebuild
+.PHONY: help venv clean-venv dev install check check-ci lint format test qt clean build info hooks cov cpp-test rebuild check-python
 
 .DEFAULT_GOAL := help
 
@@ -21,21 +21,22 @@ DEFAULT_MACOSX := 15.0
 
 help:
 	@echo "🔧 NetGraph-Core Development Commands"
-	@echo "  make venv       - Create a local virtualenv (./venv)"
-	@echo "  make dev        - Install dev deps and pre-commit"
-	@echo "  make install    - Editable install (no dev deps)"
-	@echo "  make check      - Pre-commit (auto-fix) + C++/Python tests, then lint"
-	@echo "  make check-ci   - Non-mutating lint + tests (CI entrypoint)"
-	@echo "  make lint       - Ruff + Pyright"
-	@echo "  make format     - Ruff format"
-	@echo "  make test       - Run pytest"
-	@echo "  make qt         - Quick tests (exclude slow/benchmark if marked)"
-	@echo "  make cov        - Coverage summary + XML + single-page combined HTML"
-	@echo "  make build      - Build wheel"
-	@echo "  make clean      - Clean build artifacts"
-	@echo "  make hooks      - Run pre-commit on all files"
-	@echo "  make info       - Show tool versions"
-	@echo "  make rebuild    - Clean and rebuild using Apple Clang (respects CMAKE_ARGS)"
+	@echo "  make venv         - Create a local virtualenv (./venv)"
+	@echo "  make dev          - Install dev deps and pre-commit"
+	@echo "  make install      - Editable install (no dev deps)"
+	@echo "  make check        - Pre-commit (auto-fix) + C++/Python tests, then lint"
+	@echo "  make check-ci     - Non-mutating lint + tests (CI entrypoint)"
+	@echo "  make lint         - Ruff + Pyright"
+	@echo "  make format       - Ruff format"
+	@echo "  make test         - Run pytest"
+	@echo "  make qt           - Quick tests (exclude slow/benchmark if marked)"
+	@echo "  make cov          - Coverage summary + XML + single-page combined HTML"
+	@echo "  make build        - Build wheel"
+	@echo "  make clean        - Clean build artifacts"
+	@echo "  make hooks        - Run pre-commit on all files"
+	@echo "  make info         - Show tool versions"
+	@echo "  make check-python - Check if venv Python matches system Python"
+	@echo "  make rebuild      - Clean and rebuild with system Python (respects CMAKE_ARGS)"
 
 # Allow callers to pass CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET consistently
 ENV_MACOS := $(if $(MACOSX_DEPLOYMENT_TARGET),MACOSX_DEPLOYMENT_TARGET=$(MACOSX_DEPLOYMENT_TARGET),MACOSX_DEPLOYMENT_TARGET=$(DEFAULT_MACOSX))
@@ -47,7 +48,7 @@ DEV_ENV := $(ENV_MACOS) $(ENV_CC) $(ENV_CXX) $(ENV_CMAKE)
 dev:
 	@echo "🚀 Setting up development environment..."
 	@if [ ! -x "$(VENV_BIN)/python" ]; then \
-		echo "🐍 Creating virtual environment in ./venv ..."; \
+		echo "🐍 Creating virtual environment with $(PY_FIND) ..."; \
 		$(PY_FIND) -m venv venv; \
 		$(VENV_BIN)/python -m pip install -U pip wheel; \
 	fi
@@ -56,6 +57,7 @@ dev:
 	@echo "🔗 Installing pre-commit hooks..."
 	@$(VENV_BIN)/python -m pre_commit install --install-hooks
 	@echo "✅ Dev environment ready. Activate with: source venv/bin/activate"
+	@$(MAKE) check-python
 
 venv:
 	@echo "🐍 Creating virtual environment in ./venv ..."
@@ -104,12 +106,24 @@ clean:
 	@rm -rf Testing CTestTestfile.cmake
 
 info:
-	@echo "Python: $$($(PYTHON) --version)"
+	@echo "Python (active): $$($(PYTHON) --version)"
+	@echo "Python (system): $$($(PY_FIND) --version 2>/dev/null || echo 'missing')"
+	@$(MAKE) check-python
 	@echo "Ruff: $$($(RUFF) --version 2>/dev/null || echo 'missing')"
 	@echo "Pyright: $$($(PYTHON) -m pyright --version 2>/dev/null | head -1 || echo 'missing')"
 	@echo "Pytest: $$($(PYTEST) --version 2>/dev/null || echo 'missing')"
 	@echo "CMake: $$(cmake --version 2>/dev/null | head -1 || echo 'missing')"
 	@echo "Ninja: $$(ninja --version 2>/dev/null || echo 'missing')"
+
+check-python:
+	@if [ -x "$(VENV_BIN)/python" ]; then \
+		VENV_VER=$$($(VENV_BIN)/python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown"); \
+		SYS_VER=$$($(PY_FIND) -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown"); \
+		if [ -n "$$VENV_VER" ] && [ -n "$$SYS_VER" ] && [ "$$VENV_VER" != "$$SYS_VER" ]; then \
+			echo "⚠️  WARNING: venv Python ($$VENV_VER) != system Python ($$SYS_VER)"; \
+			echo "   Run 'make clean-venv && make dev' to recreate venv with system Python"; \
+		fi; \
+	fi
 
 hooks:
 	@$(PRECOMMIT) run --all-files || (echo "Some pre-commit hooks failed. Fix and re-run." && exit 1)
@@ -172,5 +186,7 @@ sanitize-test:
 		ASAN_OPTIONS=detect_leaks=1 ctest --test-dir "$$BUILD_DIR" --output-on-failure || true
 
 # Clean + reinstall in dev mode (respects CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET)
+# Always uses system Python to avoid venv version mismatches
 rebuild: clean
-	@$(DEV_ENV) $(PIP) install -e .'[dev]'
+	@echo "🔨 Rebuilding with system Python: $(PY_FIND)"
+	@$(DEV_ENV) $(PY_FIND) -m pip install -e .'[dev]'
