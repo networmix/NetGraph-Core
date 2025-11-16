@@ -72,7 +72,9 @@ public:
   [[nodiscard]] Flow place_max_flow(NodeId src, NodeId dst,
                       FlowPlacement placement,
                       bool shortest_path = false,
-                      bool require_capacity = true);
+                      bool require_capacity = true,
+                      std::span<const bool> node_mask = {},
+                      std::span<const bool> edge_mask = {});
 
   // Compute min-cut with respect to current residual state, starting reachability
   // from source s on the residual graph (forward arcs: residual>MIN; reverse arcs:

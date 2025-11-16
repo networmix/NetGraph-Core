@@ -45,7 +45,9 @@ struct PredDAG {
 //   For EB semantics this means re-running SPF on updated residuals
 //   will remove saturated next-hops and therefore *change* the fixed
 //   equal-split set (progressive behavior).
-// - node_mask: if provided, node_mask[v]==true means node v is allowed (false excludes it)
+// - node_mask: if provided, node_mask[v]==true means node v is allowed (false excludes it).
+//   If the source node is masked (node_mask[src]==false), returns an empty predecessor DAG
+//   with all distances at infinity, as no traversal can begin from an excluded source.
 // - edge_mask: if provided, edge_mask[e]==true means edge e is allowed (false excludes it)
 [[nodiscard]] std::pair<std::vector<Cost>, PredDAG>
 shortest_paths(const StrictMultiDiGraph& g, NodeId src,

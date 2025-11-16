@@ -190,14 +190,22 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
   std::vector<Cost> dist(static_cast<std::size_t>(N), std::numeric_limits<Cost>::max());
   const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(g.num_nodes()));
   const bool use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(g.num_edges()));
-  if (src >= 0 && src < N && (!use_node_mask || node_mask[static_cast<std::size_t>(src)])) {
+  const bool src_allowed = (src >= 0 && src < N && (!use_node_mask || node_mask[static_cast<std::size_t>(src)]));
+  if (src_allowed) {
     dist[static_cast<std::size_t>(src)] = static_cast<Cost>(0);
   }
 
   // pred_lists[v] stores predecessors for node v as (parent_node, [edges_from_parent]).
   // In multipath mode, multiple parents with equal-cost paths are retained.
   std::vector<std::vector<std::pair<NodeId, std::vector<EdgeId>>>> pred_lists(static_cast<std::size_t>(N));
-  if (src >= 0 && src < N) pred_lists[static_cast<std::size_t>(src)] = {};
+  if (src_allowed) {
+    pred_lists[static_cast<std::size_t>(src)] = {};
+  } else {
+    // Source is out of range or masked out: no traversal, return empty DAG.
+    PredDAG dag;
+    dag.parent_offsets.assign(static_cast<std::size_t>(N + 1), 0);
+    return {std::move(dist), std::move(dag)};
+  }
 
   // Priority queue for Dijkstra (min-heap by cost).
   // QItem is (cost, node). Lambda comparator inverts comparison for min-heap.
@@ -356,6 +364,15 @@ shortest_paths(const StrictMultiDiGraph& g, NodeId src,
                std::span<const Cap> residual,
                std::span<const bool> node_mask,
                std::span<const bool> edge_mask) {
+  if (!node_mask.empty() && node_mask.size() != static_cast<std::size_t>(g.num_nodes())) {
+    throw std::invalid_argument("shortest_paths: node_mask length mismatch");
+  }
+  if (!edge_mask.empty() && edge_mask.size() != static_cast<std::size_t>(g.num_edges())) {
+    throw std::invalid_argument("shortest_paths: edge_mask length mismatch");
+  }
+  if (!residual.empty() && residual.size() != static_cast<std::size_t>(g.num_edges())) {
+    throw std::invalid_argument("shortest_paths: residual length mismatch");
+  }
   return shortest_paths_core(g, src, dst, multipath, selection, residual, node_mask, edge_mask);
 }
 

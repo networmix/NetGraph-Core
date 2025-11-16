@@ -205,6 +205,9 @@ class FlowState:
         flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
         shortest_path: bool = False,
         require_capacity: bool = True,
+        *,
+        node_mask: "Optional[np.ndarray]" = None,
+        edge_mask: "Optional[np.ndarray]" = None,
     ) -> float:
         """Place maximum flow from src to dst.
 
@@ -212,6 +215,8 @@ class FlowState:
             require_capacity: Whether to require edges to have capacity.
                 - True (default): Routes adapt to residuals (SDN/TE, progressive fill).
                 - False: Routes based on costs only (IP/IGP, fixed routing).
+            node_mask: Optional 1-D bool array (True=allowed). Copied for thread safety.
+            edge_mask: Optional 1-D bool array (True=allowed). Copied for thread safety.
 
         For *IP-style ECMP* max-flow, use: require_capacity=False, shortest_path=True,
         flow_placement=EQUAL_BALANCED.
@@ -285,29 +290,26 @@ class FlowPolicy:
     When static_paths is empty the policy may refresh the DAG per round using
     residual-aware shortest paths. This progressively prunes saturated next-hops
     (traffic-engineering style) and differs from one-shot ECMP admission.
+
+    Args:
+        algorithms: Algorithms instance (kept alive by FlowPolicy)
+        graph: Graph handle (kept alive by FlowPolicy)
+        config: FlowPolicyConfig with all policy parameters
+        node_mask: Optional 1-D bool array (True=allowed). **Copied for thread safety.**
+        edge_mask: Optional 1-D bool array (True=allowed). **Copied for thread safety.**
+
+    Raises:
+        TypeError: If masks have wrong dtype, ndim, or length.
     """
 
     def __init__(
         self,
         algorithms: "Algorithms",
         graph: "Graph",
-        config: Optional["FlowPolicyConfig"] = None,
-        /,
+        config: "FlowPolicyConfig",
         *,
-        path_alg: PathAlg = PathAlg.SPF,
-        flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
-        selection: EdgeSelection = ...,  # default provided by runtime binding
-        min_flow_count: int = 1,
-        max_flow_count: Optional[int] = None,
-        max_path_cost: Optional[int] = None,
-        max_path_cost_factor: Optional[float] = None,
-        shortest_path: bool = False,
-        reoptimize_flows_on_each_placement: bool = False,
-        max_no_progress_iterations: int = 100,
-        max_total_iterations: int = 10000,
-        diminishing_returns_enabled: bool = True,
-        diminishing_returns_window: int = 8,
-        diminishing_returns_epsilon_frac: float = 1e-3,
+        node_mask: "Optional[np.ndarray]" = None,
+        edge_mask: "Optional[np.ndarray]" = None,
     ) -> None: ...
 
     def flow_count(self) -> int: ...
@@ -419,12 +421,20 @@ class Algorithms:
             selection: Edge selection policy
             residual: Optional 1-D float64 array of residuals. **Copied for thread safety.**
             node_mask: Optional 1-D bool mask (length num_nodes). **Copied for thread safety.**
+                       True = node allowed, False = node excluded.
+                       **If source node is masked (False), returns empty DAG with all distances at infinity.**
             edge_mask: Optional 1-D bool mask (length num_edges). **Copied for thread safety.**
+                       True = edge allowed, False = edge excluded.
             multipath: Whether to track multiple equal-cost paths
             dtype: "float64" (inf for unreachable) or "int64" (max for unreachable)
 
         Returns:
             (distances, predecessor_dag)
+
+        Note:
+            When the source node is masked out (node_mask[src] == False), the algorithm
+            immediately returns an empty predecessor DAG with all distances set to infinity,
+            as no traversal can begin from an excluded source.
 
         Raises:
             TypeError: If arrays have wrong dtype, ndim, or length.
@@ -518,6 +528,7 @@ class Algorithms:
         edge_masks: Optional[list["np.ndarray"]] = None,
         flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
         shortest_path: bool = False,
+        require_capacity: bool = True,
         with_edge_flows: bool = False,
         with_reachable: bool = False,
         with_residuals: bool = False,
@@ -528,6 +539,7 @@ class Algorithms:
             pairs: int32 array of shape [B, 2] with (src, dst) pairs
             node_masks: Optional list of B bool masks. **Each copied for thread safety.**
             edge_masks: Optional list of B bool masks. **Each copied for thread safety.**
+            require_capacity: If True, exclude saturated edges (SDN/TE). If False, route by cost only (IP/IGP).
 
         Returns:
             List of FlowSummary objects, one per pair.

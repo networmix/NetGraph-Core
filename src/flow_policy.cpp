@@ -54,7 +54,7 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   if (flow_placement_ == FlowPlacement::EqualBalanced) {
     sel.multi_edge = true;
   }
-  // Decide whether we need residual-aware SPF and whether to build an edge mask.
+  // Decide whether we need residual-aware SPF.
   // Residual awareness is controlled by require_capacity_:
   //   - require_capacity=true: Require edges to have capacity, routes adapt to residuals (SDN/TE behavior)
   //   - require_capacity=false: Routes based on costs only (IP/IGP behavior)
@@ -62,22 +62,37 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   const bool require_residual = (require_capacity_ || (flow_placement_ == FlowPlacement::EqualBalanced && min_flow.has_value()));
   const auto residual = fg.residual_view();
 
-  // Edge mask: filter edges by minimum residual capacity threshold.
-  std::unique_ptr<bool[]> em_bool;  // unique_ptr manages memory (like Python context manager)
-  const bool* edge_mask_ptr = nullptr;
-  bool need_mask = false;
-  if (require_residual) {
-    // Do not enforce a per-target residual threshold for EqualBalanced.
-    // IP ECMP-style equalization should consider all equal-cost next-hops with any residual.
-    // Capacity gating is already honored by passing the residual span to SPF.
-    need_mask = (min_flow.has_value() && flow_placement_ != FlowPlacement::EqualBalanced);
-    if (need_mask) {
-      em_bool.reset(new bool[residual.size()]);  // allocate mask array
-      double thr = *min_flow;
-      for (std::size_t i=0;i<residual.size();++i) em_bool[i] = static_cast<double>(residual[i]) >= thr;
-      edge_mask_ptr = em_bool.get();
+  // Edge mask: combine user-provided mask with minimum residual capacity threshold.
+  // For Proportional mode with min_flow threshold and max_flow_count limit, we filter edges
+  // by minimum capacity to ensure paths can accommodate the required flow. This prevents
+  // selecting low-capacity paths when limited to a single flow (max_flow_count=1).
+  // For EqualBalanced mode, we skip per-edge thresholds since group-based semantics mean
+  // per-edge thresholds can over-prune; capacity gating via residual + kMinCap is sufficient.
+  std::unique_ptr<bool[]> combined_edge_mask;
+  std::span<const bool> final_edge_mask;
+
+  if (require_residual && min_flow.has_value() && flow_placement_ != FlowPlacement::EqualBalanced) {
+    // Need to filter by min_flow threshold for Proportional mode
+    combined_edge_mask.reset(new bool[residual.size()]);
+    double thr = *min_flow;
+
+    if (!edge_mask_.empty()) {
+      // Combine user mask with min_flow mask: both must be true
+      for (std::size_t i=0; i<residual.size(); ++i) {
+        combined_edge_mask[i] = edge_mask_[i] && (static_cast<double>(residual[i]) >= thr);
+      }
+    } else {
+      // Only min_flow mask
+      for (std::size_t i=0; i<residual.size(); ++i) {
+        combined_edge_mask[i] = static_cast<double>(residual[i]) >= thr;
+      }
     }
+    final_edge_mask = std::span<const bool>(combined_edge_mask.get(), residual.size());
+  } else if (!edge_mask_.empty()) {
+    // Only user-provided mask
+    final_edge_mask = edge_mask_;
   }
+
   // Set require_capacity directly (no casting needed - same field name)
   sel.require_capacity = require_capacity_;
   SpfOptions opts;
@@ -85,8 +100,8 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   opts.selection = sel;
   opts.dst = dst;
   opts.residual = require_residual ? residual : std::span<const Cap>();
-  opts.node_mask = {};
-  opts.edge_mask = (require_residual && need_mask) ? std::span<const bool>(edge_mask_ptr, residual.size()) : std::span<const bool>();
+  opts.node_mask = node_mask_;  // Use user-provided node mask
+  opts.edge_mask = final_edge_mask;
   auto res = ctx_.algorithms->spf(ctx_.graph, src, opts);
   const auto& dist = res.first;
   PredDAG dag = std::move(res.second);

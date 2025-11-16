@@ -377,13 +377,25 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
   return placed;
 }
 
-Flow FlowState::place_max_flow(NodeId src, NodeId dst, FlowPlacement placement, bool shortest_path, bool require_capacity) {
+Flow FlowState::place_max_flow(NodeId src, NodeId dst, FlowPlacement placement,
+                               bool shortest_path, bool require_capacity,
+                               std::span<const bool> node_mask,
+                               std::span<const bool> edge_mask) {
   // require_capacity controls routing behavior:
   //   - true: Require edges to have capacity, exclude saturated links (SDN/TE, progressive)
   //   - false: Routes based on costs only, ignore capacity (IP/IGP, fixed routing)
   //
   // NOTE: With FlowPlacement::EqualBalanced + require_capacity=true, this behaves as a
   // progressive "fill". For IP ECMP, use require_capacity=false + shortest_path=true.
+
+  // Validate mask lengths
+  if (!node_mask.empty() && node_mask.size() != static_cast<std::size_t>(g_->num_nodes())) {
+    throw std::invalid_argument("FlowState::place_max_flow: node_mask length mismatch");
+  }
+  if (!edge_mask.empty() && edge_mask.size() != static_cast<std::size_t>(g_->num_edges())) {
+    throw std::invalid_argument("FlowState::place_max_flow: edge_mask length mismatch");
+  }
+
   Flow total = static_cast<Flow>(0.0);
   while (true) {
     EdgeSelection sel;
@@ -391,7 +403,8 @@ Flow FlowState::place_max_flow(NodeId src, NodeId dst, FlowPlacement placement, 
     sel.require_capacity = require_capacity;
     sel.tie_break = EdgeTieBreak::Deterministic;
     auto [dist, dag] = shortest_paths(*g_, src, dst, /*multipath=*/true, sel,
-                                      require_capacity ? residual_ : std::span<const Cap>{});
+                                      require_capacity ? residual_ : std::span<const Cap>{},
+                                      node_mask, edge_mask);
     if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size()-1 || dag.parent_offsets[static_cast<std::size_t>(dst)] == dag.parent_offsets[static_cast<std::size_t>(dst)+1]) {
       break;
     }
@@ -406,20 +419,34 @@ Flow FlowState::place_max_flow(NodeId src, NodeId dst, FlowPlacement placement, 
 MinCut FlowState::compute_min_cut(NodeId src, std::span<const bool> node_mask, std::span<const bool> edge_mask) const {
   MinCut out;
   const auto N = g_->num_nodes();
+
+  // Early return if source is out of range
+  if (!(src >= 0 && src < N)) return out;
+
+  // Validate mask lengths
+  if (!node_mask.empty() && node_mask.size() != static_cast<std::size_t>(N)) {
+    throw std::invalid_argument("FlowState::compute_min_cut: node_mask length mismatch");
+  }
+  if (!edge_mask.empty() && edge_mask.size() != static_cast<std::size_t>(g_->num_edges())) {
+    throw std::invalid_argument("FlowState::compute_min_cut: edge_mask length mismatch");
+  }
+
   const auto row = g_->row_offsets_view();
   const auto col = g_->col_indices_view();
   const auto aei = g_->adj_edge_index_view();
   const auto in_row = g_->in_row_offsets_view();
   const auto in_col = g_->in_col_indices_view();
   const auto in_aei = g_->in_adj_edge_index_view();
-  const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(N));
-  const bool use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(g_->num_edges()));
+  const bool use_node_mask = !node_mask.empty();
+  const bool use_edge_mask = !edge_mask.empty();
+
+  // Early return if source is masked out
+  if (use_node_mask && !node_mask[static_cast<std::size_t>(src)]) return out;
+
   std::vector<char> visited(static_cast<std::size_t>(N), 0);
   std::queue<std::int32_t> q;
-  if (src >= 0 && src < N && (!use_node_mask || node_mask[static_cast<std::size_t>(src)])) {
-    visited[static_cast<std::size_t>(src)] = 1;
-    q.push(src);
-  }
+  visited[static_cast<std::size_t>(src)] = 1;
+  q.push(src);
   while (!q.empty()) {
     auto u = q.front(); q.pop();
     if (use_node_mask && !node_mask[static_cast<std::size_t>(u)]) continue;

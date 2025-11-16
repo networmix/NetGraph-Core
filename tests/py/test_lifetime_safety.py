@@ -146,8 +146,9 @@ class TestFlowPolicyLifetime:
         )
         graph = algs.build_graph(g)
 
-        # Use keyword constructor
-        policy = FlowPolicy(algs, graph, min_flow_count=1, max_total_iterations=100)
+        # Use config constructor
+        cfg = FlowPolicyConfig(min_flow_count=1, max_total_iterations=100)
+        policy = FlowPolicy(algs, graph, cfg)
 
         algs_ref = weakref.ref(algs)
 

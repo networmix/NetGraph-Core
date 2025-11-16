@@ -37,8 +37,8 @@ struct Candidate {
 
 
 static std::optional<Path> dijkstra_single(const StrictMultiDiGraph& g, NodeId s, NodeId t,
-                                           const std::vector<unsigned char>* node_mask,
-                                           const std::vector<unsigned char>* edge_mask) {
+                                           const std::vector<std::uint8_t>* node_mask,
+                                           const std::vector<std::uint8_t>* edge_mask) {
   const auto row = g.row_offsets_view();
   const auto col = g.col_indices_view();
   const auto aei = g.adj_edge_index_view();
@@ -153,18 +153,25 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
   if (k <= 0) return {};
   if (src < 0 || dst < 0 || src >= g.num_nodes() || dst >= g.num_nodes()) return {};
 
+  if (!node_mask.empty() && node_mask.size() != static_cast<std::size_t>(g.num_nodes())) {
+    throw std::invalid_argument("k_shortest_paths: node_mask length mismatch");
+  }
+  if (!edge_mask.empty() && edge_mask.size() != static_cast<std::size_t>(g.num_edges())) {
+    throw std::invalid_argument("k_shortest_paths: edge_mask length mismatch");
+  }
+
   // Base shortest path
-  std::vector<unsigned char> node_mask_vec;
-  std::vector<unsigned char> edge_mask_vec;
-  const std::vector<unsigned char>* nm_ptr = nullptr;
-  const std::vector<unsigned char>* em_ptr = nullptr;
+  std::vector<std::uint8_t> node_mask_vec;
+  std::vector<std::uint8_t> edge_mask_vec;
+  const std::vector<std::uint8_t>* nm_ptr = nullptr;
+  const std::vector<std::uint8_t>* em_ptr = nullptr;
   if (node_mask.size() == static_cast<std::size_t>(g.num_nodes())) {
-    node_mask_vec.assign(static_cast<std::size_t>(g.num_nodes()), static_cast<unsigned char>(1));
+    node_mask_vec.assign(static_cast<std::size_t>(g.num_nodes()), static_cast<std::uint8_t>(1));
     for (std::size_t i=0;i<node_mask_vec.size();++i) node_mask_vec[i] = node_mask[i] ? 1u : 0u;
     nm_ptr = &node_mask_vec;
   }
   if (edge_mask.size() == static_cast<std::size_t>(g.num_edges())) {
-    edge_mask_vec.assign(static_cast<std::size_t>(g.num_edges()), static_cast<unsigned char>(1));
+    edge_mask_vec.assign(static_cast<std::size_t>(g.num_edges()), static_cast<std::uint8_t>(1));
     for (std::size_t i=0;i<edge_mask_vec.size();++i) edge_mask_vec[i] = edge_mask[i] ? 1u : 0u;
     em_ptr = &edge_mask_vec;
   }
@@ -232,15 +239,15 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
     for (std::size_t j = 0; j + 1 < last.nodes.size(); ++j) {
       std::int32_t spur_node = last.nodes[j];
       // Build masks: exclude prefix nodes [0..j-1]
-      std::vector<unsigned char> node_mask_local;
-      node_mask_local.assign(static_cast<std::size_t>(g.num_nodes()), static_cast<unsigned char>(1));
+      std::vector<std::uint8_t> node_mask_local;
+      node_mask_local.assign(static_cast<std::size_t>(g.num_nodes()), static_cast<std::uint8_t>(1));
       for (std::size_t r = 0; r < j; ++r) node_mask_local[static_cast<std::size_t>(last.nodes[r])] = 0;
       if (nm_ptr) {
         for (std::size_t idx=0; idx<node_mask_local.size(); ++idx) node_mask_local[idx] = (node_mask_local[idx] && (*nm_ptr)[idx]) ? 1u : 0u;
       }
       // Edge mask: exclude next edges of already-accepted paths that share this prefix
-      std::vector<unsigned char> edge_mask_local;
-      edge_mask_local.assign(static_cast<std::size_t>(g.num_edges()), static_cast<unsigned char>(1));
+      std::vector<std::uint8_t> edge_mask_local;
+      edge_mask_local.assign(static_cast<std::size_t>(g.num_edges()), static_cast<std::uint8_t>(1));
       for (auto const& P : paths) {
         if (P.nodes.size() > j && std::equal(P.nodes.begin(), P.nodes.begin() + j, last.nodes.begin())) {
           // Exclude edge at position j for this path

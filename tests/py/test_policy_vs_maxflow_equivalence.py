@@ -49,9 +49,7 @@ def _policy_for(
     max_flow_c = (
         1 if (placement == ngc.FlowPlacement.EQUAL_BALANCED and shortest_path) else None
     )
-    return ngc.FlowPolicy(
-        algs,
-        gh,
+    cfg = ngc.FlowPolicyConfig(
         path_alg=ngc.PathAlg.SPF,
         flow_placement=placement,
         selection=sel,
@@ -59,6 +57,7 @@ def _policy_for(
         shortest_path=shortest_path,
         max_flow_count=max_flow_c,
     )
+    return ngc.FlowPolicy(algs, gh, cfg)
 
 
 def _max_flow_for(

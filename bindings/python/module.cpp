@@ -409,9 +409,23 @@ PYBIND11_MODULE(_netgraph_core, m) {
       .def("place_on_dag", [](FlowState& fs, std::int32_t src, std::int32_t dst, const PredDAG& dag, double requested_flow, FlowPlacement placement){
         py::gil_scoped_release rel; auto placed = fs.place_on_dag(src, dst, dag, requested_flow, placement); py::gil_scoped_acquire acq; return placed;
       }, py::arg("src"), py::arg("dst"), py::arg("dag"), py::arg("requested_flow") = std::numeric_limits<double>::infinity(), py::arg("flow_placement") = FlowPlacement::Proportional)
-      .def("place_max_flow", [](FlowState& fs, std::int32_t src, std::int32_t dst, FlowPlacement placement, bool shortest_path, bool require_capacity){
-        py::gil_scoped_release rel; auto total = fs.place_max_flow(src, dst, placement, shortest_path, require_capacity); py::gil_scoped_acquire acq; return total;
-      }, py::arg("src"), py::arg("dst"), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false, py::arg("require_capacity") = true)
+      .def("place_max_flow", [](py::object self_obj, std::int32_t src, std::int32_t dst,
+                                 FlowPlacement placement, bool shortest_path, bool require_capacity,
+                                 py::object node_mask, py::object edge_mask){
+        FlowState& fs = py::cast<FlowState&>(self_obj);
+        // Get graph reference to validate mask lengths
+        const StrictMultiDiGraph& g = py::cast<const StrictMultiDiGraph&>(self_obj.attr("_graph_ref"));
+        auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(g.num_nodes()), "node_mask");
+        auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(g.num_edges()), "edge_mask");
+        py::gil_scoped_release rel;
+        auto total = fs.place_max_flow(src, dst, placement, shortest_path, require_capacity,
+                                       node_bs.view, edge_bs.view);
+        py::gil_scoped_acquire acq;
+        return total;
+      }, py::arg("src"), py::arg("dst"),
+         py::arg("flow_placement") = FlowPlacement::Proportional,
+         py::arg("shortest_path") = false, py::arg("require_capacity") = true,
+         py::kw_only(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none())
       .def("compute_min_cut", [](py::object self_obj, std::int32_t src, py::object node_mask, py::object edge_mask){
         const FlowState& fs = py::cast<const FlowState&>(self_obj);
         // Get graph reference to validate mask lengths
@@ -546,9 +560,19 @@ PYBIND11_MODULE(_netgraph_core, m) {
       .def_readwrite("diminishing_returns_epsilon_frac", &FlowPolicyConfig::diminishing_returns_epsilon_frac);
 
   py::class_<FlowPolicy>(m, "FlowPolicy", py::dynamic_attr())
-      .def("__init__", [](py::object self, py::object algs_obj, py::object graph_obj, const FlowPolicyConfig& cfg){
+      .def("__init__", [](py::object self, py::object algs_obj, py::object graph_obj, FlowPolicyConfig cfg,
+                          py::object node_mask, py::object edge_mask){
             std::shared_ptr<Algorithms> algs = py::cast<std::shared_ptr<Algorithms>>(algs_obj);
             const PyGraph& pg = py::cast<const PyGraph&>(graph_obj);
+
+            // Convert masks to spans (FlowPolicy will copy the data)
+            auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(pg.num_nodes), "node_mask");
+            auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(pg.num_edges), "edge_mask");
+
+            // Update config with mask spans (will be copied by FlowPolicy constructor)
+            cfg.node_mask = node_bs.view;
+            cfg.edge_mask = edge_bs.view;
+
             ExecutionContext ctx(algs, pg.handle);
             FlowPolicy* fp = self.cast<FlowPolicy*>();
             new (fp) FlowPolicy(ctx, cfg);
@@ -556,53 +580,9 @@ PYBIND11_MODULE(_netgraph_core, m) {
             self.attr("_graph_ref") = graph_obj;
            },
            py::arg("algorithms"), py::arg("graph"), py::arg("config"),
-           py::keep_alive<1, 2>()  // self keeps algorithms alive
-      )
-      .def("__init__", [](py::object self, py::object algs_obj, py::object graph_obj,
-                       PathAlg path_alg,
-                       FlowPlacement flow_placement,
-                       EdgeSelection selection,
-                       bool require_capacity,
-                       int min_flow_count,
-                       std::optional<int> max_flow_count,
-                       std::optional<Cost> max_path_cost,
-                       std::optional<double> max_path_cost_factor,
-                       bool shortest_path,
-                       bool reoptimize_flows_on_each_placement,
-                       int max_no_progress_iterations,
-                       int max_total_iterations,
-                       bool diminishing_returns_enabled,
-                       int diminishing_returns_window,
-                       double diminishing_returns_epsilon_frac){
-            std::shared_ptr<Algorithms> algs = py::cast<std::shared_ptr<Algorithms>>(algs_obj);
-            const PyGraph& pg = py::cast<const PyGraph&>(graph_obj);
-            ExecutionContext ctx(algs, pg.handle);
-            FlowPolicy* fp = self.cast<FlowPolicy*>();
-            new (fp) FlowPolicy(ctx, path_alg, flow_placement, selection, require_capacity,
-                               min_flow_count, max_flow_count, max_path_cost, max_path_cost_factor,
-                               shortest_path, reoptimize_flows_on_each_placement,
-                               max_no_progress_iterations, max_total_iterations,
-                               diminishing_returns_enabled, diminishing_returns_window,
-                               diminishing_returns_epsilon_frac);
-            self.attr("_algorithms_ref") = algs_obj;
-            self.attr("_graph_ref") = graph_obj;
-           },
-           py::arg("algorithms"), py::arg("graph"),
-           py::arg("path_alg") = PathAlg::SPF,
-           py::arg("flow_placement") = FlowPlacement::Proportional,
-           py::arg("selection") = EdgeSelection{},
-           py::arg("require_capacity") = true,
-           py::arg("min_flow_count") = 1,
-           py::arg("max_flow_count") = py::none(),
-           py::arg("max_path_cost") = py::none(),
-           py::arg("max_path_cost_factor") = py::none(),
-           py::arg("shortest_path") = false,
-           py::arg("reoptimize_flows_on_each_placement") = false,
-           py::arg("max_no_progress_iterations") = 100,
-           py::arg("max_total_iterations") = 10000,
-           py::arg("diminishing_returns_enabled") = true,
-           py::arg("diminishing_returns_window") = 8,
-           py::arg("diminishing_returns_epsilon_frac") = 1e-3,
+           py::kw_only(),
+           py::arg("node_mask") = py::none(),
+           py::arg("edge_mask") = py::none(),
            py::keep_alive<1, 2>()  // self keeps algorithms alive
       )
       .def("flow_count", &FlowPolicy::flow_count)

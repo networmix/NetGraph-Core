@@ -38,8 +38,14 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
   if (src < 0 || src >= N || dst < 0 || dst >= N || src == dst) {
     return {0.0, std::move(summary)};
   }
-  const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(g.num_nodes()));
-  const bool use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(g.num_edges()));
+  if (!node_mask.empty() && node_mask.size() != static_cast<std::size_t>(g.num_nodes())) {
+    throw std::invalid_argument("calc_max_flow: node_mask length mismatch");
+  }
+  if (!edge_mask.empty() && edge_mask.size() != static_cast<std::size_t>(g.num_edges())) {
+    throw std::invalid_argument("calc_max_flow: edge_mask length mismatch");
+  }
+  const bool use_node_mask = !node_mask.empty();
+  const bool use_edge_mask = !edge_mask.empty();
   if ((use_node_mask && !node_mask[static_cast<std::size_t>(src)]) ||
       (use_node_mask && !node_mask[static_cast<std::size_t>(dst)])) {
     return {0.0, std::move(summary)};
@@ -109,8 +115,8 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
       summary.reachable_nodes.assign(static_cast<std::size_t>(g.num_nodes()), 0u);
       auto residual = fs.residual_view();
       auto capv = fs.capacity_view();
-      const bool reach_use_node_mask = (node_mask.size() == static_cast<std::size_t>(g.num_nodes()));
-      const bool reach_use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(g.num_edges()));
+      const bool reach_use_node_mask = use_node_mask;
+      const bool reach_use_edge_mask = use_edge_mask;
       const auto N = static_cast<std::size_t>(g.num_nodes());
       std::vector<std::int32_t> stack;
       stack.reserve(N);
@@ -166,6 +172,18 @@ batch_max_flow(const StrictMultiDiGraph& g,
                bool with_residuals,
                const std::vector<std::span<const bool>>& node_masks,
                const std::vector<std::span<const bool>>& edge_masks) {
+  // Validate all masks upfront
+  for (const auto& nm : node_masks) {
+    if (!nm.empty() && nm.size() != static_cast<std::size_t>(g.num_nodes())) {
+      throw std::invalid_argument("batch_max_flow: node_mask length mismatch");
+    }
+  }
+  for (const auto& em : edge_masks) {
+    if (!em.empty() && em.size() != static_cast<std::size_t>(g.num_edges())) {
+      throw std::invalid_argument("batch_max_flow: edge_mask length mismatch");
+    }
+  }
+
   std::vector<FlowSummary> out;
   out.reserve(pairs.size());
   for (std::size_t i = 0; i < pairs.size(); ++i) {

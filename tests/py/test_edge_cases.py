@@ -29,9 +29,7 @@ def test_eb_min_flow_gating_does_not_prune_valid_parallel_edges(algs):
         multi_edge=True, require_capacity=True, tie_break=ngc.EdgeTieBreak.DETERMINISTIC
     )
     # Use EqualBalanced with max_flow_count=1 so per_target == requested volume
-    policy = ngc.FlowPolicy(
-        algs,
-        algs.build_graph(g),
+    cfg = ngc.FlowPolicyConfig(
         path_alg=ngc.PathAlg.SPF,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
         selection=sel,
@@ -39,6 +37,7 @@ def test_eb_min_flow_gating_does_not_prune_valid_parallel_edges(algs):
         max_flow_count=1,
         shortest_path=True,
     )
+    policy = ngc.FlowPolicy(algs, algs.build_graph(g), cfg)
     placed, leftover = policy.place_demand(fg, 0, 2, 0, 1.0)
     # Should place 1.0 (group capacity min(0.6)*2 = 1.2 supports it)
     assert placed >= 1.0 - 1e-9

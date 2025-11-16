@@ -32,38 +32,34 @@ def make_policy(config: str, algs: ngc.Algorithms, gh) -> ngc.FlowPolicy:
             require_capacity=True,
             tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
         )
-        return ngc.FlowPolicy(
-            algs,
-            gh,
+        cfg = ngc.FlowPolicyConfig(
             path_alg=ngc.PathAlg.SPF,
             flow_placement=ngc.FlowPlacement.PROPORTIONAL,
             selection=sel,
             shortest_path=True,
         )
+        return ngc.FlowPolicy(algs, gh, cfg)
     if config == "SHORTEST_PATHS_ECMP":
         sel = ngc.EdgeSelection(
             multi_edge=True,
             require_capacity=True,
             tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
         )
-        return ngc.FlowPolicy(
-            algs,
-            gh,
+        cfg = ngc.FlowPolicyConfig(
             path_alg=ngc.PathAlg.SPF,
             flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
             selection=sel,
             shortest_path=True,
             max_flow_count=1,
         )
+        return ngc.FlowPolicy(algs, gh, cfg)
     if config == "TE_ECMP_16_LSP":
         sel = ngc.EdgeSelection(
             multi_edge=False,
             require_capacity=True,
             tie_break=ngc.EdgeTieBreak.PREFER_HIGHER_RESIDUAL,
         )
-        return ngc.FlowPolicy(
-            algs,
-            gh,
+        cfg = ngc.FlowPolicyConfig(
             path_alg=ngc.PathAlg.SPF,
             flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
             selection=sel,
@@ -73,6 +69,7 @@ def make_policy(config: str, algs: ngc.Algorithms, gh) -> ngc.FlowPolicy:
             # TE placement should not stop early due to tiny increments
             # to ensure full utilization
         )
+        return ngc.FlowPolicy(algs, gh, cfg)
     raise AssertionError(f"Unknown config {config}")
 
 

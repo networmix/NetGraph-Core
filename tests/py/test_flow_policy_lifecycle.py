@@ -28,15 +28,14 @@ def _small_graph(build_graph):
 def test_flow_policy_place_rebalance_remove(build_graph, algs, to_handle):
     g = _small_graph(build_graph)
     fg = ngc.FlowGraph(g)
-    policy = ngc.FlowPolicy(
-        algs,
-        to_handle(g),
+    cfg = ngc.FlowPolicyConfig(
         path_alg=ngc.PathAlg.SPF,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
         selection=_make_sel(),
         min_flow_count=2,
         max_flow_count=4,
     )
+    policy = ngc.FlowPolicy(algs, to_handle(g), cfg)
 
     placed, remaining = policy.place_demand(fg, 0, 1, flowClass=0, volume=4.0)
     assert placed + remaining == pytest.approx(4.0, rel=0, abs=1e-9)
@@ -64,15 +63,14 @@ def test_flow_policy_flow_count_bounds(build_graph, algs, to_handle):
     g = _small_graph(build_graph)
     fg = ngc.FlowGraph(g)
     # Constrain to exactly 3 flows
-    policy = ngc.FlowPolicy(
-        algs,
-        to_handle(g),
+    cfg = ngc.FlowPolicyConfig(
         path_alg=ngc.PathAlg.SPF,
         flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
         selection=_make_sel(),
         min_flow_count=3,
         max_flow_count=3,
     )
+    policy = ngc.FlowPolicy(algs, to_handle(g), cfg)
     placed, _ = policy.place_demand(fg, 0, 1, flowClass=0, volume=3.0)
     assert placed >= 0.0
     assert policy.flow_count() == 3

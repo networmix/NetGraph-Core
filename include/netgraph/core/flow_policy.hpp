@@ -47,6 +47,8 @@ struct FlowPolicyConfig {
   bool diminishing_returns_enabled { true };
   int diminishing_returns_window { 8 };
   double diminishing_returns_epsilon_frac { 1e-3 };
+  std::span<const bool> node_mask {};  // Optional node mask for failure exclusions (True = include)
+  std::span<const bool> edge_mask {};  // Optional edge mask for failure exclusions (True = include)
 };
 
 // FlowPolicy manages flow creation, placement, reoptimization for a single demand
@@ -61,7 +63,31 @@ public:
       max_path_cost_factor_(cfg.max_path_cost_factor), reoptimize_flows_on_each_placement_(cfg.reoptimize_flows_on_each_placement),
       max_no_progress_iterations_(cfg.max_no_progress_iterations), max_total_iterations_(cfg.max_total_iterations),
       diminishing_returns_enabled_(cfg.diminishing_returns_enabled), diminishing_returns_window_(cfg.diminishing_returns_window),
-      diminishing_returns_epsilon_frac_(cfg.diminishing_returns_epsilon_frac) {}
+      diminishing_returns_epsilon_frac_(cfg.diminishing_returns_epsilon_frac)
+  {
+    // Validate mask sizes early for clearer error messages
+    const auto* g = ctx_.graph.graph.get();
+    if (g) {
+      if (!cfg.node_mask.empty() && cfg.node_mask.size() != static_cast<std::size_t>(g->num_nodes())) {
+        throw std::invalid_argument("FlowPolicy: node_mask length mismatch");
+      }
+      if (!cfg.edge_mask.empty() && cfg.edge_mask.size() != static_cast<std::size_t>(g->num_edges())) {
+        throw std::invalid_argument("FlowPolicy: edge_mask length mismatch");
+      }
+    }
+
+    // Copy mask data if provided
+    if (!cfg.node_mask.empty()) {
+      node_mask_storage_.reset(new bool[cfg.node_mask.size()]);
+      std::copy(cfg.node_mask.begin(), cfg.node_mask.end(), node_mask_storage_.get());
+      node_mask_ = std::span<const bool>(node_mask_storage_.get(), cfg.node_mask.size());
+    }
+    if (!cfg.edge_mask.empty()) {
+      edge_mask_storage_.reset(new bool[cfg.edge_mask.size()]);
+      std::copy(cfg.edge_mask.begin(), cfg.edge_mask.end(), edge_mask_storage_.get());
+      edge_mask_ = std::span<const bool>(edge_mask_storage_.get(), cfg.edge_mask.size());
+    }
+  }
 
   FlowPolicy(const ExecutionContext& ctx,
              PathAlg path_alg,
@@ -139,6 +165,12 @@ private:
   bool diminishing_returns_enabled_ { true };
   int diminishing_returns_window_ { 8 };
   double diminishing_returns_epsilon_frac_ { 1e-3 };
+
+  // Mask storage and views for failure exclusions
+  std::unique_ptr<bool[]> node_mask_storage_;
+  std::unique_ptr<bool[]> edge_mask_storage_;
+  std::span<const bool> node_mask_ {};
+  std::span<const bool> edge_mask_ {};
 
   // State
   std::unordered_map<FlowIndex, FlowRecord, FlowIndexHash> flows_;
