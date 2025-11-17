@@ -1,6 +1,6 @@
-"""Comprehensive mask validation tests.
+"""Mask validation tests.
 
-Tests that all core API entry points strictly validate mask lengths
+Validates that API entry points enforce mask length requirements
 and reject malformed masks with clear error messages.
 """
 

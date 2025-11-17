@@ -36,6 +36,9 @@ struct FlowPolicyConfig {
   EdgeSelection selection { EdgeSelection{} };
   bool require_capacity { true };  // Require edges to have capacity (software-defined/traffic engineering).
                                    // Set false for cost-only routing (traditional IP/IGP shortest-paths).
+  bool multipath { true };         // Enable individual flows to split across multiple equal-cost paths.
+                                   // When true: each flow uses a DAG containing all equal-cost paths (hash-based ECMP).
+                                   // When false: each flow uses a single path (tunnel-based ECMP, MPLS LSP semantics).
   int min_flow_count { 1 };
   std::optional<int> max_flow_count { std::nullopt };
   std::optional<Cost> max_path_cost { std::nullopt };
@@ -58,7 +61,7 @@ public:
   FlowPolicy(const ExecutionContext& ctx, const FlowPolicyConfig& cfg)
     : ctx_(ctx),
       path_alg_(cfg.path_alg), flow_placement_(cfg.flow_placement), selection_(cfg.selection),
-      require_capacity_(cfg.require_capacity), shortest_path_(cfg.shortest_path),
+      require_capacity_(cfg.require_capacity), multipath_(cfg.multipath), shortest_path_(cfg.shortest_path),
       min_flow_count_(cfg.min_flow_count), max_flow_count_(cfg.max_flow_count), max_path_cost_(cfg.max_path_cost),
       max_path_cost_factor_(cfg.max_path_cost_factor), reoptimize_flows_on_each_placement_(cfg.reoptimize_flows_on_each_placement),
       max_no_progress_iterations_(cfg.max_no_progress_iterations), max_total_iterations_(cfg.max_total_iterations),
@@ -94,6 +97,7 @@ public:
              FlowPlacement flow_placement,
              EdgeSelection selection,
              bool require_capacity = true,
+             bool multipath = true,
              int min_flow_count = 1,
              std::optional<int> max_flow_count = std::nullopt,
              std::optional<Cost> max_path_cost = std::nullopt,
@@ -107,7 +111,7 @@ public:
              double diminishing_returns_epsilon_frac = 1e-3)
     : ctx_(ctx),
       path_alg_(path_alg), flow_placement_(flow_placement), selection_(selection),
-      require_capacity_(require_capacity), shortest_path_(shortest_path),
+      require_capacity_(require_capacity), multipath_(multipath), shortest_path_(shortest_path),
       min_flow_count_(min_flow_count), max_flow_count_(max_flow_count), max_path_cost_(max_path_cost),
       max_path_cost_factor_(max_path_cost_factor), reoptimize_flows_on_each_placement_(reoptimize_flows_on_each_placement),
       max_no_progress_iterations_(max_no_progress_iterations), max_total_iterations_(max_total_iterations),
@@ -154,6 +158,7 @@ private:
   FlowPlacement flow_placement_ { FlowPlacement::Proportional };
   EdgeSelection selection_ { EdgeSelection{} };
   bool require_capacity_ { true };
+  bool multipath_ { true };
   bool shortest_path_ { false };
   int min_flow_count_ { 1 };
   std::optional<int> max_flow_count_ {};

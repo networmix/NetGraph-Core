@@ -137,16 +137,18 @@ def assert_valid_min_cut():
 
 @pytest.fixture
 def build_graph():
-    """Return a function that builds a StrictMultiDiGraph from edges.
+    """Build a StrictMultiDiGraph from edge tuples.
 
-    The returned function accepts:
-      - num_nodes: int
-      - edges: list of tuples (src, dst, cost, cap[, ext_id])
+    Args:
+        num_nodes: Number of nodes in the graph
+        edges: List of tuples (src, dst, cost, cap[, ext_id])
+
+    Returns:
+        StrictMultiDiGraph instance
     """
 
     def _builder(num_nodes: int, edges: list[tuple]) -> ngc.StrictMultiDiGraph:
         if not edges:
-            # Build an empty graph quickly
             return ngc.StrictMultiDiGraph.from_arrays(
                 num_nodes,
                 np.empty((0,), dtype=np.int32),
@@ -158,7 +160,6 @@ def build_graph():
         dst = np.array([e[1] for e in edges], dtype=np.int32)
         cost = np.array([int(e[2]) for e in edges], dtype=np.int64)
         cap = np.array([float(e[3]) for e in edges], dtype=np.float64)
-        # External ids at this layer are ignored by core and used only in tests
         return ngc.StrictMultiDiGraph.from_arrays(num_nodes, src, dst, cap, cost)
 
     return _builder
@@ -215,10 +216,7 @@ def square2_graph(build_graph):
 
 @pytest.fixture
 def graph3(build_graph):
-    """Graph3: six-node mixed topology used across SPF/max-flow tests.
-
-    Nodes: 0..5; includes parallel min-cost edges and a longer route via node 5.
-    """
+    """Six-node mixed topology with parallel edges and multiple paths."""
 
     edges = [
         (0, 1, 1, 2, 0),  # A->B parallels
@@ -227,12 +225,12 @@ def graph3(build_graph):
         (1, 2, 1, 1, 3),  # B->C parallels
         (1, 2, 1, 2, 4),
         (1, 2, 1, 3, 5),
-        (2, 3, 2, 3, 6),  # C->D cost 2
-        (0, 4, 1, 5, 7),  # A->E cost 1
-        (4, 2, 1, 4, 8),  # E->C cost 1
-        (0, 3, 4, 2, 9),  # A->D cost 4
-        (2, 5, 1, 1, 10),  # C->F cost 1
-        (5, 3, 1, 2, 11),  # F->D cost 1
+        (2, 3, 2, 3, 6),  # C->D
+        (0, 4, 1, 5, 7),  # A->E
+        (4, 2, 1, 4, 8),  # E->C
+        (0, 3, 4, 2, 9),  # A->D
+        (2, 5, 1, 1, 10),  # C->F
+        (5, 3, 1, 2, 11),  # F->D
     ]
     return build_graph(6, edges)
 
@@ -297,10 +295,7 @@ def square3_graph(build_graph):
 
 @pytest.fixture
 def graph1_graph(build_graph):
-    """Small five-node graph with cross edges between B and C.
-
-    Nodes: 0(A),1(B),2(C),3(D),4(E)
-    """
+    """Five-node graph with bidirectional edges between B and C."""
 
     edges = [
         (0, 1, 1, 1, 0),
@@ -316,10 +311,7 @@ def graph1_graph(build_graph):
 
 @pytest.fixture
 def graph2_graph(build_graph):
-    """Branched five-node graph with C/D to E.
-
-    Nodes: 0(A),1(B),2(C),3(D),4(E)
-    """
+    """Five-node branched graph with bidirectional C-D edges."""
 
     edges = [
         (0, 1, 1, 1, 0),
@@ -501,3 +493,385 @@ def square5_graph(build_graph):
         (2, 1, 1, 1, 5),  # C->B
     ]
     return build_graph(5, edges)
+
+
+# FlowPolicy canonical configurations
+# These represent common use cases for flow routing and traffic engineering
+
+
+@pytest.fixture
+def make_flow_policy_config():
+    """Factory for canonical FlowPolicy configurations.
+
+    Canonical configurations:
+    - SHORTEST_PATHS_ECMP: IP/IGP-style ECMP (hash-based multipath, shortest paths only)
+    - SHORTEST_PATHS_WCMP: IP/IGP-style WCMP (proportional multipath, shortest paths only)
+    - TE_WCMP_UNLIM: Traffic engineering with unlimited proportional flows
+    - TE_ECMP_UP_TO_256_LSP: TE with up to 256 ECMP LSPs (tunnel-based)
+    - TE_ECMP_16_LSP: TE with exactly 16 ECMP LSPs (fixed allocation)
+
+    Usage:
+        config = make_flow_policy_config("SHORTEST_PATHS_ECMP")
+        policy = ngc.FlowPolicy(algs, graph, config)
+    """
+
+    def _make(config_name: str) -> ngc.FlowPolicyConfig:
+        if config_name == "SHORTEST_PATHS_ECMP":
+            # IP/IGP ECMP: Hash-based equal splitting across shortest paths
+            # - multipath=True: Each flow splits across all equal-cost next-hops
+            # - require_capacity=False: Routes based on costs only (IGP behavior)
+            # - shortest_path=True: Only use lowest-cost paths
+            # - max_flow_count=1: Single flow (models single demand stream)
+            config = ngc.FlowPolicyConfig()
+            config.path_alg = ngc.PathAlg.SPF
+            config.flow_placement = ngc.FlowPlacement.EQUAL_BALANCED
+            config.selection = ngc.EdgeSelection(
+                multi_edge=True,
+                require_capacity=False,
+                tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
+            )
+            config.require_capacity = False
+            config.multipath = True
+            config.shortest_path = True
+            config.min_flow_count = 1
+            config.max_flow_count = 1
+            return config
+
+        elif config_name == "SHORTEST_PATHS_WCMP":
+            # IP/IGP WCMP: Proportional splitting across shortest paths
+            # - Similar to ECMP but uses PROPORTIONAL placement
+            # - Flow splits proportionally to available capacity
+            config = ngc.FlowPolicyConfig()
+            config.path_alg = ngc.PathAlg.SPF
+            config.flow_placement = ngc.FlowPlacement.PROPORTIONAL
+            config.selection = ngc.EdgeSelection(
+                multi_edge=True,
+                require_capacity=False,
+                tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
+            )
+            config.require_capacity = False
+            config.multipath = True
+            config.shortest_path = True
+            config.min_flow_count = 1
+            config.max_flow_count = 1
+            return config
+
+        elif config_name == "TE_WCMP_UNLIM":
+            # Traffic Engineering: Unlimited proportional flows
+            # - require_capacity=True: Respects capacity, progressive fill
+            # - No flow count limits: Creates flows as needed
+            # - Uses all available paths (not just shortest)
+            config = ngc.FlowPolicyConfig()
+            config.path_alg = ngc.PathAlg.SPF
+            config.flow_placement = ngc.FlowPlacement.PROPORTIONAL
+            config.selection = ngc.EdgeSelection(
+                multi_edge=True,
+                require_capacity=True,
+                tie_break=ngc.EdgeTieBreak.PREFER_HIGHER_RESIDUAL,
+            )
+            config.require_capacity = True
+            config.multipath = True
+            config.min_flow_count = 1
+            # max_flow_count not set: unlimited
+            return config
+
+        elif config_name == "TE_ECMP_UP_TO_256_LSP":
+            # Traffic Engineering: Up to 256 ECMP LSPs (tunnels)
+            # - multipath=False: Each flow is a single-path LSP/tunnel
+            # - max_flow_count=256: Up to 256 parallel LSPs
+            # - ECMP across LSPs (not within each LSP)
+            config = ngc.FlowPolicyConfig()
+            config.path_alg = ngc.PathAlg.SPF
+            config.flow_placement = ngc.FlowPlacement.EQUAL_BALANCED
+            config.selection = ngc.EdgeSelection(
+                multi_edge=False,
+                require_capacity=True,
+                tie_break=ngc.EdgeTieBreak.PREFER_HIGHER_RESIDUAL,
+            )
+            config.require_capacity = True
+            config.multipath = False
+            config.min_flow_count = 1
+            config.max_flow_count = 256
+            config.reoptimize_flows_on_each_placement = True
+            return config
+
+        elif config_name == "TE_ECMP_16_LSP":
+            # Traffic Engineering: Exactly 16 ECMP LSPs (fixed allocation)
+            # - Similar to TE_ECMP_UP_TO_256_LSP but fixed at 16 flows
+            # - Models hardware with fixed LSP resources
+            config = ngc.FlowPolicyConfig()
+            config.path_alg = ngc.PathAlg.SPF
+            config.flow_placement = ngc.FlowPlacement.EQUAL_BALANCED
+            config.selection = ngc.EdgeSelection(
+                multi_edge=False,
+                require_capacity=True,
+                tie_break=ngc.EdgeTieBreak.PREFER_HIGHER_RESIDUAL,
+            )
+            config.require_capacity = True
+            config.multipath = False
+            config.min_flow_count = 16
+            config.max_flow_count = 16
+            config.reoptimize_flows_on_each_placement = True
+            return config
+
+        else:
+            raise ValueError(f"Unknown configuration: {config_name}")
+
+    return _make
+
+
+@pytest.fixture
+def make_flow_policy():
+    """Factory for creating FlowPolicy with canonical configurations and optional masks.
+
+    Usage:
+        policy = make_flow_policy(
+            "SHORTEST_PATHS_ECMP",
+            algs,
+            graph_handle,
+            node_mask=mask_array,
+            edge_mask=mask_array
+        )
+    """
+
+    def _make(
+        config_name: str,
+        algs: ngc.Algorithms,
+        graph_handle,
+        node_mask=None,
+        edge_mask=None,
+    ) -> ngc.FlowPolicy:
+        # Get base configuration using default constructor and set attributes
+        # (This matches the pattern used in test_flow_policy_presets.py)
+        if config_name == "SHORTEST_PATHS_ECMP":
+            config = ngc.FlowPolicyConfig()
+            config.path_alg = ngc.PathAlg.SPF
+            config.flow_placement = ngc.FlowPlacement.EQUAL_BALANCED
+            config.selection = ngc.EdgeSelection(
+                multi_edge=True,
+                require_capacity=False,
+                tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
+            )
+            config.require_capacity = False
+            config.multipath = True
+            config.shortest_path = True
+            config.min_flow_count = 1
+            config.max_flow_count = 1
+
+        elif config_name == "SHORTEST_PATHS_WCMP":
+            config = ngc.FlowPolicyConfig()
+            config.path_alg = ngc.PathAlg.SPF
+            config.flow_placement = ngc.FlowPlacement.PROPORTIONAL
+            config.selection = ngc.EdgeSelection(
+                multi_edge=True,
+                require_capacity=False,
+                tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
+            )
+            config.require_capacity = False
+            config.multipath = True
+            config.shortest_path = True
+            config.min_flow_count = 1
+            config.max_flow_count = 1
+
+        elif config_name == "TE_WCMP_UNLIM":
+            config = ngc.FlowPolicyConfig()
+            config.path_alg = ngc.PathAlg.SPF
+            config.flow_placement = ngc.FlowPlacement.PROPORTIONAL
+            config.selection = ngc.EdgeSelection(
+                multi_edge=True,
+                require_capacity=True,
+                tie_break=ngc.EdgeTieBreak.PREFER_HIGHER_RESIDUAL,
+            )
+            config.require_capacity = True
+            config.multipath = True
+            config.min_flow_count = 1
+
+        elif config_name == "TE_ECMP_UP_TO_256_LSP":
+            config = ngc.FlowPolicyConfig()
+            config.path_alg = ngc.PathAlg.SPF
+            config.flow_placement = ngc.FlowPlacement.EQUAL_BALANCED
+            config.selection = ngc.EdgeSelection(
+                multi_edge=False,
+                require_capacity=True,
+                tie_break=ngc.EdgeTieBreak.PREFER_HIGHER_RESIDUAL,
+            )
+            config.require_capacity = True
+            config.multipath = False
+            config.min_flow_count = 1
+            config.max_flow_count = 256
+            config.reoptimize_flows_on_each_placement = True
+
+        elif config_name == "TE_ECMP_16_LSP":
+            config = ngc.FlowPolicyConfig()
+            config.path_alg = ngc.PathAlg.SPF
+            config.flow_placement = ngc.FlowPlacement.EQUAL_BALANCED
+            config.selection = ngc.EdgeSelection(
+                multi_edge=False,
+                require_capacity=True,
+                tie_break=ngc.EdgeTieBreak.PREFER_HIGHER_RESIDUAL,
+            )
+            config.require_capacity = True
+            config.multipath = False
+            config.min_flow_count = 16
+            config.max_flow_count = 16
+            config.reoptimize_flows_on_each_placement = True
+
+        else:
+            raise ValueError(f"Unknown configuration: {config_name}")
+
+        # Create policy with optional masks
+        return ngc.FlowPolicy(
+            algs, graph_handle, config, node_mask=node_mask, edge_mask=edge_mask
+        )
+
+    return _make
+
+
+# ============================================================================
+# Validation helpers for path distribution and flow placement
+# ============================================================================
+
+
+def analyze_path_usage(
+    fg: ngc.FlowGraph, graph: ngc.StrictMultiDiGraph, source: int, target: int
+) -> dict[int, float]:
+    """Analyze which parallel paths are used and their volumes.
+
+    For topologies with parallel paths between source and target,
+    identifies which middle nodes are used and how much flow goes through each.
+
+    Args:
+        fg: FlowGraph with placed flows
+        graph: Topology graph
+        source: Source node
+        target: Target node
+
+    Returns:
+        Dict mapping middle_node_id -> total_flow_volume through that path
+        For 2-hop parallel paths: {middle_node: flow_volume}
+    """
+    edge_flows = fg.edge_flow_view()
+    edge_src = graph.edge_src_view()
+    edge_dst = graph.edge_dst_view()
+
+    path_usage = {}
+
+    # Find all edges from source and sum their flows
+    for edge_id in range(graph.num_edges()):
+        if edge_src[edge_id] == source:
+            middle_node = edge_dst[edge_id]
+            flow = edge_flows[edge_id]
+            if flow > 1e-9:  # Only count non-zero flows
+                path_usage[middle_node] = flow
+
+    return path_usage
+
+
+def count_lsps_per_path(
+    policy: ngc.FlowPolicy,
+    fg: ngc.FlowGraph,
+    graph: ngc.StrictMultiDiGraph,
+    source: int,
+    target: int,
+) -> dict[int, list[int]]:
+    """Count how many LSPs use each parallel path.
+
+    For topologies with parallel paths, determines which LSPs (flows)
+    use which paths.
+
+    Args:
+        policy: FlowPolicy with placed flows
+        fg: FlowGraph with placed flows
+        graph: Topology graph
+        source: Source node
+        target: Target node
+
+    Returns:
+        Dict mapping middle_node_id -> list of flow_ids using that path
+    """
+    edge_src = graph.edge_src_view()
+    edge_dst = graph.edge_dst_view()
+
+    path_lsps: dict[int, list[int]] = {}
+
+    # For each flow, determine which path it uses
+    for flow_id in range(policy.flow_count()):
+        try:
+            flow_index = ngc.FlowIndex(source, target, 0, flow_id)
+            flow_edges = fg.get_flow_edges(flow_index)
+
+            # Find the middle node this flow uses (for 2-hop paths)
+            # flow_edges is list of (edge_id, volume) tuples
+            for edge_id, _ in flow_edges:
+                src = edge_src[edge_id]
+                dst = edge_dst[edge_id]
+                if src == source:
+                    middle_node = dst
+                    if middle_node not in path_lsps:
+                        path_lsps[middle_node] = []
+                    path_lsps[middle_node].append(flow_id)
+                    break
+        except (KeyError, RuntimeError):
+            pass  # Flow might not exist or have no edges
+
+    return path_lsps
+
+
+def check_distribution_balanced(
+    lsps_per_path: dict[int, list[int]], tolerance: int = 1
+) -> tuple[bool, dict]:
+    """Check if LSPs are evenly distributed across paths.
+
+    Args:
+        lsps_per_path: Dict mapping path_id -> list of LSP ids
+        tolerance: Maximum allowed difference in LSP count between paths
+
+    Returns:
+        (is_balanced, stats)
+        is_balanced: True if max_count - min_count <= tolerance
+        stats: Dict with min, max, counts for debugging
+    """
+    if not lsps_per_path:
+        return (True, {"counts": [], "min": 0, "max": 0, "variance": 0})
+
+    counts = [len(lsps) for lsps in lsps_per_path.values()]
+    min_count = min(counts)
+    max_count = max(counts)
+    variance = max_count - min_count
+
+    stats = {
+        "counts": counts,
+        "min": min_count,
+        "max": max_count,
+        "variance": variance,
+        "per_path": {path_id: len(lsps) for path_id, lsps in lsps_per_path.items()},
+    }
+
+    is_balanced = variance <= tolerance
+
+    return (is_balanced, stats)
+
+
+def calculate_theoretical_capacity_parallel_paths(
+    capacity_per_path: float, num_paths: int, num_lsps: int
+) -> float:
+    """Calculate theoretical maximum capacity with optimal LSP distribution.
+
+    For parallel equal-capacity paths with single-path LSPs.
+
+    Args:
+        capacity_per_path: Capacity of each path
+        num_paths: Number of available paths
+        num_lsps: Number of LSPs to distribute
+
+    Returns:
+        Theoretical maximum total capacity with optimal distribution
+    """
+    if num_lsps <= num_paths:
+        # Each LSP gets its own path
+        return num_lsps * capacity_per_path
+    else:
+        # LSPs must share paths
+        lsps_per_path = num_lsps / num_paths
+        capacity_per_lsp = capacity_per_path / lsps_per_path
+        return num_lsps * capacity_per_lsp

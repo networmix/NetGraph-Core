@@ -498,6 +498,7 @@ PYBIND11_MODULE(_netgraph_core, m) {
                        FlowPlacement flow_placement,
                        EdgeSelection selection,
                        bool require_capacity,
+                       bool multipath,
                        int min_flow_count,
                        py::object max_flow_count,
                        py::object max_path_cost,
@@ -514,6 +515,7 @@ PYBIND11_MODULE(_netgraph_core, m) {
             cfg.flow_placement = flow_placement;
             cfg.selection = selection;
             cfg.require_capacity = require_capacity;
+            cfg.multipath = multipath;
             cfg.min_flow_count = min_flow_count;
             if (!max_flow_count.is_none()) cfg.max_flow_count = py::cast<int>(max_flow_count);
             if (!max_path_cost.is_none()) cfg.max_path_cost = py::cast<Cost>(max_path_cost);
@@ -532,6 +534,7 @@ PYBIND11_MODULE(_netgraph_core, m) {
           py::arg("flow_placement") = FlowPlacement::Proportional,
           py::arg("selection") = EdgeSelection{},
           py::arg("require_capacity") = true,
+          py::arg("multipath") = true,
           py::arg("min_flow_count") = 1,
           py::arg("max_flow_count") = py::none(),
           py::arg("max_path_cost") = py::none(),
@@ -547,6 +550,7 @@ PYBIND11_MODULE(_netgraph_core, m) {
       .def_readwrite("flow_placement", &FlowPolicyConfig::flow_placement)
       .def_readwrite("selection", &FlowPolicyConfig::selection)
       .def_readwrite("require_capacity", &FlowPolicyConfig::require_capacity)
+      .def_readwrite("multipath", &FlowPolicyConfig::multipath)
       .def_readwrite("min_flow_count", &FlowPolicyConfig::min_flow_count)
       .def_readwrite("max_flow_count", &FlowPolicyConfig::max_flow_count)
       .def_readwrite("max_path_cost", &FlowPolicyConfig::max_path_cost)

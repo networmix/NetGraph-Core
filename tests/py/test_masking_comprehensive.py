@@ -1,13 +1,11 @@
-"""
-Comprehensive tests for masking behavior in NetGraph-Core.
+"""Masking behavior tests.
 
-These tests verify:
-1. Masked source node handling (critical bug fix)
-2. Masked destination node handling
-3. Combined node and edge masks
-4. Interaction with residual capacity
-5. Masking in max_flow and k_shortest_paths
-6. Validation of mask semantics (true = allowed, false = excluded)
+Verifies node/edge mask handling across all algorithms:
+- Masked source/destination nodes
+- Combined node and edge masks
+- Interaction with residual capacity
+- Masking in max_flow, shortest_paths, and k_shortest_paths
+- Mask semantics (true = allowed, false = excluded)
 """
 
 import numpy as np

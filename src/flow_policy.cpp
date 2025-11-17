@@ -50,10 +50,18 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
 
   // Use configured selection for per-adjacency edge behavior (multi-edge, tie-breaking).
   EdgeSelection sel = selection_;
-  // For EqualBalanced, ensure we consider the full equal-cost next-hop set.
-  if (flow_placement_ == FlowPlacement::EqualBalanced) {
+
+  // Enforce semantic consistency between multipath and multi_edge:
+  // - Tunnel mode (multipath=false): force single edge per hop for true single-path semantics
+  // - Hash-ECMP with EqualBalanced: use all equal-cost edges to maximize fanout
+  if (!multipath_) {
+    sel.multi_edge = false;
+  } else if (flow_placement_ == FlowPlacement::EqualBalanced) {
     sel.multi_edge = true;
   }
+
+  // Respect capacity requirements from both config sources
+  sel.require_capacity = (selection_.require_capacity || require_capacity_);
   // Decide whether we need residual-aware SPF.
   // Residual awareness is controlled by require_capacity_:
   //   - require_capacity=true: Require edges to have capacity, routes adapt to residuals (SDN/TE behavior)
@@ -96,7 +104,7 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   // Set require_capacity directly (no casting needed - same field name)
   sel.require_capacity = require_capacity_;
   SpfOptions opts;
-  opts.multipath = true;
+  opts.multipath = multipath_;  // Use configured multipath value (enables/disables flow splitting across equal-cost paths)
   opts.selection = sel;
   opts.dst = dst;
   opts.residual = require_residual ? residual : std::span<const Cap>();
@@ -278,14 +286,11 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
       if (no_progress>=max_no_progress_iterations_) break;
       continue;
     }
-    // Proceed even if selection is not explicitly capacity-aware; placement
-    // uses residuals, and DAG is refreshed with per-flow targets.
-    //
-    // EB note: we refresh the DAG each round using residual-aware SPF.
-    // This prunes saturated next-hops and *changes the equal-split set*
-    // (progressive behavior). This is useful for TE-like reoptimization,
-    // but it is not the one-shot ECMP admission semantics. Gate or disable
-    // this if strict single-pass ECMP on the initial DAG is required.
+    // Refresh DAG based on current residuals for dynamic path selection.
+    // This prunes saturated next-hops and updates path selection.
+    // For multipath flows, this tracks saturated edges within the DAG.
+    // For tunnel flows, this allows different tunnels to discover different paths
+    // as residuals change, enabling natural fan-out across equal-cost paths.
     if (flow_placement_ == FlowPlacement::EqualBalanced && static_paths_.empty()) {
       if (auto pb = get_path_bundle(fg, f->src, f->dst, std::optional<double>(per_target))) {
         f->dag = std::move(pb->first);
@@ -350,6 +355,13 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
       }
     }
     if (iters >= max_total_iterations_) break;
+  }
+
+  // Reoptimize all flows after placement if enabled
+  if (reoptimize_flows_on_each_placement_) {
+    for (auto& kv : flows_) {
+      (void)reoptimize_flow(fg, kv.first, kMinFlow);
+    }
   }
 
   // For EQUAL_BALANCED placement, rebalance flows to maintain equal volumes.

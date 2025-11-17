@@ -266,11 +266,23 @@ class FlowIndex:
 
 
 class FlowPolicyConfig:
-    """Configuration for FlowPolicy behavior."""
+    """Configuration for FlowPolicy behavior.
+
+    Key Parameters:
+        multipath: Controls whether individual flows split across multiple equal-cost paths.
+            - True (default): Hash-based ECMP - each flow uses a DAG with ALL equal-cost paths.
+              Flow volume is split across these paths according to flow_placement strategy.
+              This models router ECMP behavior where packets are hashed across next-hops.
+            - False: Tunnel-based ECMP - each flow uses a SINGLE path (one tunnel/LSP).
+              Multiple flows can share the same path. This models MPLS LSP semantics where
+              each LSP follows one specific path, and ECMP means balancing ACROSS LSPs.
+    """
 
     path_alg: PathAlg
     flow_placement: FlowPlacement
     selection: EdgeSelection
+    require_capacity: bool
+    multipath: bool
     min_flow_count: int
     max_flow_count: Optional[int]
     max_path_cost: Optional[int]

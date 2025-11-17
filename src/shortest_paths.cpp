@@ -149,14 +149,15 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
 } // namespace netgraph::core
 
 /*
-  shortest_paths — Dijkstra over a StrictMultiDiGraph with flexible selection.
+  Dijkstra shortest path algorithm with capacity-aware tie-breaking.
 
   Features:
-    - Optional residual-aware traversal (treat residual as capacity gate).
-    - Multipath mode collects all equal-cost predecessor edges per node.
-    - Single-path mode chooses one best edge per neighbor group with
-      deterministic tie-breaking (or by higher residual if requested).
-    - Optional early exit when a specific destination is provided.
+    - Residual-aware traversal: uses dynamic residuals if provided, otherwise static capacity
+    - Multipath mode: collects all equal-cost predecessor edges per node
+    - Single-path mode: selects one edge per adjacency using:
+      * Edge-level tie-breaking for parallel edges (PreferHigherResidual or Deterministic)
+      * Node-level tie-breaking for equal-cost nodes (prefers higher bottleneck capacity)
+    - Early exit when specific destination is reached
 */
 #include "netgraph/core/shortest_paths.hpp"
 #include <cmath>
@@ -164,6 +165,7 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
 #include <limits>
 #include <stdexcept>
 #include <queue>
+#include <tuple>
 #include <utility>
 #include <vector>
 #include "netgraph/core/constants.hpp"
@@ -188,11 +190,17 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
 
   // Initialize distance array to infinity (max value).
   std::vector<Cost> dist(static_cast<std::size_t>(N), std::numeric_limits<Cost>::max());
+
+  // Track minimum residual capacity along the path to each node (for node-level tie-breaking).
+  // When distances are equal, prefer paths with higher bottleneck capacity.
+  std::vector<Cap> min_residual_to_node(static_cast<std::size_t>(N), static_cast<Cap>(0));
+
   const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(g.num_nodes()));
   const bool use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(g.num_edges()));
   const bool src_allowed = (src >= 0 && src < N && (!use_node_mask || node_mask[static_cast<std::size_t>(src)]));
   if (src_allowed) {
     dist[static_cast<std::size_t>(src)] = static_cast<Cost>(0);
+    min_residual_to_node[static_cast<std::size_t>(src)] = std::numeric_limits<Cap>::max();
   }
 
   // pred_lists[v] stores predecessors for node v as (parent_node, [edges_from_parent]).
@@ -207,12 +215,14 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
     return {std::move(dist), std::move(dag)};
   }
 
-  // Priority queue for Dijkstra (min-heap by cost).
-  // QItem is (cost, node). Lambda comparator inverts comparison for min-heap.
-  using QItem = std::pair<Cost, NodeId>;
-  auto cmp = [](const QItem& a, const QItem& b) { return a.first > b.first; };
+  // Priority queue for Dijkstra with capacity-aware node-level tie-breaking.
+  // QItem is (cost, -residual, node). Negated residual ensures higher capacity = higher priority.
+  // Lexicographic ordering: cost (minimize) -> residual (maximize) -> node (deterministic).
+  // This naturally distributes flows across equal-cost paths based on available capacity.
+  using QItem = std::tuple<Cost, Cap, NodeId>;
+  auto cmp = [](const QItem& a, const QItem& b) { return a > b; };
   std::priority_queue<QItem, std::vector<QItem>, decltype(cmp)> pq(cmp);
-  pq.emplace(static_cast<Cost>(0), src);
+  pq.emplace(static_cast<Cost>(0), -std::numeric_limits<Cap>::max(), src);
   Cost best_dst_cost = std::numeric_limits<Cost>::max();
   bool have_best_dst = false;
   const bool early_exit = dst.has_value();
@@ -224,8 +234,9 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
 
   while (!pq.empty()) {
     // Extract min-cost node from priority queue.
-    // Structured binding: auto [d_u, u] = ... destructures the pair.
-    auto [d_u, u] = pq.top(); pq.pop();
+    // Structured binding: auto [d_u, neg_res_u, u] = ... destructures the tuple.
+    auto [d_u, neg_res_u, u] = pq.top(); pq.pop();
+    (void)neg_res_u;  // Residual was only for tie-breaking in queue, not needed here
     if (u < 0 || u >= N) continue;
     // Skip stale entries (node already processed at a lower cost).
     if (d_u > dist[static_cast<std::size_t>(u)]) continue;
@@ -233,7 +244,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
     // Early exit optimization: record when we first reach destination.
     if (early_exit && u == dst_node && !have_best_dst) { best_dst_cost = d_u; have_best_dst = true; }
     if (early_exit && u == dst_node) {
-      if (pq.empty() || pq.top().first > best_dst_cost) break; else continue;
+      if (pq.empty() || std::get<0>(pq.top()) > best_dst_cost) break; else continue;
     }
 
     // Iterate over u's outgoing edges using CSR row offsets.
@@ -304,21 +315,36 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
       if (!selected_edges.empty()) {
         Cost new_cost = static_cast<Cost>(d_u + min_edge_cost);
         auto v_idx = static_cast<std::size_t>(v);
+
+        // Compute bottleneck capacity along path to v through u for node-level tie-breaking.
+        // Uses dynamic residuals if provided, otherwise static capacity.
+        // This allows tie-breaking by capacity even in cost-only routing mode.
+        Cap max_edge_residual = static_cast<Cap>(0);
+        for (auto edge_id : selected_edges) {
+          const Cap rem = has_residual ? residual[static_cast<std::size_t>(edge_id)]
+                                        : cap[static_cast<std::size_t>(edge_id)];
+          if (rem > max_edge_residual) max_edge_residual = rem;
+        }
+        Cap path_residual = std::min(min_residual_to_node[static_cast<std::size_t>(u)], max_edge_residual);
+
         // Relaxation: found shorter path to v.
         if (new_cost < dist[v_idx]) {
           dist[v_idx] = new_cost;
+          min_residual_to_node[v_idx] = path_residual;
           pred_lists[v_idx].clear();
           pred_lists[v_idx].push_back({u, std::move(selected_edges)});
-          pq.emplace(new_cost, v);
+          pq.emplace(new_cost, -path_residual, v);  // Negate residual for max-heap behavior
         }
         // Multipath: found equal-cost alternative path to v.
         else if (multipath && new_cost == dist[v_idx]) {
           pred_lists[v_idx].push_back({u, std::move(selected_edges)});
+          // Note: In multipath mode, we don't update min_residual_to_node because
+          // we're collecting all equal-cost paths, not choosing based on residual.
         }
       }
       i = j;  // Advance to next neighbor group
     }
-    if (have_best_dst) { if (pq.empty() || pq.top().first > best_dst_cost) break; }
+    if (have_best_dst) { if (pq.empty() || std::get<0>(pq.top()) > best_dst_cost) break; }
   }
 
   // Convert pred_lists to PredDAG using CSR-like layout.

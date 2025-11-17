@@ -131,7 +131,7 @@ TEST(FlowPolicyCore, Proportional_SingleDemand_MaxFlowCount1_UsesSinglePath) {
   auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
   ExecutionContext ctx(algs, gh);
   FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::Proportional, sel,
-                     /*require_capacity=*/true, /*min_flow_count=*/1, /*max_flow_count=*/1);
+                     /*require_capacity=*/true, /*multipath=*/false, /*min_flow_count=*/1, /*max_flow_count=*/1);
   auto res = policy.place_demand(fg, 0, 2, 0, 2.0);
   EXPECT_NEAR(res.first, 2.0, 1e-9);
   EXPECT_NEAR(res.second, 0.0, 1e-9);
