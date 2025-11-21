@@ -113,7 +113,6 @@ static std::vector<EdgeGroup> build_groups_residual(const StrictMultiDiGraph& g,
   const auto& via     = dag.via_edges;
   const auto N = g.num_nodes();
   // Compute reachability: BFS backward from destination t to identify nodes on SPF DAG.
-  // Python developers: this is like a reverse BFS to find ancestors.
   std::vector<char> reach(static_cast<std::size_t>(N), 0);
   if (t >= 0 && t < N) {
     std::queue<std::int32_t> q; q.push(t); reach[static_cast<std::size_t>(t)] = 1;

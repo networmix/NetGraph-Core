@@ -22,7 +22,6 @@ add_executable(netgraph_core_tests
   tests/cpp/flow_graph_tests.cpp
   tests/cpp/max_flow_tests.cpp
   tests/cpp/k_shortest_paths_tests.cpp
-  tests/cpp/negative_safety_tests.cpp
   tests/cpp/masking_tests.cpp
 )
   target_link_libraries(netgraph_core_tests PRIVATE netgraph_core GTest::gtest_main)

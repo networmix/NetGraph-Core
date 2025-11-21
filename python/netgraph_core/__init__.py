@@ -1,5 +1,12 @@
-# Re-export types from extension
+"""Runtime package surface for :mod:`netgraph_core`.
+
+All public symbols are re-exported from the compiled ``_netgraph_core`` module so
+downstream users import everything from a single place. Typing shims supplied in
+``_docs.py`` keep editors happy without affecting runtime behavior.
+"""
+
 # pyright: reportMissingImports=false
+
 from _netgraph_core import (
     Algorithms,
     Backend,

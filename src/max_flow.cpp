@@ -23,9 +23,6 @@
 
 namespace netgraph::core {
 
-namespace {
-} // namespace
-
 std::pair<Flow, FlowSummary>
 calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
               FlowPlacement placement, bool shortest_path,

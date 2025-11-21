@@ -88,7 +88,6 @@ StrictMultiDiGraph StrictMultiDiGraph::from_arrays(
   g.edges_ = m;
 
   // Build CSR (Compressed Sparse Row) adjacency structure.
-  // CSR is a compact representation for sparse graphs, similar to scipy.sparse.csr_matrix.
   // For each node u, row_offsets_[u]:row_offsets_[u+1] gives the range in col_indices_
   // that stores u's outgoing neighbors, and adj_edge_index_ stores the corresponding EdgeIds.
 

@@ -1,10 +1,4 @@
-/* Shortest paths (Dijkstra) with multipath predecessor DAG support.
- *
- * For Python developers:
- * - std::pair<A, B>: tuple of two elements (like tuple[A, B])
- * - std::optional<T>: nullable value (like T | None)
- * - std::nullopt: None equivalent for std::optional
- */
+/* Shortest paths (Dijkstra) with multipath predecessor DAG support. */
 #pragma once
 
 #include <optional>
@@ -18,8 +12,7 @@
 namespace netgraph::core {
 
 // PredDAG (Predecessor Directed Acyclic Graph): compact representation of all equal-cost
-// shortest paths from a source node. Similar to a defaultdict(list) in Python, but stored
-// in CSR format for efficiency.
+// shortest paths from a source node. Stored in CSR format for efficiency.
 //
 // For each node v, predecessors are stored in parents[parent_offsets[v]:parent_offsets[v+1]]
 // with corresponding EdgeIds in via_edges[parent_offsets[v]:parent_offsets[v+1]].

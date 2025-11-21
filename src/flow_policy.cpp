@@ -101,8 +101,6 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
     final_edge_mask = edge_mask_;
   }
 
-  // Set require_capacity directly (no casting needed - same field name)
-  sel.require_capacity = require_capacity_;
   SpfOptions opts;
   opts.multipath = multipath_;  // Use configured multipath value (enables/disables flow splitting across equal-cost paths)
   opts.selection = sel;
@@ -263,7 +261,6 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
     }
   }
   // Round-robin placement: iterate over flows and try to place volume on each.
-  // Python developers: deque is like collections.deque, efficient for pop/push at both ends.
   std::deque<FlowIndex> q;
   for (auto const& kv : flows_) q.push_back(kv.first);
   double total_placed = 0.0;

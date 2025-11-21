@@ -1,12 +1,4 @@
-/* Core type aliases and helper structs.
- *
- * For Python developers:
- * - NodeId/EdgeId: int32 (matches np.int32)
- * - Cost: int64 (matches np.int64)
- * - Cap/Flow: double (matches np.float64)
- * - std::span<T>: lightweight view over contiguous arrays (like memoryview, no copy)
- * - std::optional<T>: nullable value (like T | None)
- */
+/* Core type aliases and helper structs. */
 #pragma once
 
 #include <cstdint>
@@ -25,7 +17,7 @@ using FlowClass = std::int32_t;  // Flow priority/class bucket
 using FlowId = std::int64_t;     // Unique flow identifier
 
 // FlowIndex uniquely identifies a flow: (src, dst, class, id).
-// Used as a key in unordered_map (like Python dict with custom __hash__).
+// Used as a key in unordered_map.
 struct FlowIndex {
   NodeId src;
   NodeId dst;
@@ -41,7 +33,7 @@ struct FlowIndexHash {
   std::size_t operator()(const FlowIndex& k) const noexcept {
     std::size_t h = 0;
     auto combine = [&h](std::size_t v) {
-      // Hash combine formula (similar to Python's hash tuple)
+      // Hash combine formula
       h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
     };
     combine(std::hash<NodeId>{}(k.src));

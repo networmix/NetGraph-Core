@@ -1,11 +1,4 @@
-/* Immutable directed multigraph with CSR and reverse CSR adjacency.
- *
- * For Python developers:
- * - CSR (Compressed Sparse Row): efficient sparse graph format, like scipy.sparse.csr_matrix
- * - std::span<const T>: read-only view over arrays (like memoryview, no copy)
- * - [[nodiscard]]: C++ attribute meaning "don't ignore return value" (like @must_use)
- * - noexcept: function never throws exceptions (optimization hint)
- */
+/* Immutable directed multigraph with CSR and reverse CSR adjacency. */
 #pragma once
 
 #include <cstdint>
@@ -17,7 +10,7 @@
 namespace netgraph::core {
 
 // Edge identifiers:
-// - EdgeId: index into the graph's internal edge arrays (0-based, like Python list index).
+// - EdgeId: index into the graph's internal edge arrays (0-based).
 //   Edges are reordered during construction by (cost, src, dst) for deterministic traversal.
 // - External edge IDs (ext_edge_ids): optional user-provided identifiers (e.g., your database IDs)
 //   that are reordered alongside edges, allowing results to reference edges using stable,
