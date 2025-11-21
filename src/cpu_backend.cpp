@@ -97,6 +97,21 @@ public:
                                           opts.with_edge_flows, opts.with_reachable, opts.with_residuals,
                                           node_masks, edge_masks);
   }
+
+  std::vector<std::pair<EdgeId, Flow>> sensitivity_analysis(
+      const GraphHandle& gh, NodeId src, NodeId dst, const MaxFlowOptions& opts) override {
+    const StrictMultiDiGraph& g = *gh.graph;
+    // Validate mask lengths strictly.
+    if (!opts.node_mask.empty() && opts.node_mask.size() != static_cast<std::size_t>(g.num_nodes())) {
+      throw std::invalid_argument("CpuBackend::sensitivity_analysis: node_mask length mismatch");
+    }
+    if (!opts.edge_mask.empty() && opts.edge_mask.size() != static_cast<std::size_t>(g.num_edges())) {
+      throw std::invalid_argument("CpuBackend::sensitivity_analysis: edge_mask length mismatch");
+    }
+    return netgraph::core::sensitivity_analysis(g, src, dst,
+                                                opts.placement, opts.require_capacity,
+                                                opts.node_mask, opts.edge_mask);
+  }
 };
 } // namespace
 

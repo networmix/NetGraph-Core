@@ -47,4 +47,10 @@ batch_max_flow(const StrictMultiDiGraph& g,
                const std::vector<std::span<const bool>>& node_masks = {},
                const std::vector<std::span<const bool>>& edge_masks = {});
 
+[[nodiscard]] std::vector<std::pair<EdgeId, Flow>>
+sensitivity_analysis(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
+                     FlowPlacement placement, bool require_capacity,
+                     std::span<const bool> node_mask = {},
+                     std::span<const bool> edge_mask = {});
+
 } // namespace netgraph::core

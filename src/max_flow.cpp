@@ -201,4 +201,78 @@ batch_max_flow(const StrictMultiDiGraph& g,
   }
   return out;
 }
+
+std::vector<std::pair<EdgeId, Flow>>
+sensitivity_analysis(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
+                     FlowPlacement placement, bool require_capacity,
+                     std::span<const bool> node_mask,
+                     std::span<const bool> edge_mask) {
+  // Step 1: Baseline analysis to identify saturated edges
+  auto [baseline_flow, summary] = calc_max_flow(
+      g, src, dst, placement,
+      /*shortest_path=*/false,
+      require_capacity,
+      /*with_edge_flows=*/false,
+      /*with_reachable=*/false,
+      /*with_residuals=*/true,
+      node_mask, edge_mask);
+
+  if (baseline_flow < kMinFlow || summary.residual_capacity.empty()) {
+    return {};
+  }
+
+  std::vector<EdgeId> candidates;
+  // Identify saturated edges (residual <= kMinCap)
+  // Only consider edges that are not already masked out
+  for (EdgeId eid = 0; eid < static_cast<EdgeId>(summary.residual_capacity.size()); ++eid) {
+    if (!edge_mask.empty() && !edge_mask[eid]) continue; // Already masked
+    if (summary.residual_capacity[eid] <= kMinCap) {
+      candidates.push_back(eid);
+    }
+  }
+
+  if (candidates.empty()) {
+    return {};
+  }
+
+  // Prepare mutable mask buffer
+  const auto N = static_cast<std::size_t>(g.num_edges());
+  std::unique_ptr<bool[]> test_mask_buf(new bool[N]);
+  if (edge_mask.empty()) {
+    std::fill(test_mask_buf.get(), test_mask_buf.get() + N, true);
+  } else {
+    std::copy(edge_mask.begin(), edge_mask.end(), test_mask_buf.get());
+  }
+  // View for passing to calc_max_flow
+  std::span<const bool> test_mask_span(test_mask_buf.get(), N);
+
+  std::vector<std::pair<EdgeId, Flow>> results;
+  results.reserve(candidates.size());
+
+  // Step 2: Iterate candidates
+  for (EdgeId eid : candidates) {
+    // Mask out the edge
+    test_mask_buf[eid] = false;
+
+    auto [new_flow, _] = calc_max_flow(
+        g, src, dst, placement,
+        /*shortest_path=*/false,
+        require_capacity,
+        /*with_edge_flows=*/false,
+        /*with_reachable=*/false,
+        /*with_residuals=*/false,
+        node_mask, test_mask_span);
+
+    double delta = baseline_flow - new_flow;
+    if (delta > kMinFlow) {
+      results.emplace_back(eid, delta);
+    }
+
+    // Restore mask
+    test_mask_buf[eid] = true;
+  }
+
+  return results;
+}
+
 } // namespace netgraph::core

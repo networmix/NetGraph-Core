@@ -44,6 +44,11 @@ public:
     return backend_->batch_max_flow(gh, pairs, opts, node_masks, edge_masks);
   }
 
+  [[nodiscard]] std::vector<std::pair<EdgeId, Flow>>
+  sensitivity_analysis(const GraphHandle& gh, NodeId src, NodeId dst, const MaxFlowOptions& opts) const {
+    return backend_->sensitivity_analysis(gh, src, dst, opts);
+  }
+
 private:
   BackendPtr backend_;
 };

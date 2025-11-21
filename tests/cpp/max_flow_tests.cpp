@@ -1081,34 +1081,89 @@ TEST(MaxFlow, ShortestPath_MustSaturateAllEqualCostPaths) {
 }
 
 //=============================================================================
-// TEST MATRIX SUMMARY
+// SECTION 11: SENSITIVITY ANALYSIS
 //=============================================================================
-//
-// Coverage Matrix (Proportional placement with shortest_path=True):
-//
-// | Path Structure            | Equal Cap | Asym Cap | Zero Cap | Validated |
-// |---------------------------|-----------|----------|----------|-----------|
-// | Single path               |     ✓     |    ✓     |    -     |     ✓     |
-// | 2 disjoint equal-cost     |     ✓     |    ✓     |    ✓     |     ✓     |
-// | 3 disjoint equal-cost     |     ✓     |    -     |    -     |     ✓     |
-// | 4 disjoint equal-cost     |     ✓     |    -     |    -     |     ✓     |
-// | 10 disjoint equal-cost    |     ✓     |    -     |    -     |     ✓     |
-// | 2 cost tiers              |     ✓     |    -     |    -     |     ✓     |
-// | 3 cost tiers              |     ✓     |    -     |    -     |     ✓     |
-// | Grid topology             |     ✓     |    -     |    -     |     ✓     |
-// | Shared bottleneck         |     ✓     |    -     |    -     |     ✓     |
-// | 3-tier Clos fabric        |     ✓     |    -     |    -     |     ✓     |
-// | Triangle (combine mode)   |     ✓     |    -     |    -     |     ✓     |
-// | Simple parallel paths     |     ✓     |    -     |    -     |     ✓     |
-//
-// Additional validation dimensions:
-// - Placement modes: Proportional ✓, EqualBalanced ✓
-// - shortest_path: True ✓, False ✓
-// - Optional features: edge flows ✓, residuals ✓, reachable ✓, min-cut ✓
-// - Masks: node mask ✓, edge mask ✓
-// - Batch operations: ✓
-// - Real-world topologies: Clos ✓, Triangle ✓, Parallel paths ✓
-//
-// TOTAL TEST COUNT: 45 tests
-// COVERAGE: All critical parameter combinations + NetGraph integration validated
-//=============================================================================
+
+TEST(MaxFlow, Sensitivity_SinglePath) {
+  auto g = make_line_graph(3);
+  auto be = make_cpu_backend();
+  Algorithms algs(be);
+  auto gh = algs.build_graph(g);
+
+  MaxFlowOptions opts;
+  opts.placement = FlowPlacement::Proportional;
+
+  auto results = algs.sensitivity_analysis(gh, 0, 2, opts);
+
+  // Path: 0->1->2. Both edges saturated and critical.
+  // Capacity is 1.0. Flow is 1.0.
+  // Removing any edge drops flow to 0. Delta = 1.0.
+  EXPECT_EQ(results.size(), 2u);
+  for (const auto& p : results) {
+    EXPECT_NEAR(p.second, 1.0, 1e-9);
+  }
+}
+
+TEST(MaxFlow, Sensitivity_TwoParallelPaths) {
+  // Two paths, capacity 10 each. Total 20.
+  auto g = make_n_disjoint_paths(2, 10.0);
+  auto be = make_cpu_backend();
+  Algorithms algs(be);
+  auto gh = algs.build_graph(g);
+
+  MaxFlowOptions opts;
+  opts.placement = FlowPlacement::Proportional;
+
+  auto results = algs.sensitivity_analysis(gh, 0, 3, opts);
+
+  // All 4 edges are saturated.
+  // Removing any edge kills one path (flow 20 -> 10). Delta = 10.
+  EXPECT_EQ(results.size(), 4u);
+  for (const auto& p : results) {
+    EXPECT_NEAR(p.second, 10.0, 1e-9);
+  }
+}
+
+TEST(MaxFlow, Sensitivity_PartialSaturation) {
+  // Topology: S->A (cap 10), S->B (cap 5)
+  //           A->T (cap 5),  B->T (cap 10)
+  // Flow: S->A->T limited by A->T (5). S->B->T limited by S->B (5). Total 10.
+  // Saturated: A->T (edge 2), S->B (edge 1).
+  // Non-Saturated: S->A (edge 0), B->T (edge 3).
+
+  std::int32_t src[4] = {0, 0, 1, 2};
+  std::int32_t dst[4] = {1, 2, 3, 3};
+  double cap[4] = {10.0, 5.0, 5.0, 10.0};
+  std::int64_t cost[4] = {1, 1, 1, 1};
+
+  auto g = StrictMultiDiGraph::from_arrays(4,
+    std::span(src, 4), std::span(dst, 4),
+    std::span(cap, 4), std::span(cost, 4));
+
+  auto be = make_cpu_backend();
+  Algorithms algs(be);
+  auto gh = algs.build_graph(g);
+
+  MaxFlowOptions opts;
+  opts.placement = FlowPlacement::Proportional;
+  opts.shortest_path = false;
+
+  auto results = algs.sensitivity_analysis(gh, 0, 3, opts);
+
+  // Should only report saturated edges: S->B and A->T.
+  // (We assume edge indices follow insertion order: 0, 1, 2, 3)
+  // S->B is index 1. A->T is index 2.
+
+  // Check results
+  int count = 0;
+  for (const auto& p : results) {
+    if (p.first == 1 || p.first == 2) {
+      EXPECT_NEAR(p.second, 5.0, 1e-9);
+      count++;
+    } else {
+      // If non-saturated edges are reported (which they shouldn't be based on logic), fail.
+      FAIL() << "Reported sensitivity for non-saturated edge " << p.first;
+    }
+  }
+  EXPECT_EQ(count, 2);
+}

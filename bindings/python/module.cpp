@@ -300,7 +300,23 @@ PYBIND11_MODULE(_netgraph_core, m) {
         parse_mask_list(edge_masks, static_cast<std::size_t>(pg.num_edges), "edge_masks", edge_bufs, edge_spans);
         MaxFlowOptions o; o.placement = placement; o.shortest_path = shortest_path; o.require_capacity = require_capacity; o.with_edge_flows = with_edge_flows; o.with_reachable = with_reachable; o.with_residuals = with_residuals;
         py::gil_scoped_release rel; auto out = algs.batch_max_flow(pg.handle, pp, o, node_spans, edge_spans); py::gil_scoped_acquire acq; return out;
-      }, py::arg("graph"), py::arg("pairs"), py::kw_only(), py::arg("node_masks") = py::none(), py::arg("edge_masks") = py::none(), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false, py::arg("require_capacity") = true, py::arg("with_edge_flows") = false, py::arg("with_reachable") = false, py::arg("with_residuals") = false);
+      }, py::arg("graph"), py::arg("pairs"), py::kw_only(), py::arg("node_masks") = py::none(), py::arg("edge_masks") = py::none(), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false, py::arg("require_capacity") = true, py::arg("with_edge_flows") = false, py::arg("with_reachable") = false, py::arg("with_residuals") = false)
+      .def("sensitivity_analysis", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src, std::int32_t dst,
+                                      FlowPlacement placement, bool require_capacity,
+                                      py::object node_mask, py::object edge_mask){
+        if (src < 0 || src >= pg.num_nodes || dst < 0 || dst >= pg.num_nodes) throw py::value_error("src/dst out of range");
+        MaxFlowOptions o; o.placement = placement; o.require_capacity = require_capacity;
+        auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(pg.num_nodes), "node_mask");
+        auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(pg.num_edges), "edge_mask");
+        o.node_mask = node_bs.view; o.edge_mask = edge_bs.view;
+        py::gil_scoped_release rel; auto res = algs.sensitivity_analysis(pg.handle, src, dst, o); py::gil_scoped_acquire acq;
+        // Return as list of tuples (EdgeId, FlowDelta)
+        py::list out;
+        for (auto const& pr : res) {
+          out.append(py::make_tuple(pr.first, pr.second));
+        }
+        return out;
+      }, py::arg("graph"), py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("require_capacity") = true, py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none());
 
   py::class_<PredDAG>(m, "PredDAG")
       .def_property_readonly("parent_offsets", [](const PredDAG& d){

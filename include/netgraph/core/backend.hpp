@@ -57,6 +57,9 @@ public:
       const MaxFlowOptions& opts,
       const std::vector<std::span<const bool>>& node_masks = {},
       const std::vector<std::span<const bool>>& edge_masks = {}) = 0;
+
+  [[nodiscard]] virtual std::vector<std::pair<EdgeId, Flow>> sensitivity_analysis(
+      const GraphHandle& gh, NodeId src, NodeId dst, const MaxFlowOptions& opts) = 0;
 };
 
 using BackendPtr = std::shared_ptr<Backend>;
