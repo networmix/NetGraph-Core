@@ -195,6 +195,7 @@ TEST(FlowPolicyCore, DiminishingReturnsCutoff) {
   ExecutionContext ctx(algs, gh);
   FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
                      /*require_capacity=*/true,
+                     /*multipath=*/true,
                      /*min_flow_count=*/1, /*max_flow_count=*/1000000,
                      /*max_path_cost=*/std::nullopt, /*max_path_cost_factor=*/std::nullopt,
                      /*shortest_path=*/false,
