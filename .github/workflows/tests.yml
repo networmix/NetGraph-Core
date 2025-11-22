@@ -4,6 +4,7 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -13,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-13]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,11 +49,3 @@ jobs:
             build/coverage/coverage-python.xml
             build/coverage/coverage-cpp.xml
             build/coverage/coverage-combined.html
-      # - name: Upload to Codecov
-      #   uses: codecov/codecov-action@v4
-      #   with:
-      #     files: |
-      #       coverage-python.xml
-      #       coverage-cpp.xml
-      #     token: ${{ secrets.CODECOV_TOKEN }}
-      #     fail_ci_if_error: false

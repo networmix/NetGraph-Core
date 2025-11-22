@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: Wheel (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-13]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build wheels using cibuildwheel
+      # ENV variables control the build (architectures, python versions)
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          # Build for Python 3.9+
+          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
+          # Skip PyPy and musllinux for now (unless desired)
+          CIBW_SKIP: "pp* *-musllinux_*"
+
+          # macOS: Build Universal2 wheels on Intel runner (macos-13)
+          CIBW_ARCHS_MACOS: "universal2"
+          CIBW_TEST_COMMAND: "python -c \"import netgraph_core; print(netgraph_core.__version__)\""
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cibw-wheels-${{ matrix.os }}-${{ strategy.job-index }}
+          path: ./wheelhouse/*.whl
+
+  build_sdist:
+    name: Build SDist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build SDist
+        run: pipx run build --sdist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cibw-sdist
+          path: dist/*.tar.gz
+
+  publish_pypi:
+    name: Publish to PyPI
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # Required for Trusted Publishing (OIDC)
+
+    # Only publish on tag pushes
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cibw-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
