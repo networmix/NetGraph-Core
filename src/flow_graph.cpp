@@ -1,7 +1,7 @@
 /*
   FlowGraph — authoritative flow ledger layered over FlowState.
 
-  Tracks per-flow edge deltas to support exact removal and path inspection,
+  Tracks per-flow edge allocations to support exact removal and path inspection,
   while delegating residual and aggregate flow management to FlowState.
 */
 #include "netgraph/core/flow_graph.hpp"
@@ -13,11 +13,6 @@ namespace netgraph::core {
 
 FlowGraph::FlowGraph(const StrictMultiDiGraph& g)
   : g_(&g), fs_(g) {
-  // Precompute EdgeId -> (src,dst) directly from edge views
-  auto sv = g_->edge_src_view();
-  auto dv = g_->edge_dst_view();
-  src_of_.assign(sv.begin(), sv.end());
-  dst_of_.assign(dv.begin(), dv.end());
 }
 
 Flow FlowGraph::place(const FlowIndex& idx, NodeId src, NodeId dst,
@@ -31,7 +26,7 @@ Flow FlowGraph::place(const FlowIndex& idx, NodeId src, NodeId dst,
   auto& bucket = ledger_[idx];
 
   // Delegate placement to FlowState, which returns the actual placed flow and
-  // populates bucket with per-edge deltas (EdgeId, Flow) pairs.
+  // populates bucket with per-edge allocations (EdgeId, Flow) pairs.
   Flow placed = fs_.place_on_dag(src, dst, dag, amount, placement, &bucket);
 
   // Coalesce and filter: merge duplicate EdgeIds. Keep any positive totals
@@ -63,7 +58,7 @@ void FlowGraph::remove(const FlowIndex& idx) {
   auto it = ledger_.find(idx);
   if (it == ledger_.end()) return;  // flow not found
   const auto& deltas = it->second;
-  // Revert this flow's deltas from the FlowState by subtracting them.
+  // Revert this flow's allocations from the FlowState by subtracting them.
   if (!deltas.empty()) {
     fs_.apply_deltas(deltas, /*add=*/false);  // false = subtract
   }
@@ -93,16 +88,16 @@ std::vector<EdgeId> FlowGraph::get_flow_path(const FlowIndex& idx) const {
   if (it == ledger_.end()) return {};
   const auto& deltas = it->second;
 
-  // Reconstruct a simple path from the flow's edge deltas.
+  // Reconstruct a simple path from the flow's edge allocations.
   // This only succeeds if the flow forms a single path (not a DAG).
 
   // Step 1: Build adjacency map from edges with positive flow.
   std::unordered_map<NodeId, std::vector<std::pair<NodeId, EdgeId>>> adj;
-  // Build adjacency list from deltas using cached src/dst.
+  // Build adjacency list from allocations using cached src/dst.
   for (auto const& pr : deltas) {
     if (pr.second < kMinFlow) continue;
     auto eid = static_cast<std::size_t>(pr.first);
-    NodeId u = src_of_[eid]; NodeId v = dst_of_[eid];
+    NodeId u = g_->edge_src_view()[eid]; NodeId v = g_->edge_dst_view()[eid];
     adj[u].emplace_back(v, pr.first);
   }
 

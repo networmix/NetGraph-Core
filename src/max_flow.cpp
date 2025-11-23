@@ -4,6 +4,9 @@
   Uses FlowState to track residuals and place flow along SPF predecessor DAGs.
   Accumulates total flow, optional per-edge flows, cost distribution, and
   derives a min-cut from the final residual graph.
+
+  Algorithm: Iterative augmentation using Successive Shortest Path on residual graphs,
+  pushing flow across full ECMP/WCMP DAGs at each step.
 */
 #include "netgraph/core/max_flow.hpp"
 #include "netgraph/core/shortest_paths.hpp"
@@ -104,8 +107,8 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
     summary.flows.reserve(cost_dist.size());
     for (auto const& pr : cost_dist) { summary.costs.push_back(pr.first); summary.flows.push_back(pr.second); }
   }
-  // Min-cut extraction (proportional/equal-balanced): compute reachability in final residual graph
-  // Residual graph has forward residual = residual[e], reverse residual = flow[e] (capacity - residual)
+  // Min-Cut: Set of edges crossing from the reachable set (S) to the unreachable set (T).
+  // Computed by finding all nodes reachable from src in the residual graph.
   if (total >= kMinFlow) {
     auto mc = fs.compute_min_cut(src, node_mask, edge_mask);
     summary.min_cut = mc;

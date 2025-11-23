@@ -1,11 +1,5 @@
 [build-system]
-requires = [
-    "scikit-build-core>=0.10",
-    "pybind11>=3",
-    "numpy>=1.22",
-    "cmake>=3.23",
-    "ninja",
-]
+requires = ["scikit-build-core>=0.10", "pybind11>=3", "numpy>=1.22"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -36,12 +30,6 @@ classifiers = [
 ]
 dependencies = ["numpy>=1.22"]
 
-[tool.setuptools]
-packages = []
-
-[tool.setuptools.package-data]
-"netgraph_core" = ["py.typed"]
-
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
@@ -61,8 +49,7 @@ Homepage = "https://github.com/networmix/NetGraph-Core"
 [tool.scikit-build]
 wheel.expand-macos-universal-tags = true
 build-dir = "build/{wheel_tag}"
-cmake.minimum-version = "3.23"
-
+cmake.version = ">=3.23"
 # Include Python sources from the "python/" directory
 wheel.packages = ["python/netgraph_core"]
 
@@ -71,9 +58,7 @@ wheel.packages = ["python/netgraph_core"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
-markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-]
+markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 
 [tool.ruff]
 line-length = 88

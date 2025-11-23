@@ -1,14 +1,56 @@
 # NetGraph-Core
 
-C++ implementation of graph algorithms for network flow analysis and traffic engineering with Python bindings.
+C++ graph engine for network flow analysis, traffic engineering simulation, and capacity planning.
 
-## Features
+## Overview
 
-- **Algorithms:** Shortest paths (Dijkstra), K-shortest paths (Yen), max-flow (successive shortest paths)
-- **Graph representation:** Immutable directed multigraph with CSR adjacency
-- **Flow placement:** Tunable policies (proportional to capacity, equal-balanced across paths)
-- **Python bindings:** NumPy integration, GIL released during computation
-- **Deterministic:** Reproducible edge ordering by (cost, src, dst)
+NetGraph-Core provides a specialized graph implementation for networking problems. Key design priorities:
+
+- **Determinism**: Guaranteed reproducible edge ordering by (cost, src, dst).
+- **Flow Modeling**: Native support for multi-commodity flow state, residual tracking, and ECMP/WCMP placement.
+- **Performance**: Immutable CSR (Compressed Sparse Row) adjacency and zero-copy NumPy views.
+
+## Core Features
+
+### 1. Graph Representations
+
+- **`StrictMultiDiGraph`**: Immutable directed multigraph using CSR adjacency. Supports parallel edges (multi-graph), essential for network topologies.
+- **`FlowGraph`**: Topology overlay managing mutable flow state, per-flow edge allocations, and residual capacities.
+
+### 2. Network Algorithms
+
+- **Shortest Paths (SPF)**:
+  - Modified Dijkstra returns a **Predecessor DAG** to capture all equal-cost paths.
+  - Supports **ECMP** (Equal-Cost Multi-Path) routing.
+  - Features **node/edge masking** and **residual-aware tie-breaking**.
+
+- **K-Shortest Paths (KSP)**:
+  - Yen's algorithm returning DAG-wrapped paths.
+  - Configurable constraints on cost factors (e.g., paths within 1.5x of optimal).
+
+- **Max-Flow**:
+  - **Algorithm**: Iterative augmentation using Successive Shortest Path on residual graphs, pushing flow across full ECMP/WCMP DAGs at each step.
+  - **Traffic Engineering (TE) Mode**: Routing adapts to residual capacity (progressive fill).
+  - **IP Routing Mode**: Cost-only routing (ECMP/WCMP) ignoring capacity constraints.
+
+- **Analysis**:
+  - **Sensitivity Analysis**: Identifies bottleneck edges where capacity relaxation increases total flow.
+  - **Min-Cut**: Computes minimum cuts on residual graphs.
+
+### 3. Flow Policy Engine
+
+Unified configuration object (`FlowPolicy`) that models diverse routing behaviors:
+
+- **Modeling**: Unified configuration for **IP Routing** (static costs) and **Traffic Engineering** (dynamic residuals).
+- **Placement Strategies**:
+  - `EqualBalanced`: **ECMP** (equal splitting) - equal distribution across next-hops and parallel edges.
+  - `Proportional`: **WCMP** (weighted splitting) - distribution proportional to residual capacity.
+- **Lifecycle Management**: Handles demand placement, re-optimization of existing flows, and constraints (path cost, stretch factor, flow counts).
+
+### 4. Python Integration
+
+- **Zero-Copy**: Exposes C++ internal buffers to Python as read-only NumPy arrays (float64/int64).
+- **Concurrency**: Releases the Python GIL during graph algorithms to enable threading.
 
 ## Installation
 

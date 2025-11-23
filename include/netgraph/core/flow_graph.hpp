@@ -1,4 +1,4 @@
-/* FlowGraph manages per-flow edge deltas over FlowState. */
+/* FlowGraph manages per-flow edge allocations over FlowState. */
 #pragma once
 
 #include <cstdint>
@@ -14,7 +14,7 @@
 
 namespace netgraph::core {
 
-// FlowGraph manages per-flow edge deltas over a StrictMultiDiGraph.
+// FlowGraph manages per-flow edge allocations over a StrictMultiDiGraph.
 // Composes FlowState for residual/aggregate edge flow management.
 class FlowGraph {
 public:
@@ -29,12 +29,12 @@ public:
   // Access underlying graph (const)
   [[nodiscard]] const StrictMultiDiGraph& graph() const noexcept { return *g_; }
 
-// Apply placement and record per-edge deltas for this flow. Returns placed amount.
+// Apply placement and record per-edge allocations for this flow. Returns placed amount.
   [[nodiscard]] Flow place(const FlowIndex& idx, NodeId src, NodeId dst,
              const PredDAG& dag, Flow amount,
              FlowPlacement placement);
 
-  // Remove a specific flow, reverting its edge deltas from the ledger.
+  // Remove a specific flow, reverting its edge allocations from the ledger.
   void remove(const FlowIndex& idx);
 
   // Remove all flows belonging to a given flowClass.
@@ -55,9 +55,6 @@ private:
   FlowState fs_;
   // Per-flow ledger: stores only edges with non-zero flow
   std::unordered_map<FlowIndex, std::vector<std::pair<EdgeId, Flow>>, FlowIndexHash> ledger_;
-  // Cached EdgeId -> (src,dst) maps for faster path reconstruction
-  std::vector<NodeId> src_of_;
-  std::vector<NodeId> dst_of_;
 };
 
 } // namespace netgraph::core

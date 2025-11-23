@@ -55,7 +55,7 @@ public:
                     const PredDAG& dag,
                     Flow requested_flow,
                     FlowPlacement placement,
-                    // Optional trace collector to record per-edge deltas applied by this call
+                    // Optional trace collector to record per-edge allocations applied by this call
                     std::vector<std::pair<EdgeId, Flow>>* trace = nullptr);
 
   // Convenience: run repeated placements until exhaustion (or single tier when
@@ -76,16 +76,17 @@ public:
                       std::span<const bool> node_mask = {},
                       std::span<const bool> edge_mask = {});
 
-  // Compute min-cut with respect to current residual state, starting reachability
-  // from source s on the residual graph (forward arcs: residual>MIN; reverse arcs:
-  // positive flow). Honors optional masks.
+  // Compute min-cut (edges crossing from reachable set S to unreachable set T)
+  // based on reachability in the current residual graph.
+  // Reachability starts from source s; forward arcs allowed if residual > kMinCap,
+  // reverse arcs allowed if flow > kMinFlow.
   [[nodiscard]] MinCut compute_min_cut(NodeId src,
                          std::span<const bool> node_mask = {},
                          std::span<const bool> edge_mask = {}) const;
 
-  // Apply or revert a set of edge flow deltas directly.
+  // Apply or revert a set of edge flow allocations directly.
   // When add==true, treats each (eid, flow) as additional placed flow on the edge.
-  // When add==false, removes placed flow (reverts deltas), clamping to [0, capacity].
+  // When add==false, removes placed flow (reverts allocations), clamping to [0, capacity].
   void apply_deltas(std::span<const std::pair<EdgeId, Flow>> deltas, bool add) noexcept;
 
 private:
