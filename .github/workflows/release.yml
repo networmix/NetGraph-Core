@@ -33,8 +33,8 @@ jobs:
 
           # macOS: Build Universal2 wheels on Intel runner (macos-13)
           CIBW_ARCHS_MACOS: "universal2"
-          CIBW_TEST_COMMAND: "python -c \"import netgraph_core; print(netgraph_core.__version__)\""
-          CIBW_BEFORE_ALL_LINUX: "yum install -y libatomic || apt-get update && apt-get install -y libatomic1 || apk add libatomic"
+          CIBW_TEST_COMMAND: 'python -c "import netgraph_core; print(netgraph_core.__version__)"'
+          CIBW_BEFORE_ALL_LINUX: "yum install -y libatomic || (apt-get update && apt-get install -y libatomic1) || apk add libatomic"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write  # Required for Trusted Publishing (OIDC)
+      id-token: write # Required for Trusted Publishing (OIDC)
 
     # Only publish on tag pushes
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
