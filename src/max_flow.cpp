@@ -205,13 +205,15 @@ batch_max_flow(const StrictMultiDiGraph& g,
 
 std::vector<std::pair<EdgeId, Flow>>
 sensitivity_analysis(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
-                     FlowPlacement placement, bool require_capacity,
+                     FlowPlacement placement, bool shortest_path,
+                     bool require_capacity,
                      std::span<const bool> node_mask,
                      std::span<const bool> edge_mask) {
   // Step 1: Baseline analysis to identify saturated edges
+  // Uses shortest_path mode to match the routing semantics being analyzed.
   auto [baseline_flow, summary] = calc_max_flow(
       g, src, dst, placement,
-      /*shortest_path=*/false,
+      shortest_path,
       require_capacity,
       /*with_edge_flows=*/false,
       /*with_reachable=*/false,
@@ -250,14 +252,14 @@ sensitivity_analysis(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
   std::vector<std::pair<EdgeId, Flow>> results;
   results.reserve(candidates.size());
 
-  // Step 2: Iterate candidates
+  // Step 2: Iterate candidates, testing flow reduction when each is removed
   for (EdgeId eid : candidates) {
     // Mask out the edge
     test_mask_buf[eid] = false;
 
     auto [new_flow, _] = calc_max_flow(
         g, src, dst, placement,
-        /*shortest_path=*/false,
+        shortest_path,
         require_capacity,
         /*with_edge_flows=*/false,
         /*with_reachable=*/false,

@@ -109,7 +109,8 @@ public:
       throw std::invalid_argument("CpuBackend::sensitivity_analysis: edge_mask length mismatch");
     }
     return netgraph::core::sensitivity_analysis(g, src, dst,
-                                                opts.placement, opts.require_capacity,
+                                                opts.placement, opts.shortest_path,
+                                                opts.require_capacity,
                                                 opts.node_mask, opts.edge_mask);
   }
 };

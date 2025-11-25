@@ -1167,3 +1167,92 @@ TEST(MaxFlow, Sensitivity_PartialSaturation) {
   }
   EXPECT_EQ(count, 2);
 }
+
+TEST(MaxFlow, Sensitivity_ShortestPathVsMaxFlow) {
+  // Tests that shortest_path mode produces different sensitivity results
+  // than full max-flow mode when there are paths of different costs.
+  //
+  // Topology: S(0) -> A(1) -> T(2) [cost 1+1=2, cap 10 each]
+  //           S(0) -> B(3) -> T(2) [cost 2+2=4, cap 5 each]
+  //
+  // With shortest_path=false (full max-flow):
+  //   - Uses both paths: S->A->T (10) + S->B->T (5) = 15 total
+  //   - All 4 edges are saturated and critical
+  //
+  // With shortest_path=true (single-pass, IP/IGP mode):
+  //   - Only uses cheapest path: S->A->T (10)
+  //   - Edges 2,3 (S->B->T path) are NOT used, so NOT critical
+
+  std::int32_t src[4] = {0, 1, 0, 3};
+  std::int32_t dst[4] = {1, 2, 3, 2};
+  double cap[4] = {10.0, 10.0, 5.0, 5.0};
+  std::int64_t cost[4] = {1, 1, 2, 2};  // S->A->T costs 2, S->B->T costs 4
+
+  auto g = StrictMultiDiGraph::from_arrays(4,
+    std::span(src, 4), std::span(dst, 4),
+    std::span(cap, 4), std::span(cost, 4));
+
+  auto be = make_cpu_backend();
+  Algorithms algs(be);
+  auto gh = algs.build_graph(g);
+
+  // Step 1: Verify baseline flow values with max_flow
+  // This validates the routing semantics before testing sensitivity
+  {
+    MaxFlowOptions opts;
+    opts.placement = FlowPlacement::Proportional;
+    opts.shortest_path = false;
+    auto [flow_full, _] = algs.max_flow(gh, 0, 2, opts);
+    EXPECT_NEAR(flow_full, 15.0, 1e-9) << "Full max-flow should be 15";
+  }
+  {
+    MaxFlowOptions opts;
+    opts.placement = FlowPlacement::Proportional;
+    opts.shortest_path = true;
+    auto [flow_sp, _] = algs.max_flow(gh, 0, 2, opts);
+    EXPECT_NEAR(flow_sp, 10.0, 1e-9) << "Shortest-path flow should be 10";
+  }
+
+  // Step 2: Test sensitivity with shortest_path=false (full max-flow)
+  {
+    MaxFlowOptions opts;
+    opts.placement = FlowPlacement::Proportional;
+    opts.shortest_path = false;
+
+    auto results = algs.sensitivity_analysis(gh, 0, 2, opts);
+
+    // All 4 edges should be saturated and critical
+    EXPECT_EQ(results.size(), 4u) << "Full max-flow should report all 4 edges as critical";
+
+    // Edges 0,1 (S->A->T path) have delta 10 when removed
+    // Edges 2,3 (S->B->T path) have delta 5 when removed
+    for (const auto& p : results) {
+      if (p.first == 0 || p.first == 1) {
+        EXPECT_NEAR(p.second, 10.0, 1e-9);
+      } else {
+        EXPECT_NEAR(p.second, 5.0, 1e-9);
+      }
+    }
+  }
+
+  // Step 3: Test sensitivity with shortest_path=true (IP/IGP mode)
+  {
+    MaxFlowOptions opts;
+    opts.placement = FlowPlacement::Proportional;
+    opts.shortest_path = true;
+
+    auto results = algs.sensitivity_analysis(gh, 0, 2, opts);
+
+    // Only edges 0,1 (S->A->T path) should be critical
+    // Edges 2,3 (S->B->T path) are not used under shortest-path routing
+    EXPECT_EQ(results.size(), 2u) << "Shortest-path mode should only report 2 edges as critical";
+
+    for (const auto& p : results) {
+      EXPECT_TRUE(p.first == 0 || p.first == 1)
+          << "Edge " << p.first << " should not be critical in shortest-path mode";
+      // Baseline=10, removing either S->A or A->T forces traffic to S->B->T (cap 5)
+      // Delta = 10 - 5 = 5
+      EXPECT_NEAR(p.second, 5.0, 1e-9);
+    }
+  }
+}

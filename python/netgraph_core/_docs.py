@@ -557,3 +557,46 @@ class Algorithms:
             List of FlowSummary objects, one per pair.
         """
         ...
+
+    def sensitivity_analysis(
+        self,
+        graph: "Graph",
+        src: int,
+        dst: int,
+        *,
+        flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
+        shortest_path: bool = False,
+        require_capacity: bool = True,
+        node_mask: Optional["np.ndarray"] = None,
+        edge_mask: Optional["np.ndarray"] = None,
+    ) -> list[tuple[int, float]]:
+        """Sensitivity analysis to identify critical edges that constrain flow.
+
+        Computes baseline flow, then tests removing each saturated edge to
+        measure how much the total flow would be reduced.
+
+        The `shortest_path` parameter controls the routing semantics:
+
+        - shortest_path=False (default): Full max-flow analysis (SDN/TE mode).
+          Identifies edges critical for achieving maximum possible flow.
+
+        - shortest_path=True: Shortest-path-only analysis (IP/IGP mode).
+          Identifies edges critical for flow under ECMP routing. Edges on
+          unused longer paths are not reported as critical.
+
+        Args:
+            graph: Graph handle
+            src: Source node
+            dst: Destination node
+            flow_placement: Flow placement strategy
+            shortest_path: If True, use single-pass shortest-path flow (IP/IGP).
+                          If False, use full iterative max-flow (SDN/TE).
+            require_capacity: If True, exclude saturated edges from routing.
+            node_mask: Optional 1-D bool mask. **Copied for thread safety.**
+            edge_mask: Optional 1-D bool mask. **Copied for thread safety.**
+
+        Returns:
+            List of (edge_id, flow_delta) tuples. Each edge_id is an edge
+            whose removal would reduce total flow by flow_delta.
+        """
+        ...

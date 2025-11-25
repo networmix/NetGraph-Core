@@ -47,9 +47,26 @@ batch_max_flow(const StrictMultiDiGraph& g,
                const std::vector<std::span<const bool>>& node_masks = {},
                const std::vector<std::span<const bool>>& edge_masks = {});
 
+// Performs sensitivity analysis to identify edges that constrain flow.
+//
+// Computes baseline flow (using full max-flow or shortest-path-only mode),
+// then tests removing each saturated edge to measure its criticality.
+//
+// Arguments:
+//   g: The input graph.
+//   src, dst: Source and destination nodes.
+//   placement: Flow placement strategy.
+//   shortest_path: If true, uses single-pass shortest-path flow (IP/IGP mode).
+//                  If false, uses full iterative max-flow (SDN/TE mode).
+//   require_capacity: If true, excludes saturated edges from routing.
+//   node_mask, edge_mask: Optional masks to exclude nodes/edges.
+//
+// Returns:
+//   Pairs of (EdgeId, FlowDelta) for edges whose removal reduces flow.
 [[nodiscard]] std::vector<std::pair<EdgeId, Flow>>
 sensitivity_analysis(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
-                     FlowPlacement placement, bool require_capacity,
+                     FlowPlacement placement, bool shortest_path,
+                     bool require_capacity,
                      std::span<const bool> node_mask = {},
                      std::span<const bool> edge_mask = {});
 
