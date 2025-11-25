@@ -21,6 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Install uv for faster dependency installation (required on macOS, bundled in manylinux)
+      - uses: astral-sh/setup-uv@v4
+
       # Build wheels using cibuildwheel
       # ENV variables control the build (architectures, python versions)
       - name: Build wheels
@@ -28,8 +31,11 @@ jobs:
         env:
           # Build for Python 3.9+
           CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
-          # Skip PyPy and musllinux for now (unless desired)
-          CIBW_SKIP: "pp* *-musllinux_*"
+          # Skip PyPy, musllinux, and 32-bit Linux
+          CIBW_SKIP: "pp* *-musllinux_* *-manylinux_i686"
+
+          # Use uv for faster dependency installation (10-100x faster than pip)
+          CIBW_BUILD_FRONTEND: "build[uv]"
 
           # macOS: Build Universal2 wheels on Intel runner (macos-13)
           CIBW_ARCHS_MACOS: "universal2"
