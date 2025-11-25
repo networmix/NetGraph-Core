@@ -1,6 +1,6 @@
 # NetGraph-Core Development Makefile
 
-.PHONY: help venv clean-venv dev install check check-ci lint format test qt clean build info hooks cov cpp-test rebuild check-python
+.PHONY: help venv clean-venv dev install check check-ci lint format test qt clean build info hooks cov cpp-test rebuild check-python sanitize-test
 
 .DEFAULT_GOAL := help
 
@@ -48,8 +48,16 @@ DEV_ENV := $(ENV_MACOS) $(ENV_CC) $(ENV_CXX) $(ENV_CMAKE)
 dev:
 	@echo "🚀 Setting up development environment..."
 	@if [ ! -x "$(VENV_BIN)/python" ]; then \
+		if [ -z "$(PY_FIND)" ]; then \
+			echo "❌ Error: No Python interpreter found (python3 or python)"; \
+			exit 1; \
+		fi; \
 		echo "🐍 Creating virtual environment with $(PY_FIND) ..."; \
-		$(PY_FIND) -m venv venv; \
+		$(PY_FIND) -m venv venv || { echo "❌ Failed to create venv"; exit 1; }; \
+		if [ ! -x "$(VENV_BIN)/python" ]; then \
+			echo "❌ Error: venv creation failed - $(VENV_BIN)/python not found"; \
+			exit 1; \
+		fi; \
 		$(VENV_BIN)/python -m pip install -U pip wheel; \
 	fi
 	@echo "📦 Installing dev dependencies..."
@@ -61,7 +69,15 @@ dev:
 
 venv:
 	@echo "🐍 Creating virtual environment in ./venv ..."
-	@$(PY_FIND) -m venv venv
+	@if [ -z "$(PY_FIND)" ]; then \
+		echo "❌ Error: No Python interpreter found (python3 or python)"; \
+		exit 1; \
+	fi
+	@$(PY_FIND) -m venv venv || { echo "❌ Failed to create venv"; exit 1; }
+	@if [ ! -x "$(VENV_BIN)/python" ]; then \
+		echo "❌ Error: venv creation failed - $(VENV_BIN)/python not found"; \
+		exit 1; \
+	fi
 	@$(VENV_BIN)/python -m pip install -U pip wheel
 	@echo "✅ venv ready. Activate with: source venv/bin/activate"
 
@@ -94,16 +110,27 @@ test:
 	@$(PYTEST)
 
 qt:
-	@$(PYTEST) -m "not slow and not benchmark"
+	@$(PYTEST) --no-cov -m "not slow and not benchmark"
 
 build:
-	@$(PYTHON) -m build
+	@echo "🏗️  Building distribution packages..."
+	@if $(PYTHON) -c "import build" >/dev/null 2>&1; then \
+		$(PYTHON) -m build; \
+	else \
+		echo "❌ build module not installed. Install dev dependencies with: make dev"; \
+		exit 1; \
+	fi
 
 clean:
-	@rm -rf build/ dist/ *.egg-info/ **/__pycache__ */__pycache__
+	@echo "🧹 Cleaning build artifacts and cache files..."
+	@rm -rf build/ dist/ *.egg-info/
+	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	@find . -type f -name "*.pyc" -delete 2>/dev/null || true
+	@find . -type f -name "*.pyo" -delete 2>/dev/null || true
 	@rm -f .coverage coverage-*.xml coverage-*.html
 	@rm -rf htmlcov-python
 	@rm -rf Testing CTestTestfile.cmake
+	@echo "✅ Cleanup complete!"
 
 info:
 	@echo "Python (active): $$($(PYTHON) --version)"
