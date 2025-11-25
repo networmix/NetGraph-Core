@@ -34,7 +34,7 @@ NetGraph-Core provides a specialized graph implementation for networking problem
   - **IP Routing Mode**: Cost-only routing (ECMP/WCMP) ignoring capacity constraints.
 
 - **Analysis**:
-  - **Sensitivity Analysis**: Identifies bottleneck edges where capacity relaxation increases total flow.
+  - **Sensitivity Analysis**: Identifies bottleneck edges where capacity relaxation increases total flow. Supports `shortest_path` mode to analyze only edges used under ECMP routing (IP/IGP networks) vs. full max-flow (SDN/TE networks).
   - **Min-Cut**: Computes minimum cuts on residual graphs.
 
 ### 3. Flow Policy Engine
