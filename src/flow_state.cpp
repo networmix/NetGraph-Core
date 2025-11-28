@@ -324,7 +324,7 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
     while (!q.empty()) {
       auto u = q.front(); q.pop();
       double f_in = inflow[static_cast<std::size_t>(u)];
-      if (f_in < kMinFlow) continue;
+      if (f_in < kEpsilon) continue;
       int split = node_split[static_cast<std::size_t>(u)];
       if (split <= 0) continue;
       for (auto gi : succ[static_cast<std::size_t>(u)]) {
@@ -332,7 +332,7 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
         if (gr.eids.empty()) continue;
         // Group share proportional to number of edges (equal per-edge split).
         double push = f_in * (static_cast<double>(gr.eids.size()) / static_cast<double>(split));
-        if (push < kMinFlow) continue;
+        if (push < kEpsilon) continue;
         assigned[gi] += push;
         auto v = static_cast<std::size_t>(gr.from);
         inflow[v] += push;

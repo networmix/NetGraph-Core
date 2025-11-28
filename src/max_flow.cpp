@@ -80,6 +80,7 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
 
     Cost path_cost = dist[static_cast<std::size_t>(dst)];
     Flow placed = fs.place_on_dag(src, dst, dag, std::numeric_limits<double>::infinity(), placement);
+
     if (placed < kMinFlow) break;
     total += placed;
     // Merge by exact cost (integer)

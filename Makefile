@@ -6,8 +6,8 @@
 
 VENV_BIN := $(PWD)/venv/bin
 # Use dynamic (recursive) assignment so a newly created venv is picked up
-# Prefer the python3 on PATH (e.g., set by setup-python)
-PY_FIND := $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null)
+# Prefer explicit versions first (newest to oldest), then python3 on PATH
+PY_FIND := $(shell for v in 3.13 3.12 3.11 3.10; do command -v python$$v >/dev/null 2>&1 && { echo python$$v; exit 0; }; done; command -v python3 2>/dev/null || command -v python 2>/dev/null)
 PYTHON ?= $(if $(wildcard $(VENV_BIN)/python),$(VENV_BIN)/python,$(PY_FIND))
 PIP = $(PYTHON) -m pip
 PYTEST = $(PYTHON) -m pytest
@@ -123,13 +123,13 @@ build:
 
 clean:
 	@echo "🧹 Cleaning build artifacts and cache files..."
-	@rm -rf build/ dist/ *.egg-info/
+	@rm -rf build/ dist/ *.egg-info/ || true
 	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	@find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	@find . -type f -name "*.pyo" -delete 2>/dev/null || true
-	@rm -f .coverage coverage-*.xml coverage-*.html
-	@rm -rf htmlcov-python
-	@rm -rf Testing CTestTestfile.cmake
+	@rm -f .coverage coverage-*.xml coverage-*.html || true
+	@rm -rf htmlcov-python || true
+	@rm -rf Testing CTestTestfile.cmake || true
 	@echo "✅ Cleanup complete!"
 
 info:
