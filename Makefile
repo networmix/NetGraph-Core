@@ -4,15 +4,30 @@
 
 .DEFAULT_GOAL := help
 
+# --------------------------------------------------------------------------
+# Python interpreter detection
+# --------------------------------------------------------------------------
+# VENV_BIN: path to local virtualenv bin directory
 VENV_BIN := $(PWD)/venv/bin
-# Use dynamic (recursive) assignment so a newly created venv is picked up
-# Prefer explicit versions first (newest to oldest), then python3 on PATH
-PY_FIND := $(shell for v in 3.13 3.12 3.11 3.10; do command -v python$$v >/dev/null 2>&1 && { echo python$$v; exit 0; }; done; command -v python3 2>/dev/null || command -v python 2>/dev/null)
-PYTHON ?= $(if $(wildcard $(VENV_BIN)/python),$(VENV_BIN)/python,$(PY_FIND))
-PIP = $(PYTHON) -m pip
-PYTEST = $(PYTHON) -m pytest
-RUFF = $(PYTHON) -m ruff
-PRECOMMIT = $(PYTHON) -m pre_commit
+
+# PY_BEST: scan for newest supported Python (used when creating new venvs)
+# Supports 3.9-3.13 to match CI matrix
+PY_BEST := $(shell for v in 3.13 3.12 3.11 3.10 3.9; do command -v python$$v >/dev/null 2>&1 && { echo python$$v; exit 0; }; done; command -v python3 2>/dev/null || command -v python 2>/dev/null)
+
+# PY_PATH: active python3/python on PATH (respects CI setup-python and activated venvs)
+PY_PATH := $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null)
+
+# PYTHON: interpreter used for all commands
+#   1. Use local venv if present
+#   2. Otherwise use active python on PATH (important for CI)
+#   3. Fall back to best available version
+PYTHON ?= $(if $(wildcard $(VENV_BIN)/python),$(VENV_BIN)/python,$(if $(PY_PATH),$(PY_PATH),$(PY_BEST)))
+
+# Derived tool commands (always use -m to ensure correct environment)
+PIP := $(PYTHON) -m pip
+PYTEST := $(PYTHON) -m pytest
+RUFF := $(PYTHON) -m ruff
+PRECOMMIT := $(PYTHON) -m pre_commit
 
 # Detect Apple Command Line Tools compilers (prefer system toolchain on macOS)
 APPLE_CLANG := $(shell xcrun --find clang 2>/dev/null)
@@ -35,8 +50,8 @@ help:
 	@echo "  make clean        - Clean build artifacts"
 	@echo "  make hooks        - Run pre-commit on all files"
 	@echo "  make info         - Show tool versions"
-	@echo "  make check-python - Check if venv Python matches system Python"
-	@echo "  make rebuild      - Clean and rebuild with system Python (respects CMAKE_ARGS)"
+	@echo "  make check-python - Check if venv Python matches best available"
+	@echo "  make rebuild      - Clean and rebuild (respects CMAKE_ARGS)"
 
 # Allow callers to pass CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET consistently
 ENV_MACOS := $(if $(MACOSX_DEPLOYMENT_TARGET),MACOSX_DEPLOYMENT_TARGET=$(MACOSX_DEPLOYMENT_TARGET),MACOSX_DEPLOYMENT_TARGET=$(DEFAULT_MACOSX))
@@ -48,12 +63,12 @@ DEV_ENV := $(ENV_MACOS) $(ENV_CC) $(ENV_CXX) $(ENV_CMAKE)
 dev:
 	@echo "🚀 Setting up development environment..."
 	@if [ ! -x "$(VENV_BIN)/python" ]; then \
-		if [ -z "$(PY_FIND)" ]; then \
+		if [ -z "$(PY_BEST)" ]; then \
 			echo "❌ Error: No Python interpreter found (python3 or python)"; \
 			exit 1; \
 		fi; \
-		echo "🐍 Creating virtual environment with $(PY_FIND) ..."; \
-		$(PY_FIND) -m venv venv || { echo "❌ Failed to create venv"; exit 1; }; \
+		echo "🐍 Creating virtual environment with $(PY_BEST) ..."; \
+		$(PY_BEST) -m venv venv || { echo "❌ Failed to create venv"; exit 1; }; \
 		if [ ! -x "$(VENV_BIN)/python" ]; then \
 			echo "❌ Error: venv creation failed - $(VENV_BIN)/python not found"; \
 			exit 1; \
@@ -69,11 +84,11 @@ dev:
 
 venv:
 	@echo "🐍 Creating virtual environment in ./venv ..."
-	@if [ -z "$(PY_FIND)" ]; then \
+	@if [ -z "$(PY_BEST)" ]; then \
 		echo "❌ Error: No Python interpreter found (python3 or python)"; \
 		exit 1; \
 	fi
-	@$(PY_FIND) -m venv venv || { echo "❌ Failed to create venv"; exit 1; }
+	@$(PY_BEST) -m venv venv || { echo "❌ Failed to create venv"; exit 1; }
 	@if [ ! -x "$(VENV_BIN)/python" ]; then \
 		echo "❌ Error: venv creation failed - $(VENV_BIN)/python not found"; \
 		exit 1; \
@@ -87,7 +102,6 @@ clean-venv:
 install:
 	@echo "📦 Installing package (editable)"
 	@$(DEV_ENV) $(PIP) install -e .
-
 
 check:
 	@PYTHON=$(PYTHON) bash dev/run-checks.sh
@@ -134,7 +148,7 @@ clean:
 
 info:
 	@echo "Python (active): $$($(PYTHON) --version)"
-	@echo "Python (system): $$($(PY_FIND) --version 2>/dev/null || echo 'missing')"
+	@echo "Python (best):   $$($(PY_BEST) --version 2>/dev/null || echo 'missing')"
 	@$(MAKE) check-python
 	@echo "Ruff: $$($(RUFF) --version 2>/dev/null || echo 'missing')"
 	@echo "Pyright: $$($(PYTHON) -m pyright --version 2>/dev/null | head -1 || echo 'missing')"
@@ -145,10 +159,10 @@ info:
 check-python:
 	@if [ -x "$(VENV_BIN)/python" ]; then \
 		VENV_VER=$$($(VENV_BIN)/python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown"); \
-		SYS_VER=$$($(PY_FIND) -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown"); \
-		if [ -n "$$VENV_VER" ] && [ -n "$$SYS_VER" ] && [ "$$VENV_VER" != "$$SYS_VER" ]; then \
-			echo "⚠️  WARNING: venv Python ($$VENV_VER) != system Python ($$SYS_VER)"; \
-			echo "   Run 'make clean-venv && make dev' to recreate venv with system Python"; \
+		BEST_VER=$$($(PY_BEST) -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown"); \
+		if [ -n "$$VENV_VER" ] && [ -n "$$BEST_VER" ] && [ "$$VENV_VER" != "$$BEST_VER" ]; then \
+			echo "⚠️  WARNING: venv Python ($$VENV_VER) != best available Python ($$BEST_VER)"; \
+			echo "   Run 'make clean-venv && make dev' to recreate venv if desired"; \
 		fi; \
 	fi
 
@@ -163,7 +177,6 @@ cpp-test:
 		if command -v ninja >/dev/null 2>&1; then GEN_ARGS="-G Ninja"; fi; \
 		cmake -S . -B "$$BUILD_DIR" -DNETGRAPH_CORE_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release $$GEN_ARGS; \
 		cmake --build "$$BUILD_DIR" --config Release -j; \
-		# Determine parallelism
 		if command -v sysctl >/dev/null 2>&1; then \
 			NPROC=$$(sysctl -n hw.ncpu 2>/dev/null || echo 2); \
 		elif command -v nproc >/dev/null 2>&1; then \
@@ -175,7 +188,7 @@ cpp-test:
 
 cov:
 	@echo "📦 Reinstalling with C++ coverage instrumentation..."
-	@$(PIP) install -U scikit-build-core "pybind11>=3"
+	@$(PIP) install -U scikit-build-core "pybind11>=2.11"
 	@PIP_NO_BUILD_ISOLATION=1 CMAKE_ARGS="-DNETGRAPH_CORE_COVERAGE=ON" $(PIP) install -e .'[dev]'
 	@echo "🧪 Running Python tests with coverage..."
 	@mkdir -p build/coverage
@@ -187,7 +200,7 @@ cov:
 		if command -v ninja >/dev/null 2>&1; then GEN_ARGS="-G Ninja"; fi; \
 		cmake -S . -B "$$BUILD_DIR" -DNETGRAPH_CORE_BUILD_TESTS=ON -DNETGRAPH_CORE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug $$GEN_ARGS; \
 		cmake --build "$$BUILD_DIR" --config Debug -j; \
-		ctest --test-dir "$$BUILD_DIR" --output-on-failure || true
+		ctest --test-dir "$$BUILD_DIR" --output-on-failure || echo "⚠️  Some C++ tests failed (continuing for coverage)"
 	@echo "📈 Generating C++ coverage XML (gcovr)..."
 	@$(PYTHON) -m gcovr --root . \
 		--object-directory build \
@@ -201,7 +214,6 @@ cov:
 	@echo ""
 	@echo "✅ Coverage ready in build/coverage/: coverage-python.xml, coverage-cpp.xml, coverage-combined.html"
 
-.PHONY: sanitize-test
 sanitize-test:
 	@echo "🧪 Building and running C++ tests with sanitizers..."
 	@BUILD_DIR="build/cpp-sanitize"; \
@@ -210,10 +222,10 @@ sanitize-test:
 		if command -v ninja >/dev/null 2>&1; then GEN_ARGS="-G Ninja"; fi; \
 		cmake -S . -B "$$BUILD_DIR" -DNETGRAPH_CORE_BUILD_TESTS=ON -DNETGRAPH_CORE_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug $$GEN_ARGS; \
 		cmake --build "$$BUILD_DIR" --config Debug -j; \
-		ASAN_OPTIONS=detect_leaks=1 ctest --test-dir "$$BUILD_DIR" --output-on-failure || true
+		ASAN_OPTIONS=detect_leaks=1 ctest --test-dir "$$BUILD_DIR" --output-on-failure || echo "⚠️  Some sanitizer tests failed"
 
 # Clean + reinstall in dev mode (respects CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET)
-# Always uses system Python to avoid venv version mismatches
+# Uses active PYTHON (venv or PATH) to avoid environment mismatches
 rebuild: clean
-	@echo "🔨 Rebuilding with system Python: $(PY_FIND)"
-	@$(DEV_ENV) $(PY_FIND) -m pip install -e .'[dev]'
+	@echo "🔨 Rebuilding with: $(PYTHON)"
+	@$(DEV_ENV) $(PIP) install -e .'[dev]'
