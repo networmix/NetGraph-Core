@@ -26,11 +26,12 @@ struct PredDAG {
 
 // Compute shortest paths from src using Dijkstra's algorithm.
 // Returns (distances, predecessor_dag) where distances[v] is the shortest cost to reach v
-// (or inf if unreachable), and predecessor_dag encodes all equal-cost paths.
+// (or inf if unreachable), and predecessor_dag encodes the shortest path structure.
 //
 // Parameters:
 // - dst: if provided, algorithm may exit early once destination is reached
-// - multipath: if true, keep all equal-cost predecessors; if false, keep only one per node
+// - multipath: if true, keep all equal-cost predecessors; if false, keep one per node
+//   (in single-path mode, ties are broken by preferring higher bottleneck capacity)
 // - selection: edge selection policy (multi-edge, capacity filtering, tie-breaking)
 // - residual: if provided, use these capacities instead of graph's original capacities.
 //   Passing a non-empty 'residual' span forces capacity gating:

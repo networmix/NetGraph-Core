@@ -1,4 +1,4 @@
-/* Implementation helpers for shortest_paths.hpp extras. */
+/* Path enumeration from PredDAG (resolve_to_paths). */
 #include "netgraph/core/shortest_paths.hpp"
 
 #include <algorithm>
@@ -236,10 +236,12 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
     // Extract min-cost node from priority queue.
     // Structured binding: auto [d_u, neg_res_u, u] = ... destructures the tuple.
     auto [d_u, neg_res_u, u] = pq.top(); pq.pop();
-    (void)neg_res_u;  // Residual was only for tie-breaking in queue, not needed here
     if (u < 0 || u >= N) continue;
     // Skip stale entries (node already processed at a lower cost).
     if (d_u > dist[static_cast<std::size_t>(u)]) continue;
+    // Skip residual-stale entries in single-path mode (same cost but outdated residual).
+    if (!multipath && d_u == dist[static_cast<std::size_t>(u)] &&
+        -neg_res_u < min_residual_to_node[static_cast<std::size_t>(u)] - kEpsilon) continue;
 
     // Early exit optimization: record when we first reach destination.
     if (early_exit && u == dst_node && !have_best_dst) { best_dst_cost = d_u; have_best_dst = true; }
@@ -311,7 +313,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
         selected_edges.clear();
         selected_edges.push_back(static_cast<EdgeId>(best_edge_id));
       }
-      // Update distance and predecessors if we found a better path.
+      // Update distance and predecessors if we found a better path (or equal-cost with better capacity).
       if (!selected_edges.empty()) {
         Cost new_cost = static_cast<Cost>(d_u + min_edge_cost);
         auto v_idx = static_cast<std::size_t>(v);
@@ -327,8 +329,10 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
         }
         Cap path_residual = std::min(min_residual_to_node[static_cast<std::size_t>(u)], max_edge_residual);
 
-        // Relaxation: found shorter path to v.
-        if (new_cost < dist[v_idx]) {
+        // Relaxation: found shorter path to v, or equal-cost path with better capacity (single-path mode).
+        if (new_cost < dist[v_idx] ||
+            (!multipath && new_cost == dist[v_idx] &&
+             path_residual > min_residual_to_node[v_idx] + kEpsilon)) {
           dist[v_idx] = new_cost;
           min_residual_to_node[v_idx] = path_residual;
           pred_lists[v_idx].clear();
