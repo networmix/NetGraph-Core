@@ -5,7 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.1] - 2025-11-25
+## [0.2.1] - 2025-12-01
+
+### Fixed
+
+- **Shortest Paths**: In single-path mode, ties between equal-cost paths are now broken by preferring higher bottleneck capacity. Improves flow placement when multiple equal-cost paths exist with different capacities.
+- **Flow Placement**: Use epsilon threshold in `place_on_dag()` to fix placement of very small flow fractions in large fanout networks.
 
 ### Changed
 
