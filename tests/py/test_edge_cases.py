@@ -80,3 +80,97 @@ def test_ksp_distance_dtype_int64_exact(algs):
         dist_i64 = np.asarray(dist_i64)
         assert dist_i64.dtype == np.int64
         assert int(dist_i64[2]) == int(big + big)
+
+
+def test_max_flow_zero_capacity_on_shortest_path_equal_balanced(algs, to_handle):
+    """EqualBalanced with require_capacity=False returns 0 when shortest path has no capacity.
+
+    With require_capacity=False (true IP/IGP semantics), routing is cost-only.
+    If the shortest path has a zero-capacity edge, no flow can be placed.
+
+    Topology:
+        Shortest path: 0->1->2 (cost 2, but 0->1 has cap=0)
+        Longer path:   0->3->2 (cost 4, cap=100)
+    """
+    src = np.array([0, 1, 0, 3], dtype=np.int32)
+    dst = np.array([1, 2, 3, 2], dtype=np.int32)
+    cap = np.array(
+        [0.0, 10.0, 100.0, 100.0], dtype=np.float64
+    )  # 0->1 has zero capacity
+    cost = np.array([1, 1, 2, 2], dtype=np.int64)
+    g = ngc.StrictMultiDiGraph.from_arrays(4, src, dst, cap, cost)
+
+    # Test with EqualBalanced + require_capacity=False + shortest_path=True
+    total, summary = algs.max_flow(
+        to_handle(g),
+        0,
+        2,
+        flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
+        shortest_path=True,
+        require_capacity=False,
+        with_edge_flows=True,
+    )
+
+    # Should return 0 because the shortest path (cost 2) has no capacity
+    assert np.isclose(total, 0.0), (
+        f"Expected 0 flow when shortest path has zero capacity, got {total}"
+    )
+
+    # Verify no edge flows were placed
+    edge_flows = np.asarray(summary.edge_flows)
+    assert np.allclose(edge_flows, 0.0), f"Expected no edge flows, got {edge_flows}"
+
+
+def test_max_flow_zero_capacity_on_shortest_path_proportional(algs, to_handle):
+    """Proportional with require_capacity=False returns 0 when shortest path has no capacity.
+
+    With require_capacity=False, if the shortest path has a zero-capacity edge,
+    no flow can be placed. Both placements behave consistently.
+    """
+    src = np.array([0, 1, 0, 3], dtype=np.int32)
+    dst = np.array([1, 2, 3, 2], dtype=np.int32)
+    cap = np.array([0.0, 10.0, 100.0, 100.0], dtype=np.float64)
+    cost = np.array([1, 1, 2, 2], dtype=np.int64)
+    g = ngc.StrictMultiDiGraph.from_arrays(4, src, dst, cap, cost)
+
+    total, summary = algs.max_flow(
+        to_handle(g),
+        0,
+        2,
+        flow_placement=ngc.FlowPlacement.PROPORTIONAL,
+        shortest_path=True,
+        require_capacity=False,
+        with_edge_flows=True,
+    )
+
+    assert np.isclose(total, 0.0), (
+        f"Expected 0 flow when shortest path has zero capacity, got {total}"
+    )
+
+
+def test_max_flow_require_capacity_true_finds_alternative(algs, to_handle):
+    """With require_capacity=True, max_flow should find an alternative path with capacity.
+
+    This is the contrast test: when require_capacity=True, the algorithm should
+    skip the zero-capacity edge and find the longer path that has capacity.
+    """
+    src = np.array([0, 1, 0, 3], dtype=np.int32)
+    dst = np.array([1, 2, 3, 2], dtype=np.int32)
+    cap = np.array([0.0, 10.0, 100.0, 100.0], dtype=np.float64)
+    cost = np.array([1, 1, 2, 2], dtype=np.int64)
+    g = ngc.StrictMultiDiGraph.from_arrays(4, src, dst, cap, cost)
+
+    total, summary = algs.max_flow(
+        to_handle(g),
+        0,
+        2,
+        flow_placement=ngc.FlowPlacement.EQUAL_BALANCED,
+        shortest_path=True,
+        require_capacity=True,  # This should skip zero-capacity edges
+        with_edge_flows=True,
+    )
+
+    # Should find the longer path 0->3->2 and place 100 flow
+    assert np.isclose(total, 100.0), (
+        f"Expected 100 flow via alternative path, got {total}"
+    )

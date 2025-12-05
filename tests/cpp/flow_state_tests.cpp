@@ -377,3 +377,58 @@ TEST(FlowState, EqualBalanced_DownstreamSplitEqualization) {
   EXPECT_NEAR(ef[3], 5.0, 1e-9); // 2->4
   EXPECT_NEAR(ef[4], 5.0, 1e-9); // 3->4
 }
+
+TEST(FlowState, EqualBalanced_ZeroCapacityOnShortestPath_ReturnsZero) {
+  // With require_capacity=false (true IP/IGP semantics), routing is cost-only.
+  // If the shortest path has a zero-capacity edge, no flow can be placed.
+  // Graph: 0->1 (cap 0, cost 1) -> 2 (cap 10, cost 1)  [shortest path, but no capacity]
+  //        0->3 (cap 100, cost 2) -> 2 (cap 100, cost 2)  [longer path with capacity]
+  std::int32_t src[4]  = {0, 1, 0, 3};
+  std::int32_t dst[4]  = {1, 2, 3, 2};
+  double       cap[4]  = {0.0, 10.0, 100.0, 100.0};  // 0->1 has zero capacity!
+  std::int64_t cost[4] = {1,   1,    2,     2};
+  auto g = StrictMultiDiGraph::from_arrays(4,
+    std::span(src, 4), std::span(dst, 4),
+    std::span(cap, 4), std::span(cost, 4));
+  FlowState fs(g);
+
+  // Build DAG with require_capacity=false (cost-only routing, ignores capacity).
+  // This simulates true IP/IGP behavior where routes are based purely on cost.
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto [dist, dag] = shortest_paths(g, 0, 2, /*multipath=*/true, sel, {}, {}, {});
+
+  // Verify SPF found a path (the zero-capacity one is included in the DAG).
+  // The shortest path 0->1->2 has cost 2, while 0->3->2 has cost 4.
+  EXPECT_LT(dist[2], std::numeric_limits<Cost>::max());
+
+  // Attempt EqualBalanced placement. Since the shortest path has no capacity,
+  // and we're in single-tier mode (simulated by only having one DAG),
+  // placement should return 0.
+  Flow placed = fs.place_on_dag(0, 2, dag, std::numeric_limits<double>::infinity(), FlowPlacement::EqualBalanced);
+  EXPECT_NEAR(placed, 0.0, 1e-9) << "EqualBalanced should return 0 when shortest path has no capacity";
+
+  // Verify no edge flows were placed
+  auto ef = fs.edge_flow_view();
+  for (std::size_t i = 0; i < static_cast<std::size_t>(g.num_edges()); ++i) {
+    EXPECT_NEAR(ef[i], 0.0, 1e-9) << "Edge " << i << " should have no flow";
+  }
+}
+
+TEST(FlowState, Proportional_ZeroCapacityOnShortestPath_ReturnsZero) {
+  // With require_capacity=false, if the shortest path has a zero-capacity edge,
+  // no flow can be placed. Both placements behave consistently.
+  std::int32_t src[4]  = {0, 1, 0, 3};
+  std::int32_t dst[4]  = {1, 2, 3, 2};
+  double       cap[4]  = {0.0, 10.0, 100.0, 100.0};
+  std::int64_t cost[4] = {1,   1,    2,     2};
+  auto g = StrictMultiDiGraph::from_arrays(4,
+    std::span(src, 4), std::span(dst, 4),
+    std::span(cap, 4), std::span(cost, 4));
+  FlowState fs(g);
+
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto [dist, dag] = shortest_paths(g, 0, 2, /*multipath=*/true, sel, {}, {}, {});
+
+  Flow placed = fs.place_on_dag(0, 2, dag, std::numeric_limits<double>::infinity(), FlowPlacement::Proportional);
+  EXPECT_NEAR(placed, 0.0, 1e-9) << "Proportional should return 0 when shortest path has no capacity";
+}

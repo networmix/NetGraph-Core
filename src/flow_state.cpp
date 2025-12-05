@@ -341,6 +341,14 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
       }
     }
 
+    // Early exit if destination is not reachable with capacity.
+    // With require_capacity=false, SPF includes zero-capacity edges in the DAG,
+    // but those edges are filtered out during group building. If no path with
+    // capacity reaches the destination, return 0.
+    if (inflow[static_cast<std::size_t>(dst)] < kEpsilon) {
+      return static_cast<Flow>(0.0);
+    }
+
     // Single-pass ECMP admission: scale the unit assignment by the smallest
     // per-group headroom so that no edge is oversubscribed under *fixed equal
     // per-edge splits*. Any further injection with the same splits would violate
