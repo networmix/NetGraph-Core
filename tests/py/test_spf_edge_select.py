@@ -150,3 +150,37 @@ def test_spf_residual_single_min_cost_with_cap_remaining_load_factored(
     assert e - s == 1
     assert int(via[s]) in range(g.num_edges())
     assert_pred_dag_integrity(g, dag)
+
+
+def test_spf_single_path_prefers_higher_residual_equal_cost(
+    build_graph, assert_pred_dag_integrity, algs, to_handle
+):
+    # Two equal-cost paths 0->1->3 (cap 1) and 0->2->3 (cap 10); single-path mode
+    edges = [
+        (0, 1, 1.0, 1.0, 10),
+        (1, 3, 1.0, 1.0, 11),
+        (0, 2, 1.0, 10.0, 20),
+        (2, 3, 1.0, 10.0, 21),
+    ]
+    g = build_graph(4, edges)
+    sel = ngc.EdgeSelection(
+        multi_edge=False,
+        require_capacity=False,
+        tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
+    )
+
+    dist, dag = algs.spf(
+        to_handle(g),
+        0,
+        3,
+        selection=sel,
+        multipath=False,  # single-path mode should prefer the higher-residual path
+    )
+
+    assert np.isclose(dist[3], 2.0)
+    off = np.asarray(dag.parent_offsets)
+    parents = np.asarray(dag.parents)
+    s, e = int(off[3]), int(off[4])
+    assert e - s == 1
+    assert int(parents[s]) == 2  # chooses path via node 2 (higher residual)
+    assert_pred_dag_integrity(g, dag)

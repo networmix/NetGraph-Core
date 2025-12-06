@@ -17,6 +17,15 @@ from conftest import (
 
 import netgraph_core as ngc
 
+
+def _make_graph(num_nodes, src, dst, cap, cost):
+    """Helper to build graph with auto-generated ext_edge_ids."""
+    ext_edge_ids = np.arange(len(src), dtype=np.int64)
+    return ngc.StrictMultiDiGraph.from_arrays(
+        num_nodes, src, dst, cap, cost, ext_edge_ids
+    )
+
+
 # ============================================================================
 # FIXTURES: Test Topologies
 # ============================================================================
@@ -33,7 +42,7 @@ def parallel_paths_varying_capacities():
     cap = np.array([100.0, 50.0, 75.0, 100.0, 50.0, 75.0], dtype=np.float64)
     cost = np.array([10, 10, 10, 10, 10, 10], dtype=np.int64)  # Equal costs
 
-    return ngc.StrictMultiDiGraph.from_arrays(num_nodes, src, dst, cap, cost)
+    return _make_graph(num_nodes, src, dst, cap, cost)
 
 
 @pytest.fixture
@@ -48,7 +57,7 @@ def parallel_paths_varying_costs():
     # First hop costs: 10, 20, 30; Second hop costs: 10, 20, 30
     cost = np.array([10, 20, 30, 10, 20, 30], dtype=np.int64)
 
-    return ngc.StrictMultiDiGraph.from_arrays(num_nodes, src, dst, cap, cost)
+    return _make_graph(num_nodes, src, dst, cap, cost)
 
 
 # ============================================================================
@@ -64,7 +73,7 @@ def test_path_distribution_with_equal_cost_paths(algs, to_handle):
     dst = np.array([1, 2, 3, 4, 5, 5, 5, 5], dtype=np.int32)
     cap = np.array([50.0] * 8, dtype=np.float64)
     cost = np.array([10] * 8, dtype=np.int64)  # All equal cost
-    g = ngc.StrictMultiDiGraph.from_arrays(num_nodes, src, dst, cap, cost)
+    g = _make_graph(num_nodes, src, dst, cap, cost)
 
     fg = ngc.FlowGraph(g)
     config = ngc.FlowPolicyConfig()
@@ -103,7 +112,7 @@ def test_path_usage_optimality(algs, to_handle):
     dst = np.array([1, 2, 3, 4, 5, 6, 6, 6, 6, 6], dtype=np.int32)
     cap = np.array([100.0] * 10, dtype=np.float64)
     cost = np.array([10] * 10, dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(num_nodes, src, dst, cap, cost)
+    g = _make_graph(num_nodes, src, dst, cap, cost)
 
     fg = ngc.FlowGraph(g)
     config = ngc.FlowPolicyConfig()
@@ -141,7 +150,7 @@ def test_ecmp_equal_balancing_strict(algs, to_handle):
     dst = np.array([1, 2, 3, 4, 4, 4], dtype=np.int32)
     cap = np.array([100.0, 100.0, 100.0, 100.0, 100.0, 100.0], dtype=np.float64)
     cost = np.array([10] * 6, dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(num_nodes, src, dst, cap, cost)
+    g = _make_graph(num_nodes, src, dst, cap, cost)
 
     fg = ngc.FlowGraph(g)
     config = ngc.FlowPolicyConfig()
@@ -211,7 +220,7 @@ def test_multipath_true_vs_false_capacity_difference(algs, to_handle):
     dst = np.array([1, 2, 3, 4, 4, 4], dtype=np.int32)
     cap = np.array([100.0] * 6, dtype=np.float64)
     cost = np.array([10] * 6, dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(num_nodes, src, dst, cap, cost)
+    g = _make_graph(num_nodes, src, dst, cap, cost)
 
     # Test 1: multipath=true (hash-based ECMP)
     fg1 = ngc.FlowGraph(g)
@@ -257,7 +266,7 @@ def test_flow_count_matches_configuration(algs, to_handle):
     dst = np.array(dst_nodes + [11] * 10, dtype=np.int32)
     cap = np.array([100.0] * 20, dtype=np.float64)
     cost = np.array([10] * 20, dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(12, src, dst, cap, cost)
+    g = _make_graph(12, src, dst, cap, cost)
 
     # Test various flow counts
     for target_flows in [1, 4, 8, 16]:
@@ -291,7 +300,7 @@ def test_distribution_variance_minimal(algs, to_handle):
     dst = np.array([1, 2, 3, 4, 5, 5, 5, 5], dtype=np.int32)
     cap = np.array([50.0] * 8, dtype=np.float64)
     cost = np.array([10] * 8, dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(num_nodes, src, dst, cap, cost)
+    g = _make_graph(num_nodes, src, dst, cap, cost)
 
     fg = ngc.FlowGraph(g)
     config = ngc.FlowPolicyConfig()
@@ -325,7 +334,7 @@ def test_capacity_near_theoretical_max(algs, to_handle):
     dst = np.array([1, 2, 3, 4, 4, 4], dtype=np.int32)
     cap = np.array([60.0] * 6, dtype=np.float64)
     cost = np.array([10] * 6, dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(num_nodes, src, dst, cap, cost)
+    g = _make_graph(num_nodes, src, dst, cap, cost)
 
     fg = ngc.FlowGraph(g)
     config = ngc.FlowPolicyConfig()
@@ -363,7 +372,7 @@ def test_all_equal_cost_paths_utilized(algs, to_handle):
     dst = np.array([1, 2, 3, 3], dtype=np.int32)
     cap = np.array([50.0] * 4, dtype=np.float64)
     cost = np.array([10] * 4, dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(num_nodes, src, dst, cap, cost)
+    g = _make_graph(num_nodes, src, dst, cap, cost)
 
     fg = ngc.FlowGraph(g)
     config = ngc.FlowPolicyConfig()

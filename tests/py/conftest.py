@@ -155,12 +155,16 @@ def build_graph():
                 np.empty((0,), dtype=np.int32),
                 np.empty((0,), dtype=np.float64),
                 np.empty((0,), dtype=np.int64),
+                np.empty((0,), dtype=np.int64),
             )
         src = np.array([e[0] for e in edges], dtype=np.int32)
         dst = np.array([e[1] for e in edges], dtype=np.int32)
         cost = np.array([int(e[2]) for e in edges], dtype=np.int64)
         cap = np.array([float(e[3]) for e in edges], dtype=np.float64)
-        return ngc.StrictMultiDiGraph.from_arrays(num_nodes, src, dst, cap, cost)
+        ext_edge_ids = np.arange(len(edges), dtype=np.int64)
+        return ngc.StrictMultiDiGraph.from_arrays(
+            num_nodes, src, dst, cap, cost, ext_edge_ids
+        )
 
     return _builder
 
@@ -621,7 +625,7 @@ def make_flow_policy_config():
 
 
 @pytest.fixture
-def make_flow_policy():
+def make_flow_policy(make_flow_policy_config):
     """Factory for creating FlowPolicy with canonical configurations and optional masks.
 
     Usage:
@@ -641,87 +645,11 @@ def make_flow_policy():
         node_mask=None,
         edge_mask=None,
     ) -> ngc.FlowPolicy:
-        # Get base configuration using default constructor and set attributes
-        # (This matches the pattern used in test_flow_policy_presets.py)
-        if config_name == "SHORTEST_PATHS_ECMP":
-            config = ngc.FlowPolicyConfig()
-            config.path_alg = ngc.PathAlg.SPF
-            config.flow_placement = ngc.FlowPlacement.EQUAL_BALANCED
-            config.selection = ngc.EdgeSelection(
-                multi_edge=True,
-                require_capacity=False,
-                tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
-            )
-            config.require_capacity = False
-            config.multipath = True
-            config.shortest_path = True
-            config.min_flow_count = 1
-            config.max_flow_count = 1
-
-        elif config_name == "SHORTEST_PATHS_WCMP":
-            config = ngc.FlowPolicyConfig()
-            config.path_alg = ngc.PathAlg.SPF
-            config.flow_placement = ngc.FlowPlacement.PROPORTIONAL
-            config.selection = ngc.EdgeSelection(
-                multi_edge=True,
-                require_capacity=False,
-                tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
-            )
-            config.require_capacity = False
-            config.multipath = True
-            config.shortest_path = True
-            config.min_flow_count = 1
-            config.max_flow_count = 1
-
-        elif config_name == "TE_WCMP_UNLIM":
-            config = ngc.FlowPolicyConfig()
-            config.path_alg = ngc.PathAlg.SPF
-            config.flow_placement = ngc.FlowPlacement.PROPORTIONAL
-            config.selection = ngc.EdgeSelection(
-                multi_edge=True,
-                require_capacity=True,
-                tie_break=ngc.EdgeTieBreak.PREFER_HIGHER_RESIDUAL,
-            )
-            config.require_capacity = True
-            config.multipath = True
-            config.min_flow_count = 1
-
-        elif config_name == "TE_ECMP_UP_TO_256_LSP":
-            config = ngc.FlowPolicyConfig()
-            config.path_alg = ngc.PathAlg.SPF
-            config.flow_placement = ngc.FlowPlacement.EQUAL_BALANCED
-            config.selection = ngc.EdgeSelection(
-                multi_edge=False,
-                require_capacity=True,
-                tie_break=ngc.EdgeTieBreak.PREFER_HIGHER_RESIDUAL,
-            )
-            config.require_capacity = True
-            config.multipath = False
-            config.min_flow_count = 1
-            config.max_flow_count = 256
-            config.reoptimize_flows_on_each_placement = True
-
-        elif config_name == "TE_ECMP_16_LSP":
-            config = ngc.FlowPolicyConfig()
-            config.path_alg = ngc.PathAlg.SPF
-            config.flow_placement = ngc.FlowPlacement.EQUAL_BALANCED
-            config.selection = ngc.EdgeSelection(
-                multi_edge=False,
-                require_capacity=True,
-                tie_break=ngc.EdgeTieBreak.PREFER_HIGHER_RESIDUAL,
-            )
-            config.require_capacity = True
-            config.multipath = False
-            config.min_flow_count = 16
-            config.max_flow_count = 16
-            config.reoptimize_flows_on_each_placement = True
-
-        else:
-            raise ValueError(f"Unknown configuration: {config_name}")
-
-        # Create policy with optional masks
+        # Reuse the single-source preset factory to avoid drift.
+        base_cfg = make_flow_policy_config(config_name)
+        # Pass masks directly to FlowPolicy constructor (not stored on config).
         return ngc.FlowPolicy(
-            algs, graph_handle, config, node_mask=node_mask, edge_mask=edge_mask
+            algs, graph_handle, base_cfg, node_mask=node_mask, edge_mask=edge_mask
         )
 
     return _make

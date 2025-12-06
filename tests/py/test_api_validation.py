@@ -8,6 +8,14 @@ import pytest
 import netgraph_core as ngc
 
 
+def _make_graph(num_nodes, src, dst, cap, cost):
+    """Helper to build graph with auto-generated ext_edge_ids."""
+    ext_edge_ids = np.arange(len(src), dtype=np.int64)
+    return ngc.StrictMultiDiGraph.from_arrays(
+        num_nodes, src, dst, cap, cost, ext_edge_ids
+    )
+
+
 def _small_graph(build_graph):
     # 0 -> 1 with cost=1, cap=1
     return build_graph(2, [(0, 1, 1.0, 1.0, 0)])
@@ -79,12 +87,12 @@ def test_batch_max_flow_masks_length_mismatch_raises(build_graph, algs, to_handl
 
 def test_flowstate_views_are_readonly():
     """Verify that FlowState views return read-only arrays."""
-    g = ngc.StrictMultiDiGraph.from_arrays(
-        num_nodes=3,
-        src=np.array([0, 1], dtype=np.int32),
-        dst=np.array([1, 2], dtype=np.int32),
-        capacity=np.array([10.0, 10.0]),
-        cost=np.ones(2, dtype=np.int64),
+    g = _make_graph(
+        3,
+        np.array([0, 1], dtype=np.int32),
+        np.array([1, 2], dtype=np.int32),
+        np.array([10.0, 10.0]),
+        np.ones(2, dtype=np.int64),
     )
 
     fs = ngc.FlowState(g)
@@ -110,12 +118,12 @@ def test_flowstate_views_are_readonly():
 
 def test_flowgraph_views_are_readonly():
     """Verify that FlowGraph views return read-only arrays."""
-    g = ngc.StrictMultiDiGraph.from_arrays(
-        num_nodes=3,
-        src=np.array([0, 1], dtype=np.int32),
-        dst=np.array([1, 2], dtype=np.int32),
-        capacity=np.array([10.0, 10.0]),
-        cost=np.ones(2, dtype=np.int64),
+    g = _make_graph(
+        3,
+        np.array([0, 1], dtype=np.int32),
+        np.array([1, 2], dtype=np.int32),
+        np.array([10.0, 10.0]),
+        np.ones(2, dtype=np.int64),
     )
 
     fg = ngc.FlowGraph(g)

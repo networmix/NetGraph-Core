@@ -116,7 +116,7 @@ PYBIND11_MODULE(_netgraph_core, m) {
           [](std::int32_t num_nodes,
              py::array src, py::array dst,
              py::array capacity, py::array cost,
-             py::object ext_edge_ids_obj) {
+             py::array ext_edge_ids) {
             // public API: src/dst are int32; pass through as int32 to core
             auto src_s = as_span<std::int32_t>(src, "src");
             auto dst_s = as_span<std::int32_t>(dst, "dst");
@@ -124,19 +124,15 @@ PYBIND11_MODULE(_netgraph_core, m) {
             auto cap_s = as_span<double>(capacity, "capacity");
             // Cost dtype must be int64 to match internal Cost type
             auto cost_s = as_span<std::int64_t>(cost, "cost");
-            // Optional ext_edge_ids
-            std::span<const std::int64_t> ext_s;
-            if (!ext_edge_ids_obj.is_none()) {
-              py::array ext_arr = ext_edge_ids_obj.cast<py::array>();
-              ext_s = as_span<std::int64_t>(ext_arr, "ext_edge_ids");
-            }
+            // ext_edge_ids required: maps internal edge indices to caller's stable IDs
+            auto ext_s = as_span<std::int64_t>(ext_edge_ids, "ext_edge_ids");
             return StrictMultiDiGraph::from_arrays(num_nodes,
                                                   src_s,
                                                   dst_s,
                                                   cap_s, cost_s, ext_s);
           },
           py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"),
-          py::kw_only(), py::arg("ext_edge_ids") = py::none())
+          py::arg("ext_edge_ids"))
       .def("num_nodes", &StrictMultiDiGraph::num_nodes)
       .def("num_edges", &StrictMultiDiGraph::num_edges)
       .def("capacity_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<double>(g.capacity_view()); })
@@ -175,13 +171,9 @@ PYBIND11_MODULE(_netgraph_core, m) {
                                           std::int32_t num_nodes,
                                           py::array src, py::array dst,
                                           py::array capacity, py::array cost,
-                                          py::object ext_edge_ids_obj){
+                                          py::array ext_edge_ids){
         // Build graph and construct shared ownership directly
-        std::span<const std::int64_t> ext_s;
-        if (!ext_edge_ids_obj.is_none()) {
-          py::array ext_arr = ext_edge_ids_obj.cast<py::array>();
-          ext_s = as_span<std::int64_t>(ext_arr, "ext_edge_ids");
-        }
+        auto ext_s = as_span<std::int64_t>(ext_edge_ids, "ext_edge_ids");
         auto sp = std::make_shared<StrictMultiDiGraph>(
             StrictMultiDiGraph::from_arrays(
                 num_nodes,
@@ -193,7 +185,7 @@ PYBIND11_MODULE(_netgraph_core, m) {
         auto gh = algs.build_graph(std::static_pointer_cast<const StrictMultiDiGraph>(sp));
         // GraphHandle holds shared ownership; no additional Python-side owner needed
         return PyGraph{ gh, py::none(), sp->num_nodes(), sp->num_edges() };
-      }, py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"), py::kw_only(), py::arg("ext_edge_ids") = py::none())
+      }, py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"), py::arg("ext_edge_ids"))
       .def("spf", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src,
                        py::object dst, py::object selection_obj, py::object residual_obj,
                        py::object node_mask, py::object edge_mask, bool multipath, std::string dtype){

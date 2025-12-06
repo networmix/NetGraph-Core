@@ -95,7 +95,7 @@ std::vector<EdgeId> FlowGraph::get_flow_path(const FlowIndex& idx) const {
   std::unordered_map<NodeId, std::vector<std::pair<NodeId, EdgeId>>> adj;
   // Build adjacency list from allocations using cached src/dst.
   for (auto const& pr : deltas) {
-    if (pr.second < kMinFlow) continue;
+    if (pr.second < kEpsilon) continue;
     auto eid = static_cast<std::size_t>(pr.first);
     NodeId u = g_->edge_src_view()[eid]; NodeId v = g_->edge_dst_view()[eid];
     adj[u].emplace_back(v, pr.first);

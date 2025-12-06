@@ -238,6 +238,7 @@ def test_flow_costs_match_expected(algs, to_handle):
         np.array([1, 2], dtype=np.int32),
         np.array([100.0, 100.0], dtype=np.float64),
         np.array([10, 20], dtype=np.int64),
+        np.array([0, 1], dtype=np.int64),
     )
 
     fg = ngc.FlowGraph(g)
@@ -266,6 +267,7 @@ def test_flow_costs_match_expected(algs, to_handle):
         np.array([1, 2, 2], dtype=np.int32),
         np.array([100.0, 100.0, 100.0], dtype=np.float64),
         np.array([5, 10, 20], dtype=np.int64),
+        np.array([0, 1, 2], dtype=np.int64),
     )
 
     fg2 = ngc.FlowGraph(g2)

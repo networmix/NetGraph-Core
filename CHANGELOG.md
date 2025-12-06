@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2025-12-06
+
+### Changed
+
+- **Python bindings**: `StrictMultiDiGraph.from_arrays` now requires `ext_edge_ids` so callers always supply stable external edge identifiers.
+- **FlowPolicy**: construction is now config-only (via `FlowPolicyConfig`), dropping the parameter-heavy constructor.
+
+### Fixed
+
+- **FlowGraph**: `get_flow_path` now filters only below-`kEpsilon` noise so paths are reconstructed even when per-edge allocations are smaller than `kMinFlow`.
+
 ## [0.2.2] - 2025-12-05
 
 ### Fixed

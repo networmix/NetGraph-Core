@@ -92,31 +92,6 @@ public:
     }
   }
 
-  FlowPolicy(const ExecutionContext& ctx,
-             PathAlg path_alg,
-             FlowPlacement flow_placement,
-             EdgeSelection selection,
-             bool require_capacity = true,
-             bool multipath = true,
-             int min_flow_count = 1,
-             std::optional<int> max_flow_count = std::nullopt,
-             std::optional<Cost> max_path_cost = std::nullopt,
-             std::optional<double> max_path_cost_factor = std::nullopt,
-             bool shortest_path = false,
-             bool reoptimize_flows_on_each_placement = false,
-             int max_no_progress_iterations = 100,
-             int max_total_iterations = 10000,
-             bool diminishing_returns_enabled = true,
-             int diminishing_returns_window = 8,
-             double diminishing_returns_epsilon_frac = 1e-3)
-    : ctx_(ctx),
-      path_alg_(path_alg), flow_placement_(flow_placement), selection_(selection),
-      require_capacity_(require_capacity), multipath_(multipath), shortest_path_(shortest_path),
-      min_flow_count_(min_flow_count), max_flow_count_(max_flow_count), max_path_cost_(max_path_cost),
-      max_path_cost_factor_(max_path_cost_factor), reoptimize_flows_on_each_placement_(reoptimize_flows_on_each_placement),
-      max_no_progress_iterations_(max_no_progress_iterations), max_total_iterations_(max_total_iterations),
-      diminishing_returns_enabled_(diminishing_returns_enabled), diminishing_returns_window_(diminishing_returns_window),
-      diminishing_returns_epsilon_frac_(diminishing_returns_epsilon_frac) {}
   ~FlowPolicy() noexcept = default;
 
   [[nodiscard]] int flow_count() const noexcept { return static_cast<int>(flows_.size()); }

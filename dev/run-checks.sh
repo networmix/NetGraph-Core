@@ -81,14 +81,6 @@ if [ "${SKIP_CPP_TESTS:-0}" = "1" ]; then
 else
     echo "🔧 Checking for CMake to run C++ tests..."
     if command -v cmake >/dev/null 2>&1; then
-        # Quick connectivity check to GitHub for googletest download; skip if offline
-        if command -v curl >/dev/null 2>&1; then
-            if ! curl -Is --connect-timeout 5 https://github.com >/dev/null 2>&1; then
-                echo "⚠️  Network appears unavailable (github.com unreachable). Skipping C++ tests."
-                SKIP_CPP_TESTS=1
-            fi
-        fi
-
         if [ "${SKIP_CPP_TESTS:-0}" != "1" ]; then
             echo "🧪 Running C++ tests (ctest)..."
             BUILD_DIR="build/cpp-tests"

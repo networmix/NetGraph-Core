@@ -10,10 +10,18 @@ import pytest
 import netgraph_core as ngc
 
 
+def _make_graph(num_nodes, src, dst, cap, cost):
+    """Helper to build graph with auto-generated ext_edge_ids."""
+    ext_edge_ids = np.arange(len(src), dtype=np.int64)
+    return ngc.StrictMultiDiGraph.from_arrays(
+        num_nodes, src, dst, cap, cost, ext_edge_ids
+    )
+
+
 @pytest.fixture
 def tiny_graph():
     """Tiny graph: 0 -> 1 -> 2"""
-    return ngc.StrictMultiDiGraph.from_arrays(
+    return _make_graph(
         3,
         np.array([0, 1], np.int32),
         np.array([1, 2], np.int32),

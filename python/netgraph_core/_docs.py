@@ -2,6 +2,9 @@
 
 This module is intentionally light; runtime implementations live in the
 compiled extension. The goal is to provide type hints and help text.
+
+TODO: replace this hand-written stub with generated `.pyi` (e.g. via
+pybind11-stubgen) to prevent drift from the runtime bindings.
 """
 
 from __future__ import annotations
@@ -405,8 +408,7 @@ class Algorithms:
         dst: "np.ndarray",
         capacity: "np.ndarray",
         cost: "np.ndarray",
-        *,
-        ext_edge_ids: "Optional[np.ndarray]" = None,
+        ext_edge_ids: "np.ndarray",
     ) -> "Graph":
         """Build graph directly from arrays (graph is owned by the handle)."""
         ...

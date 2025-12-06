@@ -41,7 +41,7 @@ try:  # pragma: no cover - typing-only import
             MinCut as MinCut,
             PredDAG as PredDAG,
         )
-except Exception:
+except ImportError:
     # Safe fallback if _docs.py changes; runtime bindings above remain authoritative.
     pass
 

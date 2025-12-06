@@ -23,11 +23,13 @@ StrictMultiDiGraph make_square1() {
   std::int32_t dst_arr[4] = {1, 2, 3, 2};
   double cap_arr[4] = {1.0, 1.0, 2.0, 2.0};
   std::int64_t cost_arr[4] = {1, 1, 2, 2};
+  std::int64_t ext_arr[4] = {0, 1, 2, 3};
   std::span<const std::int32_t> src(src_arr, 4);
   std::span<const std::int32_t> dst(dst_arr, 4);
   std::span<const double> cap(cap_arr, 4);
   std::span<const std::int64_t> cost(cost_arr, 4);
-  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost);
+  std::span<const std::int64_t> ext(ext_arr, 4);
+  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost, ext);
 }
 
 StrictMultiDiGraph make_line1() {
@@ -42,11 +44,13 @@ StrictMultiDiGraph make_line1() {
   std::int32_t dst_arr[4] = {1, 2, 2, 2};
   double cap_arr[4] = {5.0, 1.0, 3.0, 7.0};
   std::int64_t cost_arr[4] = {1, 1, 1, 2};
+  std::int64_t ext_arr[4] = {0, 1, 2, 3};
   std::span<const std::int32_t> src(src_arr, 4);
   std::span<const std::int32_t> dst(dst_arr, 4);
   std::span<const double> cap(cap_arr, 4);
   std::span<const std::int64_t> cost(cost_arr, 4);
-  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost);
+  std::span<const std::int64_t> ext(ext_arr, 4);
+  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost, ext);
 }
 
 StrictMultiDiGraph make_square3() {
@@ -57,11 +61,13 @@ StrictMultiDiGraph make_square3() {
   std::int32_t dst_arr[4] = {1, 2, 3, 2};
   double cap_arr[4] = {100.0, 125.0, 75.0, 50.0};
   std::int64_t cost_arr[4] = {1, 1, 1, 1};
+  std::int64_t ext_arr[4] = {0, 1, 2, 3};
   std::span<const std::int32_t> src(src_arr, 4);
   std::span<const std::int32_t> dst(dst_arr, 4);
   std::span<const double> cap(cap_arr, 4);
   std::span<const std::int64_t> cost(cost_arr, 4);
-  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost);
+  std::span<const std::int64_t> ext(ext_arr, 4);
+  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost, ext);
 }
 
 void expect_edge_flows_by_uv(const FlowGraph& fg, std::initializer_list<std::tuple<int,int,double>> exp) {
@@ -104,7 +110,11 @@ TEST(FlowPolicyCore, Proportional_SingleDemand_UsesShortestPath) {
   EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
   auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
   ExecutionContext ctx(algs, gh);
-  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::Proportional, sel);
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::Proportional;
+  cfg.selection = sel;
+  cfg.require_capacity = true;
+  FlowPolicy policy(ctx, cfg);
   auto res = policy.place_demand(fg, /*src=*/0, /*dst=*/2, /*flowClass=*/0, /*volume=*/1.0);
   EXPECT_NEAR(res.first, 1.0, 1e-9);
   EXPECT_NEAR(res.second, 0.0, 1e-9);
@@ -117,7 +127,11 @@ TEST(FlowPolicyCore, Proportional_SingleDemand_SplitsAcrossTwoEqualCostPaths) {
   EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
   auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
   ExecutionContext ctx(algs, gh);
-  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::Proportional, sel);
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::Proportional;
+  cfg.selection = sel;
+  cfg.require_capacity = true;
+  FlowPolicy policy(ctx, cfg);
   auto res = policy.place_demand(fg, 0, 2, 0, 2.0);
   EXPECT_NEAR(res.first, 2.0, 1e-9);
   EXPECT_NEAR(res.second, 0.0, 1e-9);
@@ -130,8 +144,14 @@ TEST(FlowPolicyCore, Proportional_SingleDemand_MaxFlowCount1_UsesSinglePath) {
   EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
   auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
   ExecutionContext ctx(algs, gh);
-  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::Proportional, sel,
-                     /*require_capacity=*/true, /*multipath=*/false, /*min_flow_count=*/1, /*max_flow_count=*/1);
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::Proportional;
+  cfg.selection = sel;
+  cfg.require_capacity = true;
+  cfg.multipath = false;
+  cfg.min_flow_count = 1;
+  cfg.max_flow_count = 1;
+  FlowPolicy policy(ctx, cfg);
   auto res = policy.place_demand(fg, 0, 2, 0, 2.0);
   EXPECT_NEAR(res.first, 2.0, 1e-9);
   EXPECT_NEAR(res.second, 0.0, 1e-9);
@@ -144,7 +164,11 @@ TEST(FlowPolicyCore, Proportional_SingleDemand_PartialPlacement_InsufficientCapa
   EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
   auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
   ExecutionContext ctx(algs, gh);
-  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::Proportional, sel);
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::Proportional;
+  cfg.selection = sel;
+  cfg.require_capacity = true;
+  FlowPolicy policy(ctx, cfg);
   auto res = policy.place_demand(fg, 0, 2, 0, 5.0);
   EXPECT_NEAR(res.first, 3.0, 1e-9);
   EXPECT_NEAR(res.second, 2.0, 1e-9);
@@ -157,9 +181,13 @@ TEST(FlowPolicyCore, EqualBalanced_SingleDemand_FlowCount2_BalancedDistribution)
   EdgeSelection sel; sel.multi_edge = false; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
   auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
   ExecutionContext ctx(algs, gh);
-  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
-                     /*require_capacity=*/true,
-                     /*min_flow_count=*/2, /*max_flow_count=*/2);
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::EqualBalanced;
+  cfg.selection = sel;
+  cfg.require_capacity = true;
+  cfg.min_flow_count = 2;
+  cfg.max_flow_count = 2;
+  FlowPolicy policy(ctx, cfg);
   auto res = policy.place_demand(fg, 0, 2, 0, 7.0);
   EXPECT_NEAR(res.first, 4.0, 1e-9);
   EXPECT_NEAR(res.second, 3.0, 1e-9);
@@ -177,9 +205,13 @@ TEST(FlowPolicyCore, EqualBalanced_SingleDemand_FlowCount3_SaturatesBothPaths) {
   EdgeSelection sel; sel.multi_edge = false; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
   auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
   ExecutionContext ctx(algs, gh);
-  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
-                     /*require_capacity=*/true,
-                     /*min_flow_count=*/3, /*max_flow_count=*/3);
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::EqualBalanced;
+  cfg.selection = sel;
+  cfg.require_capacity = true;
+  cfg.min_flow_count = 3;
+  cfg.max_flow_count = 3;
+  FlowPolicy policy(ctx, cfg);
   auto res = policy.place_demand(fg, 0, 2, 0, 200.0);
   EXPECT_NEAR(res.first, 150.0, 1e-9);
   EXPECT_NEAR(res.second, 50.0, 1e-9);
@@ -193,14 +225,21 @@ TEST(FlowPolicyCore, DiminishingReturnsCutoff) {
   EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
   auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
   ExecutionContext ctx(algs, gh);
-  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
-                     /*require_capacity=*/true,
-                     /*multipath=*/true,
-                     /*min_flow_count=*/1, /*max_flow_count=*/1000000,
-                     /*max_path_cost=*/std::nullopt, /*max_path_cost_factor=*/std::nullopt,
-                     /*shortest_path=*/false,
-                     /*reoptimize*/false, /*max_no_progress*/100, /*max_total_iters*/10000,
-                     /*dim_enabled*/true, /*dim_window*/8, /*dim_eps*/1e-3);
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::EqualBalanced;
+  cfg.selection = sel;
+  cfg.require_capacity = true;
+  cfg.multipath = true;
+  cfg.min_flow_count = 1;
+  cfg.max_flow_count = 1000000;
+  cfg.shortest_path = false;
+  cfg.reoptimize_flows_on_each_placement = false;
+  cfg.max_no_progress_iterations = 100;
+  cfg.max_total_iterations = 10000;
+  cfg.diminishing_returns_enabled = true;
+  cfg.diminishing_returns_window = 8;
+  cfg.diminishing_returns_epsilon_frac = 1e-3;
+  FlowPolicy policy(ctx, cfg);
   auto res = policy.place_demand(fg, 0, 2, 0, 7.0);
   EXPECT_GE(res.first, 0.0);
   EXPECT_GE(res.second, 0.0);
@@ -215,20 +254,25 @@ TEST(FlowPolicyCore, EqualBalanced_ShortestPath_ECMP3_SaturatesAllEqualCostPaths
   std::int32_t dst_arr[6] = {1, 2, 3, 4, 4, 4};
   double cap_arr[6] = {5.0, 5.0, 5.0, 5.0, 5.0, 5.0};
   std::int64_t cost_arr[6] = {1, 1, 1, 1, 1, 1};
+  std::int64_t ext_arr[6] = {0, 1, 2, 3, 4, 5};
   auto g = StrictMultiDiGraph::from_arrays(num_nodes,
                                            std::span<const std::int32_t>(src_arr, 6),
                                            std::span<const std::int32_t>(dst_arr, 6),
                                            std::span<const double>(cap_arr, 6),
-                                           std::span<const std::int64_t>(cost_arr, 6));
+                                           std::span<const std::int64_t>(cost_arr, 6),
+                                           std::span<const std::int64_t>(ext_arr, 6));
   FlowGraph fg(g);
   EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
   auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
   ExecutionContext ctx(algs, gh);
-  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
-                    /*require_capacity=*/false,
-                    /*min_flow_count=*/1, /*max_flow_count=*/1,
-                    /*max_path_cost=*/std::nullopt, /*max_path_cost_factor=*/std::nullopt,
-                    /*shortest_path=*/true);
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::EqualBalanced;
+  cfg.selection = sel;
+  cfg.require_capacity = false;
+  cfg.min_flow_count = 1;
+  cfg.max_flow_count = 1;
+  cfg.shortest_path = true;
+  FlowPolicy policy(ctx, cfg);
   auto res = policy.place_demand(fg, 0, 4, 0, 100.0);
   // Should place sum of shortest-tier capacities = 15.0, and stop
   EXPECT_NEAR(res.first, 15.0, 1e-9);
@@ -245,20 +289,25 @@ TEST(FlowPolicyCore, EqualBalanced_ShortestPath_DownstreamSplit_BalancesBottlene
   std::int32_t dst_arr[5] = {1, 2, 3, 4, 4};
   double cap_arr[5] = {10.0, 5.0, 5.0, 10.0, 10.0};
   std::int64_t cost_arr[5] = {1, 1, 1, 1, 1};
+  std::int64_t ext_arr[5] = {0, 1, 2, 3, 4};
   auto g = StrictMultiDiGraph::from_arrays(num_nodes,
                                            std::span<const std::int32_t>(src_arr, 5),
                                            std::span<const std::int32_t>(dst_arr, 5),
                                            std::span<const double>(cap_arr, 5),
-                                           std::span<const std::int64_t>(cost_arr, 5));
+                                           std::span<const std::int64_t>(cost_arr, 5),
+                                           std::span<const std::int64_t>(ext_arr, 5));
   FlowGraph fg(g);
   EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
   auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
   ExecutionContext ctx(algs, gh);
-  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
-                    /*require_capacity=*/false,
-                    /*min_flow_count=*/1, /*max_flow_count=*/1,
-                    /*max_path_cost=*/std::nullopt, /*max_path_cost_factor=*/std::nullopt,
-                    /*shortest_path=*/true);
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::EqualBalanced;
+  cfg.selection = sel;
+  cfg.require_capacity = false;
+  cfg.min_flow_count = 1;
+  cfg.max_flow_count = 1;
+  cfg.shortest_path = true;
+  FlowPolicy policy(ctx, cfg);
   auto res = policy.place_demand(fg, 0, 4, 0, 100.0);
   EXPECT_NEAR(res.first, 10.0, 1e-9);
   EXPECT_NEAR(res.second, 90.0, 1e-9);
@@ -275,20 +324,25 @@ TEST(FlowPolicyCore, EqualBalanced_ShortestPath_IgnoresHigherCostTier) {
   std::int32_t dst_arr[4] = {1, 4, 2, 4};
   double cap_arr[4] = {10.0, 10.0, 50.0, 50.0};
   std::int64_t cost_arr[4] = {1, 1, 2, 2};
+  std::int64_t ext_arr[4] = {0, 1, 2, 3};
   auto g = StrictMultiDiGraph::from_arrays(num_nodes,
                                            std::span<const std::int32_t>(src_arr, 4),
                                            std::span<const std::int32_t>(dst_arr, 4),
                                            std::span<const double>(cap_arr, 4),
-                                           std::span<const std::int64_t>(cost_arr, 4));
+                                           std::span<const std::int64_t>(cost_arr, 4),
+                                           std::span<const std::int64_t>(ext_arr, 4));
   FlowGraph fg(g);
   EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
   auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
   ExecutionContext ctx(algs, gh);
-  FlowPolicy policy(ctx, PathAlg::SPF, FlowPlacement::EqualBalanced, sel,
-                    /*require_capacity=*/false,
-                    /*min_flow_count=*/1, /*max_flow_count=*/1,
-                    /*max_path_cost=*/std::nullopt, /*max_path_cost_factor=*/std::nullopt,
-                    /*shortest_path=*/true);
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::EqualBalanced;
+  cfg.selection = sel;
+  cfg.require_capacity = false;
+  cfg.min_flow_count = 1;
+  cfg.max_flow_count = 1;
+  cfg.shortest_path = true;
+  FlowPolicy policy(ctx, cfg);
   auto res = policy.place_demand(fg, 0, 4, 0, 100.0);
   EXPECT_NEAR(res.first, 10.0, 1e-9);
   EXPECT_NEAR(res.second, 90.0, 1e-9);

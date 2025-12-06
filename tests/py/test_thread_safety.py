@@ -18,6 +18,14 @@ from netgraph_core import (
 )
 
 
+def _make_graph(num_nodes, src, dst, capacity, cost):
+    """Helper to build graph with auto-generated ext_edge_ids."""
+    ext_edge_ids = np.arange(len(src), dtype=np.int64)
+    return StrictMultiDiGraph.from_arrays(
+        num_nodes, src, dst, capacity, cost, ext_edge_ids
+    )
+
+
 class TestSPFThreadSafety:
     """Test that spf() is thread-safe with respect to mask mutations."""
 
@@ -25,27 +33,25 @@ class TestSPFThreadSafety:
         """
         Verify that mutating node_mask in another thread doesn't affect spf() results.
 
-        Before fix: span points to NumPy buffer, GIL released, other thread mutates.
-        After fix: mask is copied to local vector before GIL release.
+        The C++ code copies the mask to a local vector before releasing the GIL,
+        so concurrent mutations to the NumPy buffer won't cause data races.
         """
-        # Create a graph
         backend = Backend.cpu()
         algs = Algorithms(backend)
 
         n = 100
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=n,
-            src=np.arange(n - 1, dtype=np.int32),
-            dst=np.arange(1, n, dtype=np.int32),
-            capacity=np.ones(n - 1) * 10.0,
-            cost=np.ones(n - 1, dtype=np.int64),
+        g = _make_graph(
+            n,
+            np.arange(n - 1, dtype=np.int32),
+            np.arange(1, n, dtype=np.int32),
+            np.ones(n - 1) * 10.0,
+            np.ones(n - 1, dtype=np.int64),
         )
         graph = algs.build_graph(g)
 
         # Create node mask (all True initially)
         node_mask = np.ones(n, dtype=bool)
 
-        # Results storage
         results = []
 
         def run_spf():
@@ -66,8 +72,8 @@ class TestSPFThreadSafety:
 
         mutator.join()
 
-        # After fix: SPF should see a consistent mask (either all True or all False)
-        # It won't see a partially-mutated state because it copied the mask
+        # SPF should see a consistent mask (either all True or all False)
+        # because the C++ code copies the mask before releasing the GIL
         dist, dag = results[0]
 
         # If mask was all True: all nodes should be reachable
@@ -91,12 +97,12 @@ class TestSPFThreadSafety:
         src = np.array([e[0] for e in edges], dtype=np.int32)
         dst = np.array([e[1] for e in edges], dtype=np.int32)
 
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=n,
-            src=src,
-            dst=dst,
-            capacity=np.ones(n) * 10.0,
-            cost=np.ones(n, dtype=np.int64),
+        g = _make_graph(
+            n,
+            src,
+            dst,
+            np.ones(n) * 10.0,
+            np.ones(n, dtype=np.int64),
         )
         graph = algs.build_graph(g)
 
@@ -132,12 +138,12 @@ class TestKSPThreadSafety:
         algs = Algorithms(backend)
 
         n = 20
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=n,
-            src=np.array([0, 0, 1, 1, 2], dtype=np.int32),
-            dst=np.array([1, 2, 3, 4, 4], dtype=np.int32),
-            capacity=np.ones(5) * 10.0,
-            cost=np.array([1, 2, 1, 2, 1], dtype=np.int64),
+        g = _make_graph(
+            n,
+            np.array([0, 0, 1, 1, 2], dtype=np.int32),
+            np.array([1, 2, 3, 4, 4], dtype=np.int32),
+            np.ones(5) * 10.0,
+            np.array([1, 2, 1, 2, 1], dtype=np.int64),
         )
         graph = algs.build_graph(g)
 
@@ -171,12 +177,12 @@ class TestMaxFlowThreadSafety:
         backend = Backend.cpu()
         algs = Algorithms(backend)
 
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=4,
-            src=np.array([0, 0, 1, 2], dtype=np.int32),
-            dst=np.array([1, 2, 3, 3], dtype=np.int32),
-            capacity=np.array([10.0, 10.0, 10.0, 10.0]),
-            cost=np.ones(4, dtype=np.int64),
+        g = _make_graph(
+            4,
+            np.array([0, 0, 1, 2], dtype=np.int32),
+            np.array([1, 2, 3, 3], dtype=np.int32),
+            np.array([10.0, 10.0, 10.0, 10.0]),
+            np.ones(4, dtype=np.int64),
         )
         graph = algs.build_graph(g)
 
@@ -215,12 +221,12 @@ class TestConcurrentAlgorithmCalls:
         algs = Algorithms(backend)
 
         n = 30
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=n,
-            src=np.arange(n - 1, dtype=np.int32),
-            dst=np.arange(1, n, dtype=np.int32),
-            capacity=np.ones(n - 1) * 10.0,
-            cost=np.ones(n - 1, dtype=np.int64),
+        g = _make_graph(
+            n,
+            np.arange(n - 1, dtype=np.int32),
+            np.arange(1, n, dtype=np.int32),
+            np.ones(n - 1) * 10.0,
+            np.ones(n - 1, dtype=np.int64),
         )
         graph = algs.build_graph(g)
 
@@ -261,12 +267,12 @@ class TestStressThreadSafety:
         algs = Algorithms(backend)
 
         n = 50
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=n,
-            src=np.arange(n - 1, dtype=np.int32),
-            dst=np.arange(1, n, dtype=np.int32),
-            capacity=np.random.rand(n - 1) * 100,
-            cost=np.ones(n - 1, dtype=np.int64),
+        g = _make_graph(
+            n,
+            np.arange(n - 1, dtype=np.int32),
+            np.arange(1, n, dtype=np.int32),
+            np.random.rand(n - 1) * 100,
+            np.ones(n - 1, dtype=np.int64),
         )
         graph = algs.build_graph(g)
 
@@ -316,12 +322,12 @@ class TestMemoryOrdering:
         algs = Algorithms(backend)
 
         n = 10
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=n,
-            src=np.arange(n - 1, dtype=np.int32),
-            dst=np.arange(1, n, dtype=np.int32),
-            capacity=np.ones(n - 1),
-            cost=np.ones(n - 1, dtype=np.int64),
+        g = _make_graph(
+            n,
+            np.arange(n - 1, dtype=np.int32),
+            np.arange(1, n, dtype=np.int32),
+            np.ones(n - 1),
+            np.ones(n - 1, dtype=np.int64),
         )
         graph = algs.build_graph(g)
 

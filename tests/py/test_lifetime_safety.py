@@ -23,18 +23,26 @@ from netgraph_core import (
 )
 
 
+def _make_graph(num_nodes, src, dst, capacity, cost):
+    """Helper to build graph with auto-generated ext_edge_ids."""
+    ext_edge_ids = np.arange(len(src), dtype=np.int64)
+    return StrictMultiDiGraph.from_arrays(
+        num_nodes, src, dst, capacity, cost, ext_edge_ids
+    )
+
+
 class TestFlowStateLifetime:
     """Test FlowState keeps graph alive (Issue #1)."""
 
     def test_flowstate_keeps_graph_alive_basic(self):
         """FlowState should prevent graph from being garbage collected."""
         # Create graph
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=3,
-            src=np.array([0, 1], dtype=np.int32),
-            dst=np.array([1, 2], dtype=np.int32),
-            capacity=np.array([10.0, 10.0]),
-            cost=np.array([1, 1], dtype=np.int64),
+        g = _make_graph(
+            3,
+            np.array([0, 1], dtype=np.int32),
+            np.array([1, 2], dtype=np.int32),
+            np.array([10.0, 10.0]),
+            np.array([1, 1], dtype=np.int64),
         )
 
         # Create FlowState (should keep graph alive via keep_alive<0,1>)
@@ -65,12 +73,12 @@ class TestFlowStateLifetime:
 
     def test_flowstate_with_residual_keeps_graph_alive(self):
         """FlowState(graph, residual) should keep graph alive, not residual."""
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=3,
-            src=np.array([0, 1], dtype=np.int32),
-            dst=np.array([1, 2], dtype=np.int32),
-            capacity=np.array([10.0, 10.0]),
-            cost=np.array([1, 1], dtype=np.int64),
+        g = _make_graph(
+            3,
+            np.array([0, 1], dtype=np.int32),
+            np.array([1, 2], dtype=np.int32),
+            np.array([10.0, 10.0]),
+            np.array([1, 1], dtype=np.int64),
         )
 
         residual = np.array([5.0, 7.0])
@@ -102,12 +110,12 @@ class TestFlowPolicyLifetime:
         backend = Backend.cpu()
         algs = Algorithms(backend)
 
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=3,
-            src=np.array([0, 1], dtype=np.int32),
-            dst=np.array([1, 2], dtype=np.int32),
-            capacity=np.array([10.0, 10.0]),
-            cost=np.array([1, 1], dtype=np.int64),
+        g = _make_graph(
+            3,
+            np.array([0, 1], dtype=np.int32),
+            np.array([1, 2], dtype=np.int32),
+            np.array([10.0, 10.0]),
+            np.array([1, 1], dtype=np.int64),
         )
         graph = algs.build_graph(g)
 
@@ -137,12 +145,12 @@ class TestFlowPolicyLifetime:
         backend = Backend.cpu()
         algs = Algorithms(backend)
 
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=3,
-            src=np.array([0, 1], dtype=np.int32),
-            dst=np.array([1, 2], dtype=np.int32),
-            capacity=np.array([10.0, 10.0]),
-            cost=np.array([1, 1], dtype=np.int64),
+        g = _make_graph(
+            3,
+            np.array([0, 1], dtype=np.int32),
+            np.array([1, 2], dtype=np.int32),
+            np.array([10.0, 10.0]),
+            np.array([1, 1], dtype=np.int64),
         )
         graph = algs.build_graph(g)
 
@@ -164,12 +172,12 @@ class TestFlowGraphLifetime:
 
     def test_flowgraph_keeps_graph_alive(self):
         """FlowGraph should prevent graph from being garbage collected."""
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=3,
-            src=np.array([0, 1], dtype=np.int32),
-            dst=np.array([1, 2], dtype=np.int32),
-            capacity=np.array([10.0, 10.0]),
-            cost=np.array([1, 1], dtype=np.int64),
+        g = _make_graph(
+            3,
+            np.array([0, 1], dtype=np.int32),
+            np.array([1, 2], dtype=np.int32),
+            np.array([10.0, 10.0]),
+            np.array([1, 1], dtype=np.int64),
         )
 
         fg = FlowGraph(g)
@@ -201,12 +209,12 @@ class TestComplexLifetimeScenarios:
 
     def test_nested_lifetime_chain(self):
         """Test chain: Graph -> FlowState -> operations."""
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=3,
-            src=np.array([0, 1], dtype=np.int32),
-            dst=np.array([1, 2], dtype=np.int32),
-            capacity=np.array([10.0, 10.0]),
-            cost=np.array([1, 1], dtype=np.int64),
+        g = _make_graph(
+            3,
+            np.array([0, 1], dtype=np.int32),
+            np.array([1, 2], dtype=np.int32),
+            np.array([10.0, 10.0]),
+            np.array([1, 1], dtype=np.int64),
         )
 
         fs = FlowState(g)
@@ -228,12 +236,12 @@ class TestComplexLifetimeScenarios:
 
     def test_multiple_flowstates_share_graph(self):
         """Multiple FlowStates should all keep the same graph alive."""
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=3,
-            src=np.array([0, 1], dtype=np.int32),
-            dst=np.array([1, 2], dtype=np.int32),
-            capacity=np.array([10.0, 10.0]),
-            cost=np.array([1, 1], dtype=np.int64),
+        g = _make_graph(
+            3,
+            np.array([0, 1], dtype=np.int32),
+            np.array([1, 2], dtype=np.int32),
+            np.array([10.0, 10.0]),
+            np.array([1, 1], dtype=np.int64),
         )
 
         fs1 = FlowState(g)
@@ -269,12 +277,12 @@ class TestLifetimeUnderStress:
     def test_rapid_create_delete_cycle(self):
         """Rapidly create and delete objects to stress lifetime management."""
         for _ in range(100):
-            g = StrictMultiDiGraph.from_arrays(
-                num_nodes=10,
-                src=np.arange(9, dtype=np.int32),
-                dst=np.arange(1, 10, dtype=np.int32),
-                capacity=np.ones(9),
-                cost=np.ones(9, dtype=np.int64),
+            g = _make_graph(
+                10,
+                np.arange(9, dtype=np.int32),
+                np.arange(1, 10, dtype=np.int32),
+                np.ones(9),
+                np.ones(9, dtype=np.int64),
             )
 
             fs = FlowState(g)
@@ -299,12 +307,12 @@ class TestLifetimeUnderStress:
     def test_large_graph_lifetime(self):
         """Test lifetime with larger graphs to catch memory issues."""
         n = 1000
-        g = StrictMultiDiGraph.from_arrays(
-            num_nodes=n,
-            src=np.arange(n - 1, dtype=np.int32),
-            dst=np.arange(1, n, dtype=np.int32),
-            capacity=np.random.rand(n - 1) * 100,
-            cost=np.ones(n - 1, dtype=np.int64),
+        g = _make_graph(
+            n,
+            np.arange(n - 1, dtype=np.int32),
+            np.arange(1, n, dtype=np.int32),
+            np.random.rand(n - 1) * 100,
+            np.ones(n - 1, dtype=np.int64),
         )
 
         fs = FlowState(g)

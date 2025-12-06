@@ -91,27 +91,6 @@ def test_ext_edge_ids_with_manual_reverse():
         assert ext_ids_view[i] == exp_ext_id
 
 
-def test_ext_edge_ids_empty():
-    """Test that ext_edge_ids can be omitted (backward compatibility)."""
-    num_nodes = 2
-    src = np.array([0], dtype=np.int32)
-    dst = np.array([1], dtype=np.int32)
-    capacity = np.array([10.0], dtype=np.float64)
-    cost = np.array([1], dtype=np.int64)
-
-    g = netgraph_core.StrictMultiDiGraph.from_arrays(
-        num_nodes=num_nodes,
-        src=src,
-        dst=dst,
-        capacity=capacity,
-        cost=cost,
-        # No ext_edge_ids
-    )
-
-    ext_ids_view = g.ext_edge_ids_view()
-    assert len(ext_ids_view) == 0, "ext_edge_ids should be empty when not provided"
-
-
 def test_ext_edge_ids_encoding_scheme():
     """Test a typical encoding scheme: (linkIndex << 1) | directionBit."""
     num_nodes = 3
@@ -159,6 +138,5 @@ def test_ext_edge_ids_encoding_scheme():
 if __name__ == "__main__":
     test_ext_edge_ids_without_reverse()
     test_ext_edge_ids_with_manual_reverse()
-    test_ext_edge_ids_empty()
     test_ext_edge_ids_encoding_scheme()
     print("All ext_edge_ids tests passed!")

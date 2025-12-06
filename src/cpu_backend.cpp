@@ -24,6 +24,8 @@ public:
       const GraphHandle& gh, NodeId src, const SpfOptions& opts) override {
     const StrictMultiDiGraph& g = *gh.graph;
     // Validate mask lengths strictly; mismatches are user errors.
+    // NOTE: Keep this as the single public boundary check; deeper layers
+    // (shortest_paths) should rely on this to avoid redundant validation.
     if (!opts.node_mask.empty() && opts.node_mask.size() != static_cast<std::size_t>(g.num_nodes())) {
       throw std::invalid_argument("CpuBackend::spf: node_mask length mismatch");
     }

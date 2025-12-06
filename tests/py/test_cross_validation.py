@@ -17,6 +17,14 @@ import pytest
 import netgraph_core as ngc
 
 
+def _make_graph(num_nodes, src, dst, cap, cost):
+    """Helper to build graph with auto-generated ext_edge_ids."""
+    ext_edge_ids = np.arange(len(src), dtype=np.int64)
+    return ngc.StrictMultiDiGraph.from_arrays(
+        num_nodes, src, dst, cap, cost, ext_edge_ids
+    )
+
+
 def _build_3tier_clos_graph() -> ngc.StrictMultiDiGraph:
     """Build a 3-tier Clos topology matching NetGraph scenario_3.yaml structure.
 
@@ -101,7 +109,7 @@ def _build_3tier_clos_graph() -> ngc.StrictMultiDiGraph:
     # Clos2 brick2: T2 (44-47) mesh to T1 (40-43)
     add_mesh(44, 4, 40, 4, 100.0)
 
-    return ngc.StrictMultiDiGraph.from_arrays(
+    return _make_graph(
         num_nodes,
         np.array(src_list, dtype=np.int32),
         np.array(dst_list, dtype=np.int32),
@@ -127,7 +135,7 @@ def _build_triangle_graph() -> ngc.StrictMultiDiGraph:
     cap = np.array([2.0, 1.0, 1.0], dtype=np.float64)
     cost = np.array([1, 1, 1], dtype=np.int64)
 
-    return ngc.StrictMultiDiGraph.from_arrays(3, src, dst, cap, cost)
+    return _make_graph(3, src, dst, cap, cost)
 
 
 def _build_simple_parallel_paths_graph() -> ngc.StrictMultiDiGraph:
@@ -146,7 +154,7 @@ def _build_simple_parallel_paths_graph() -> ngc.StrictMultiDiGraph:
     cap = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float64)
     cost = np.array([1, 1, 1, 1], dtype=np.int64)
 
-    return ngc.StrictMultiDiGraph.from_arrays(4, src, dst, cap, cost)
+    return _make_graph(4, src, dst, cap, cost)
 
 
 class TestNetGraphCrossValidation:

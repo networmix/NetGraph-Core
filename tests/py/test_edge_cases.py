@@ -16,6 +16,14 @@ import pytest
 import netgraph_core as ngc
 
 
+def _make_graph(num_nodes, src, dst, cap, cost):
+    """Helper to build graph with auto-generated ext_edge_ids."""
+    ext_edge_ids = np.arange(len(src), dtype=np.int64)
+    return ngc.StrictMultiDiGraph.from_arrays(
+        num_nodes, src, dst, cap, cost, ext_edge_ids
+    )
+
+
 def test_eb_min_flow_gating_does_not_prune_valid_parallel_edges(algs):
     """EB path gating: do not prune paths where per-edge residual < min_flow but group supports it."""
     # Graph: 0->1 cap 1.2; 1->2 has two parallel edges cap 0.6 each; all costs=1
@@ -23,7 +31,7 @@ def test_eb_min_flow_gating_does_not_prune_valid_parallel_edges(algs):
     dst = np.array([1, 2, 2], dtype=np.int32)
     cap = np.array([1.2, 0.6, 0.6], dtype=np.float64)
     cost = np.array([1, 1, 1], dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(3, src, dst, cap, cost)
+    g = _make_graph(3, src, dst, cap, cost)
     fg = ngc.FlowGraph(g)
     sel = ngc.EdgeSelection(
         multi_edge=True, require_capacity=True, tie_break=ngc.EdgeTieBreak.DETERMINISTIC
@@ -51,7 +59,7 @@ def test_spf_distance_dtype_int64_exact(algs):
     dst = np.array([1, 2], dtype=np.int32)
     cap = np.array([1.0, 1.0], dtype=np.float64)
     cost = np.array([big, big], dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(3, src, dst, cap, cost)
+    g = _make_graph(3, src, dst, cap, cost)
     try:
         dist_i64, _ = algs.spf(algs.build_graph(g), 0, 2, dtype="int64")
     except TypeError:
@@ -69,7 +77,7 @@ def test_ksp_distance_dtype_int64_exact(algs):
     dst = np.array([1, 2], dtype=np.int32)
     cap = np.array([1.0, 1.0], dtype=np.float64)
     cost = np.array([big, big], dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(3, src, dst, cap, cost)
+    g = _make_graph(3, src, dst, cap, cost)
     try:
         items = algs.ksp(algs.build_graph(g), 0, 2, k=1, dtype="int64")
     except TypeError:
@@ -98,7 +106,7 @@ def test_max_flow_zero_capacity_on_shortest_path_equal_balanced(algs, to_handle)
         [0.0, 10.0, 100.0, 100.0], dtype=np.float64
     )  # 0->1 has zero capacity
     cost = np.array([1, 1, 2, 2], dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(4, src, dst, cap, cost)
+    g = _make_graph(4, src, dst, cap, cost)
 
     # Test with EqualBalanced + require_capacity=False + shortest_path=True
     total, summary = algs.max_flow(
@@ -131,7 +139,7 @@ def test_max_flow_zero_capacity_on_shortest_path_proportional(algs, to_handle):
     dst = np.array([1, 2, 3, 2], dtype=np.int32)
     cap = np.array([0.0, 10.0, 100.0, 100.0], dtype=np.float64)
     cost = np.array([1, 1, 2, 2], dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(4, src, dst, cap, cost)
+    g = _make_graph(4, src, dst, cap, cost)
 
     total, summary = algs.max_flow(
         to_handle(g),
@@ -158,7 +166,7 @@ def test_max_flow_require_capacity_true_finds_alternative(algs, to_handle):
     dst = np.array([1, 2, 3, 2], dtype=np.int32)
     cap = np.array([0.0, 10.0, 100.0, 100.0], dtype=np.float64)
     cost = np.array([1, 1, 2, 2], dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(4, src, dst, cap, cost)
+    g = _make_graph(4, src, dst, cap, cost)
 
     total, summary = algs.max_flow(
         to_handle(g),

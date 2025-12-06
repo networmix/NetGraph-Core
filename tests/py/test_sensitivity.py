@@ -3,9 +3,17 @@ import numpy as np
 import netgraph_core as ngc
 
 
+def _make_graph(num_nodes, src, dst, capacity, cost):
+    """Helper to build graph with auto-generated ext_edge_ids."""
+    ext_edge_ids = np.arange(len(src), dtype=np.int64)
+    return ngc.StrictMultiDiGraph.from_arrays(
+        num_nodes, src, dst, capacity, cost, ext_edge_ids
+    )
+
+
 def test_sensitivity_simple():
     # S->T (cap 10)
-    g = ngc.StrictMultiDiGraph.from_arrays(
+    g = _make_graph(
         num_nodes=2,
         src=np.array([0], dtype=np.int32),
         dst=np.array([1], dtype=np.int32),
@@ -23,7 +31,7 @@ def test_sensitivity_simple():
 
 def test_sensitivity_parallel():
     # S->T (cap 10), S->T (cap 10)
-    g = ngc.StrictMultiDiGraph.from_arrays(
+    g = _make_graph(
         num_nodes=2,
         src=np.array([0, 0], dtype=np.int32),
         dst=np.array([1, 1], dtype=np.int32),
@@ -42,7 +50,7 @@ def test_sensitivity_parallel():
 def test_sensitivity_partial():
     # S->A (10), S->B (5), A->T (5), B->T (10)
     # 0->1 (0), 0->2 (1), 1->3 (2), 2->3 (3)
-    g = ngc.StrictMultiDiGraph.from_arrays(
+    g = _make_graph(
         num_nodes=4,
         src=np.array([0, 0, 1, 2], dtype=np.int32),
         dst=np.array([1, 2, 3, 3], dtype=np.int32),
@@ -66,7 +74,7 @@ def test_sensitivity_partial():
 
 def test_sensitivity_masked():
     # Two parallel paths, cap 10. One masked out via input mask.
-    g = ngc.StrictMultiDiGraph.from_arrays(
+    g = _make_graph(
         num_nodes=2,
         src=np.array([0, 0], dtype=np.int32),
         dst=np.array([1, 1], dtype=np.int32),
@@ -101,7 +109,7 @@ def test_sensitivity_shortest_path_vs_max_flow():
       - Only uses cheapest path: S->A->T (10)
       - Edges 2,3 (S->B->T path) are NOT used, so NOT critical
     """
-    g = ngc.StrictMultiDiGraph.from_arrays(
+    g = _make_graph(
         num_nodes=4,
         src=np.array([0, 1, 0, 3], dtype=np.int32),
         dst=np.array([1, 2, 3, 2], dtype=np.int32),

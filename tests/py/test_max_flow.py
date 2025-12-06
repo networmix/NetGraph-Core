@@ -5,6 +5,14 @@ import numpy as np
 import netgraph_core as ngc
 
 
+def _make_graph(num_nodes, src, dst, cap, cost):
+    """Helper to build graph with auto-generated ext_edge_ids."""
+    ext_edge_ids = np.arange(len(src), dtype=np.int64)
+    return ngc.StrictMultiDiGraph.from_arrays(
+        num_nodes, src, dst, cap, cost, ext_edge_ids
+    )
+
+
 def test_max_flow_square1_proportional_with_edge_flows(
     square1_graph,
     flows_by_eid,
@@ -170,7 +178,7 @@ def test_max_flow_ecmp3_equal_balanced(algs, to_handle):
     dst = np.array([1, 2, 3, 4, 4, 4], dtype=np.int32)
     cap = np.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0], dtype=np.float64)
     cost = np.array([1, 1, 1, 1, 1, 1], dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(5, src, dst, cap, cost)
+    g = _make_graph(5, src, dst, cap, cost)
     total, summary = algs.max_flow(
         to_handle(g),
         0,
@@ -194,7 +202,7 @@ def test_max_flow_downstream_equal_balanced(algs, to_handle):
     dst = np.array([1, 2, 3, 4, 4], dtype=np.int32)
     cap = np.array([10.0, 5.0, 5.0, 5.0, 5.0], dtype=np.float64)
     cost = np.array([1, 1, 1, 1, 1], dtype=np.int64)
-    g = ngc.StrictMultiDiGraph.from_arrays(5, src, dst, cap, cost)
+    g = _make_graph(5, src, dst, cap, cost)
     total, summary = algs.max_flow(
         to_handle(g),
         0,

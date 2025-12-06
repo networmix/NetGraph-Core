@@ -105,7 +105,6 @@ install:
 
 check:
 	@PYTHON=$(PYTHON) bash dev/run-checks.sh
-	@$(MAKE) lint
 
 check-ci:
 	@$(MAKE) lint
