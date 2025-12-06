@@ -1,6 +1,6 @@
 # NetGraph-Core Development Makefile
 
-.PHONY: help venv clean-venv dev install check check-ci lint format test qt clean build info hooks cov cpp-test rebuild check-python sanitize-test
+.PHONY: help venv clean-venv dev install check check-ci lint format test qt build clean check-dist publish-test publish info hooks check-python cpp-test cov sanitize-test rebuild
 
 .DEFAULT_GOAL := help
 
@@ -36,22 +36,36 @@ DEFAULT_MACOSX := 15.0
 
 help:
 	@echo "🔧 NetGraph-Core Development Commands"
-	@echo "  make venv         - Create a local virtualenv (./venv)"
-	@echo "  make dev          - Install dev deps and pre-commit"
-	@echo "  make install      - Editable install (no dev deps)"
-	@echo "  make check        - Pre-commit (auto-fix) + C++/Python tests, then lint"
-	@echo "  make check-ci     - Non-mutating lint + tests (CI entrypoint)"
-	@echo "  make lint         - Ruff + Pyright"
-	@echo "  make format       - Ruff format"
-	@echo "  make test         - Run pytest"
-	@echo "  make qt           - Quick tests (exclude slow/benchmark if marked)"
-	@echo "  make cov          - Coverage summary + XML + single-page combined HTML"
-	@echo "  make build        - Build wheel"
-	@echo "  make clean        - Clean build artifacts"
-	@echo "  make hooks        - Run pre-commit on all files"
-	@echo "  make info         - Show tool versions"
-	@echo "  make check-python - Check if venv Python matches best available"
-	@echo "  make rebuild      - Clean and rebuild (respects CMAKE_ARGS)"
+	@echo ""
+	@echo "Setup & Installation:"
+	@echo "  make venv          - Create a local virtualenv (./venv)"
+	@echo "  make dev           - Full development environment (package + dev deps + hooks)"
+	@echo "  make install       - Install package for usage (no dev dependencies)"
+	@echo "  make clean-venv    - Remove virtual environment"
+	@echo "  make rebuild       - Clean and rebuild (respects CMAKE_ARGS)"
+	@echo ""
+	@echo "Code Quality & Testing:"
+	@echo "  make check         - Run pre-commit (auto-fix) + C++/Python tests, then lint"
+	@echo "  make check-ci      - Run non-mutating lint + tests (CI entrypoint)"
+	@echo "  make lint          - Run only linting (non-mutating: ruff + pyright)"
+	@echo "  make format        - Auto-format code with ruff"
+	@echo "  make test          - Run tests with coverage"
+	@echo "  make qt            - Run quick tests only (exclude slow/benchmark)"
+	@echo "  make cpp-test      - Build and run C++ tests"
+	@echo "  make cov           - Coverage summary + XML + single-page combined HTML"
+	@echo "  make sanitize-test - Build and run C++ tests with sanitizers"
+	@echo ""
+	@echo "Build & Package:"
+	@echo "  make build         - Build distribution packages"
+	@echo "  make clean         - Clean build artifacts and cache files"
+	@echo "  make check-dist    - Check distribution packages with twine"
+	@echo "  make publish-test  - Publish to Test PyPI"
+	@echo "  make publish       - Publish to PyPI"
+	@echo ""
+	@echo "Utilities:"
+	@echo "  make info          - Show project information"
+	@echo "  make hooks         - Run pre-commit on all files"
+	@echo "  make check-python  - Check if venv Python matches best available"
 
 # Allow callers to pass CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET consistently
 ENV_MACOS := $(if $(MACOSX_DEPLOYMENT_TARGET),MACOSX_DEPLOYMENT_TARGET=$(MACOSX_DEPLOYMENT_TARGET),MACOSX_DEPLOYMENT_TARGET=$(DEFAULT_MACOSX))
@@ -134,15 +148,43 @@ build:
 		exit 1; \
 	fi
 
+check-dist:
+	@echo "🔍 Checking distribution packages..."
+	@if $(PYTHON) -c "import twine" >/dev/null 2>&1; then \
+		$(PYTHON) -m twine check dist/*; \
+	else \
+		echo "❌ twine not installed. Install dev dependencies with: make dev"; \
+		exit 1; \
+	fi
+
+publish-test:
+	@echo "📦 Publishing to Test PyPI..."
+	@if $(PYTHON) -c "import twine" >/dev/null 2>&1; then \
+		$(PYTHON) -m twine upload --repository testpypi dist/*; \
+	else \
+		echo "❌ twine not installed. Install dev dependencies with: make dev"; \
+		exit 1; \
+	fi
+
+publish:
+	@echo "🚀 Publishing to PyPI..."
+	@if $(PYTHON) -c "import twine" >/dev/null 2>&1; then \
+		$(PYTHON) -m twine upload dist/*; \
+	else \
+		echo "❌ twine not installed. Install dev dependencies with: make dev"; \
+		exit 1; \
+	fi
+
 clean:
 	@echo "🧹 Cleaning build artifacts and cache files..."
 	@rm -rf build/ dist/ *.egg-info/ || true
-	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-	@find . -type f -name "*.pyc" -delete 2>/dev/null || true
-	@find . -type f -name "*.pyo" -delete 2>/dev/null || true
-	@rm -f .coverage coverage-*.xml coverage-*.html || true
-	@rm -rf htmlcov-python || true
+	@rm -rf .pytest_cache .ruff_cache .mypy_cache htmlcov htmlcov-python .coverage coverage.xml coverage-*.xml .benchmarks .pytest-benchmark || true
 	@rm -rf Testing CTestTestfile.cmake || true
+	@find . -path "./venv" -prune -o -type f -name "*.pyc" -delete 2>/dev/null || true
+	@find . -path "./venv" -prune -o -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	@find . -path "./venv" -prune -o -type f -name "*.pyo" -delete 2>/dev/null || true
+	@find . -path "./venv" -prune -o -type f -name "*~" -delete 2>/dev/null || true
+	@find . -path "./venv" -prune -o -type f -name "*.orig" -delete 2>/dev/null || true
 	@echo "✅ Cleanup complete!"
 
 info:
