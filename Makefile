@@ -21,7 +21,8 @@ PY_PATH := $(shell command -v python3 2>/dev/null || command -v python 2>/dev/nu
 #   1. Use local venv if present
 #   2. Otherwise use active python on PATH (important for CI)
 #   3. Fall back to best available version
-PYTHON ?= $(if $(wildcard $(VENV_BIN)/python),$(VENV_BIN)/python,$(if $(PY_PATH),$(PY_PATH),$(PY_BEST)))
+#   4. Final fallback to 'python3' literal for clear error messages
+PYTHON ?= $(if $(wildcard $(VENV_BIN)/python),$(VENV_BIN)/python,$(if $(PY_PATH),$(PY_PATH),$(if $(PY_BEST),$(PY_BEST),python3)))
 
 # Derived tool commands (always use -m to ensure correct environment)
 PIP := $(PYTHON) -m pip
@@ -87,7 +88,7 @@ dev:
 			echo "❌ Error: venv creation failed - $(VENV_BIN)/python not found"; \
 			exit 1; \
 		fi; \
-		$(VENV_BIN)/python -m pip install -U pip wheel; \
+		$(VENV_BIN)/python -m pip install -U pip setuptools wheel; \
 	fi
 	@echo "📦 Installing dev dependencies..."
 	@$(DEV_ENV) $(VENV_BIN)/python -m pip install -e .'[dev]'
@@ -107,7 +108,7 @@ venv:
 		echo "❌ Error: venv creation failed - $(VENV_BIN)/python not found"; \
 		exit 1; \
 	fi
-	@$(VENV_BIN)/python -m pip install -U pip wheel
+	@$(VENV_BIN)/python -m pip install -U pip setuptools wheel
 	@echo "✅ venv ready. Activate with: source venv/bin/activate"
 
 clean-venv:
