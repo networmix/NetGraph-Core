@@ -11,8 +11,8 @@
 VENV_BIN := $(PWD)/venv/bin
 
 # PY_BEST: scan for newest supported Python (used when creating new venvs)
-# Supports 3.9-3.13 to match CI matrix
-PY_BEST := $(shell for v in 3.13 3.12 3.11 3.10 3.9; do command -v python$$v >/dev/null 2>&1 && { echo python$$v; exit 0; }; done; command -v python3 2>/dev/null || command -v python 2>/dev/null)
+# Supports 3.11-3.13 to match requires-python >=3.11
+PY_BEST := $(shell for v in 3.13 3.12 3.11; do command -v python$$v >/dev/null 2>&1 && { echo python$$v; exit 0; }; done; command -v python3 2>/dev/null || command -v python 2>/dev/null)
 
 # PY_PATH: active python3/python on PATH (respects CI setup-python and activated venvs)
 PY_PATH := $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null)

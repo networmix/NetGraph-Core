@@ -4,10 +4,10 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "netgraph-core"
-version = "0.2.3"
+version = "0.3.0"
 description = "C++ implementation of graph algorithms for network flow analysis and traffic engineering with Python bindings"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "Project Contributors" }]
 classifiers = [
@@ -18,8 +18,6 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -80,7 +78,7 @@ skip-magic-trailing-comma = false
 
 [tool.pyright]
 typeCheckingMode = "standard"
-pythonVersion = "3.9"
+pythonVersion = "3.11"
 exclude = [
     "venv/**",
     "tests/**",

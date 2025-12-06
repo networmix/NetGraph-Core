@@ -89,7 +89,7 @@ make cov        # Coverage report (C++ + Python)
 ## Requirements
 
 - **C++:** C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+)
-- **Python:** 3.9+
+- **Python:** 3.11+
 - **Build:** CMake 3.15+, scikit-build-core
 - **Dependencies:** pybind11, NumPy
 

@@ -70,7 +70,7 @@ def cost_dist_dict():
     def _to_dict(summary) -> dict[float, float]:
         costs = np.asarray(getattr(summary, "costs", []), dtype=float)
         flows = np.asarray(getattr(summary, "flows", []), dtype=float)
-        return {float(c): float(f) for c, f in zip(costs, flows)}
+        return {float(c): float(f) for c, f in zip(costs, flows, strict=False)}
 
     return _to_dict
 

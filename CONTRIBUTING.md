@@ -6,7 +6,7 @@ This document provides guidelines for setting up your development environment an
 
 NetGraph-Core is a hybrid C++/Python project. You will need:
 
-- Python 3.9+
+- Python 3.11+
 - C++20 compatible compiler (GCC 10+, Clang 12+, MSVC 2019+)
 - CMake 3.23+
 - Ninja (recommended)
