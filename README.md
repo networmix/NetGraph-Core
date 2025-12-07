@@ -64,6 +64,14 @@ Or from source:
 pip install -e .
 ```
 
+### Build Optimizations
+
+Default builds include LTO and loop unrolling. For local development:
+
+```bash
+make install-native   # CPU-specific optimizations (not portable)
+```
+
 ## Repository Structure
 
 ```
@@ -81,9 +89,9 @@ tests/py/               # Python tests (pytest)
 make dev        # Setup: venv, dependencies, pre-commit hooks
 make check      # Run all tests and linting (auto-fix formatting)
 make check-ci   # Strict checks without auto-fix (for CI)
+make test       # Python tests with coverage
 make cpp-test   # C++ tests only
-make py-test    # Python tests only
-make cov        # Coverage report (C++ + Python)
+make cov        # Combined coverage report (C++ + Python)
 ```
 
 ## Requirements

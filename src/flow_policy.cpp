@@ -16,6 +16,7 @@
 #include "netgraph/core/constants.hpp"
 #include "netgraph/core/algorithms.hpp"
 #include "netgraph/core/options.hpp"
+#include "netgraph/core/profiling.hpp"
 
 #include <algorithm>
 #include <deque>
@@ -199,6 +200,7 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
                                                   double volume,
                                                   std::optional<double> target_per_flow,
                                                   std::optional<double> min_flow) {
+  NGRAPH_PROFILE_SCOPE("place_demand");
 
   // Compute target flow per flow-record.
   // target: the volume to place per flow (or globally if target_per_flow is unset).

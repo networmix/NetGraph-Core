@@ -14,6 +14,7 @@
 #include "netgraph/core/flow_state.hpp"
 #include "netgraph/core/shortest_paths.hpp"
 #include "netgraph/core/constants.hpp"
+#include "netgraph/core/profiling.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -211,6 +212,7 @@ void FlowState::reset(std::span<const Cap> residual_init) {
 Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
                              Flow requested_flow, FlowPlacement placement,
                              std::vector<std::pair<EdgeId, Flow>>* trace) {
+  NGRAPH_PROFILE_SCOPE("place_on_dag");
   const auto N = g_->num_nodes();
   if (src < 0 || src >= N || dst < 0 || dst >= N || src == dst) return 0.0;
 

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2025-12-08
+
+### Added
+
+- **Profiling**: Runtime profiling infrastructure for C++ hot paths (`shortest_paths_core`, `place_demand`, `place_on_dag`).
+  - Enable via `NGRAPH_CORE_PROFILE=1` environment variable.
+  - Python API: `profiling_enabled()`, `profiling_dump()`, `profiling_reset()`.
+  - Minimal overhead when disabled (single static bool check per instrumented scope).
+  - ~2% overhead when enabled.
+
+### Changed
+
+- **Build**: Default optimizations: LTO, loop unrolling, `-fno-math-errno`. Add `make install-native` for CPU-specific builds.
+
 ## [0.3.0] - 2025-12-06
 
 ### Changed

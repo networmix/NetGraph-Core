@@ -1,6 +1,6 @@
 # NetGraph-Core Development Makefile
 
-.PHONY: help venv clean-venv dev install check check-ci lint format test qt build clean check-dist publish-test publish info hooks check-python cpp-test cov sanitize-test rebuild
+.PHONY: help venv clean-venv dev install install-native install-pgo check check-ci lint format test qt build clean check-dist publish-test publish info hooks check-python cpp-test cov sanitize-test rebuild
 
 .DEFAULT_GOAL := help
 
@@ -41,7 +41,9 @@ help:
 	@echo "Setup & Installation:"
 	@echo "  make venv          - Create a local virtualenv (./venv)"
 	@echo "  make dev           - Full development environment (package + dev deps + hooks)"
-	@echo "  make install       - Install package for usage (no dev dependencies)"
+	@echo "  make install       - Install package (default optimizations: LTO, loop unrolling)"
+	@echo "  make install-native - Install with CPU-specific optimizations (faster, not portable)"
+	@echo "  make install-pgo   - Profile-guided optimization (two-phase build, experimental)"
 	@echo "  make clean-venv    - Remove virtual environment"
 	@echo "  make rebuild       - Clean and rebuild (respects CMAKE_ARGS)"
 	@echo ""
@@ -115,8 +117,38 @@ clean-venv:
 	@rm -rf venv/
 
 install:
-	@echo "📦 Installing package (editable)"
+	@echo "📦 Installing package (editable, default optimizations)"
 	@$(DEV_ENV) $(PIP) install -e .
+
+install-native:
+	@echo "📦 Installing with native CPU optimizations (-march=native)"
+	@echo "   Note: Binary will only work on this CPU architecture"
+	@$(ENV_MACOS) $(ENV_CC) $(ENV_CXX) CMAKE_ARGS="$(strip $(CMAKE_ARGS) -DNETGRAPH_CORE_NATIVE=ON)" $(PIP) install -e .
+
+# PGO profile stored outside build/ so it survives rebuild
+PGO_DIR := $(PWD)/.pgo-profile
+
+install-pgo:
+	@echo "📦 PGO Build Phase 1/3: Instrumenting..."
+	@rm -rf build/ $(PGO_DIR)
+	@mkdir -p $(PGO_DIR)
+	@$(ENV_MACOS) $(ENV_CC) $(ENV_CXX) CMAKE_ARGS="$(strip $(CMAKE_ARGS) -DNETGRAPH_CORE_PGO_GENERATE=ON -DNETGRAPH_CORE_PGO_DIR=$(PGO_DIR) -DNETGRAPH_CORE_NATIVE=ON)" $(PIP) install -e .
+	@echo "📦 PGO Build Phase 2/3: Collecting profile (running benchmark)..."
+	@$(PYTHON) dev/benchmark_profiling_overhead.py --mesh-size 25 --spf-iters 1000 --flow-iters 200 >/dev/null 2>&1
+	@# Clang: merge raw profiles into .profdata (profile may be in cwd or PGO_DIR)
+	@if ls $(PGO_DIR)/*.profraw >/dev/null 2>&1; then \
+		echo "   Merging Clang profile data..."; \
+		xcrun llvm-profdata merge -output=$(PGO_DIR)/default.profdata $(PGO_DIR)/*.profraw 2>/dev/null || \
+		llvm-profdata merge -output=$(PGO_DIR)/default.profdata $(PGO_DIR)/*.profraw; \
+	elif ls *.profraw >/dev/null 2>&1; then \
+		mv *.profraw $(PGO_DIR)/; \
+		xcrun llvm-profdata merge -output=$(PGO_DIR)/default.profdata $(PGO_DIR)/*.profraw 2>/dev/null || \
+		llvm-profdata merge -output=$(PGO_DIR)/default.profdata $(PGO_DIR)/*.profraw; \
+	fi
+	@echo "📦 PGO Build Phase 3/3: Rebuilding with profile data..."
+	@rm -rf build/
+	@$(ENV_MACOS) $(ENV_CC) $(ENV_CXX) CMAKE_ARGS="$(strip $(CMAKE_ARGS) -DNETGRAPH_CORE_PGO_USE=ON -DNETGRAPH_CORE_PGO_DIR=$(PGO_DIR) -DNETGRAPH_CORE_NATIVE=ON)" $(PIP) install -e .
+	@echo "✅ PGO build complete"
 
 check:
 	@PYTHON=$(PYTHON) bash dev/run-checks.sh

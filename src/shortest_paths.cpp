@@ -1,5 +1,6 @@
 /* Path enumeration from PredDAG (resolve_to_paths). */
 #include "netgraph/core/shortest_paths.hpp"
+#include "netgraph/core/profiling.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -181,6 +182,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
                     std::span<const Cap> residual,
                     std::span<const bool> node_mask,
                     std::span<const bool> edge_mask) {
+  NGRAPH_PROFILE_SCOPE("shortest_paths_core");
   const auto N = g.num_nodes();
   const auto row = g.row_offsets_view();
   const auto col = g.col_indices_view();

@@ -24,6 +24,9 @@ from _netgraph_core import (
     PathAlg,
     PredDAG,
     StrictMultiDiGraph,
+    profiling_dump,
+    profiling_enabled,
+    profiling_reset,
 )
 
 from ._version import __version__
@@ -63,4 +66,7 @@ __all__ = [
     "FlowSummary",
     "Backend",
     "Algorithms",
+    "profiling_enabled",
+    "profiling_dump",
+    "profiling_reset",
 ]

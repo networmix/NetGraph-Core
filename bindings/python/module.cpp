@@ -23,6 +23,7 @@
 #include "netgraph/core/backend.hpp"
 #include "netgraph/core/algorithms.hpp"
 #include "netgraph/core/options.hpp"
+#include "netgraph/core/profiling.hpp"
 
 namespace py = pybind11;
 using namespace netgraph::core;
@@ -604,4 +605,12 @@ PYBIND11_MODULE(_netgraph_core, m) {
            py::arg("flow_graph"), py::arg("src"), py::arg("dst"), py::arg("flowClass"), py::arg("target"))
       .def("remove_demand", [](FlowPolicy& p, FlowGraph& fg){ py::gil_scoped_release rel; p.remove_demand(fg); py::gil_scoped_acquire acq; })
       .def_property_readonly("flows", [](const FlowPolicy& p){ py::dict out; for (auto const& kv : p.flows()) { const auto& idx = kv.first; const auto& f = kv.second; out[py::make_tuple(idx.src, idx.dst, idx.flowClass, idx.flowId)] = py::make_tuple(f.src, f.dst, f.cost, f.placed_flow); } return out; });
+
+  // Profiling functions (enabled via NGRAPH_CORE_PROFILE=1 environment variable)
+  m.def("profiling_enabled", &profiling_enabled,
+        "Return True if profiling is enabled (NGRAPH_CORE_PROFILE=1).");
+  m.def("profiling_dump", []{ ProfilingStats::instance().dump(); },
+        "Print profiling statistics to stderr.");
+  m.def("profiling_reset", []{ ProfilingStats::instance().reset(); },
+        "Clear all profiling statistics.");
 }

@@ -105,25 +105,117 @@ if(APPLE)
   target_compile_definitions(_netgraph_core PRIVATE _LIBCPP_DISABLE_AVAILABILITY=1 _LIBCPP_ABI_VERSION=1)
 endif()
 
-# Optional coverage instrumentation for GCC/Clang
+# =============================================================================
+# Performance optimizations (disabled when coverage/sanitizers are enabled)
+# =============================================================================
+
 option(NETGRAPH_CORE_COVERAGE "Enable C++ coverage instrumentation" OFF)
-if(NETGRAPH_CORE_COVERAGE)
-  message(STATUS "Enabling coverage instrumentation for C++ targets")
-  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    foreach(tgt netgraph_core _netgraph_core)
-      # Use no optimizations and include debug info for accurate line mapping
-      target_compile_options(${tgt} PRIVATE -O0 -g --coverage)
-      # Link coverage runtime
-      target_link_options(${tgt} PRIVATE --coverage)
-    endforeach()
+option(NETGRAPH_CORE_SANITIZE "Enable Address/Undefined sanitizers" OFF)
+option(NETGRAPH_CORE_NATIVE "Optimize for current CPU (not portable)" OFF)
+option(NETGRAPH_CORE_FAST_MATH "Enable fast math (may affect precision)" OFF)
+option(NETGRAPH_CORE_PGO_GENERATE "Instrument for PGO profile collection" OFF)
+option(NETGRAPH_CORE_PGO_USE "Use PGO profile data (set NETGRAPH_CORE_PGO_DIR)" OFF)
+set(NETGRAPH_CORE_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Directory for PGO profile data")
+
+# Only apply optimizations when not in debug/instrumentation mode
+if(NOT NETGRAPH_CORE_COVERAGE AND NOT NETGRAPH_CORE_SANITIZE)
+  # LTO (Link Time Optimization) - enables cross-module inlining
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
+  if(ipo_supported)
+    message(STATUS "Enabling LTO (Link Time Optimization)")
+    set_target_properties(netgraph_core PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set_target_properties(_netgraph_core PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
   else()
-    message(WARNING "NETGRAPH_CORE_COVERAGE is set but compiler '${CMAKE_CXX_COMPILER_ID}' is not supported")
+    message(STATUS "LTO not supported: ${ipo_error}")
+  endif()
+
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # GCC-only: allow aggressive inlining by promising symbols won't be interposed
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      target_compile_options(netgraph_core PRIVATE -fno-semantic-interposition)
+      target_compile_options(_netgraph_core PRIVATE -fno-semantic-interposition)
+    endif()
+
+    # Safe floating-point optimizations (we don't use errno, FP exceptions, or change rounding mode)
+    target_compile_options(netgraph_core PRIVATE -fno-math-errno -fno-trapping-math)
+    target_compile_options(_netgraph_core PRIVATE -fno-math-errno -fno-trapping-math)
+
+    # Aggressive loop optimizations
+    target_compile_options(netgraph_core PRIVATE -funroll-loops)
+    target_compile_options(_netgraph_core PRIVATE -funroll-loops)
+
+    # Native CPU instructions (AVX2, etc.) - only for local builds
+    if(NETGRAPH_CORE_NATIVE)
+      message(STATUS "Enabling native CPU optimizations (-march=native)")
+      target_compile_options(netgraph_core PRIVATE -march=native)
+      target_compile_options(_netgraph_core PRIVATE -march=native)
+    endif()
+
+    # Fast math - trades IEEE compliance for speed
+    if(NETGRAPH_CORE_FAST_MATH)
+      message(STATUS "Enabling fast math optimizations")
+      target_compile_options(netgraph_core PRIVATE -ffast-math)
+      target_compile_options(_netgraph_core PRIVATE -ffast-math)
+    endif()
+
+    # PGO (Profile-Guided Optimization) - uses runtime profile to guide inlining decisions
+    # GCC: -fprofile-generate/-fprofile-use, Clang: -fprofile-instr-*
+    if(NETGRAPH_CORE_PGO_GENERATE)
+      message(STATUS "PGO: Instrumenting for profile generation -> ${NETGRAPH_CORE_PGO_DIR}")
+      file(MAKE_DIRECTORY ${NETGRAPH_CORE_PGO_DIR})
+      if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(netgraph_core PRIVATE -fprofile-generate=${NETGRAPH_CORE_PGO_DIR})
+        target_compile_options(_netgraph_core PRIVATE -fprofile-generate=${NETGRAPH_CORE_PGO_DIR})
+        target_link_options(netgraph_core PRIVATE -fprofile-generate=${NETGRAPH_CORE_PGO_DIR})
+        target_link_options(_netgraph_core PRIVATE -fprofile-generate=${NETGRAPH_CORE_PGO_DIR})
+      else()
+        # Clang/AppleClang: use LLVM instrumentation PGO
+        target_compile_options(netgraph_core PRIVATE -fprofile-instr-generate=${NETGRAPH_CORE_PGO_DIR}/default.profraw)
+        target_compile_options(_netgraph_core PRIVATE -fprofile-instr-generate=${NETGRAPH_CORE_PGO_DIR}/default.profraw)
+        target_link_options(netgraph_core PRIVATE -fprofile-instr-generate=${NETGRAPH_CORE_PGO_DIR}/default.profraw)
+        target_link_options(_netgraph_core PRIVATE -fprofile-instr-generate=${NETGRAPH_CORE_PGO_DIR}/default.profraw)
+      endif()
+    elseif(NETGRAPH_CORE_PGO_USE)
+      message(STATUS "PGO: Using profile data from ${NETGRAPH_CORE_PGO_DIR}")
+      if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(netgraph_core PRIVATE -fprofile-use=${NETGRAPH_CORE_PGO_DIR} -fprofile-correction)
+        target_compile_options(_netgraph_core PRIVATE -fprofile-use=${NETGRAPH_CORE_PGO_DIR} -fprofile-correction)
+      else()
+        # Clang/AppleClang: use merged .profdata file
+        target_compile_options(netgraph_core PRIVATE -fprofile-instr-use=${NETGRAPH_CORE_PGO_DIR}/default.profdata)
+        target_compile_options(_netgraph_core PRIVATE -fprofile-instr-use=${NETGRAPH_CORE_PGO_DIR}/default.profdata)
+      endif()
+    endif()
+  elseif(MSVC)
+    # /O2: full optimization, /GL: whole program optimization (MSVC's LTO)
+    target_compile_options(netgraph_core PRIVATE /O2 /GL)
+    target_compile_options(_netgraph_core PRIVATE /O2 /GL)
+    if(NETGRAPH_CORE_FAST_MATH)
+      target_compile_options(netgraph_core PRIVATE /fp:fast)
+      target_compile_options(_netgraph_core PRIVATE /fp:fast)
+    endif()
   endif()
 endif()
 
-# Optional sanitizers for debug testing
-option(NETGRAPH_CORE_SANITIZE "Enable Address/Undefined sanitizers" OFF)
+# =============================================================================
+# Debug/instrumentation options (mutually exclusive with optimizations above)
+# =============================================================================
+
+if(NETGRAPH_CORE_COVERAGE)
+  message(STATUS "Enabling coverage instrumentation (disables optimizations)")
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    foreach(tgt netgraph_core _netgraph_core)
+      target_compile_options(${tgt} PRIVATE -O0 -g --coverage)
+      target_link_options(${tgt} PRIVATE --coverage)
+    endforeach()
+  else()
+    message(WARNING "NETGRAPH_CORE_COVERAGE requires GCC or Clang")
+  endif()
+endif()
+
 if(NETGRAPH_CORE_SANITIZE)
+  message(STATUS "Enabling sanitizers (disables optimizations)")
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set(SAN_FLAGS "-fsanitize=address,undefined -fno-omit-frame-pointer")
     foreach(tgt netgraph_core _netgraph_core)
@@ -131,7 +223,7 @@ if(NETGRAPH_CORE_SANITIZE)
       target_link_options(${tgt} PRIVATE ${SAN_FLAGS})
     endforeach()
   else()
-    message(WARNING "NETGRAPH_CORE_SANITIZE is set but compiler '${CMAKE_CXX_COMPILER_ID}' is not supported")
+    message(WARNING "NETGRAPH_CORE_SANITIZE requires GCC or Clang")
   endif()
 endif()
 
