@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-13]
+        os: [ubuntu-22.04, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +37,7 @@ jobs:
           # Use uv for faster dependency installation (10-100x faster than pip)
           CIBW_BUILD_FRONTEND: "build[uv]"
 
-          # macOS: Build Universal2 wheels on Intel runner (macos-13)
+          # macOS: Build Universal2 wheels on arm64 runner (macos-latest)
           CIBW_ARCHS_MACOS: "universal2"
           CIBW_TEST_COMMAND: 'python -c "import netgraph_core; print(netgraph_core.__version__)"'
           CIBW_BEFORE_ALL_LINUX: "yum install -y libatomic || (apt-get update && apt-get install -y libatomic1) || apk add libatomic"
