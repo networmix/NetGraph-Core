@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2025-12-12
+
+### Fixed
+
+- **Profiling**: Fix ODR violation that caused empty stats when profiling was enabled. Moved `profiling_enabled()` and `ProfilingStats::instance()` definitions from inline header to `profiling.cpp` to ensure a single instance when static library is linked into the Python module.
+
 ## [0.3.1] - 2025-12-08
 
 ### Added

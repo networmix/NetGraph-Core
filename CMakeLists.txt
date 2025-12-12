@@ -79,6 +79,7 @@ add_library(netgraph_core STATIC
   src/flow_graph.cpp
   src/flow_policy.cpp
   src/cpu_backend.cpp
+  src/profiling.cpp
 )
 target_include_directories(netgraph_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

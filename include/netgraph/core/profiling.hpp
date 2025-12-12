@@ -24,7 +24,6 @@ From Python:
 
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -33,21 +32,14 @@ From Python:
 namespace netgraph::core {
 
 // Check once at startup, cache result. Returns true if NGRAPH_CORE_PROFILE=1.
-inline bool profiling_enabled() noexcept {
-    static const bool enabled = [] {
-        const char* env = std::getenv("NGRAPH_CORE_PROFILE");
-        return env && env[0] == '1';
-    }();
-    return enabled;
-}
+// Defined in profiling.cpp to avoid ODR violations with static library linking.
+bool profiling_enabled() noexcept;
 
 // Singleton collecting profiling statistics.
 class ProfilingStats {
 public:
-    static ProfilingStats& instance() {
-        static ProfilingStats inst;
-        return inst;
-    }
+    // Defined in profiling.cpp to avoid ODR violations with static library linking.
+    static ProfilingStats& instance();
 
     void record(const char* name, double micros) {
         std::lock_guard<std::mutex> lock(mutex_);
