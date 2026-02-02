@@ -7,6 +7,8 @@ downstream users import everything from a single place. Typing shims supplied in
 
 # pyright: reportMissingImports=false
 
+from importlib.metadata import version
+
 from _netgraph_core import (
     Algorithms,
     Backend,
@@ -29,7 +31,7 @@ from _netgraph_core import (
     profiling_reset,
 )
 
-from ._version import __version__
+__version__ = version("netgraph-core")
 
 # Provide richer type information for editors/type-checkers without affecting runtime.
 try:  # pragma: no cover - typing-only import
