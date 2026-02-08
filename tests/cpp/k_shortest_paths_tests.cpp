@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
+#include <limits>
+#include <set>
 #include "netgraph/core/k_shortest_paths.hpp"
+#include "netgraph/core/shortest_paths.hpp"
 #include "netgraph/core/backend.hpp"
 #include "netgraph/core/algorithms.hpp"
 #include "netgraph/core/strict_multidigraph.hpp"
@@ -195,5 +198,110 @@ TEST(KShortestPaths, LooplessPaths) {
   // First path should be shortest (cost 3)
   if (!paths.empty()) {
     EXPECT_DOUBLE_EQ(paths[0].first[3], 3.0) << "Shortest path should have cost 3";
+  }
+}
+
+TEST(KShortestPaths, OutOfOrderNodePredDAGSemantics) {
+  // Graph topology that forces paths visiting nodes out of numerical order.
+  // Path 1 (shortest): 0 -> 1 -> 2 (cost 2, in-order)
+  // Path 2 (longer):   0 -> 3 -> 2 (cost 4, visits node 3 before node 2)
+  // This was the exact bug scenario: PredDAG fill for path [0,3,2] swapped
+  // parent entries between nodes 2 and 3 when using a linear index.
+  auto g = make_square_graph(1);  // 0->1->2 (cost 2) vs 0->3->2 (cost 4)
+
+  auto items = k_shortest_paths(g, 0, 2, 5, std::nullopt, true);
+
+  ASSERT_GE(items.size(), 2) << "Should find at least 2 paths";
+
+  // Verify all PredDAGs have correct semantic structure
+  for (std::size_t p = 0; p < items.size(); ++p) {
+    const auto& [dist, dag] = items[p];
+    SCOPED_TRACE("Path " + std::to_string(p));
+
+    expect_pred_dag_valid(dag, g.num_nodes());
+    expect_pred_dag_semantically_valid(g, dag, dist);
+
+    // Source must have distance 0 and destination must be reachable
+    EXPECT_EQ(dist[0], 0);
+    EXPECT_LT(dist[2], std::numeric_limits<Cost>::max());
+
+    // Verify path can be reconstructed via resolve_to_paths
+    auto concrete = resolve_to_paths(dag, 0, 2, /*split_parallel_edges=*/true);
+    EXPECT_GE(concrete.size(), 1) << "resolve_to_paths should reconstruct at least one path";
+
+    // Verify reconstructed path is valid: consecutive nodes connected by claimed edges
+    for (const auto& path : concrete) {
+      ASSERT_GE(path.size(), 2);  // at least src and dst
+      EXPECT_EQ(path.front().first, 0) << "Path should start at source";
+      EXPECT_EQ(path.back().first, 2) << "Path should end at destination";
+      // Check edge connectivity
+      for (std::size_t i = 0; i + 1 < path.size(); ++i) {
+        auto from_node = path[i].first;
+        auto to_node = path[i + 1].first;
+        const auto& edges = path[i].second;
+        for (auto eid : edges) {
+          EXPECT_EQ(g.edge_src_view()[static_cast<std::size_t>(eid)], from_node);
+          EXPECT_EQ(g.edge_dst_view()[static_cast<std::size_t>(eid)], to_node);
+        }
+      }
+    }
+  }
+}
+
+TEST(KShortestPaths, LargerOutOfOrderTopology) {
+  // Larger graph where multiple k-shortest paths visit nodes out of numerical order.
+  // Topology (6 nodes):
+  //   0 -> 5 -> 3 -> 1 (cost 3, severely out-of-order: 0,5,3,1)
+  //   0 -> 2 -> 4 -> 1 (cost 6, also out-of-order: 0,2,4,1)
+  //   0 -> 1           (cost 10, direct)
+  std::int32_t src_arr[7] = {0, 5, 3, 0, 2, 4, 0};
+  std::int32_t dst_arr[7] = {5, 3, 1, 2, 4, 1, 1};
+  double cap_arr[7] = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
+  std::int64_t cost_arr[7] = {1, 1, 1, 2, 2, 2, 10};
+
+  auto g = StrictMultiDiGraph::from_arrays(6,
+    std::span(src_arr, 7), std::span(dst_arr, 7),
+    std::span(cap_arr, 7), std::span(cost_arr, 7));
+
+  auto items = k_shortest_paths(g, 0, 1, 5, std::nullopt, true);
+
+  ASSERT_GE(items.size(), 2) << "Should find at least 2 paths";
+
+  // Verify costs are non-decreasing
+  for (std::size_t i = 0; i + 1 < items.size(); ++i) {
+    EXPECT_LE(items[i].first[1], items[i + 1].first[1])
+        << "Paths should be sorted by cost to destination";
+  }
+
+  // The first path should be 0->5->3->1 (cost 3)
+  EXPECT_EQ(items[0].first[1], 3) << "Shortest path cost should be 3";
+
+  // Verify all PredDAGs are semantically correct and can be resolved
+  for (std::size_t p = 0; p < items.size(); ++p) {
+    const auto& [dist, dag] = items[p];
+    SCOPED_TRACE("Path " + std::to_string(p));
+
+    expect_pred_dag_valid(dag, g.num_nodes());
+    expect_pred_dag_semantically_valid(g, dag, dist);
+
+    // Source must have distance 0 and destination must be reachable
+    EXPECT_EQ(dist[0], 0);
+    EXPECT_LT(dist[1], std::numeric_limits<Cost>::max());
+
+    auto concrete = resolve_to_paths(dag, 0, 1, true);
+    EXPECT_GE(concrete.size(), 1) << "Should reconstruct at least one concrete path";
+
+    // Verify node connectivity in reconstructed paths
+    for (const auto& path : concrete) {
+      ASSERT_GE(path.size(), 2);
+      EXPECT_EQ(path.front().first, 0);
+      EXPECT_EQ(path.back().first, 1);
+      // Verify no repeated nodes (simple path)
+      std::set<NodeId> visited;
+      for (const auto& [node, edges] : path) {
+        EXPECT_TRUE(visited.insert(node).second)
+            << "Node " << node << " appears twice in path (cycle)";
+      }
+    }
   }
 }

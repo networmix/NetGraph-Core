@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2026-02-08
+
+### Fixed
+
+- **K-Shortest Paths**: Fix off-by-one in Yen's prefix comparison and PredDAG CSR fill order. Paths visiting nodes out of numerical order (e.g., `[0,3,2]`) previously produced malformed predecessor DAGs.
+
 ## [0.3.4] - 2026-02-02
 
 ### Changed

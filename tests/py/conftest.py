@@ -77,9 +77,19 @@ def cost_dist_dict():
 
 @pytest.fixture
 def assert_pred_dag_integrity():
-    """Return an assertion helper to validate PredDAG shapes and id ranges."""
+    """Return an assertion helper to validate PredDAG shapes, id ranges, and semantics.
 
-    def _assert(g: ngc.StrictMultiDiGraph, dag: ngc.PredDAG) -> None:
+    Checks structural validity (sizes, ranges, monotonicity) AND semantic
+    correctness: each parent entry must correspond to an actual edge in the
+    graph from the claimed parent to the node, and if distances are provided,
+    the distance must be consistent (dist[v] == dist[parent] + edge_cost).
+    """
+
+    def _assert(
+        g: ngc.StrictMultiDiGraph,
+        dag: ngc.PredDAG,
+        dist: np.ndarray | None = None,
+    ) -> None:
         off = np.asarray(dag.parent_offsets)
         par = np.asarray(dag.parents)
         via = np.asarray(dag.via_edges)
@@ -94,6 +104,36 @@ def assert_pred_dag_integrity():
             # Id ranges
             assert int(par.min()) >= 0 and int(par.max()) < g.num_nodes()
             assert int(via.min()) >= 0 and int(via.max()) < g.num_edges()
+
+        # Semantic validation: each entry must reference an actual graph edge
+        edge_src = np.asarray(g.edge_src_view())
+        edge_dst = np.asarray(g.edge_dst_view())
+        edge_cost = np.asarray(g.cost_view())
+        for v in range(g.num_nodes()):
+            s, e = int(off[v]), int(off[v + 1])
+            for i in range(s, e):
+                parent = int(par[i])
+                eid = int(via[i])
+                # The via_edge must go from parent -> v
+                assert int(edge_src[eid]) == parent, (
+                    f"PredDAG entry for node {v}: via_edge {eid} has src="
+                    f"{int(edge_src[eid])}, expected parent={parent}"
+                )
+                assert int(edge_dst[eid]) == v, (
+                    f"PredDAG entry for node {v}: via_edge {eid} has dst="
+                    f"{int(edge_dst[eid])}, expected node={v}"
+                )
+                # Distance consistency (if distances provided)
+                if dist is not None:
+                    d_v = float(dist[v])
+                    d_p = float(dist[parent])
+                    ec = float(edge_cost[eid])
+                    if d_v < 1e18 and d_p < 1e18:  # skip unreachable
+                        assert abs(d_v - (d_p + ec)) < 1e-9, (
+                            f"PredDAG distance inconsistency at node {v}: "
+                            f"dist[{v}]={d_v} != dist[{parent}]={d_p} + "
+                            f"cost({eid})={ec} = {d_p + ec}"
+                        )
 
     return _assert
 

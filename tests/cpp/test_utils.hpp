@@ -285,17 +285,23 @@ inline void expect_csr_valid(const StrictMultiDiGraph& g) {
   auto row = g.row_offsets_view();
   auto col = g.col_indices_view();
   auto aei = g.adj_edge_index_view();
+  auto edge_src = g.edge_src_view();
+  auto edge_dst = g.edge_dst_view();
+  const auto M = static_cast<std::size_t>(g.num_edges());
+  const auto N = static_cast<std::size_t>(g.num_nodes());
+
+  // --- Forward CSR structural checks ---
 
   // Offsets should be monotonic
-  EXPECT_EQ(row.size(), static_cast<std::size_t>(g.num_nodes() + 1));
+  EXPECT_EQ(row.size(), N + 1);
   for (std::size_t i = 0; i < row.size() - 1; ++i) {
     EXPECT_LE(row[i], row[i + 1]) << "Row offsets not monotonic at " << i;
   }
 
   // Total edges match
-  EXPECT_EQ(row[row.size() - 1], g.num_edges());
-  EXPECT_EQ(col.size(), static_cast<std::size_t>(g.num_edges()));
-  EXPECT_EQ(aei.size(), static_cast<std::size_t>(g.num_edges()));
+  EXPECT_EQ(static_cast<std::size_t>(row[row.size() - 1]), M);
+  EXPECT_EQ(col.size(), M);
+  EXPECT_EQ(aei.size(), M);
 
   // All column indices and edge indices in range
   for (std::size_t i = 0; i < col.size(); ++i) {
@@ -303,6 +309,75 @@ inline void expect_csr_valid(const StrictMultiDiGraph& g) {
     EXPECT_LT(col[i], g.num_nodes()) << "Column index out of range at " << i;
     EXPECT_GE(aei[i], 0) << "Invalid edge index at " << i;
     EXPECT_LT(aei[i], g.num_edges()) << "Edge index out of range at " << i;
+  }
+
+  // --- Forward CSR semantic checks ---
+
+  // Bijection: every edge appears exactly once in the CSR
+  std::vector<int> edge_count(M, 0);
+  for (std::size_t u = 0; u < N; ++u) {
+    auto s = static_cast<std::size_t>(row[u]);
+    auto e = static_cast<std::size_t>(row[u + 1]);
+    for (std::size_t j = s; j < e; ++j) {
+      auto eid = static_cast<std::size_t>(aei[j]);
+      ASSERT_LT(eid, M) << "Edge index out of range at CSR pos " << j;
+      edge_count[eid]++;
+
+      // Source consistency: edge must originate from node u
+      EXPECT_EQ(static_cast<std::size_t>(edge_src[eid]), u)
+          << "Forward CSR: edge " << eid << " in node " << u
+          << "'s adjacency has src=" << edge_src[eid];
+
+      // Destination consistency: col_indices must match edge destination
+      EXPECT_EQ(col[j], edge_dst[eid])
+          << "Forward CSR: col_indices[" << j << "]=" << col[j]
+          << " doesn't match edge_dst[" << eid << "]=" << edge_dst[eid];
+    }
+  }
+  for (std::size_t eid = 0; eid < M; ++eid) {
+    EXPECT_EQ(edge_count[eid], 1)
+        << "Edge " << eid << " appears " << edge_count[eid]
+        << " times in forward CSR (expected exactly 1)";
+  }
+
+  // --- Reverse CSR checks ---
+  auto in_row = g.in_row_offsets_view();
+  auto in_col = g.in_col_indices_view();
+  auto in_aei = g.in_adj_edge_index_view();
+
+  EXPECT_EQ(in_row.size(), N + 1);
+  for (std::size_t i = 0; i < in_row.size() - 1; ++i) {
+    EXPECT_LE(in_row[i], in_row[i + 1]) << "Reverse row offsets not monotonic at " << i;
+  }
+  EXPECT_EQ(static_cast<std::size_t>(in_row[in_row.size() - 1]), M);
+  EXPECT_EQ(in_col.size(), M);
+  EXPECT_EQ(in_aei.size(), M);
+
+  // Bijection and consistency for reverse CSR
+  std::vector<int> rev_edge_count(M, 0);
+  for (std::size_t v = 0; v < N; ++v) {
+    auto s = static_cast<std::size_t>(in_row[v]);
+    auto e = static_cast<std::size_t>(in_row[v + 1]);
+    for (std::size_t j = s; j < e; ++j) {
+      auto eid = static_cast<std::size_t>(in_aei[j]);
+      ASSERT_LT(eid, M) << "Reverse edge index out of range at CSR pos " << j;
+      rev_edge_count[eid]++;
+
+      // Destination consistency: edge must point to node v
+      EXPECT_EQ(static_cast<std::size_t>(edge_dst[eid]), v)
+          << "Reverse CSR: edge " << eid << " in node " << v
+          << "'s incoming list has dst=" << edge_dst[eid];
+
+      // Source consistency: in_col_indices must match edge source
+      EXPECT_EQ(in_col[j], edge_src[eid])
+          << "Reverse CSR: in_col_indices[" << j << "]=" << in_col[j]
+          << " doesn't match edge_src[" << eid << "]=" << edge_src[eid];
+    }
+  }
+  for (std::size_t eid = 0; eid < M; ++eid) {
+    EXPECT_EQ(rev_edge_count[eid], 1)
+        << "Edge " << eid << " appears " << rev_edge_count[eid]
+        << " times in reverse CSR (expected exactly 1)";
   }
 }
 
@@ -322,6 +397,42 @@ inline void expect_pred_dag_valid(const PredDAG& dag, int num_nodes) {
   for (auto p : dag.parents) {
     EXPECT_GE(p, 0);
     EXPECT_LT(p, num_nodes);
+  }
+}
+
+// Extended PredDAG validation that also checks semantic correctness against a graph.
+// Verifies that each entry refers to an actual edge from parent to node, and that
+// distances are consistent (dist[v] == dist[parent] + edge_cost).
+inline void expect_pred_dag_semantically_valid(const StrictMultiDiGraph& g,
+                                               const PredDAG& dag,
+                                               const std::vector<Cost>& dist) {
+  const auto N = g.num_nodes();
+  const auto edge_src = g.edge_src_view();
+  const auto edge_dst = g.edge_dst_view();
+  const auto edge_cost = g.cost_view();
+
+  expect_pred_dag_valid(dag, N);
+
+  for (std::int32_t v = 0; v < N; ++v) {
+    auto s = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v)]);
+    auto e = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v) + 1]);
+    for (std::size_t i = s; i < e; ++i) {
+      auto parent = dag.parents[i];
+      auto eid = static_cast<std::size_t>(dag.via_edges[i]);
+      ASSERT_LT(eid, static_cast<std::size_t>(g.num_edges()));
+      // Edge must go from parent -> v
+      EXPECT_EQ(edge_src[eid], parent)
+          << "Node " << v << ": via_edge " << eid << " src mismatch";
+      EXPECT_EQ(edge_dst[eid], v)
+          << "Node " << v << ": via_edge " << eid << " dst mismatch";
+      // Distance consistency
+      auto d_v = dist[static_cast<std::size_t>(v)];
+      auto d_p = dist[static_cast<std::size_t>(parent)];
+      if (d_v < std::numeric_limits<Cost>::max() && d_p < std::numeric_limits<Cost>::max()) {
+        EXPECT_EQ(d_v, d_p + edge_cost[eid])
+            << "Distance inconsistency at node " << v;
+      }
+    }
   }
 }
 

@@ -11,8 +11,8 @@ def test_ksp_line1_two_paths(
     assert len(items) >= 2
     costs = [t_cost(dist, 2) for dist, _ in items[:2]]
     assert all(np.isclose(c, 2.0) for c in costs)
-    for _dist, dag in items[:2]:
-        assert_pred_dag_integrity(g, dag)
+    for d, dag in items[:2]:
+        assert_pred_dag_integrity(g, dag, dist=d)
 
 
 def test_ksp_square1_two_paths(
@@ -24,8 +24,8 @@ def test_ksp_square1_two_paths(
     costs = [t_cost(dist, 2) for dist, _ in items[:2]]
     # Expect costs 2 and 4 (A->B->C and A->D->C)
     assert set(round(c, 6) for c in costs) == {2.0, 4.0}
-    for _dist, dag in items[:2]:
-        assert_pred_dag_integrity(g, dag)
+    for d, dag in items[:2]:
+        assert_pred_dag_integrity(g, dag, dist=d)
 
 
 def test_ksp_fully_connected_costs(
@@ -36,8 +36,8 @@ def test_ksp_fully_connected_costs(
     assert len(items) == 2
     assert np.isclose(t_cost(items[0][0], 1), 1.0)
     assert np.isclose(t_cost(items[1][0], 1), 2.0)
-    for _dist, dag in items:
-        assert_pred_dag_integrity(g, dag)
+    for d, dag in items:
+        assert_pred_dag_integrity(g, dag, dist=d)
 
 
 def test_ksp_max_cost_factor_limit(
@@ -48,7 +48,7 @@ def test_ksp_max_cost_factor_limit(
     items = algs.ksp(to_handle(g), 0, 1, k=5, max_cost_factor=1.0, unique=True)
     assert len(items) == 1
     assert np.isclose(t_cost(items[0][0], 1), 1.0)
-    assert_pred_dag_integrity(g, items[0][1])
+    assert_pred_dag_integrity(g, items[0][1], dist=items[0][0])
 
 
 def test_ksp_graph5_thresholds(
@@ -66,9 +66,9 @@ def test_ksp_graph5_thresholds(
     items2 = algs.ksp(to_handle(g), 0, 1, k=10, max_cost_factor=1.0, unique=True)
     assert len(items2) == 1
     assert np.isclose(t_cost(items2[0][0], 1), 1.0)
-    for _dist, dag in items[:2]:
-        assert_pred_dag_integrity(g, dag)
-    assert_pred_dag_integrity(g, items2[0][1])
+    for d, dag in items[:2]:
+        assert_pred_dag_integrity(g, dag, dist=d)
+    assert_pred_dag_integrity(g, items2[0][1], dist=items2[0][0])
 
 
 def test_ksp_square5_routes(
@@ -85,5 +85,5 @@ def test_ksp_square5_routes(
     # No route from A(0) to E(4)
     empty = algs.ksp(to_handle(g), 0, 4, k=5, max_cost_factor=None, unique=True)
     assert empty == []
-    for _dist, dag in items[:2]:
-        assert_pred_dag_integrity(g, dag)
+    for d, dag in items[:2]:
+        assert_pred_dag_integrity(g, dag, dist=d)
