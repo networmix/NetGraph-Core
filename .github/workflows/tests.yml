@@ -39,7 +39,7 @@ jobs:
       - name: Install system dependencies
         run: |
           dnf install -y \
-            gcc gcc-c++ make cmake ninja-build git \
+            gcc gcc-c++ make cmake git \
             python${{ matrix.python-version }} \
             python${{ matrix.python-version }}-devel \
             python${{ matrix.python-version }}-pip \
