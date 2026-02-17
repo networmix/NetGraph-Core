@@ -79,7 +79,7 @@ jobs:
       - name: Install and test wheel
         run: |
           python3.11 -m pip install --upgrade pip
-          python3.11 -m pip install netgraph-core --no-index --find-links wheelhouse/
+          python3.11 -m pip install netgraph-core --find-links wheelhouse/
           python3.11 -c "import netgraph_core; print('CentOS Stream 9:', netgraph_core.__version__)"
 
   publish_pypi:
