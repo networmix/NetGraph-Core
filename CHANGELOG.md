@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **CI**: Upgrade cibuildwheel from v2 to v3.3.1 for Python 3.14 wheel builds.
 
+### Fixed
+
+- **Python Bindings**: Fix object leak on Python 3.14 caused by pybind11 not clearing managed dicts during deallocation. Replace `dynamic_attr` + `_graph_ref` pattern with `py::keep_alive` for FlowState, FlowGraph, and FlowPolicy.
+
 ## [0.3.6] - 2026-02-17
 
 ### Fixed

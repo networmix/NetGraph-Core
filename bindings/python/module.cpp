@@ -367,24 +367,17 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       });
 
   // FlowState bindings
-  py::class_<FlowState>(m, "FlowState", py::dynamic_attr())
-      .def("__init__", [](py::object self, py::object graph_obj){
-        const StrictMultiDiGraph& g = py::cast<const StrictMultiDiGraph&>(graph_obj);
-        FlowState* fs = self.cast<FlowState*>();
-        new (fs) FlowState(g);
-        self.attr("_graph_ref") = graph_obj;
-      }, py::arg("graph"))
-      .def("__init__", [](py::object self, py::object graph_obj, py::array residual){
-        const StrictMultiDiGraph& g = py::cast<const StrictMultiDiGraph&>(graph_obj);
+  py::class_<FlowState>(m, "FlowState")
+      .def(py::init([](const StrictMultiDiGraph& g){ return FlowState(g); }),
+           py::arg("graph"), py::keep_alive<1, 2>())
+      .def(py::init([](const StrictMultiDiGraph& g, py::array residual){
         if (!(py::isinstance<py::array_t<double>>(residual))) throw py::type_error("residual must be a numpy float64 array");
         if (!(residual.flags() & py::array::c_style)) throw py::type_error("residual must be C-contiguous");
         auto buf = residual.request();
         if (buf.ndim != 1 || static_cast<std::size_t>(buf.shape[0]) != static_cast<std::size_t>(g.num_edges())) throw py::type_error("residual length must equal num_edges");
         std::span<const double> rspan(static_cast<const double*>(buf.ptr), static_cast<std::size_t>(buf.shape[0]));
-        FlowState* fs = self.cast<FlowState*>();
-        new (fs) FlowState(g, rspan);
-        self.attr("_graph_ref") = graph_obj;
-      }, py::arg("graph"), py::arg("residual"))
+        return FlowState(g, rspan);
+      }), py::arg("graph"), py::arg("residual"), py::keep_alive<1, 2>())
       .def("reset", [](FlowState& fs){ fs.reset(); })
       .def("reset", [](FlowState& fs, py::array residual){
         if (!(py::isinstance<py::array_t<double>>(residual))) throw py::type_error("residual must be a numpy float64 array");
@@ -422,8 +415,7 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
                                  FlowPlacement placement, bool shortest_path, bool require_capacity,
                                  py::object node_mask, py::object edge_mask){
         FlowState& fs = py::cast<FlowState&>(self_obj);
-        // Get graph reference to validate mask lengths
-        const StrictMultiDiGraph& g = py::cast<const StrictMultiDiGraph&>(self_obj.attr("_graph_ref"));
+        const StrictMultiDiGraph& g = fs.graph();
         auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(g.num_nodes()), "node_mask");
         auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(g.num_edges()), "edge_mask");
         py::gil_scoped_release rel;
@@ -437,8 +429,7 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
          py::kw_only(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none())
       .def("compute_min_cut", [](py::object self_obj, std::int32_t src, py::object node_mask, py::object edge_mask){
         const FlowState& fs = py::cast<const FlowState&>(self_obj);
-        // Get graph reference to validate mask lengths
-        const StrictMultiDiGraph& g = py::cast<const StrictMultiDiGraph&>(self_obj.attr("_graph_ref"));
+        const StrictMultiDiGraph& g = fs.graph();
         auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(g.num_nodes()), "node_mask");
         auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(g.num_edges()), "edge_mask");
         py::gil_scoped_release rel;
@@ -455,13 +446,9 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .def_readonly("flowClass", &FlowIndex::flowClass)
       .def_readonly("flowId", &FlowIndex::flowId);
 
-  py::class_<FlowGraph>(m, "FlowGraph", py::dynamic_attr())
-      .def("__init__", [](py::object self, py::object graph_obj){
-        const StrictMultiDiGraph& g = py::cast<const StrictMultiDiGraph&>(graph_obj);
-        FlowGraph* fg = self.cast<FlowGraph*>();
-        new (fg) FlowGraph(g);
-        self.attr("_graph_ref") = graph_obj;
-      }, py::arg("graph"))
+  py::class_<FlowGraph>(m, "FlowGraph")
+      .def(py::init([](const StrictMultiDiGraph& g){ return FlowGraph(g); }),
+           py::arg("graph"), py::keep_alive<1, 2>())
       .def("capacity_view", [](py::object self_obj){
         const FlowGraph& fg = py::cast<const FlowGraph&>(self_obj);
         auto s = fg.capacity_view();
@@ -572,32 +559,26 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .def_readwrite("diminishing_returns_window", &FlowPolicyConfig::diminishing_returns_window)
       .def_readwrite("diminishing_returns_epsilon_frac", &FlowPolicyConfig::diminishing_returns_epsilon_frac);
 
-  py::class_<FlowPolicy>(m, "FlowPolicy", py::dynamic_attr())
-      .def("__init__", [](py::object self, py::object algs_obj, py::object graph_obj, FlowPolicyConfig cfg,
+  py::class_<FlowPolicy>(m, "FlowPolicy")
+      .def("__init__", [](FlowPolicy& self, py::object algs_obj, const PyGraph& pg, FlowPolicyConfig cfg,
                           py::object node_mask, py::object edge_mask){
             std::shared_ptr<Algorithms> algs = py::cast<std::shared_ptr<Algorithms>>(algs_obj);
-            const PyGraph& pg = py::cast<const PyGraph&>(graph_obj);
 
-            // Convert masks to spans (FlowPolicy will copy the data)
             auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(pg.num_nodes), "node_mask");
             auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(pg.num_edges), "edge_mask");
 
-            // Update config with mask spans (will be copied by FlowPolicy constructor)
             cfg.node_mask = node_bs.view;
             cfg.edge_mask = edge_bs.view;
 
             ExecutionContext ctx(algs, pg.handle);
-            FlowPolicy* fp = self.cast<FlowPolicy*>();
-            new (fp) FlowPolicy(ctx, cfg);
-            self.attr("_algorithms_ref") = algs_obj;
-            self.attr("_graph_ref") = graph_obj;
+            new (&self) FlowPolicy(ctx, cfg);
            },
            py::arg("algorithms"), py::arg("graph"), py::arg("config"),
            py::kw_only(),
            py::arg("node_mask") = py::none(),
            py::arg("edge_mask") = py::none(),
-           py::keep_alive<1, 2>()  // self keeps algorithms alive
-      )
+           py::keep_alive<1, 2>(),   // self keeps algorithms alive
+           py::keep_alive<1, 3>())   // self keeps graph alive
       .def("flow_count", &FlowPolicy::flow_count)
       .def("placed_demand", &FlowPolicy::placed_demand)
       .def("place_demand", [](FlowPolicy& p, FlowGraph& fg, std::int32_t src, std::int32_t dst, FlowClass flowClass, double volume, py::object target_per_flow, py::object min_flow){ std::optional<double> tpf; if (!target_per_flow.is_none()) tpf = py::cast<double>(target_per_flow); std::optional<double> mfl; if (!min_flow.is_none()) mfl = py::cast<double>(min_flow); py::gil_scoped_release rel; auto pr = p.place_demand(fg, src, dst, flowClass, volume, tpf, mfl); py::gil_scoped_acquire acq; return py::make_tuple(pr.first, pr.second); }, py::arg("flow_graph"), py::arg("src"), py::arg("dst"), py::arg("flowClass"), py::arg("volume"), py::arg("target_per_flow") = py::none(), py::arg("min_flow") = py::none())

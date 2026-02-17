@@ -38,6 +38,9 @@ public:
   [[nodiscard]] std::span<const Cap> residual_view() const noexcept { return residual_; }
   [[nodiscard]] std::span<const Flow> edge_flow_view() const noexcept { return edge_flow_; }
 
+  // Access underlying graph (const).
+  [[nodiscard]] const StrictMultiDiGraph& graph() const noexcept { return *g_; }
+
   // Mutating placement along a given PredDAG tier between src and dst.
   // requested_flow may be +inf. Returns the amount actually placed.
   //
