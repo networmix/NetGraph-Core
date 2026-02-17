@@ -65,7 +65,7 @@ make format
 
 Releases are automated via GitHub Actions when a new tag is pushed.
 
-1. Bump version in `pyproject.toml` and `python/netgraph_core/_version.py`.
+1. Bump version in `pyproject.toml`.
 2. Commit and push.
 3. Create and push a tag:
 
