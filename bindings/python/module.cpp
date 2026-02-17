@@ -87,7 +87,7 @@ static std::span<const T> as_span(const py::array& arr, const char* name) {
   return std::span<const T>(static_cast<const T*>(buf.ptr), static_cast<std::size_t>(buf.size));
 }
 
-PYBIND11_MODULE(_netgraph_core, m) {
+PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
   m.doc() = "NetGraph-Core C++ bindings";
 
   py::enum_<EdgeTieBreak>(m, "EdgeTieBreak")

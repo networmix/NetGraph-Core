@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "netgraph-core"
-version = "0.3.6"
+version = "0.4.0"
 description = "C++ implementation of graph algorithms for network flow analysis and traffic engineering with Python bindings"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: C++",
     "Programming Language :: Python :: Implementation :: CPython",

@@ -27,10 +27,10 @@ jobs:
       # Build wheels using cibuildwheel
       # ENV variables control the build (architectures, python versions)
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21.3
+        uses: pypa/cibuildwheel@v3.3.1
         env:
           # Build for Python 3.11+
-          CIBW_BUILD: "cp311-* cp312-* cp313-*"
+          CIBW_BUILD: "cp311-* cp312-* cp313-* cp314-* cp314t-*"
           # Skip PyPy, musllinux, and 32-bit Linux
           CIBW_SKIP: "pp* *-musllinux_* *-manylinux_i686"
 
