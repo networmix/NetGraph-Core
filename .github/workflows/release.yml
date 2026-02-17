@@ -62,13 +62,17 @@ jobs:
           path: dist/*.tar.gz
 
   test_wheels_centos_stream_9:
-    name: Test wheels (CentOS Stream 9)
+    name: Test wheels (CentOS Stream 9, py${{ matrix.python-version }})
     needs: [build_wheels]
     runs-on: ubuntu-latest
     container: quay.io/centos/centos:stream9
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - name: Install Python
-        run: dnf install -y python3.11 python3.11-pip
+        run: dnf install -y python${{ matrix.python-version }} python${{ matrix.python-version }}-pip
 
       - uses: actions/download-artifact@v4
         with:
@@ -78,9 +82,9 @@ jobs:
 
       - name: Install and test wheel
         run: |
-          python3.11 -m pip install --upgrade pip
-          python3.11 -m pip install netgraph-core --find-links wheelhouse/
-          python3.11 -c "import netgraph_core; print('CentOS Stream 9:', netgraph_core.__version__)"
+          python${{ matrix.python-version }} -m pip install --upgrade pip
+          python${{ matrix.python-version }} -m pip install netgraph-core --find-links wheelhouse/
+          python${{ matrix.python-version }} -c "import netgraph_core; print('CentOS Stream 9:', netgraph_core.__version__)"
 
   publish_pypi:
     name: Publish to PyPI

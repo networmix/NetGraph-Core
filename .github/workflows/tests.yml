@@ -52,7 +52,7 @@ jobs:
           python${{ matrix.python-version }} -m pip install -U pip wheel
           python${{ matrix.python-version }} -m pip install -e .[dev]
 
-      - name: Run CI checks
+      - name: Run CI checks (lint + C++/Python tests)
         run: PYTHON=python${{ matrix.python-version }} make check-ci
 
   coverage:

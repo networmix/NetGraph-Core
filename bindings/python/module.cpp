@@ -189,7 +189,7 @@ PYBIND11_MODULE(_netgraph_core, m) {
       }, py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"), py::arg("ext_edge_ids"))
       .def("spf", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src,
                        py::object dst, py::object selection_obj, py::object residual_obj,
-                       py::object node_mask, py::object edge_mask, bool multipath, std::string dtype){
+                       py::object node_mask, py::object edge_mask, bool multipath, std::string dtype) -> py::tuple {
         if (src < 0 || src >= pg.num_nodes) throw py::value_error("src out of range");
         SpfOptions opts; if (!selection_obj.is_none()) opts.selection = py::cast<EdgeSelection>(selection_obj);
         if (!dst.is_none()) { auto d = py::cast<std::int32_t>(dst); if (d < 0 || d >= pg.num_nodes) throw py::value_error("dst out of range"); opts.dst = static_cast<NodeId>(d); }
