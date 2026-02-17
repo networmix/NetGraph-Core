@@ -61,9 +61,30 @@ jobs:
           name: cibw-sdist
           path: dist/*.tar.gz
 
+  test_wheels_centos_stream_9:
+    name: Test wheels (CentOS Stream 9)
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    container: quay.io/centos/centos:stream9
+    steps:
+      - name: Install Python
+        run: dnf install -y python3.11 python3.11-pip
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cibw-wheels-ubuntu-*
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: Install and test wheel
+        run: |
+          python3.11 -m pip install --upgrade pip
+          python3.11 -m pip install netgraph-core --find-links wheelhouse/
+          python3.11 -c "import netgraph_core; print('CentOS Stream 9:', netgraph_core.__version__)"
+
   publish_pypi:
     name: Publish to PyPI
-    needs: [build_wheels, build_sdist]
+    needs: [build_wheels, build_sdist, test_wheels_centos_stream_9]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

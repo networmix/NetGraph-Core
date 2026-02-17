@@ -27,6 +27,34 @@ jobs:
       - name: Run CI checks (lint + C++/Python tests)
         run: make check-ci
 
+  test-centos-stream-9:
+    name: CentOS Stream 9 (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    container: quay.io/centos/centos:stream9
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Install system dependencies
+        run: |
+          dnf install -y \
+            gcc gcc-c++ make cmake git \
+            python${{ matrix.python-version }} \
+            python${{ matrix.python-version }}-devel \
+            python${{ matrix.python-version }}-pip \
+            libatomic
+
+      - uses: actions/checkout@v4
+
+      - name: Install Python deps
+        run: |
+          python${{ matrix.python-version }} -m pip install -U pip wheel
+          python${{ matrix.python-version }} -m pip install -e .[dev]
+
+      - name: Run CI checks
+        run: PYTHON=python${{ matrix.python-version }} make check-ci
+
   coverage:
     name: Coverage (ubuntu, py3.11)
     runs-on: ubuntu-22.04
