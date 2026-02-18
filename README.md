@@ -103,4 +103,4 @@ make cov        # Combined coverage report (C++ + Python)
 
 ## License
 
-AGPL-3.0-or-later
+GPL-3.0-or-later
