@@ -103,4 +103,4 @@ make cov        # Combined coverage report (C++ + Python)
 
 ## License
 
-GPL-3.0-or-later
+BSD-3-Clause
