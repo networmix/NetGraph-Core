@@ -219,6 +219,35 @@ TEST(MaxFlow, ECMP_TwoPaths_EqualBalanced_ShortestPath) {
   validate_flow_conservation(g, summary, 0, 3);
 }
 
+TEST(MaxFlow, EqualBalanced_ZeroCostCycleStillFindsFeasibleFlow) {
+  // Shortest-tier zero-cost cycle between 1 and 2:
+  // 0->1 (0), 1->2 (0), 2->1 (0), exits 1->3 (1), 2->3 (1)
+  std::int32_t src_arr[5] = {0, 1, 2, 2, 1};
+  std::int32_t dst_arr[5] = {1, 2, 1, 3, 3};
+  double cap_arr[5] = {1.0, 1.0, 1.0, 1.0, 1.0};
+  std::int64_t cost_arr[5] = {0, 0, 0, 1, 1};
+  auto g = StrictMultiDiGraph::from_arrays(4,
+    std::span(src_arr, 5), std::span(dst_arr, 5),
+    std::span(cap_arr, 5), std::span(cost_arr, 5));
+
+  auto be = make_cpu_backend();
+  Algorithms algs(be);
+  auto gh = algs.build_graph(g);
+
+  MaxFlowOptions opts_prop;
+  opts_prop.placement = FlowPlacement::Proportional;
+  opts_prop.shortest_path = false;
+  auto [total_prop, _] = algs.max_flow(gh, 0, 3, opts_prop);
+  EXPECT_NEAR(total_prop, 1.0, 1e-9);
+
+  MaxFlowOptions opts_eq;
+  opts_eq.placement = FlowPlacement::EqualBalanced;
+  opts_eq.shortest_path = false;
+  auto [total_eq, __] = algs.max_flow(gh, 0, 3, opts_eq);
+  EXPECT_NEAR(total_eq, 1.0, 1e-9)
+      << "Equal-balanced should not collapse to zero flow on zero-cost cycle";
+}
+
 TEST(MaxFlow, ECMP_ThreePaths_Proportional_ShortestPath) {
   // Extends ECMP validation to 3 equal-cost paths
   auto g = make_n_disjoint_paths(3, 10.0);

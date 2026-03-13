@@ -7,6 +7,7 @@
 #include "netgraph/core/shortest_paths.hpp"
 #include "netgraph/core/flow_graph.hpp"
 #include "netgraph/core/max_flow.hpp"
+#include "netgraph/core/cost_utils.hpp"
 
 namespace netgraph::core::test {
 
@@ -429,7 +430,7 @@ inline void expect_pred_dag_semantically_valid(const StrictMultiDiGraph& g,
       auto d_v = dist[static_cast<std::size_t>(v)];
       auto d_p = dist[static_cast<std::size_t>(parent)];
       if (d_v < std::numeric_limits<Cost>::max() && d_p < std::numeric_limits<Cost>::max()) {
-        EXPECT_EQ(d_v, d_p + edge_cost[eid])
+        EXPECT_EQ(d_v, saturating_cost_add(d_p, edge_cost[eid]))
             << "Distance inconsistency at node " << v;
       }
     }

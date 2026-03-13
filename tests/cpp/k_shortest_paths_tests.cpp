@@ -305,3 +305,24 @@ TEST(KShortestPaths, LargerOutOfOrderTopology) {
     }
   }
 }
+
+TEST(KShortestPaths, OverflowSaturatesWithoutNegativeWrap) {
+  const auto kMax = std::numeric_limits<Cost>::max();
+  // Single path with mathematically overflowing sum.
+  std::int32_t src_arr[2] = {0, 1};
+  std::int32_t dst_arr[2] = {1, 2};
+  double cap_arr[2] = {1.0, 1.0};
+  std::int64_t cost_arr[2] = {kMax - 5, 10};
+  auto g = StrictMultiDiGraph::from_arrays(3,
+    std::span(src_arr, 2), std::span(dst_arr, 2),
+    std::span(cap_arr, 2), std::span(cost_arr, 2));
+
+  auto items = k_shortest_paths(g, 0, 2, 1, std::nullopt, true);
+  ASSERT_EQ(items.size(), 1u);
+  const auto& [dist, dag] = items.front();
+
+  EXPECT_EQ(dist[0], 0);
+  EXPECT_EQ(dist[1], kMax - 5);
+  EXPECT_EQ(dist[2], kMax - 1) << "Overflow should saturate to finite max";
+  expect_pred_dag_semantically_valid(g, dag, dist);
+}

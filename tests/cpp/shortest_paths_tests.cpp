@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <limits>
+#include <set>
 #include "netgraph/core/shortest_paths.hpp"
 #include "netgraph/core/strict_multidigraph.hpp"
 #include "netgraph/core/backend.hpp"
@@ -297,4 +298,60 @@ TEST(ShortestPaths, RejectsMaskLengthMismatch) {
   auto edge_mask = make_bool_mask(static_cast<std::size_t>(g.num_edges() - 1), true);
   opts2.edge_mask = std::span<const bool>(edge_mask.get(), static_cast<std::size_t>(g.num_edges() - 1));
   EXPECT_THROW({ (void)algs.spf(gh, 0, opts2); }, std::invalid_argument);
+}
+
+TEST(ShortestPaths, OverflowSaturatesWithoutWrapping) {
+  const auto kMax = std::numeric_limits<Cost>::max();
+  // 0->1 has huge cost, 1->2 overflows if added, 0->2 is cheap alternative.
+  std::int32_t src[3] = {0, 1, 0};
+  std::int32_t dst[3] = {1, 2, 2};
+  double cap[3] = {1.0, 1.0, 1.0};
+  std::int64_t cost[3] = {kMax - 5, 10, 100};
+
+  auto g = StrictMultiDiGraph::from_arrays(3,
+    std::span(src, 3), std::span(dst, 3),
+    std::span(cap, 3), std::span(cost, 3));
+
+  EdgeSelection sel;
+  sel.multi_edge = true;
+  sel.require_capacity = false;
+  sel.tie_break = EdgeTieBreak::Deterministic;
+
+  auto [dist, dag] = shortest_paths(g, 0, std::nullopt, true, sel, {}, {}, {});
+
+  EXPECT_EQ(dist[0], 0);
+  EXPECT_EQ(dist[1], kMax - 5);
+  EXPECT_EQ(dist[2], 100) << "Overflowed path must not wrap negative and win";
+
+  expect_pred_dag_semantically_valid(g, dag, dist);
+}
+
+TEST(ShortestPaths, ResolveToPathsSkipsZeroCostCycleBackEdges) {
+  // Topology with a zero-cost cycle on the shortest tier:
+  // 0->1->2->1 and exits 1->3, 2->3.
+  std::int32_t src[5] = {0, 1, 2, 2, 1};
+  std::int32_t dst[5] = {1, 2, 1, 3, 3};
+  double cap[5] = {1.0, 1.0, 1.0, 1.0, 1.0};
+  std::int64_t cost[5] = {0, 0, 0, 1, 1};
+  auto g = StrictMultiDiGraph::from_arrays(4,
+    std::span(src, 5), std::span(dst, 5),
+    std::span(cap, 5), std::span(cost, 5));
+
+  EdgeSelection sel;
+  sel.multi_edge = true;
+  sel.require_capacity = false;
+  sel.tie_break = EdgeTieBreak::Deterministic;
+  auto [dist, dag] = shortest_paths(g, 0, 3, true, sel, {}, {}, {});
+
+  expect_pred_dag_semantically_valid(g, dag, dist);
+
+  // Must terminate without max_paths and return only simple paths.
+  auto paths = resolve_to_paths(dag, 0, 3, false, std::nullopt);
+  EXPECT_EQ(paths.size(), 2u);
+  for (const auto& path : paths) {
+    std::set<NodeId> seen;
+    for (const auto& [node, _] : path) {
+      EXPECT_TRUE(seen.insert(node).second) << "Path contains a cycle";
+    }
+  }
 }

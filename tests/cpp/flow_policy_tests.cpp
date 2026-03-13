@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <limits>
 
 #include "netgraph/core/flow_graph.hpp"
 #include "netgraph/core/flow_policy.hpp"
@@ -348,4 +349,37 @@ TEST(FlowPolicyCore, EqualBalanced_ShortestPath_IgnoresHigherCostTier) {
   EXPECT_NEAR(res.second, 90.0, 1e-9);
   // Only shortest tier edges should carry flow
   expect_edge_flows_by_uv(fg, {{0,1,10.0}, {1,4,10.0}, {0,2,0.0}, {2,4,0.0}});
+}
+
+TEST(FlowPolicyCore, MaxPathCostFactor_DoesNotOverflowAndRejectValidPath) {
+  const auto kMax = std::numeric_limits<Cost>::max();
+  // Single edge with very large cost; max_path_cost_factor should not overflow
+  // and incorrectly reject this valid path.
+  std::int32_t num_nodes = 2;
+  std::int32_t src_arr[1] = {0};
+  std::int32_t dst_arr[1] = {1};
+  double cap_arr[1] = {1.0};
+  std::int64_t cost_arr[1] = {kMax - 5};
+  std::int64_t ext_arr[1] = {0};
+  auto g = StrictMultiDiGraph::from_arrays(num_nodes,
+                                           std::span<const std::int32_t>(src_arr, 1),
+                                           std::span<const std::int32_t>(dst_arr, 1),
+                                           std::span<const double>(cap_arr, 1),
+                                           std::span<const std::int64_t>(cost_arr, 1),
+                                           std::span<const std::int64_t>(ext_arr, 1));
+  FlowGraph fg(g);
+  auto be = make_cpu_backend();
+  auto algs = std::make_shared<Algorithms>(be);
+  auto gh = algs->build_graph(g);
+  ExecutionContext ctx(algs, gh);
+
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::Proportional;
+  cfg.max_flow_count = 1;
+  cfg.max_path_cost_factor = 2.0;
+  FlowPolicy policy(ctx, cfg);
+
+  auto res = policy.place_demand(fg, 0, 1, 0, 1.0);
+  EXPECT_NEAR(res.first, 1.0, 1e-9);
+  EXPECT_NEAR(res.second, 0.0, 1e-9);
 }
