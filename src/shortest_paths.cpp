@@ -42,6 +42,7 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
     paths.push_back(std::move(p));
     return paths;
   }
+  if (dag.parent_offsets.size() < 2) return paths;
   if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size() - 1) return paths;
   if (dag.parent_offsets[static_cast<std::size_t>(dst)] == dag.parent_offsets[static_cast<std::size_t>(dst) + 1]) return paths;
 
@@ -49,9 +50,11 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
   struct Frame { NodeId node; std::size_t idx; std::vector<std::pair<NodeId, std::vector<EdgeId>>> groups; };
   std::vector<Frame> stack;
   stack.reserve(16);
+  std::vector<char> on_path(static_cast<std::size_t>(dag.parent_offsets.size() - 1), 0);
   // start from dst
   Frame start; start.node = dst; start.idx = 0; group_parents(dag, dst, start.groups);
   stack.push_back(std::move(start));
+  on_path[static_cast<std::size_t>(dst)] = 1;
 
   std::vector<std::pair<NodeId, std::vector<EdgeId>>> current; // reversed path accum
 
@@ -59,6 +62,7 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
     auto& top = stack.back();
     if (top.idx >= top.groups.size()) {
       // backtrack
+      on_path[static_cast<std::size_t>(top.node)] = 0;
       stack.pop_back();
       if (!current.empty()) current.pop_back();
       continue;
@@ -134,6 +138,11 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
       current.pop_back();
       continue;
     }
+    if (parent < 0 || static_cast<std::size_t>(parent) >= on_path.size() || on_path[static_cast<std::size_t>(parent)]) {
+      // Skip cyclic/invalid predecessor relation.
+      current.pop_back();
+      continue;
+    }
     // descend
     Frame next; next.node = parent; next.idx = 0; group_parents(dag, parent, next.groups);
     if (next.groups.empty()) {
@@ -141,6 +150,7 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
       current.pop_back();
       continue;
     }
+    on_path[static_cast<std::size_t>(parent)] = 1;
     stack.push_back(std::move(next));
   }
 
@@ -217,6 +227,35 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
     dag.parent_offsets.assign(static_cast<std::size_t>(N + 1), 0);
     return {std::move(dist), std::move(dag)};
   }
+
+  std::vector<int> seen(static_cast<std::size_t>(N), 0);
+  int seen_token = 0;
+  auto parent_reaches_child_via_pred_links = [&](NodeId parent, NodeId child) {
+    if (parent == child) return true;
+    ++seen_token;
+    if (seen_token == 0) {
+      std::fill(seen.begin(), seen.end(), 0);
+      seen_token = 1;
+    }
+    std::vector<NodeId> st;
+    st.reserve(16);
+    st.push_back(parent);
+    seen[static_cast<std::size_t>(parent)] = seen_token;
+    while (!st.empty()) {
+      NodeId cur = st.back();
+      st.pop_back();
+      if (cur == child) return true;
+      for (const auto& pr : pred_lists[static_cast<std::size_t>(cur)]) {
+        NodeId p = pr.first;
+        if (p < 0 || p >= N) continue;
+        auto p_idx = static_cast<std::size_t>(p);
+        if (seen[p_idx] == seen_token) continue;
+        seen[p_idx] = seen_token;
+        st.push_back(p);
+      }
+    }
+    return false;
+  };
 
   // Priority queue for Dijkstra with capacity-aware node-level tie-breaking.
   // QItem is (cost, -residual, node). Negated residual ensures higher capacity = higher priority.
@@ -344,7 +383,11 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
         }
         // Multipath: found equal-cost alternative path to v.
         else if (multipath && new_cost == dist[v_idx]) {
-          pred_lists[v_idx].push_back({u, std::move(selected_edges)});
+          // Guard against zero-cost predecessor cycles by rejecting additions
+          // that would introduce a cycle in predecessor relations.
+          if (!parent_reaches_child_via_pred_links(u, v)) {
+            pred_lists[v_idx].push_back({u, std::move(selected_edges)});
+          }
           // Note: In multipath mode, we don't update min_residual_to_node because
           // we're collecting all equal-cost paths, not choosing based on residual.
         }
