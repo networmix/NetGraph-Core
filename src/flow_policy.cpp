@@ -14,6 +14,7 @@
 */
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/constants.hpp"
+#include "netgraph/core/cost_utils.hpp"
 #include "netgraph/core/algorithms.hpp"
 #include "netgraph/core/options.hpp"
 #include "netgraph/core/profiling.hpp"
@@ -129,7 +130,8 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   if (max_path_cost_.has_value() || max_path_cost_factor_.has_value()) {
     double maxf = max_path_cost_factor_.value_or(1.0);
     Cost absmax = max_path_cost_.value_or(std::numeric_limits<Cost>::max());
-    if (dst_cost > std::min<Cost>(absmax, static_cast<Cost>(static_cast<double>(best_path_cost_) * maxf))) return std::nullopt;
+    Cost relmax = saturating_cost_mul_factor(best_path_cost_, maxf);
+    if (dst_cost > std::min<Cost>(absmax, relmax)) return std::nullopt;
   }
   // Ensure there is at least one predecessor for dst
   if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size()-1) return std::nullopt;

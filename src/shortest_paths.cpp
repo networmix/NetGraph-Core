@@ -170,6 +170,7 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
 #include <utility>
 #include <vector>
 #include "netgraph/core/constants.hpp"
+#include "netgraph/core/cost_utils.hpp"
 
 namespace netgraph::core {
 
@@ -317,7 +318,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
       }
       // Update distance and predecessors if we found a better path (or equal-cost with better capacity).
       if (!selected_edges.empty()) {
-        Cost new_cost = static_cast<Cost>(d_u + min_edge_cost);
+        Cost new_cost = saturating_cost_add(d_u, min_edge_cost);
         auto v_idx = static_cast<std::size_t>(v);
 
         // Compute bottleneck capacity along path to v through u for node-level tie-breaking.

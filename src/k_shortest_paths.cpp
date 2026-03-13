@@ -19,6 +19,7 @@
 
 // Use multipath SPF DAG for spur enumeration
 #include "netgraph/core/shortest_paths.hpp"
+#include "netgraph/core/cost_utils.hpp"
 
 namespace netgraph::core {
 
@@ -80,7 +81,7 @@ static std::optional<Path> dijkstra_single(const StrictMultiDiGraph& g, NodeId s
         }
       }
       if (best_eid >= 0) {
-        Cost nd = static_cast<Cost>(d_u + min_edge_cost);
+        Cost nd = saturating_cost_add(d_u, min_edge_cost);
         auto vi = static_cast<std::size_t>(v);
         if (nd < dist[vi]) { dist[vi] = nd; parent[vi] = u; via[vi] = best_eid; pq.emplace(nd, v); }
       }
@@ -197,7 +198,9 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
         dist[static_cast<std::size_t>(P.nodes.front())] = 0;
         for (std::size_t i = 1; i < P.nodes.size(); ++i) {
           auto u = P.nodes[i-1]; auto v = P.nodes[i]; auto e = P.edges[i-1];
-          dist[static_cast<std::size_t>(v)] = dist[static_cast<std::size_t>(u)] + static_cast<Cost>(cost_view[static_cast<std::size_t>(e)]);
+          dist[static_cast<std::size_t>(v)] = saturating_cost_add(
+              dist[static_cast<std::size_t>(u)],
+              static_cast<Cost>(cost_view[static_cast<std::size_t>(e)]));
           dag.parent_offsets[static_cast<std::size_t>(v+1)] = 1;
         }
         for (std::size_t v = 1; v < dag.parent_offsets.size(); ++v) dag.parent_offsets[v] += dag.parent_offsets[v-1];
@@ -234,7 +237,9 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
     for (std::size_t idx = 1; idx < last.nodes.size(); ++idx) {
       // edge at idx-1
       auto e = last.edges[idx - 1];
-      prefix_cost[idx] = prefix_cost[idx - 1] + static_cast<Cost>(cost_view[static_cast<std::size_t>(e)]);
+      prefix_cost[idx] = saturating_cost_add(
+          prefix_cost[idx - 1],
+          static_cast<Cost>(cost_view[static_cast<std::size_t>(e)]));
     }
     // Spur node positions 0..len-2
     for (std::size_t j = 0; j + 1 < last.nodes.size(); ++j) {
@@ -300,7 +305,11 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
         for (auto e : spur_edges) cand_edges.push_back(e);
         // Compute candidate cost as prefix_cost[j] + sum(spur_edges)
         Cost cand_cost = prefix_cost[j];
-        for (auto e : spur_edges) cand_cost += static_cast<Cost>(cost_view[static_cast<std::size_t>(e)]);
+        for (auto e : spur_edges) {
+          cand_cost = saturating_cost_add(
+              cand_cost,
+              static_cast<Cost>(cost_view[static_cast<std::size_t>(e)]));
+        }
         if (cand_cost > max_cost) continue;
         auto sig = path_signature(cand_edges);
         if (unique && visited.find(sig) != visited.end()) continue;
@@ -332,7 +341,9 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
       dist[static_cast<std::size_t>(P.nodes.front())] = 0;
       for (std::size_t i = 1; i < P.nodes.size(); ++i) {
         auto u = P.nodes[i-1]; auto v = P.nodes[i]; auto e = P.edges[i-1];
-        dist[static_cast<std::size_t>(v)] = dist[static_cast<std::size_t>(u)] + static_cast<Cost>(cost_view[static_cast<std::size_t>(e)]);
+        dist[static_cast<std::size_t>(v)] = saturating_cost_add(
+            dist[static_cast<std::size_t>(u)],
+            static_cast<Cost>(cost_view[static_cast<std::size_t>(e)]));
         dag.parent_offsets[static_cast<std::size_t>(v+1)] = 1;
       }
       for (std::size_t v = 1; v < dag.parent_offsets.size(); ++v) dag.parent_offsets[v] += dag.parent_offsets[v-1];
