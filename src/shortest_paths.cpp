@@ -230,6 +230,8 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
 
   std::vector<std::uint32_t> seen(static_cast<std::size_t>(N), 0u);
   std::uint32_t seen_token = 0u;
+  std::vector<NodeId> dfs_stack;
+  dfs_stack.reserve(16);
   auto parent_reaches_child_via_pred_links = [&](NodeId parent, NodeId child) {
     if (parent == child) return true;
     ++seen_token;
@@ -237,13 +239,12 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
       std::fill(seen.begin(), seen.end(), 0);
       seen_token = 1;
     }
-    std::vector<NodeId> st;
-    st.reserve(16);
-    st.push_back(parent);
+    dfs_stack.clear();
+    dfs_stack.push_back(parent);
     seen[static_cast<std::size_t>(parent)] = seen_token;
-    while (!st.empty()) {
-      NodeId cur = st.back();
-      st.pop_back();
+    while (!dfs_stack.empty()) {
+      NodeId cur = dfs_stack.back();
+      dfs_stack.pop_back();
       if (cur == child) return true;
       for (const auto& pr : pred_lists[static_cast<std::size_t>(cur)]) {
         NodeId p = pr.first;
@@ -251,7 +252,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
         auto p_idx = static_cast<std::size_t>(p);
         if (seen[p_idx] == seen_token) continue;
         seen[p_idx] = seen_token;
-        st.push_back(p);
+        dfs_stack.push_back(p);
       }
     }
     return false;
@@ -383,9 +384,10 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
         }
         // Multipath: found equal-cost alternative path to v.
         else if (multipath && new_cost == dist[v_idx]) {
-          // Guard against zero-cost predecessor cycles by rejecting additions
-          // that would introduce a cycle in predecessor relations.
-          if (!parent_reaches_child_via_pred_links(u, v)) {
+          // With non-negative edge costs, predecessor cycles can only arise on
+          // zero-cost equal-distance tiers. Keep the cycle guard only for that
+          // case to minimize overhead in typical positive-cost topologies.
+          if (min_edge_cost != 0 || !parent_reaches_child_via_pred_links(u, v)) {
             pred_lists[v_idx].push_back({u, std::move(selected_edges)});
           }
           // Note: In multipath mode, we don't update min_residual_to_node because
