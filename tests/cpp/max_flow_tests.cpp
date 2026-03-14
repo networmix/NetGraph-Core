@@ -243,7 +243,8 @@ TEST(MaxFlow, EqualBalanced_ZeroCostCycleStillFindsFeasibleFlow) {
   MaxFlowOptions opts_eq;
   opts_eq.placement = FlowPlacement::EqualBalanced;
   opts_eq.shortest_path = false;
-  auto [total_eq, __] = algs.max_flow(gh, 0, 3, opts_eq);
+  auto [total_eq, unused_summary_eq] = algs.max_flow(gh, 0, 3, opts_eq);
+  (void)unused_summary_eq;
   EXPECT_NEAR(total_eq, 1.0, 1e-9)
       << "Equal-balanced should not collapse to zero flow on zero-cost cycle";
 }
@@ -699,7 +700,8 @@ TEST(MaxFlow, PlacementModes_EqualCapacity_IdenticalResult) {
   MaxFlowOptions opts_eq;
   opts_eq.placement = FlowPlacement::EqualBalanced;
   opts_eq.shortest_path = true;
-  auto [total_eq, __] = algs.max_flow(gh, 0, 3, opts_eq);
+  auto [total_eq, unused_summary_eq] = algs.max_flow(gh, 0, 3, opts_eq);
+  (void)unused_summary_eq;
 
   // Both should saturate both paths
   EXPECT_NEAR(total_prop, 20.0, 1e-9);

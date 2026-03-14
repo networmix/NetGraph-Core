@@ -17,8 +17,9 @@ namespace netgraph::core {
   return static_cast<Cost>(std::numeric_limits<Cost>::max() - 1);
 }
 
-// Saturating add for path costs. If either argument is "infinity" (max), or
-// the sum would overflow, returns cost_finite_max().
+// Saturating add for path costs.
+// - If either argument is "infinity" (cost_max), returns cost_max.
+// - If finite addition would overflow, returns cost_finite_max.
 [[nodiscard]] inline constexpr Cost saturating_cost_add(Cost a, Cost b) noexcept {
   if (a == cost_max() || b == cost_max()) return cost_max();
   if (a >= cost_finite_max() || b >= cost_finite_max()) return cost_finite_max();

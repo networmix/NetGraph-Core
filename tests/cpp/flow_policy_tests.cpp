@@ -351,7 +351,7 @@ TEST(FlowPolicyCore, EqualBalanced_ShortestPath_IgnoresHigherCostTier) {
   expect_edge_flows_by_uv(fg, {{0,1,10.0}, {1,4,10.0}, {0,2,0.0}, {2,4,0.0}});
 }
 
-TEST(FlowPolicyCore, MaxPathCostFactor_DoesNotOverflowAndRejectValidPath) {
+TEST(FlowPolicyCore, MaxPathCostFactor_DoesNotOverflowOrRejectValidPath) {
   const auto kMax = std::numeric_limits<Cost>::max();
   // Single edge with very large cost; max_path_cost_factor should not overflow
   // and incorrectly reject this valid path.

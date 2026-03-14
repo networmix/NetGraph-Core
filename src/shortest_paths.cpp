@@ -228,8 +228,8 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
     return {std::move(dist), std::move(dag)};
   }
 
-  std::vector<int> seen(static_cast<std::size_t>(N), 0);
-  int seen_token = 0;
+  std::vector<std::uint32_t> seen(static_cast<std::size_t>(N), 0u);
+  std::uint32_t seen_token = 0u;
   auto parent_reaches_child_via_pred_links = [&](NodeId parent, NodeId child) {
     if (parent == child) return true;
     ++seen_token;
