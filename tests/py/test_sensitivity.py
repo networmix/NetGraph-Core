@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 
 import netgraph_core as ngc
@@ -146,3 +148,49 @@ def test_sensitivity_shortest_path_vs_max_flow():
     # Delta values: baseline=10, with edge removed traffic uses S->B->T (cap 5)
     for eid, delta in res_sp:
         assert abs(delta - 5.0) < 1e-9, f"Edge {eid} should have delta 5.0, got {delta}"
+
+
+def test_sensitivity_order_deterministic_across_runs():
+    """Repeated runs should preserve the same edge ordering and deltas."""
+    g = _make_graph(
+        num_nodes=4,
+        src=np.array([0, 0, 1, 2], dtype=np.int32),
+        dst=np.array([1, 2, 3, 3], dtype=np.int32),
+        capacity=np.array([10.0, 5.0, 5.0, 10.0], dtype=np.float64),
+        cost=np.array([1, 1, 1, 1], dtype=np.int64),
+    )
+    alg = ngc.Algorithms(ngc.Backend.cpu())
+    gh = alg.build_graph(g)
+
+    first = alg.sensitivity_analysis(gh, 0, 3)
+    second = alg.sensitivity_analysis(gh, 0, 3)
+
+    assert first == second
+
+
+def test_sensitivity_threaded_matches_serial():
+    """Threaded sensitivity must exactly match the forced-serial reference."""
+    g = _make_graph(
+        num_nodes=4,
+        src=np.array([0, 1, 0, 3], dtype=np.int32),
+        dst=np.array([1, 2, 3, 2], dtype=np.int32),
+        capacity=np.array([10.0, 10.0, 5.0, 5.0], dtype=np.float64),
+        cost=np.array([1, 1, 2, 2], dtype=np.int64),
+    )
+    alg = ngc.Algorithms(ngc.Backend.cpu())
+    gh = alg.build_graph(g)
+
+    previous = os.environ.get("NGRAPH_CORE_SENSITIVITY_THREADS")
+    try:
+        os.environ["NGRAPH_CORE_SENSITIVITY_THREADS"] = "1"
+        serial = alg.sensitivity_analysis(gh, 0, 2, shortest_path=False)
+
+        os.environ["NGRAPH_CORE_SENSITIVITY_THREADS"] = "4"
+        threaded = alg.sensitivity_analysis(gh, 0, 2, shortest_path=False)
+    finally:
+        if previous is None:
+            os.environ.pop("NGRAPH_CORE_SENSITIVITY_THREADS", None)
+        else:
+            os.environ["NGRAPH_CORE_SENSITIVITY_THREADS"] = previous
+
+    assert threaded == serial

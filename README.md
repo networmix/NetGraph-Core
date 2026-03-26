@@ -103,4 +103,4 @@ make cov        # Combined coverage report (C++ + Python)
 
 ## License
 
-BSD-3-Clause
+[MIT License](LICENSE)

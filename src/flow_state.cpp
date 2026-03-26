@@ -225,7 +225,8 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
   if (placement == FlowPlacement::Proportional) {
     // Proportional placement: use Dinic-like augmentation on reversed DAG.
     // We reverse the DAG (dst -> src) so flow propagates topologically from dst.
-    FlowWorkspace ws; build_reversed_residual(ws, N, groups);
+    FlowWorkspace ws;
+    build_reversed_residual(ws, N, groups);
     while (remaining > kMinFlow && ws.bfs(dst, src)) {
       std::fill(ws.it.begin(), ws.it.end(), 0);
       Flow pushed_layer = static_cast<Flow>(0.0);

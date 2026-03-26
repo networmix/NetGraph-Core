@@ -16,15 +16,76 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <future>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <queue>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace netgraph::core {
+
+namespace {
+
+std::size_t sensitivity_thread_budget(std::size_t candidate_count) {
+  if (candidate_count <= 1) {
+    return 1;
+  }
+
+  const char* env = std::getenv("NGRAPH_CORE_SENSITIVITY_THREADS");
+  if (env != nullptr && env[0] != '\0') {
+    char* end = nullptr;
+    unsigned long parsed = std::strtoul(env, &end, 10);
+    if (end != env) {
+      if (parsed == 0ul) {
+        return 1;
+      }
+      return std::min<std::size_t>(static_cast<std::size_t>(parsed), candidate_count);
+    }
+  }
+
+  const auto hw = std::thread::hardware_concurrency();
+  const auto budget = hw > 0 ? static_cast<std::size_t>(hw) : 1u;
+  return std::min<std::size_t>(budget, candidate_count);
+}
+
+std::optional<std::pair<EdgeId, Flow>>
+evaluate_sensitivity_candidate(const StrictMultiDiGraph& g,
+                               NodeId src,
+                               NodeId dst,
+                               FlowPlacement placement,
+                               bool shortest_path,
+                               bool require_capacity,
+                               Flow baseline_flow,
+                               std::span<const bool> node_mask,
+                               EdgeId eid,
+                               bool* local_mask,
+                               std::size_t mask_size) {
+  local_mask[static_cast<std::size_t>(eid)] = false;
+
+  auto [new_flow, _] = calc_max_flow(
+      g, src, dst, placement,
+      shortest_path,
+      require_capacity,
+      /*with_edge_flows=*/false,
+      /*with_reachable=*/false,
+      /*with_residuals=*/false,
+      node_mask, std::span<const bool>(local_mask, mask_size));
+
+  local_mask[static_cast<std::size_t>(eid)] = true;
+
+  double delta = baseline_flow - new_flow;
+  if (delta > kMinFlow) {
+    return std::pair<EdgeId, Flow>{eid, delta};
+  }
+  return std::nullopt;
+}
+
+} // namespace
 
 std::pair<Flow, FlowSummary>
 calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
@@ -247,33 +308,58 @@ sensitivity_analysis(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
   } else {
     std::copy(edge_mask.begin(), edge_mask.end(), test_mask_buf.get());
   }
-  // View for passing to calc_max_flow
-  std::span<const bool> test_mask_span(test_mask_buf.get(), N);
-
   std::vector<std::pair<EdgeId, Flow>> results;
   results.reserve(candidates.size());
 
   // Step 2: Iterate candidates, testing flow reduction when each is removed
-  for (EdgeId eid : candidates) {
-    // Mask out the edge
-    test_mask_buf[eid] = false;
-
-    auto [new_flow, _] = calc_max_flow(
-        g, src, dst, placement,
-        shortest_path,
-        require_capacity,
-        /*with_edge_flows=*/false,
-        /*with_reachable=*/false,
-        /*with_residuals=*/false,
-        node_mask, test_mask_span);
-
-    double delta = baseline_flow - new_flow;
-    if (delta > kMinFlow) {
-      results.emplace_back(eid, delta);
+  const auto thread_budget = sensitivity_thread_budget(candidates.size());
+  if (thread_budget <= 1) {
+    for (EdgeId eid : candidates) {
+      auto maybe_result = evaluate_sensitivity_candidate(
+          g, src, dst, placement,
+          shortest_path, require_capacity,
+          baseline_flow, node_mask,
+          eid, test_mask_buf.get(), N);
+      if (maybe_result.has_value()) {
+        results.push_back(*maybe_result);
+      }
     }
+    return results;
+  }
 
-    // Restore mask
-    test_mask_buf[eid] = true;
+  const auto chunk_size = (candidates.size() + thread_budget - 1) / thread_budget;
+  std::vector<std::future<std::vector<std::pair<EdgeId, Flow>>>> futures;
+  futures.reserve(thread_budget);
+
+  for (std::size_t begin = 0; begin < candidates.size(); begin += chunk_size) {
+    const std::size_t end = std::min<std::size_t>(begin + chunk_size, candidates.size());
+    futures.emplace_back(std::async(std::launch::async, [&, begin, end]() {
+      std::unique_ptr<bool[]> local_mask_buf(new bool[N]);
+      if (!edge_mask.empty()) {
+        std::copy(edge_mask.begin(), edge_mask.end(), local_mask_buf.get());
+      } else {
+        std::fill(local_mask_buf.get(), local_mask_buf.get() + N, true);
+      }
+
+      std::vector<std::pair<EdgeId, Flow>> local_results;
+      local_results.reserve(end - begin);
+      for (std::size_t idx = begin; idx < end; ++idx) {
+        auto maybe_result = evaluate_sensitivity_candidate(
+            g, src, dst, placement,
+            shortest_path, require_capacity,
+            baseline_flow, node_mask,
+            candidates[idx], local_mask_buf.get(), N);
+        if (maybe_result.has_value()) {
+          local_results.push_back(*maybe_result);
+        }
+      }
+      return local_results;
+    }));
+  }
+
+  for (auto& future : futures) {
+    auto local_results = future.get();
+    results.insert(results.end(), local_results.begin(), local_results.end());
   }
 
   return results;

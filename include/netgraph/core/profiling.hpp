@@ -22,12 +22,15 @@ From Python:
 */
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <mutex>
+#include <ostream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace netgraph::core {
 
@@ -41,38 +44,13 @@ public:
     // Defined in profiling.cpp to avoid ODR violations with static library linking.
     static ProfilingStats& instance();
 
-    void record(const char* name, double micros) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto& e = stats_[name];
-        e.total_us += micros;
-        e.count++;
-        if (micros < e.min_us) e.min_us = micros;
-        if (micros > e.max_us) e.max_us = micros;
-    }
-
-    void dump() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        std::cerr << "\n=== NetGraph-Core Profiling Stats ===\n";
-        for (const auto& [name, e] : stats_) {
-            double avg = e.count > 0 ? e.total_us / e.count : 0.0;
-            std::cerr << name << ":\n"
-                      << "  calls: " << e.count << "\n"
-                      << "  total: " << e.total_us / 1000.0 << " ms\n"
-                      << "  avg:   " << avg << " us\n"
-                      << "  min:   " << e.min_us << " us\n"
-                      << "  max:   " << e.max_us << " us\n";
-        }
-        std::cerr << "=====================================\n";
-    }
-
-    void reset() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        stats_.clear();
-    }
+    void record(const char* name, double micros);
+    void dump() const { dump(std::cerr); }
+    void dump(std::ostream& out) const;
+    void reset();
 
 private:
     ProfilingStats() = default;
-
     struct Entry {
         double total_us = 0;
         int64_t count = 0;
@@ -80,8 +58,30 @@ private:
         double max_us = 0;
     };
 
-    std::mutex mutex_;
-    std::unordered_map<std::string, Entry> stats_;
+    class LocalStats {
+    public:
+        explicit LocalStats(ProfilingStats& owner);
+        ~LocalStats();
+
+        void record(const char* name, double micros);
+        void append_to(std::unordered_map<std::string, Entry>& out) const;
+        void clear();
+
+    private:
+        ProfilingStats& owner_;
+        mutable std::mutex mutex_;
+        std::unordered_map<std::string, Entry> stats_;
+    };
+
+    LocalStats& local_stats();
+    void register_local(LocalStats* local);
+    void finalize_local(LocalStats* local);
+    static void merge_entry(Entry& dst, const Entry& src);
+    std::unordered_map<std::string, Entry> snapshot_unlocked() const;
+
+    mutable std::mutex mutex_;
+    std::vector<LocalStats*> active_locals_;
+    std::unordered_map<std::string, Entry> finished_stats_;
 };
 
 // RAII timer. Does nothing if name is nullptr.

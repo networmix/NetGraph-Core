@@ -432,3 +432,40 @@ TEST(FlowState, Proportional_ZeroCapacityOnShortestPath_ReturnsZero) {
   Flow placed = fs.place_on_dag(0, 2, dag, std::numeric_limits<double>::infinity(), FlowPlacement::Proportional);
   EXPECT_NEAR(placed, 0.0, 1e-9) << "Proportional should return 0 when shortest path has no capacity";
 }
+
+TEST(FlowState, RepeatedPlacementAfterResetAndIndependentInstancesStayStable) {
+  // Exercise the per-instance workspace reuse path:
+  // 1. repeated placement on one FlowState after reset must be identical
+  // 2. a second FlowState must remain unaffected by the first instance
+  std::int32_t src[5]  = {0, 1, 1, 2, 3};
+  std::int32_t dst[5]  = {1, 2, 3, 4, 4};
+  double       cap[5]  = {10.0, 5.0, 5.0, 5.0, 5.0};
+  std::int64_t cost[5] = {1,    1,   1,   1,   1};
+  auto g = StrictMultiDiGraph::from_arrays(5,
+    std::span(src, 5), std::span(dst, 5),
+    std::span(cap, 5), std::span(cost, 5));
+
+  FlowState fs1(g);
+  FlowState fs2(g);
+
+  EdgeSelection sel;
+  sel.multi_edge = true;
+  sel.require_capacity = true;
+  sel.tie_break = EdgeTieBreak::Deterministic;
+  auto [dist, dag] = shortest_paths(g, 0, 4, /*multipath=*/true, sel, {}, {}, {});
+
+  Flow placed_first = fs1.place_on_dag(0, 4, dag, 10.0, FlowPlacement::EqualBalanced);
+  std::vector<Flow> first_flows(fs1.edge_flow_view().begin(), fs1.edge_flow_view().end());
+  EXPECT_NEAR(placed_first, 10.0, 1e-9);
+
+  for (auto flow : fs2.edge_flow_view()) {
+    EXPECT_NEAR(flow, 0.0, 1e-12);
+  }
+
+  fs1.reset();
+  Flow placed_second = fs1.place_on_dag(0, 4, dag, 10.0, FlowPlacement::EqualBalanced);
+  EXPECT_NEAR(placed_second, placed_first, 1e-9);
+  for (std::size_t i = 0; i < first_flows.size(); ++i) {
+    EXPECT_NEAR(fs1.edge_flow_view()[i], first_flows[i], 1e-9);
+  }
+}

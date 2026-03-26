@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-03-26
+
+### Changed
+
+- Relicensed from BSD-3-Clause to MIT
+- Parallelized sensitivity analysis across candidate edges using `std::async`; thread count controlled by `NGRAPH_CORE_SENSITIVITY_THREADS` env or hardware concurrency
+- Thread-local profiling stats to remove global mutex from the hot `record()` path; public API unchanged
+
 ## [0.6.0] - 2026-02-26
 
 ### Changed
