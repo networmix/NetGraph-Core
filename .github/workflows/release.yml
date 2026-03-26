@@ -23,6 +23,8 @@ jobs:
             cibw_archs: "aarch64"
           - os: macos-latest
             cibw_archs: "universal2"
+          - os: windows-latest
+            cibw_archs: "AMD64"
 
     steps:
       - uses: actions/checkout@v4
