@@ -6,6 +6,8 @@
 #include "netgraph/core/max_flow.hpp"
 #include "netgraph/core/shortest_paths.hpp"
 
+#include <stdexcept>
+
 namespace netgraph::core {
 
 namespace {
