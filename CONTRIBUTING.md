@@ -65,13 +65,19 @@ make format
 
 Releases are automated via GitHub Actions when a new tag is pushed.
 
-1. Bump version in `pyproject.toml`.
-2. Commit and push.
-3. Create and push a tag:
+1. Move the pending notes into a new `## [X.Y.Z] - YYYY-MM-DD` section in `CHANGELOG.md`,
+   dated the day you tag. Mark anything that breaks consumers as **BREAKING**.
+2. Bump `version` in `pyproject.toml` to the same `X.Y.Z`. CI does not cross-check the
+   tag against this value, so a mismatch publishes the wrong version silently.
+3. Commit and push.
+4. Create and push a matching tag:
 
    ```bash
-   git tag v0.1.0
-   git push origin v0.1.0
+   git tag v0.8.0
+   git push origin v0.8.0
    ```
 
-4. The CI pipeline will build wheels, sdist, and publish to PyPI.
+5. The CI pipeline builds wheels and the sdist, tests them, and publishes to PyPI via
+   Trusted Publishing. `make publish` / `make publish-test` upload whatever is in your
+   local `dist/` and are for Test PyPI or emergencies only -- real releases go through
+   the tag.

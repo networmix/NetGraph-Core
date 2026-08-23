@@ -57,6 +57,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only
         PathAlg as PathAlg,
         PredDAG as PredDAG,
         StrictMultiDiGraph as StrictMultiDiGraph,
+        profiling_dump as profiling_dump,
+        profiling_enabled as profiling_enabled,
+        profiling_reset as profiling_reset,
     )
 
 __all__ = [

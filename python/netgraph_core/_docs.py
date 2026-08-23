@@ -131,9 +131,15 @@ class Backend:
 
 
 class Graph:
-    """Opaque graph handle provided by the runtime extension (typing stub only)."""
+    """Opaque backend graph handle produced by Algorithms.build_graph.
 
-    ...
+    Keeps the underlying StrictMultiDiGraph alive for as long as it is used.
+    """
+
+    @property
+    def num_nodes(self) -> int: ...
+    @property
+    def num_edges(self) -> int: ...
 
 
 class FlowGraph:
@@ -507,6 +513,12 @@ class FlowPolicy:
     ) -> tuple[float, float]:
         """Place `volume` of demand; returns (placed, remaining).
 
+        Raises:
+            ValueError: If this policy already manages a different (src, dst)
+                pair (call remove_demand() first, or use one policy per
+                demand), or if `flow_graph` wraps a different
+                StrictMultiDiGraph than the policy's own graph handle.
+
         EQUAL_BALANCED note: when the equalizing rebalance runs, `placed` is
         the policy's TOTAL placed demand (cumulative across calls, because
         rebalancing re-places previously placed volume too), so
@@ -526,7 +538,10 @@ class FlowPolicy:
         target: float,
     ) -> tuple[float, float]: ...
 
-    def remove_demand(self, flow_graph: "FlowGraph") -> None: ...
+    def remove_demand(self, flow_graph: "FlowGraph") -> None:
+        """Remove all of this policy's flows, releasing its (src, dst) binding."""
+        ...
+
     def set_static_paths(self, src: int, dst: int, paths: "Sequence[PredDAG]") -> None:
         """Pin this policy's demand to explicit path bundles (MPLS-style).
 
@@ -572,6 +587,10 @@ class MinCut:
 class FlowSummary:
     total_flow: float
     min_cut: MinCut
+    # Cost-weighted breakdown of total_flow, ascending and unique. Entries from
+    # the SPF tier loop are shortest-path-DAG costs; entries from the residual
+    # completion phase are MARGINAL costs (forward edge costs minus the cost of
+    # the flow they cancel) and need not match any traversable src->dst path.
     costs: "np.ndarray"  # int64[K]
     flows: "np.ndarray"  # float64[K]
     edge_flows: "np.ndarray"
@@ -794,3 +813,18 @@ class Algorithms:
             whose removal would reduce total flow by flow_delta.
         """
         ...
+
+
+def profiling_enabled() -> bool:
+    """True if profiling is enabled (NGRAPH_CORE_PROFILE=1 in the environment)."""
+    ...
+
+
+def profiling_dump() -> None:
+    """Print collected profiling statistics to stderr."""
+    ...
+
+
+def profiling_reset() -> None:
+    """Clear all collected profiling statistics."""
+    ...
