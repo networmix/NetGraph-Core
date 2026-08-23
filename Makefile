@@ -281,6 +281,7 @@ cov:
 		--object-directory build/cpp-tests-cov \
 		--filter 'include/netgraph' --filter 'src' --exclude 'tests' --exclude 'bindings/.*' --exclude '.*pybind11.*' --exclude '_deps/pybind11-src/.*' \
 		--gcov-ignore-errors=all \
+		--gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
 		--xml-pretty -o build/coverage/coverage-cpp.xml
 	@echo ""
 	@echo "================ Python + C++ coverage (summary) ================"

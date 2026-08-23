@@ -27,7 +27,11 @@ add_executable(netgraph_core_tests
   target_link_libraries(netgraph_core_tests PRIVATE netgraph_core GTest::gtest_main)
   target_include_directories(netgraph_core_tests PRIVATE tests/cpp)
   if(NETGRAPH_CORE_COVERAGE AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
+    # Atomic counters: see the NETGRAPH_CORE_COVERAGE block below.
     target_compile_options(netgraph_core_tests PRIVATE -O0 -g --coverage)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+      target_compile_options(netgraph_core_tests PRIVATE -fprofile-update=atomic)
+    endif()
     target_link_options(netgraph_core_tests PRIVATE --coverage)
   endif()
   include(GoogleTest)
@@ -206,8 +210,15 @@ endif()
 if(NETGRAPH_CORE_COVERAGE)
   message(STATUS "Enabling coverage instrumentation (disables optimizations)")
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # batch_max_flow and sensitivity_analysis run worker threads, and the default
+    # non-atomic profile counters corrupt under concurrent updates (gcov then
+    # emits impossible values such as "branch 4 taken -1").
+    set(COV_FLAGS -O0 -g --coverage)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+      list(APPEND COV_FLAGS -fprofile-update=atomic)
+    endif()
     foreach(tgt netgraph_core _netgraph_core)
-      target_compile_options(${tgt} PRIVATE -O0 -g --coverage)
+      target_compile_options(${tgt} PRIVATE ${COV_FLAGS})
       target_link_options(${tgt} PRIVATE --coverage)
     endforeach()
   else()
