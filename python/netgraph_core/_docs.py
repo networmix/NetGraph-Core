@@ -24,6 +24,8 @@ class EdgeTieBreak:
     PREFER_HIGHER_RESIDUAL: ClassVar[EdgeTieBreak]
     __members__: ClassVar[dict[str, EdgeTieBreak]]
 
+    def __init__(self, value: int) -> None: ...
+
     @property
     def name(self) -> str: ...
     @property
@@ -62,6 +64,8 @@ class FlowPlacement:
     PROPORTIONAL: ClassVar[FlowPlacement]
     EQUAL_BALANCED: ClassVar[FlowPlacement]
     __members__: ClassVar[dict[str, FlowPlacement]]
+
+    def __init__(self, value: int) -> None: ...
 
     @property
     def name(self) -> str: ...
@@ -108,6 +112,8 @@ class PredDAG:
 class PathAlg:
     SPF: ClassVar[PathAlg]
     __members__: ClassVar[dict[str, PathAlg]]
+
+    def __init__(self, value: int) -> None: ...
 
     @property
     def name(self) -> str: ...
@@ -385,10 +391,21 @@ class StrictMultiDiGraph:
 
 
 class FlowIndex:
-    src: int
-    dst: int
-    flowClass: int
-    flowId: int
+    """Identity of one flow: (src, dst, flowClass, flowId).
+
+    The constructor takes exactly four POSITIONAL arguments (the binding
+    declares no argument names), and the attributes are read-only.
+    """
+
+    def __init__(self, src: int, dst: int, flowClass: int, flowId: int, /) -> None: ...
+    @property
+    def src(self) -> int: ...
+    @property
+    def dst(self) -> int: ...
+    @property
+    def flowClass(self) -> int: ...
+    @property
+    def flowId(self) -> int: ...
 
 
 class FlowPolicyConfig:
@@ -420,6 +437,29 @@ class FlowPolicyConfig:
     diminishing_returns_enabled: bool
     diminishing_returns_window: int
     diminishing_returns_epsilon_frac: float
+
+    def __init__(
+        self,
+        *,
+        path_alg: PathAlg = ...,
+        flow_placement: FlowPlacement = ...,
+        selection: EdgeSelection = ...,
+        require_capacity: bool = True,
+        multipath: bool = True,
+        min_flow_count: int = 1,
+        max_flow_count: Optional[int] = None,
+        max_path_cost: Optional[int] = None,
+        max_path_cost_factor: Optional[float] = None,
+        shortest_path: bool = False,
+        reoptimize_flows_on_each_placement: bool = False,
+        max_no_progress_iterations: int = 100,
+        max_total_iterations: int = 10000,
+        diminishing_returns_enabled: bool = True,
+        diminishing_returns_window: int = 8,
+        diminishing_returns_epsilon_frac: float = 1e-3,
+    ) -> None:
+        """All parameters are keyword-only; the no-argument form is also valid."""
+        ...
 
 
 class FlowPolicy:

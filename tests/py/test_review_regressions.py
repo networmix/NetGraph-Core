@@ -428,3 +428,72 @@ class TestKspCostCeiling:
         g = _graph(3, [(0, 1, 5.0, 1), (1, 2, 5.0, 1)])
         pg = algs.build_graph(g)
         assert len(algs.ksp(pg, 0, 2, k=k, max_cost_factor=1.0)) == 1
+
+
+class TestStubConstructorConsistency:
+    """Finding 16: widened stubs declared no __init__ for classes that need one.
+
+    `_docs.py` is wired to type checkers, so a stub whose constructor disagrees
+    with the binding turns "unchecked" into "confidently wrong": pyright rejected
+    every real `FlowIndex(src, dst, cls, id)` call in the downstream consumer.
+    This repo's own pyright missed it because `tests/**` is excluded, so assert
+    the correspondence at runtime instead.
+    """
+
+    def _runtime_classes(self):
+        import _netgraph_core
+
+        for name in sorted(n for n in dir(_netgraph_core) if not n.startswith("_")):
+            obj = getattr(_netgraph_core, name)
+            if isinstance(obj, type):
+                yield name, obj
+
+    def test_stub_declares_init_wherever_construction_needs_arguments(self):
+        from netgraph_core import _docs
+
+        missing = []
+        for name, rt in self._runtime_classes():
+            stub = getattr(_docs, name, None)
+            if stub is None:
+                continue  # not part of the typed surface
+            try:
+                rt()
+                continue  # zero-arg construction works; a bare stub is fine
+            except Exception:
+                pass
+            doc = rt.__init__.__doc__ or ""
+            if "__init__" not in doc:
+                continue  # no bound constructor at all (e.g. result-only types)
+            if "__init__" not in vars(stub):
+                missing.append(name)
+        assert not missing, (
+            f"stub classes need an __init__ matching the binding: {missing}"
+        )
+
+    def test_stub_attributes_exist_at_runtime(self):
+        from netgraph_core import _docs
+
+        wrong = []
+        for name, rt in self._runtime_classes():
+            stub = getattr(_docs, name, None)
+            if stub is None:
+                continue
+            declared = {
+                a
+                for a in vars(stub)
+                if not a.startswith("_") and not callable(vars(stub)[a])
+            }
+            declared |= set(getattr(stub, "__annotations__", {}))
+            for attr in declared:
+                if not hasattr(rt, attr):
+                    wrong.append(f"{name}.{attr}")
+        assert not wrong, f"_docs.py declares attributes absent at runtime: {wrong}"
+
+    def test_flow_index_constructor_matches_the_binding(self):
+        # The exact call shape the downstream consumer uses.
+        idx = ngc.FlowIndex(1, 2, 3, 4)
+        assert (idx.src, idx.dst, idx.flowClass, idx.flowId) == (1, 2, 3, 4)
+        with pytest.raises(TypeError):
+            ngc.FlowIndex(src=1, dst=2, flowClass=3, flowId=4)  # positional-only
+        with pytest.raises(AttributeError):
+            idx.src = 9  # read-only, as the stub's properties declare
