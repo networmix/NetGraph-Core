@@ -10,6 +10,7 @@
 #include <pybind11/stl.h>
 #include <cstring>
 #include <memory>
+#include <optional>
 
 #include "netgraph/core/k_shortest_paths.hpp"
 #include "netgraph/core/max_flow.hpp"
