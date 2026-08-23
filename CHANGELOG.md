@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Flow Policy**: `place_demand` silently routed a second `(src, dst)` pair over the first pair's paths. It now raises `invalid_argument`; use one policy per demand or call `remove_demand()` first.
 - **Graph Construction**: `from_arrays` now rejects a total edge cost at or above 2^62, which overflows the int64 path arithmetic in SPF and silently corrupts results.
 - **Flow State**: `compute_min_cut` and max-flow reachability derived placed flow from `capacity - residual`, overstating it for a `FlowState` built with a custom `residual_init`. Both now use `edge_flow`.
+- **Python Bindings**: `batch_max_flow` rejected a valid int32 `pairs` array on Windows, because the dtype check compared buffer format strings and NumPy spells int32 as `NPY_LONG` on LLP64 but `NPY_INT` on LP64. It now compares dtype equivalence, and rejects non-contiguous `pairs` rather than reading them as if packed.
 - **Build**: `NETGRAPH_CORE_SANITIZE` passed its flags as one quoted string, so sanitizer builds never compiled, and the test target was missing them entirely. `make sanitize-test` also no longer sets `detect_leaks=1` on macOS, where it aborts.
+- **Build**: Coverage builds now use `-fprofile-update=atomic` on GCC; the default non-atomic counters corrupt under the threads used by `batch_max_flow` and `sensitivity_analysis`.
 
 ### Changed
 
