@@ -16,10 +16,6 @@ public:
     return backend_->build_graph(g);
   }
 
-  [[nodiscard]] GraphHandle build_graph(std::shared_ptr<const StrictMultiDiGraph> g) const {
-    return backend_->build_graph(std::move(g));
-  }
-
   [[nodiscard]] std::pair<std::vector<Cost>, PredDAG>
   spf(const GraphHandle& gh, NodeId src, const SpfOptions& opts) const {
     return backend_->spf(gh, src, opts);

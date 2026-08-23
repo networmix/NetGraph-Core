@@ -156,7 +156,7 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .def_static("cpu", [](){ return PyBackend{ make_cpu_backend() }; });
 
   py::class_<PyGraph>(m, "Graph")
-      // Opaque holder; constructed via Algorithms.build_graph or build_graph_from_arrays
+      // Opaque holder; constructed via Algorithms.build_graph
       .def_property_readonly("num_nodes", [](const PyGraph& pg){ return pg.num_nodes; })
       .def_property_readonly("num_edges", [](const PyGraph& pg){ return pg.num_edges; });
 
@@ -175,25 +175,6 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
         // referencing a non-owned graph instance.
         return PyGraph{ gh, graph_obj, g.num_nodes(), g.num_edges() };
       }, py::arg("graph"))
-      .def("build_graph_from_arrays", [](const Algorithms& algs,
-                                          std::int32_t num_nodes,
-                                          py::array src, py::array dst,
-                                          py::array capacity, py::array cost,
-                                          py::array ext_edge_ids){
-        // Build graph and construct shared ownership directly
-        auto ext_s = as_span<std::int64_t>(ext_edge_ids, "ext_edge_ids");
-        auto sp = std::make_shared<StrictMultiDiGraph>(
-            StrictMultiDiGraph::from_arrays(
-                num_nodes,
-                as_span<std::int32_t>(src, "src"),
-                as_span<std::int32_t>(dst, "dst"),
-                as_span<double>(capacity, "capacity"),
-                as_span<std::int64_t>(cost, "cost"),
-                ext_s));
-        auto gh = algs.build_graph(std::static_pointer_cast<const StrictMultiDiGraph>(sp));
-        // GraphHandle holds shared ownership; no additional Python-side owner needed
-        return PyGraph{ gh, py::none(), sp->num_nodes(), sp->num_edges() };
-      }, py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"), py::arg("ext_edge_ids"))
       .def("spf", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src,
                        py::object dst, py::object selection_obj, py::object residual_obj,
                        py::object node_mask, py::object edge_mask, bool multipath, std::string dtype) -> py::tuple {

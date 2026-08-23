@@ -500,18 +500,6 @@ class Algorithms:
         """
         ...
 
-    def build_graph_from_arrays(
-        self,
-        num_nodes: int,
-        src: "np.ndarray",
-        dst: "np.ndarray",
-        capacity: "np.ndarray",
-        cost: "np.ndarray",
-        ext_edge_ids: "np.ndarray",
-    ) -> "Graph":
-        """Build graph directly from arrays (graph is owned by the handle)."""
-        ...
-
     def spf(
         self,
         graph: "Graph",

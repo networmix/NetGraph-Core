@@ -18,10 +18,6 @@ public:
     return GraphHandle{ std::shared_ptr<const StrictMultiDiGraph>(&g, [](const StrictMultiDiGraph*){}) };
   }
 
-  GraphHandle build_graph(std::shared_ptr<const StrictMultiDiGraph> g) override {
-    return GraphHandle{ std::move(g) };
-  }
-
   std::pair<std::vector<Cost>, PredDAG> spf(
       const GraphHandle& gh, NodeId src, const SpfOptions& opts) override {
     const StrictMultiDiGraph& g = *gh.graph;

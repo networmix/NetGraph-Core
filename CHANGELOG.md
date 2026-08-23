@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - **Dead code**: `.gcovr.cfg` (never read -- gcovr's default config name has no leading dot, and `make cov` passes every flag explicitly), the unreachable `FlowGraph` include and `expect_flow_conservation()` helper in the C++ test utilities, unused test helpers/fixtures, `_USE_MATH_DEFINES` (no `M_*` macro is used), and unused `<optional>`/`<stack>`/`<unordered_map>`/`<unordered_set>`/`<cmath>` includes across `src/` and `include/`.
+- **Python Bindings**: `Algorithms.build_graph_from_arrays`. Nothing used it (no test, and not NetGraph), and the `Graph` handle it returned could not be passed to `FlowGraph` or `FlowPolicy`, so it only ever served the stateless algorithms while looking like a peer of `build_graph`. Build the graph with `StrictMultiDiGraph.from_arrays()` and pass it to `Algorithms.build_graph()`.
+- **C++ API**: The `build_graph(std::shared_ptr<const StrictMultiDiGraph>)` overload on `Algorithms` and `Backend`, which existed solely to serve that binding. Removing it also drops a pure virtual that every `Backend` implementation had to provide. Callers wanting the handle to own the graph can construct it directly: `GraphHandle{my_shared_ptr}`.
 - **Python Bindings**: The unreachable `Flow` class (bound from `FlowRecord`). No binding constructed or returned one, it was absent from `__all__`, and the name collided with the C++ alias `using Flow = double`.
 
 ## [0.7.2] - 2026-03-26
