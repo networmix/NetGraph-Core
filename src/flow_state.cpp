@@ -21,6 +21,7 @@
 #include <limits>
 #include <optional>
 #include <queue>
+#include <span>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -98,68 +99,99 @@ struct FlowWorkspace {
 struct EdgeGroup {
   std::int32_t from; // child v (destination of grouped edges)
   std::int32_t to;   // parent u (source of grouped edges)
-  std::vector<EdgeId> eids; // underlying forward edges u->v (may be multiple parallel edges)
+  // Underlying forward edges u->v (parallel edges) as a slice of GroupSet::eids.
+  // Storing a slice rather than a std::vector keeps group building allocation-free;
+  // rebuilding groups after every augmentation used to dominate place_on_dag.
+  std::int32_t eid_begin {0};
+  std::int32_t eid_count {0};
   Cap sum_cap {0.0};  // sum of residual capacities for Proportional placement
   Cap min_cap {0.0};  // min residual capacity for EqualBalanced placement
 };
 
+// Groups plus the arena backing their edge slices, and the scratch used to build
+// them. One instance is reused across every rebuild within a place_on_dag call so
+// the buffers keep their capacity.
+struct GroupSet {
+  std::vector<EdgeGroup> groups;
+  std::vector<EdgeId> eids;            // arena: group gi owns [eid_begin, +eid_count)
+  std::vector<char> reach;             // scratch: backward reachability from t
+  std::vector<std::int32_t> uniq;      // scratch: distinct parents of one node
+  std::vector<std::int32_t> bfs;       // scratch: BFS queue
+
+  [[nodiscard]] std::span<const EdgeId> edges_of(const EdgeGroup& gr) const noexcept {
+    return std::span<const EdgeId>(eids.data() + gr.eid_begin,
+                                   static_cast<std::size_t>(gr.eid_count));
+  }
+};
+
 // Build grouped edges by (parent u, child v) that can reach destination t,
 // using the current residual snapshot.
-static std::vector<EdgeGroup> build_groups_residual(const StrictMultiDiGraph& g,
-                                                    const PredDAG& dag, NodeId t,
-                                                    const std::vector<Cap>& residual) {
-  std::vector<EdgeGroup> groups;
+static void build_groups_residual(const StrictMultiDiGraph& g,
+                                  const PredDAG& dag, NodeId t,
+                                  const std::vector<Cap>& residual,
+                                  GroupSet& gs) {
+  gs.groups.clear();
+  gs.eids.clear();
   const auto& offsets = dag.parent_offsets;
   const auto& parents = dag.parents;
   const auto& via     = dag.via_edges;
   const auto N = g.num_nodes();
   // Compute reachability: BFS backward from destination t to identify nodes on SPF DAG.
-  std::vector<char> reach(static_cast<std::size_t>(N), 0);
+  gs.reach.assign(static_cast<std::size_t>(N), 0);
   if (t >= 0 && t < N) {
-    std::queue<std::int32_t> q; q.push(t); reach[static_cast<std::size_t>(t)] = 1;
-    while (!q.empty()) {
-      auto v = q.front(); q.pop();
+    gs.bfs.clear();
+    gs.bfs.push_back(t);
+    gs.reach[static_cast<std::size_t>(t)] = 1;
+    for (std::size_t head = 0; head < gs.bfs.size(); ++head) {
+      const auto v = gs.bfs[head];
       // Iterate over v's predecessors (parents in the DAG).
       std::size_t s = static_cast<std::size_t>(offsets[static_cast<std::size_t>(v)]);
       std::size_t e = static_cast<std::size_t>(offsets[static_cast<std::size_t>(v + 1)]);
       for (std::size_t i = s; i < e; ++i) {
         auto u = parents[i];
-        if (!reach[static_cast<std::size_t>(u)]) { reach[static_cast<std::size_t>(u)] = 1; q.push(u); }
+        if (!gs.reach[static_cast<std::size_t>(u)]) { gs.reach[static_cast<std::size_t>(u)] = 1; gs.bfs.push_back(u); }
       }
     }
   }
   // For each reachable node v, group its incoming DAG edges by parent node u.
   // This creates one group per (u, v) pair, aggregating parallel edges.
+  // Two passes per node (collect distinct parents, then gather each parent's edges)
+  // keep every group's edges contiguous in the arena without any allocation.
   for (std::int32_t v = 0; v < N; ++v) {
-    if (!reach[static_cast<std::size_t>(v)]) continue;
-    // Small linear grouping by parent (faster than a hash for typical degrees).
-    std::vector<std::pair<std::int32_t, std::vector<std::int32_t>>> by_parent;
+    if (!gs.reach[static_cast<std::size_t>(v)]) continue;
     const std::size_t s = static_cast<std::size_t>(offsets[static_cast<std::size_t>(v)]);
     const std::size_t e = static_cast<std::size_t>(offsets[static_cast<std::size_t>(v + 1)]);
+    // Pass 1: distinct parents, in first-appearance order (matches the previous
+    // by_parent ordering, so emitted groups keep the same order as before).
+    gs.uniq.clear();
     for (std::size_t i = s; i < e; ++i) {
       const auto u = parents[i];
       bool found = false;
-      for (auto& pr : by_parent) {
-        if (pr.first == u) { pr.second.push_back(via[i]); found = true; break; }
-      }
-      if (!found) by_parent.emplace_back(u, std::vector<std::int32_t>{ via[i] });
+      for (auto pu : gs.uniq) { if (pu == u) { found = true; break; } }
+      if (!found) gs.uniq.push_back(u);
     }
-    for (auto& kv : by_parent) {
-      EdgeGroup gr; gr.from = v; gr.to = kv.first; gr.eids.clear();
+    // Pass 2: gather each parent's admissible parallel edges contiguously.
+    for (auto u : gs.uniq) {
+      EdgeGroup gr;
+      gr.from = v; gr.to = u;
+      gr.eid_begin = static_cast<std::int32_t>(gs.eids.size());
       gr.sum_cap = static_cast<Cap>(0.0); gr.min_cap = std::numeric_limits<Cap>::infinity();
-      for (auto eid0 : kv.second) {
+      for (std::size_t i = s; i < e; ++i) {
+        if (parents[i] != u) continue;
+        const auto eid0 = via[i];
         const Cap c = residual[static_cast<std::size_t>(eid0)];
         if (c >= kMinCap) {
-          gr.eids.push_back(eid0);
+          gs.eids.push_back(eid0);
           gr.sum_cap += c;
           gr.min_cap = std::min(gr.min_cap, c);
         }
       }
+      gr.eid_count = static_cast<std::int32_t>(gs.eids.size()) - gr.eid_begin;
       if (gr.min_cap == std::numeric_limits<Cap>::infinity()) gr.min_cap = static_cast<Cap>(0.0);
-      if (!gr.eids.empty()) groups.push_back(std::move(gr));
+      if (gr.eid_count > 0) gs.groups.push_back(gr);
+      // else: nothing was appended, so the arena is already back at eid_begin.
     }
   }
-  return groups;
 }
 
 // Construct reversed residual graph for Dinic BFS/DFS using group capacities.
@@ -216,8 +248,11 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
   const auto N = g_->num_nodes();
   if (src < 0 || src >= N || dst < 0 || dst >= N || src == dst) return 0.0;
 
-  // Build groups using current residual
-  auto groups = build_groups_residual(*g_, dag, dst, residual_);
+  // Build groups using current residual. `gs` is reused across rebuilds so its
+  // buffers keep their capacity for the whole call.
+  GroupSet gs;
+  build_groups_residual(*g_, dag, dst, residual_, gs);
+  const auto& groups = gs.groups;
 
   Flow placed = static_cast<Flow>(0.0);
   double remaining = static_cast<double>(requested_flow);
@@ -251,7 +286,7 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
           // Guard against division by zero when group capacity is numerically zero.
           double denom = gr.sum_cap > kMinCap ? gr.sum_cap : 1.0;
           // Proportional split: each edge gets share = sent * (edge_residual / sum_residual).
-          for (auto eid : gr.eids) {
+          for (auto eid : gs.edges_of(gr)) {
             Cap base = residual_[static_cast<std::size_t>(eid)];
             double share = sent * (static_cast<double>(base) / denom);
             edge_flow_[static_cast<std::size_t>(eid)] += static_cast<Cap>(share);
@@ -261,7 +296,7 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
         }
       }
       // Rebuild groups for next tier using updated residual
-      groups = build_groups_residual(*g_, dag, dst, residual_);
+      build_groups_residual(*g_, dag, dst, residual_, gs);
       build_reversed_residual(ws, N, groups);
     }
   } else {
@@ -274,9 +309,9 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
     std::vector<double> rev_cap(groups.size(), 0.0);
     for (std::size_t gi = 0; gi < groups.size(); ++gi) {
       const auto& gr = groups[gi];
-      if (gr.eids.empty()) continue;
+      if (gr.eid_count == 0) continue;
       // EB: group admissible total = min_edge_residual * |edges|
-      const double cap_rev = static_cast<double>(gr.min_cap) * static_cast<double>(gr.eids.size());
+      const double cap_rev = static_cast<double>(gr.min_cap) * static_cast<double>(gr.eid_count);
       if (cap_rev >= kMinCap) {
         succ[static_cast<std::size_t>(gr.to)].push_back(gi); // u -> v (group index)
         rev_cap[gi] = cap_rev;
@@ -301,7 +336,7 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
     for (std::size_t u = 0; u < succ.size(); ++u) {
       if (!reach[u]) continue;
       int s = 0;
-      for (auto gi : succ[u]) s += static_cast<int>(groups[gi].eids.size());
+      for (auto gi : succ[u]) s += static_cast<int>(groups[gi].eid_count);
       node_split[u] = s;
     }
 
@@ -332,9 +367,9 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
       if (split <= 0) continue;
       for (auto gi : succ[static_cast<std::size_t>(u)]) {
         const auto& gr = groups[gi];
-        if (gr.eids.empty()) continue;
+        if (gr.eid_count == 0) continue;
         // Group share proportional to number of edges (equal per-edge split).
-        double push = f_in * (static_cast<double>(gr.eids.size()) / static_cast<double>(split));
+        double push = f_in * (static_cast<double>(gr.eid_count) / static_cast<double>(split));
         if (push < kEpsilon) continue;
         assigned[gi] += push;
         auto v = static_cast<std::size_t>(gr.from);
@@ -371,11 +406,11 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
       placed += use;
       // Apply scaled group assignments equally over parallel edges.
       for (std::size_t gi = 0; gi < groups.size(); ++gi) {
-        const auto& gr = groups[gi]; if (gr.eids.empty()) continue;
+        const auto& gr = groups[gi]; if (gr.eid_count == 0) continue;
         double flow_scaled = assigned[gi] * static_cast<double>(use);
         if (flow_scaled < kMinFlow) continue;
-        double per_edge = flow_scaled / static_cast<double>(gr.eids.size());
-        for (auto eid : gr.eids) {
+        double per_edge = flow_scaled / static_cast<double>(gr.eid_count);
+        for (auto eid : gs.edges_of(gr)) {
           edge_flow_[static_cast<std::size_t>(eid)] += static_cast<Flow>(per_edge);
           double base = static_cast<double>(residual_[static_cast<std::size_t>(eid)]);
           residual_[static_cast<std::size_t>(eid)] = static_cast<Cap>(std::max(0.0, base - per_edge));

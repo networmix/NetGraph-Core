@@ -97,7 +97,17 @@ public:
   [[nodiscard]] int flow_count() const noexcept { return static_cast<int>(flows_.size()); }
   [[nodiscard]] double placed_demand() const noexcept;
 
-  // Core operations
+  // Core operations.
+  //
+  // A FlowPolicy manages the flows of a SINGLE demand. Once it holds flows, calling
+  // place_demand() with a different (src, dst) throws std::invalid_argument, because
+  // the round-robin loop routes using the src/dst stored on the existing flow records.
+  // Use one policy per demand, or call remove_demand() first to retarget it.
+  //
+  // `fg` must wrap the same StrictMultiDiGraph as the policy's own graph handle;
+  // placing onto a FlowGraph built from a different graph is rejected.
+  //
+  // Returns (total_placed, remaining_volume).
   [[nodiscard]] std::pair<double,double> place_demand(FlowGraph& fg,
                                         NodeId src, NodeId dst,
                                         FlowClass flowClass,
@@ -105,6 +115,8 @@ public:
                                         std::optional<double> target_per_flow = std::nullopt,
                                         std::optional<double> min_flow = std::nullopt);
 
+  // Re-places the currently placed volume so each flow carries ~target_per_flow.
+  // (src, dst) must match the demand this policy already manages.
   [[nodiscard]] std::pair<double,double> rebalance_demand(FlowGraph& fg,
                                             NodeId src, NodeId dst,
                                             FlowClass flowClass,
@@ -120,6 +132,9 @@ public:
 
 private:
   // Helpers
+  // Throws std::invalid_argument if fg wraps a different graph than this policy, or if
+  // (src, dst) differs from the demand already managed here. `what` names the caller.
+  void check_demand_target(const FlowGraph& fg, NodeId src, NodeId dst, const char* what) const;
   [[nodiscard]] std::optional<std::pair<PredDAG, Cost>> get_path_bundle(const FlowGraph& fg,
                                                           NodeId src, NodeId dst,
                                                           std::optional<double> min_flow);

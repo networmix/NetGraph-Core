@@ -16,8 +16,14 @@ struct MinCut { std::vector<EdgeId> edges; };
 struct FlowSummary {
   Flow total_flow {0.0};
   MinCut min_cut {};
-  // Parallel arrays: costs[i] has placed flow flows[i] at that total path cost.
-  // Costs are ascending and unique; flows are raw volumes (not normalized).
+  // Parallel arrays: costs[i] carries placed flow flows[i]. Costs are ascending and
+  // unique; flows are raw volumes (not normalized).
+  //
+  // Entries from the SPF tier loop are the total cost of the shortest-path DAG used.
+  // Entries produced by the residual completion phase are MARGINAL costs: the cost of
+  // the augmenting path's forward edges minus the cost of the flow it cancelled. Such
+  // an entry need not correspond to any traversable s-t path, so treat costs[] as a
+  // cost-weighted breakdown of the total flow rather than a list of path costs.
   std::vector<Cost> costs;
   std::vector<Flow> flows;
   std::vector<Flow> edge_flows; // filled if requested
@@ -26,6 +32,17 @@ struct FlowSummary {
   std::vector<std::uint8_t> reachable_nodes; // length == g.num_nodes(); 0/1 flags
 };
 
+// Computes maximum flow from src to dst.
+//
+// The SPF tier loop augments along forward shortest-path DAGs only. For
+// FlowPlacement::Proportional with require_capacity=true and shortest_path=false a
+// residual completion phase then augments with reverse arcs, so the result is a true
+// maximum flow and summary.min_cut satisfies max-flow/min-cut duality.
+//
+// The other configurations are placement models rather than max-flow computations and
+// may report less than the maximum: EqualBalanced models single-pass ECMP admission,
+// require_capacity=false models fixed cost-only IP routing, and shortest_path=true
+// restricts flow to the first cost tier.
 [[nodiscard]] std::pair<Flow, FlowSummary>
 calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
               FlowPlacement placement, bool shortest_path,

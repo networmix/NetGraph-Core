@@ -11,8 +11,15 @@
 
 namespace netgraph::core {
 
-// PredDAG (Predecessor Directed Acyclic Graph): compact representation of all equal-cost
+// PredDAG (Predecessor Directed Acyclic Graph): compact representation of the equal-cost
 // shortest paths from a source node. Stored in CSR format for efficiency.
+//
+// The DAG is always acyclic. With strictly positive edge costs it captures *every*
+// equal-cost shortest path. Zero-cost edges are the one exception: a predecessor is
+// recorded only while the child is still unsettled, so among nodes that are mutually
+// reachable at equal distance the settle order decides which alternatives are kept.
+// Without that rule a zero-cost pair u<->v would record each node as the other's
+// parent, making the structure cyclic and path enumeration non-terminating.
 //
 // For each node v, predecessors are stored in parents[parent_offsets[v]:parent_offsets[v+1]]
 // with corresponding EdgeIds in via_edges[parent_offsets[v]:parent_offsets[v+1]].
@@ -55,7 +62,10 @@ shortest_paths(const StrictMultiDiGraph& g, NodeId src,
 // Enumerate concrete paths represented by a PredDAG from src to dst.
 // Each path is returned as a sequence of (node_id, (edge_ids...)) pairs ending with (dst, ()).
 // When split_parallel_edges=false, parallel edges per hop are grouped in the tuple.
-// When true, one edge per hop is selected to produce concrete paths; enumeration may be capped with max_paths.
+// When true, the cartesian product over parallel edges is enumerated, yielding one
+// concrete single-edge path per combination; cap it with max_paths.
+// Enumeration is exponential in the DAG's branching, so pass max_paths on wide ECMP DAGs.
+// NOTE: this function does not release the Python GIL when called through the bindings.
 [[nodiscard]] std::vector<std::vector<std::pair<NodeId, std::vector<EdgeId>>>>
 resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
                  bool split_parallel_edges = false,

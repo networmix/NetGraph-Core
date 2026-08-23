@@ -47,7 +47,7 @@ Run specific test suites:
 
 ```bash
 make cpp-test   # C++ tests (GoogleTest)
-make py-test    # Python tests (pytest)
+make test       # Python tests (pytest)
 ```
 
 ### Code Style

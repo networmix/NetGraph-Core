@@ -29,12 +29,12 @@ NetGraph-Core provides a specialized graph implementation for networking problem
   - Configurable constraints on cost factors (e.g., paths within 1.5x of optimal).
 
 - **Max-Flow**:
-  - **Algorithm**: Iterative augmentation using Successive Shortest Path on residual graphs, pushing flow across full ECMP/WCMP DAGs at each step.
+  - **Algorithm**: Iterative augmentation using Successive Shortest Path on residual graphs, pushing flow across full ECMP/WCMP DAGs at each step. For `Proportional` placement with `require_capacity=True`, a final residual completion phase augments with reverse arcs so the result is a true maximum flow; the other modes are placement models and may report less.
   - **Traffic Engineering (TE) Mode**: Routing adapts to residual capacity (progressive fill).
   - **IP Routing Mode**: Cost-only routing (ECMP/WCMP) ignoring capacity constraints.
 
 - **Analysis**:
-  - **Sensitivity Analysis**: Identifies bottleneck edges where capacity relaxation increases total flow. Supports `shortest_path` mode to analyze only edges used under ECMP routing (IP/IGP networks) vs. full max-flow (SDN/TE networks).
+  - **Sensitivity Analysis**: Identifies critical edges by removing each saturated edge and measuring how much total flow is *lost*. Supports `shortest_path` mode to analyze only edges used under ECMP routing (IP/IGP networks) vs. full max-flow (SDN/TE networks).
   - **Min-Cut**: Computes minimum cuts on residual graphs.
 
 ### 3. Flow Policy Engine
@@ -49,8 +49,8 @@ Unified configuration object (`FlowPolicy`) that models diverse routing behavior
 
 ### 4. Python Integration
 
-- **Zero-Copy**: Exposes C++ internal buffers to Python as read-only NumPy arrays (float64/int64).
-- **Concurrency**: Releases the Python GIL during graph algorithms to enable threading.
+- **Zero-Copy**: `FlowState` and `FlowGraph` `*_view()` methods expose C++ buffers as read-only NumPy arrays that track mutation in place. `StrictMultiDiGraph.*_view()` returns copies instead, so the graph's immutability cannot be violated.
+- **Concurrency**: Releases the Python GIL during the long-running algorithms (SPF, KSP, max-flow, placement) to enable threading. `PredDAG.resolve_to_paths` holds the GIL. `batch_max_flow` and `sensitivity_analysis` also use internal worker threads, sized by `NGRAPH_CORE_BATCH_THREADS` / `NGRAPH_CORE_SENSITIVITY_THREADS`.
 
 ## Installation
 
@@ -89,7 +89,7 @@ tests/py/               # Python tests (pytest)
 make dev        # Setup: venv, dependencies, pre-commit hooks
 make check      # Run all tests and linting (auto-fix formatting)
 make check-ci   # Strict checks without auto-fix (for CI)
-make test       # Python tests with coverage
+make test       # Python tests
 make cpp-test   # C++ tests only
 make cov        # Combined coverage report (C++ + Python)
 ```
@@ -98,7 +98,7 @@ make cov        # Combined coverage report (C++ + Python)
 
 - **C++:** C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+)
 - **Python:** 3.11+
-- **Build:** CMake 3.15+, scikit-build-core
+- **Build:** CMake 3.23+, scikit-build-core
 - **Dependencies:** pybind11, NumPy
 
 ## License

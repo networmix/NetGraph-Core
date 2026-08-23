@@ -22,7 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Shortest Paths**: Replaced nested per-node predecessor vectors with flat intrusive lists, removing the allocation churn that dominated the hot path (~3-4x faster; output unchanged).
-- **Max-Flow**: Parallelized `batch_max_flow` across source/destination pairs using `std::async`; thread count controlled by `NGRAPH_CORE_BATCH_THREADS` env or hardware concurrency.
+- **Flow Placement**: `place_on_dag` now rebuilds its `(parent, child)` edge groups into a reused arena instead of nested per-node vectors, which was ~70% of its runtime (~2-2.4x faster; output unchanged).
+- **Max-Flow**: Parallelized `batch_max_flow` across source/destination pairs using `std::async`; workers claim pairs from a shared counter, so a batch whose costs are unevenly distributed still parallelizes. Thread count from `NGRAPH_CORE_BATCH_THREADS` env or hardware concurrency.
+- **Flow Policy**: `place_demand` computes one SPF when seeding initial flows instead of repeating an identical one per flow; seeding cost no longer scales with `min_flow_count`.
+- **Python Bindings**: A wrong-typed `graph`/`algorithms` argument now raises `TypeError` instead of an opaque `RuntimeError: Unable to cast ... to C++ type '?'`, `Algorithms.spf` raises `TypeError` for a wrong `residual` length (matching every other length check), `Algorithms.ksp` validates `dtype` before running, and `batch_max_flow` rejects out-of-range node ids like the single-pair entry points.
+- **Python Typing**: Corrected `_docs.py` (pybind11 enums and classes are not `enum.Enum`/`dataclass`, `MinCut.edges` is an `int32` array, removed a `Path` class that never existed) and widened the type-checking re-exports from 6 names to all 16, so `Algorithms`, `FlowPolicy`, `StrictMultiDiGraph` and friends are no longer `Unknown` to type checkers despite the shipped `py.typed`.
+- **Docs**: Corrected README/CONTRIBUTING (required CMake is 3.23 not 3.15, `make py-test` does not exist, `make test` does not collect coverage), the `sensitivity_analysis` description in README and `backend.hpp` (it measures flow *lost* on edge removal, not gain from relaxing capacity), the zero-copy and GIL claims, and header contracts for `from_arrays`, `PredDAG`, `FlowSummary.costs`, `calc_max_flow` and `FlowPolicy`.
+
+### Removed
+
+- **Python Bindings**: The unreachable `Flow` class (bound from `FlowRecord`). No binding constructed or returned one, it was absent from `__all__`, and the name collided with the C++ alias `using Flow = double`.
 
 ## [0.7.2] - 2026-03-26
 

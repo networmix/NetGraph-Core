@@ -26,6 +26,31 @@
 
 namespace netgraph::core {
 
+/* Reject uses that would silently produce a wrong answer:
+   - a FlowGraph wrapping a different graph than the policy routes on (SPF would run
+     on one topology while flow is placed on another);
+   - a (src, dst) pair different from the demand this policy already manages (the
+     round-robin loop routes using src/dst from the existing flow records). */
+void FlowPolicy::check_demand_target(const FlowGraph& fg, NodeId src, NodeId dst,
+                                     const char* what) const {
+  const auto* policy_graph = ctx_.graph.graph.get();
+  if (policy_graph != nullptr && policy_graph != &fg.graph()) {
+    throw std::invalid_argument(
+        std::string("FlowPolicy::") + what +
+        ": the FlowGraph wraps a different StrictMultiDiGraph than this policy; "
+        "paths would be selected on one topology and placed on another");
+  }
+  if (!flows_.empty()) {
+    const auto& existing = flows_.begin()->second;
+    if (existing.src != src || existing.dst != dst) {
+      throw std::invalid_argument(
+          std::string("FlowPolicy::") + what +
+          ": this policy already manages a demand for a different (src, dst) pair; "
+          "use a separate FlowPolicy per demand or call remove_demand() first");
+    }
+  }
+}
+
 double FlowPolicy::placed_demand() const noexcept {
   double s = 0.0;
   for (auto const& kv : flows_) s += kv.second.placed_flow;
@@ -202,19 +227,7 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
                                                   std::optional<double> min_flow) {
   NGRAPH_PROFILE_SCOPE("place_demand");
 
-  // A FlowPolicy manages flows for a single demand. Placing a different
-  // (src, dst) pair on a policy that already holds flows would silently route
-  // the new volume over the previous pair's paths (the round-robin loop reads
-  // src/dst from the existing flow records), so reject it loudly.
-  if (!flows_.empty()) {
-    const auto& existing = flows_.begin()->second;
-    if (existing.src != src || existing.dst != dst) {
-      throw std::invalid_argument(
-          "FlowPolicy::place_demand: this policy already manages a demand for a "
-          "different (src, dst) pair; use a separate FlowPolicy per demand or "
-          "call remove_demand() first");
-    }
-  }
+  check_demand_target(fg, src, dst, "place_demand");
 
   // Compute target flow per flow-record.
   // target: the volume to place per flow (or globally if target_per_flow is unset).
@@ -268,11 +281,20 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
       if (max_flow_count_.has_value()) {
         initial = std::min(initial, *max_flow_count_);
       }
-      for (int i=0;i<initial;++i) {
-        auto min_req = (flow_placement_ == FlowPlacement::EqualBalanced && max_flow_count_.has_value())
-                         ? std::optional<double>(per_target)
-                         : min_flow;
-        [[maybe_unused]] auto* created = create_flow(fg, src, dst, flowClass, min_req);
+      auto min_req = (flow_placement_ == FlowPlacement::EqualBalanced && max_flow_count_.has_value())
+                       ? std::optional<double>(per_target)
+                       : min_flow;
+      // Seeding places no flow, so residuals do not change between iterations and
+      // every create_flow() here would recompute the identical SPF. Compute the
+      // bundle once and copy it into each seeded flow.
+      if (initial > 0) {
+        if (auto pb = get_path_bundle(fg, src, dst, min_req)) {
+          for (int i = 0; i < initial; ++i) {
+            FlowIndex idx{src, dst, flowClass, next_flow_id_++};
+            FlowRecord f(idx, src, dst, pb->first, pb->second);
+            flows_.emplace(idx, std::move(f));
+          }
+        }
       }
     }
   }
@@ -403,6 +425,10 @@ std::pair<double,double> FlowPolicy::rebalance_demand(FlowGraph& fg,
                                                       NodeId src, NodeId dst,
                                                       FlowClass flowClass,
                                                       double target_per_flow) {
+  // Must run before remove_demand() empties flows_, or the check inside
+  // place_demand() would have nothing left to compare against and would
+  // silently retarget this policy's volume onto a different node pair.
+  check_demand_target(fg, src, dst, "rebalance_demand");
   double vol = placed_demand();
   remove_demand(fg);
   return place_demand(fg, src, dst, flowClass, vol, target_per_flow, std::nullopt);

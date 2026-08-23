@@ -121,8 +121,9 @@ public:
   //   opts: Configuration options.
   //
   // Returns:
-  //   A vector of pairs (EdgeId, Flow gain), indicating how much flow would
-  //   increase if the edge's capacity were relaxed.
+  //   A vector of pairs (EdgeId, FlowDelta) for edges whose removal reduces
+  //   total flow, where FlowDelta is how much flow is LOST without that edge.
+  //   This is a criticality measure, not the gain from relaxing capacity.
   [[nodiscard]] virtual std::vector<std::pair<EdgeId, Flow>> sensitivity_analysis(
       const GraphHandle& gh, NodeId src, NodeId dst, const MaxFlowOptions& opts) = 0;
 };

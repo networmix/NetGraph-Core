@@ -14,6 +14,7 @@
 #include "netgraph/core/constants.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -356,12 +357,22 @@ batch_max_flow(const StrictMultiDiGraph& g,
     run_range(0, pairs.size());
     return out;
   }
-  const auto chunk_size = (pairs.size() + thread_budget - 1) / thread_budget;
+  // Claim pairs one at a time from a shared counter rather than handing each worker a
+  // fixed contiguous chunk. Per-pair cost varies by orders of magnitude (a dense
+  // cross-fabric pair versus a disconnected one), so static chunking leaves workers
+  // idle whenever the expensive pairs happen to land in the same chunk.
+  std::atomic<std::size_t> next_pair{0};
+  auto run_dynamic = [&]() {
+    for (;;) {
+      const std::size_t i = next_pair.fetch_add(1, std::memory_order_relaxed);
+      if (i >= pairs.size()) break;
+      run_range(i, i + 1);
+    }
+  };
   std::vector<std::future<void>> futures;
   futures.reserve(thread_budget);
-  for (std::size_t begin = 0; begin < pairs.size(); begin += chunk_size) {
-    const std::size_t end = std::min<std::size_t>(begin + chunk_size, pairs.size());
-    futures.emplace_back(std::async(std::launch::async, run_range, begin, end));
+  for (std::size_t w = 0; w < thread_budget; ++w) {
+    futures.emplace_back(std::async(std::launch::async, run_dynamic));
   }
   for (auto& f : futures) f.get();
   return out;

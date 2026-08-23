@@ -18,6 +18,18 @@ namespace netgraph::core {
 
 class StrictMultiDiGraph {
 public:
+  // Builds a graph from parallel edge arrays, which must all have the same length.
+  // Edges are reordered by (cost, src, dst); ext_edge_ids is permuted alongside them.
+  // Self-loops and duplicate (src, dst) pairs are permitted (this is a multigraph).
+  //
+  // Throws std::invalid_argument or std::out_of_range if:
+  //   - the arrays differ in length, or ext_edge_ids is neither empty nor that length
+  //   - num_nodes < 0, or any src/dst falls outside [0, num_nodes)
+  //   - any capacity < 0, or any cost < 0
+  //   - the number of edges exceeds INT32_MAX
+  //   - the TOTAL of all edge costs reaches 2^62. SPF accumulates path costs as int64
+  //     and uses INT64_MAX as the unreachable sentinel, so a larger total could wrap
+  //     negative and silently corrupt results.
   [[nodiscard]] static StrictMultiDiGraph from_arrays(
       std::int32_t num_nodes,
       std::span<const std::int32_t> src,

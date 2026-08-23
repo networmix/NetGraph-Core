@@ -285,3 +285,116 @@ class TestBatchPairsDtype:
         assert not strided.flags["C_CONTIGUOUS"]
         with pytest.raises(TypeError, match="C-contiguous"):
             algs.batch_max_flow(pg, strided)
+
+
+class TestFlowPolicyTargetGuards:
+    """Findings 9-10: FlowPolicy accepted uses that silently produced wrong answers."""
+
+    def _two_graphs_same_edge_count(self):
+        # Same edge count, different topology: the residual-length check that caught
+        # the mismatched-graph case by accident does not fire here.
+        a = _graph(4, [(0, 1, 5.0, 1), (1, 3, 5.0, 1), (0, 2, 1.0, 1)])
+        b = _graph(4, [(0, 2, 9.0, 1), (2, 3, 9.0, 1), (0, 1, 1.0, 1)])
+        return a, b
+
+    def test_flowgraph_from_a_different_graph_is_rejected(self, algs):
+        ga, gb = self._two_graphs_same_edge_count()
+        policy = ngc.FlowPolicy(algs, algs.build_graph(ga), ngc.FlowPolicyConfig())
+        with pytest.raises(ValueError, match="different StrictMultiDiGraph"):
+            policy.place_demand(ngc.FlowGraph(gb), 0, 3, 0, 100.0)
+
+    def test_rebalance_demand_rejects_a_different_pair(self, algs):
+        # remove_demand() empties flows_, so rebalance_demand must check the pair
+        # itself rather than relying on the check inside place_demand.
+        g = _graph(4, [(0, 1, 10.0, 1), (2, 3, 10.0, 1)])
+        fg = ngc.FlowGraph(g)
+        policy = ngc.FlowPolicy(algs, algs.build_graph(g), ngc.FlowPolicyConfig())
+        policy.place_demand(fg, 0, 1, 0, 5.0)
+        with pytest.raises(ValueError, match="different \\(src, dst\\)"):
+            policy.rebalance_demand(fg, 2, 3, 0, 5.0)
+        # The matching pair still rebalances, and retargeting after remove_demand works.
+        policy.rebalance_demand(fg, 0, 1, 0, 2.0)
+        policy.remove_demand(fg)
+        assert policy.place_demand(fg, 2, 3, 0, 5.0)[0] == pytest.approx(5.0)
+
+
+class TestBindingValidationConsistency:
+    """Findings 11-12: validation that differed between analogous entry points."""
+
+    def _line(self):
+        return _graph(3, [(0, 1, 5.0, 1), (1, 2, 5.0, 1)])
+
+    def test_batch_max_flow_rejects_out_of_range_like_max_flow(self, algs):
+        pg = algs.build_graph(self._line())
+        # Previously this returned total_flow=0.0 and the bad id vanished into the batch.
+        with pytest.raises(ValueError, match="out of range"):
+            algs.batch_max_flow(pg, np.array([[0, 99]], dtype=np.int32))
+        with pytest.raises(ValueError, match="out of range"):
+            algs.max_flow(pg, 0, 99)
+
+    def test_ksp_validates_dtype_even_when_no_paths_exist(self, algs):
+        pg = algs.build_graph(self._line())
+        # 2 -> 0 is unreachable, so the results loop never runs; the dtype check used
+        # to live inside that loop and silently accepted the bad value.
+        with pytest.raises(ValueError, match="dtype must be"):
+            algs.ksp(pg, 2, 0, k=1, dtype="float32")
+
+    def test_algorithms_backend_argument_is_nameable(self):
+        assert isinstance(ngc.Algorithms(backend=ngc.Backend.cpu()), ngc.Algorithms)
+
+    def test_unreachable_flow_record_class_is_not_exported(self):
+        import _netgraph_core
+
+        # Nothing could construct or receive it, and the name collided with the C++
+        # alias `using Flow = double`.
+        assert not hasattr(_netgraph_core, "Flow")
+
+
+class TestTypeStubAccuracy:
+    """Finding 13: _docs.py declared types that did not match runtime."""
+
+    def test_min_cut_edges_is_an_int32_array_not_a_list(self, algs):
+        g = _graph(3, [(0, 1, 5.0, 1), (1, 2, 5.0, 1)])
+        _, summary = algs.max_flow(algs.build_graph(g), 0, 2)
+        edges = summary.min_cut.edges
+        assert isinstance(edges, np.ndarray)
+        assert edges.dtype == np.int32
+
+    def test_stub_declares_only_names_that_exist(self):
+        import _netgraph_core
+
+        from netgraph_core import _docs
+
+        declared = {
+            n
+            for n in dir(_docs)
+            if not n.startswith("_") and isinstance(getattr(_docs, n), type)
+        }
+        missing = {n for n in declared if not hasattr(_netgraph_core, n)}
+        assert not missing, f"_docs.py declares nonexistent runtime types: {missing}"
+
+
+class TestErrorTypeConsistency:
+    """Finding 14: the same class of user error raised different exception types."""
+
+    @pytest.fixture
+    def pg(self, algs):
+        return algs.build_graph(_graph(3, [(0, 1, 5.0, 1), (1, 2, 5.0, 1)]))
+
+    def test_spf_residual_length_raises_type_error_like_masks(self, algs, pg):
+        # Previously the residual length check fell through to the C++ core, which
+        # throws std::invalid_argument -> ValueError, while every mask length check
+        # in the binding layer raises TypeError.
+        with pytest.raises(TypeError, match="residual length must equal"):
+            algs.spf(pg, 0, residual=np.zeros(5))
+        with pytest.raises(TypeError, match="node_mask length must equal"):
+            algs.spf(pg, 0, node_mask=np.ones(7, dtype=bool))
+
+    def test_wrong_typed_arguments_raise_type_error_not_runtime_error(self, algs, pg):
+        # These hand-rolled casts used to surface as
+        # "RuntimeError: Unable to cast ... to C++ type '?'", which no `except
+        # TypeError` catches and which names nothing actionable.
+        with pytest.raises(TypeError, match="must be a StrictMultiDiGraph"):
+            algs.build_graph(5)
+        with pytest.raises(TypeError, match="must be an Algorithms"):
+            ngc.FlowPolicy("not-algorithms", pg, ngc.FlowPolicyConfig())
