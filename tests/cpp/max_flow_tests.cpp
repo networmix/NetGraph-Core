@@ -1256,3 +1256,83 @@ TEST(MaxFlow, Sensitivity_ShortestPathVsMaxFlow) {
     }
   }
 }
+
+// ============================================================================
+// Regression: residual completion phase (flow cancellation)
+// ============================================================================
+
+// Successive shortest paths over forward-only SPF DAGs can strand capacity that
+// only reverse-arc cancellation can recover. On this full-duplex topology the
+// first tier routes 0->1->2->3 (cost 3), blocking both the direct 1->3 exit and
+// the 2->3 exit; the true maximum needs to reroute it. Expected max flow is 3:
+//   0->1->3 (1), 0->2->1->3 (1), 0->2->3 (1); the cut {0,2}|{1,3} has capacity 3.
+TEST(MaxFlow, CompletionPhase_RecoversCancellation) {
+  std::vector<std::int32_t> src, dst;
+  std::vector<double> cap;
+  std::vector<std::int64_t> cost;
+  auto add_duplex = [&](std::int32_t u, std::int32_t v, double c, std::int64_t k) {
+    src.push_back(u); dst.push_back(v); cap.push_back(c); cost.push_back(k);
+    src.push_back(v); dst.push_back(u); cap.push_back(c); cost.push_back(k);
+  };
+  add_duplex(1, 3, 3.0, 17);
+  add_duplex(0, 2, 8.0, 17);
+  add_duplex(1, 2, 1.0, 1);
+  add_duplex(1, 0, 1.0, 1);
+  add_duplex(3, 2, 1.0, 1);
+  auto g = StrictMultiDiGraph::from_arrays(4, src, dst, cap, cost);
+
+  auto be = make_cpu_backend();
+  Algorithms algs(be);
+  auto gh = algs.build_graph(g);
+
+  MaxFlowOptions opts;
+  opts.placement = FlowPlacement::Proportional;
+  opts.shortest_path = false;
+
+  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
+  EXPECT_NEAR(total, 3.0, 1e-9) << "true max flow requires cancelling the first tier";
+
+  // Max-flow/min-cut duality: the reported cut capacity must equal the flow.
+  double cut_cap = 0.0;
+  auto capv = g.capacity_view();
+  for (auto eid : summary.min_cut.edges) cut_cap += capv[static_cast<std::size_t>(eid)];
+  EXPECT_NEAR(cut_cap, total, 1e-9) << "min-cut capacity must equal total flow";
+
+  // Cost distribution must account for exactly the total flow.
+  double dist_sum = 0.0;
+  for (auto f : summary.flows) dist_sum += f;
+  EXPECT_NEAR(dist_sum, total, 1e-9);
+}
+
+// The completion phase must respect masks: masking node 2 on the topology above
+// limits the flow to the direct 0->1->3 route.
+TEST(MaxFlow, CompletionPhase_RespectsNodeMask) {
+  std::vector<std::int32_t> src, dst;
+  std::vector<double> cap;
+  std::vector<std::int64_t> cost;
+  auto add_duplex = [&](std::int32_t u, std::int32_t v, double c, std::int64_t k) {
+    src.push_back(u); dst.push_back(v); cap.push_back(c); cost.push_back(k);
+    src.push_back(v); dst.push_back(u); cap.push_back(c); cost.push_back(k);
+  };
+  add_duplex(1, 3, 3.0, 17);
+  add_duplex(0, 2, 8.0, 17);
+  add_duplex(1, 2, 1.0, 1);
+  add_duplex(1, 0, 1.0, 1);
+  add_duplex(3, 2, 1.0, 1);
+  auto g = StrictMultiDiGraph::from_arrays(4, src, dst, cap, cost);
+
+  auto be = make_cpu_backend();
+  Algorithms algs(be);
+  auto gh = algs.build_graph(g);
+
+  auto mask = make_bool_mask(4);
+  mask[2] = false;
+
+  MaxFlowOptions opts;
+  opts.placement = FlowPlacement::Proportional;
+  opts.shortest_path = false;
+  opts.node_mask = std::span<const bool>(mask.get(), 4);
+
+  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
+  EXPECT_NEAR(total, 1.0, 1e-9) << "without node 2 only 0->1->3 remains (bottleneck 1)";
+}

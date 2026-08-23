@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-08-22
+
+### Fixed
+
+- **Max-Flow**: `calc_max_flow` could return less than the true maximum, since the tier loop augments only along forward SPF DAGs and never cancels an earlier placement (the reported `min_cut` then contradicted `total_flow`). Added a residual completion phase with reverse arcs for `Proportional` + `require_capacity` + `shortest_path=false`; results increase where the previous value was suboptimal.
+- **Shortest Paths**: Zero-cost edges produced a cyclic predecessor DAG, making `EqualBalanced` placement return 0 flow and `resolve_to_paths` hang. Equal-cost predecessors are now recorded only while a node is unsettled, and `resolve_to_paths` guards against cycles in caller-supplied DAGs.
+- **K-Shortest Paths**: Spur enumeration materialized every equal-cost path, exponential in ECMP fan-out (a 22-stage ladder needed ~19 s and ~3.8 GB for `k=3`). Enumeration is now bounded by the number of candidates still acceptable; tie-breaking among equal-cost paths may differ, but path counts and costs are unchanged.
+- **Flow Policy**: `place_demand` silently routed a second `(src, dst)` pair over the first pair's paths. It now raises `invalid_argument`; use one policy per demand or call `remove_demand()` first.
+- **Graph Construction**: `from_arrays` now rejects a total edge cost at or above 2^62, which overflows the int64 path arithmetic in SPF and silently corrupts results.
+- **Flow State**: `compute_min_cut` and max-flow reachability derived placed flow from `capacity - residual`, overstating it for a `FlowState` built with a custom `residual_init`. Both now use `edge_flow`.
+- **Build**: `NETGRAPH_CORE_SANITIZE` passed its flags as one quoted string, so sanitizer builds never compiled, and the test target was missing them entirely. `make sanitize-test` also no longer sets `detect_leaks=1` on macOS, where it aborts.
+
+### Changed
+
+- **Shortest Paths**: Replaced nested per-node predecessor vectors with flat intrusive lists, removing the allocation churn that dominated the hot path (~3-4x faster; output unchanged).
+- **Max-Flow**: Parallelized `batch_max_flow` across source/destination pairs using `std::async`; thread count controlled by `NGRAPH_CORE_BATCH_THREADS` env or hardware concurrency.
+
 ## [0.7.2] - 2026-03-26
 
 ### Fixed

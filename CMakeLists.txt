@@ -218,8 +218,16 @@ endif()
 if(NETGRAPH_CORE_SANITIZE)
   message(STATUS "Enabling sanitizers (disables optimizations)")
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set(SAN_FLAGS "-fsanitize=address,undefined -fno-omit-frame-pointer")
-    foreach(tgt netgraph_core _netgraph_core)
+    # Must be a CMake list: a single quoted string reaches the compiler as one
+    # argument and clang rejects "-fsanitize=address,undefined -fno-omit-frame-pointer".
+    set(SAN_FLAGS -fsanitize=address,undefined -fno-omit-frame-pointer)
+    set(SAN_TARGETS netgraph_core _netgraph_core)
+    if(TARGET netgraph_core_tests)
+      # The test executable links the sanitized static library, so it must be
+      # built and linked with the same flags to pull in the sanitizer runtime.
+      list(APPEND SAN_TARGETS netgraph_core_tests)
+    endif()
+    foreach(tgt ${SAN_TARGETS})
       target_compile_options(${tgt} PRIVATE ${SAN_FLAGS})
       target_link_options(${tgt} PRIVATE ${SAN_FLAGS})
     endforeach()

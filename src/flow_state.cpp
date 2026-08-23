@@ -481,8 +481,12 @@ MinCut FlowState::compute_min_cut(NodeId src, std::span<const bool> node_mask, s
       auto eid = static_cast<std::size_t>(in_aei[j]);
       if (use_edge_mask && !edge_mask[eid]) continue;
       if (use_node_mask && !node_mask[static_cast<std::size_t>(w)]) continue;
-      double flow_e = g_->capacity_view()[eid] - residual_[eid];
-      if (flow_e > kMinFlow && !visited[static_cast<std::size_t>(w)]) {
+      // Reverse arcs exist where THIS state has placed cancellable flow. Using
+      // edge_flow_ (not capacity - residual) keeps the traversal correct when
+      // the state was constructed with a custom residual_init, where
+      // capacity - residual also counts pre-existing usage this state never
+      // placed and cannot cancel.
+      if (edge_flow_[eid] > kMinFlow && !visited[static_cast<std::size_t>(w)]) {
         visited[static_cast<std::size_t>(w)] = 1;
         q.push(w);
       }

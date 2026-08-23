@@ -202,6 +202,20 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
                                                   std::optional<double> min_flow) {
   NGRAPH_PROFILE_SCOPE("place_demand");
 
+  // A FlowPolicy manages flows for a single demand. Placing a different
+  // (src, dst) pair on a policy that already holds flows would silently route
+  // the new volume over the previous pair's paths (the round-robin loop reads
+  // src/dst from the existing flow records), so reject it loudly.
+  if (!flows_.empty()) {
+    const auto& existing = flows_.begin()->second;
+    if (existing.src != src || existing.dst != dst) {
+      throw std::invalid_argument(
+          "FlowPolicy::place_demand: this policy already manages a demand for a "
+          "different (src, dst) pair; use a separate FlowPolicy per demand or "
+          "call remove_demand() first");
+    }
+  }
+
   // Compute target flow per flow-record.
   // target: the volume to place per flow (or globally if target_per_flow is unset).
   // per_target: refined target for EqualBalanced mode (considers source capacity).
