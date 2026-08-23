@@ -9,7 +9,7 @@ pybind11-stubgen) to prevent drift from the runtime bindings.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional, Sequence
 
 if TYPE_CHECKING:  # only for typing; runtime comes from extension
     import numpy as np  # type: ignore[reportMissingImports]
@@ -78,6 +78,22 @@ class PredDAG:
     parent_offsets: np.ndarray
     parents: np.ndarray
     via_edges: np.ndarray
+
+    @staticmethod
+    def from_edges(graph: "StrictMultiDiGraph", edges: "Sequence[int]") -> "PredDAG":
+        """Build a single-path PredDAG from a contiguous edge-id sequence.
+
+        The missing constructor for operator-defined explicit paths; PredDAGs
+        returned by Algorithms.spf/ksp work directly wherever a PredDAG is
+        accepted (FlowState.place_on_dag, FlowGraph.place,
+        FlowPolicy.set_static_paths).
+
+        Raises:
+            ValueError: If edges is empty, an id is out of range, consecutive
+                edges do not connect, or the walk revisits a node (a pinned
+                path must be a simple path).
+        """
+        ...
 
     def resolve_to_paths(
         self,
@@ -409,9 +425,12 @@ class FlowPolicyConfig:
 class FlowPolicy:
     """Flow policy for demand placement.
 
-    When static_paths is empty the policy may refresh the DAG per round using
-    residual-aware shortest paths. This progressively prunes saturated next-hops
-    (traffic-engineering style) and differs from one-shot ECMP admission.
+    Dynamic policies may refresh the DAG per round using residual-aware
+    shortest paths, progressively pruning saturated next-hops (traffic-
+    engineering style), which differs from one-shot ECMP admission.
+
+    A policy can instead be pinned to explicit path bundles with
+    set_static_paths(); see that method for the pinned semantics.
 
     Args:
         algorithms: Algorithms instance (kept alive by FlowPolicy)
@@ -445,7 +464,18 @@ class FlowPolicy:
         volume: float,
         target_per_flow: Optional[float] = None,
         min_flow: Optional[float] = None,
-    ) -> tuple[float, float]: ...
+    ) -> tuple[float, float]:
+        """Place `volume` of demand; returns (placed, remaining).
+
+        EQUAL_BALANCED note: when the equalizing rebalance runs, `placed` is
+        the policy's TOTAL placed demand (cumulative across calls, because
+        rebalancing re-places previously placed volume too), so
+        `placed + remaining` can exceed this call's `volume`. Use
+        placed_demand() deltas for strict per-call accounting. EB placement is
+        also not incremental: each call's volume defines the per-flow target,
+        so a second, smaller call may place nothing.
+        """
+        ...
 
     def rebalance_demand(
         self,
@@ -457,6 +487,39 @@ class FlowPolicy:
     ) -> tuple[float, float]: ...
 
     def remove_demand(self, flow_graph: "FlowGraph") -> None: ...
+    def set_static_paths(self, src: int, dst: int, paths: "Sequence[PredDAG]") -> None:
+        """Pin this policy's demand to explicit path bundles (MPLS-style).
+
+        One flow is created per USABLE bundle at the next placement, in supply
+        order, each permanently bound to its own bundle. A single-path bundle
+        (from PredDAG.from_edges or ksp) models a strict-ERO LSP: any failed
+        hop takes it down. A multi-walk bundle (an SPF DAG) models a pinned
+        DAG / SR-TE-style policy that renormalizes over surviving walks.
+
+        Bundles are validated against the policy's graph, then pruned against
+        the policy's node/edge masks; a bundle with no surviving src->dst walk
+        is DOWN and creates no flow (pinned paths do not reroute around
+        failures). Each flow's cost is the min-cost src->dst walk of its
+        PRUNED bundle. EqualBalanced spreads over the usable (up) bundles
+        only; down LSPs = len(paths) - flow_count().
+
+        With static paths configured the policy neither creates additional
+        flows nor reoptimizes: max_path_cost, max_path_cost_factor,
+        min_flow_count and reoptimize_flows_on_each_placement are inert.
+        Placement is not incremental across place_demand calls for
+        EqualBalanced (each call's volume defines the per-flow target).
+
+        Raises:
+            ValueError: If paths is empty; the policy already holds flows
+                (call remove_demand() first); shortest_path=True is
+                configured; src/dst is out of range or equal; a user-supplied
+                max_flow_count differs from len(paths); or a bundle is
+                malformed (wrong shape, out-of-range ids, an edge that does
+                not connect its parent to its node in this graph, a cycle, or
+                no src->dst walk). Calling again before placement replaces
+                the previous pinning.
+        """
+        ...
 
     @property
     def flows(self) -> dict[tuple[int, int, int, int], tuple[int, int, int, float]]: ...

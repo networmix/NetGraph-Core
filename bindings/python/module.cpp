@@ -328,6 +328,16 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .def_property_readonly("via_edges", [](const PredDAG& d){
         return copy_to_numpy<std::int32_t>(std::span<const std::int32_t>(d.via_edges.data(), d.via_edges.size()));
       })
+      .def_static("from_edges", [](const StrictMultiDiGraph& g, py::sequence edges){
+        std::vector<EdgeId> e;
+        e.reserve(py::len(edges));
+        for (auto item : edges) e.push_back(py::cast<EdgeId>(item));
+        return make_path_dag(g, e);
+      }, py::arg("graph"), py::arg("edges"),
+         "Build a single-path PredDAG from a contiguous edge-id sequence.\n"
+         "Validates that each edge exists, consecutive edges connect, and the walk "
+         "is a simple path. The result works anywhere a PredDAG is accepted "
+         "(place_on_dag, FlowGraph.place, FlowPolicy.set_static_paths).")
       .def("resolve_to_paths", [](const PredDAG& dag, std::int32_t src, std::int32_t dst, bool split_parallel_edges, py::object max_paths){
         std::optional<std::int64_t> mp;
         if (!max_paths.is_none()) mp = py::cast<std::int64_t>(max_paths);
@@ -594,6 +604,17 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .def("rebalance_demand", [](FlowPolicy& p, FlowGraph& fg, std::int32_t src, std::int32_t dst, FlowClass flowClass, double target){ py::gil_scoped_release rel; auto pr = p.rebalance_demand(fg, src, dst, flowClass, target); py::gil_scoped_acquire acq; return py::make_tuple(pr.first, pr.second); },
            py::arg("flow_graph"), py::arg("src"), py::arg("dst"), py::arg("flowClass"), py::arg("target"))
       .def("remove_demand", [](FlowPolicy& p, FlowGraph& fg){ py::gil_scoped_release rel; p.remove_demand(fg); py::gil_scoped_acquire acq; })
+      .def("set_static_paths", [](FlowPolicy& p, std::int32_t src, std::int32_t dst, py::sequence paths){
+        std::vector<PredDAG> bundles;
+        bundles.reserve(py::len(paths));
+        for (auto item : paths) bundles.push_back(py::cast<const PredDAG&>(item));
+        py::gil_scoped_release rel;
+        p.set_static_paths(src, dst, std::move(bundles));
+        py::gil_scoped_acquire acq;
+      }, py::arg("src"), py::arg("dst"), py::arg("paths"),
+         "Pin this policy's demand to explicit path bundles (one flow per usable "
+         "bundle, bound in supply order). See FlowPolicy docs for validation, mask "
+         "(failure) semantics, and which config knobs become inert.")
       .def_property_readonly("flows", [](const FlowPolicy& p){ py::dict out; for (auto const& kv : p.flows()) { const auto& idx = kv.first; const auto& f = kv.second; out[py::make_tuple(idx.src, idx.dst, idx.flowClass, idx.flowId)] = py::make_tuple(f.src, f.dst, f.cost, f.placed_flow); } return out; });
 
   // Profiling functions (enabled via NGRAPH_CORE_PROFILE=1 environment variable)

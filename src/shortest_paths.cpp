@@ -36,6 +36,71 @@ static inline void group_parents(const PredDAG& dag, NodeId v,
   }
 }
 
+std::pair<std::vector<Cost>, PredDAG>
+path_to_pred_dag(const StrictMultiDiGraph& g,
+                 std::span<const NodeId> nodes,
+                 std::span<const EdgeId> edges) {
+  const auto cost_view = g.cost_view();
+  std::vector<Cost> dist(static_cast<std::size_t>(g.num_nodes()),
+                         std::numeric_limits<Cost>::max());
+  PredDAG dag;
+  dag.parent_offsets.assign(static_cast<std::size_t>(g.num_nodes() + 1), 0);
+  if (!nodes.empty()) {
+    dist[static_cast<std::size_t>(nodes.front())] = 0;
+    for (std::size_t i = 1; i < nodes.size(); ++i) {
+      auto u = nodes[i - 1]; auto v = nodes[i]; auto e = edges[i - 1];
+      dist[static_cast<std::size_t>(v)] =
+          dist[static_cast<std::size_t>(u)] + cost_view[static_cast<std::size_t>(e)];
+      dag.parent_offsets[static_cast<std::size_t>(v + 1)] = 1;
+    }
+    for (std::size_t v = 1; v < dag.parent_offsets.size(); ++v)
+      dag.parent_offsets[v] += dag.parent_offsets[v - 1];
+    dag.parents.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
+    dag.via_edges.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
+    for (std::size_t i = 1; i < nodes.size(); ++i) {
+      auto v = nodes[i];
+      auto base = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v)]);
+      dag.parents[base] = nodes[i - 1];
+      dag.via_edges[base] = edges[i - 1];
+    }
+  }
+  return {std::move(dist), std::move(dag)};
+}
+
+PredDAG make_path_dag(const StrictMultiDiGraph& g, std::span<const EdgeId> edges) {
+  if (edges.empty()) {
+    throw std::invalid_argument("make_path_dag: edges must be non-empty");
+  }
+  const auto E = static_cast<std::size_t>(g.num_edges());
+  const auto esrc = g.edge_src_view();
+  const auto edst = g.edge_dst_view();
+  std::vector<NodeId> nodes;
+  nodes.reserve(edges.size() + 1);
+  std::vector<char> seen(static_cast<std::size_t>(g.num_nodes()), 0);
+  for (std::size_t i = 0; i < edges.size(); ++i) {
+    const auto e = edges[i];
+    if (e < 0 || static_cast<std::size_t>(e) >= E) {
+      throw std::invalid_argument("make_path_dag: edge id out of range");
+    }
+    const auto u = esrc[static_cast<std::size_t>(e)];
+    const auto v = edst[static_cast<std::size_t>(e)];
+    if (i == 0) {
+      nodes.push_back(u);
+      seen[static_cast<std::size_t>(u)] = 1;
+    } else if (u != nodes.back()) {
+      throw std::invalid_argument(
+          "make_path_dag: edges are not contiguous (edge source does not match the "
+          "previous edge's destination)");
+    }
+    if (seen[static_cast<std::size_t>(v)]) {
+      throw std::invalid_argument("make_path_dag: path revisits a node (must be a simple path)");
+    }
+    seen[static_cast<std::size_t>(v)] = 1;
+    nodes.push_back(v);
+  }
+  return path_to_pred_dag(g, nodes, edges).second;
+}
+
 std::vector<std::vector<std::pair<NodeId, std::vector<EdgeId>>>>
 resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
                  bool split_parallel_edges,

@@ -218,29 +218,8 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
     // Convert and return
     std::vector<std::pair<std::vector<Cost>, PredDAG>> items;
     items.reserve(paths.size());
-    auto cost_view = g.cost_view();
     for (auto const& P : paths) {
-      std::vector<Cost> dist(static_cast<std::size_t>(g.num_nodes()), std::numeric_limits<Cost>::max());
-      PredDAG dag;
-      dag.parent_offsets.assign(static_cast<std::size_t>(g.num_nodes() + 1), 0);
-      // Fill distances along path and one-parent predecessors
-      if (!P.nodes.empty()) {
-        dist[static_cast<std::size_t>(P.nodes.front())] = 0;
-        for (std::size_t i = 1; i < P.nodes.size(); ++i) {
-          auto u = P.nodes[i-1]; auto v = P.nodes[i]; auto e = P.edges[i-1];
-          dist[static_cast<std::size_t>(v)] = dist[static_cast<std::size_t>(u)] + static_cast<Cost>(cost_view[static_cast<std::size_t>(e)]);
-          dag.parent_offsets[static_cast<std::size_t>(v+1)] = 1;
-        }
-        for (std::size_t v = 1; v < dag.parent_offsets.size(); ++v) dag.parent_offsets[v] += dag.parent_offsets[v-1];
-        dag.parents.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
-        dag.via_edges.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
-        for (std::size_t i = 1; i < P.nodes.size(); ++i) {
-          auto v = P.nodes[i];
-          auto base = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v)]);
-          dag.parents[base] = P.nodes[i-1]; dag.via_edges[base] = P.edges[i-1];
-        }
-      }
-      items.emplace_back(std::move(dist), std::move(dag));
+      items.push_back(path_to_pred_dag(g, P.nodes, P.edges));
     }
     return items;
   }
@@ -362,26 +341,7 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
   std::vector<std::pair<std::vector<Cost>, PredDAG>> items;
   items.reserve(paths.size());
   for (auto const& P : paths) {
-    std::vector<Cost> dist(static_cast<std::size_t>(g.num_nodes()), std::numeric_limits<Cost>::max());
-    PredDAG dag;
-    dag.parent_offsets.assign(static_cast<std::size_t>(g.num_nodes() + 1), 0);
-    if (!P.nodes.empty()) {
-      dist[static_cast<std::size_t>(P.nodes.front())] = 0;
-      for (std::size_t i = 1; i < P.nodes.size(); ++i) {
-        auto u = P.nodes[i-1]; auto v = P.nodes[i]; auto e = P.edges[i-1];
-        dist[static_cast<std::size_t>(v)] = dist[static_cast<std::size_t>(u)] + static_cast<Cost>(cost_view[static_cast<std::size_t>(e)]);
-        dag.parent_offsets[static_cast<std::size_t>(v+1)] = 1;
-      }
-      for (std::size_t v = 1; v < dag.parent_offsets.size(); ++v) dag.parent_offsets[v] += dag.parent_offsets[v-1];
-      dag.parents.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
-      dag.via_edges.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
-      for (std::size_t i = 1; i < P.nodes.size(); ++i) {
-        auto v = P.nodes[i];
-        auto base = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v)]);
-        dag.parents[base] = P.nodes[i-1]; dag.via_edges[base] = P.edges[i-1];
-      }
-    }
-    items.emplace_back(std::move(dist), std::move(dag));
+    items.push_back(path_to_pred_dag(g, P.nodes, P.edges));
   }
   return items;
 }

@@ -106,7 +106,11 @@ public:
   // `fg` must wrap the same StrictMultiDiGraph as the policy's own graph handle;
   // placing onto a FlowGraph built from a different graph is rejected.
   //
-  // Returns (total_placed, remaining_volume).
+  // Returns (placed, remaining). NOTE for EqualBalanced: when the equalizing
+  // rebalance runs, `placed` is the policy's TOTAL placed demand (cumulative
+  // across calls, since rebalancing re-places previously placed volume too) and
+  // `placed + remaining` can therefore exceed this call's `volume`. Use
+  // placed_demand() deltas for strict per-call accounting.
   [[nodiscard]] std::pair<double,double> place_demand(FlowGraph& fg,
                                         NodeId src, NodeId dst,
                                         FlowClass flowClass,
@@ -125,15 +129,49 @@ public:
 
   [[nodiscard]] const std::unordered_map<FlowIndex, FlowRecord, FlowIndexHash>& flows() const noexcept { return flows_; }
 
-// Configure static paths for flow creation. Each entry is (src, dst, dag, cost).
-// max_flow_count must equal the number of static paths if set.
-  void set_static_paths(std::vector<std::tuple<NodeId, NodeId, PredDAG, Cost>> paths);
+  // Pin this policy's demand to explicit path bundles (MPLS-style routing).
+  //
+  // One flow is created per USABLE bundle at the next placement, in supply order,
+  // each permanently bound to its own bundle. A single-path bundle (e.g. from
+  // make_path_dag / PredDAG.from_edges or ksp) models a strict-ERO LSP: any failed
+  // hop takes it down. A multi-walk bundle (e.g. an SPF DAG) models a pinned DAG /
+  // SR-TE-style policy that renormalizes over its surviving walks.
+  //
+  // Each bundle is validated against the policy's graph (shape, id ranges,
+  // edge-endpoint consistency, acyclicity, and an src->dst walk), then pruned
+  // against the policy's node/edge masks. A bundle with no surviving src->dst walk
+  // is DOWN: it creates no flow and carries nothing (a pinned path does not
+  // reroute around failures). Each flow's cost is the min-cost src->dst walk of
+  // its PRUNED bundle, computed from the graph's edge costs.
+  //
+  // With static paths configured the policy neither creates additional flows nor
+  // reoptimizes: max_path_cost, max_path_cost_factor, min_flow_count and
+  // reoptimize_flows_on_each_placement are inert. EqualBalanced spreads over the
+  // usable (up) bundles only. flow_count() reports the usable count U; the
+  // supplied count N is the caller's, so down LSPs = N - flow_count().
+  //
+  // Throws std::invalid_argument if bundles is empty, the policy already holds
+  // flows (remove_demand() first), shortest_path=true is configured (single-
+  // augmentation IP semantics contradict pinned multi-LSP placement), src/dst is
+  // invalid or src == dst, a user-supplied max_flow_count differs from
+  // bundles.size(), or any bundle is malformed. Calling again before placement
+  // replaces the previous pinning.
+  void set_static_paths(NodeId src, NodeId dst, std::vector<PredDAG> bundles);
 
 private:
   // Helpers
   // Throws std::invalid_argument if fg wraps a different graph than this policy, or if
   // (src, dst) differs from the demand already managed here. `what` names the caller.
   void check_demand_target(const FlowGraph& fg, NodeId src, NodeId dst, const char* what) const;
+  // Placement core: target computation, flow creation, round-robin placement, and
+  // the optional post-placement reoptimization. The public place_demand() wraps it
+  // with the iterative EqualBalanced rebalance rounds.
+  [[nodiscard]] std::pair<double,double> place_demand_body(FlowGraph& fg,
+                                             NodeId src, NodeId dst,
+                                             FlowClass flowClass,
+                                             double volume,
+                                             std::optional<double> target_per_flow,
+                                             std::optional<double> min_flow);
   [[nodiscard]] std::optional<std::pair<PredDAG, Cost>> get_path_bundle(const FlowGraph& fg,
                                                           NodeId src, NodeId dst,
                                                           std::optional<double> min_flow);
@@ -171,8 +209,17 @@ private:
   Cost best_path_cost_ { std::numeric_limits<Cost>::max() };
   FlowId next_flow_id_ { 0 };
 
-  // Static paths (optional)
-  std::vector<std::tuple<NodeId, NodeId, PredDAG, Cost>> static_paths_;
+  // Static paths (optional): usable (mask-pruned) bundles, one flow per bundle.
+  struct StaticBundle {
+    PredDAG dag;   // pruned to mask-surviving entries
+    Cost cost {0}; // min-cost src->dst walk within the pruned bundle
+  };
+  NodeId static_src_ {-1};
+  NodeId static_dst_ {-1};
+  int static_supplied_count_ {0};  // N as supplied; usable U = static_bundles_.size()
+  std::vector<StaticBundle> static_bundles_;
+
+  [[nodiscard]] bool has_static_paths() const noexcept { return !static_bundles_.empty() || static_supplied_count_ > 0; }
 };
 
 } // namespace netgraph::core

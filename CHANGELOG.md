@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.0] - 2026-08-22
 
+### Added
+
+- **Flow Policy**: `set_static_paths(src, dst, paths)` pins a demand to explicit path bundles (MPLS-style routing), finishing a feature that was ported but never bound and whose port bound every flow to the first bundle. One flow per usable bundle, each bound to its own bundle in supply order; bundles are validated against the graph and pruned against the policy's masks, and a bundle with no surviving `src->dst` walk is down (no reroute). `EqualBalanced` spreads over the up bundles only. With static paths the policy neither grows its flow set nor reoptimizes; `max_path_cost`/`-factor`, `min_flow_count` and `reoptimize_flows_on_each_placement` are inert.
+- **Shortest Paths**: `PredDAG.from_edges(graph, edges)` builds a single-path `PredDAG` from a contiguous edge-id sequence (`make_path_dag` in C++) -- the missing constructor for operator-defined explicit paths. Extracting it also deduplicates the two identical path-to-DAG conversion blocks in `k_shortest_paths` (outputs unchanged).
+
 ### Fixed
 
 - **Max-Flow**: `calc_max_flow` could return less than the true maximum, since the tier loop augments only along forward SPF DAGs and never cancels an earlier placement (the reported `min_cut` then contradicted `total_flow`). Added a residual completion phase with reverse arcs for `Proportional` + `require_capacity` + `shortest_path=false`; results increase where the previous value was suboptimal.
@@ -26,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Flow Placement**: `place_on_dag` now rebuilds its `(parent, child)` edge groups into a reused arena instead of nested per-node vectors, which was ~70% of its runtime (~2-2.4x faster; output unchanged).
 - **Max-Flow**: Parallelized `batch_max_flow` across source/destination pairs using `std::async`; workers claim pairs from a shared counter, so a batch whose costs are unevenly distributed still parallelizes. Thread count from `NGRAPH_CORE_BATCH_THREADS` env or hardware concurrency.
 - **Flow Policy**: `place_demand` computes one SPF when seeding initial flows instead of repeating an identical one per flow; seeding cost no longer scales with `min_flow_count`.
+- **Flow Policy**: The `EqualBalanced` rebalance recursion (`place_demand` -> `rebalance_demand` -> `place_demand`) is now an iterative loop with numerically identical results (returned leftover may differ by ~1 ulp from floating-point summation order); with many pinned bundles of heterogeneous capacity the recursion depth grew like `U * ln(imbalance/kMinFlow)`, a stack-overflow risk on worker threads.
 - **Python Bindings**: A wrong-typed `graph`/`algorithms` argument now raises `TypeError` instead of an opaque `RuntimeError: Unable to cast ... to C++ type '?'`, `Algorithms.spf` raises `TypeError` for a wrong `residual` length (matching every other length check), `Algorithms.ksp` validates `dtype` before running, and `batch_max_flow` rejects out-of-range node ids like the single-pair entry points.
 - **Python Typing**: Corrected `_docs.py` (pybind11 enums and classes are not `enum.Enum`/`dataclass`, `MinCut.edges` is an `int32` array, removed a `Path` class that never existed) and widened the type-checking re-exports from 6 names to all 16, so `Algorithms`, `FlowPolicy`, `StrictMultiDiGraph` and friends are no longer `Unknown` to type checkers despite the shipped `py.typed`.
 - **Tests**: Several assertions could never fail and now do: a self-loop assertion sat inside `except Exception: pass`, a thread-safety test ended in `assert True` while its workers called `pytest.fail()` from a thread where it cannot fail the test, and two tautologies (`assert size >= 0`) were replaced with the properties actually under test.

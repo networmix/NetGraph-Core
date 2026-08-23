@@ -59,6 +59,27 @@ shortest_paths(const StrictMultiDiGraph& g, NodeId src,
                std::span<const bool> node_mask = {},
                std::span<const bool> edge_mask = {});
 
+// Build the SPF-compatible (distances, PredDAG) pair for one concrete path given
+// as node/edge sequences (nodes[i] -> nodes[i+1] via edges[i]; so nodes.size() ==
+// edges.size() + 1, or a single node with no edges). Distances are cumulative edge
+// costs along the path, INT64_MAX elsewhere; the DAG stores one parent per visited
+// node. Inputs are trusted (no validation) -- used by KSP's result conversion.
+[[nodiscard]] std::pair<std::vector<Cost>, PredDAG>
+path_to_pred_dag(const StrictMultiDiGraph& g,
+                 std::span<const NodeId> nodes,
+                 std::span<const EdgeId> edges);
+
+// Build a single-path PredDAG from a contiguous edge sequence (the missing
+// constructor for operator-defined explicit paths; PredDAGs from SPF/KSP work
+// directly wherever a PredDAG is accepted).
+//
+// Throws std::invalid_argument if edges is empty, any id is out of range, the
+// sequence is not contiguous (dst(e_i) != src(e_{i+1})), or the walk repeats a
+// node (a repeated node cannot be represented as one-parent-per-node, and a
+// pinned path is a simple path by definition).
+[[nodiscard]] PredDAG make_path_dag(const StrictMultiDiGraph& g,
+                                    std::span<const EdgeId> edges);
+
 // Enumerate concrete paths represented by a PredDAG from src to dst.
 // Each path is returned as a sequence of (node_id, (edge_ids...)) pairs ending with (dst, ()).
 // When split_parallel_edges=false, parallel edges per hop are grouped in the tuple.
