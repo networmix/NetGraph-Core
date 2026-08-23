@@ -267,9 +267,15 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
                                  py::object node_masks, py::object edge_masks,
                                  FlowPlacement placement, bool shortest_path, bool require_capacity,
                                  bool with_edge_flows, bool with_reachable, bool with_residuals){
+        // Check the dtype, not the buffer format string: NumPy spells int32 as
+        // NPY_LONG ('l') on LLP64 (Windows) and NPY_INT ('i') on LP64, while
+        // format_descriptor<int32_t> is always 'i'. Comparing format strings
+        // therefore rejects a genuine int32 array on Windows. isinstance uses
+        // dtype equivalence, matching as_span() above.
+        if (!py::isinstance<py::array_t<std::int32_t>>(pairs)) throw py::type_error("pairs dtype must be int32");
+        if (!(pairs.flags() & py::array::c_style)) throw py::type_error("pairs must be C-contiguous (use np.ascontiguousarray)");
         auto buf = pairs.request();
         if (buf.ndim != 2 || buf.shape[1] != 2) throw py::type_error("pairs must be shape [B,2]");
-        if (buf.format != py::format_descriptor<std::int32_t>::format()) throw py::type_error("pairs dtype must be int32");
         const std::size_t B = static_cast<std::size_t>(buf.shape[0]);
         std::vector<std::pair<NodeId,NodeId>> pp; pp.reserve(B);
         auto* p = static_cast<const std::int32_t*>(buf.ptr);

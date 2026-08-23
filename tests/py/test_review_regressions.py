@@ -15,6 +15,8 @@ Each test locks in the fixed behavior for a confirmed defect:
 6. StrictMultiDiGraph accepted cost totals that overflow int64 path arithmetic.
 7. FlowState.compute_min_cut treated pre-existing usage from a custom
    residual_init as cancellable flow.
+8. batch_max_flow rejected a genuine int32 `pairs` array on Windows, and read
+   non-contiguous input as if it were packed.
 """
 
 from __future__ import annotations
@@ -246,3 +248,40 @@ class TestFlowStateCustomResidual:
         np.testing.assert_allclose(np.asarray(fs.edge_flow_view()), [4.0, 4.0])
         cut = np.asarray(fs.compute_min_cut(0).edges)
         assert cut.size > 0
+
+
+class TestBatchPairsDtype:
+    """Finding 8: `batch_max_flow` rejected a genuine int32 array on Windows.
+
+    The dtype check compared buffer format strings. NumPy spells int32 as
+    NPY_LONG ('l') on LLP64 (Windows) but NPY_INT ('i') on LP64, while
+    pybind11's `format_descriptor<int32_t>` is always 'i', so the check threw on
+    Windows for a correctly-typed array. Parametrizing over both 32-bit
+    spellings exercises whichever one is the platform's alias for int32.
+    """
+
+    def _line_graph(self):
+        return _graph(3, [(0, 1, 5.0, 1), (1, 2, 5.0, 1)])
+
+    @pytest.mark.parametrize("dtype", [np.int32, np.intc])
+    def test_accepts_every_int32_spelling(self, algs, dtype):
+        g = self._line_graph()
+        pg = algs.build_graph(g)
+        pairs = np.array([[0, 2]], dtype=dtype)
+        assert np.dtype(dtype).itemsize == 4 and np.dtype(dtype).kind == "i"
+        out = algs.batch_max_flow(pg, pairs)
+        assert out[0].total_flow == pytest.approx(5.0)
+
+    def test_rejects_wrong_dtype(self, algs):
+        pg = algs.build_graph(self._line_graph())
+        with pytest.raises(TypeError, match="int32"):
+            algs.batch_max_flow(pg, np.array([[0, 2]], dtype=np.int64))
+
+    def test_rejects_non_contiguous(self, algs):
+        # A strided view would otherwise be read as if it were packed, silently
+        # turning [[0, 2]] into the pair (0, 99).
+        pg = algs.build_graph(self._line_graph())
+        strided = np.array([[0, 99, 2, 99]], dtype=np.int32)[:, ::2]
+        assert not strided.flags["C_CONTIGUOUS"]
+        with pytest.raises(TypeError, match="C-contiguous"):
+            algs.batch_max_flow(pg, strided)
