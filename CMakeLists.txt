@@ -89,7 +89,6 @@ target_include_directories(netgraph_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_compile_definitions(netgraph_core PRIVATE _USE_MATH_DEFINES)
 ## C++ standard is set globally above.
 target_compile_features(netgraph_core PUBLIC cxx_std_20)
 

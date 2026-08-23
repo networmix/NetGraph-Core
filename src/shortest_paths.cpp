@@ -1,10 +1,16 @@
 /* Path enumeration from PredDAG (resolve_to_paths). */
 #include "netgraph/core/shortest_paths.hpp"
+#include "netgraph/core/constants.hpp"
 #include "netgraph/core/profiling.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <optional>
-#include <stack>
+#include <queue>
+#include <stdexcept>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -169,17 +175,6 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
       * Node-level tie-breaking for equal-cost nodes (prefers higher bottleneck capacity)
     - Early exit when specific destination is reached
 */
-#include "netgraph/core/shortest_paths.hpp"
-#include <cmath>
-#include <cstdint>
-#include <limits>
-#include <stdexcept>
-#include <queue>
-#include <tuple>
-#include <utility>
-#include <vector>
-#include "netgraph/core/constants.hpp"
-
 namespace netgraph::core {
 
 namespace {

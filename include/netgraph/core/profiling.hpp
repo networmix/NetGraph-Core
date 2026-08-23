@@ -2,8 +2,7 @@
 
 Enable via environment variable: NGRAPH_CORE_PROFILE=1
 
-When disabled (default), overhead is minimal: ~2-4 CPU cycles per scope
-due to a single static bool check with branch prediction.
+When disabled (default), each instrumented scope costs one cached-bool check.
 
 Usage:
     #include "netgraph/core/profiling.hpp"
@@ -22,7 +21,6 @@ From Python:
 */
 #pragma once
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -113,8 +111,8 @@ private:
 #define NGRAPH_CONCAT_IMPL(a, b) a##b
 #define NGRAPH_CONCAT(a, b) NGRAPH_CONCAT_IMPL(a, b)
 
-// Main profiling macro. Expands to a ScopedTimer only if profiling is enabled.
-// When disabled, the check is a single static bool read (~1-2 cycles).
+// Main profiling macro. Expands to a ScopedTimer only if profiling is enabled;
+// when disabled the timer is constructed with a null name and does no work.
 #define NGRAPH_PROFILE_SCOPE(name) \
     ::netgraph::core::ScopedTimer NGRAPH_CONCAT(_ngraph_timer_, __LINE__)( \
         ::netgraph::core::profiling_enabled() ? (name) : nullptr)

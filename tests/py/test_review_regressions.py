@@ -17,6 +17,14 @@ Each test locks in the fixed behavior for a confirmed defect:
    residual_init as cancellable flow.
 8. batch_max_flow rejected a genuine int32 `pairs` array on Windows, and read
    non-contiguous input as if it were packed.
+9-10. FlowPolicy accepted a FlowGraph built from a different graph, and
+   rebalance_demand bypassed the (src, dst) guard.
+11-12. batch_max_flow and ksp validated inputs later (or not at all) compared
+   with their single-pair counterparts.
+13. _docs.py declared types that did not match runtime.
+14. The same class of user error raised different exception types.
+15. k_shortest_paths read paths.back() on an empty vector when
+   max_cost_factor < 1.0 and k > 1.
 """
 
 from __future__ import annotations
@@ -398,3 +406,25 @@ class TestErrorTypeConsistency:
             algs.build_graph(5)
         with pytest.raises(TypeError, match="must be an Algorithms"):
             ngc.FlowPolicy("not-algorithms", pg, ngc.FlowPolicyConfig())
+
+
+class TestKspCostCeiling:
+    """Finding 15: k>1 with max_cost_factor < 1.0 read paths.back() on an empty vector.
+
+    The ceiling lands below the shortest path, so nothing is admitted. The k == 1
+    branch returned early and masked the undefined behaviour; k >= 2 fell into the
+    spur loop, which opens with `paths.back()`.
+    """
+
+    @pytest.mark.parametrize("k", [1, 2, 5])
+    @pytest.mark.parametrize("factor", [0.5, 0.99])
+    def test_sub_unit_factor_returns_empty_for_every_k(self, algs, k, factor):
+        g = _graph(3, [(0, 1, 5.0, 1), (1, 2, 5.0, 1)])
+        pg = algs.build_graph(g)
+        assert algs.ksp(pg, 0, 2, k=k, max_cost_factor=factor) == []
+
+    @pytest.mark.parametrize("k", [1, 2, 5])
+    def test_unit_factor_still_admits_the_shortest_path(self, algs, k):
+        g = _graph(3, [(0, 1, 5.0, 1), (1, 2, 5.0, 1)])
+        pg = algs.build_graph(g)
+        assert len(algs.ksp(pg, 0, 2, k=k, max_cost_factor=1.0)) == 1

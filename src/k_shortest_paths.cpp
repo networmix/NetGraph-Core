@@ -7,7 +7,6 @@
 #include "netgraph/core/k_shortest_paths.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -210,6 +209,11 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
     max_cost = best_cost * (*max_cost_factor);
   }
   if (p0->cost <= max_cost) paths.push_back(*p0);
+  // A max_cost_factor below 1.0 puts the ceiling under the shortest path itself, so
+  // nothing was admitted. Return now: the k > 1 loop below opens with paths.back(),
+  // which is undefined behaviour on an empty vector. (The k == 1 branch would have
+  // masked this, so the guard must sit ahead of it.)
+  if (paths.empty()) return {};
   if (k == 1) {
     // Convert and return
     std::vector<std::pair<std::vector<Cost>, PredDAG>> items;

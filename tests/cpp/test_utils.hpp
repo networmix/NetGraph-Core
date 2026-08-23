@@ -5,7 +5,6 @@
 #include <vector>
 #include "netgraph/core/strict_multidigraph.hpp"
 #include "netgraph/core/shortest_paths.hpp"
-#include "netgraph/core/flow_graph.hpp"
 #include "netgraph/core/max_flow.hpp"
 
 namespace netgraph::core::test {
@@ -433,38 +432,6 @@ inline void expect_pred_dag_semantically_valid(const StrictMultiDiGraph& g,
             << "Distance inconsistency at node " << v;
       }
     }
-  }
-}
-
-inline void expect_flow_conservation(const FlowGraph& fg, NodeId src, NodeId dst) {
-  const auto& g = fg.graph();
-  auto row = g.row_offsets_view();
-  auto col = g.col_indices_view();
-  auto aei = g.adj_edge_index_view();
-  auto in_row = g.in_row_offsets_view();
-  auto in_col = g.in_col_indices_view();
-  auto in_aei = g.in_adj_edge_index_view();
-  auto flows = fg.edge_flow_view();
-
-  // For each intermediate node, inflow should equal outflow
-  for (std::int32_t u = 0; u < g.num_nodes(); ++u) {
-    if (u == src || u == dst) continue;
-
-    double outflow = 0.0;
-    auto s = static_cast<std::size_t>(row[static_cast<std::size_t>(u)]);
-    auto e = static_cast<std::size_t>(row[static_cast<std::size_t>(u) + 1]);
-    for (std::size_t j = s; j < e; ++j) {
-      outflow += flows[static_cast<std::size_t>(aei[j])];
-    }
-
-    double inflow = 0.0;
-    auto is = static_cast<std::size_t>(in_row[static_cast<std::size_t>(u)]);
-    auto ie = static_cast<std::size_t>(in_row[static_cast<std::size_t>(u) + 1]);
-    for (std::size_t j = is; j < ie; ++j) {
-      inflow += flows[static_cast<std::size_t>(in_aei[j])];
-    }
-
-    EXPECT_NEAR(inflow, outflow, 1e-9) << "Flow not conserved at node " << u;
   }
 }
 

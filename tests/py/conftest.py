@@ -439,16 +439,6 @@ def dag_to_pred_map():
 
 
 @pytest.fixture
-def make_pred_map(dag_to_pred_map):
-    """Alias fixture for converting PredDAG to {node: {parent: [EdgeId]}}.
-
-    Provided to make intent clearer at call sites.
-    """
-
-    return dag_to_pred_map
-
-
-@pytest.fixture
 def assert_paths_concrete():
     """Validate path tuples returned by resolve_to_paths.
 

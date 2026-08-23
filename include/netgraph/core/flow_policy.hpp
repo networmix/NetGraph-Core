@@ -24,7 +24,6 @@ struct ExecutionContext {
   std::shared_ptr<Algorithms> algorithms;
   GraphHandle graph;
 
-  // Constructor with validation
   ExecutionContext(std::shared_ptr<Algorithms> algs, const GraphHandle& gh) noexcept
       : algorithms(std::move(algs)), graph(gh) {}
 };

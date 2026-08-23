@@ -260,8 +260,6 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
             auto* outp = dist_arr.mutable_data();
             for (std::size_t i=0;i<dist.size();++i) outp[i] = (dist[i]==maxc) ? std::numeric_limits<double>::infinity() : static_cast<double>(dist[i]);
             out.append(py::make_tuple(std::move(dist_arr), pr.second));
-          } else {
-            throw py::value_error("dtype must be 'float64' or 'int64'");
           }
         }
         return out;

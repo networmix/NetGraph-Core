@@ -22,7 +22,6 @@
 #include <deque>
 #include <limits>
 #include <optional>
-#include <unordered_set>
 
 namespace netgraph::core {
 

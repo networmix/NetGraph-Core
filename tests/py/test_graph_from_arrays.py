@@ -61,10 +61,9 @@ def test_from_arrays_self_loops_behavior():
     dst = np.array([0], dtype=np.int32)  # self-loop
     cap = np.array([1.0], dtype=np.float64)
     cost = np.array([1], dtype=np.int64)
-    # Either allowed or rejected; assert it doesn't crash and creates 1 edge or raises
-    try:
-        g = ngc.StrictMultiDiGraph.from_arrays(n, src, dst, cap, cost, _make_ext_ids(1))
-        assert g.num_edges() >= 1
-    except Exception:
-        # Accept rejection behavior too
-        pass
+    # Self-loops are accepted: StrictMultiDiGraph is a multigraph and from_arrays
+    # only rejects out-of-range ids and negative capacity/cost.
+    g = ngc.StrictMultiDiGraph.from_arrays(n, src, dst, cap, cost, _make_ext_ids(1))
+    assert g.num_edges() == 1
+    assert g.edge_src_view()[0] == 0
+    assert g.edge_dst_view()[0] == 0

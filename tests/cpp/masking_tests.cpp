@@ -410,7 +410,7 @@ TEST(MaskingTests, KSPWithEdgeMask) {
       std::span<const bool>(edge_mask.get(), g.num_edges()));
 
   // Should find remaining path(s)
-  EXPECT_GE(results.size(), 0);
+  EXPECT_EQ(results.size(), 1u);
 
   for (const auto& [dist, dag] : results) {
     if (dist[2] < std::numeric_limits<Cost>::max()) {

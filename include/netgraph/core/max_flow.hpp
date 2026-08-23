@@ -1,7 +1,6 @@
 /* Max-flow utility APIs with summaries and batch evaluation. */
 #pragma once
 
-#include <optional>
 #include <cstdint>
 #include <utility>
 #include <vector>

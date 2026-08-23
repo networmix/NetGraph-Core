@@ -52,7 +52,7 @@ help:
 	@echo "  make check-ci      - Run non-mutating lint + tests (CI entrypoint)"
 	@echo "  make lint          - Run only linting (non-mutating: ruff + pyright)"
 	@echo "  make format        - Auto-format code with ruff"
-	@echo "  make test          - Run tests with coverage"
+	@echo "  make test          - Run Python tests (pytest)"
 	@echo "  make qt            - Run quick tests only (exclude slow/benchmark)"
 	@echo "  make cpp-test      - Build and run C++ tests"
 	@echo "  make cov           - Coverage summary + XML + single-page combined HTML"

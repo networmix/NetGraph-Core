@@ -8,6 +8,7 @@ downstream users import everything from a single place. Typing shims supplied in
 # pyright: reportMissingImports=false
 
 from importlib.metadata import version
+from typing import TYPE_CHECKING
 
 from _netgraph_core import (
     Algorithms,
@@ -38,31 +39,25 @@ __version__ = version("netgraph-core")
 # change what a type checker sees. Keep this list in sync with _docs.py, and keep
 # _docs.py in sync with the bindings -- a wrong stub is worse than a missing one,
 # because it turns "unchecked" into "confidently wrong".
-try:  # pragma: no cover - typing-only import
-    from typing import TYPE_CHECKING as _TYPE_CHECKING
-
-    if _TYPE_CHECKING:  # noqa: SIM108
-        from ._docs import (  # noqa: I001
-            Algorithms as Algorithms,
-            Backend as Backend,
-            EdgeSelection as EdgeSelection,
-            EdgeTieBreak as EdgeTieBreak,
-            FlowGraph as FlowGraph,
-            FlowIndex as FlowIndex,
-            FlowPlacement as FlowPlacement,
-            FlowPolicy as FlowPolicy,
-            FlowPolicyConfig as FlowPolicyConfig,
-            FlowState as FlowState,
-            FlowSummary as FlowSummary,
-            Graph as Graph,
-            MinCut as MinCut,
-            PathAlg as PathAlg,
-            PredDAG as PredDAG,
-            StrictMultiDiGraph as StrictMultiDiGraph,
-        )
-except ImportError:
-    # Safe fallback if _docs.py changes; runtime bindings above remain authoritative.
-    pass
+if TYPE_CHECKING:  # pragma: no cover - typing-only
+    from ._docs import (  # noqa: I001
+        Algorithms as Algorithms,
+        Backend as Backend,
+        EdgeSelection as EdgeSelection,
+        EdgeTieBreak as EdgeTieBreak,
+        FlowGraph as FlowGraph,
+        FlowIndex as FlowIndex,
+        FlowPlacement as FlowPlacement,
+        FlowPolicy as FlowPolicy,
+        FlowPolicyConfig as FlowPolicyConfig,
+        FlowState as FlowState,
+        FlowSummary as FlowSummary,
+        Graph as Graph,
+        MinCut as MinCut,
+        PathAlg as PathAlg,
+        PredDAG as PredDAG,
+        StrictMultiDiGraph as StrictMultiDiGraph,
+    )
 
 __all__ = [
     "__version__",
