@@ -151,16 +151,47 @@ def test_masked_runs_certify(algs, certify_max_flow):
 
     Masks are a good place for a future defect of this kind to hide: no external
     solver models them, so an oracle-based test cannot reach them at all.
+
+    Node and edge masks are checked separately and together, because they are
+    separate branches in ``calc_max_flow`` -- including inside the residual
+    completion phase added in 0.8.0, whose forward and reverse arc loops each
+    consult ``edge_mask`` independently. A node-mask-only sweep leaves those
+    branches, and the certificate's own ``edge_mask`` handling, unexercised.
     """
     rng = np.random.default_rng(SEED + 1)
-    for _ in range(200):
+    saw_masked_node = False
+    saw_masked_edge = False
+
+    for i in range(300):
         g, s, t = _random_graph(rng)
         n = g.num_nodes()
-        node_mask = np.ones(n, dtype=bool)
-        victim = int(rng.integers(0, n))
-        if victim not in (s, t):
-            node_mask[victim] = False
+
+        node_mask = None
+        edge_mask = None
+        mode = i % 3  # 0: nodes only, 1: edges only, 2: both
+        if mode in (0, 2):
+            node_mask = np.ones(n, dtype=bool)
+            victim = int(rng.integers(0, n))
+            if victim not in (s, t):
+                node_mask[victim] = False
+                saw_masked_node = True
+        if mode in (1, 2):
+            edge_mask = rng.random(g.num_edges()) > 0.25
+            if not edge_mask.all():
+                saw_masked_edge = True
+
         total, summary = algs.max_flow(
-            algs.build_graph(g), s, t, node_mask=node_mask, with_edge_flows=True
+            algs.build_graph(g),
+            s,
+            t,
+            node_mask=node_mask,
+            edge_mask=edge_mask,
+            with_edge_flows=True,
         )
-        certify_max_flow(g, summary, total, s, t, node_mask=node_mask)
+        certify_max_flow(
+            g, summary, total, s, t, node_mask=node_mask, edge_mask=edge_mask
+        )
+
+    # Guard against the sweep silently degrading into an unmasked one.
+    assert saw_masked_node, "node-mask branch was never exercised"
+    assert saw_masked_edge, "edge-mask branch was never exercised"
