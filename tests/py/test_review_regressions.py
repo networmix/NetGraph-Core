@@ -182,14 +182,20 @@ class TestKspEcmpLadder:
 class TestBatchMaxFlowParity:
     """Finding 4: batch results must equal per-pair results (now parallel)."""
 
-    def test_batch_equals_serial(self, algs):
+    def test_batch_equals_serial(self, algs, certify_max_flow):
         rng = np.random.default_rng(7)
         n = 12
         edges = []
         for _ in range(40):
             u, v = rng.integers(0, n, size=2)
             if u != v:
-                edges.append((int(u), int(v), float(rng.integers(1, 8)), 1))
+                # Costs must be dispersed. With a single cost tier there is nothing
+                # for shortest-path tier ordering to get wrong, so a uniform-cost
+                # generator only ever samples the region where max-flow defects of
+                # the Finding 1 kind cannot occur.
+                cap = float(rng.integers(1, 8))
+                cost = int(rng.integers(1, 21))
+                edges.append((int(u), int(v), cap, cost))
         g = _graph(n, edges)
         pg = algs.build_graph(g)
         pairs = np.array([[i, (i + 5) % n] for i in range(8)], dtype=np.int32)
@@ -200,6 +206,9 @@ class TestBatchMaxFlowParity:
             np.testing.assert_array_equal(
                 np.asarray(batch[i].edge_flows), np.asarray(summary.edge_flows)
             )
+            # Agreement between two code paths that share calc_max_flow only proves
+            # consistency; both could be wrong together. Certify the result too.
+            certify_max_flow(g, summary, total, int(a), int(b))
 
 
 class TestFlowPolicySrcDstGuard:

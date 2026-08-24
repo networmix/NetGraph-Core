@@ -33,7 +33,7 @@ def test_flow_summary_shapes_and_min_cut_valid(
     )
     assert np.isclose(total, 8.0)
     assert_edge_flows_shape(g, summary, expected_present=True)
-    assert_valid_min_cut(g, summary.min_cut)
+    assert_valid_min_cut(g, summary.min_cut, total)
     # Cost distribution checked in test_max_flow_cost_distribution.py
 
 
