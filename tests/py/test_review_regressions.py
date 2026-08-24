@@ -506,3 +506,80 @@ class TestStubConstructorConsistency:
             ngc.FlowIndex(src=1, dst=2, flowClass=3, flowId=4)  # positional-only
         with pytest.raises(AttributeError):
             idx.src = 9  # read-only, as the stub's properties declare
+
+
+class TestFlowPolicyMaxPathCostFactor:
+    """`max_path_cost_factor` had no test coverage at all.
+
+    The gate multiplies the best path cost by the factor and casts back to Cost.
+    Before 0.8.0 it did that unconditionally, including while `best_path_cost_` was
+    still the INT64_MAX "no best path yet" sentinel -- the product is then far outside
+    the int64 range and the conversion is undefined behavior. The fix skips the
+    relative bound until a best cost exists and drops it when the product would not
+    fit. Neither branch was exercised by any test.
+
+    Scope: these are *coverage* tests, not detectors of the original UB. They were run
+    against 0.7.2 (pre-fix) and pass there too, because an out-of-range float->int
+    conversion is undefined rather than reliably wrong -- in practice it saturates to
+    something that still admits the path. What discriminates fixed from unfixed here is
+    UBSan (`make sanitize-test`), and these tests are what gives it something to
+    instrument on this path. Their standalone value is guarding the *functional*
+    behaviour of the bound during future refactors.
+    """
+
+    @staticmethod
+    def _policy(algs, gh, *, max_flow_count=1, **cfg_kwargs):
+        sel = ngc.EdgeSelection(
+            multi_edge=True,
+            require_capacity=True,
+            tie_break=ngc.EdgeTieBreak.DETERMINISTIC,
+        )
+        cfg = ngc.FlowPolicyConfig(
+            path_alg=ngc.PathAlg.SPF,
+            flow_placement=ngc.FlowPlacement.PROPORTIONAL,
+            selection=sel,
+            max_flow_count=max_flow_count,
+            **cfg_kwargs,
+        )
+        return ngc.FlowPolicy(algs, gh, cfg)
+
+    def test_factor_applies_before_any_best_cost_exists(self, algs):
+        """First placement: the sentinel path must not be multiplied and cast."""
+        g = _graph(3, [(0, 1, 1.0, 5), (1, 2, 1.0, 5)])
+        gh = algs.build_graph(g)
+        policy = self._policy(algs, gh, max_path_cost_factor=2.0)
+        placed, left = policy.place_demand(ngc.FlowGraph(g), 0, 2, 0, 1.0)
+        assert placed == pytest.approx(1.0)
+        assert left == pytest.approx(0.0)
+
+    def test_huge_factor_does_not_wrap_the_bound(self, algs):
+        """best_cost * factor overflows int64; the bound must be dropped, not wrapped.
+
+        A wrapped (negative) bound would reject the shortest path itself, so a
+        successful placement is what distinguishes the guard from the bug.
+        """
+        big = 1 << 60  # legal: total stays below the 2**62 construction ceiling
+        g = _graph(3, [(0, 1, 1.0, big), (1, 2, 1.0, big)])
+        gh = algs.build_graph(g)
+        policy = self._policy(algs, gh, max_path_cost_factor=1e9)
+        placed, _ = policy.place_demand(ngc.FlowGraph(g), 0, 2, 0, 1.0)
+        assert placed == pytest.approx(1.0)
+
+    def test_factor_still_excludes_a_too_expensive_alternative(self, algs):
+        """The bound must remain functional, not merely safe."""
+        g = _graph(
+            4,
+            [
+                (0, 1, 1.0, 1),
+                (1, 3, 1.0, 1),  # cost 2 route
+                (0, 2, 5.0, 50),
+                (2, 3, 5.0, 50),  # cost 100 route, far beyond 2x
+            ],
+        )
+        gh = algs.build_graph(g)
+        policy = self._policy(
+            algs, gh, max_flow_count=4, max_path_cost_factor=2.0, min_flow_count=1
+        )
+        placed, _ = policy.place_demand(ngc.FlowGraph(g), 0, 3, 0, 6.0)
+        # Only the cost-2 route is within 2x; the cost-100 route must stay unused.
+        assert placed == pytest.approx(1.0)
