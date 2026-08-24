@@ -164,15 +164,136 @@ def assert_edge_flows_shape():
 
 @pytest.fixture
 def assert_valid_min_cut():
-    """Return an assertion helper to validate MinCut edge ids are unique and valid."""
+    """Return an assertion helper to validate a MinCut.
 
-    def _assert(g: ngc.StrictMultiDiGraph, min_cut) -> None:
+    Always checks that edge ids are unique and in range. Note that an empty cut
+    satisfies those two checks vacuously, so pass ``total_flow`` whenever the call
+    site computed a true maximum flow: that enables the max-flow/min-cut duality
+    check (``total_flow == sum(capacity[cut])``), which is what actually pins the
+    result down.
+
+    Duality only holds for a genuine maximum flow. Do NOT pass ``total_flow`` for
+    ``EQUAL_BALANCED`` placement (an ECMP admission model that deliberately places
+    less than the maximum) or for ``shortest_path=True`` (a single augmentation).
+    """
+
+    def _assert(
+        g: ngc.StrictMultiDiGraph, min_cut, total_flow: float | None = None
+    ) -> None:
         edges = [int(e) for e in getattr(min_cut, "edges", [])]
-        assert len(edges) == len(set(edges))
+        assert len(edges) == len(set(edges)), "min-cut has duplicate edge ids"
         for e in edges:
             assert 0 <= e < g.num_edges()
 
+        if total_flow is None:
+            return
+
+        cap = np.asarray(g.capacity_view(), dtype=float)
+        cut_cap = float(cap[edges].sum()) if edges else 0.0
+        assert cut_cap == pytest.approx(total_flow), (
+            f"max-flow/min-cut duality violated: flow={total_flow} "
+            f"but cut capacity={cut_cap} (cut={edges})"
+        )
+        if total_flow > 0:
+            assert edges, "positive flow reported with an empty min-cut"
+
     return _assert
+
+
+@pytest.fixture
+def certify_max_flow():
+    """Return a helper that *proves* a max-flow result correct without an oracle.
+
+    Checks four properties. Together they are a certificate of optimality: by weak
+    duality any feasible flow is bounded by any s-t cut, so a feasible flow whose
+    value equals the capacity of a genuine cut is necessarily maximum.
+
+    1. feasibility   -- ``0 <= flow(e) <= capacity(e)``, and masked-out edges idle
+    2. conservation  -- inflow == outflow at interior nodes; net at sink == total
+    3. genuine cut   -- deleting the reported cut edges disconnects src from dst
+    4. tightness     -- ``total == sum(capacity[cut])``
+
+    Pass ``maximal=False`` for configurations that deliberately place less than the
+    maximum (``EQUAL_BALANCED`` placement, ``shortest_path=True``); only checks 1-2
+    apply there, and they still hold.
+
+    Requires ``with_edge_flows=True`` on the ``max_flow`` call.
+    """
+
+    def _certify(
+        g: ngc.StrictMultiDiGraph,
+        summary,
+        total: float,
+        src: int,
+        dst: int,
+        *,
+        maximal: bool = True,
+        node_mask=None,
+        edge_mask=None,
+        tol: float = 1e-6,
+    ) -> None:
+        flow = np.asarray(summary.edge_flows, dtype=float)
+        assert flow.size == g.num_edges(), (
+            "certify_max_flow needs edge flows; pass with_edge_flows=True"
+        )
+        cap = np.asarray(g.capacity_view(), dtype=float)
+        e_src = np.asarray(g.edge_src_view())
+        e_dst = np.asarray(g.edge_dst_view())
+        n = g.num_nodes()
+
+        # 1. feasibility
+        assert np.all(flow >= -tol), "negative flow on some edge"
+        assert np.all(flow <= cap + tol), "flow exceeds capacity on some edge"
+
+        usable = np.ones(g.num_edges(), dtype=bool)
+        if edge_mask is not None:
+            usable &= np.asarray(edge_mask, dtype=bool)
+        if node_mask is not None:
+            nm = np.asarray(node_mask, dtype=bool)
+            usable &= nm[e_src] & nm[e_dst]
+        assert np.all(np.abs(flow[~usable]) <= tol), "flow placed on a masked-out edge"
+
+        # 2. conservation
+        net = np.zeros(n)
+        np.add.at(net, e_src, -flow)
+        np.add.at(net, e_dst, flow)
+        interior = [v for v in range(n) if v != src and v != dst]
+        if interior:
+            worst = float(np.max(np.abs(net[interior])))
+            assert worst <= tol, f"flow not conserved at an interior node (net={worst})"
+        assert net[dst] == pytest.approx(total, abs=tol), (
+            f"net inflow at sink ({net[dst]}) != reported total ({total})"
+        )
+
+        if not maximal:
+            return
+
+        # 3. the reported cut must actually separate src from dst
+        cut = {int(e) for e in np.asarray(summary.min_cut.edges)}
+        adj: list[list[int]] = [[] for _ in range(n)]
+        for e in range(g.num_edges()):
+            if e in cut or not usable[e] or cap[e] <= 0:
+                continue
+            adj[int(e_src[e])].append(int(e_dst[e]))
+        seen = {int(src)}
+        stack = [int(src)]
+        while stack:
+            u = stack.pop()
+            for v in adj[u]:
+                if v not in seen:
+                    seen.add(v)
+                    stack.append(v)
+        assert int(dst) not in seen, (
+            f"reported min-cut {sorted(cut)} does not separate {src} from {dst}"
+        )
+
+        # 4. tightness -- with (1)-(3) this proves the flow is maximum
+        cut_cap = float(cap[sorted(cut)].sum()) if cut else 0.0
+        assert cut_cap == pytest.approx(total, abs=tol), (
+            f"flow ({total}) != min-cut capacity ({cut_cap}); flow is not maximal"
+        )
+
+    return _certify
 
 
 @pytest.fixture

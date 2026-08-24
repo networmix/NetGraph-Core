@@ -33,7 +33,7 @@ def test_max_flow_square1_proportional_with_edge_flows(
     # Multi-tier: cost 2 path carries 1, then cost 4 path carries 2 => total 3
     assert np.isclose(total, 3.0)
     assert_edge_flows_shape(g, summary, expected_present=True)
-    assert_valid_min_cut(g, summary.min_cut)
+    assert_valid_min_cut(g, summary.min_cut, total)
     fb = flows_by_eid(g, summary.edge_flows)
     # Check totals on 4 edges in this small graph (order is deterministic by compaction)
     assert len(fb) == g.num_edges()
@@ -61,6 +61,7 @@ def test_square1_equal_balanced_min_cut_and_distribution(
     # Min-cut returns EdgeIds; ensure it has size 2 and corresponds to cut around source or sink
     mc = set(map(int, summary.min_cut.edges))
     assert len(mc) == 2
+    # EQUAL_BALANCED places less than the maximum, so duality does not apply.
     assert_valid_min_cut(g, summary.min_cut)
     assert_edge_flows_shape(g, summary, expected_present=True)
     # Cost distribution checks live in test_max_flow_cost_distribution.py
@@ -133,6 +134,7 @@ def test_max_flow_square1_shortest_path_single_augmentation(
     )
     assert np.isclose(total, 1.0)
     assert_edge_flows_shape(g, summary, expected_present=True)
+    # shortest_path=True is a single augmentation, not a maximum flow.
     assert_valid_min_cut(g, summary.min_cut)
     fb = flows_by_eid(g, summary.edge_flows)
     # Should augment along A->B->C only once
@@ -162,6 +164,7 @@ def test_max_flow_line1_equal_balanced(
     # Equal-balanced across tiers: limited by A->B capacity => total 5
     assert np.isclose(total, 5.0)
     assert_edge_flows_shape(g, summary, expected_present=True)
+    # EQUAL_BALANCED places less than the maximum, so duality does not apply.
     assert_valid_min_cut(g, summary.min_cut)
     fb = flows_by_eid(g, summary.edge_flows)
     # Expect 2 across min-cost tier (1 + 1), then remaining 3 on min/higher edges by successive tiers
@@ -238,7 +241,7 @@ def test_max_flow_graph3_proportional_parallel_distribution(
     # Incoming to C via min-cost parents: from B (cap 1+2+3=6) and from E (cap 4) => total 10
     assert np.isclose(total, 10.0)
     assert_edge_flows_shape(g, summary, expected_present=True)
-    assert_valid_min_cut(g, summary.min_cut)
+    assert_valid_min_cut(g, summary.min_cut, total)
     fb = flows_by_eid(g, summary.edge_flows)
     # B->C parallels proportional to capacity: 1:2:3 over total 6 => 1,2,3
     assert np.isclose(fb[4], 1.0)
@@ -276,7 +279,7 @@ def test_max_flow_two_disjoint_shortest_routes_proportional(
     # Bottlenecks along S->A->T = min(3,2)=2 and S->B->T = min(4,1)=1 => total 3
     assert np.isclose(total, 3.0)
     assert_edge_flows_shape(g, summary, expected_present=True)
-    assert_valid_min_cut(g, summary.min_cut)
+    assert_valid_min_cut(g, summary.min_cut, total)
     fb = flows_by_eid(g, summary.edge_flows)
     assert np.isclose(fb[0], 2.0)  # S->A
     assert np.isclose(fb[2], 2.0)  # A->T
