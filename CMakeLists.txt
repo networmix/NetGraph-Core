@@ -230,7 +230,13 @@ if(NETGRAPH_CORE_SANITIZE)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # Must be a CMake list: a single quoted string reaches the compiler as one
     # argument and clang rejects "-fsanitize=address,undefined -fno-omit-frame-pointer".
-    set(SAN_FLAGS -fsanitize=address,undefined -fno-omit-frame-pointer)
+    #
+    # -fno-sanitize-recover=undefined makes UBSan findings FATAL. Without it UBSan
+    # prints a "runtime error:" diagnostic and lets the program continue, so the test
+    # still exits 0 and ctest reports success -- undefined behaviour would be detected
+    # and then silently ignored, which is indistinguishable from not checking at all.
+    set(SAN_FLAGS -fsanitize=address,undefined -fno-omit-frame-pointer
+                  -fno-sanitize-recover=undefined)
     set(SAN_TARGETS netgraph_core _netgraph_core)
     if(TARGET netgraph_core_tests)
       # The test executable links the sanitized static library, so it must be
