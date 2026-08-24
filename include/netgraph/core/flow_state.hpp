@@ -7,7 +7,6 @@
 #pragma once
 
 #include <cstdint>
-#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -90,6 +89,9 @@ public:
   // Apply or revert a set of edge flow allocations directly.
   // When add==true, treats each (eid, flow) as additional placed flow on the edge.
   // When add==false, removes placed flow (reverts allocations), clamping to [0, capacity].
+  // NOTE: residual is recomputed as capacity - edge_flow, so for a FlowState built with
+  // a custom residual_init this discards the initial offset. Entries with flow <= 0 and
+  // out-of-range edge ids are ignored.
   void apply_deltas(std::span<const std::pair<EdgeId, Flow>> deltas, bool add) noexcept;
 
 private:

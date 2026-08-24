@@ -7,7 +7,6 @@
 #pragma once
 
 #include <memory>
-#include <optional>
 #include <utility>
 #include <vector>
 #include <span>
@@ -31,7 +30,9 @@ public:
 
   // Prepares a backend-specific graph handle from an existing graph reference.
   //
-  // The CPU backend creates a non-owning shared_ptr with a no-op deleter.
+  // The CPU backend creates a non-owning shared_ptr with a no-op deleter, so the
+  // caller must keep `g` alive for as long as the handle is used. To hand the
+  // handle shared ownership instead, construct it directly: GraphHandle{my_sp}.
   //
   // Arguments:
   //   g: The source graph to wrap.
@@ -39,16 +40,6 @@ public:
   // Returns:
   //   A GraphHandle containing the backend-specific graph representation.
   [[nodiscard]] virtual GraphHandle build_graph(const StrictMultiDiGraph& g) = 0;
-
-  // Prepares a backend-specific graph handle that takes shared ownership of the
-  // provided graph instance.
-  //
-  // Arguments:
-  //   g: The source graph as a shared_ptr.
-  //
-  // Returns:
-  //   A GraphHandle that shares ownership of the graph.
-  [[nodiscard]] virtual GraphHandle build_graph(std::shared_ptr<const StrictMultiDiGraph> g) = 0;
 
   // Computes shortest paths from a source node.
   //
@@ -121,8 +112,9 @@ public:
   //   opts: Configuration options.
   //
   // Returns:
-  //   A vector of pairs (EdgeId, Flow gain), indicating how much flow would
-  //   increase if the edge's capacity were relaxed.
+  //   A vector of pairs (EdgeId, FlowDelta) for edges whose removal reduces
+  //   total flow, where FlowDelta is how much flow is LOST without that edge.
+  //   This is a criticality measure, not the gain from relaxing capacity.
   [[nodiscard]] virtual std::vector<std::pair<EdgeId, Flow>> sensitivity_analysis(
       const GraphHandle& gh, NodeId src, NodeId dst, const MaxFlowOptions& opts) = 0;
 };

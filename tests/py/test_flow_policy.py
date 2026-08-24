@@ -7,7 +7,6 @@ remaining volumes to expected capacities.
 
 from __future__ import annotations
 
-import math
 from typing import Dict, Tuple
 
 import numpy as np
@@ -88,10 +87,6 @@ EXPECTED: Dict[str, Tuple[Tuple[int, int], float]] = {
     "graph2_graph": ((0, 4), 1.0),
     "graph4_graph": ((0, 4), 6.0),
 }
-
-
-def _almost_equal(a: float, b: float, tol: float = 1e-9) -> bool:
-    return math.isclose(a, b, rel_tol=0, abs_tol=tol)
 
 
 def _run_case(

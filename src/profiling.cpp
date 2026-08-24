@@ -9,6 +9,7 @@
 */
 #include "netgraph/core/profiling.hpp"
 
+#include <algorithm>  // std::sort in dump()
 #include <cstdlib>
 
 namespace netgraph::core {

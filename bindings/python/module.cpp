@@ -10,6 +10,7 @@
 #include <pybind11/stl.h>
 #include <cstring>
 #include <memory>
+#include <optional>
 
 #include "netgraph/core/k_shortest_paths.hpp"
 #include "netgraph/core/max_flow.hpp"
@@ -155,38 +156,25 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .def_static("cpu", [](){ return PyBackend{ make_cpu_backend() }; });
 
   py::class_<PyGraph>(m, "Graph")
-      // Opaque holder; constructed via Algorithms.build_graph or build_graph_from_arrays
+      // Opaque holder; constructed via Algorithms.build_graph
       .def_property_readonly("num_nodes", [](const PyGraph& pg){ return pg.num_nodes; })
       .def_property_readonly("num_edges", [](const PyGraph& pg){ return pg.num_edges; });
 
   py::class_<Algorithms, std::shared_ptr<Algorithms>>(m, "Algorithms")
-      .def(py::init([](const PyBackend& b){ return std::make_shared<Algorithms>(b.impl); }))
+      .def(py::init([](const PyBackend& b){ return std::make_shared<Algorithms>(b.impl); }), py::arg("backend"))
       .def("build_graph", [](const Algorithms& algs, py::object graph_obj){
+        // graph_obj is py::object so PyGraph can keep it alive; check the type
+        // explicitly, since a bare .cast<> failure surfaces as an opaque
+        // "RuntimeError: Unable to cast ... to C++ type '?'".
+        if (!py::isinstance<StrictMultiDiGraph>(graph_obj)) {
+          throw py::type_error("build_graph: graph must be a StrictMultiDiGraph");
+        }
         const StrictMultiDiGraph& g = graph_obj.cast<const StrictMultiDiGraph&>();
         auto gh = algs.build_graph(g);
         // Keep the Python graph object alive alongside the handle when
         // referencing a non-owned graph instance.
         return PyGraph{ gh, graph_obj, g.num_nodes(), g.num_edges() };
       }, py::arg("graph"))
-      .def("build_graph_from_arrays", [](const Algorithms& algs,
-                                          std::int32_t num_nodes,
-                                          py::array src, py::array dst,
-                                          py::array capacity, py::array cost,
-                                          py::array ext_edge_ids){
-        // Build graph and construct shared ownership directly
-        auto ext_s = as_span<std::int64_t>(ext_edge_ids, "ext_edge_ids");
-        auto sp = std::make_shared<StrictMultiDiGraph>(
-            StrictMultiDiGraph::from_arrays(
-                num_nodes,
-                as_span<std::int32_t>(src, "src"),
-                as_span<std::int32_t>(dst, "dst"),
-                as_span<double>(capacity, "capacity"),
-                as_span<std::int64_t>(cost, "cost"),
-                ext_s));
-        auto gh = algs.build_graph(std::static_pointer_cast<const StrictMultiDiGraph>(sp));
-        // GraphHandle holds shared ownership; no additional Python-side owner needed
-        return PyGraph{ gh, py::none(), sp->num_nodes(), sp->num_edges() };
-      }, py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"), py::arg("ext_edge_ids"))
       .def("spf", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src,
                        py::object dst, py::object selection_obj, py::object residual_obj,
                        py::object node_mask, py::object edge_mask, bool multipath, std::string dtype) -> py::tuple {
@@ -199,6 +187,12 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
           if (!(arr.flags() & py::array::c_style)) throw py::type_error("residual must be C-contiguous (np.ascontiguousarray)");
           auto buf = arr.request();
           if (buf.ndim != 1 || buf.format != py::format_descriptor<double>::format()) throw py::type_error("residual must be 1-D float64");
+          // Check length here so this matches the TypeError raised by every other
+          // length check (masks, FlowState residual); otherwise the core throws
+          // std::invalid_argument, which reaches Python as ValueError.
+          if (static_cast<std::int32_t>(buf.shape[0]) != pg.num_edges) {
+            throw py::type_error("residual length must equal " + std::to_string(pg.num_edges));
+          }
           residual_vec.resize(static_cast<std::size_t>(buf.shape[0]));
           std::memcpy(residual_vec.data(), buf.ptr, residual_vec.size()*sizeof(double));
           opts.residual = std::span<const double>(residual_vec.data(), residual_vec.size());
@@ -228,6 +222,7 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
                        int k, py::object max_cost_factor, bool unique, py::object node_mask, py::object edge_mask, std::string dtype){
         if (src < 0 || src >= pg.num_nodes || dst < 0 || dst >= pg.num_nodes) throw py::value_error("src/dst out of range");
         if (k <= 0) throw py::value_error("k must be >= 1");
+        if (dtype != "float64" && dtype != "int64") throw py::value_error("dtype must be 'float64' or 'int64'");
         KspOptions opts; opts.k = k; opts.unique = unique; if (!max_cost_factor.is_none()) opts.max_cost_factor = py::cast<double>(max_cost_factor);
         auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(pg.num_nodes), "node_mask");
         auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(pg.num_edges), "edge_mask");
@@ -247,8 +242,6 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
             auto* outp = dist_arr.mutable_data();
             for (std::size_t i=0;i<dist.size();++i) outp[i] = (dist[i]==maxc) ? std::numeric_limits<double>::infinity() : static_cast<double>(dist[i]);
             out.append(py::make_tuple(std::move(dist_arr), pr.second));
-          } else {
-            throw py::value_error("dtype must be 'float64' or 'int64'");
           }
         }
         return out;
@@ -267,13 +260,27 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
                                  py::object node_masks, py::object edge_masks,
                                  FlowPlacement placement, bool shortest_path, bool require_capacity,
                                  bool with_edge_flows, bool with_reachable, bool with_residuals){
+        // Check the dtype, not the buffer format string: NumPy spells int32 as
+        // NPY_LONG ('l') on LLP64 (Windows) and NPY_INT ('i') on LP64, while
+        // format_descriptor<int32_t> is always 'i'. Comparing format strings
+        // therefore rejects a genuine int32 array on Windows. isinstance uses
+        // dtype equivalence, matching as_span() above.
+        if (!py::isinstance<py::array_t<std::int32_t>>(pairs)) throw py::type_error("pairs dtype must be int32");
+        if (!(pairs.flags() & py::array::c_style)) throw py::type_error("pairs must be C-contiguous (use np.ascontiguousarray)");
         auto buf = pairs.request();
         if (buf.ndim != 2 || buf.shape[1] != 2) throw py::type_error("pairs must be shape [B,2]");
-        if (buf.format != py::format_descriptor<std::int32_t>::format()) throw py::type_error("pairs dtype must be int32");
         const std::size_t B = static_cast<std::size_t>(buf.shape[0]);
         std::vector<std::pair<NodeId,NodeId>> pp; pp.reserve(B);
         auto* p = static_cast<const std::int32_t*>(buf.ptr);
         for (std::size_t i=0;i<B;++i) { pp.emplace_back(p[2*i], p[2*i+1]); }
+        // Match the single-pair entry points: an out-of-range id is a caller error,
+        // not a zero-flow result that silently disappears into the batch.
+        for (std::size_t i=0;i<pp.size();++i) {
+          if (pp[i].first < 0 || pp[i].first >= pg.num_nodes ||
+              pp[i].second < 0 || pp[i].second >= pg.num_nodes) {
+            throw py::value_error("pairs[" + std::to_string(i) + "] has a src/dst out of range");
+          }
+        }
         std::vector<BoolSpan> node_bufs, edge_bufs;
         std::vector<std::span<const bool>> node_spans; std::vector<std::span<const bool>> edge_spans;
         auto parse_mask_list = [&](py::object list_obj, std::size_t expected_len, const char* what,
@@ -321,6 +328,16 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .def_property_readonly("via_edges", [](const PredDAG& d){
         return copy_to_numpy<std::int32_t>(std::span<const std::int32_t>(d.via_edges.data(), d.via_edges.size()));
       })
+      .def_static("from_edges", [](const StrictMultiDiGraph& g, py::sequence edges){
+        std::vector<EdgeId> e;
+        e.reserve(py::len(edges));
+        for (auto item : edges) e.push_back(py::cast<EdgeId>(item));
+        return make_path_dag(g, e);
+      }, py::arg("graph"), py::arg("edges"),
+         "Build a single-path PredDAG from a contiguous edge-id sequence.\n"
+         "Validates that each edge exists, consecutive edges connect, and the walk "
+         "is a simple path. The result works anywhere a PredDAG is accepted "
+         "(place_on_dag, FlowGraph.place, FlowPolicy.set_static_paths).")
       .def("resolve_to_paths", [](const PredDAG& dag, std::int32_t src, std::int32_t dst, bool split_parallel_edges, py::object max_paths){
         std::optional<std::int64_t> mp;
         if (!max_paths.is_none()) mp = py::cast<std::int64_t>(max_paths);
@@ -478,12 +495,11 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .def("get_flow_edges", [](const FlowGraph& fg, const FlowIndex& idx){ auto v = fg.get_flow_edges(idx); py::list out; for (auto const& pr : v) { out.append(py::make_tuple(pr.first, pr.second)); } return out; })
       .def("get_flow_path", [](const FlowGraph& fg, const FlowIndex& idx){ auto v = fg.get_flow_path(idx); py::list out; for (auto e : v) out.append(e); return out; });
 
-  py::class_<FlowRecord>(m, "Flow")
-      .def_property_readonly("index", [](const FlowRecord& f){ return f.index; })
-      .def_readonly("src", &FlowRecord::src)
-      .def_readonly("dst", &FlowRecord::dst)
-      .def_readonly("cost", &FlowRecord::cost)
-      .def_readonly("placed_flow", &FlowRecord::placed_flow);
+  // NOTE: FlowRecord is deliberately not bound. No binding constructs or returns one
+  // (FlowPolicy.flows yields plain tuples), so the class was unreachable, and the
+  // Python name "Flow" collided with the C++ alias `using Flow = double`. If per-flow
+  // records become part of the public API, bind it under an unambiguous name such as
+  // "FlowRecord" and have FlowPolicy.flows return it instead of tuples.
 
   py::enum_<PathAlg>(m, "PathAlg")
       .value("SPF", PathAlg::SPF);
@@ -562,6 +578,9 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
   py::class_<FlowPolicy>(m, "FlowPolicy")
       .def("__init__", [](FlowPolicy& self, py::object algs_obj, const PyGraph& pg, FlowPolicyConfig cfg,
                           py::object node_mask, py::object edge_mask){
+            if (!py::isinstance<Algorithms>(algs_obj)) {
+              throw py::type_error("FlowPolicy: algorithms must be an Algorithms instance");
+            }
             std::shared_ptr<Algorithms> algs = py::cast<std::shared_ptr<Algorithms>>(algs_obj);
 
             auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(pg.num_nodes), "node_mask");
@@ -585,6 +604,17 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .def("rebalance_demand", [](FlowPolicy& p, FlowGraph& fg, std::int32_t src, std::int32_t dst, FlowClass flowClass, double target){ py::gil_scoped_release rel; auto pr = p.rebalance_demand(fg, src, dst, flowClass, target); py::gil_scoped_acquire acq; return py::make_tuple(pr.first, pr.second); },
            py::arg("flow_graph"), py::arg("src"), py::arg("dst"), py::arg("flowClass"), py::arg("target"))
       .def("remove_demand", [](FlowPolicy& p, FlowGraph& fg){ py::gil_scoped_release rel; p.remove_demand(fg); py::gil_scoped_acquire acq; })
+      .def("set_static_paths", [](FlowPolicy& p, std::int32_t src, std::int32_t dst, py::sequence paths){
+        std::vector<PredDAG> bundles;
+        bundles.reserve(py::len(paths));
+        for (auto item : paths) bundles.push_back(py::cast<const PredDAG&>(item));
+        py::gil_scoped_release rel;
+        p.set_static_paths(src, dst, std::move(bundles));
+        py::gil_scoped_acquire acq;
+      }, py::arg("src"), py::arg("dst"), py::arg("paths"),
+         "Pin this policy's demand to explicit path bundles (one flow per usable "
+         "bundle, bound in supply order). See FlowPolicy docs for validation, mask "
+         "(failure) semantics, and which config knobs become inert.")
       .def_property_readonly("flows", [](const FlowPolicy& p){ py::dict out; for (auto const& kv : p.flows()) { const auto& idx = kv.first; const auto& f = kv.second; out[py::make_tuple(idx.src, idx.dst, idx.flowClass, idx.flowId)] = py::make_tuple(f.src, f.dst, f.cost, f.placed_flow); } return out; });
 
   // Profiling functions (enabled via NGRAPH_CORE_PROFILE=1 environment variable)

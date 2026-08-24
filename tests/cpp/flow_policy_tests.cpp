@@ -6,6 +6,7 @@
 #include "netgraph/core/algorithms.hpp"
 #include "netgraph/core/strict_multidigraph.hpp"
 #include "netgraph/core/types.hpp"
+#include "test_utils.hpp"
 
 using namespace netgraph::core;
 
@@ -348,4 +349,88 @@ TEST(FlowPolicyCore, EqualBalanced_ShortestPath_IgnoresHigherCostTier) {
   EXPECT_NEAR(res.second, 90.0, 1e-9);
   // Only shortest tier edges should carry flow
   expect_edge_flows_by_uv(fg, {{0,1,10.0}, {1,4,10.0}, {0,2,0.0}, {2,4,0.0}});
+}
+
+// ============================================================================
+// Static paths (pinned path bundles)
+// ============================================================================
+
+// Each flow binds to ITS OWN bundle in supply order (the original Python
+// semantics; the first C++ port bound every flow to bundle[0]).
+TEST(FlowPolicyStatic, PerFlowBundleBinding) {
+  auto g = make_square1();
+  FlowGraph fg(g);
+  auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
+  ExecutionContext ctx(algs, gh);
+  FlowPolicy policy(ctx, FlowPolicyConfig{});
+
+  // Edge ids after (cost, src, dst) reordering match construction order here.
+  EdgeId short_path[2] = {0, 1};  // A->B->C, cost 2, cap 1
+  EdgeId long_path[2] = {2, 3};   // A->D->C, cost 4, cap 2
+  std::vector<PredDAG> bundles;
+  bundles.push_back(make_path_dag(g, std::span<const EdgeId>(short_path, 2)));
+  bundles.push_back(make_path_dag(g, std::span<const EdgeId>(long_path, 2)));
+  policy.set_static_paths(0, 2, std::move(bundles));
+
+  auto [placed, left] = policy.place_demand(fg, 0, 2, 0, 3.0);
+  EXPECT_NEAR(placed, 3.0, 1e-9);
+  EXPECT_NEAR(left, 0.0, 1e-9);
+  ASSERT_EQ(policy.flow_count(), 2);
+  // Creation order == supply order; costs prove the binding.
+  std::vector<std::pair<FlowId, Cost>> got;
+  for (auto const& kv : policy.flows()) got.emplace_back(kv.first.flowId, kv.second.cost);
+  std::sort(got.begin(), got.end());
+  EXPECT_EQ(got[0].second, 2);
+  EXPECT_EQ(got[1].second, 4);
+}
+
+// A bundle whose every walk is masked out is DOWN: no flow, no volume.
+TEST(FlowPolicyStatic, MaskedBundleIsDown) {
+  using netgraph::core::test::make_bool_mask;
+  auto g = make_square1();
+  FlowGraph fg(g);
+  auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
+  ExecutionContext ctx(algs, gh);
+
+  auto edge_mask = make_bool_mask(4);
+  edge_mask[0] = false;  // A->B down -> the short bundle has no surviving walk
+  FlowPolicyConfig cfg;
+  cfg.edge_mask = std::span<const bool>(edge_mask.get(), 4);
+  FlowPolicy policy(ctx, cfg);
+
+  EdgeId short_path[2] = {0, 1};
+  EdgeId long_path[2] = {2, 3};
+  std::vector<PredDAG> bundles;
+  bundles.push_back(make_path_dag(g, std::span<const EdgeId>(short_path, 2)));
+  bundles.push_back(make_path_dag(g, std::span<const EdgeId>(long_path, 2)));
+  policy.set_static_paths(0, 2, std::move(bundles));
+
+  auto [placed, left] = policy.place_demand(fg, 0, 2, 0, 3.0);
+  EXPECT_EQ(policy.flow_count(), 1);
+  EXPECT_NEAR(placed, 2.0, 1e-9);  // only the long bundle carries
+  EXPECT_NEAR(left, 1.0, 1e-9);
+}
+
+// Malformed bundles are rejected loudly; a foreign-graph DAG cannot slip through.
+TEST(FlowPolicyStatic, ValidationRejectsForeignAndDisconnectedBundles) {
+  auto g = make_square1();
+  auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be); auto gh = algs->build_graph(g);
+  ExecutionContext ctx(algs, gh);
+  FlowPolicy policy(ctx, FlowPolicyConfig{});
+
+  EdgeId short_path[2] = {0, 1};
+  auto dag = make_path_dag(g, std::span<const EdgeId>(short_path, 2));
+
+  // Connects 0->2, not 1->3: structurally wrong for that demand.
+  {
+    std::vector<PredDAG> b; b.push_back(dag);
+    EXPECT_THROW(policy.set_static_paths(1, 3, std::move(b)), std::invalid_argument);
+  }
+  // Shuffled via edge: entry no longer connects its parent to its node.
+  {
+    PredDAG bad = dag;
+    bad.via_edges[0] = 3;  // D->C edge in place of a parent link
+    std::vector<PredDAG> b; b.push_back(std::move(bad));
+    EXPECT_THROW(policy.set_static_paths(0, 2, std::move(b)), std::invalid_argument);
+  }
 }

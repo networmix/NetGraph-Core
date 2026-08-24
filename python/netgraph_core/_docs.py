@@ -9,9 +9,7 @@ pybind11-stubgen) to prevent drift from the runtime bindings.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional, Sequence
 
 if TYPE_CHECKING:  # only for typing; runtime comes from extension
     import numpy as np  # type: ignore[reportMissingImports]
@@ -19,19 +17,38 @@ if TYPE_CHECKING:  # only for typing; runtime comes from extension
     # to prevent circular imports during type checking.
 
 
-class EdgeTieBreak(Enum):
-    DETERMINISTIC = 1
-    PREFER_HIGHER_RESIDUAL = 2
+class EdgeTieBreak:
+    """Tie-break rule among equal-cost parallel edges (pybind11 enum)."""
+
+    DETERMINISTIC: ClassVar[EdgeTieBreak]
+    PREFER_HIGHER_RESIDUAL: ClassVar[EdgeTieBreak]
+    __members__: ClassVar[dict[str, EdgeTieBreak]]
+
+    def __init__(self, value: int) -> None: ...
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
 
 
-@dataclass
 class EdgeSelection:
-    multi_edge: bool = True
-    require_capacity: bool = False
-    tie_break: EdgeTieBreak = EdgeTieBreak.DETERMINISTIC
+    """Edge selection policy. The constructor is keyword-only."""
+
+    multi_edge: bool
+    require_capacity: bool
+    tie_break: EdgeTieBreak
+
+    def __init__(
+        self,
+        *,
+        multi_edge: bool = True,
+        require_capacity: bool = False,
+        tie_break: EdgeTieBreak = ...,
+    ) -> None: ...
 
 
-class FlowPlacement(Enum):
+class FlowPlacement:
     """How to place flow across equal-cost predecessors during augmentation.
 
     PROPORTIONAL (WCMP-like): Distributes flow proportionally to available capacity.
@@ -44,8 +61,16 @@ class FlowPlacement(Enum):
         ECMP = Equal-Cost Multi-Path; WCMP = Weighted-Cost Multi-Path.
     """
 
-    PROPORTIONAL = 1
-    EQUAL_BALANCED = 2
+    PROPORTIONAL: ClassVar[FlowPlacement]
+    EQUAL_BALANCED: ClassVar[FlowPlacement]
+    __members__: ClassVar[dict[str, FlowPlacement]]
+
+    def __init__(self, value: int) -> None: ...
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
 
 
 class PredDAG:
@@ -58,6 +83,22 @@ class PredDAG:
     parents: np.ndarray
     via_edges: np.ndarray
 
+    @staticmethod
+    def from_edges(graph: "StrictMultiDiGraph", edges: "Sequence[int]") -> "PredDAG":
+        """Build a single-path PredDAG from a contiguous edge-id sequence.
+
+        The missing constructor for operator-defined explicit paths; PredDAGs
+        returned by Algorithms.spf/ksp work directly wherever a PredDAG is
+        accepted (FlowState.place_on_dag, FlowGraph.place,
+        FlowPolicy.set_static_paths).
+
+        Raises:
+            ValueError: If edges is empty, an id is out of range, consecutive
+                edges do not connect, or the walk revisits a node (a pinned
+                path must be a simple path).
+        """
+        ...
+
     def resolve_to_paths(
         self,
         src: int,
@@ -68,8 +109,16 @@ class PredDAG:
     ) -> list[tuple[tuple[int, tuple[int, ...]], ...]]: ...
 
 
-class PathAlg(Enum):
-    SPF = 1
+class PathAlg:
+    SPF: ClassVar[PathAlg]
+    __members__: ClassVar[dict[str, PathAlg]]
+
+    def __init__(self, value: int) -> None: ...
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
 
 
 class Backend:
@@ -82,9 +131,15 @@ class Backend:
 
 
 class Graph:
-    """Opaque graph handle provided by the runtime extension (typing stub only)."""
+    """Opaque backend graph handle produced by Algorithms.build_graph.
 
-    ...
+    Keeps the underlying StrictMultiDiGraph alive for as long as it is used.
+    """
+
+    @property
+    def num_nodes(self) -> int: ...
+    @property
+    def num_edges(self) -> int: ...
 
 
 class FlowGraph:
@@ -118,7 +173,7 @@ class FlowGraph:
         dst: int,
         dag: "PredDAG",
         amount: float,
-        flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
+        flow_placement: FlowPlacement = ...,
     ) -> float: ...
 
     def remove(self, index: "FlowIndex") -> None: ...
@@ -187,7 +242,7 @@ class FlowState:
         dst: int,
         dag: "PredDAG",
         requested_flow: float = float("inf"),
-        flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
+        flow_placement: FlowPlacement = ...,
     ) -> float:
         """Place flow along a predecessor DAG.
 
@@ -205,7 +260,7 @@ class FlowState:
         self,
         src: int,
         dst: int,
-        flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
+        flow_placement: FlowPlacement = ...,
         shortest_path: bool = False,
         require_capacity: bool = True,
         *,
@@ -256,16 +311,107 @@ class FlowState:
 
 
 class StrictMultiDiGraph:
-    """Opaque graph structure provided by the runtime extension (typing stub only)."""
+    """Immutable directed multigraph with CSR and reverse-CSR adjacency.
 
-    ...
+    Edges are reordered by (cost, src, dst) at construction, so EdgeId values are
+    positions in that canonical order rather than the caller's input order. Use
+    `ext_edge_ids` to map results back to caller-side identifiers.
+
+    Every `*_view()` method returns a fresh, writable COPY of the internal buffer,
+    so mutating the result cannot violate the graph's immutability. (This differs
+    from `FlowState`/`FlowGraph` views, which are live read-only views.)
+    """
+
+    @staticmethod
+    def from_arrays(
+        num_nodes: int,
+        src: "np.ndarray",
+        dst: "np.ndarray",
+        capacity: "np.ndarray",
+        cost: "np.ndarray",
+        ext_edge_ids: "np.ndarray",
+    ) -> "StrictMultiDiGraph":
+        """Build a graph from parallel edge arrays (all must be 1-D, C-contiguous).
+
+        Args:
+            num_nodes: Node count; every src/dst must lie in [0, num_nodes).
+            src: int32[E] source node ids.
+            dst: int32[E] destination node ids.
+            capacity: float64[E] capacities, each >= 0.
+            cost: int64[E] costs, each >= 0. Their TOTAL must stay below 2**62,
+                since SPF accumulates path costs as int64.
+            ext_edge_ids: int64[E] caller-side ids, permuted alongside the edges.
+
+        Raises:
+            TypeError: On a wrong dtype, a non-contiguous array, or a wrong shape.
+            ValueError: On a negative capacity/cost, a node id out of range, a
+                length mismatch, or a total cost at or above 2**62.
+        """
+        ...
+
+    def num_nodes(self) -> int: ...
+    def num_edges(self) -> int: ...
+    def capacity_view(self) -> "np.ndarray":
+        """Copy of per-edge capacities, float64[E]."""
+        ...
+
+    def cost_view(self) -> "np.ndarray":
+        """Copy of per-edge costs, int64[E]."""
+        ...
+
+    def edge_src_view(self) -> "np.ndarray":
+        """Copy of per-edge source node ids, int32[E]."""
+        ...
+
+    def edge_dst_view(self) -> "np.ndarray":
+        """Copy of per-edge destination node ids, int32[E]."""
+        ...
+
+    def ext_edge_ids_view(self) -> "np.ndarray":
+        """Copy of caller-supplied external edge ids, int64[E]."""
+        ...
+
+    def row_offsets_view(self) -> "np.ndarray":
+        """CSR row offsets over outgoing edges, int32[num_nodes + 1]."""
+        ...
+
+    def col_indices_view(self) -> "np.ndarray":
+        """CSR neighbour node ids for outgoing edges, int32[E]."""
+        ...
+
+    def adj_edge_index_view(self) -> "np.ndarray":
+        """EdgeId for each CSR outgoing entry, int32[E]."""
+        ...
+
+    def in_row_offsets_view(self) -> "np.ndarray":
+        """Reverse-CSR row offsets over incoming edges, int32[num_nodes + 1]."""
+        ...
+
+    def in_col_indices_view(self) -> "np.ndarray":
+        """Reverse-CSR predecessor node ids, int32[E]."""
+        ...
+
+    def in_adj_edge_index_view(self) -> "np.ndarray":
+        """EdgeId for each reverse-CSR entry, int32[E]."""
+        ...
 
 
 class FlowIndex:
-    src: int
-    dst: int
-    flowClass: int
-    flowId: int
+    """Identity of one flow: (src, dst, flowClass, flowId).
+
+    The constructor takes exactly four POSITIONAL arguments (the binding
+    declares no argument names), and the attributes are read-only.
+    """
+
+    def __init__(self, src: int, dst: int, flowClass: int, flowId: int, /) -> None: ...
+    @property
+    def src(self) -> int: ...
+    @property
+    def dst(self) -> int: ...
+    @property
+    def flowClass(self) -> int: ...
+    @property
+    def flowId(self) -> int: ...
 
 
 class FlowPolicyConfig:
@@ -298,13 +444,39 @@ class FlowPolicyConfig:
     diminishing_returns_window: int
     diminishing_returns_epsilon_frac: float
 
+    def __init__(
+        self,
+        *,
+        path_alg: PathAlg = ...,
+        flow_placement: FlowPlacement = ...,
+        selection: EdgeSelection = ...,
+        require_capacity: bool = True,
+        multipath: bool = True,
+        min_flow_count: int = 1,
+        max_flow_count: Optional[int] = None,
+        max_path_cost: Optional[int] = None,
+        max_path_cost_factor: Optional[float] = None,
+        shortest_path: bool = False,
+        reoptimize_flows_on_each_placement: bool = False,
+        max_no_progress_iterations: int = 100,
+        max_total_iterations: int = 10000,
+        diminishing_returns_enabled: bool = True,
+        diminishing_returns_window: int = 8,
+        diminishing_returns_epsilon_frac: float = 1e-3,
+    ) -> None:
+        """All parameters are keyword-only; the no-argument form is also valid."""
+        ...
+
 
 class FlowPolicy:
     """Flow policy for demand placement.
 
-    When static_paths is empty the policy may refresh the DAG per round using
-    residual-aware shortest paths. This progressively prunes saturated next-hops
-    (traffic-engineering style) and differs from one-shot ECMP admission.
+    Dynamic policies may refresh the DAG per round using residual-aware
+    shortest paths, progressively pruning saturated next-hops (traffic-
+    engineering style), which differs from one-shot ECMP admission.
+
+    A policy can instead be pinned to explicit path bundles with
+    set_static_paths(); see that method for the pinned semantics.
 
     Args:
         algorithms: Algorithms instance (kept alive by FlowPolicy)
@@ -338,7 +510,24 @@ class FlowPolicy:
         volume: float,
         target_per_flow: Optional[float] = None,
         min_flow: Optional[float] = None,
-    ) -> tuple[float, float]: ...
+    ) -> tuple[float, float]:
+        """Place `volume` of demand; returns (placed, remaining).
+
+        Raises:
+            ValueError: If this policy already manages a different (src, dst)
+                pair (call remove_demand() first, or use one policy per
+                demand), or if `flow_graph` wraps a different
+                StrictMultiDiGraph than the policy's own graph handle.
+
+        EQUAL_BALANCED note: when the equalizing rebalance runs, `placed` is
+        the policy's TOTAL placed demand (cumulative across calls, because
+        rebalancing re-places previously placed volume too), so
+        `placed + remaining` can exceed this call's `volume`. Use
+        placed_demand() deltas for strict per-call accounting. EB placement is
+        also not incremental: each call's volume defines the per-flow target,
+        so a second, smaller call may place nothing.
+        """
+        ...
 
     def rebalance_demand(
         self,
@@ -349,27 +538,59 @@ class FlowPolicy:
         target: float,
     ) -> tuple[float, float]: ...
 
-    def remove_demand(self, flow_graph: "FlowGraph") -> None: ...
+    def remove_demand(self, flow_graph: "FlowGraph") -> None:
+        """Remove all of this policy's flows, releasing its (src, dst) binding."""
+        ...
+
+    def set_static_paths(self, src: int, dst: int, paths: "Sequence[PredDAG]") -> None:
+        """Pin this policy's demand to explicit path bundles (MPLS-style).
+
+        One flow is created per USABLE bundle at the next placement, in supply
+        order, each permanently bound to its own bundle. A single-path bundle
+        (from PredDAG.from_edges or ksp) models a strict-ERO LSP: any failed
+        hop takes it down. A multi-walk bundle (an SPF DAG) models a pinned
+        DAG / SR-TE-style policy that renormalizes over surviving walks.
+
+        Bundles are validated against the policy's graph, then pruned against
+        the policy's node/edge masks; a bundle with no surviving src->dst walk
+        is DOWN and creates no flow (pinned paths do not reroute around
+        failures). Each flow's cost is the min-cost src->dst walk of its
+        PRUNED bundle. EqualBalanced spreads over the usable (up) bundles
+        only; down LSPs = len(paths) - flow_count().
+
+        With static paths configured the policy neither creates additional
+        flows nor reoptimizes: max_path_cost, max_path_cost_factor,
+        min_flow_count and reoptimize_flows_on_each_placement are inert.
+        Placement is not incremental across place_demand calls for
+        EqualBalanced (each call's volume defines the per-flow target).
+
+        Raises:
+            ValueError: If paths is empty; the policy already holds flows
+                (call remove_demand() first); shortest_path=True is
+                configured; src/dst is out of range or equal; a user-supplied
+                max_flow_count differs from len(paths); or a bundle is
+                malformed (wrong shape, out-of-range ids, an edge that does
+                not connect its parent to its node in this graph, a cycle, or
+                no src->dst walk). Calling again before placement replaces
+                the previous pinning.
+        """
+        ...
 
     @property
     def flows(self) -> dict[tuple[int, int, int, int], tuple[int, int, int, float]]: ...
 
 
-@dataclass(frozen=True)
-class Path:
-    nodes: np.ndarray
-    edges: np.ndarray
-    cost: float
-
-
 class MinCut:
-    edges: list[int]
+    edges: "np.ndarray"  # int32[K], copy of the cut edge ids
 
 
-@dataclass(frozen=True)
 class FlowSummary:
     total_flow: float
     min_cut: MinCut
+    # Cost-weighted breakdown of total_flow, ascending and unique. Entries from
+    # the SPF tier loop are shortest-path-DAG costs; entries from the residual
+    # completion phase are MARGINAL costs (forward edge costs minus the cost of
+    # the flow they cancel) and need not match any traversable src->dst path.
     costs: "np.ndarray"  # int64[K]
     flows: "np.ndarray"  # float64[K]
     edge_flows: "np.ndarray"
@@ -399,18 +620,6 @@ class Algorithms:
 
         The graph object is kept alive automatically.
         """
-        ...
-
-    def build_graph_from_arrays(
-        self,
-        num_nodes: int,
-        src: "np.ndarray",
-        dst: "np.ndarray",
-        capacity: "np.ndarray",
-        cost: "np.ndarray",
-        ext_edge_ids: "np.ndarray",
-    ) -> "Graph":
-        """Build graph directly from arrays (graph is owned by the handle)."""
         ...
 
     def spf(
@@ -451,7 +660,9 @@ class Algorithms:
             as no traversal can begin from an excluded source.
 
         Raises:
-            TypeError: If arrays have wrong dtype, ndim, or length.
+            TypeError: If arrays have wrong dtype, ndim, or length
+                (residual must have length num_edges; masks must match
+                num_nodes / num_edges).
             ValueError: If src/dst out of range.
         """
         ...
@@ -491,7 +702,7 @@ class Algorithms:
         src: int,
         dst: int,
         *,
-        flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
+        flow_placement: FlowPlacement = ...,
         shortest_path: bool = False,
         require_capacity: bool = True,
         with_edge_flows: bool = False,
@@ -540,7 +751,7 @@ class Algorithms:
         *,
         node_masks: Optional[list["np.ndarray"]] = None,
         edge_masks: Optional[list["np.ndarray"]] = None,
-        flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
+        flow_placement: FlowPlacement = ...,
         shortest_path: bool = False,
         require_capacity: bool = True,
         with_edge_flows: bool = False,
@@ -566,7 +777,7 @@ class Algorithms:
         src: int,
         dst: int,
         *,
-        flow_placement: FlowPlacement = FlowPlacement.PROPORTIONAL,
+        flow_placement: FlowPlacement = ...,
         shortest_path: bool = False,
         require_capacity: bool = True,
         node_mask: Optional["np.ndarray"] = None,
@@ -602,3 +813,18 @@ class Algorithms:
             whose removal would reduce total flow by flow_delta.
         """
         ...
+
+
+def profiling_enabled() -> bool:
+    """True if profiling is enabled (NGRAPH_CORE_PROFILE=1 in the environment)."""
+    ...
+
+
+def profiling_dump() -> None:
+    """Print collected profiling statistics to stderr."""
+    ...
+
+
+def profiling_reset() -> None:
+    """Clear all collected profiling statistics."""
+    ...

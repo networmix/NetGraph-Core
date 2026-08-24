@@ -60,25 +60,6 @@ def _policy_for(
     return ngc.FlowPolicy(algs, gh, cfg)
 
 
-def _max_flow_for(
-    algs: ngc.Algorithms,
-    gh,
-    placement: ngc.FlowPlacement,
-    shortest_path: bool,
-    require_capacity: bool,
-) -> float:
-    total, _ = algs.max_flow(
-        gh,
-        0,
-        1,  # src, dst are supplied by fixtures through to_handle(graph) below; we override per case
-        flow_placement=placement,
-        shortest_path=shortest_path,
-        require_capacity=require_capacity,
-        with_edge_flows=False,
-    )
-    return float(total)
-
-
 @pytest.mark.parametrize(
     "graph_label",
     [

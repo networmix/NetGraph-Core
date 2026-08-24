@@ -14,6 +14,7 @@
 #include "netgraph/core/constants.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -23,7 +24,6 @@
 #include <optional>
 #include <queue>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -31,12 +31,12 @@ namespace netgraph::core {
 
 namespace {
 
-std::size_t sensitivity_thread_budget(std::size_t candidate_count) {
+std::size_t thread_budget_from_env(const char* env_name, std::size_t candidate_count) {
   if (candidate_count <= 1) {
     return 1;
   }
 
-  const char* env = std::getenv("NGRAPH_CORE_SENSITIVITY_THREADS");
+  const char* env = std::getenv(env_name);
   if (env != nullptr && env[0] != '\0') {
     char* end = nullptr;
     unsigned long parsed = std::strtoul(env, &end, 10);
@@ -151,6 +151,93 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
     if (shortest_path) break;
   }
 
+  // Completion phase. The tier loop above augments only along forward SPF DAGs
+  // and can never cancel an earlier placement, so it may terminate below the
+  // true maximum (its own min-cut then contradicts total_flow). Finish with
+  // BFS augmentation on the full residual graph, where traversing an edge
+  // backwards returns previously placed flow. Only meaningful for Proportional
+  // max-flow semantics: EqualBalanced models ECMP admission and
+  // require_capacity=false models fixed-cost IP routing, both of which are
+  // placement models rather than max-flow computations.
+  if (placement == FlowPlacement::Proportional && !shortest_path && require_capacity) {
+    const auto row = g.row_offsets_view();
+    const auto col = g.col_indices_view();
+    const auto aei = g.adj_edge_index_view();
+    const auto irow = g.in_row_offsets_view();
+    const auto icol = g.in_col_indices_view();
+    const auto iaei = g.in_adj_edge_index_view();
+    const auto costv = g.cost_view();
+    const auto residual = fs.residual_view();
+    const auto eflow = fs.edge_flow_view();
+    std::vector<std::int32_t> prev_node(static_cast<std::size_t>(N));
+    std::vector<EdgeId> prev_edge(static_cast<std::size_t>(N));
+    std::vector<char> prev_fwd(static_cast<std::size_t>(N));
+    std::vector<char> seen(static_cast<std::size_t>(N));
+    std::vector<std::pair<EdgeId, Flow>> fwd_deltas, rev_deltas;
+    while (true) {
+      std::fill(seen.begin(), seen.end(), 0);
+      std::queue<std::int32_t> bfs;
+      seen[static_cast<std::size_t>(src)] = 1;
+      bfs.push(src);
+      bool found = false;
+      while (!bfs.empty() && !found) {
+        auto u = bfs.front(); bfs.pop();
+        auto us = static_cast<std::size_t>(u);
+        // Forward residual arcs u -> v.
+        for (auto j = static_cast<std::size_t>(row[us]); j < static_cast<std::size_t>(row[us + 1]); ++j) {
+          auto v = static_cast<std::size_t>(col[j]);
+          auto eid = static_cast<std::size_t>(aei[j]);
+          if (use_edge_mask && !edge_mask[eid]) continue;
+          if (use_node_mask && !node_mask[v]) continue;
+          if (seen[v] || residual[eid] <= kMinCap) continue;
+          seen[v] = 1; prev_node[v] = u; prev_edge[v] = static_cast<EdgeId>(eid); prev_fwd[v] = 1;
+          if (static_cast<NodeId>(v) == dst) { found = true; break; }
+          bfs.push(static_cast<std::int32_t>(v));
+        }
+        if (found) break;
+        // Reverse residual arcs u -> w along edges w -> u carrying flow.
+        for (auto j = static_cast<std::size_t>(irow[us]); j < static_cast<std::size_t>(irow[us + 1]); ++j) {
+          auto w = static_cast<std::size_t>(icol[j]);
+          auto eid = static_cast<std::size_t>(iaei[j]);
+          if (use_edge_mask && !edge_mask[eid]) continue;
+          if (use_node_mask && !node_mask[w]) continue;
+          if (seen[w] || eflow[eid] <= kMinFlow) continue;
+          seen[w] = 1; prev_node[w] = u; prev_edge[w] = static_cast<EdgeId>(eid); prev_fwd[w] = 0;
+          if (static_cast<NodeId>(w) == dst) { found = true; break; }
+          bfs.push(static_cast<std::int32_t>(w));
+        }
+      }
+      if (!found) break;
+      // Bottleneck and marginal path cost (forward costs minus cancelled costs).
+      double bottleneck = std::numeric_limits<double>::infinity();
+      Cost path_cost = 0;
+      for (auto v = dst; v != src; v = prev_node[static_cast<std::size_t>(v)]) {
+        auto vs = static_cast<std::size_t>(v);
+        auto eid = static_cast<std::size_t>(prev_edge[vs]);
+        if (prev_fwd[vs]) {
+          bottleneck = std::min(bottleneck, static_cast<double>(residual[eid]));
+          path_cost += costv[eid];
+        } else {
+          bottleneck = std::min(bottleneck, static_cast<double>(eflow[eid]));
+          path_cost -= costv[eid];
+        }
+      }
+      if (!(bottleneck >= kMinFlow)) break;
+      fwd_deltas.clear(); rev_deltas.clear();
+      for (auto v = dst; v != src; v = prev_node[static_cast<std::size_t>(v)]) {
+        auto vs = static_cast<std::size_t>(v);
+        if (prev_fwd[vs]) fwd_deltas.emplace_back(prev_edge[vs], static_cast<Flow>(bottleneck));
+        else rev_deltas.emplace_back(prev_edge[vs], static_cast<Flow>(bottleneck));
+      }
+      fs.apply_deltas(fwd_deltas, /*add=*/true);
+      fs.apply_deltas(rev_deltas, /*add=*/false);
+      total += static_cast<Flow>(bottleneck);
+      bool merged2 = false;
+      for (auto& pr : cost_dist) { if (pr.first == path_cost) { pr.second += bottleneck; merged2 = true; break; } }
+      if (!merged2) cost_dist.emplace_back(path_cost, static_cast<Flow>(bottleneck));
+    }
+  }
+
   summary.total_flow = total;
   if (with_edge_flows) {
     auto ef = fs.edge_flow_view();
@@ -177,7 +264,7 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
     if (with_reachable) {
       summary.reachable_nodes.assign(static_cast<std::size_t>(g.num_nodes()), 0u);
       auto residual = fs.residual_view();
-      auto capv = fs.capacity_view();
+      auto eflows = fs.edge_flow_view();
       const bool reach_use_node_mask = use_node_mask;
       const bool reach_use_edge_mask = use_edge_mask;
       const auto N = static_cast<std::size_t>(g.num_nodes());
@@ -214,8 +301,7 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
           auto eid = static_cast<std::size_t>(iae[p]);
           if (reach_use_edge_mask && !edge_mask[eid]) continue;
           if (reach_use_node_mask && !node_mask[u]) continue;
-          auto flow = capv[eid] - residual[eid];
-          if (flow > kMinFlow && !summary.reachable_nodes[u]) {
+          if (eflows[eid] > kMinFlow && !summary.reachable_nodes[u]) {
             stack.push_back(static_cast<std::int32_t>(u));
           }
         }
@@ -247,21 +333,47 @@ batch_max_flow(const StrictMultiDiGraph& g,
     }
   }
 
-  std::vector<FlowSummary> out;
-  out.reserve(pairs.size());
-  for (std::size_t i = 0; i < pairs.size(); ++i) {
-    auto pr = pairs[i];
-    std::span<const bool> nm = (i < node_masks.size() ? node_masks[i] : std::span<const bool>{});
-    std::span<const bool> em = (i < edge_masks.size() ? edge_masks[i] : std::span<const bool>{});
-    auto [val, summary] = calc_max_flow(g, pr.first, pr.second,
-                                        placement, shortest_path,
-                                        require_capacity,
-                                        with_edge_flows,
-                                        with_reachable,
-                                        with_residuals,
-                                        nm, em);
-    out.push_back(std::move(summary));
+  std::vector<FlowSummary> out(pairs.size());
+  auto run_range = [&](std::size_t begin, std::size_t end) {
+    for (std::size_t i = begin; i < end; ++i) {
+      auto pr = pairs[i];
+      std::span<const bool> nm = (i < node_masks.size() ? node_masks[i] : std::span<const bool>{});
+      std::span<const bool> em = (i < edge_masks.size() ? edge_masks[i] : std::span<const bool>{});
+      auto [val, summary] = calc_max_flow(g, pr.first, pr.second,
+                                          placement, shortest_path,
+                                          require_capacity,
+                                          with_edge_flows,
+                                          with_reachable,
+                                          with_residuals,
+                                          nm, em);
+      out[i] = std::move(summary);
+    }
+  };
+  // Pairs are independent over an immutable graph; evaluate chunks in parallel.
+  // Thread count from NGRAPH_CORE_BATCH_THREADS env or hardware concurrency.
+  const auto thread_budget = thread_budget_from_env("NGRAPH_CORE_BATCH_THREADS", pairs.size());
+  if (thread_budget <= 1) {
+    run_range(0, pairs.size());
+    return out;
   }
+  // Claim pairs one at a time from a shared counter rather than handing each worker a
+  // fixed contiguous chunk. Per-pair cost varies by orders of magnitude (a dense
+  // cross-fabric pair versus a disconnected one), so static chunking leaves workers
+  // idle whenever the expensive pairs happen to land in the same chunk.
+  std::atomic<std::size_t> next_pair{0};
+  auto run_dynamic = [&]() {
+    for (;;) {
+      const std::size_t i = next_pair.fetch_add(1, std::memory_order_relaxed);
+      if (i >= pairs.size()) break;
+      run_range(i, i + 1);
+    }
+  };
+  std::vector<std::future<void>> futures;
+  futures.reserve(thread_budget);
+  for (std::size_t w = 0; w < thread_budget; ++w) {
+    futures.emplace_back(std::async(std::launch::async, run_dynamic));
+  }
+  for (auto& f : futures) f.get();
   return out;
 }
 
@@ -312,7 +424,7 @@ sensitivity_analysis(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
   results.reserve(candidates.size());
 
   // Step 2: Iterate candidates, testing flow reduction when each is removed
-  const auto thread_budget = sensitivity_thread_budget(candidates.size());
+  const auto thread_budget = thread_budget_from_env("NGRAPH_CORE_SENSITIVITY_THREADS", candidates.size());
   if (thread_budget <= 1) {
     for (EdgeId eid : candidates) {
       auto maybe_result = evaluate_sensitivity_candidate(

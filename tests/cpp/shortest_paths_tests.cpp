@@ -298,3 +298,46 @@ TEST(ShortestPaths, RejectsMaskLengthMismatch) {
   opts2.edge_mask = std::span<const bool>(edge_mask.get(), static_cast<std::size_t>(g.num_edges() - 1));
   EXPECT_THROW({ (void)algs.spf(gh, 0, opts2); }, std::invalid_argument);
 }
+
+// ============================================================================
+// Regression: zero-cost edges must not create cycles in the PredDAG
+// ============================================================================
+
+// A zero-cost pair 1<->2 previously recorded each node as the other's parent
+// (both relaxations see an "equal cost" path), producing a cyclic PredDAG.
+// EqualBalanced placement then stalled (returned 0 flow) and path enumeration
+// walked the cycle forever. Equal-cost predecessors are now only accepted while
+// the child is unsettled, which keeps the DAG acyclic by settle order.
+TEST(ShortestPaths, ZeroCostEdges_PredDAGIsAcyclic) {
+  std::int32_t src_arr[4] = {0, 1, 2, 2};
+  std::int32_t dst_arr[4] = {1, 2, 1, 3};
+  double cap_arr[4] = {10.0, 10.0, 10.0, 10.0};
+  std::int64_t cost_arr[4] = {1, 0, 0, 1};
+  auto g = StrictMultiDiGraph::from_arrays(4,
+    std::span(src_arr, 4), std::span(dst_arr, 4),
+    std::span(cap_arr, 4), std::span(cost_arr, 4));
+
+  EdgeSelection sel;
+  sel.multi_edge = true;
+  auto [dist, dag] = shortest_paths(g, 0, std::nullopt, /*multipath=*/true, sel);
+
+  EXPECT_EQ(dist[3], 2);
+
+  // No 2-cycles: v's parent u must not also have v as a parent.
+  for (std::int32_t v = 0; v < 4; ++v) {
+    for (auto i = dag.parent_offsets[static_cast<std::size_t>(v)];
+         i < dag.parent_offsets[static_cast<std::size_t>(v) + 1]; ++i) {
+      auto u = dag.parents[static_cast<std::size_t>(i)];
+      for (auto j = dag.parent_offsets[static_cast<std::size_t>(u)];
+           j < dag.parent_offsets[static_cast<std::size_t>(u) + 1]; ++j) {
+        EXPECT_NE(dag.parents[static_cast<std::size_t>(j)], v)
+            << "cycle " << u << "<->" << v << " in PredDAG";
+      }
+    }
+  }
+
+  // Path enumeration must terminate and yield the single simple path.
+  auto paths = resolve_to_paths(dag, 0, 3);
+  ASSERT_EQ(paths.size(), 1u);
+  EXPECT_EQ(paths[0].size(), 4u);  // 0 -> 1 -> 2 -> 3
+}

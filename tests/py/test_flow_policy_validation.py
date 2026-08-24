@@ -45,21 +45,6 @@ def parallel_paths_varying_capacities():
     return _make_graph(num_nodes, src, dst, cap, cost)
 
 
-@pytest.fixture
-def parallel_paths_varying_costs():
-    """3 parallel paths with different costs for cost-aware testing."""
-    # S -> [M1, M2, M3] -> T
-    # Paths: S-M1-T (cost 10), S-M2-T (cost 20), S-M3-T (cost 30)
-    num_nodes = 5
-    src = np.array([0, 0, 0, 1, 2, 3], dtype=np.int32)
-    dst = np.array([1, 2, 3, 4, 4, 4], dtype=np.int32)
-    cap = np.array([100.0, 100.0, 100.0, 100.0, 100.0, 100.0], dtype=np.float64)
-    # First hop costs: 10, 20, 30; Second hop costs: 10, 20, 30
-    cost = np.array([10, 20, 30, 10, 20, 30], dtype=np.int64)
-
-    return _make_graph(num_nodes, src, dst, cap, cost)
-
-
 # ============================================================================
 # TEST 1: Path Distribution and Balance
 # ============================================================================

@@ -166,7 +166,10 @@ class TestKSPThreadSafety:
 
         # Should get consistent results (either with or without node 2)
         num_paths = results[0]
-        assert num_paths >= 0  # Should not crash or return corrupted data
+        # The mask must be copied before the GIL is released, so the run sees one
+        # consistent snapshot: 2 paths (mask untouched) or 1 (node 2 blocked, leaving
+        # 0->1->4). Any other count means it observed a torn mask.
+        assert num_paths in (1, 2)
 
 
 class TestMaxFlowThreadSafety:
@@ -277,20 +280,27 @@ class TestStressThreadSafety:
         graph = algs.build_graph(g)
 
         node_mask = np.ones(n, dtype=bool)
+        # pytest.fail() inside a worker thread cannot fail the test: the exception
+        # stays in that thread and join() does not re-raise it. Record failures and
+        # assert on them from the main thread instead.
+        errors: list[str] = []
 
         def run_algorithms():
             """Run various algorithms repeatedly."""
             for _ in range(20):
                 try:
                     algs.spf(graph, 0, node_mask=node_mask)
-                except Exception as e:
-                    pytest.fail(f"Algorithm raised exception: {e}")
+                except Exception as e:  # noqa: BLE001 - reported below
+                    errors.append(f"algorithm raised: {e!r}")
 
         def mutate_continuously():
             """Continuously mutate the mask."""
-            for _ in range(100):
-                node_mask[:] = np.random.rand(n) > 0.5
-                time.sleep(0.001)
+            try:
+                for _ in range(100):
+                    node_mask[:] = np.random.rand(n) > 0.5
+                    time.sleep(0.001)
+            except Exception as e:  # noqa: BLE001 - reported below
+                errors.append(f"mutator raised: {e!r}")
 
         algo_thread = threading.Thread(target=run_algorithms)
         mutator_thread = threading.Thread(target=mutate_continuously)
@@ -301,8 +311,7 @@ class TestStressThreadSafety:
         algo_thread.join()
         mutator_thread.join()
 
-        # If we got here without crashes/exceptions, thread safety is working
-        assert True, "Thread safety test completed without crashes"
+        assert not errors, "; ".join(errors)
 
 
 class TestMemoryOrdering:

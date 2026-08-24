@@ -305,3 +305,27 @@ TEST(KShortestPaths, LargerOutOfOrderTopology) {
     }
   }
 }
+
+// Regression: a max_cost_factor below 1.0 puts the cost ceiling under the shortest
+// path, so no path is admitted. The k > 1 loop opened with paths.back() on that empty
+// vector -- undefined behaviour. The k == 1 early return masked it, so only k >= 2 hit
+// it. All k must now agree and return no paths.
+TEST(KSP, MaxCostFactorBelowOne_ReturnsEmptyForAllK) {
+  auto g = make_line_graph(3);
+  auto be = make_cpu_backend();
+  Algorithms algs(be);
+  auto gh = algs.build_graph(g);
+
+  for (int k : {1, 2, 5}) {
+    KspOptions opts;
+    opts.k = k;
+    opts.max_cost_factor = 0.5;
+    auto out = algs.ksp(gh, 0, 2, opts);
+    EXPECT_TRUE(out.empty()) << "k=" << k << " should admit no path under a sub-1.0 factor";
+  }
+  // A factor of exactly 1.0 still admits the shortest path.
+  KspOptions ok;
+  ok.k = 3;
+  ok.max_cost_factor = 1.0;
+  EXPECT_EQ(algs.ksp(gh, 0, 2, ok).size(), 1u);
+}

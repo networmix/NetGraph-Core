@@ -27,7 +27,11 @@ add_executable(netgraph_core_tests
   target_link_libraries(netgraph_core_tests PRIVATE netgraph_core GTest::gtest_main)
   target_include_directories(netgraph_core_tests PRIVATE tests/cpp)
   if(NETGRAPH_CORE_COVERAGE AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
+    # Atomic counters: see the NETGRAPH_CORE_COVERAGE block below.
     target_compile_options(netgraph_core_tests PRIVATE -O0 -g --coverage)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+      target_compile_options(netgraph_core_tests PRIVATE -fprofile-update=atomic)
+    endif()
     target_link_options(netgraph_core_tests PRIVATE --coverage)
   endif()
   include(GoogleTest)
@@ -85,7 +89,6 @@ target_include_directories(netgraph_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_compile_definitions(netgraph_core PRIVATE _USE_MATH_DEFINES)
 ## C++ standard is set globally above.
 target_compile_features(netgraph_core PUBLIC cxx_std_20)
 
@@ -206,8 +209,15 @@ endif()
 if(NETGRAPH_CORE_COVERAGE)
   message(STATUS "Enabling coverage instrumentation (disables optimizations)")
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # batch_max_flow and sensitivity_analysis run worker threads, and the default
+    # non-atomic profile counters corrupt under concurrent updates (gcov then
+    # emits impossible values such as "branch 4 taken -1").
+    set(COV_FLAGS -O0 -g --coverage)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+      list(APPEND COV_FLAGS -fprofile-update=atomic)
+    endif()
     foreach(tgt netgraph_core _netgraph_core)
-      target_compile_options(${tgt} PRIVATE -O0 -g --coverage)
+      target_compile_options(${tgt} PRIVATE ${COV_FLAGS})
       target_link_options(${tgt} PRIVATE --coverage)
     endforeach()
   else()
@@ -218,8 +228,16 @@ endif()
 if(NETGRAPH_CORE_SANITIZE)
   message(STATUS "Enabling sanitizers (disables optimizations)")
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set(SAN_FLAGS "-fsanitize=address,undefined -fno-omit-frame-pointer")
-    foreach(tgt netgraph_core _netgraph_core)
+    # Must be a CMake list: a single quoted string reaches the compiler as one
+    # argument and clang rejects "-fsanitize=address,undefined -fno-omit-frame-pointer".
+    set(SAN_FLAGS -fsanitize=address,undefined -fno-omit-frame-pointer)
+    set(SAN_TARGETS netgraph_core _netgraph_core)
+    if(TARGET netgraph_core_tests)
+      # The test executable links the sanitized static library, so it must be
+      # built and linked with the same flags to pull in the sanitizer runtime.
+      list(APPEND SAN_TARGETS netgraph_core_tests)
+    endif()
+    foreach(tgt ${SAN_TARGETS})
       target_compile_options(${tgt} PRIVATE ${SAN_FLAGS})
       target_link_options(${tgt} PRIVATE ${SAN_FLAGS})
     endforeach()

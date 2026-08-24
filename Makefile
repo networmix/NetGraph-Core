@@ -52,7 +52,7 @@ help:
 	@echo "  make check-ci      - Run non-mutating lint + tests (CI entrypoint)"
 	@echo "  make lint          - Run only linting (non-mutating: ruff + pyright)"
 	@echo "  make format        - Auto-format code with ruff"
-	@echo "  make test          - Run tests with coverage"
+	@echo "  make test          - Run Python tests (pytest)"
 	@echo "  make qt            - Run quick tests only (exclude slow/benchmark)"
 	@echo "  make cpp-test      - Build and run C++ tests"
 	@echo "  make cov           - Coverage summary + XML + single-page combined HTML"
@@ -281,6 +281,7 @@ cov:
 		--object-directory build/cpp-tests-cov \
 		--filter 'include/netgraph' --filter 'src' --exclude 'tests' --exclude 'bindings/.*' --exclude '.*pybind11.*' --exclude '_deps/pybind11-src/.*' \
 		--gcov-ignore-errors=all \
+		--gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
 		--xml-pretty -o build/coverage/coverage-cpp.xml
 	@echo ""
 	@echo "================ Python + C++ coverage (summary) ================"
@@ -296,7 +297,8 @@ sanitize-test:
 		if command -v ninja >/dev/null 2>&1; then GEN_ARGS="-G Ninja"; fi; \
 		cmake -S . -B "$$BUILD_DIR" -DNETGRAPH_CORE_BUILD_TESTS=ON -DNETGRAPH_CORE_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug $$GEN_ARGS; \
 		cmake --build "$$BUILD_DIR" --config Debug -j; \
-		ASAN_OPTIONS=detect_leaks=1 ctest --test-dir "$$BUILD_DIR" --output-on-failure || echo "⚠️  Some sanitizer tests failed"
+		if [ "$$(uname -s)" = "Darwin" ]; then ASAN_ENV="ASAN_OPTIONS=detect_leaks=0"; else ASAN_ENV="ASAN_OPTIONS=detect_leaks=1"; fi; \
+		env $$ASAN_ENV ctest --test-dir "$$BUILD_DIR" --output-on-failure || echo "⚠️  Some sanitizer tests failed"
 
 # Clean + reinstall in dev mode (respects CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET)
 # Uses active PYTHON (venv or PATH) to avoid environment mismatches

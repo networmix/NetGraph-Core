@@ -37,7 +37,14 @@ StrictMultiDiGraph StrictMultiDiGraph::from_arrays(
     throw std::invalid_argument("number of edges exceeds INT32_MAX");
   }
 
-  // Invariants: ids within [0, num_nodes), non-negative weights
+  // Invariants: ids within [0, num_nodes), non-negative weights.
+  // SPF accumulates path costs as int64 without overflow checks and uses
+  // INT64_MAX as the unreachable sentinel, so the total of all edge costs
+  // (an upper bound on any simple path, and on one reverse-edge bounce) must
+  // stay below 2^62 or accumulated costs could wrap negative and silently
+  // corrupt results.
+  constexpr std::uint64_t kMaxTotalCost = (std::uint64_t{1} << 62);
+  std::uint64_t total_cost = 0;
   for (std::size_t i = 0; i < m; ++i) {
     if (src[i] < 0 || dst[i] < 0 || src[i] >= num_nodes || dst[i] >= num_nodes) {
       throw std::out_of_range("edge index out of range of num_nodes");
@@ -46,6 +53,13 @@ StrictMultiDiGraph StrictMultiDiGraph::from_arrays(
       throw std::invalid_argument("capacity must be >= 0");
     }
     if (cost[i] < 0) { throw std::invalid_argument("cost must be >= 0"); }
+    const auto c = static_cast<std::uint64_t>(cost[i]);
+    if (c >= kMaxTotalCost - total_cost) {
+      throw std::invalid_argument(
+          "total edge cost must stay below 2^62: larger accumulated path costs "
+          "overflow int64 cost arithmetic and silently corrupt results");
+    }
+    total_cost += c;
   }
   // Gather initial arrays
   std::vector<NodeId> src_v(src.begin(), src.end());

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "pybind11>=3", "numpy>=1.22"]
+requires = ["scikit-build-core>=0.10", "pybind11>=3", "numpy>=1.23.2"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "netgraph-core"
-version = "0.7.2"
+version = "0.8.0"
 description = "C++ implementation of graph algorithms for network flow analysis and traffic engineering with Python bindings"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,7 +26,7 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
     "Operating System :: OS Independent",
 ]
-dependencies = ["numpy>=1.22"]
+dependencies = ["numpy>=1.23.2"]
 
 [project.optional-dependencies]
 dev = [

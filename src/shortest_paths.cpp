@@ -1,10 +1,16 @@
 /* Path enumeration from PredDAG (resolve_to_paths). */
 #include "netgraph/core/shortest_paths.hpp"
+#include "netgraph/core/constants.hpp"
 #include "netgraph/core/profiling.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <optional>
-#include <stack>
+#include <queue>
+#include <stdexcept>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -30,6 +36,71 @@ static inline void group_parents(const PredDAG& dag, NodeId v,
   }
 }
 
+std::pair<std::vector<Cost>, PredDAG>
+path_to_pred_dag(const StrictMultiDiGraph& g,
+                 std::span<const NodeId> nodes,
+                 std::span<const EdgeId> edges) {
+  const auto cost_view = g.cost_view();
+  std::vector<Cost> dist(static_cast<std::size_t>(g.num_nodes()),
+                         std::numeric_limits<Cost>::max());
+  PredDAG dag;
+  dag.parent_offsets.assign(static_cast<std::size_t>(g.num_nodes() + 1), 0);
+  if (!nodes.empty()) {
+    dist[static_cast<std::size_t>(nodes.front())] = 0;
+    for (std::size_t i = 1; i < nodes.size(); ++i) {
+      auto u = nodes[i - 1]; auto v = nodes[i]; auto e = edges[i - 1];
+      dist[static_cast<std::size_t>(v)] =
+          dist[static_cast<std::size_t>(u)] + cost_view[static_cast<std::size_t>(e)];
+      dag.parent_offsets[static_cast<std::size_t>(v + 1)] = 1;
+    }
+    for (std::size_t v = 1; v < dag.parent_offsets.size(); ++v)
+      dag.parent_offsets[v] += dag.parent_offsets[v - 1];
+    dag.parents.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
+    dag.via_edges.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
+    for (std::size_t i = 1; i < nodes.size(); ++i) {
+      auto v = nodes[i];
+      auto base = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v)]);
+      dag.parents[base] = nodes[i - 1];
+      dag.via_edges[base] = edges[i - 1];
+    }
+  }
+  return {std::move(dist), std::move(dag)};
+}
+
+PredDAG make_path_dag(const StrictMultiDiGraph& g, std::span<const EdgeId> edges) {
+  if (edges.empty()) {
+    throw std::invalid_argument("make_path_dag: edges must be non-empty");
+  }
+  const auto E = static_cast<std::size_t>(g.num_edges());
+  const auto esrc = g.edge_src_view();
+  const auto edst = g.edge_dst_view();
+  std::vector<NodeId> nodes;
+  nodes.reserve(edges.size() + 1);
+  std::vector<char> seen(static_cast<std::size_t>(g.num_nodes()), 0);
+  for (std::size_t i = 0; i < edges.size(); ++i) {
+    const auto e = edges[i];
+    if (e < 0 || static_cast<std::size_t>(e) >= E) {
+      throw std::invalid_argument("make_path_dag: edge id out of range");
+    }
+    const auto u = esrc[static_cast<std::size_t>(e)];
+    const auto v = edst[static_cast<std::size_t>(e)];
+    if (i == 0) {
+      nodes.push_back(u);
+      seen[static_cast<std::size_t>(u)] = 1;
+    } else if (u != nodes.back()) {
+      throw std::invalid_argument(
+          "make_path_dag: edges are not contiguous (edge source does not match the "
+          "previous edge's destination)");
+    }
+    if (seen[static_cast<std::size_t>(v)]) {
+      throw std::invalid_argument("make_path_dag: path revisits a node (must be a simple path)");
+    }
+    seen[static_cast<std::size_t>(v)] = 1;
+    nodes.push_back(v);
+  }
+  return path_to_pred_dag(g, nodes, edges).second;
+}
+
 std::vector<std::vector<std::pair<NodeId, std::vector<EdgeId>>>>
 resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
                  bool split_parallel_edges,
@@ -49,9 +120,14 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
   struct Frame { NodeId node; std::size_t idx; std::vector<std::pair<NodeId, std::vector<EdgeId>>> groups; };
   std::vector<Frame> stack;
   stack.reserve(16);
+  // on_path[v] marks nodes on the current DFS stack. A well-formed PredDAG is
+  // acyclic, but zero-cost edges (or a caller-supplied DAG) can contain cycles;
+  // without this guard the enumeration below would walk them forever.
+  std::vector<char> on_path(dag.parent_offsets.size() > 0 ? dag.parent_offsets.size() - 1 : 0, 0);
   // start from dst
   Frame start; start.node = dst; start.idx = 0; group_parents(dag, dst, start.groups);
   stack.push_back(std::move(start));
+  on_path[static_cast<std::size_t>(dst)] = 1;
 
   std::vector<std::pair<NodeId, std::vector<EdgeId>>> current; // reversed path accum
 
@@ -59,11 +135,14 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
     auto& top = stack.back();
     if (top.idx >= top.groups.size()) {
       // backtrack
+      on_path[static_cast<std::size_t>(top.node)] = 0;
       stack.pop_back();
       if (!current.empty()) current.pop_back();
       continue;
     }
     auto [parent, edges] = top.groups[top.idx++];
+    // Skip parents already on the current path (cycle in the input DAG).
+    if (parent != src && on_path[static_cast<std::size_t>(parent)]) continue;
     current.emplace_back(top.node, std::move(edges));
     if (parent == src) {
       // reached src; build forward segments: for each hop prev->next store (next, edges)
@@ -141,6 +220,7 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
       current.pop_back();
       continue;
     }
+    on_path[static_cast<std::size_t>(parent)] = 1;
     stack.push_back(std::move(next));
   }
 
@@ -160,17 +240,6 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
       * Node-level tie-breaking for equal-cost nodes (prefers higher bottleneck capacity)
     - Early exit when specific destination is reached
 */
-#include "netgraph/core/shortest_paths.hpp"
-#include <cmath>
-#include <cstdint>
-#include <limits>
-#include <stdexcept>
-#include <queue>
-#include <tuple>
-#include <utility>
-#include <vector>
-#include "netgraph/core/constants.hpp"
-
 namespace netgraph::core {
 
 namespace {
@@ -205,11 +274,25 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
     min_residual_to_node[static_cast<std::size_t>(src)] = std::numeric_limits<Cap>::max();
   }
 
-  // pred_lists[v] stores predecessors for node v as (parent_node, [edges_from_parent]).
-  // In multipath mode, multiple parents with equal-cost paths are retained.
-  std::vector<std::vector<std::pair<NodeId, std::vector<EdgeId>>>> pred_lists(static_cast<std::size_t>(N));
+  // Predecessor storage as a flat intrusive list: pred_head/pred_tail index into
+  // the ent_* arrays, whose entries are (parent, via_edge) pairs appended in
+  // discovery order. This avoids the per-node/per-group vector allocations that
+  // previously dominated SPF runtime (~70% of samples in malloc/free).
+  std::vector<std::int32_t> pred_head(static_cast<std::size_t>(N), -1);
+  std::vector<std::int32_t> pred_tail(static_cast<std::size_t>(N), -1);
+  std::vector<NodeId>  ent_parent; ent_parent.reserve(static_cast<std::size_t>(g.num_edges()));
+  std::vector<EdgeId>  ent_edge;   ent_edge.reserve(static_cast<std::size_t>(g.num_edges()));
+  std::vector<std::int32_t> ent_next; ent_next.reserve(static_cast<std::size_t>(g.num_edges()));
+  auto pred_clear = [&](std::size_t v){ pred_head[v] = -1; pred_tail[v] = -1; };
+  auto pred_append = [&](std::size_t v, NodeId p, EdgeId e){
+    const auto idx = static_cast<std::int32_t>(ent_parent.size());
+    ent_parent.push_back(p); ent_edge.push_back(e); ent_next.push_back(-1);
+    if (pred_head[v] < 0) { pred_head[v] = idx; }
+    else { ent_next[static_cast<std::size_t>(pred_tail[v])] = idx; }
+    pred_tail[v] = idx;
+  };
   if (src_allowed) {
-    pred_lists[static_cast<std::size_t>(src)] = {};
+    // source has no predecessors
   } else {
     // Source is out of range or masked out: no traversal, return empty DAG.
     PredDAG dag;
@@ -234,6 +317,13 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
   const bool require_cap = selection.require_capacity || has_residual;
   const bool multipath = multipath_arg;
 
+  // settled[v] is set once v is popped at its final distance. Equal-cost
+  // predecessor updates are only accepted while v is unsettled: with positive
+  // edge costs every equal-cost parent is discovered before v settles, and with
+  // zero-cost edges this guard is what keeps the PredDAG acyclic (previously a
+  // zero-cost pair u<->v recorded each node as the other's parent).
+  std::vector<char> settled(static_cast<std::size_t>(N), 0);
+  std::vector<EdgeId> sel_buf; sel_buf.reserve(16);
   while (!pq.empty()) {
     // Extract min-cost node from priority queue.
     // Structured binding: auto [d_u, neg_res_u, u] = ... destructures the tuple.
@@ -244,6 +334,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
     // Skip residual-stale entries in single-path mode (same cost but outdated residual).
     if (!multipath && d_u == dist[static_cast<std::size_t>(u)] &&
         -neg_res_u < min_residual_to_node[static_cast<std::size_t>(u)] - kEpsilon) continue;
+    settled[static_cast<std::size_t>(u)] = 1;
 
     // Early exit optimization: record when we first reach destination.
     if (early_exit && u == dst_node && !have_best_dst) { best_dst_cost = d_u; have_best_dst = true; }
@@ -266,7 +357,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
 
       // Select best edge(s) from u to v according to policy.
       Cost min_edge_cost = std::numeric_limits<Cost>::max();
-      std::vector<EdgeId> selected_edges;
+      std::vector<EdgeId>& selected_edges = sel_buf; selected_edges.clear();
       double best_rem_for_min_cost = -1.0;
       std::size_t j = i;
       int best_edge_id = -1;
@@ -333,17 +424,18 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
 
         // Relaxation: found shorter path to v, or equal-cost path with better capacity (single-path mode).
         if (new_cost < dist[v_idx] ||
-            (!multipath && new_cost == dist[v_idx] &&
+            (!multipath && new_cost == dist[v_idx] && !settled[v_idx] &&
              path_residual > min_residual_to_node[v_idx] + kEpsilon)) {
           dist[v_idx] = new_cost;
           min_residual_to_node[v_idx] = path_residual;
-          pred_lists[v_idx].clear();
-          pred_lists[v_idx].push_back({u, std::move(selected_edges)});
+          pred_clear(v_idx);
+          for (auto sel_e : selected_edges) pred_append(v_idx, u, sel_e);
           pq.emplace(new_cost, -path_residual, v);  // Negate residual for max-heap behavior
         }
-        // Multipath: found equal-cost alternative path to v.
-        else if (multipath && new_cost == dist[v_idx]) {
-          pred_lists[v_idx].push_back({u, std::move(selected_edges)});
+        // Multipath: found equal-cost alternative path to v (only while v is
+        // unsettled; see the settled[] comment above).
+        else if (multipath && new_cost == dist[v_idx] && !settled[v_idx]) {
+          for (auto sel_e : selected_edges) pred_append(v_idx, u, sel_e);
           // Note: In multipath mode, we don't update min_residual_to_node because
           // we're collecting all equal-cost paths, not choosing based on residual.
         }
@@ -353,7 +445,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
     if (have_best_dst) { if (pq.empty() || std::get<0>(pq.top()) > best_dst_cost) break; }
   }
 
-  // Convert pred_lists to PredDAG using CSR-like layout.
+  // Convert flat predecessor lists to PredDAG using CSR-like layout.
   // parent_offsets[v]:parent_offsets[v+1] gives the range in parents/via_edges for node v.
   PredDAG dag;
   dag.parent_offsets.assign(static_cast<std::size_t>(N+1), 0);
@@ -361,7 +453,7 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
   // Step 1: Count total predecessor entries per node.
   for (std::int32_t v=0; v<N; ++v) {
     std::size_t c=0;
-    for (auto const& pe : pred_lists[static_cast<std::size_t>(v)]) c += pe.second.size();
+    for (std::int32_t i = pred_head[static_cast<std::size_t>(v)]; i >= 0; i = ent_next[static_cast<std::size_t>(i)]) ++c;
     dag.parent_offsets[static_cast<std::size_t>(v+1)] = static_cast<std::int32_t>(c);
   }
 
@@ -375,13 +467,10 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
   for (std::int32_t v=0; v<N; ++v) {
     auto base = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v)]);
     std::size_t k = 0;
-    for (auto const& pe : pred_lists[static_cast<std::size_t>(v)]) {
-      NodeId p = pe.first;
-      for (auto e : pe.second) {
-        dag.parents[base+k] = p;
-        dag.via_edges[base+k] = e;
-        ++k;
-      }
+    for (std::int32_t i = pred_head[static_cast<std::size_t>(v)]; i >= 0; i = ent_next[static_cast<std::size_t>(i)]) {
+      dag.parents[base+k] = ent_parent[static_cast<std::size_t>(i)];
+      dag.via_edges[base+k] = ent_edge[static_cast<std::size_t>(i)];
+      ++k;
     }
   }
   return {std::move(dist), std::move(dag)};

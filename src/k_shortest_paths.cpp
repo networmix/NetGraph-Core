@@ -7,7 +7,6 @@
 #include "netgraph/core/k_shortest_paths.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -35,6 +34,13 @@ struct Candidate {
   std::vector<EdgeId> edges;
   bool operator>(const Candidate& o) const { return cost > o.cost; }
 };
+
+struct VectorHash { size_t operator()(const std::vector<EdgeId>& v) const noexcept {
+  size_t h = 1469598103934665603ull;
+  for (auto x : v) { h ^= static_cast<size_t>(x + 0x9e3779b97f4a7c15ull); h *= 1099511628211ull; }
+  return h;
+}};
+using PathSet = std::unordered_set<std::vector<EdgeId>, VectorHash>;
 
 
 static std::optional<Path> dijkstra_single(const StrictMultiDiGraph& g, NodeId s, NodeId t,
@@ -107,9 +113,15 @@ static std::optional<Path> dijkstra_single(const StrictMultiDiGraph& g, NodeId s
   return p;
 }
 
-// Enumerate all shortest spur paths from spur->t using PredDAG produced by
-// shortest_paths(spur, ..., multipath=true). Returns a list of (nodes, edges)
-// sequences in forward order.
+// Enumerate shortest spur paths from spur->t using the PredDAG produced by
+// shortest_paths(spur, ..., multipath=true), in deterministic DFS order.
+// All spur paths in the DAG share the same (shortest) cost, and at most
+// max_count candidates can ever be accepted downstream, so enumeration stops
+// after emitting max_count paths. Without the bound this walk materializes
+// every equal-cost path — exponential in ECMP fan-out (2^k paths on a k-stage
+// ladder). When dedup is supplied (unique mode), paths whose full edge
+// sequence (prefix + spur segment) was already visited are skipped without
+// consuming the bound, so the cap cannot starve fresh candidates.
 static void dfs_spur_paths(NodeId spur, NodeId v,
                            const std::vector<std::int32_t>& off,
                            const std::vector<std::int32_t>& parents,
@@ -117,7 +129,11 @@ static void dfs_spur_paths(NodeId spur, NodeId v,
                            std::vector<std::int32_t>& nodes_rev,
                            std::vector<EdgeId>& edges_rev,
                            std::vector<std::vector<std::int32_t>>& out_nodes,
-                           std::vector<std::vector<EdgeId>>& out_edges) {
+                           std::vector<std::vector<EdgeId>>& out_edges,
+                           std::size_t max_count,
+                           const std::vector<EdgeId>* prefix_edges,
+                           const PathSet* dedup) {
+  if (out_nodes.size() >= max_count) return;
   if (v == spur) {
     // build forward
     std::vector<std::int32_t> n; n.reserve(nodes_rev.size() + 1);
@@ -125,6 +141,13 @@ static void dfs_spur_paths(NodeId spur, NodeId v,
     for (auto it = nodes_rev.rbegin(); it != nodes_rev.rend(); ++it) n.push_back(*it);
     std::vector<EdgeId> e; e.reserve(edges_rev.size());
     for (auto it = edges_rev.rbegin(); it != edges_rev.rend(); ++it) e.push_back(*it);
+    if (dedup != nullptr) {
+      std::vector<EdgeId> full;
+      full.reserve(prefix_edges->size() + e.size());
+      full.insert(full.end(), prefix_edges->begin(), prefix_edges->end());
+      full.insert(full.end(), e.begin(), e.end());
+      if (dedup->find(full) != dedup->end()) return;  // already visited; free the slot
+    }
     out_nodes.push_back(std::move(n));
     out_edges.push_back(std::move(e));
     return;
@@ -132,11 +155,13 @@ static void dfs_spur_paths(NodeId spur, NodeId v,
   auto s = off[static_cast<std::size_t>(v)];
   auto e = off[static_cast<std::size_t>(v) + 1];
   for (std::int32_t i = s; i < e; ++i) {
+    if (out_nodes.size() >= max_count) return;
     auto u = parents[static_cast<std::size_t>(i)];
     auto eid = via[static_cast<std::size_t>(i)];
     edges_rev.push_back(static_cast<EdgeId>(eid));
     nodes_rev.push_back(v);
-    dfs_spur_paths(spur, u, off, parents, via, nodes_rev, edges_rev, out_nodes, out_edges);
+    dfs_spur_paths(spur, u, off, parents, via, nodes_rev, edges_rev, out_nodes, out_edges,
+                   max_count, prefix_edges, dedup);
     nodes_rev.pop_back();
     edges_rev.pop_back();
   }
@@ -184,33 +209,17 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
     max_cost = best_cost * (*max_cost_factor);
   }
   if (p0->cost <= max_cost) paths.push_back(*p0);
+  // A max_cost_factor below 1.0 puts the ceiling under the shortest path itself, so
+  // nothing was admitted. Return now: the k > 1 loop below opens with paths.back(),
+  // which is undefined behaviour on an empty vector. (The k == 1 branch would have
+  // masked this, so the guard must sit ahead of it.)
+  if (paths.empty()) return {};
   if (k == 1) {
     // Convert and return
     std::vector<std::pair<std::vector<Cost>, PredDAG>> items;
     items.reserve(paths.size());
-    auto cost_view = g.cost_view();
     for (auto const& P : paths) {
-      std::vector<Cost> dist(static_cast<std::size_t>(g.num_nodes()), std::numeric_limits<Cost>::max());
-      PredDAG dag;
-      dag.parent_offsets.assign(static_cast<std::size_t>(g.num_nodes() + 1), 0);
-      // Fill distances along path and one-parent predecessors
-      if (!P.nodes.empty()) {
-        dist[static_cast<std::size_t>(P.nodes.front())] = 0;
-        for (std::size_t i = 1; i < P.nodes.size(); ++i) {
-          auto u = P.nodes[i-1]; auto v = P.nodes[i]; auto e = P.edges[i-1];
-          dist[static_cast<std::size_t>(v)] = dist[static_cast<std::size_t>(u)] + static_cast<Cost>(cost_view[static_cast<std::size_t>(e)]);
-          dag.parent_offsets[static_cast<std::size_t>(v+1)] = 1;
-        }
-        for (std::size_t v = 1; v < dag.parent_offsets.size(); ++v) dag.parent_offsets[v] += dag.parent_offsets[v-1];
-        dag.parents.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
-        dag.via_edges.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
-        for (std::size_t i = 1; i < P.nodes.size(); ++i) {
-          auto v = P.nodes[i];
-          auto base = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v)]);
-          dag.parents[base] = P.nodes[i-1]; dag.via_edges[base] = P.edges[i-1];
-        }
-      }
-      items.emplace_back(std::move(dist), std::move(dag));
+      items.push_back(path_to_pred_dag(g, P.nodes, P.edges));
     }
     return items;
   }
@@ -219,12 +228,7 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
   auto cost_view = g.cost_view();
   std::priority_queue<Candidate, std::vector<Candidate>, std::greater<Candidate>> B;
   auto path_signature = [&](const std::vector<EdgeId>& edges){ return edges; };
-  struct VectorHash { size_t operator()(const std::vector<EdgeId>& v) const noexcept {
-    size_t h = 1469598103934665603ull;
-    for (auto x : v) { h ^= static_cast<size_t>(x + 0x9e3779b97f4a7c15ull); h *= 1099511628211ull; }
-    return h;
-  }};
-  std::unordered_set<std::vector<EdgeId>, VectorHash> visited;
+  PathSet visited;
   visited.insert(path_signature(p0->edges));
 
   for (int i = 1; i < k; ++i) {
@@ -282,12 +286,23 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
           dag_spur.parent_offsets[static_cast<std::size_t>(dst)] == dag_spur.parent_offsets[static_cast<std::size_t>(dst + 1)]) {
         continue;
       }
+      // Every spur path in the DAG costs dist_spur[dst]; skip the whole family
+      // if the resulting candidates would exceed the cost ceiling.
+      if (static_cast<double>(prefix_cost[j]) + static_cast<double>(dist_spur[static_cast<std::size_t>(dst)]) > max_cost) {
+        continue;
+      }
+      // At most (k - accepted) further paths can ever be accepted, so that many
+      // fresh candidates from this spur family suffice.
+      const std::size_t want = static_cast<std::size_t>(k) - paths.size();
+      std::vector<EdgeId> prefix_edges(last.edges.begin(),
+                                       last.edges.begin() + static_cast<std::ptrdiff_t>(j));
       std::vector<std::int32_t> nodes_rev;
       std::vector<std::int32_t> edges_rev;
       std::vector<std::vector<std::int32_t>> spur_nodes_list;
       std::vector<std::vector<std::int32_t>> spur_edges_list;
       dfs_spur_paths(spur_node, dst, dag_spur.parent_offsets, dag_spur.parents, dag_spur.via_edges,
-                     nodes_rev, edges_rev, spur_nodes_list, spur_edges_list);
+                     nodes_rev, edges_rev, spur_nodes_list, spur_edges_list,
+                     want, &prefix_edges, unique ? &visited : nullptr);
       for (std::size_t si = 0; si < spur_nodes_list.size(); ++si) {
         const auto& spur_nodes = spur_nodes_list[si];
         const auto& spur_edges = spur_edges_list[si];
@@ -326,26 +341,7 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
   std::vector<std::pair<std::vector<Cost>, PredDAG>> items;
   items.reserve(paths.size());
   for (auto const& P : paths) {
-    std::vector<Cost> dist(static_cast<std::size_t>(g.num_nodes()), std::numeric_limits<Cost>::max());
-    PredDAG dag;
-    dag.parent_offsets.assign(static_cast<std::size_t>(g.num_nodes() + 1), 0);
-    if (!P.nodes.empty()) {
-      dist[static_cast<std::size_t>(P.nodes.front())] = 0;
-      for (std::size_t i = 1; i < P.nodes.size(); ++i) {
-        auto u = P.nodes[i-1]; auto v = P.nodes[i]; auto e = P.edges[i-1];
-        dist[static_cast<std::size_t>(v)] = dist[static_cast<std::size_t>(u)] + static_cast<Cost>(cost_view[static_cast<std::size_t>(e)]);
-        dag.parent_offsets[static_cast<std::size_t>(v+1)] = 1;
-      }
-      for (std::size_t v = 1; v < dag.parent_offsets.size(); ++v) dag.parent_offsets[v] += dag.parent_offsets[v-1];
-      dag.parents.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
-      dag.via_edges.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
-      for (std::size_t i = 1; i < P.nodes.size(); ++i) {
-        auto v = P.nodes[i];
-        auto base = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v)]);
-        dag.parents[base] = P.nodes[i-1]; dag.via_edges[base] = P.edges[i-1];
-      }
-    }
-    items.emplace_back(std::move(dist), std::move(dag));
+    items.push_back(path_to_pred_dag(g, P.nodes, P.edges));
   }
   return items;
 }
