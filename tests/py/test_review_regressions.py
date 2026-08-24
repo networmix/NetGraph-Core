@@ -518,13 +518,18 @@ class TestFlowPolicyMaxPathCostFactor:
     relative bound until a best cost exists and drops it when the product would not
     fit. Neither branch was exercised by any test.
 
-    Scope: these are *coverage* tests, not detectors of the original UB. They were run
-    against 0.7.2 (pre-fix) and pass there too, because an out-of-range float->int
-    conversion is undefined rather than reliably wrong -- in practice it saturates to
-    something that still admits the path. What discriminates fixed from unfixed here is
-    UBSan (`make sanitize-test`), and these tests are what gives it something to
-    instrument on this path. Their standalone value is guarding the *functional*
-    behaviour of the bound during future refactors.
+    Scope: these are *coverage* tests, not detectors of the original UB. They pass
+    against 0.7.2 (pre-fix) too, because an out-of-range float->int conversion is
+    undefined rather than reliably wrong -- in practice it saturates to something that
+    still admits the path. They also cannot reach the sentinel branch at all: a
+    reachable destination updates `best_path_cost_` (flow_policy.cpp:135) before the
+    gate runs. Their value is guarding the *functional* behaviour of the bound.
+
+    Detection of the UB itself lives in C++, in
+    `FlowPolicyCostBounds.MaxPathCostFactor_*` -- `make sanitize-test` builds with
+    sanitizers but runs `ctest`, so it never executes this Python suite. Those tests
+    use an unreachable destination to keep the sentinel live, and fail against the
+    pre-fix conversion.
     """
 
     @staticmethod

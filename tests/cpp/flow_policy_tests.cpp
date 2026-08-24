@@ -434,3 +434,74 @@ TEST(FlowPolicyStatic, ValidationRejectsForeignAndDisconnectedBundles) {
     EXPECT_THROW(policy.set_static_paths(0, 2, std::move(b)), std::invalid_argument);
   }
 }
+
+// The max_path_cost_factor gate multiplies best_path_cost_ by the factor and casts
+// the product back to Cost. best_path_cost_ is only updated when dst is reachable
+// (flow_policy.cpp:135), so an UNREACHABLE destination is the one way to reach the
+// gate while it still holds the INT64_MAX "no best path yet" sentinel. Before 0.8.0
+// the multiply-and-cast ran unconditionally there, and INT64_MAX * factor is far
+// outside the int64 range -- undefined behavior.
+//
+// No assertion can distinguish fixed from unfixed here: both return "no path" for an
+// unreachable destination. The check is the UB itself, so this test exists to give
+// UBSan something to instrument. It only has teeth under `make sanitize-test`, which
+// runs ctest -- which is why this lives in C++ and not in the Python suite.
+TEST(FlowPolicyCostBounds, MaxPathCostFactor_UnreachableDst_KeepsSentinelOutOfTheCast) {
+  // 0 -> 1, plus an isolated node 2 that cannot be reached from 0.
+  std::vector<std::int32_t> src{0}, dst{1};
+  std::vector<double> cap{1.0};
+  std::vector<std::int64_t> cost{7};
+  auto g = StrictMultiDiGraph::from_arrays(3, src, dst, cap, cost);
+  FlowGraph fg(g);
+
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true;
+  sel.tie_break = EdgeTieBreak::Deterministic;
+  auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be);
+  auto gh = algs->build_graph(g);
+  ExecutionContext ctx(algs, gh);
+
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::Proportional;
+  cfg.selection = sel;
+  cfg.require_capacity = true;
+  cfg.max_flow_count = 1;
+  cfg.min_flow_count = 1;  // seeding is what calls get_path_bundle
+  cfg.max_path_cost_factor = 2.0;
+  FlowPolicy policy(ctx, cfg);
+
+  // Reaches the gate with best_path_cost_ == INT64_MAX. Nothing can be placed.
+  auto res = policy.place_demand(fg, /*src=*/0, /*dst=*/2, /*flowClass=*/0, /*volume=*/1.0);
+  EXPECT_NEAR(res.first, 0.0, 1e-9);
+  EXPECT_NEAR(res.second, 1.0, 1e-9);
+}
+
+// A very large (but legal) best cost times a large factor overflows the int64 range
+// too. The bound must be dropped rather than wrapped: a wrapped negative bound would
+// reject the shortest path itself, so a successful placement is what separates the
+// guard from the bug. Unlike the sentinel case above, this one IS assertable.
+TEST(FlowPolicyCostBounds, MaxPathCostFactor_HugeProduct_DropsBoundInsteadOfWrapping) {
+  const std::int64_t big = std::int64_t{1} << 60;  // total stays below the 2^62 ceiling
+  std::vector<std::int32_t> src{0, 1}, dst{1, 2};
+  std::vector<double> cap{1.0, 1.0};
+  std::vector<std::int64_t> cost{big, big};
+  auto g = StrictMultiDiGraph::from_arrays(3, src, dst, cap, cost);
+  FlowGraph fg(g);
+
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true;
+  sel.tie_break = EdgeTieBreak::Deterministic;
+  auto be = make_cpu_backend(); auto algs = std::make_shared<Algorithms>(be);
+  auto gh = algs->build_graph(g);
+  ExecutionContext ctx(algs, gh);
+
+  FlowPolicyConfig cfg;
+  cfg.flow_placement = FlowPlacement::Proportional;
+  cfg.selection = sel;
+  cfg.require_capacity = true;
+  cfg.max_flow_count = 1;
+  cfg.min_flow_count = 1;
+  cfg.max_path_cost_factor = 1e9;
+  FlowPolicy policy(ctx, cfg);
+
+  auto res = policy.place_demand(fg, /*src=*/0, /*dst=*/2, /*flowClass=*/0, /*volume=*/1.0);
+  EXPECT_NEAR(res.first, 1.0, 1e-9);
+}
