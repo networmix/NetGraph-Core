@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Flow Policy**: `get_path_bundle` now memoizes raw SPF results keyed by the exact inputs that can vary per call (src, dst, residual content, residual-awareness). EqualBalanced placement and rebalance rounds re-request bundles against residual state that repeats -- 94% of SPF calls in a measured place/rebalance cycle were exact input repeats, largely remove+place round-trips restoring identical bytes -- and those calls are now elided. Matching is exact (FlowGraph state stamp fast path, full residual `memcmp` content path), so all outputs are bit-identical; a corpus hash over max-flow, SPF, KSP and policy outputs is unchanged. Measured on place/rebalance churn: 31-70% faster; single EqualBalanced placement: 6-26% faster; Proportional mode skips the memo (it measured 0% repeat inputs) and is unaffected. `FlowGraph` gained an internal monotonic state stamp to support this; no public API change.
+
 ## [0.8.0] - 2026-08-24
 
 ### Added
