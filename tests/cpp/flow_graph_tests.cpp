@@ -264,3 +264,49 @@ TEST(FlowGraph, LedgerMicroFlows_RemovalRestoresResidual) {
     EXPECT_NEAR(res_after[i], capv[i], 1e-9) << "Residual not restored at edge " << i;
   }
 }
+
+// state_stamp() uids must be unique per reachable instance. A copy that shared
+// the source's uid could diverge by the same number of mutations and then
+// present an equal stamp over different residual content, which would let
+// FlowPolicy's SPF memo fast path serve a DAG cached for the other object.
+// Moved-from FlowGraphs remain valid and mutable, so moves must not share the
+// uid either.
+TEST(FlowGraphStamp, CopiesAndMovesGetFreshUids) {
+  auto g = make_square_graph(1);
+  FlowGraph a(g);
+  const auto uid_a = a.state_stamp().uid;
+
+  FlowGraph b(a);                       // copy ctor
+  EXPECT_NE(b.state_stamp().uid, uid_a);
+
+  FlowGraph c(g);
+  c = a;                                // copy assign
+  EXPECT_NE(c.state_stamp().uid, uid_a);
+  EXPECT_NE(c.state_stamp().uid, b.state_stamp().uid);
+
+  FlowGraph d(std::move(b));            // move ctor
+  EXPECT_NE(d.state_stamp().uid, uid_a);
+
+  FlowGraph e(g);
+  e = std::move(c);                     // move assign
+  EXPECT_NE(e.state_stamp().uid, uid_a);
+}
+
+// The end-to-end failure the uid rule prevents: two copies mutated the same
+// NUMBER of times (equal versions) but with different content must never
+// satisfy the stamp fast path. Equal-version divergence is exactly the case a
+// shared uid would get wrong.
+TEST(FlowGraphStamp, EqualVersionDivergentCopiesCompareUnequal) {
+  auto g = make_square_graph(1);  // 0->1->2 cheap, 0->3->2 expensive
+  FlowGraph a(g);
+  FlowGraph b(a);
+
+  // One mutation each (same version count), different targets.
+  PredDAG cheap = make_path_dag(g, std::array<EdgeId, 2>{0, 1});
+  PredDAG dear  = make_path_dag(g, std::array<EdgeId, 2>{2, 3});
+  FlowIndex idx{0, 2, 0, 0};
+  (void)a.place(idx, 0, 2, cheap, 0.5, FlowPlacement::Proportional);
+  (void)b.place(idx, 0, 2, dear, 0.5, FlowPlacement::Proportional);
+
+  EXPECT_FALSE(a.state_stamp() == b.state_stamp());
+}

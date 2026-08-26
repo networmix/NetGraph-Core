@@ -21,6 +21,17 @@ public:
   explicit FlowGraph(const StrictMultiDiGraph& g);
   ~FlowGraph() noexcept = default;
 
+  // Copies and moves take a FRESH uid (and version 0). uid must be unique per
+  // reachable instance: a shared uid would let two objects that diverge after
+  // copying present equal StateStamps over different residual content, and
+  // FlowPolicy's memo fast path would then serve a DAG cached for the other
+  // object's state. Moved-from objects stay valid and mutable, so moves must
+  // not share the uid either; the one-time cache miss this costs is nothing.
+  FlowGraph(const FlowGraph& other);
+  FlowGraph& operator=(const FlowGraph& other);
+  FlowGraph(FlowGraph&& other) noexcept;
+  FlowGraph& operator=(FlowGraph&& other) noexcept;
+
   // Views
   [[nodiscard]] std::span<const Cap> capacity_view() const noexcept { return fs_.capacity_view(); }
   [[nodiscard]] std::span<const Cap> residual_view() const noexcept { return fs_.residual_view(); }

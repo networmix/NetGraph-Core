@@ -9,15 +9,55 @@
 
 #include <algorithm>
 #include <atomic>
+#include <utility>
 
 namespace netgraph::core {
 
-FlowGraph::FlowGraph(const StrictMultiDiGraph& g)
-  : g_(&g), fs_(g) {
-  // Process-unique instance id for state_stamp(); never reused, so a stamp
-  // taken from a destroyed FlowGraph can never match a later instance.
+namespace {
+// Process-unique instance ids for state_stamp(); never reused, so a stamp
+// taken from one FlowGraph can never match a different (or later) instance.
+std::uint64_t fresh_flow_graph_uid() noexcept {
   static std::atomic<std::uint64_t> next_uid{1};
-  uid_ = next_uid.fetch_add(1, std::memory_order_relaxed);
+  return next_uid.fetch_add(1, std::memory_order_relaxed);
+}
+} // namespace
+
+FlowGraph::FlowGraph(const StrictMultiDiGraph& g)
+  : g_(&g), fs_(g), uid_(fresh_flow_graph_uid()) {
+}
+
+// See the header: copies and moves must not share the source's uid, or two
+// diverging objects could present equal stamps over different residuals.
+FlowGraph::FlowGraph(const FlowGraph& other)
+  : g_(other.g_), fs_(other.fs_), ledger_(other.ledger_),
+    uid_(fresh_flow_graph_uid()), version_(0) {
+}
+
+FlowGraph& FlowGraph::operator=(const FlowGraph& other) {
+  if (this != &other) {
+    g_ = other.g_;
+    fs_ = other.fs_;
+    ledger_ = other.ledger_;
+    uid_ = fresh_flow_graph_uid();
+    version_ = 0;
+  }
+  return *this;
+}
+
+FlowGraph::FlowGraph(FlowGraph&& other) noexcept
+  : g_(other.g_), fs_(std::move(other.fs_)), ledger_(std::move(other.ledger_)),
+    uid_(fresh_flow_graph_uid()), version_(0) {
+}
+
+FlowGraph& FlowGraph::operator=(FlowGraph&& other) noexcept {
+  if (this != &other) {
+    g_ = other.g_;
+    fs_ = std::move(other.fs_);
+    ledger_ = std::move(other.ledger_);
+    uid_ = fresh_flow_graph_uid();
+    version_ = 0;
+  }
+  return *this;
 }
 
 Flow FlowGraph::place(const FlowIndex& idx, NodeId src, NodeId dst,
