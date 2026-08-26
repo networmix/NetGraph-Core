@@ -8,17 +8,23 @@
 #include "netgraph/core/constants.hpp"
 
 #include <algorithm>
+#include <atomic>
 
 namespace netgraph::core {
 
 FlowGraph::FlowGraph(const StrictMultiDiGraph& g)
   : g_(&g), fs_(g) {
+  // Process-unique instance id for state_stamp(); never reused, so a stamp
+  // taken from a destroyed FlowGraph can never match a later instance.
+  static std::atomic<std::uint64_t> next_uid{1};
+  uid_ = next_uid.fetch_add(1, std::memory_order_relaxed);
 }
 
 Flow FlowGraph::place(const FlowIndex& idx, NodeId src, NodeId dst,
                       const PredDAG& dag, Flow amount,
                       FlowPlacement placement) {
   if (amount <= 0.0) return 0.0;
+  ++version_;  // residuals may change from here on
 
   // Get or create ledger entry for this flow. The ledger tracks per-edge
   // cumulative amounts contributed by this flow (not just last placement).
@@ -57,6 +63,7 @@ Flow FlowGraph::place(const FlowIndex& idx, NodeId src, NodeId dst,
 void FlowGraph::remove(const FlowIndex& idx) {
   auto it = ledger_.find(idx);
   if (it == ledger_.end()) return;  // flow not found
+  ++version_;
   const auto& deltas = it->second;
   // Revert this flow's allocations from the FlowState by subtracting them.
   if (!deltas.empty()) {
@@ -73,6 +80,7 @@ void FlowGraph::remove_by_class(FlowClass flowClass) {
 }
 
 void FlowGraph::reset() noexcept {
+  ++version_;
   fs_.reset();
   ledger_.clear();
 }

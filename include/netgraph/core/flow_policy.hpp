@@ -209,6 +209,36 @@ private:
   Cost best_path_cost_ { std::numeric_limits<Cost>::max() };
   FlowId next_flow_id_ { 0 };
 
+  // Memo of recent raw SPF results computed by get_path_bundle(), used only in
+  // EqualBalanced mode. SPF is a pure function of (graph, selection, multipath,
+  // node_mask, src, dst, residual, edge_mask); in EB mode everything except
+  // (src, dst, residual, min_flow) is fixed for the lifetime of the policy (the
+  // min_flow-derived edge mask is Proportional-only), so those four ARE the key.
+  // EB placement and rebalance rounds re-request bundles against residual
+  // content that repeats -- 94% of SPF calls in a measured place/rebalance
+  // cycle were exact input repeats, largely remove+place round-trips that
+  // restore identical bytes -- and the memo elides those calls without changing
+  // any output. Matching is exact: a (uid, version) StateStamp equality is the
+  // fast path (unchanged FlowGraph implies unchanged content), with a full
+  // residual memcmp as the content path (catches the round-trips). Proportional
+  // mode measured 0% repeats, so it skips the memo and pays nothing. Cost gates
+  // and best_path_cost_ updates still run on every call, hit or miss: they
+  // depend on mutable policy state.
+  struct SpfMemoEntry {
+    NodeId src = -1, dst = -1;
+    bool with_residual = false;
+    FlowGraph::StateStamp stamp {0, 0};
+    std::vector<Cap> residual;  // key copy; empty when SPF ran residual-blind
+    bool has_min_flow = false;  // toggles require_residual; the value is Proportional-only
+    PredDAG dag;
+    Cost dst_cost = 0;
+  };
+  // MRU order: front = most recent. Entry count adapts to graph size so the
+  // memo stays under ~512 KiB per policy regardless of edge count.
+  static constexpr std::size_t kSpfMemoMaxEntries = 24;
+  static constexpr std::size_t kSpfMemoMaxBytes = 512 * 1024;
+  std::vector<SpfMemoEntry> spf_memo_;
+
   // Static paths (optional): usable (mask-pruned) bundles, one flow per bundle.
   struct StaticBundle {
     PredDAG dag;   // pruned to mask-surviving entries

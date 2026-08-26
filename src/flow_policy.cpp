@@ -19,6 +19,7 @@
 #include "netgraph/core/profiling.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <deque>
 #include <limits>
 #include <optional>
@@ -127,11 +128,71 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   opts.residual = require_residual ? residual : std::span<const Cap>();
   opts.node_mask = node_mask_;  // Use user-provided node mask
   opts.edge_mask = final_edge_mask;
-  auto res = ctx_.algorithms->spf(ctx_.graph, src, opts);
-  const auto& dist = res.first;
-  PredDAG dag = std::move(res.second);
-  if (dst < 0 || static_cast<std::size_t>(dst) >= dist.size()) return std::nullopt;
-  Cost dst_cost = dist[static_cast<std::size_t>(dst)];
+  // dist.size() == num_nodes() for every SPF result, so the range check does
+  // not depend on the SPF output; hoisting it lets the memo skip the call.
+  if (dst < 0 || dst >= ctx_.graph.graph->num_nodes()) return std::nullopt;
+
+  PredDAG dag;
+  Cost dst_cost;
+  const bool use_memo = (flow_placement_ == FlowPlacement::EqualBalanced);
+  const auto stamp = fg.state_stamp();
+  const bool with_residual = !opts.residual.empty();
+  std::size_t hit_idx = spf_memo_.size();
+  if (use_memo) {
+    for (std::size_t i = 0; i < spf_memo_.size(); ++i) {
+      const auto& e = spf_memo_[i];
+      // min_flow's VALUE never reaches SPF in EB mode (the value-derived edge
+      // mask is Proportional-only); only has_value() matters, via
+      // require_residual. Keying on the value caused misses whenever rebalance
+      // rounds adjusted the per-flow target against unchanged residuals.
+      if (e.src != src || e.dst != dst || e.with_residual != with_residual ||
+          e.has_min_flow != min_flow.has_value()) {
+        continue;
+      }
+      // Fast path: same FlowGraph, no mutation since the entry was stored.
+      // Content path: byte-identical residuals (rebalance remove+place
+      // round-trips restore content while the version keeps advancing).
+      const bool same = !with_residual || e.stamp == stamp ||
+          (e.residual.size() == opts.residual.size() &&
+           std::memcmp(e.residual.data(), opts.residual.data(),
+                       opts.residual.size() * sizeof(Cap)) == 0);
+      if (same) { hit_idx = i; break; }
+    }
+  }
+  if (hit_idx < spf_memo_.size()) {
+    dag = spf_memo_[hit_idx].dag;
+    dst_cost = spf_memo_[hit_idx].dst_cost;
+    // MRU: move the hit to the front so hot entries stay cheap to find.
+    if (hit_idx != 0) {
+      std::rotate(spf_memo_.begin(), spf_memo_.begin() + hit_idx,
+                  spf_memo_.begin() + hit_idx + 1);
+    }
+  } else {
+    auto res = ctx_.algorithms->spf(ctx_.graph, src, opts);
+    dag = std::move(res.second);
+    dst_cost = res.first[static_cast<std::size_t>(dst)];
+    if (use_memo) {
+      SpfMemoEntry entry;
+      entry.src = src;
+      entry.dst = dst;
+      entry.with_residual = with_residual;
+      entry.stamp = stamp;
+      entry.residual.assign(opts.residual.begin(), opts.residual.end());
+      entry.has_min_flow = min_flow.has_value();
+      entry.dag = dag;
+      entry.dst_cost = dst_cost;
+      const std::size_t entry_bytes =
+          entry.residual.size() * sizeof(Cap) +
+          entry.dag.parent_offsets.size() * sizeof(std::int32_t) +
+          entry.dag.parents.size() * (sizeof(NodeId) + sizeof(EdgeId)) +
+          sizeof(SpfMemoEntry);
+      const std::size_t cap = std::clamp<std::size_t>(
+          kSpfMemoMaxBytes / std::max<std::size_t>(entry_bytes, 1), 1,
+          kSpfMemoMaxEntries);
+      spf_memo_.insert(spf_memo_.begin(), std::move(entry));
+      if (spf_memo_.size() > cap) spf_memo_.resize(cap);
+    }
+  }
   if (dst_cost < best_path_cost_) best_path_cost_ = dst_cost;
 
   // Enforce path cost constraints:
