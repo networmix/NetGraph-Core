@@ -244,21 +244,7 @@ hooks:
 	@$(PRECOMMIT) run --all-files || (echo "Some pre-commit hooks failed. Fix and re-run." && exit 1)
 
 cpp-test:
-	@echo "🧪 Building and running C++ tests..."
-	@BUILD_DIR="build/cpp-tests"; \
-		mkdir -p "$$BUILD_DIR"; \
-		GEN_ARGS=""; \
-		if command -v ninja >/dev/null 2>&1; then GEN_ARGS="-G Ninja"; fi; \
-		cmake -S . -B "$$BUILD_DIR" -DNETGRAPH_CORE_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release $$GEN_ARGS; \
-		cmake --build "$$BUILD_DIR" --config Release -j; \
-		if command -v sysctl >/dev/null 2>&1; then \
-			NPROC=$$(sysctl -n hw.ncpu 2>/dev/null || echo 2); \
-		elif command -v nproc >/dev/null 2>&1; then \
-			NPROC=$$(nproc); \
-		else \
-			NPROC=2; \
-		fi; \
-		ctest --test-dir "$$BUILD_DIR" --output-on-failure -j "$$NPROC" --timeout 120
+	@PATH="$(VENV_BIN):$$PATH" bash dev/cpp-tests.sh release
 
 cov:
 	@echo "📦 Reinstalling with C++ coverage instrumentation..."
@@ -290,15 +276,7 @@ cov:
 	@echo "✅ Coverage ready in build/coverage/: coverage-python.xml, coverage-cpp.xml, coverage-combined.html"
 
 sanitize-test:
-	@echo "🧪 Building and running C++ tests with sanitizers..."
-	@BUILD_DIR="build/cpp-sanitize"; \
-		mkdir -p "$$BUILD_DIR"; \
-		GEN_ARGS=""; \
-		if command -v ninja >/dev/null 2>&1; then GEN_ARGS="-G Ninja"; fi; \
-		cmake -S . -B "$$BUILD_DIR" -DNETGRAPH_CORE_BUILD_TESTS=ON -DNETGRAPH_CORE_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug $$GEN_ARGS; \
-		cmake --build "$$BUILD_DIR" --config Debug -j; \
-		if [ "$$(uname -s)" = "Darwin" ]; then ASAN_ENV="ASAN_OPTIONS=detect_leaks=0"; else ASAN_ENV="ASAN_OPTIONS=detect_leaks=1"; fi; \
-		env $$ASAN_ENV ctest --test-dir "$$BUILD_DIR" --output-on-failure || echo "⚠️  Some sanitizer tests failed"
+	@PATH="$(VENV_BIN):$$PATH" bash dev/cpp-tests.sh sanitize
 
 # Clean + reinstall in dev mode (respects CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET)
 # Uses active PYTHON (venv or PATH) to avoid environment mismatches
