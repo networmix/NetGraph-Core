@@ -49,14 +49,10 @@ public:
   //      where cap_rev[g] = min_edge_residual(g) * |E_g|
   //        (enforces equal per-edge shares),
   //            assigned[g] = unit-demand load on group g under equal splits.
-  //  - Place once and return. We do NOT re-split/recompute after a bottleneck
-  //    saturates. Re-invoking this on the updated residuals changes the effective
-  //    next-hop set (progressive traffic-engineering behavior) and is outside
-  //    "single-pass ECMP admission".
-  //
-  // EqualBalancedFixed uses the same global scale but takes the split set from
-  // the DAG edges with capacity rather than with residual, so a member that has
-  // been saturated since the DAG was built yields scale 0 and nothing is placed.
+  //  - Place once and return. The split set is every DAG edge with capacity,
+  //    so a member filled since the DAG was built yields scale 0 and nothing
+  //    is placed; progression past a full member comes from recomputing the
+  //    DAG with a residual-aware SPF, not from re-invoking this on a stale one.
   //
   // EqualBalancedLossy splits over the same capacity-based set without scaling:
   // each edge carries min(share, residual), the excess is dropped, and the

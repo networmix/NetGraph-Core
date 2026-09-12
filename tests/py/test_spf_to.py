@@ -60,7 +60,7 @@ def test_fanout_forces_all_sources_and_admission_scales_globally(fanout_graph):
         4,
         dag,
         100.0,
-        ngc.FlowPlacement.EQUAL_BALANCED_FIXED,
+        ngc.FlowPlacement.EQUAL_BALANCED,
     )
     # Even 50/50 split; S2's 20-unit link admits 20 of 50, so the demand scales to 0.4.
     assert placed == pytest.approx(40.0)

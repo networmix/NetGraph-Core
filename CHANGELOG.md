@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-09-13
+
+### Fixed
+
+- **Flow Placement**: `EQUAL_BALANCED` built its split set from the DAG edges that still had residual, so re-placing on a DAG that contained a member filled by an earlier placement silently re-hashed over the remaining members. A forwarding table does not react to load: the split set is now every DAG edge with capacity, and a full member drives the single admission scale to 0, so nothing more is admitted on that DAG. Progression past a full member comes from recomputing the DAG with a residual-aware SPF, which `place_max_flow` and `FlowPolicy` already do, so every documented path is unchanged. The one observable change is `place_max_flow` with `require_capacity=false` and `shortest_path=false`, which filled a cost-only DAG in several passes and now places once, the single-pass answer that cost-only routing is documented to give.
+
+### Removed
+
+- **BREAKING**: `EQUAL_BALANCED_FIXED`, added in 0.9.0 as a separate mode with the behaviour above. `EQUAL_BALANCED` now has that behaviour, so the value is gone; `EQUAL_BALANCED_LOSSY` is now value 3.
+
 ## [0.9.0] - 2026-09-13
 
 ### Added
