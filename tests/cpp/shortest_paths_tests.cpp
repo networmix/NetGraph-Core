@@ -341,3 +341,113 @@ TEST(ShortestPaths, ZeroCostEdges_PredDAGIsAcyclic) {
   ASSERT_EQ(paths.size(), 1u);
   EXPECT_EQ(paths[0].size(), 4u);  // 0 -> 1 -> 2 -> 3
 }
+
+// ---------------------------------------------------------------------------
+// shortest_paths_to: reverse SPF toward one destination, with forced fan-out.
+// ---------------------------------------------------------------------------
+#include "netgraph/core/flow_state.hpp"
+
+namespace {
+// Nodes: 0=P (pseudo source), 1=S1, 2=S2, 3=M, 4=T.
+// Edges: 0: P->S1 cost 0 cap 1e6; 1: P->S2 cost 0 cap 1e6;
+//        2: S1->T cost 1 cap 100;  3: S2->M cost 1 cap 20; 4: M->T cost 1 cap 60.
+// S1 is one hop from T, S2 two hops, so an SPF from P keeps only S1.
+StrictMultiDiGraph make_fanout_graph() {
+  std::int32_t src[5]  = {0, 0, 1, 2, 3};
+  std::int32_t dst[5]  = {1, 2, 4, 3, 4};
+  double       cap[5]  = {1e6, 1e6, 100.0, 20.0, 60.0};
+  std::int64_t cost[5] = {0, 0, 1, 1, 1};
+  return StrictMultiDiGraph::from_arrays(5,
+    std::span(src, 5), std::span(dst, 5), std::span(cap, 5), std::span(cost, 5));
+}
+EdgeSelection cost_only_sel() {
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
+  return sel;
+}
+} // namespace
+
+TEST(ShortestPathsTo, DistancesMatchForwardDistancesToDst) {
+  auto g = make_grid_graph(3, 4);
+  const NodeId t = g.num_nodes() - 1;
+  auto [dist_to, dag] = shortest_paths_to(g, t, /*multipath=*/true, cost_only_sel());
+  expect_pred_dag_valid(dag, g.num_nodes());
+  for (NodeId s = 0; s < g.num_nodes(); ++s) {
+    auto [dist_from_s, fwd] = shortest_paths(g, s, t, /*multipath=*/true, cost_only_sel());
+    EXPECT_EQ(dist_to[static_cast<std::size_t>(s)], dist_from_s[static_cast<std::size_t>(t)]) << "node " << s;
+  }
+  // Every DAG entry u -> v via e lies on a shortest u -> t walk.
+  const auto esrc = g.edge_src_view(); const auto edst = g.edge_dst_view(); const auto cost = g.cost_view();
+  for (NodeId v = 0; v < g.num_nodes(); ++v) {
+    for (auto i = dag.parent_offsets[static_cast<std::size_t>(v)]; i < dag.parent_offsets[static_cast<std::size_t>(v)+1]; ++i) {
+      const auto e = static_cast<std::size_t>(dag.via_edges[static_cast<std::size_t>(i)]);
+      const NodeId u = dag.parents[static_cast<std::size_t>(i)];
+      EXPECT_EQ(esrc[e], u); EXPECT_EQ(edst[e], v);
+      EXPECT_EQ(dist_to[static_cast<std::size_t>(u)], cost[e] + dist_to[static_cast<std::size_t>(v)]);
+    }
+  }
+}
+
+TEST(ShortestPathsTo, ForwardSpfFromPseudoSourceKeepsOnlyNearestSource) {
+  auto g = make_fanout_graph();
+  auto [dist, dag] = shortest_paths(g, 0, 4, /*multipath=*/true, cost_only_sel());
+  // T (node 4) is reached only via S1 -> T (edge 2): S2's branch costs 2 and is
+  // not on a shortest P -> T path, so a placement from P never uses S2.
+  ASSERT_EQ(dag.parent_offsets[5] - dag.parent_offsets[4], 1);
+  EXPECT_EQ(dag.via_edges[static_cast<std::size_t>(dag.parent_offsets[4])], 2);
+}
+
+TEST(ShortestPathsTo, FanoutEdgesForceEverySourceIntoTheDag) {
+  auto g = make_fanout_graph();
+  EdgeId fan[2] = {0, 1};
+  auto [dist, dag] = shortest_paths_to(g, 4, /*multipath=*/true, cost_only_sel(), {}, {}, {}, std::span<const EdgeId>(fan, 2));
+  expect_pred_dag_valid(dag, g.num_nodes());
+  EXPECT_EQ(dist[1], 1); EXPECT_EQ(dist[2], 2); EXPECT_EQ(dist[0], 1) << "pseudo source keeps the SPF distance via S1";
+  // Both S1 and S2 now have P as parent via their attachment edge.
+  ASSERT_EQ(dag.parent_offsets[2] - dag.parent_offsets[1], 1); EXPECT_EQ(dag.via_edges[static_cast<std::size_t>(dag.parent_offsets[1])], 0);
+  ASSERT_EQ(dag.parent_offsets[3] - dag.parent_offsets[2], 1); EXPECT_EQ(dag.via_edges[static_cast<std::size_t>(dag.parent_offsets[2])], 1);
+  // Entry the SPF already recorded (P->S1) is not duplicated.
+  int p_entries = 0;
+  for (auto v : dag.parents) if (v == 0) ++p_entries;
+  EXPECT_EQ(p_entries, 2);
+
+  // Lossless equal-balanced admission over the fan-out: shares 50/50 of 100;
+  // S2's branch admits 20 of 50 (link 3) so the whole demand scales to 0.4.
+  FlowState fs(g);
+  EXPECT_NEAR(fs.place_on_dag(0, 4, dag, 100.0, FlowPlacement::EqualBalancedFixed), 40.0, 1e-9);
+  EXPECT_NEAR(fs.edge_flow_view()[2], 20.0, 1e-9);
+  EXPECT_NEAR(fs.edge_flow_view()[3], 20.0, 1e-9);
+}
+
+TEST(ShortestPathsTo, FanoutSkipsUnreachableAndMaskedHeads) {
+  auto g = make_fanout_graph();
+  EdgeId fan[2] = {0, 1};
+  auto edge_mask = make_bool_mask(static_cast<std::size_t>(g.num_edges()), true);
+  edge_mask[3] = false;  // S2 -> M down: S2 cannot reach T
+  auto [dist, dag] = shortest_paths_to(g, 4, true, cost_only_sel(), {}, {},
+                                       std::span<const bool>(edge_mask.get(), static_cast<std::size_t>(g.num_edges())),
+                                       std::span<const EdgeId>(fan, 2));
+  EXPECT_EQ(dist[2], std::numeric_limits<Cost>::max());
+  EXPECT_EQ(dag.parent_offsets[3] - dag.parent_offsets[2], 0) << "no fan-out entry to an unreachable source";
+  EXPECT_EQ(dag.parent_offsets[2] - dag.parent_offsets[1], 1);
+}
+
+TEST(ShortestPathsTo, FanoutFromInteriorNodeIsRejected) {
+  auto g = make_fanout_graph();
+  EdgeId fan[1] = {4};  // M -> T, but M already has the incoming entry S2 -> M
+  EXPECT_THROW((void)shortest_paths_to(g, 4, true, cost_only_sel(), {}, {}, {}, std::span<const EdgeId>(fan, 1)),
+               std::invalid_argument);
+  EdgeId bad[1] = {99};
+  EXPECT_THROW((void)shortest_paths_to(g, 4, true, cost_only_sel(), {}, {}, {}, std::span<const EdgeId>(bad, 1)),
+               std::invalid_argument);
+}
+
+TEST(ShortestPathsTo, SinglePathModeKeepsOneSuccessorPerNode) {
+  auto g = make_n_disjoint_paths(3, 10.0);
+  const NodeId t = g.num_nodes() - 1;
+  auto [dist, dag] = shortest_paths_to(g, t, /*multipath=*/false, cost_only_sel());
+  expect_pred_dag_valid(dag, g.num_nodes());
+  // Count DAG entries leaving node 0: exactly one successor.
+  int leaving_src = 0;
+  for (auto p : dag.parents) if (p == 0) ++leaving_src;
+  EXPECT_EQ(leaving_src, 1);
+}

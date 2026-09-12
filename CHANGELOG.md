@@ -5,9 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-09-13
+
+### Added
+
+- **Shortest Paths**: `shortest_paths_to(dst, ...)` / `Algorithms.spf_to` runs Dijkstra over the in-adjacency and returns distances *to* one destination plus a forward-oriented `PredDAG` valid for placement from any node toward it (the union of the per-source shortest-path DAGs). `fanout_edges` adds edges regardless of cost, for an origin whose first hop is a traffic split rather than a routing decision, such as a pseudo source whose demand originates evenly at every attached real source; a fan-out edge must leave a node with no incoming DAG entry, which keeps the result acyclic.
+- **Flow Placement**: two equal-balanced modes for hop-by-hop ECMP with a load-blind forwarding table. `EQUAL_BALANCED_FIXED` takes the split set from the DAG edges with *capacity* rather than residual and keeps the single global admission scale, so a member filled since the DAG was computed drives the scale to 0 (lossless hash-ECMP admission; the existing `EQUAL_BALANCED` drops such members from the split, which is progressive/TE behaviour). `EQUAL_BALANCED_LOSSY` splits over the same set without a scale: each edge carries `min(share, residual)`, the excess is dropped, deficits propagate downstream, and the placed amount is what reaches the destination. `FlowGraph.place_with_drops` returns the dropped volume per edge; `FlowState::place_on_dag` gained an optional `drops` collector. On a 100/10 parallel pair offered 100 units, `EQUAL_BALANCED` and `EQUAL_BALANCED_FIXED` admit 20 and `EQUAL_BALANCED_LOSSY` delivers 60. `FlowPolicy` treats the new modes as equal-balanced except that the lossy mode skips the equalizing rebalance, so with pinned routes each LSP carries what fits and `placed` is the delivered total.
 
 ### Changed
+
+- **Flow Policy**: a cost-only policy (`require_capacity=false`) no longer passes the residual to SPF when an equal-balanced per-flow target is set. A residual forces capacity-aware edge selection, so such policies silently routed around saturated edges instead of following costs; they now route on cost alone, and the per-flow target still bounds how much each flow requests.
 
 - **Flow Policy**: `get_path_bundle` now memoizes raw SPF results keyed by the exact inputs that can vary per call (src, dst, residual content, residual-awareness). EqualBalanced placement and rebalance rounds re-request bundles against residual state that repeats -- 94% of SPF calls in a measured place/rebalance cycle were exact input repeats, largely remove+place round-trips restoring identical bytes -- and those calls are now elided. Matching is exact (FlowGraph state stamp fast path, full residual `memcmp` content path), so all outputs are bit-identical; a corpus hash over max-flow, SPF, KSP and policy outputs is unchanged. Measured on place/rebalance churn: 31-70% faster; single EqualBalanced placement: 6-26% faster; Proportional mode skips the memo (it measured 0% repeat inputs) and is unaffected. `FlowGraph` gained an internal monotonic state stamp to support this; no public API change.
 

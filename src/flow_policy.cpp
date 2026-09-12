@@ -26,6 +26,16 @@
 
 namespace netgraph::core {
 
+namespace {
+// The equal-balanced placements share FlowPolicy's per-flow target and DAG
+// refresh logic (and, except for the lossy mode, the equalizing rebalance in
+// place_demand); they differ only inside FlowState::place_on_dag.
+constexpr bool is_equal_balanced(FlowPlacement p) noexcept {
+  return p == FlowPlacement::EqualBalanced || p == FlowPlacement::EqualBalancedFixed ||
+         p == FlowPlacement::EqualBalancedLossy;
+}
+} // namespace
+
 /* Reject uses that would silently produce a wrong answer:
    - a FlowGraph wrapping a different graph than the policy routes on (SPF would run
      on one topology while flow is placed on another);
@@ -76,7 +86,7 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   // - Hash-ECMP with EqualBalanced: use all equal-cost edges to maximize fanout
   if (!multipath_) {
     sel.multi_edge = false;
-  } else if (flow_placement_ == FlowPlacement::EqualBalanced) {
+  } else if (is_equal_balanced(flow_placement_)) {
     sel.multi_edge = true;
   }
 
@@ -86,8 +96,10 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   // Residual awareness is controlled by require_capacity_:
   //   - require_capacity=true: Require edges to have capacity, routes adapt to residuals (SDN/TE behavior)
   //   - require_capacity=false: Routes based on costs only (IP/IGP behavior)
-  // Additionally, for EqualBalanced mode with minimum flow threshold, we use residuals.
-  const bool require_residual = (require_capacity_ || (flow_placement_ == FlowPlacement::EqualBalanced && min_flow.has_value()));
+  // Passing a residual to SPF forces capacity-aware selection, so a cost-only
+  // policy must not pass one even when an equal-balanced per-flow target is
+  // set; the target only shapes how much is requested per flow, not the route.
+  const bool require_residual = require_capacity_;
   const auto residual = fg.residual_view();
 
   // Edge mask: combine user-provided mask with minimum residual capacity threshold.
@@ -99,7 +111,7 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   std::unique_ptr<bool[]> combined_edge_mask;
   std::span<const bool> final_edge_mask;
 
-  if (require_residual && min_flow.has_value() && flow_placement_ != FlowPlacement::EqualBalanced) {
+  if (require_residual && min_flow.has_value() && !is_equal_balanced(flow_placement_)) {
     // Need to filter by min_flow threshold for Proportional mode
     combined_edge_mask.reset(new bool[residual.size()]);
     double thr = *min_flow;
@@ -134,7 +146,7 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
 
   PredDAG dag;
   Cost dst_cost;
-  const bool use_memo = (flow_placement_ == FlowPlacement::EqualBalanced);
+  const bool use_memo = (is_equal_balanced(flow_placement_));
   const auto stamp = fg.state_stamp();
   const bool with_residual = !opts.residual.empty();
   std::size_t hit_idx = spf_memo_.size();
@@ -311,7 +323,11 @@ std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
   // currently placed volume at the equal-share target), and the recursion's return
   // value telescoped to (placed_demand(), pre-rebalance leftover + volume lost in
   // rebalancing), which is reproduced after the loop.
-  if (flow_placement_ == FlowPlacement::EqualBalanced && !flows_.empty()) {
+  // Lossy placement is best-effort: each flow is offered its share and carries
+  // what fits, so equalizing what was *carried* would contradict the model
+  // (it would throttle the healthy flows down to the congested one).
+  if (is_equal_balanced(flow_placement_) &&
+      flow_placement_ != FlowPlacement::EqualBalancedLossy && !flows_.empty()) {
     // Restore the reoptimize flag even if a round throws (bad_alloc is the only
     // realistic thrower here); otherwise the policy would stay permanently
     // non-reoptimizing.
@@ -365,7 +381,7 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
   // pinned policy that is the number of USABLE bundles (a head-end hashes over up
   // LSPs only); dynamically it is the configured max_flow_count.
   int eb_divisor = 0;
-  if (flow_placement_ == FlowPlacement::EqualBalanced) {
+  if (is_equal_balanced(flow_placement_)) {
     if (is_static) eb_divisor = static_cast<int>(static_bundles_.size());
     else if (max_flow_count_.has_value()) eb_divisor = *max_flow_count_;
   }
@@ -413,7 +429,7 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
       if (max_flow_count_.has_value()) {
         initial = std::min(initial, *max_flow_count_);
       }
-      auto min_req = (flow_placement_ == FlowPlacement::EqualBalanced && max_flow_count_.has_value())
+      auto min_req = (is_equal_balanced(flow_placement_) && max_flow_count_.has_value())
                        ? std::optional<double>(per_target)
                        : min_flow;
       // Seeding places no flow, so residuals do not change between iterations and
@@ -465,7 +481,7 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
     // For multipath flows, this tracks saturated edges within the DAG.
     // For tunnel flows, this allows different tunnels to discover different paths
     // as residuals change, enabling natural fan-out across equal-cost paths.
-    if (flow_placement_ == FlowPlacement::EqualBalanced && !is_static) {
+    if (is_equal_balanced(flow_placement_) && !is_static) {
       if (auto pb = get_path_bundle(fg, f->src, f->dst, std::optional<double>(per_target))) {
         f->dag = std::move(pb->first);
         f->cost = pb->second;
@@ -515,7 +531,7 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
     // A pinned policy neither grows its flow set nor reoptimizes: the pinned-ness
     // guard is explicit, never inferred from flow-count arithmetic.
     if (!is_static) {
-      if (flow_placement_ == FlowPlacement::EqualBalanced) {
+      if (is_equal_balanced(flow_placement_)) {
         if (max_flow_count_.has_value()) {
           // Bounded EB: add flows up to configured maximum.
           if (static_cast<int>(flows_.size()) < *max_flow_count_) {

@@ -56,13 +56,28 @@ class FlowPlacement:
 
     EQUAL_BALANCED (ECMP): Single-pass admission on a fixed shortest-path DAG (Dijkstra).
         Computes one global scale so no edge is oversubscribed under equal
-        per-edge splits, places once, and stops. Re-invoking on updated
-        residuals changes the next-hop set (progressive traffic-engineering behavior).
+        per-edge splits, places once, and stops. The split set is the DAG's
+        edges that still have residual, so re-invoking on updated residuals
+        changes the next-hop set (progressive traffic-engineering behavior).
         ECMP = Equal-Cost Multi-Path; WCMP = Weighted-Cost Multi-Path.
+
+    EQUAL_BALANCED_FIXED: The same single-pass admission, but the split set is
+        the DAG's edges with capacity (the topology's next-hop set), so a
+        member saturated since the DAG was computed drives the scale to 0 and
+        nothing is admitted. Models lossless hash-ECMP with a forwarding table
+        that does not react to load.
+
+    EQUAL_BALANCED_LOSSY: Equal split over the same capacity-based set with no
+        scaling: each edge carries min(share, residual) and drops the excess,
+        deficits propagate downstream, and the placed amount is what reaches
+        the destination. Models best-effort hash-ECMP forwarding; per-edge
+        drops are available from FlowGraph.place_with_drops.
     """
 
     PROPORTIONAL: ClassVar[FlowPlacement]
     EQUAL_BALANCED: ClassVar[FlowPlacement]
+    EQUAL_BALANCED_FIXED: ClassVar[FlowPlacement]
+    EQUAL_BALANCED_LOSSY: ClassVar[FlowPlacement]
     __members__: ClassVar[dict[str, FlowPlacement]]
 
     def __init__(self, value: int) -> None: ...
@@ -176,6 +191,24 @@ class FlowGraph:
         flow_placement: FlowPlacement = ...,
     ) -> float: ...
 
+    def place_with_drops(
+        self,
+        index: "FlowIndex",
+        src: int,
+        dst: int,
+        dag: "PredDAG",
+        amount: float,
+        flow_placement: FlowPlacement = ...,
+    ) -> tuple[float, list[tuple[int, float]]]:
+        """Like place(), returning (placed, drops).
+
+        `drops` lists (edge_id, dropped_volume) for every edge that dropped
+        flow under EQUAL_BALANCED_LOSSY; other placements return an empty
+        list. Dropped volume never enters the ledger, so remove() reverts only
+        what was carried.
+        """
+        ...
+
     def remove(self, index: "FlowIndex") -> None: ...
     def remove_by_class(self, cls: int) -> None: ...
     def reset(self) -> None: ...
@@ -249,7 +282,9 @@ class FlowState:
         EqualBalanced is **single-pass ECMP admission** on the provided DAG:
         we compute one global scale so no edge is oversubscribed under equal per-edge
         splits, apply it once, and return. Re-invoking on updated residuals changes
-        the next-hop set (progressive behavior).
+        the next-hop set (progressive behavior). EQUAL_BALANCED_FIXED keeps the
+        topology's next-hop set instead (a saturated member yields scale 0), and
+        EQUAL_BALANCED_LOSSY forwards best-effort over it (see FlowPlacement).
 
         Returns:
             Amount of flow actually placed (may be less than requested).
@@ -664,6 +699,54 @@ class Algorithms:
                 (residual must have length num_edges; masks must match
                 num_nodes / num_edges).
             ValueError: If src/dst out of range.
+        """
+        ...
+
+    def spf_to(
+        self,
+        graph: "Graph",
+        dst: int,
+        *,
+        selection: Optional[EdgeSelection] = None,
+        residual: Optional["np.ndarray"] = None,
+        node_mask: Optional["np.ndarray"] = None,
+        edge_mask: Optional["np.ndarray"] = None,
+        multipath: bool = True,
+        fanout_edges: Optional[Sequence[int]] = None,
+        dtype: str = "float64",
+    ) -> tuple["np.ndarray", "PredDAG"]:
+        """Shortest paths from every node *to* dst (reverse SPF).
+
+        Returns ``(distances_to_dst, dag)``. ``distances_to_dst[u]`` is the cost
+        of a shortest ``u -> dst`` walk (inf / int64 max if none). The DAG is
+        forward-oriented, so it works anywhere a PredDAG is accepted, and is
+        valid for placement from *any* node toward ``dst``: every walk it
+        holds from a node ``u`` to ``dst`` costs ``distances_to_dst[u]``. It is
+        the union of the per-source shortest-path DAGs toward ``dst``.
+
+        Args:
+            graph: Graph handle
+            dst: Destination node
+            selection: Edge selection policy (as for spf)
+            residual: Optional 1-D float64 array of residuals (copied); forces
+                capacity gating as for spf
+            node_mask: Optional 1-D bool mask (length num_nodes), copied
+            edge_mask: Optional 1-D bool mask (length num_edges), copied
+            multipath: Keep every equal-cost successor per node; False keeps
+                one, preferring higher bottleneck capacity toward dst
+            fanout_edges: Edge ids added to the DAG regardless of cost, for an
+                origin whose first hop is a traffic split rather than a
+                routing decision (a pseudo source fanning out over every
+                attached real source). Each edge is added when it passes the
+                masks and capacity gate and its head has a finite distance;
+                its tail must have no incoming DAG entry
+            dtype: "float64" (inf for unreachable) or "int64" (max for unreachable)
+
+        Raises:
+            TypeError: If arrays have wrong dtype, ndim, or length.
+            ValueError: If dst or a fanout edge id is out of range, or a
+                fanout edge leaves a node that already has an incoming DAG
+                entry.
         """
         ...
 

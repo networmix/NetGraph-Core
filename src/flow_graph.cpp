@@ -62,7 +62,8 @@ FlowGraph& FlowGraph::operator=(FlowGraph&& other) noexcept {
 
 Flow FlowGraph::place(const FlowIndex& idx, NodeId src, NodeId dst,
                       const PredDAG& dag, Flow amount,
-                      FlowPlacement placement) {
+                      FlowPlacement placement,
+                      std::vector<std::pair<EdgeId, Flow>>* drops) {
   if (amount <= 0.0) return 0.0;
   ++version_;  // residuals may change from here on
 
@@ -73,7 +74,7 @@ Flow FlowGraph::place(const FlowIndex& idx, NodeId src, NodeId dst,
 
   // Delegate placement to FlowState, which returns the actual placed flow and
   // populates bucket with per-edge allocations (EdgeId, Flow) pairs.
-  Flow placed = fs_.place_on_dag(src, dst, dag, amount, placement, &bucket);
+  Flow placed = fs_.place_on_dag(src, dst, dag, amount, placement, &bucket, drops);
 
   // Coalesce and filter: merge duplicate EdgeIds. Keep any positive totals
   // (do not drop sub-kMinFlow amounts) to preserve exact reversibility.

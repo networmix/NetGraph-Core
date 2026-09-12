@@ -93,3 +93,39 @@ resolve_to_paths(const PredDAG& dag, NodeId src, NodeId dst,
                  std::optional<std::int64_t> max_paths = std::nullopt);
 
 } // namespace netgraph::core
+
+namespace netgraph::core {
+
+// Compute shortest paths *to* dst from every node (Dijkstra over the in-adjacency).
+// Returns (distances, dag) where distances[u] is the cost of a shortest u -> dst walk
+// (INT64_MAX if none) and dag is a forward-oriented PredDAG: parents[v] holds (u, e)
+// for every edge e = u -> v that lies on a shortest u -> dst walk. Unlike a DAG from
+// shortest_paths(), which is rooted at one source, this DAG is valid for placement
+// from *any* node toward dst, and every walk it contains from a node u to dst has
+// cost distances[u]. It is the union of the per-source shortest-path DAGs toward dst.
+//
+// Parameters mirror shortest_paths(): multipath keeps every equal-cost successor per
+// node (false keeps one, preferring higher bottleneck capacity toward dst);
+// selection, residual, node_mask and edge_mask apply as there. Zero-cost edges get
+// the same acyclicity guard (a successor is recorded only while its node is
+// unsettled).
+//
+// fanout_edges: edges to add to the DAG regardless of cost, modelling an origin
+// whose first hop is decided by a traffic split rather than by routing (e.g. a
+// pseudo source whose demand originates evenly at every attached real source).
+// Each edge u -> v is added as a parent entry of v when it passes the masks and
+// capacity gate and v has a finite distance; entries the SPF already recorded are
+// not duplicated, and distances[u] is set to cost(e) + distances[v] if u was
+// unreachable. Every fanout edge must leave a node that has no incoming DAG entry,
+// so the result stays acyclic; a violating edge throws std::invalid_argument, as
+// does an out-of-range edge id.
+[[nodiscard]] std::pair<std::vector<Cost>, PredDAG>
+shortest_paths_to(const StrictMultiDiGraph& g, NodeId dst,
+                  bool multipath,
+                  const EdgeSelection& selection,
+                  std::span<const Cap> residual = {},
+                  std::span<const bool> node_mask = {},
+                  std::span<const bool> edge_mask = {},
+                  std::span<const EdgeId> fanout_edges = {});
+
+} // namespace netgraph::core

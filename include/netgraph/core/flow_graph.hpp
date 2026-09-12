@@ -40,10 +40,15 @@ public:
   // Access underlying graph (const)
   [[nodiscard]] const StrictMultiDiGraph& graph() const noexcept { return *g_; }
 
-// Apply placement and record per-edge allocations for this flow. Returns placed amount.
+  // Apply placement and record per-edge allocations for this flow. Returns placed
+  // amount. `drops`, when given, receives the per-edge dropped volume of an
+  // EqualBalancedLossy placement (see FlowState::place_on_dag); other placements
+  // leave it untouched. Dropped volume is not part of the ledger: it never
+  // occupied an edge, so removing the flow reverts only what was carried.
   [[nodiscard]] Flow place(const FlowIndex& idx, NodeId src, NodeId dst,
              const PredDAG& dag, Flow amount,
-             FlowPlacement placement);
+             FlowPlacement placement,
+             std::vector<std::pair<EdgeId, Flow>>* drops = nullptr);
 
   // Remove a specific flow, reverting its edge allocations from the ledger.
   void remove(const FlowIndex& idx);

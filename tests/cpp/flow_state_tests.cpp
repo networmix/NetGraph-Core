@@ -469,3 +469,125 @@ TEST(FlowState, RepeatedPlacementAfterResetAndIndependentInstancesStayStable) {
     EXPECT_NEAR(fs1.edge_flow_view()[i], first_flows[i], 1e-9);
   }
 }
+
+// ---------------------------------------------------------------------------
+// EqualBalancedFixed / EqualBalancedLossy: load-blind hash-ECMP models.
+// ---------------------------------------------------------------------------
+#include "netgraph/core/flow_graph.hpp"
+
+namespace {
+// 0 -> 1 over two parallel equal-cost edges: edge 0 cap 10, edge 1 cap 100.
+StrictMultiDiGraph make_unbalanced_pair() {
+  std::int32_t src[2]  = {0, 0};
+  std::int32_t dst[2]  = {1, 1};
+  double       cap[2]  = {10.0, 100.0};
+  std::int64_t cost[2] = {1, 1};
+  return StrictMultiDiGraph::from_arrays(2,
+    std::span(src, 2), std::span(dst, 2), std::span(cap, 2), std::span(cost, 2));
+}
+PredDAG cost_only_dag(const StrictMultiDiGraph& g, NodeId s, NodeId t) {
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto [dist, dag] = shortest_paths(g, s, t, /*multipath=*/true, sel, {}, {}, {});
+  return dag;
+}
+} // namespace
+
+TEST(FlowState, EqualBalancedFixed_SaturatedMemberBlocksAdmission) {
+  auto g = make_unbalanced_pair();
+  auto dag = cost_only_dag(g, 0, 1);
+
+  FlowState fixed(g);
+  EXPECT_NEAR(fixed.place_on_dag(0, 1, dag, 20.0, FlowPlacement::EqualBalancedFixed), 20.0, 1e-9);
+  EXPECT_NEAR(fixed.edge_flow_view()[0], 10.0, 1e-9);
+  EXPECT_NEAR(fixed.edge_flow_view()[1], 10.0, 1e-9);
+  // The 10-unit member is saturated; equal hashing of any further demand would
+  // lose 1/2 of it, so nothing more is admitted losslessly.
+  EXPECT_NEAR(fixed.place_on_dag(0, 1, dag, 10.0, FlowPlacement::EqualBalancedFixed), 0.0, 1e-9);
+  EXPECT_NEAR(fixed.edge_flow_view()[1], 10.0, 1e-9) << "no flow may leak onto the remaining member";
+
+  // The progressive mode drops the saturated member from the split instead.
+  FlowState progressive(g);
+  EXPECT_NEAR(progressive.place_on_dag(0, 1, dag, 20.0, FlowPlacement::EqualBalanced), 20.0, 1e-9);
+  EXPECT_NEAR(progressive.place_on_dag(0, 1, dag, 10.0, FlowPlacement::EqualBalanced), 10.0, 1e-9);
+  EXPECT_NEAR(progressive.edge_flow_view()[1], 20.0, 1e-9);
+}
+
+TEST(FlowState, EqualBalancedFixed_SinglePassMatchesEqualBalancedOnFreshState) {
+  auto g = make_unbalanced_pair();
+  auto dag = cost_only_dag(g, 0, 1);
+  FlowState a(g), b(g);
+  EXPECT_NEAR(a.place_on_dag(0, 1, dag, 100.0, FlowPlacement::EqualBalanced), 20.0, 1e-9);
+  EXPECT_NEAR(b.place_on_dag(0, 1, dag, 100.0, FlowPlacement::EqualBalancedFixed), 20.0, 1e-9);
+  for (std::size_t i = 0; i < 2; ++i) EXPECT_NEAR(a.edge_flow_view()[i], b.edge_flow_view()[i], 1e-12);
+}
+
+TEST(FlowState, EqualBalancedLossy_FillAndDropReportsDrops) {
+  auto g = make_unbalanced_pair();
+  auto dag = cost_only_dag(g, 0, 1);
+  FlowState fs(g);
+  std::vector<std::pair<EdgeId, Flow>> trace, drops;
+  Flow placed = fs.place_on_dag(0, 1, dag, 100.0, FlowPlacement::EqualBalancedLossy, &trace, &drops);
+  EXPECT_NEAR(placed, 60.0, 1e-9) << "50 on the 100-unit edge, 10 on the 10-unit edge";
+  EXPECT_NEAR(fs.edge_flow_view()[0], 10.0, 1e-9);
+  EXPECT_NEAR(fs.edge_flow_view()[1], 50.0, 1e-9);
+  ASSERT_EQ(drops.size(), 1u);
+  EXPECT_EQ(drops[0].first, 0);
+  EXPECT_NEAR(drops[0].second, 40.0, 1e-9);
+  double traced = 0.0; for (auto const& pr : trace) traced += pr.second;
+  EXPECT_NEAR(traced, 60.0, 1e-9) << "the trace records carried volume only";
+
+  // A later demand still hashes half onto the saturated member and loses it.
+  drops.clear();
+  EXPECT_NEAR(fs.place_on_dag(0, 1, dag, 10.0, FlowPlacement::EqualBalancedLossy, nullptr, &drops), 5.0, 1e-9);
+  ASSERT_EQ(drops.size(), 1u);
+  EXPECT_NEAR(drops[0].second, 5.0, 1e-9);
+}
+
+TEST(FlowState, EqualBalancedLossy_DeficitPropagatesDownstream) {
+  // 0 -> 1 over edges cap 10 / 100 (cost 1 each), then 1 -> 2 cap 30 (cost 1).
+  std::int32_t src[3]  = {0, 0, 1};
+  std::int32_t dst[3]  = {1, 1, 2};
+  double       cap[3]  = {10.0, 100.0, 30.0};
+  std::int64_t cost[3] = {1, 1, 1};
+  auto g = StrictMultiDiGraph::from_arrays(3,
+    std::span(src, 3), std::span(dst, 3), std::span(cap, 3), std::span(cost, 3));
+  auto dag = cost_only_dag(g, 0, 2);
+  FlowState fs(g);
+  std::vector<std::pair<EdgeId, Flow>> drops;
+  Flow placed = fs.place_on_dag(0, 2, dag, 100.0, FlowPlacement::EqualBalancedLossy, nullptr, &drops);
+  // Node 1 receives 60 (40 dropped upstream) and forwards 30 (30 dropped on 1->2).
+  EXPECT_NEAR(placed, 30.0, 1e-9);
+  EXPECT_NEAR(fs.edge_flow_view()[2], 30.0, 1e-9);
+  double total_dropped = 0.0; for (auto const& pr : drops) total_dropped += pr.second;
+  EXPECT_NEAR(total_dropped, 70.0, 1e-9);
+}
+
+TEST(FlowState, EqualBalancedLossy_InfiniteRequestFillsWithoutDrops) {
+  auto g = make_unbalanced_pair();
+  auto dag = cost_only_dag(g, 0, 1);
+  FlowState fs(g);
+  std::vector<std::pair<EdgeId, Flow>> drops;
+  Flow placed = fs.place_on_dag(0, 1, dag, std::numeric_limits<double>::infinity(),
+                                FlowPlacement::EqualBalancedLossy, nullptr, &drops);
+  EXPECT_NEAR(placed, 110.0, 1e-9);
+  EXPECT_TRUE(drops.empty()) << "drops are undefined for an infinite offered load";
+}
+
+TEST(FlowGraph, LossyPlacementIsReversibleAndDropsStayOutOfLedger) {
+  auto g = make_unbalanced_pair();
+  auto dag = cost_only_dag(g, 0, 1);
+  FlowGraph fg(g);
+  FlowIndex idx{0, 1, 0, 7};
+  std::vector<std::pair<EdgeId, Flow>> drops;
+  EXPECT_NEAR(fg.place(idx, 0, 1, dag, 100.0, FlowPlacement::EqualBalancedLossy, &drops), 60.0, 1e-9);
+  ASSERT_EQ(drops.size(), 1u);
+  double ledger = 0.0; for (auto const& pr : fg.get_flow_edges(idx)) ledger += pr.second;
+  EXPECT_NEAR(ledger, 60.0, 1e-9) << "only carried volume is in the ledger";
+  fg.remove(idx);
+  EXPECT_NEAR(fg.residual_view()[0], 10.0, 1e-9);
+  EXPECT_NEAR(fg.residual_view()[1], 100.0, 1e-9);
+  // Non-lossy placements never touch the collector.
+  drops.clear();
+  EXPECT_NEAR(fg.place(idx, 0, 1, dag, 20.0, FlowPlacement::EqualBalanced, &drops), 20.0, 1e-9);
+  EXPECT_TRUE(drops.empty());
+}
