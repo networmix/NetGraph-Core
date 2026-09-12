@@ -17,6 +17,17 @@ struct SpfOptions {
   std::span<const bool> edge_mask {};
 };
 
+// Options for shortest_paths_to (reverse SPF toward one destination). See
+// shortest_paths.hpp for the semantics of fanout_edges.
+struct SpfToOptions {
+  bool multipath { true };
+  EdgeSelection selection {};
+  std::span<const Cap> residual {};
+  std::span<const bool> node_mask {};
+  std::span<const bool> edge_mask {};
+  std::span<const EdgeId> fanout_edges {};
+};
+
 struct KspOptions {
   int k { 1 };
   std::optional<double> max_cost_factor {};

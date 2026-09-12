@@ -2,7 +2,7 @@
   FlowState — residual capacities and placement over a fixed graph.
 
   Maintains per-edge residual capacity and cumulative edge flows. Supports
-  two placement strategies when pushing flow along an SPF DAG:
+  four placement strategies when pushing flow along an SPF DAG:
     - Proportional: distribute flow proportionally to residual capacity,
       processing nodes in topological order from source to destination.
     - EqualBalanced: distribute flow equally across available parallel edges,
@@ -10,6 +10,15 @@
       scale so no edge is oversubscribed, then return. Re-running on updated
       residuals intentionally changes the allowed next-hop set (progressive/TE);
       use place_max_flow() if you want that behavior.
+    - EqualBalancedFixed: the same single-pass admission, but the split set is
+      the DAG's edges with capacity (the topology's next-hop set) rather than
+      its edges with residual. A member saturated since the DAG was built
+      yields scale 0: lossless hash-ECMP admission with a load-blind
+      forwarding table.
+    - EqualBalancedLossy: equal split over the same capacity-based set with no
+      scaling; each edge carries min(share, residual) and drops the excess,
+      deficits propagate downstream, and the placed amount is what reaches
+      dst (best-effort hash-ECMP forwarding).
 */
 #include "netgraph/core/flow_state.hpp"
 #include "netgraph/core/shortest_paths.hpp"
@@ -122,12 +131,19 @@ struct GroupSet {
   }
 };
 
-// Build grouped edges by (parent u, child v) that can reach destination t,
-// using the current residual snapshot.
+// Build grouped edges by (parent u, child v) that can reach destination t.
+// Membership is decided by residual (edges that can still carry flow) unless
+// members_by_capacity is set, in which case every DAG edge with capacity is a
+// member and sum_cap/min_cap still reflect the current residual -- so a member
+// saturated since the DAG was built contributes min_cap = 0. The fixed and
+// lossy equal-balanced placements use the latter to model a forwarding table
+// that does not react to load.
 static void build_groups_residual(const StrictMultiDiGraph& g,
                                   const PredDAG& dag, NodeId t,
                                   const std::vector<Cap>& residual,
+                                  bool members_by_capacity,
                                   GroupSet& gs) {
+  const auto capacity = g.capacity_view();
   gs.groups.clear();
   gs.eids.clear();
   const auto& offsets = dag.parent_offsets;
@@ -178,7 +194,8 @@ static void build_groups_residual(const StrictMultiDiGraph& g,
         if (parents[i] != u) continue;
         const auto eid0 = via[i];
         const Cap c = residual[static_cast<std::size_t>(eid0)];
-        if (c >= kMinCap) {
+        const Cap gate = members_by_capacity ? capacity[static_cast<std::size_t>(eid0)] : c;
+        if (gate >= kMinCap) {
           gs.eids.push_back(eid0);
           gr.sum_cap += c;
           gr.min_cap = std::min(gr.min_cap, c);
@@ -241,15 +258,22 @@ void FlowState::reset(std::span<const Cap> residual_init) {
 
 Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
                              Flow requested_flow, FlowPlacement placement,
-                             std::vector<std::pair<EdgeId, Flow>>* trace) {
+                             std::vector<std::pair<EdgeId, Flow>>* trace,
+                             std::vector<std::pair<EdgeId, Flow>>* drops) {
   NGRAPH_PROFILE_SCOPE("place_on_dag");
   const auto N = g_->num_nodes();
   if (src < 0 || src >= N || dst < 0 || dst >= N || src == dst) return 0.0;
 
+  // The fixed and lossy equal-balanced placements model a forwarding table
+  // that does not react to load: their split set is every DAG edge with
+  // capacity, saturated or not.
+  const bool fixed_members = (placement == FlowPlacement::EqualBalancedFixed ||
+                              placement == FlowPlacement::EqualBalancedLossy);
+
   // Build groups using current residual. `gs` is reused across rebuilds so its
   // buffers keep their capacity for the whole call.
   GroupSet gs;
-  build_groups_residual(*g_, dag, dst, residual_, gs);
+  build_groups_residual(*g_, dag, dst, residual_, fixed_members, gs);
   const auto& groups = gs.groups;
 
   Flow placed = static_cast<Flow>(0.0);
@@ -294,12 +318,92 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
         }
       }
       // Rebuild groups for next tier using updated residual
-      build_groups_residual(*g_, dag, dst, residual_, gs);
+      build_groups_residual(*g_, dag, dst, residual_, /*members_by_capacity=*/false, gs);
       build_reversed_residual(ws, N, groups);
     }
+  } else if (placement == FlowPlacement::EqualBalancedLossy) {
+    // EqualBalancedLossy: best-effort hash-ECMP forwarding. Every node splits
+    // what it received equally over its outgoing member edges; each edge carries
+    // min(share, residual) and drops the rest, so a deficit propagates downstream
+    // and the placed amount is what arrives at dst. No global scale.
+    const bool record_drops = (drops != nullptr) && std::isfinite(static_cast<double>(requested_flow));
+
+    std::vector<std::vector<std::size_t>> succ(static_cast<std::size_t>(N));
+    for (std::size_t gi = 0; gi < groups.size(); ++gi) {
+      const auto& gr = groups[gi];
+      if (gr.eid_count == 0) continue;
+      succ[static_cast<std::size_t>(gr.to)].push_back(gi); // u -> v (group index)
+    }
+
+    // Reachability from src over the member graph; nodes outside it never see flow.
+    std::vector<char> reach(static_cast<std::size_t>(N), 0);
+    {
+      std::queue<std::int32_t> q; q.push(src); reach[static_cast<std::size_t>(src)] = 1;
+      while (!q.empty()) {
+        auto u = q.front(); q.pop();
+        for (auto gi : succ[static_cast<std::size_t>(u)]) {
+          auto v = groups[gi].from;
+          if (!reach[static_cast<std::size_t>(v)]) { reach[static_cast<std::size_t>(v)] = 1; q.push(v); }
+        }
+      }
+    }
+    if (!reach[static_cast<std::size_t>(dst)]) return static_cast<Flow>(0.0);
+
+    // Per-node fan-out (number of member edges) for the equal per-edge split.
+    std::vector<int> node_split(static_cast<std::size_t>(N), 0);
+    std::vector<int> indeg(static_cast<std::size_t>(N), 0);
+    for (std::size_t u = 0; u < succ.size(); ++u) {
+      if (!reach[u]) continue;
+      int s = 0;
+      for (auto gi : succ[u]) {
+        s += static_cast<int>(groups[gi].eid_count);
+        auto v = static_cast<std::size_t>(groups[gi].from);
+        if (reach[v]) indeg[v] += 1;
+      }
+      node_split[u] = s;
+    }
+
+    // Kahn's algorithm carrying actual volumes. Nodes are released once every
+    // parent has forwarded, so inflow[u] is final when u is processed.
+    std::queue<std::int32_t> q;
+    std::vector<double> inflow(static_cast<std::size_t>(N), 0.0);
+    q.push(src);
+    inflow[static_cast<std::size_t>(src)] = static_cast<double>(requested_flow);
+    while (!q.empty()) {
+      auto u = q.front(); q.pop();
+      const double f_in = inflow[static_cast<std::size_t>(u)];
+      const int split = node_split[static_cast<std::size_t>(u)];
+      // Even a node that received nothing must release its children, or a
+      // reconvergent child stays blocked behind an unreachable parent.
+      const double per_edge = (split > 0 && f_in >= kEpsilon) ? f_in / static_cast<double>(split) : 0.0;
+      for (auto gi : succ[static_cast<std::size_t>(u)]) {
+        const auto& gr = groups[gi];
+        if (per_edge > 0.0) {
+          for (auto eid : gs.edges_of(gr)) {
+            const auto ei = static_cast<std::size_t>(eid);
+            const double res = static_cast<double>(residual_[ei]);
+            const double carried = std::max(0.0, std::min(per_edge, res));
+            if (carried > 0.0) {
+              edge_flow_[ei] += static_cast<Flow>(carried);
+              residual_[ei] = static_cast<Cap>(std::max(0.0, res - carried));
+              inflow[static_cast<std::size_t>(gr.from)] += carried;
+              if (trace) trace->emplace_back(eid, static_cast<Flow>(carried));
+            }
+            const double dropped = per_edge - carried;
+            if (record_drops && dropped >= kEpsilon) drops->emplace_back(eid, static_cast<Flow>(dropped));
+          }
+        }
+        auto v = static_cast<std::size_t>(gr.from);
+        if (reach[v] && --indeg[v] == 0) q.push(static_cast<std::int32_t>(v));
+      }
+    }
+    placed = static_cast<Flow>(inflow[static_cast<std::size_t>(dst)]);
   } else {
-    // EqualBalanced placement: split flow equally across parallel edges, with
-    // topological accumulation to correctly handle reconvergent DAGs.
+    // EqualBalanced / EqualBalancedFixed placement: split flow equally across
+    // parallel edges, with topological accumulation to correctly handle
+    // reconvergent DAGs. The two differ only in the split set: EqualBalanced
+    // keeps the groups that still have headroom, EqualBalancedFixed keeps every
+    // group with capacity so that a saturated member drives the scale to 0.
 
     // Build forward adjacency from parent u to child v for each group and
     // compute aggregated reverse capacities per group.
@@ -310,9 +414,9 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
       if (gr.eid_count == 0) continue;
       // EB: group admissible total = min_edge_residual * |edges|
       const double cap_rev = static_cast<double>(gr.min_cap) * static_cast<double>(gr.eid_count);
-      if (cap_rev >= kMinCap) {
+      if (cap_rev >= kMinCap || fixed_members) {
         succ[static_cast<std::size_t>(gr.to)].push_back(gi); // u -> v (group index)
-        rev_cap[gi] = cap_rev;
+        rev_cap[gi] = cap_rev >= kMinCap ? cap_rev : 0.0;
       }
     }
 

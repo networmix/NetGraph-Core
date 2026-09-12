@@ -498,3 +498,234 @@ shortest_paths(const StrictMultiDiGraph& g, NodeId src,
 }
 
 } // namespace netgraph::core
+
+/*
+  Reverse Dijkstra: shortest paths from every node *to* one destination.
+
+  Mirrors shortest_paths_core over the in-adjacency (in_row_offsets /
+  in_col_indices / in_adj_edge_index): the priority queue settles nodes by their
+  distance to dst, edge selection runs per (u -> v) parallel group exactly as in
+  the forward variant, and node-level tie-breaking in single-path mode prefers
+  the higher bottleneck capacity toward dst. Successor entries (v, e) are kept
+  per tail node u while u is unsettled, then bucketed by v into the forward
+  PredDAG layout that placement consumes.
+*/
+namespace netgraph::core {
+
+namespace {
+static std::pair<std::vector<Cost>, PredDAG>
+shortest_paths_to_core(const StrictMultiDiGraph& g, NodeId target,
+                       bool multipath,
+                       const EdgeSelection& selection,
+                       std::span<const Cap> residual,
+                       std::span<const bool> node_mask,
+                       std::span<const bool> edge_mask,
+                       std::span<const EdgeId> fanout_edges) {
+  NGRAPH_PROFILE_SCOPE("shortest_paths_to_core");
+  const auto N = g.num_nodes();
+  const auto E = g.num_edges();
+  const auto irow = g.in_row_offsets_view();
+  const auto icol = g.in_col_indices_view();
+  const auto iaei = g.in_adj_edge_index_view();
+  const auto esrc = g.edge_src_view();
+  const auto edst = g.edge_dst_view();
+  const auto cost = g.cost_view();
+  const auto cap  = g.capacity_view();
+
+  std::vector<Cost> dist(static_cast<std::size_t>(N), std::numeric_limits<Cost>::max());
+  std::vector<Cap> min_residual_to_dst(static_cast<std::size_t>(N), static_cast<Cap>(0));
+
+  const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(N));
+  const bool use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(E));
+  const bool has_residual = (residual.size() == static_cast<std::size_t>(E));
+  const bool require_cap = selection.require_capacity || has_residual;
+  const bool target_allowed = (target >= 0 && target < N &&
+                               (!use_node_mask || node_mask[static_cast<std::size_t>(target)]));
+
+  // Successor lists per tail node u as a flat intrusive list of (v, e) entries.
+  std::vector<std::int32_t> succ_head(static_cast<std::size_t>(N), -1);
+  std::vector<std::int32_t> succ_tail(static_cast<std::size_t>(N), -1);
+  std::vector<NodeId> ent_node; ent_node.reserve(static_cast<std::size_t>(E));
+  std::vector<EdgeId> ent_edge; ent_edge.reserve(static_cast<std::size_t>(E));
+  std::vector<std::int32_t> ent_next; ent_next.reserve(static_cast<std::size_t>(E));
+  // has_in_entry[v]: some DAG entry u -> v exists; a fanout edge may not leave such a node.
+  std::vector<char> has_in_entry(static_cast<std::size_t>(N), 0);
+  auto succ_clear = [&](std::size_t u){ succ_head[u] = -1; succ_tail[u] = -1; };
+  auto succ_append = [&](std::size_t u, NodeId v, EdgeId e){
+    const auto idx = static_cast<std::int32_t>(ent_node.size());
+    ent_node.push_back(v); ent_edge.push_back(e); ent_next.push_back(-1);
+    if (succ_head[u] < 0) { succ_head[u] = idx; }
+    else { ent_next[static_cast<std::size_t>(succ_tail[u])] = idx; }
+    succ_tail[u] = idx;
+  };
+
+  if (target_allowed) {
+    dist[static_cast<std::size_t>(target)] = static_cast<Cost>(0);
+    min_residual_to_dst[static_cast<std::size_t>(target)] = std::numeric_limits<Cap>::max();
+
+    using QItem = std::tuple<Cost, Cap, NodeId>;
+    auto cmp = [](const QItem& a, const QItem& b) { return a > b; };
+    std::priority_queue<QItem, std::vector<QItem>, decltype(cmp)> pq(cmp);
+    pq.emplace(static_cast<Cost>(0), -std::numeric_limits<Cap>::max(), target);
+    std::vector<char> settled(static_cast<std::size_t>(N), 0);
+    std::vector<EdgeId> sel_buf; sel_buf.reserve(16);
+
+    while (!pq.empty()) {
+      auto [d_v, neg_res_v, v] = pq.top(); pq.pop();
+      if (v < 0 || v >= N) continue;
+      if (d_v > dist[static_cast<std::size_t>(v)]) continue;
+      if (!multipath && d_v == dist[static_cast<std::size_t>(v)] &&
+          -neg_res_v < min_residual_to_dst[static_cast<std::size_t>(v)] - kEpsilon) continue;
+      settled[static_cast<std::size_t>(v)] = 1;
+
+      // In-edges of v, clustered by tail node u (edges are sorted by (src, dst)).
+      auto start = static_cast<std::size_t>(irow[static_cast<std::size_t>(v)]);
+      auto end   = static_cast<std::size_t>(irow[static_cast<std::size_t>(v)+1]);
+      std::size_t i = start;
+      while (i < end) {
+        NodeId u = icol[i];
+        if (use_node_mask && !node_mask[static_cast<std::size_t>(u)]) {
+          std::size_t j_skip = i; while (j_skip < end && icol[j_skip] == u) ++j_skip; i = j_skip; continue;
+        }
+        Cost min_edge_cost = std::numeric_limits<Cost>::max();
+        std::vector<EdgeId>& selected_edges = sel_buf; selected_edges.clear();
+        double best_rem_for_min_cost = -1.0;
+        std::size_t j = i;
+        int best_edge_id = -1;
+        for (; j < end && icol[j] == u; ++j) {
+          auto e = static_cast<std::size_t>(iaei[j]);
+          if (use_edge_mask && !edge_mask[e]) continue;
+          const Cap rem = has_residual ? residual[e] : cap[e];
+          if (require_cap && rem < kMinCap) continue;
+          const Cost ecost = static_cast<Cost>(cost[e]);
+          if (ecost < min_edge_cost) {
+            min_edge_cost = ecost;
+            selected_edges.clear();
+            if (selection.multi_edge) {
+              selected_edges.push_back(static_cast<EdgeId>(iaei[j]));
+            } else {
+              best_edge_id = static_cast<int>(e);
+              best_rem_for_min_cost = static_cast<double>(rem);
+            }
+          } else if (ecost == min_edge_cost) {
+            if (selection.multi_edge) {
+              selected_edges.push_back(static_cast<EdgeId>(iaei[j]));
+            } else if (selection.tie_break == EdgeTieBreak::PreferHigherResidual) {
+              if (static_cast<double>(rem) > best_rem_for_min_cost + kEpsilon) {
+                best_edge_id = static_cast<int>(e);
+                best_rem_for_min_cost = static_cast<double>(rem);
+              } else if (std::abs(static_cast<double>(rem) - best_rem_for_min_cost) <= kEpsilon) {
+                if (best_edge_id < 0 || static_cast<int>(e) < best_edge_id) best_edge_id = static_cast<int>(e);
+              }
+            } else {
+              if (best_edge_id < 0 || static_cast<int>(e) < best_edge_id) best_edge_id = static_cast<int>(e);
+            }
+          }
+        }
+        if (!selection.multi_edge && best_edge_id >= 0) {
+          selected_edges.clear();
+          selected_edges.push_back(static_cast<EdgeId>(best_edge_id));
+        }
+        if (!selected_edges.empty()) {
+          const Cost new_cost = static_cast<Cost>(d_v + min_edge_cost);
+          const auto u_idx = static_cast<std::size_t>(u);
+          Cap max_edge_residual = static_cast<Cap>(0);
+          for (auto edge_id : selected_edges) {
+            const Cap rem = has_residual ? residual[static_cast<std::size_t>(edge_id)]
+                                         : cap[static_cast<std::size_t>(edge_id)];
+            if (rem > max_edge_residual) max_edge_residual = rem;
+          }
+          const Cap path_residual = std::min(min_residual_to_dst[static_cast<std::size_t>(v)], max_edge_residual);
+          if (new_cost < dist[u_idx] ||
+              (!multipath && new_cost == dist[u_idx] && !settled[u_idx] &&
+               path_residual > min_residual_to_dst[u_idx] + kEpsilon)) {
+            dist[u_idx] = new_cost;
+            min_residual_to_dst[u_idx] = path_residual;
+            succ_clear(u_idx);
+            for (auto sel_e : selected_edges) succ_append(u_idx, v, sel_e);
+            has_in_entry[static_cast<std::size_t>(v)] = 1;
+            pq.emplace(new_cost, -path_residual, u);
+          } else if (multipath && new_cost == dist[u_idx] && !settled[u_idx]) {
+            for (auto sel_e : selected_edges) succ_append(u_idx, v, sel_e);
+            has_in_entry[static_cast<std::size_t>(v)] = 1;
+          }
+        }
+        i = j;
+      }
+    }
+  }
+
+  // Forced fan-out entries (see the header).
+  for (auto e_raw : fanout_edges) {
+    if (e_raw < 0 || e_raw >= E) {
+      throw std::invalid_argument("shortest_paths_to: fanout edge id out of range");
+    }
+    const auto e = static_cast<std::size_t>(e_raw);
+    const NodeId u = esrc[e];
+    const NodeId v = edst[e];
+    if (has_in_entry[static_cast<std::size_t>(u)]) {
+      throw std::invalid_argument(
+          "shortest_paths_to: a fanout edge must leave a node with no incoming DAG entry "
+          "(otherwise the DAG could contain a cycle)");
+    }
+    if (use_edge_mask && !edge_mask[e]) continue;
+    if (use_node_mask && (!node_mask[static_cast<std::size_t>(u)] || !node_mask[static_cast<std::size_t>(v)])) continue;
+    const Cap rem = has_residual ? residual[e] : cap[e];
+    if (require_cap && rem < kMinCap) continue;
+    if (dist[static_cast<std::size_t>(v)] == std::numeric_limits<Cost>::max()) continue;
+    bool present = false;
+    for (std::int32_t i = succ_head[static_cast<std::size_t>(u)]; i >= 0; i = ent_next[static_cast<std::size_t>(i)]) {
+      if (ent_edge[static_cast<std::size_t>(i)] == e_raw) { present = true; break; }
+    }
+    if (present) continue;
+    succ_append(static_cast<std::size_t>(u), v, e_raw);
+    if (dist[static_cast<std::size_t>(u)] == std::numeric_limits<Cost>::max()) {
+      dist[static_cast<std::size_t>(u)] = static_cast<Cost>(cost[e]) + dist[static_cast<std::size_t>(v)];
+    }
+  }
+
+  // Bucket successor entries (u -> v via e) by v into the forward PredDAG layout.
+  PredDAG dag;
+  dag.parent_offsets.assign(static_cast<std::size_t>(N+1), 0);
+  for (std::int32_t u = 0; u < N; ++u) {
+    for (std::int32_t i = succ_head[static_cast<std::size_t>(u)]; i >= 0; i = ent_next[static_cast<std::size_t>(i)]) {
+      dag.parent_offsets[static_cast<std::size_t>(ent_node[static_cast<std::size_t>(i)]) + 1] += 1;
+    }
+  }
+  for (std::size_t k = 1; k < dag.parent_offsets.size(); ++k) dag.parent_offsets[k] += dag.parent_offsets[k-1];
+  dag.parents.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
+  dag.via_edges.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
+  std::vector<std::int32_t> cursor(dag.parent_offsets.begin(), dag.parent_offsets.end() - 1);
+  for (std::int32_t u = 0; u < N; ++u) {
+    for (std::int32_t i = succ_head[static_cast<std::size_t>(u)]; i >= 0; i = ent_next[static_cast<std::size_t>(i)]) {
+      const auto v = static_cast<std::size_t>(ent_node[static_cast<std::size_t>(i)]);
+      const auto pos = static_cast<std::size_t>(cursor[v]++);
+      dag.parents[pos] = u;
+      dag.via_edges[pos] = ent_edge[static_cast<std::size_t>(i)];
+    }
+  }
+  return {std::move(dist), std::move(dag)};
+}
+} // namespace
+
+std::pair<std::vector<Cost>, PredDAG>
+shortest_paths_to(const StrictMultiDiGraph& g, NodeId dst,
+                  bool multipath,
+                  const EdgeSelection& selection,
+                  std::span<const Cap> residual,
+                  std::span<const bool> node_mask,
+                  std::span<const bool> edge_mask,
+                  std::span<const EdgeId> fanout_edges) {
+  if (!node_mask.empty() && node_mask.size() != static_cast<std::size_t>(g.num_nodes())) {
+    throw std::invalid_argument("shortest_paths_to: node_mask length mismatch");
+  }
+  if (!edge_mask.empty() && edge_mask.size() != static_cast<std::size_t>(g.num_edges())) {
+    throw std::invalid_argument("shortest_paths_to: edge_mask length mismatch");
+  }
+  if (!residual.empty() && residual.size() != static_cast<std::size_t>(g.num_edges())) {
+    throw std::invalid_argument("shortest_paths_to: residual length mismatch");
+  }
+  return shortest_paths_to_core(g, dst, multipath, selection, residual, node_mask, edge_mask, fanout_edges);
+}
+
+} // namespace netgraph::core

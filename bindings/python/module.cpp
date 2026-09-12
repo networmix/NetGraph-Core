@@ -110,7 +110,9 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
 
   py::enum_<FlowPlacement>(m, "FlowPlacement")
       .value("PROPORTIONAL", FlowPlacement::Proportional)
-      .value("EQUAL_BALANCED", FlowPlacement::EqualBalanced);
+      .value("EQUAL_BALANCED", FlowPlacement::EqualBalanced)
+      .value("EQUAL_BALANCED_FIXED", FlowPlacement::EqualBalancedFixed)
+      .value("EQUAL_BALANCED_LOSSY", FlowPlacement::EqualBalancedLossy);
 
   py::class_<StrictMultiDiGraph>(m, "StrictMultiDiGraph")
       .def_static(
@@ -218,6 +220,56 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
           throw py::value_error("dtype must be 'float64' or 'int64'");
         }
       }, py::arg("graph"), py::arg("src"), py::arg("dst") = py::none(), py::kw_only(), py::arg("selection") = py::none(), py::arg("residual") = py::none(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none(), py::arg("multipath") = true, py::arg("dtype") = "float64")
+      .def("spf_to", [](const Algorithms& algs, const PyGraph& pg, std::int32_t dst,
+                          py::object selection_obj, py::object residual_obj,
+                          py::object node_mask, py::object edge_mask, bool multipath,
+                          py::object fanout_obj, std::string dtype) -> py::tuple {
+        if (dst < 0 || dst >= pg.num_nodes) throw py::value_error("dst out of range");
+        SpfToOptions opts; if (!selection_obj.is_none()) opts.selection = py::cast<EdgeSelection>(selection_obj);
+        std::vector<double> residual_vec;
+        if (!residual_obj.is_none()) {
+          auto arr = py::cast<py::array>(residual_obj);
+          if (!(arr.flags() & py::array::c_style)) throw py::type_error("residual must be C-contiguous (np.ascontiguousarray)");
+          auto buf = arr.request();
+          if (buf.ndim != 1 || buf.format != py::format_descriptor<double>::format()) throw py::type_error("residual must be 1-D float64");
+          if (static_cast<std::int32_t>(buf.shape[0]) != pg.num_edges) {
+            throw py::type_error("residual length must equal " + std::to_string(pg.num_edges));
+          }
+          residual_vec.resize(static_cast<std::size_t>(buf.shape[0]));
+          std::memcpy(residual_vec.data(), buf.ptr, residual_vec.size()*sizeof(double));
+          opts.residual = std::span<const double>(residual_vec.data(), residual_vec.size());
+        }
+        std::vector<EdgeId> fanout_vec;
+        if (!fanout_obj.is_none()) {
+          for (auto item : py::iterable(fanout_obj)) {
+            auto e = py::cast<std::int64_t>(item);
+            if (e < 0 || e >= pg.num_edges) throw py::value_error("fanout edge id out of range");
+            fanout_vec.push_back(static_cast<EdgeId>(e));
+          }
+          opts.fanout_edges = std::span<const EdgeId>(fanout_vec.data(), fanout_vec.size());
+        }
+        auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(pg.num_nodes), "node_mask");
+        auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(pg.num_edges), "edge_mask");
+        opts.node_mask = node_bs.view;
+        opts.edge_mask = edge_bs.view;
+        opts.multipath = multipath;
+        py::gil_scoped_release rel; auto res = algs.spf_to(pg.handle, dst, opts); py::gil_scoped_acquire acq;
+        auto maxc = std::numeric_limits<Cost>::max();
+        if (dtype == "int64") {
+          py::array_t<std::int64_t> dist_arr(res.first.size());
+          auto* out = dist_arr.mutable_data();
+          for (std::size_t i=0;i<res.first.size();++i) out[i] = (res.first[i]==maxc) ? static_cast<std::int64_t>(maxc) : static_cast<std::int64_t>(res.first[i]);
+          return py::make_tuple(std::move(dist_arr), res.second);
+        } else if (dtype == "float64") {
+          py::array_t<double> dist_arr(res.first.size());
+          auto* out = dist_arr.mutable_data();
+          for (std::size_t i=0;i<res.first.size();++i) out[i] = (res.first[i]==maxc) ? std::numeric_limits<double>::infinity() : static_cast<double>(res.first[i]);
+          return py::make_tuple(std::move(dist_arr), res.second);
+        } else {
+          throw py::value_error("dtype must be 'float64' or 'int64'");
+        }
+      }, py::arg("graph"), py::arg("dst"), py::kw_only(), py::arg("selection") = py::none(), py::arg("residual") = py::none(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none(), py::arg("multipath") = true, py::arg("fanout_edges") = py::none(), py::arg("dtype") = "float64",
+         "Shortest paths from every node to dst (reverse SPF). Returns (distances_to_dst, dag); the DAG is forward-oriented and valid for placement from any node toward dst. fanout_edges are added to the DAG regardless of cost (see shortest_paths.hpp).")
       .def("ksp", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src, std::int32_t dst,
                        int k, py::object max_cost_factor, bool unique, py::object node_mask, py::object edge_mask, std::string dtype){
         if (src < 0 || src >= pg.num_nodes || dst < 0 || dst >= pg.num_nodes) throw py::value_error("src/dst out of range");
@@ -489,6 +541,14 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       })
       .def_property_readonly("graph", [](const FlowGraph& fg){ return &fg.graph(); }, py::return_value_policy::reference_internal)
       .def("place", [](FlowGraph& fg, const FlowIndex& idx, std::int32_t src, std::int32_t dst, const PredDAG& dag, double amount, FlowPlacement placement){ py::gil_scoped_release rel; auto placed = fg.place(idx, src, dst, dag, amount, placement); py::gil_scoped_acquire acq; return placed; }, py::arg("index"), py::arg("src"), py::arg("dst"), py::arg("dag"), py::arg("amount"), py::arg("flow_placement") = FlowPlacement::Proportional)
+      .def("place_with_drops", [](FlowGraph& fg, const FlowIndex& idx, std::int32_t src, std::int32_t dst, const PredDAG& dag, double amount, FlowPlacement placement){
+        std::vector<std::pair<EdgeId, Flow>> drops;
+        double placed;
+        { py::gil_scoped_release rel; placed = fg.place(idx, src, dst, dag, amount, placement, &drops); }
+        py::list out; for (auto const& pr : drops) out.append(py::make_tuple(pr.first, pr.second));
+        return py::make_tuple(placed, out);
+      }, py::arg("index"), py::arg("src"), py::arg("dst"), py::arg("dag"), py::arg("amount"), py::arg("flow_placement") = FlowPlacement::EqualBalancedLossy,
+         "Like place(), but also returns the per-edge dropped volume as a list of (edge_id, dropped) pairs. Only EQUAL_BALANCED_LOSSY drops flow; other placements return an empty list.")
       .def("remove", [](FlowGraph& fg, const FlowIndex& idx){ py::gil_scoped_release rel; fg.remove(idx); py::gil_scoped_acquire acq; })
       .def("remove_by_class", [](FlowGraph& fg, std::int32_t cls){ py::gil_scoped_release rel; fg.remove_by_class(cls); py::gil_scoped_acquire acq; })
       .def("reset", [](FlowGraph& fg){ py::gil_scoped_release rel; fg.reset(); py::gil_scoped_acquire acq; })

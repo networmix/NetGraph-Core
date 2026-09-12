@@ -56,9 +56,28 @@ struct FlowIndexHash {
 //   out of scope for EqualBalanced.
 //
 // - Proportional may be used iteratively (e.g., for max-flow).
+//
+// - EqualBalanced builds its split set from the DAG edges that currently have
+//   residual, so re-invoking it on updated residuals shrinks the next-hop set
+//   (progressive behavior, used by place_max_flow and FlowPolicy fills).
+//
+// - EqualBalancedFixed builds its split set from the DAG edges that have
+//   *capacity* (the topology's next-hop set), and admits with the same single
+//   global scale computed from residual headroom. A member saturated since the
+//   DAG was built therefore blocks admission entirely (scale 0): this is
+//   lossless hash-ECMP admission with a forwarding table that does not react
+//   to load.
+//
+// - EqualBalancedLossy also splits over the topology's next-hop set, but does
+//   not scale: every edge carries min(share, residual) and the excess is
+//   dropped, deficits propagate downstream, and the placed amount is the volume
+//   that reaches dst. This is best-effort hash-ECMP forwarding; the dropped
+//   share per edge is available through the drop trace of place_on_dag.
 enum class FlowPlacement {
-  Proportional = 1,    // Distribute flow proportionally to residual capacity (like ECMP with weights)
-  EqualBalanced = 2    // Split equally per parallel edge on a fixed DAG (single-pass ECMP admission)
+  Proportional = 1,        // Distribute flow proportionally to residual capacity (like ECMP with weights)
+  EqualBalanced = 2,       // Split equally per parallel edge on a fixed DAG (single-pass ECMP admission)
+  EqualBalancedFixed = 3,  // Equal split over the topology next-hop set; a saturated member blocks admission
+  EqualBalancedLossy = 4   // Equal split over the topology next-hop set; excess over residual is dropped
 };
 
 // Tie-breaking rule when multiple equal-cost edges exist between the same (u,v) pair.

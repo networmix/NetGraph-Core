@@ -55,6 +55,12 @@ public:
   [[nodiscard]] virtual std::pair<std::vector<Cost>, PredDAG> spf(
       const GraphHandle& gh, NodeId src, const SpfOptions& opts) = 0;
 
+  // Computes shortest paths from every node to dst (reverse SPF); see
+  // shortest_paths_to() in shortest_paths.hpp. Returns distances to dst and a
+  // forward-oriented predecessor DAG valid for placement from any node toward dst.
+  [[nodiscard]] virtual std::pair<std::vector<Cost>, PredDAG> spf_to(
+      const GraphHandle& gh, NodeId dst, const SpfToOptions& opts) = 0;
+
   // Computes maximum flow between a source and destination node.
   //
   // Arguments:

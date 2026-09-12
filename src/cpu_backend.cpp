@@ -37,6 +37,20 @@ public:
                                           opts.residual, opts.node_mask, opts.edge_mask);
   }
 
+  std::pair<std::vector<Cost>, PredDAG> spf_to(
+      const GraphHandle& gh, NodeId dst, const SpfToOptions& opts) override {
+    const StrictMultiDiGraph& g = *gh.graph;
+    if (!opts.node_mask.empty() && opts.node_mask.size() != static_cast<std::size_t>(g.num_nodes())) {
+      throw std::invalid_argument("CpuBackend::spf_to: node_mask length mismatch");
+    }
+    if (!opts.edge_mask.empty() && opts.edge_mask.size() != static_cast<std::size_t>(g.num_edges())) {
+      throw std::invalid_argument("CpuBackend::spf_to: edge_mask length mismatch");
+    }
+    return netgraph::core::shortest_paths_to(g, dst, opts.multipath, opts.selection,
+                                             opts.residual, opts.node_mask, opts.edge_mask,
+                                             opts.fanout_edges);
+  }
+
   std::pair<Flow, FlowSummary> max_flow(
       const GraphHandle& gh, NodeId src, NodeId dst, const MaxFlowOptions& opts) override {
     const StrictMultiDiGraph& g = *gh.graph;

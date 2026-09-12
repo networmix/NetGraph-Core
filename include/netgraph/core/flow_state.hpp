@@ -53,12 +53,25 @@ public:
   //    saturates. Re-invoking this on the updated residuals changes the effective
   //    next-hop set (progressive traffic-engineering behavior) and is outside
   //    "single-pass ECMP admission".
+  //
+  // EqualBalancedFixed uses the same global scale but takes the split set from
+  // the DAG edges with capacity rather than with residual, so a member that has
+  // been saturated since the DAG was built yields scale 0 and nothing is placed.
+  //
+  // EqualBalancedLossy splits over the same capacity-based set without scaling:
+  // each edge carries min(share, residual), the excess is dropped, and the
+  // returned amount is what reaches dst. When `drops` is given it receives one
+  // (edge, dropped) entry per edge that dropped flow. Drops are recorded only
+  // for finite requested_flow; an infinite request fills every source edge and
+  // records no drops. Other placements never write to `drops`.
   [[nodiscard]] Flow place_on_dag(NodeId src, NodeId dst,
                     const PredDAG& dag,
                     Flow requested_flow,
                     FlowPlacement placement,
                     // Optional trace collector to record per-edge allocations applied by this call
-                    std::vector<std::pair<EdgeId, Flow>>* trace = nullptr);
+                    std::vector<std::pair<EdgeId, Flow>>* trace = nullptr,
+                    // Optional collector for per-edge dropped volume (EqualBalancedLossy only)
+                    std::vector<std::pair<EdgeId, Flow>>* drops = nullptr);
 
   // Convenience: run repeated placements until exhaustion (or single tier when
   // shortest_path=true). Returns total placed flow. Uses internal residual.
