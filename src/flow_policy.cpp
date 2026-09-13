@@ -31,8 +31,7 @@ namespace {
 // refresh logic (and, except for the lossy mode, the equalizing rebalance in
 // place_demand); they differ only inside FlowState::place_on_dag.
 constexpr bool is_equal_balanced(FlowPlacement p) noexcept {
-  return p == FlowPlacement::EqualBalanced || p == FlowPlacement::EqualBalancedFixed ||
-         p == FlowPlacement::EqualBalancedLossy;
+  return p == FlowPlacement::EqualBalanced || p == FlowPlacement::EqualBalancedLossy;
 }
 } // namespace
 

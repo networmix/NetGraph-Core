@@ -55,17 +55,13 @@ class FlowPlacement:
         May be used iteratively (e.g., for max-flow).
 
     EQUAL_BALANCED (ECMP): Single-pass admission on a fixed shortest-path DAG (Dijkstra).
-        Computes one global scale so no edge is oversubscribed under equal
-        per-edge splits, places once, and stops. The split set is the DAG's
-        edges that still have residual, so re-invoking on updated residuals
-        changes the next-hop set (progressive traffic-engineering behavior).
+        The split set is the DAG's edges with capacity (the topology's next-hop
+        set). Computes one global scale so no edge is oversubscribed under
+        equal per-edge splits, places once, and stops; a member filled since
+        the DAG was computed drives the scale to 0, because a forwarding table
+        does not react to load. Progress past a full member by recomputing the
+        DAG with a residual-aware SPF (place_max_flow and FlowPolicy do).
         ECMP = Equal-Cost Multi-Path; WCMP = Weighted-Cost Multi-Path.
-
-    EQUAL_BALANCED_FIXED: The same single-pass admission, but the split set is
-        the DAG's edges with capacity (the topology's next-hop set), so a
-        member saturated since the DAG was computed drives the scale to 0 and
-        nothing is admitted. Models lossless hash-ECMP with a forwarding table
-        that does not react to load.
 
     EQUAL_BALANCED_LOSSY: Equal split over the same capacity-based set with no
         scaling: each edge carries min(share, residual) and drops the excess,
@@ -76,7 +72,6 @@ class FlowPlacement:
 
     PROPORTIONAL: ClassVar[FlowPlacement]
     EQUAL_BALANCED: ClassVar[FlowPlacement]
-    EQUAL_BALANCED_FIXED: ClassVar[FlowPlacement]
     EQUAL_BALANCED_LOSSY: ClassVar[FlowPlacement]
     __members__: ClassVar[dict[str, FlowPlacement]]
 
@@ -281,10 +276,10 @@ class FlowState:
 
         EqualBalanced is **single-pass ECMP admission** on the provided DAG:
         we compute one global scale so no edge is oversubscribed under equal per-edge
-        splits, apply it once, and return. Re-invoking on updated residuals changes
-        the next-hop set (progressive behavior). EQUAL_BALANCED_FIXED keeps the
-        topology's next-hop set instead (a saturated member yields scale 0), and
-        EQUAL_BALANCED_LOSSY forwards best-effort over it (see FlowPlacement).
+        splits, apply it once, and return. The split set is the topology's
+        next-hop set, so a member already full yields scale 0; progress past it
+        by recomputing the DAG with residuals. EQUAL_BALANCED_LOSSY forwards
+        best-effort over the same set (see FlowPlacement).
 
         Returns:
             Amount of flow actually placed (may be less than requested).

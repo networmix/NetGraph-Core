@@ -413,7 +413,7 @@ TEST(ShortestPathsTo, FanoutEdgesForceEverySourceIntoTheDag) {
   // Lossless equal-balanced admission over the fan-out: shares 50/50 of 100;
   // S2's branch admits 20 of 50 (link 3) so the whole demand scales to 0.4.
   FlowState fs(g);
-  EXPECT_NEAR(fs.place_on_dag(0, 4, dag, 100.0, FlowPlacement::EqualBalancedFixed), 40.0, 1e-9);
+  EXPECT_NEAR(fs.place_on_dag(0, 4, dag, 100.0, FlowPlacement::EqualBalanced), 40.0, 1e-9);
   EXPECT_NEAR(fs.edge_flow_view()[2], 20.0, 1e-9);
   EXPECT_NEAR(fs.edge_flow_view()[3], 20.0, 1e-9);
 }

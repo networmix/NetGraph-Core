@@ -2,19 +2,15 @@
   FlowState — residual capacities and placement over a fixed graph.
 
   Maintains per-edge residual capacity and cumulative edge flows. Supports
-  four placement strategies when pushing flow along an SPF DAG:
+  three placement strategies when pushing flow along an SPF DAG:
     - Proportional: distribute flow proportionally to residual capacity,
       processing nodes in topological order from source to destination.
-    - EqualBalanced: distribute flow equally across available parallel edges,
-      *single-pass ECMP admission* on a fixed DAG. We compute a single global
-      scale so no edge is oversubscribed, then return. Re-running on updated
-      residuals intentionally changes the allowed next-hop set (progressive/TE);
-      use place_max_flow() if you want that behavior.
-    - EqualBalancedFixed: the same single-pass admission, but the split set is
-      the DAG's edges with capacity (the topology's next-hop set) rather than
-      its edges with residual. A member saturated since the DAG was built
-      yields scale 0: lossless hash-ECMP admission with a load-blind
-      forwarding table.
+    - EqualBalanced: *single-pass ECMP admission* on a fixed DAG. The split set
+      is the DAG's edges with capacity (the topology's next-hop set); we
+      compute a single global scale so no edge is oversubscribed, then return.
+      A member filled since the DAG was built yields scale 0: a forwarding
+      table does not react to load. place_max_flow() progresses by recomputing
+      the DAG with a residual-aware SPF.
     - EqualBalancedLossy: equal split over the same capacity-based set with no
       scaling; each edge carries min(share, residual) and drops the excess,
       deficits propagate downstream, and the placed amount is what reaches
@@ -132,12 +128,12 @@ struct GroupSet {
 };
 
 // Build grouped edges by (parent u, child v) that can reach destination t.
-// Membership is decided by residual (edges that can still carry flow) unless
-// members_by_capacity is set, in which case every DAG edge with capacity is a
-// member and sum_cap/min_cap still reflect the current residual -- so a member
-// saturated since the DAG was built contributes min_cap = 0. The fixed and
-// lossy equal-balanced placements use the latter to model a forwarding table
-// that does not react to load.
+// Membership is decided by residual (edges that can still carry flow) for
+// Proportional placement, or by capacity when members_by_capacity is set: every
+// DAG edge with capacity is a member and sum_cap/min_cap still reflect the
+// current residual, so a member filled since the DAG was built contributes
+// min_cap = 0. The equal-balanced placements use the latter to model a
+// forwarding table that does not react to load.
 static void build_groups_residual(const StrictMultiDiGraph& g,
                                   const PredDAG& dag, NodeId t,
                                   const std::vector<Cap>& residual,
@@ -264,11 +260,9 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
   const auto N = g_->num_nodes();
   if (src < 0 || src >= N || dst < 0 || dst >= N || src == dst) return 0.0;
 
-  // The fixed and lossy equal-balanced placements model a forwarding table
-  // that does not react to load: their split set is every DAG edge with
-  // capacity, saturated or not.
-  const bool fixed_members = (placement == FlowPlacement::EqualBalancedFixed ||
-                              placement == FlowPlacement::EqualBalancedLossy);
+  // The equal-balanced placements model a forwarding table that does not
+  // react to load: their split set is every DAG edge with capacity, full or not.
+  const bool fixed_members = (placement != FlowPlacement::Proportional);
 
   // Build groups using current residual. `gs` is reused across rebuilds so its
   // buffers keep their capacity for the whole call.
@@ -399,11 +393,10 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
     }
     placed = static_cast<Flow>(inflow[static_cast<std::size_t>(dst)]);
   } else {
-    // EqualBalanced / EqualBalancedFixed placement: split flow equally across
-    // parallel edges, with topological accumulation to correctly handle
-    // reconvergent DAGs. The two differ only in the split set: EqualBalanced
-    // keeps the groups that still have headroom, EqualBalancedFixed keeps every
-    // group with capacity so that a saturated member drives the scale to 0.
+    // EqualBalanced placement: split flow equally across parallel edges, with
+    // topological accumulation to correctly handle reconvergent DAGs. Every
+    // group with capacity stays in the split, so a full member drives the
+    // global scale to 0.
 
     // Build forward adjacency from parent u to child v for each group and
     // compute aggregated reverse capacities per group.
@@ -414,10 +407,8 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
       if (gr.eid_count == 0) continue;
       // EB: group admissible total = min_edge_residual * |edges|
       const double cap_rev = static_cast<double>(gr.min_cap) * static_cast<double>(gr.eid_count);
-      if (cap_rev >= kMinCap || fixed_members) {
-        succ[static_cast<std::size_t>(gr.to)].push_back(gi); // u -> v (group index)
-        rev_cap[gi] = cap_rev >= kMinCap ? cap_rev : 0.0;
-      }
+      succ[static_cast<std::size_t>(gr.to)].push_back(gi); // u -> v (group index)
+      rev_cap[gi] = cap_rev >= kMinCap ? cap_rev : 0.0;
     }
 
     // Compute reachability from src on this succ graph (to ignore disconnected parts).

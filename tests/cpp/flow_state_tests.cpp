@@ -471,7 +471,7 @@ TEST(FlowState, RepeatedPlacementAfterResetAndIndependentInstancesStayStable) {
 }
 
 // ---------------------------------------------------------------------------
-// EqualBalancedFixed / EqualBalancedLossy: load-blind hash-ECMP models.
+// EqualBalanced / EqualBalancedLossy: load-blind hash-ECMP models.
 // ---------------------------------------------------------------------------
 #include "netgraph/core/flow_graph.hpp"
 
@@ -492,33 +492,29 @@ PredDAG cost_only_dag(const StrictMultiDiGraph& g, NodeId s, NodeId t) {
 }
 } // namespace
 
-TEST(FlowState, EqualBalancedFixed_SaturatedMemberBlocksAdmission) {
+TEST(FlowState, EqualBalanced_SaturatedMemberBlocksAdmission) {
   auto g = make_unbalanced_pair();
   auto dag = cost_only_dag(g, 0, 1);
 
-  FlowState fixed(g);
-  EXPECT_NEAR(fixed.place_on_dag(0, 1, dag, 20.0, FlowPlacement::EqualBalancedFixed), 20.0, 1e-9);
-  EXPECT_NEAR(fixed.edge_flow_view()[0], 10.0, 1e-9);
-  EXPECT_NEAR(fixed.edge_flow_view()[1], 10.0, 1e-9);
-  // The 10-unit member is saturated; equal hashing of any further demand would
-  // lose 1/2 of it, so nothing more is admitted losslessly.
-  EXPECT_NEAR(fixed.place_on_dag(0, 1, dag, 10.0, FlowPlacement::EqualBalancedFixed), 0.0, 1e-9);
-  EXPECT_NEAR(fixed.edge_flow_view()[1], 10.0, 1e-9) << "no flow may leak onto the remaining member";
-
-  // The progressive mode drops the saturated member from the split instead.
-  FlowState progressive(g);
-  EXPECT_NEAR(progressive.place_on_dag(0, 1, dag, 20.0, FlowPlacement::EqualBalanced), 20.0, 1e-9);
-  EXPECT_NEAR(progressive.place_on_dag(0, 1, dag, 10.0, FlowPlacement::EqualBalanced), 10.0, 1e-9);
-  EXPECT_NEAR(progressive.edge_flow_view()[1], 20.0, 1e-9);
+  FlowState fs(g);
+  EXPECT_NEAR(fs.place_on_dag(0, 1, dag, 20.0, FlowPlacement::EqualBalanced), 20.0, 1e-9);
+  EXPECT_NEAR(fs.edge_flow_view()[0], 10.0, 1e-9);
+  EXPECT_NEAR(fs.edge_flow_view()[1], 10.0, 1e-9);
+  // The 10-unit member is full; equal hashing of any further demand would lose
+  // half of it, so nothing more is admitted losslessly on this DAG.
+  EXPECT_NEAR(fs.place_on_dag(0, 1, dag, 10.0, FlowPlacement::EqualBalanced), 0.0, 1e-9);
+  EXPECT_NEAR(fs.edge_flow_view()[1], 10.0, 1e-9) << "no flow may leak onto the remaining member";
 }
 
-TEST(FlowState, EqualBalancedFixed_SinglePassMatchesEqualBalancedOnFreshState) {
+TEST(FlowState, EqualBalanced_ProgressesOnlyThroughResidualAwareSpf) {
+  // On a fresh residual-aware DAG the full member is gone and placement continues.
   auto g = make_unbalanced_pair();
-  auto dag = cost_only_dag(g, 0, 1);
-  FlowState a(g), b(g);
-  EXPECT_NEAR(a.place_on_dag(0, 1, dag, 100.0, FlowPlacement::EqualBalanced), 20.0, 1e-9);
-  EXPECT_NEAR(b.place_on_dag(0, 1, dag, 100.0, FlowPlacement::EqualBalancedFixed), 20.0, 1e-9);
-  for (std::size_t i = 0; i < 2; ++i) EXPECT_NEAR(a.edge_flow_view()[i], b.edge_flow_view()[i], 1e-12);
+  FlowState fs(g);
+  EXPECT_NEAR(fs.place_on_dag(0, 1, cost_only_dag(g, 0, 1), 20.0, FlowPlacement::EqualBalanced), 20.0, 1e-9);
+  EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = true; sel.tie_break = EdgeTieBreak::Deterministic;
+  auto [dist, dag] = shortest_paths(g, 0, 1, /*multipath=*/true, sel, fs.residual_view(), {}, {});
+  EXPECT_NEAR(fs.place_on_dag(0, 1, dag, 10.0, FlowPlacement::EqualBalanced), 10.0, 1e-9);
+  EXPECT_NEAR(fs.edge_flow_view()[1], 20.0, 1e-9);
 }
 
 TEST(FlowState, EqualBalancedLossy_FillAndDropReportsDrops) {

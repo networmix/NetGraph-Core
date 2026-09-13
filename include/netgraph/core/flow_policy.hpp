@@ -146,9 +146,9 @@ public:
   //
   // With static paths configured the policy neither creates additional flows nor
   // reoptimizes: max_path_cost, max_path_cost_factor, min_flow_count and
-  // reoptimize_flows_on_each_placement are inert. EqualBalanced and
-  // EqualBalancedFixed spread over the usable (up) bundles only and equalize the
-  // carried volume per bundle; EqualBalancedLossy offers each up bundle an equal
+  // reoptimize_flows_on_each_placement are inert. EqualBalanced spreads over the
+  // usable (up) bundles only and equalizes the carried volume per bundle;
+  // EqualBalancedLossy offers each up bundle an equal
   // share and lets it carry what fits (no equalizing rebalance), so placed is the
   // delivered total. flow_count() reports the usable count U; the supplied count
   // N is the caller's, so down LSPs = N - flow_count().

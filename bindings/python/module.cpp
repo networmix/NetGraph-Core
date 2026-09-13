@@ -111,7 +111,6 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
   py::enum_<FlowPlacement>(m, "FlowPlacement")
       .value("PROPORTIONAL", FlowPlacement::Proportional)
       .value("EQUAL_BALANCED", FlowPlacement::EqualBalanced)
-      .value("EQUAL_BALANCED_FIXED", FlowPlacement::EqualBalancedFixed)
       .value("EQUAL_BALANCED_LOSSY", FlowPlacement::EqualBalancedLossy);
 
   py::class_<StrictMultiDiGraph>(m, "StrictMultiDiGraph")
