@@ -1,0 +1,9 @@
+PASS diamond: all ECMP alternatives, parallel edges, positive self-loop excluded, isolated node
+PASS reverse diamond: hand-derived distances and forward DAG
+PASS masked source and transit node
+PASS double capacity threshold: below rejected, exact threshold admitted
+PASS edge mask and residual gate combined
+PASS exact int64 costs above 2^53 and one-unit path difference
+PASS expected gap: zero-cost distances agree, tight-edge GPU DAG has 1->2->1 cycle; CPU DAG has 2 edges
+PASS precision gaps: float32 collapses 16777216/16777217 and admits nextafter(kMinCap,0)
+PASS capacity tie gap: CPU chooses edge 1 at 1+1e-8; float32 collapses both capacities

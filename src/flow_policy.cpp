@@ -235,7 +235,7 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size()-1) return std::nullopt;
   if (dag.parent_offsets[static_cast<std::size_t>(dst)] == dag.parent_offsets[static_cast<std::size_t>(dst)+1]) return std::nullopt;
   // Return DAG and cost as-is; placement logic decides proportional vs equal-balanced behavior.
-  return std::make_optional(std::make_pair(dag, dst_cost));
+  return std::make_optional(std::make_pair(std::move(dag), dst_cost));
 }
 
 /* Create a new flow using the current path bundle. Returns nullptr if no

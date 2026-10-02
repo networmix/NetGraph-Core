@@ -1,0 +1,13 @@
+--- a/src/shortest_paths.cpp
++++ b/src/shortest_paths.cpp
+@@ -283,8 +283,9 @@
+   bool empty() const { return h.empty(); }
+   Cost top_cost() const { return std::get<0>(h.front()); }
+   QItem pop() {
++    QItem t = h.front();
+     std::pop_heap(h.begin(), h.end(), Greater{});
+-    QItem t = h.back(); h.pop_back(); return t;
++    h.pop_back(); return t;
+   }
+   void push(Cost c, Cap nr, NodeId v) {
+     h.emplace_back(c, nr, v);

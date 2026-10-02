@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-10-02
+
+### Changed
+
+- **Shortest Paths**: `shortest_paths` / `shortest_paths_to` (and therefore `spf`, `spf_to`, max-flow, `FlowPolicy` and KSP spur searches) now run Dijkstra on a monotone bucket queue whenever the graph's edge costs fit 65,536 buckets (`max_cost / gcd(costs) + 1`), which covers unit, uniform and small-integer cost graphs including zero-cost pseudo attachments; wider or int64-offset costs keep the binary heap. The active bucket is ordered by the same `(-bottleneck, node)` key as the heap, so the pop order and every output (distances, predecessor order, single-path capacity ties, early exit) are bit-identical; a differential test in the C++ suite enforces this. Scratch arrays are now a thread-local workspace reset per search (only the touched nodes when few were touched), which removes the O(N) initialisation that dominated small destination-limited searches on large graphs. Measured sequentially on an M4 Max: 1.4–1.8x on weighted random graphs, 1.1–1.3x on unit-cost graphs, 2.4–3.0x on near-destination queries; path graphs (frontier of one node) are about 1.3x slower in absolute terms of a few microseconds, and graphs that fall back to the heap (`W > 65536`) are within a few percent of the previous heap on full-source searches while their small destination-limited searches are still about 2.8x faster. `StrictMultiDiGraph` exposes `max_cost()` / `cost_gcd()`; the C++ functions take an optional trailing `SpfQueue` for tests, and `NGRAPH_CORE_SPF_QUEUE=heap|bucket` overrides the choice process-wide. The search also skips settled neighbours before scanning their parallel edges and sizes the predecessor output from live per-node counts, which makes dense unit-cost fabrics about 1.3x faster; a frontier of one node is held inline, which halves the path-graph penalty.
+- **Max-Flow**: `calc_max_flow` and `FlowState::place_max_flow` with `require_capacity=false` computed the identical cost-only shortest-path DAG on every tier; it is now computed once per call. Results are unchanged.
+- **Internals**: `FlowPolicy` no longer copies the path DAG when returning a bundle, and the `spf` / `spf_to` bindings move the DAG into the Python result instead of copying it.
+
 ## [0.10.0] - 2026-09-13
 
 ### Fixed

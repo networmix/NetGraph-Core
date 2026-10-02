@@ -1,0 +1,4 @@
+caught forward bad_alloc
+forward distance[0]=9223372036854775807 expected=1
+caught reverse bad_alloc
+reverse distance[0]=9223372036854775807 expected=1

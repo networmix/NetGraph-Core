@@ -1,0 +1,8 @@
+date: 2026-09-27T13:35:56Z
+commit: fbab119e794c843838f4f3f96d75cb7f32f06845
+Apple M4 Max
+ae2f8f3b2f2839d6d088e0a938b86cba02c23c285c33cac99df6bf369286f264  dev/perf/spf_queue/spf_variants.hpp
+a0ac4290fd6b47bdefcc4bd4cf50257e275406cb34f371e4c0ba30368b0fea45  dev/perf/spf_queue/harness.cpp
+9ee6053d38a0b1e44df958e423e12ab93fb54c3d80c8d4bcb623730362b8f441  src/shortest_paths.cpp
+12f65bdc8daa9415d118d062bdc897981bde448f5391bed2c711c8c968e9322b  src/strict_multidigraph.cpp
+Apple clang version 21.0.0 (clang-2100.1.1.101)

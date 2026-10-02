@@ -1,0 +1,11 @@
+--- a/src/strict_multidigraph.cpp
++++ b/src/strict_multidigraph.cpp
+@@ -63,7 +63,7 @@
+     }
+     total_cost += c;
+     if (cost[i] > max_cost) max_cost = cost[i];
+-    cost_gcd = std::gcd(cost_gcd, cost[i]);
++    if (cost_gcd != 1) cost_gcd = std::gcd(cost_gcd, cost[i]);
+   }
+   g.max_cost_ = max_cost;
+   g.cost_gcd_ = cost_gcd;

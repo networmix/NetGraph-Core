@@ -1,0 +1,26 @@
+--- a/src/shortest_paths.cpp
++++ b/src/shortest_paths.cpp
+@@ -269,19 +269,20 @@
+ constexpr Cost kInf = std::numeric_limits<Cost>::max();
+ constexpr std::size_t kMaxBucketWidth = std::size_t{1} << 16;
+ 
+-using QItem = std::tuple<Cost, Cap, NodeId>;
++struct QItem { Cost cost; Cap neg_res; NodeId node; };
++
+ 
+ // Reference queue: binary heap on (cost, -bottleneck, node). Keys are unique per
+ // push (a node is re-pushed only with a strictly smaller cost or a strictly
+ // larger bottleneck), so the pop order is fully determined by the key.
+ struct HeapQueue {
+   // Functor, not a function pointer: std::push_heap / pop_heap inline it.
+-  struct Greater { bool operator()(const QItem& a, const QItem& b) const { return a > b; } };
++  struct Greater { bool operator()(const QItem& a, const QItem& b) const { return a.cost != b.cost ? a.cost > b.cost : (a.neg_res != b.neg_res ? a.neg_res > b.neg_res : a.node > b.node); } };
+   std::vector<QItem> h;
+   void begin(std::size_t, Cost) { h.clear(); }
+   void end() { h.clear(); }
+   bool empty() const { return h.empty(); }
+-  Cost top_cost() const { return std::get<0>(h.front()); }
++  Cost top_cost() const { return h.front().cost; }
+   QItem pop() {
+     std::pop_heap(h.begin(), h.end(), Greater{});
+     QItem t = h.back(); h.pop_back(); return t;

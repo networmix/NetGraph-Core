@@ -1,0 +1,8 @@
+excluded=-1 flow=cut=6
+excluded=0 flow=cut=4
+excluded=1 flow=cut=2
+excluded=2 flow=cut=6
+excluded=3 flow=cut=4
+excluded=4 flow=cut=3
+factor=1 placed=2
+factor=2 placed=6

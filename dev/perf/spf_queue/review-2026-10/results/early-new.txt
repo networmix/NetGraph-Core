@@ -1,0 +1,1 @@
+target_cost=1 beyond_target_cost=3 (node 5 requires expanding distance-2 node 4)

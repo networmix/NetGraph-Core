@@ -44,6 +44,11 @@ public:
 
   [[nodiscard]] std::span<const Cap> capacity_view() const noexcept { return capacity_; }
   [[nodiscard]] std::span<const Cost> cost_view() const noexcept { return cost_; }
+  // Cost summary recorded at construction (0 for a graph without edges):
+  // the largest edge cost, and the gcd of all edge costs (0 when every cost is
+  // 0). SPF uses them to size its bucket queue; see shortest_paths.cpp.
+  [[nodiscard]] Cost max_cost() const noexcept { return max_cost_; }
+  [[nodiscard]] Cost cost_gcd() const noexcept { return cost_gcd_; }
   [[nodiscard]] std::span<const NodeId> edge_src_view() const noexcept { return src_; }
   [[nodiscard]] std::span<const NodeId> edge_dst_view() const noexcept { return dst_; }
   [[nodiscard]] std::span<const std::int64_t> ext_edge_ids_view() const noexcept { return ext_edge_ids_; }
@@ -62,6 +67,8 @@ private:
   // Core storage (edges may be reordered in compact form)
   std::int32_t num_nodes_ {0};
   std::size_t edges_ {0};
+  Cost max_cost_ {0};
+  Cost cost_gcd_ {0};
   std::vector<Cap> capacity_ {};
   std::vector<Cost> cost_ {};
   std::vector<NodeId> src_ {};

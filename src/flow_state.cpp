@@ -535,14 +535,22 @@ Flow FlowState::place_max_flow(NodeId src, NodeId dst, FlowPlacement placement,
   }
 
   Flow total = static_cast<Flow>(0.0);
+  // With require_capacity=false the search ignores residuals, so its inputs
+  // are identical on every pass: compute it once and reuse the result.
+  std::pair<std::vector<Cost>, PredDAG> path_result;
+  bool have_path_result = false;
   while (true) {
     EdgeSelection sel;
     sel.multi_edge = true;
     sel.require_capacity = require_capacity;
     sel.tie_break = EdgeTieBreak::Deterministic;
-    auto [dist, dag] = shortest_paths(*g_, src, dst, /*multipath=*/true, sel,
-                                      require_capacity ? residual_ : std::span<const Cap>{},
-                                      node_mask, edge_mask);
+    if (require_capacity || !have_path_result) {
+      path_result = shortest_paths(*g_, src, dst, /*multipath=*/true, sel,
+                                   require_capacity ? residual_ : std::span<const Cap>{},
+                                   node_mask, edge_mask);
+      have_path_result = true;
+    }
+    const auto& [dist, dag] = path_result;
     if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size()-1 || dag.parent_offsets[static_cast<std::size_t>(dst)] == dag.parent_offsets[static_cast<std::size_t>(dst)+1]) {
       break;
     }

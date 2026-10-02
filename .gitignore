@@ -224,3 +224,6 @@ __marimo__/
 
 # Personal Superset lifecycle overrides
 .superset/config.local.json
+
+# Performance harness run logs
+dev/perf/**/*.log

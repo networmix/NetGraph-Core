@@ -1,0 +1,1 @@
+device=Apple M4 Max setup_ms=24.1354 execution_width=32

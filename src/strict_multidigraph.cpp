@@ -45,6 +45,8 @@ StrictMultiDiGraph StrictMultiDiGraph::from_arrays(
   // corrupt results.
   constexpr std::uint64_t kMaxTotalCost = (std::uint64_t{1} << 62);
   std::uint64_t total_cost = 0;
+  Cost max_cost = 0;
+  Cost cost_gcd = 0;
   for (std::size_t i = 0; i < m; ++i) {
     if (src[i] < 0 || dst[i] < 0 || src[i] >= num_nodes || dst[i] >= num_nodes) {
       throw std::out_of_range("edge index out of range of num_nodes");
@@ -60,7 +62,11 @@ StrictMultiDiGraph StrictMultiDiGraph::from_arrays(
           "overflow int64 cost arithmetic and silently corrupt results");
     }
     total_cost += c;
+    if (cost[i] > max_cost) max_cost = cost[i];
+    cost_gcd = std::gcd(cost_gcd, cost[i]);
   }
+  g.max_cost_ = max_cost;
+  g.cost_gcd_ = cost_gcd;
   // Gather initial arrays
   std::vector<NodeId> src_v(src.begin(), src.end());
   std::vector<NodeId> dst_v(dst.begin(), dst.end());

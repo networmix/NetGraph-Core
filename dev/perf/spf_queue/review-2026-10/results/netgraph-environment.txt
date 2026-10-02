@@ -1,0 +1,16 @@
+old1  2:32  up 52 days,  7:08, 3 users, load averages: 5.87 5.41 4.09
+91dc3b7e2bd3611d54d762e0fb1f875881138d66843866990f019cddfec5cc2c /Users/networmix/ws/NetGraph-Core-main/venv/lib/python3.14/site-packages/_netgraph_core.cpython-314-darwin.so
+/Users/networmix/ws/NetGraph-Core-main/venv/lib/python3.14/site-packages/_netgraph_core.cpython-314-darwin.so
+/Users/networmix/ws/NetGraph-Core-main/python/netgraph_core/__init__.py
+new  2:32  up 52 days,  7:08, 3 users, load averages: 5.64 5.37 4.08
+996ae1c6aef243b9950c345651c901b155b375da2fc429d00f079de0df67e116 /Users/networmix/ws/NetGraph-Core/venv/lib/python3.14/site-packages/_netgraph_core.cpython-314-darwin.so
+/Users/networmix/ws/NetGraph-Core/venv/lib/python3.14/site-packages/_netgraph_core.cpython-314-darwin.so
+/Users/networmix/ws/NetGraph-Core/python/netgraph_core/__init__.py
+heap  2:32  up 52 days,  7:08, 3 users, load averages: 5.64 5.37 4.08
+996ae1c6aef243b9950c345651c901b155b375da2fc429d00f079de0df67e116 /Users/networmix/ws/NetGraph-Core/venv/lib/python3.14/site-packages/_netgraph_core.cpython-314-darwin.so
+/Users/networmix/ws/NetGraph-Core/venv/lib/python3.14/site-packages/_netgraph_core.cpython-314-darwin.so
+/Users/networmix/ws/NetGraph-Core/python/netgraph_core/__init__.py
+old2  2:32  up 52 days,  7:08, 3 users, load averages: 5.74 5.40 4.10
+91dc3b7e2bd3611d54d762e0fb1f875881138d66843866990f019cddfec5cc2c /Users/networmix/ws/NetGraph-Core-main/venv/lib/python3.14/site-packages/_netgraph_core.cpython-314-darwin.so
+/Users/networmix/ws/NetGraph-Core-main/venv/lib/python3.14/site-packages/_netgraph_core.cpython-314-darwin.so
+/Users/networmix/ws/NetGraph-Core-main/python/netgraph_core/__init__.py

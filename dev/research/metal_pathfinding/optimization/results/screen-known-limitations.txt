@@ -1,0 +1,6 @@
+Exploratory screen only, not the final timing matrix.
+The conversion loop invoked the Objective-C .contents accessor once per distance,
+inflating host copy/conversion time on large batches. Corrected before final A/B/A.
+GPU DAG thread mapping also initially used query-fast threads for query-major data.
+All correctness checks passed; these were performance defects, not wrong distances.
+Source hashes are in screen-source-sha256.txt. Final hashes are in aba/environment.txt.

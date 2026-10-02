@@ -1,0 +1,70 @@
+--- a/src/shortest_paths.cpp
++++ b/src/shortest_paths.cpp
+@@ -304,13 +304,15 @@
+   std::vector<std::uint64_t> occ;   // one bit per non-empty bucket
+   std::size_t W = 0, cur_b = 0, pending = 0;
+   Cost cur = 0, stride = 1;
++  bool inline_item = false;
++  QItem single;
+ 
+   void begin(std::size_t width, Cost stride_) {
+     stride = stride_;
+     W = width;
+     if (buckets.size() < W) buckets.resize(W);
+     occ.assign((W + 63) / 64, 0);
+-    cur = 0; cur_b = 0; pending = 0;
++    cur = 0; cur_b = 0; pending = 0; inline_item = false;
+   }
+   // Early exit can leave items behind; clear only the occupied buckets.
+   void end() {
+@@ -323,20 +325,31 @@
+       }
+       occ[w] = 0;
+     }
+-    pending = 0;
++    pending = 0; inline_item = false;
+   }
+   bool empty() const { return pending == 0; }
+   std::size_t bucket_of(Cost c) const {
+     const Cost q = stride == 1 ? c : c / stride;
+     return static_cast<std::size_t>(q % static_cast<Cost>(W));
+   }
+-  void push(Cost c, Cap nr, NodeId v) {
++  void push_bucket(Cost c, Cap nr, NodeId v) {
+     const std::size_t b = bucket_of(c);
+     auto& vec = buckets[b];
+     if (vec.empty()) occ[b >> 6] |= (std::uint64_t{1} << (b & 63));
+     vec.push_back({nr, v});
+     if (b == cur_b) std::push_heap(vec.begin(), vec.end(), Greater{});
+     ++pending;
++  }
++  void push(Cost c, Cap nr, NodeId v) {
++    if (pending == 0) {
++      single = {c, nr, v}; inline_item = true; pending = 1; return;
++    }
++    if (inline_item) {
++      inline_item = false; pending = 0;
++      cur_b = bucket_of(cur);
++      push_bucket(std::get<0>(single), std::get<1>(single), std::get<2>(single));
++    }
++    push_bucket(c, nr, v);
+   }
+   // Advance to the next non-empty bucket when the active one is exhausted.
+   // Precondition: pending > 0.
+@@ -352,8 +365,15 @@
+     cur += static_cast<Cost>(steps) * stride; cur_b = f;
+     std::make_heap(buckets[f].begin(), buckets[f].end(), Greater{});
+   }
+-  Cost top_cost() { settle_active(); return cur; }
++  Cost top_cost() { if (inline_item) return std::get<0>(single); settle_active(); return cur; }
+   QItem pop() {
++    if (inline_item) {
++      inline_item = false; pending = 0;
++      // Keep cursor tied to the last bucket activation. A later promotion
++      // must first restore the current absolute cost and cyclic index.
++      cur = std::get<0>(single);
++      return single;
++    }
+     settle_active();
+     auto& vec = buckets[cur_b];
+     std::pop_heap(vec.begin(), vec.end(), Greater{});
