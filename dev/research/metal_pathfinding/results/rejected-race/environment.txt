@@ -1,0 +1,17 @@
+2026-09-26T23:00:02Z
+fbab119e794c843838f4f3f96d75cb7f32f06845
+ProductName:		macOS
+ProductVersion:		26.6.1
+BuildVersion:		25G76
+Apple M4 Max
+38654705664
+14
+Apple clang version 21.0.0 (clang-2100.1.1.101)
+Target: arm64-apple-darwin25.6.0
+Thread model: posix
+InstalledDir: /Library/Developer/CommandLineTools/usr/bin
+c7d33ce878a8f0f1a6822efff641c8fdf0514edabcb521cfe7ae3044e56170d7  dev/research/metal_pathfinding/experiment.mm
+bd5f14bdb079c40a4e0ef26ab4d48e16b8c63b830858a53a18445a2addc2b480  dev/research/metal_pathfinding/sssp.metal
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded

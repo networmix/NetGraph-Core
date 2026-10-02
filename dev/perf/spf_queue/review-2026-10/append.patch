@@ -1,0 +1,23 @@
+--- a/src/shortest_paths.cpp
++++ b/src/shortest_paths.cpp
+@@ -676,6 +676,20 @@
+   }
+   PredDAG dag;
+   dag.parent_offsets.assign(static_cast<std::size_t>(N+1), 0);
++  if (!sparse) {
++    // Upper bound includes obsolete entries, but avoids a second list walk.
++    dag.parents.reserve(ws.ent_parent.size());
++    dag.via_edges.reserve(ws.ent_edge.size());
++    for (std::int32_t v = 0; v < N; ++v) {
++      for (auto i = ws.pred_head[static_cast<std::size_t>(v)]; i >= 0;
++           i = ws.ent_next[static_cast<std::size_t>(i)]) {
++        dag.parents.push_back(ws.ent_parent[static_cast<std::size_t>(i)]);
++        dag.via_edges.push_back(ws.ent_edge[static_cast<std::size_t>(i)]);
++      }
++      dag.parent_offsets[static_cast<std::size_t>(v) + 1] = static_cast<std::int32_t>(dag.parents.size());
++    }
++    return {std::move(dist), std::move(dag)};
++  }
+   auto count = [&](std::int32_t v) {
+     std::size_t c = 0;
+     for (std::int32_t i = ws.pred_head[static_cast<std::size_t>(v)]; i >= 0; i = ws.ent_next[static_cast<std::size_t>(i)]) ++c;

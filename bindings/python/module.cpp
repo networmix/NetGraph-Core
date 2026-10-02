@@ -209,12 +209,12 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
           py::array_t<std::int64_t> dist_arr(res.first.size());
           auto* out = dist_arr.mutable_data();
           for (std::size_t i=0;i<res.first.size();++i) out[i] = (res.first[i]==maxc) ? static_cast<std::int64_t>(maxc) : static_cast<std::int64_t>(res.first[i]);
-          return py::make_tuple(std::move(dist_arr), res.second);
+          return py::make_tuple(std::move(dist_arr), std::move(res.second));
         } else if (dtype == "float64") {
           py::array_t<double> dist_arr(res.first.size());
           auto* out = dist_arr.mutable_data();
           for (std::size_t i=0;i<res.first.size();++i) out[i] = (res.first[i]==maxc) ? std::numeric_limits<double>::infinity() : static_cast<double>(res.first[i]);
-          return py::make_tuple(std::move(dist_arr), res.second);
+          return py::make_tuple(std::move(dist_arr), std::move(res.second));
         } else {
           throw py::value_error("dtype must be 'float64' or 'int64'");
         }
@@ -258,12 +258,12 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
           py::array_t<std::int64_t> dist_arr(res.first.size());
           auto* out = dist_arr.mutable_data();
           for (std::size_t i=0;i<res.first.size();++i) out[i] = (res.first[i]==maxc) ? static_cast<std::int64_t>(maxc) : static_cast<std::int64_t>(res.first[i]);
-          return py::make_tuple(std::move(dist_arr), res.second);
+          return py::make_tuple(std::move(dist_arr), std::move(res.second));
         } else if (dtype == "float64") {
           py::array_t<double> dist_arr(res.first.size());
           auto* out = dist_arr.mutable_data();
           for (std::size_t i=0;i<res.first.size();++i) out[i] = (res.first[i]==maxc) ? std::numeric_limits<double>::infinity() : static_cast<double>(res.first[i]);
-          return py::make_tuple(std::move(dist_arr), res.second);
+          return py::make_tuple(std::move(dist_arr), std::move(res.second));
         } else {
           throw py::value_error("dtype must be 'float64' or 'int64'");
         }

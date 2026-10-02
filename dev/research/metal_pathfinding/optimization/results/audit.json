@@ -1,0 +1,66 @@
+{
+  "correctness-final.csv": {
+    "rows": 336,
+    "checked_query_results": 11760
+  },
+  "stress.csv": {
+    "rows": 28,
+    "checked_query_results": 39424
+  },
+  "correctness-sanitized.csv": {
+    "rows": 336,
+    "checked_query_results": 11760
+  },
+  "stress-sanitized.csv": {
+    "rows": 28,
+    "checked_query_results": 8960
+  },
+  "aba": {
+    "phase_rows": {
+      "cpu-a1": 48,
+      "base-a1": 36,
+      "optimized-b": 216,
+      "base-a2": 36,
+      "cpu-a2": 48
+    },
+    "checked_query_results": 124704
+  },
+  "total_checked_query_results": 290192,
+  "source_sha256": {
+    "dev/metal_pathfinding/experiment.mm": "1da9ff77bd2ad97e95e951454821b25005859c6f75c27a3c56d925e5fc99f6fc",
+    "dev/metal_pathfinding/sssp.metal": "2e36b1623a3940bf1f19f5d81141bb1def14f5873fe2a98aab0101bbe68618a3",
+    "dev/metal_pathfinding/optimization/experiment.mm": "7717db8d791d17f7f0ef0b672461ad82afb2ae99cc2ab6c8cb8b33b35e74dd25",
+    "dev/metal_pathfinding/optimization/kernels.metal": "bed6c9a836e85520101659471c62b7c4c9eb6f4954cb7bb74c971f10c44f37ff",
+    "dev/metal_pathfinding/optimization/cpu_algorithms.mm": "44962b5bd1dba6ecfc8d1449e324875e35ebe373e3f33aef779be12d9cb3fd65",
+    "dev/metal_pathfinding/optimization/summarize.py": "a08a937336abf0c30fbed82ac4cec970868f1d77469d5aca1a84a9407326578a",
+    "dev/metal_pathfinding/optimization/summarize_cpu.py": "b384cca4832b308694e1642020ef09cc5b0084c27df5ec20bd64ea793ead51a0"
+  },
+  "cpu-algorithms-correctness.csv": {
+    "rows": 24,
+    "checked_query_results": 960
+  },
+  "cpu-algorithms-sanitized.csv": {
+    "rows": 24,
+    "checked_query_results": 960
+  },
+  "cpu-algorithms-full-sanitized.csv": {
+    "rows": 14,
+    "checked_query_results": 3608
+  },
+  "cpu_algorithms_aba": {
+    "phase_rows": {
+      "a1": 14,
+      "b": 216,
+      "a2": 14
+    },
+    "checked_query_results": 88056
+  },
+  "repository_checks": {
+    "workspace_check": "passed: rebuilt extension, lint, types, 170 C++ and 465 Python tests",
+    "sanitize_test": "170 C++ tests passed",
+    "ci": "not run",
+    "production_tracked_changes": false,
+    "commit_created": false,
+    "pushed": false
+  }
+}

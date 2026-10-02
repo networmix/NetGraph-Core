@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 #include <limits>
+#include <memory>
+#include <random>
+#include "netgraph/core/constants.hpp"
 #include "netgraph/core/shortest_paths.hpp"
 #include "netgraph/core/strict_multidigraph.hpp"
 #include "netgraph/core/backend.hpp"
@@ -450,4 +453,249 @@ TEST(ShortestPathsTo, SinglePathModeKeepsOneSuccessorPerNode) {
   int leaving_src = 0;
   for (auto p : dag.parents) if (p == 0) ++leaving_src;
   EXPECT_EQ(leaving_src, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Queue differential: the bucket queue must reproduce the reference heap's
+// results bit for bit (distances, parent_offsets, parents, via_edges) across
+// the whole option matrix, including zero-cost edges, masks, residuals,
+// single-path capacity ties, destination early exit and workspace reuse.
+// ---------------------------------------------------------------------------
+namespace {
+
+using SpfResult = std::pair<std::vector<Cost>, PredDAG>;
+
+struct DiffGraph {
+  StrictMultiDiGraph g;
+  std::unique_ptr<bool[]> node_mask, edge_mask;
+  std::vector<Cap> residual;
+  std::span<const bool> nm() const { return {node_mask.get(), static_cast<std::size_t>(g.num_nodes())}; }
+  std::span<const bool> em() const { return {edge_mask.get(), static_cast<std::size_t>(g.num_edges())}; }
+};
+
+struct DiffSpec {
+  unsigned seed; int n; int degree; bool masked; Cost max_cost; int zero_pct; bool int64_offset;
+};
+
+DiffGraph make_diff_graph(const DiffSpec& s) {
+  std::mt19937 rng(s.seed);
+  std::vector<std::int32_t> src, dst;
+  std::vector<Cap> cap;
+  std::vector<Cost> cost;
+  auto draw_cost = [&]() -> Cost {
+    Cost c = (static_cast<int>(rng() % 100) < s.zero_pct) ? 0 : 1 + static_cast<Cost>(rng() % static_cast<unsigned>(s.max_cost));
+    return c + (s.int64_offset ? (Cost(1) << 34) : 0);
+  };
+  for (int u = 0; u < s.n; ++u) {
+    src.push_back(u); dst.push_back((u + 1) % s.n); cost.push_back(draw_cost()); cap.push_back(1.0 + double(rng() % 100) / 7.0);
+    for (int k = 1; k < s.degree; ++k) {
+      src.push_back(u); dst.push_back(static_cast<int>(rng() % s.n));   // self-loops and parallel edges allowed
+      cost.push_back(draw_cost()); cap.push_back(1.0 + double(rng() % 100) / 7.0);
+    }
+  }
+  // A root node with out-edges only (never has an incoming DAG entry): its
+  // out-edges serve as legal fanout edges for the reverse search.
+  const int root = s.n;
+  for (int k = 0; k < 3; ++k) { src.push_back(root); dst.push_back(static_cast<int>(rng() % s.n)); cost.push_back(draw_cost()); cap.push_back(2.0); }
+  DiffGraph d{StrictMultiDiGraph::from_arrays(s.n + 1, src, dst, cap, cost), nullptr, nullptr, {}};
+  const int N = d.g.num_nodes(); const int E = d.g.num_edges();
+  d.node_mask = std::make_unique<bool[]>(static_cast<std::size_t>(N));
+  d.edge_mask = std::make_unique<bool[]>(static_cast<std::size_t>(E));
+  d.residual.assign(d.g.capacity_view().begin(), d.g.capacity_view().end());
+  for (int i = 0; i < N; ++i) d.node_mask[static_cast<std::size_t>(i)] = !s.masked || rng() % 23 != 0;
+  for (int i = 0; i < E; ++i) {
+    d.edge_mask[static_cast<std::size_t>(i)] = !s.masked || rng() % 11 != 0;
+    if (s.masked && rng() % 13 == 0) d.residual[static_cast<std::size_t>(i)] = 0;
+    if (s.masked && rng() % 17 == 0) d.residual[static_cast<std::size_t>(i)] = kMinCap * static_cast<Cap>(rng() % 3);
+  }
+  return d;
+}
+
+bool same_result(const SpfResult& a, const SpfResult& b) {
+  return a.first == b.first && a.second.parent_offsets == b.second.parent_offsets &&
+         a.second.parents == b.second.parents && a.second.via_edges == b.second.via_edges;
+}
+
+const std::vector<DiffSpec> kDiffSpecs = {
+  {1, 40, 5, true, 31, 0, false},   {2, 43, 6, true, 31, 0, false},   {3, 46, 6, true, 31, 25, false},
+  {4, 60, 4, false, 1, 0, false},   {5, 64, 5, true, 1, 30, false},   {6, 80, 6, true, 1000, 10, false},
+  {7, 50, 6, true, 31, 0, true},    {8, 120, 8, false, 31, 0, false}, {9, 90, 3, true, 5, 40, false},
+  {10, 30, 12, true, 3, 20, false},
+  // Ring graphs (degree 1): a frontier of one node exercises the bucket
+  // queue's inline item, and zero-cost edges its promotion into the buckets.
+  {11, 300, 1, false, 31, 0, false}, {12, 300, 1, true, 5, 30, false},
+};
+
+template <class Fn>
+void for_each_option(const DiffGraph& d, Fn&& fn) {
+  for (int mp = 0; mp < 2; ++mp) for (int me = 0; me < 2; ++me) for (int tb = 0; tb < 2; ++tb)
+  for (int rc = 0; rc < 2; ++rc) for (int ur = 0; ur < 2; ++ur) for (int um = 0; um < 2; ++um) {
+    EdgeSelection sel;
+    sel.multi_edge = me != 0;
+    sel.require_capacity = rc != 0;
+    sel.tie_break = tb ? EdgeTieBreak::PreferHigherResidual : EdgeTieBreak::Deterministic;
+    auto res = ur ? std::span<const Cap>(d.residual) : std::span<const Cap>{};
+    auto nm = um ? d.nm() : std::span<const bool>{};
+    auto em = um ? d.em() : std::span<const bool>{};
+    fn(mp != 0, sel, res, nm, em);
+  }
+}
+
+} // namespace
+
+TEST(ShortestPaths, QueueDifferential_Forward) {
+  std::size_t checked = 0;
+  for (const auto& spec : kDiffSpecs) {
+    auto d = make_diff_graph(spec);
+    const int n = d.g.num_nodes();
+    for (NodeId s : {NodeId(0), NodeId(n / 3), NodeId(n - 2), NodeId(n - 1)}) {
+      for_each_option(d, [&](bool mp, const EdgeSelection& sel, auto res, auto nm, auto em) {
+        auto full = shortest_paths(d.g, s, std::nullopt, mp, sel, res, nm, em, SpfQueue::Heap);
+        NodeId far = -1; Cost fd = -1;
+        for (int v = 0; v < n; ++v) if (full.first[static_cast<std::size_t>(v)] != std::numeric_limits<Cost>::max() && full.first[static_cast<std::size_t>(v)] > fd) { fd = full.first[static_cast<std::size_t>(v)]; far = v; }
+        const auto row = d.g.row_offsets_view(); const auto col = d.g.col_indices_view();
+        std::vector<std::optional<NodeId>> dsts = {std::nullopt, s, NodeId((s + n / 2) % n), far};
+        if (row[static_cast<std::size_t>(s) + 1] > row[static_cast<std::size_t>(s)]) dsts.push_back(col[static_cast<std::size_t>(row[static_cast<std::size_t>(s)])]);
+        for (auto dst : dsts) {
+          auto expected = shortest_paths(d.g, s, dst, mp, sel, res, nm, em, SpfQueue::Heap);
+          for (int rep = 0; rep < 2; ++rep) {
+            auto actual = shortest_paths(d.g, s, dst, mp, sel, res, nm, em, SpfQueue::Bucket);
+            ++checked;
+            ASSERT_TRUE(same_result(expected, actual))
+                << "seed=" << spec.seed << " src=" << s << " dst=" << (dst ? *dst : -1)
+                << " mp=" << mp << " me=" << sel.multi_edge << " rc=" << sel.require_capacity;
+          }
+          // Auto must equal one of the two explicit routes, and both equal each other.
+          auto automatic = shortest_paths(d.g, s, dst, mp, sel, res, nm, em);
+          ASSERT_TRUE(same_result(expected, automatic));
+        }
+      });
+    }
+  }
+  EXPECT_GT(checked, 20000u);
+}
+
+TEST(ShortestPaths, QueueDifferential_Reverse) {
+  std::size_t checked = 0;
+  for (const auto& spec : kDiffSpecs) {
+    auto d = make_diff_graph(spec);
+    const int n = d.g.num_nodes();
+    const NodeId root = n - 1;
+    const auto row = d.g.row_offsets_view(); const auto aei = d.g.adj_edge_index_view();
+    std::vector<EdgeId> fanout(aei.begin() + row[static_cast<std::size_t>(root)], aei.begin() + row[static_cast<std::size_t>(root) + 1]);
+    for (NodeId t : {NodeId(0), NodeId(n / 3), NodeId(n - 2)}) {
+      for_each_option(d, [&](bool mp, const EdgeSelection& sel, auto res, auto nm, auto em) {
+        for (int with_fanout = 0; with_fanout < 2; ++with_fanout) {
+          auto fo = with_fanout ? std::span<const EdgeId>(fanout) : std::span<const EdgeId>{};
+          auto expected = shortest_paths_to(d.g, t, mp, sel, res, nm, em, fo, SpfQueue::Heap);
+          for (int rep = 0; rep < 2; ++rep) {
+            auto actual = shortest_paths_to(d.g, t, mp, sel, res, nm, em, fo, SpfQueue::Bucket);
+            ++checked;
+            ASSERT_TRUE(same_result(expected, actual))
+                << "seed=" << spec.seed << " dst=" << t << " mp=" << mp << " fanout=" << with_fanout;
+          }
+        }
+      });
+    }
+  }
+  EXPECT_GT(checked, 5000u);
+}
+
+TEST(ShortestPaths, QueueDifferential_ComparisonHasTeeth) {
+  // Guard: the comparison must reject a result whose predecessor order differs.
+  auto d = make_diff_graph(kDiffSpecs[7]);
+  EdgeSelection sel;
+  auto a = shortest_paths(d.g, 0, std::nullopt, true, sel, {}, {}, {}, SpfQueue::Heap);
+  auto b = a;
+  bool permuted = false;
+  for (std::size_t v = 0; v + 1 < b.second.parent_offsets.size() && !permuted; ++v) {
+    auto lo = static_cast<std::size_t>(b.second.parent_offsets[v]);
+    auto hi = static_cast<std::size_t>(b.second.parent_offsets[v + 1]);
+    if (hi - lo >= 2 && b.second.parents[lo] != b.second.parents[hi - 1]) {
+      std::swap(b.second.parents[lo], b.second.parents[hi - 1]);
+      std::swap(b.second.via_edges[lo], b.second.via_edges[hi - 1]);
+      permuted = true;
+    }
+  }
+  ASSERT_TRUE(permuted) << "fixture has no multi-parent node";
+  EXPECT_FALSE(same_result(a, b));
+  EXPECT_TRUE(same_result(a, a));
+}
+
+TEST(ShortestPaths, BucketQueueKeepsCapacityOrderedPredecessors) {
+  // 0 -> {1,2,3} at cost 1 with bottlenecks 1, 3, 2; each -> 4 at cost 1.
+  // Equal-cost nodes settle in descending bottleneck order, so 4's parents are
+  // recorded as 2, 3, 1 (not in node-id order). Both queues must agree.
+  std::vector<std::int32_t> src = {0, 0, 0, 1, 2, 3};
+  std::vector<std::int32_t> dst = {1, 2, 3, 4, 4, 4};
+  std::vector<Cap> cap = {1.0, 3.0, 2.0, 5.0, 5.0, 5.0};
+  std::vector<Cost> cost = {1, 1, 1, 1, 1, 1};
+  auto g = StrictMultiDiGraph::from_arrays(5, src, dst, cap, cost);
+  EdgeSelection sel;
+  for (SpfQueue q : {SpfQueue::Heap, SpfQueue::Bucket, SpfQueue::Auto}) {
+    auto [dist, dag] = shortest_paths(g, 0, std::nullopt, true, sel, {}, {}, {}, q);
+    std::vector<NodeId> parents(dag.parents.begin() + dag.parent_offsets[4], dag.parents.begin() + dag.parent_offsets[5]);
+    EXPECT_EQ(parents, (std::vector<NodeId>{2, 3, 1}));
+    EXPECT_EQ(dist[4], 2);
+  }
+}
+
+TEST(ShortestPaths, WorkspaceIsResetAfterFanoutThrow) {
+  auto d = make_diff_graph(kDiffSpecs[1]);
+  const int n = d.g.num_nodes();
+  EdgeSelection sel;
+  auto before = shortest_paths_to(d.g, 0, true, sel, d.residual, d.nm(), d.em(), {}, SpfQueue::Bucket);
+  auto before_fwd = shortest_paths(d.g, 3, std::nullopt, true, sel, d.residual, d.nm(), d.em(), SpfQueue::Bucket);
+  // A fanout edge leaving a node that already has an incoming DAG entry throws
+  // after the search has filled the workspace.
+  EdgeId offending = -1;
+  const auto esrc = d.g.edge_src_view();
+  for (std::size_t v = 0; v + 1 < before.second.parent_offsets.size() && offending < 0; ++v) {
+    if (before.second.parent_offsets[v + 1] > before.second.parent_offsets[v]) {
+      const auto row = d.g.row_offsets_view(); const auto aei = d.g.adj_edge_index_view();
+      if (row[v + 1] > row[v]) offending = aei[static_cast<std::size_t>(row[v])];
+    }
+  }
+  ASSERT_GE(offending, 0);
+  ASSERT_TRUE(before.second.parent_offsets[static_cast<std::size_t>(esrc[static_cast<std::size_t>(offending)]) + 1] >
+              before.second.parent_offsets[static_cast<std::size_t>(esrc[static_cast<std::size_t>(offending)])]);
+  std::vector<EdgeId> bad = {offending};
+  for (SpfQueue q : {SpfQueue::Bucket, SpfQueue::Heap}) {
+    EXPECT_THROW((void)shortest_paths_to(d.g, 0, true, sel, d.residual, d.nm(), d.em(), bad, q), std::invalid_argument);
+    EXPECT_THROW((void)shortest_paths_to(d.g, 0, true, sel, d.residual, d.nm(), d.em(), std::vector<EdgeId>{n * 10}, q), std::invalid_argument);
+    auto after = shortest_paths_to(d.g, 0, true, sel, d.residual, d.nm(), d.em(), {}, q);
+    EXPECT_TRUE(same_result(before, after));
+    auto after_fwd = shortest_paths(d.g, 3, std::nullopt, true, sel, d.residual, d.nm(), d.em(), q);
+    EXPECT_TRUE(same_result(before_fwd, after_fwd));
+  }
+}
+
+TEST(ShortestPaths, WorkspaceReuseAcrossGraphSizesAndEmptyGraphs) {
+  auto small = make_diff_graph(kDiffSpecs[0]);
+  auto large = make_diff_graph(kDiffSpecs[7]);
+  auto empty = StrictMultiDiGraph::from_arrays(0, {}, {}, {}, {});
+  EdgeSelection sel;
+  for (SpfQueue q : {SpfQueue::Bucket, SpfQueue::Heap}) {
+    auto s1 = shortest_paths(small.g, 1, std::nullopt, true, sel, small.residual, small.nm(), small.em(), q);
+    auto l1 = shortest_paths(large.g, 5, NodeId(7), false, sel, {}, {}, {}, q);
+    auto r1 = shortest_paths_to(large.g, 9, true, sel, large.residual, {}, {}, {}, q);
+    auto e1 = shortest_paths(empty, 0, std::nullopt, true, sel, {}, {}, {}, q);
+    EXPECT_TRUE(e1.first.empty());
+    EXPECT_EQ(e1.second.parent_offsets.size(), 1u);
+    auto e2 = shortest_paths_to(empty, 0, true, sel, {}, {}, {}, {}, q);
+    EXPECT_TRUE(e2.first.empty());
+    auto s2 = shortest_paths(small.g, 1, std::nullopt, true, sel, small.residual, small.nm(), small.em(), q);
+    auto l2 = shortest_paths(large.g, 5, NodeId(7), false, sel, {}, {}, {}, q);
+    auto r2 = shortest_paths_to(large.g, 9, true, sel, large.residual, {}, {}, {}, q);
+    EXPECT_TRUE(same_result(s1, s2));
+    EXPECT_TRUE(same_result(l1, l2));
+    EXPECT_TRUE(same_result(r1, r2));
+    // A masked-out source still returns an all-INF result without touching the workspace.
+    auto masked = make_bool_mask(static_cast<std::size_t>(small.g.num_nodes()), true);
+    masked[1] = false;
+    auto m = shortest_paths(small.g, 1, std::nullopt, true, sel, {}, std::span<const bool>(masked.get(), static_cast<std::size_t>(small.g.num_nodes())), {}, q);
+    for (auto dv : m.first) EXPECT_EQ(dv, std::numeric_limits<Cost>::max());
+    auto s3 = shortest_paths(small.g, 1, std::nullopt, true, sel, small.residual, small.nm(), small.em(), q);
+    EXPECT_TRUE(same_result(s1, s3));
+  }
 }

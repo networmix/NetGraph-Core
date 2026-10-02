@@ -120,18 +120,26 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
   // Iterate tiers: SPF over current residual or costs only
   // require_capacity=true: Require edges to have capacity, exclude saturated links (SDN/TE behavior)
   // require_capacity=false: Routes based on costs only, ignore capacity (IP/IGP behavior)
+  // With require_capacity=false the search ignores residuals, so its inputs
+  // are identical on every tier: compute it once and reuse the result.
+  std::pair<std::vector<Cost>, PredDAG> path_result;
+  bool have_path_result = false;
   while (true) {
     EdgeSelection sel;
     sel.multi_edge = true;
     sel.require_capacity = require_capacity;
     sel.tie_break = EdgeTieBreak::Deterministic;
-    auto [dist, dag] = shortest_paths(
-        g, src, dst,
-        /*multipath=*/true,
-        sel,
-        require_capacity ? fs.residual_view() : std::span<const Cap>{},
-        use_node_mask ? node_mask : std::span<const bool>{},
-        use_edge_mask ? edge_mask : std::span<const bool>{});
+    if (require_capacity || !have_path_result) {
+      path_result = shortest_paths(
+          g, src, dst,
+          /*multipath=*/true,
+          sel,
+          require_capacity ? fs.residual_view() : std::span<const Cap>{},
+          use_node_mask ? node_mask : std::span<const bool>{},
+          use_edge_mask ? edge_mask : std::span<const bool>{});
+      have_path_result = true;
+    }
+    const auto& [dist, dag] = path_result;
 
     // No path if t has no parents in DAG
     if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size() - 1 ||

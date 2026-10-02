@@ -1,0 +1,12 @@
+old-a1  2:24  up 52 days, 7 hrs, 3 users, load averages: 3.69 3.44 3.03
+new-a1  2:24  up 52 days, 7 hrs, 3 users, load averages: 3.69 3.44 3.03
+heap-a1  2:24  up 52 days, 7 hrs, 3 users, load averages: 4.04 3.52 3.06
+settled  2:24  up 52 days, 7 hrs, 3 users, load averages: 4.04 3.52 3.06
+settled-heap  2:24  up 52 days, 7 hrs, 3 users, load averages: 4.11 3.54 3.07
+singleton  2:24  up 52 days, 7 hrs, 3 users, load averages: 4.11 3.54 3.07
+heapitem  2:24  up 52 days, 7 hrs, 3 users, load averages: 4.42 3.61 3.10
+notouch  2:24  up 52 days, 7 hrs, 3 users, load averages: 4.42 3.61 3.10
+new-a2  2:24  up 52 days, 7 hrs, 3 users, load averages: 4.39 3.62 3.10
+heap-a2  2:24  up 52 days, 7 hrs, 3 users, load averages: 4.39 3.62 3.10
+old-a2  2:24  up 52 days, 7 hrs, 3 users, load averages: 4.39 3.62 3.10
+end  2:24  up 52 days, 7 hrs, 3 users, load averages: 4.28 3.61 3.10

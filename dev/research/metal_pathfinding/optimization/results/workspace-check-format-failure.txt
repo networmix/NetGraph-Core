@@ -1,0 +1,29 @@
+📦 Installing package (editable, default optimizations)
+Obtaining file:///Users/networmix/ws/NetGraph-Core
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Getting requirements to build editable: started
+  Getting requirements to build editable: finished with status 'done'
+  Installing backend dependencies: started
+  Installing backend dependencies: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Requirement already satisfied: numpy>=1.23.2 in ./venv/lib/python3.14/site-packages (from netgraph-core==0.10.0) (2.5.2)
+Building wheels for collected packages: netgraph-core
+  Building editable for netgraph-core (pyproject.toml): started
+  Building editable for netgraph-core (pyproject.toml): finished with status 'done'
+  Created wheel for netgraph-core: filename=netgraph_core-0.10.0-cp314-cp314-macosx_15_0_arm64.whl size=314893 sha256=45dc943b94205d14b496b501ddece08674343bf5cd918dad537b691749b3e16c
+  Stored in directory: /private/var/folders/8q/438f_q5s0ys8nlnvjqkf953m0000gn/T/pip-ephem-wheel-cache-jhm8vyb3/wheels/18/8c/1a/f701a43f4b69f7c794e11f1f5dd0c17e819d2c98bfd1285718
+Successfully built netgraph-core
+Installing collected packages: netgraph-core
+  Attempting uninstall: netgraph-core
+    Found existing installation: netgraph-core 0.10.0
+    Uninstalling netgraph-core-0.10.0:
+      Successfully uninstalled netgraph-core-0.10.0
+Successfully installed netgraph-core-0.10.0
+Would reformat: dev/research/metal_pathfinding/optimization/summarize.py
+1 file would be reformatted, 45 files already formatted
+make[1]: *** [lint] Error 1
+make: *** [check-ci] Error 2

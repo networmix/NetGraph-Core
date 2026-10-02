@@ -1,0 +1,2 @@
+device=Apple M4 Max setup_ms=29.6173 execution_width=32
+FAIL: distance mismatch at query 59

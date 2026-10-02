@@ -1,0 +1,372 @@
+-- pybind11 not found via config; using FetchContent
+-- pybind11 v3.0.0 
+-- Enabling sanitizers (disables optimizations)
+-- Configuring done (0.6s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/networmix/ws/NetGraph-Core/build/cpp-sanitize
+[1/21] Building CXX object CMakeFiles/netgraph_core.dir/src/strict_multidigraph.cpp.o
+[2/21] Building CXX object CMakeFiles/netgraph_core.dir/src/k_shortest_paths.cpp.o
+[3/21] Building CXX object CMakeFiles/netgraph_core.dir/src/shortest_paths.cpp.o
+[4/21] Building CXX object CMakeFiles/netgraph_core.dir/src/max_flow.cpp.o
+[5/21] Building CXX object CMakeFiles/netgraph_core.dir/src/cpu_backend.cpp.o
+[6/21] Building CXX object CMakeFiles/netgraph_core.dir/src/flow_state.cpp.o
+[7/21] Building CXX object CMakeFiles/netgraph_core.dir/src/flow_graph.cpp.o
+[8/21] Building CXX object CMakeFiles/netgraph_core.dir/src/flow_policy.cpp.o
+[9/21] Building CXX object CMakeFiles/netgraph_core_tests.dir/tests/cpp/smoke_test.cpp.o
+[10/21] Building CXX object CMakeFiles/netgraph_core_tests.dir/tests/cpp/strict_multidigraph_tests.cpp.o
+[11/21] Building CXX object CMakeFiles/netgraph_core_tests.dir/tests/cpp/flow_policy_tests.cpp.o
+[12/21] Building CXX object CMakeFiles/netgraph_core_tests.dir/tests/cpp/shortest_paths_tests.cpp.o
+[13/21] Building CXX object CMakeFiles/netgraph_core_tests.dir/tests/cpp/flow_state_tests.cpp.o
+[14/21] Building CXX object CMakeFiles/netgraph_core_tests.dir/tests/cpp/flow_graph_tests.cpp.o
+[15/21] Linking CXX static library libnetgraph_core.a
+[16/21] Building CXX object CMakeFiles/netgraph_core_tests.dir/tests/cpp/max_flow_tests.cpp.o
+[17/21] Building CXX object CMakeFiles/netgraph_core_tests.dir/tests/cpp/k_shortest_paths_tests.cpp.o
+[18/21] Building CXX object CMakeFiles/netgraph_core_tests.dir/tests/cpp/masking_tests.cpp.o
+[19/21] Linking CXX executable netgraph_core_tests
+[20/21] Building CXX object CMakeFiles/_netgraph_core.dir/bindings/python/module.cpp.o
+[21/21] Linking CXX shared module _netgraph_core.cpython-314-darwin.so
+Test project /Users/networmix/ws/NetGraph-Core/build/cpp-sanitize
+        Start  93: FlowGraphStamp.CopiesAndMovesGetFreshUids
+        Start  94: FlowGraphStamp.EqualVersionDivergentCopiesCompareUnequal
+        Start  16: FlowPolicyCostBounds.MaxPathCostFactor_HugeProduct_DropsBoundInsteadOfWrapping
+        Start  15: FlowPolicyCostBounds.MaxPathCostFactor_UnreachableDst_KeepsSentinelOutOfTheCast
+  1/170 Test  #93: FlowGraphStamp.CopiesAndMovesGetFreshUids .........................................   Passed    0.06 sec
+  2/170 Test  #94: FlowGraphStamp.EqualVersionDivergentCopiesCompareUnequal ..........................   Passed    0.06 sec
+  3/170 Test  #16: FlowPolicyCostBounds.MaxPathCostFactor_HugeProduct_DropsBoundInsteadOfWrapping ....   Passed    0.06 sec
+        Start  47: ShortestPaths.ResolveToPathsWithMaxPathsLimit
+        Start  46: ShortestPaths.ResolveToPathsSplittingParallelEdges
+        Start  11: FlowPolicyCore.EqualBalanced_ShortestPath_IgnoresHigherCostTier
+  4/170 Test  #15: FlowPolicyCostBounds.MaxPathCostFactor_UnreachableDst_KeepsSentinelOutOfTheCast ...   Passed    0.06 sec
+        Start  43: ShortestPaths.PredDAGIntegrity
+  5/170 Test  #11: FlowPolicyCore.EqualBalanced_ShortestPath_IgnoresHigherCostTier ...................   Passed    0.06 sec
+        Start  18: StrictMultiDiGraph.SingleNode
+  6/170 Test  #46: ShortestPaths.ResolveToPathsSplittingParallelEdges ................................   Passed    0.06 sec
+  7/170 Test  #43: ShortestPaths.PredDAGIntegrity ....................................................   Passed    0.06 sec
+        Start  45: ShortestPaths.PreferHigherResidualTieBreak
+        Start  30: StrictMultiDiGraph.OutOfRangeNodeThrows
+  8/170 Test  #47: ShortestPaths.ResolveToPathsWithMaxPathsLimit .....................................   Passed    0.06 sec
+        Start  38: ShortestPaths.MultipleEqualCostPaths
+  9/170 Test  #45: ShortestPaths.PreferHigherResidualTieBreak ........................................   Passed    0.06 sec
+        Start  41: ShortestPaths.EdgeMaskFiltering
+ 10/170 Test  #18: StrictMultiDiGraph.SingleNode .....................................................   Passed    0.06 sec
+ 11/170 Test  #30: StrictMultiDiGraph.OutOfRangeNodeThrows ...........................................   Passed    0.06 sec
+ 12/170 Test  #38: ShortestPaths.MultipleEqualCostPaths ..............................................   Passed    0.06 sec
+        Start 130: MaxFlow.Sensitivity_TwoParallelPaths
+        Start 103: MaxFlow.ECMP_FourPaths_ClosFabric_Simulation
+        Start  31: StrictMultiDiGraph.NegativeCapacityThrows
+ 13/170 Test  #41: ShortestPaths.EdgeMaskFiltering ...................................................   Passed    0.06 sec
+        Start  28: StrictMultiDiGraph.MismatchedArrayLengthsThrow
+ 14/170 Test #130: MaxFlow.Sensitivity_TwoParallelPaths ..............................................   Passed    0.06 sec
+        Start  71: FlowState.EqualBalanced_ECMP3_FirstHopEqualization
+ 15/170 Test #103: MaxFlow.ECMP_FourPaths_ClosFabric_Simulation ......................................   Passed    0.06 sec
+ 16/170 Test  #31: StrictMultiDiGraph.NegativeCapacityThrows .........................................   Passed    0.06 sec
+        Start 109: MaxFlow.ZeroCapacityPath_CorrectFiltering
+        Start 147: MaskingTests.MaskedSourceWithDestination
+ 17/170 Test  #28: StrictMultiDiGraph.MismatchedArrayLengthsThrow ....................................   Passed    0.06 sec
+        Start 152: MaskingTests.MaskedIntermediateNode
+ 18/170 Test  #71: FlowState.EqualBalanced_ECMP3_FirstHopEqualization ................................   Passed    0.06 sec
+ 19/170 Test #109: MaxFlow.ZeroCapacityPath_CorrectFiltering .........................................   Passed    0.06 sec
+ 20/170 Test #147: MaskingTests.MaskedSourceWithDestination ..........................................   Passed    0.06 sec
+        Start  12: FlowPolicyStatic.PerFlowBundleBinding
+        Start 112: MaxFlow.EqualCost_ShortestVsFull_Equivalent
+        Start   5: FlowPolicyCore.Proportional_SingleDemand_PartialPlacement_InsufficientCapacity
+ 21/170 Test #152: MaskingTests.MaskedIntermediateNode ...............................................   Passed    0.06 sec
+        Start 122: MaxFlow.GridGraph_3x3_MultipleEqualCostPaths
+ 22/170 Test  #12: FlowPolicyStatic.PerFlowBundleBinding .............................................   Passed    0.06 sec
+        Start  68: FlowState.ResetWithInvalidResidualThrows
+ 23/170 Test #112: MaxFlow.EqualCost_ShortestVsFull_Equivalent .......................................   Passed    0.06 sec
+ 24/170 Test   #5: FlowPolicyCore.Proportional_SingleDemand_PartialPlacement_InsufficientCapacity ....   Passed    0.06 sec
+        Start  44: ShortestPaths.TieBreakingDeterminism
+        Start  39: ShortestPaths.ResidualAwareFiltering
+ 25/170 Test #122: MaxFlow.GridGraph_3x3_MultipleEqualCostPaths ......................................   Passed    0.07 sec
+        Start   4: FlowPolicyCore.Proportional_SingleDemand_MaxFlowCount1_UsesSinglePath
+ 26/170 Test  #44: ShortestPaths.TieBreakingDeterminism ..............................................   Passed    0.07 sec
+        Start 108: MaxFlow.EqualBalanced_NodeMask_ReducesECMPWidth
+ 27/170 Test  #39: ShortestPaths.ResidualAwareFiltering ..............................................   Passed    0.07 sec
+        Start  73: FlowState.EqualBalanced_DownstreamSplitEqualization
+ 28/170 Test  #68: FlowState.ResetWithInvalidResidualThrows ..........................................   Passed    0.07 sec
+        Start 137: KShortestPaths.NodeMaskBlocksPaths
+ 29/170 Test   #4: FlowPolicyCore.Proportional_SingleDemand_MaxFlowCount1_UsesSinglePath .............   Passed    0.07 sec
+        Start  72: FlowState.EqualBalanced_MinFlowGating_DoesNotPruneValidParallelEdges
+ 30/170 Test  #73: FlowState.EqualBalanced_DownstreamSplitEqualization ...............................   Passed    0.06 sec
+        Start 107: MaxFlow.AsymmetricCapacity_1to100_EqualBalanced
+ 31/170 Test #108: MaxFlow.EqualBalanced_NodeMask_ReducesECMPWidth ...................................   Passed    0.06 sec
+ 32/170 Test #137: KShortestPaths.NodeMaskBlocksPaths ................................................   Passed    0.06 sec
+        Start 140: KShortestPaths.PathsSortedByCost
+        Start  36: ShortestPaths.SingleSourceAllNodes
+ 33/170 Test  #72: FlowState.EqualBalanced_MinFlowGating_DoesNotPruneValidParallelEdges ..............   Passed    0.06 sec
+        Start 158: MaskingTests.MaskWithResidualCapacity
+ 34/170 Test #107: MaxFlow.AsymmetricCapacity_1to100_EqualBalanced ...................................   Passed    0.06 sec
+ 35/170 Test #140: KShortestPaths.PathsSortedByCost ..................................................   Passed    0.06 sec
+ 36/170 Test  #36: ShortestPaths.SingleSourceAllNodes ................................................   Passed    0.06 sec
+        Start 148: MaskingTests.MaskedSourceInMaxFlow
+        Start 113: MaxFlow.ThreeCostTiers_ShortestPath_LowestTierOnly
+        Start 157: MaskingTests.NodeMaskOverridesEdgeMask
+ 37/170 Test #158: MaskingTests.MaskWithResidualCapacity .............................................   Passed    0.06 sec
+        Start 146: MaskingTests.MaskedSourceReturnsEmptyDAG
+ 38/170 Test #148: MaskingTests.MaskedSourceInMaxFlow ................................................   Passed    0.06 sec
+ 39/170 Test #113: MaxFlow.ThreeCostTiers_ShortestPath_LowestTierOnly ................................   Passed    0.06 sec
+ 40/170 Test #157: MaskingTests.NodeMaskOverridesEdgeMask ............................................   Passed    0.06 sec
+        Start   1: GraphSmoke.ConstructAndRunSPF
+        Start  24: StrictMultiDiGraph.CSRReverseAdjacency
+        Start  67: FlowState.InvalidResidualInitThrows
+ 41/170 Test #146: MaskingTests.MaskedSourceReturnsEmptyDAG ..........................................   Passed    0.07 sec
+ 42/170 Test   #1: GraphSmoke.ConstructAndRunSPF .....................................................   Passed    0.06 sec
+ 43/170 Test  #24: StrictMultiDiGraph.CSRReverseAdjacency ............................................   Passed    0.06 sec
+        Start  92: FlowGraph.LedgerMicroFlows_RemovalRestoresResidual
+        Start  10: FlowPolicyCore.EqualBalanced_ShortestPath_DownstreamSplit_BalancesBottleneck
+        Start  40: ShortestPaths.NodeMaskIsolation
+ 44/170 Test  #67: FlowState.InvalidResidualInitThrows ...............................................   Passed    0.07 sec
+        Start 123: MaxFlow.SharedBottleneck_MultiplePathsMerge
+ 45/170 Test  #40: ShortestPaths.NodeMaskIsolation ...................................................   Passed    0.06 sec
+        Start  22: StrictMultiDiGraph.ExternalEdgeIdsPreserved
+ 46/170 Test  #10: FlowPolicyCore.EqualBalanced_ShortestPath_DownstreamSplit_BalancesBottleneck ......   Passed    0.06 sec
+ 47/170 Test #123: MaxFlow.SharedBottleneck_MultiplePathsMerge .......................................   Passed    0.06 sec
+        Start  74: FlowState.EqualBalanced_ZeroCapacityOnShortestPath_ReturnsZero
+        Start  20: StrictMultiDiGraph.ParallelEdges
+ 48/170 Test  #92: FlowGraph.LedgerMicroFlows_RemovalRestoresResidual ................................   Passed    0.07 sec
+        Start 115: MaxFlow.FlowConservation_IntermediateNodes
+ 49/170 Test  #74: FlowState.EqualBalanced_ZeroCapacityOnShortestPath_ReturnsZero ....................   Passed    0.07 sec
+        Start  91: FlowGraph.LedgerHistory_RemovalRestoresResidual
+ 50/170 Test  #22: StrictMultiDiGraph.ExternalEdgeIdsPreserved .......................................   Passed    0.07 sec
+ 51/170 Test  #20: StrictMultiDiGraph.ParallelEdges ..................................................   Passed    0.07 sec
+        Start  35: StrictMultiDiGraph.MultipleCostTiers
+        Start  33: StrictMultiDiGraph.SelfLoopAllowed
+ 52/170 Test #115: MaxFlow.FlowConservation_IntermediateNodes ........................................   Passed    0.07 sec
+        Start   9: FlowPolicyCore.EqualBalanced_ShortestPath_ECMP3_SaturatesAllEqualCostPaths
+ 53/170 Test  #33: StrictMultiDiGraph.SelfLoopAllowed ................................................   Passed    0.07 sec
+        Start  29: StrictMultiDiGraph.ExtEdgeIdsWrongLengthThrows
+ 54/170 Test  #91: FlowGraph.LedgerHistory_RemovalRestoresResidual ...................................   Passed    0.07 sec
+ 55/170 Test  #35: StrictMultiDiGraph.MultipleCostTiers ..............................................   Passed    0.07 sec
+        Start   2: FlowPolicyCore.Proportional_SingleDemand_UsesShortestPath
+        Start  75: FlowState.Proportional_ZeroCapacityOnShortestPath_ReturnsZero
+ 56/170 Test   #9: FlowPolicyCore.EqualBalanced_ShortestPath_ECMP3_SaturatesAllEqualCostPaths ........   Passed    0.06 sec
+        Start 101: MaxFlow.ECMP_TwoPaths_EqualBalanced_ShortestPath
+ 57/170 Test   #2: FlowPolicyCore.Proportional_SingleDemand_UsesShortestPath .........................   Passed    0.07 sec
+        Start 145: KSP.MaxCostFactorBelowOne_ReturnsEmptyForAllK
+ 58/170 Test  #29: StrictMultiDiGraph.ExtEdgeIdsWrongLengthThrows ....................................   Passed    0.07 sec
+ 59/170 Test  #75: FlowState.Proportional_ZeroCapacityOnShortestPath_ReturnsZero .....................   Passed    0.07 sec
+        Start 119: MaxFlow.NodeMask_BlocksFlowThroughNode
+        Start 134: MaxFlow.CompletionPhase_RespectsNodeMask
+ 60/170 Test #101: MaxFlow.ECMP_TwoPaths_EqualBalanced_ShortestPath ..................................   Passed    0.07 sec
+        Start 126: MaxFlow.Triangle_Topology_Combine_Mode
+ 61/170 Test #145: KSP.MaxCostFactorBelowOne_ReturnsEmptyForAllK .....................................   Passed    0.07 sec
+        Start 167: MaskingTests.AllNodesMaskedNoReachability
+ 62/170 Test #119: MaxFlow.NodeMask_BlocksFlowThroughNode ............................................   Passed    0.07 sec
+ 63/170 Test #134: MaxFlow.CompletionPhase_RespectsNodeMask ..........................................   Passed    0.07 sec
+        Start  21: StrictMultiDiGraph.EdgeSortingByCost
+        Start  19: StrictMultiDiGraph.SingleEdge
+ 64/170 Test #126: MaxFlow.Triangle_Topology_Combine_Mode ............................................   Passed    0.07 sec
+        Start  17: StrictMultiDiGraph.EmptyGraph
+ 65/170 Test  #21: StrictMultiDiGraph.EdgeSortingByCost ..............................................   Passed    0.07 sec
+        Start  14: FlowPolicyStatic.ValidationRejectsForeignAndDisconnectedBundles
+ 66/170 Test #167: MaskingTests.AllNodesMaskedNoReachability .........................................   Passed    0.07 sec
+ 67/170 Test  #19: StrictMultiDiGraph.SingleEdge .....................................................   Passed    0.07 sec
+        Start 151: MaskingTests.MaskedDestinationUnreachable
+        Start  37: ShortestPaths.DisconnectedComponents
+ 68/170 Test  #17: StrictMultiDiGraph.EmptyGraph .....................................................   Passed    0.07 sec
+        Start 100: MaxFlow.ECMP_TwoPaths_Proportional_FullMaxFlow
+ 69/170 Test  #14: FlowPolicyStatic.ValidationRejectsForeignAndDisconnectedBundles ...................   Passed    0.07 sec
+        Start 106: MaxFlow.AsymmetricCapacity_1to1M_NumericalStability
+ 70/170 Test #151: MaskingTests.MaskedDestinationUnreachable .........................................   Passed    0.07 sec
+ 71/170 Test  #37: ShortestPaths.DisconnectedComponents ..............................................   Passed    0.07 sec
+        Start  99: MaxFlow.ECMP_TwoPaths_Proportional_ShortestPath
+        Start  85: FlowGraph.RemovalDeletesEntry
+ 72/170 Test #100: MaxFlow.ECMP_TwoPaths_Proportional_FullMaxFlow ....................................   Passed    0.07 sec
+        Start 114: MaxFlow.PlacementModes_EqualCapacity_IdenticalResult
+ 73/170 Test  #99: MaxFlow.ECMP_TwoPaths_Proportional_ShortestPath ...................................   Passed    0.07 sec
+        Start  89: FlowGraph.GetFlowPathForDAGReturnsEmpty
+ 74/170 Test #106: MaxFlow.AsymmetricCapacity_1to1M_NumericalStability ...............................   Passed    0.07 sec
+ 75/170 Test  #85: FlowGraph.RemovalDeletesEntry .....................................................   Passed    0.07 sec
+        Start  13: FlowPolicyStatic.MaskedBundleIsDown
+        Start 139: KShortestPaths.MaxCostFactorLimit
+ 76/170 Test #114: MaxFlow.PlacementModes_EqualCapacity_IdenticalResult ..............................   Passed    0.07 sec
+        Start 135: KShortestPaths.FindsKPaths
+ 77/170 Test  #13: FlowPolicyStatic.MaskedBundleIsDown ...............................................   Passed    0.07 sec
+        Start 149: MaskingTests.MaskedSourceInComputeMinCut
+ 78/170 Test  #89: FlowGraph.GetFlowPathForDAGReturnsEmpty ...........................................   Passed    0.07 sec
+ 79/170 Test #139: KShortestPaths.MaxCostFactorLimit .................................................   Passed    0.07 sec
+ 80/170 Test #135: KShortestPaths.FindsKPaths ........................................................   Passed    0.07 sec
+        Start  96: MaxFlow.SinglePath_BottleneckConstraint
+        Start  27: StrictMultiDiGraph.InvalidNumNodesThrows
+        Start  63: FlowState.ApplyDeltasSubtractive
+ 81/170 Test  #27: StrictMultiDiGraph.InvalidNumNodesThrows ..........................................   Passed    0.07 sec
+        Start 170: MaskingTests.AlgorithmsAPIMaxFlowWithMask
+ 82/170 Test #149: MaskingTests.MaskedSourceInComputeMinCut ..........................................   Passed    0.07 sec
+ 83/170 Test  #96: MaxFlow.SinglePath_BottleneckConstraint ...........................................   Passed    0.07 sec
+ 84/170 Test  #63: FlowState.ApplyDeltasSubtractive ..................................................   Passed    0.07 sec
+        Start 110: MaxFlow.TwoCostTiers_ShortestPath_SingleTierOnly
+        Start 160: MaskingTests.KSPWithNodeMask
+        Start   6: FlowPolicyCore.EqualBalanced_SingleDemand_FlowCount2_BalancedDistribution
+ 85/170 Test #170: MaskingTests.AlgorithmsAPIMaxFlowWithMask .........................................   Passed    0.07 sec
+ 86/170 Test #160: MaskingTests.KSPWithNodeMask ......................................................   Passed    0.07 sec
+ 87/170 Test   #6: FlowPolicyCore.EqualBalanced_SingleDemand_FlowCount2_BalancedDistribution .........   Passed    0.07 sec
+        Start 144: KShortestPaths.LargerOutOfOrderTopology
+        Start  23: StrictMultiDiGraph.CSROffsetsMonotonicity
+        Start   8: FlowPolicyCore.DiminishingReturnsCutoff
+ 88/170 Test #110: MaxFlow.TwoCostTiers_ShortestPath_SingleTierOnly ..................................   Passed    0.07 sec
+        Start  97: MaxFlow.SinglePath_ShortestPathEquivalence
+ 89/170 Test #144: KShortestPaths.LargerOutOfOrderTopology ...........................................   Passed    0.07 sec
+ 90/170 Test   #8: FlowPolicyCore.DiminishingReturnsCutoff ...........................................   Passed    0.07 sec
+        Start 156: MaskingTests.CombinedNodeAndEdgeMasks
+        Start 169: MaskingTests.AlgorithmsAPIMaskedSource
+ 91/170 Test  #23: StrictMultiDiGraph.CSROffsetsMonotonicity .........................................   Passed    0.07 sec
+ 92/170 Test  #97: MaxFlow.SinglePath_ShortestPathEquivalence ........................................   Passed    0.07 sec
+        Start 117: MaxFlow.CostDistribution_AccountsForAllFlow
+        Start  86: FlowGraph.RemoveByClassFiltersCorrectly
+ 93/170 Test #117: MaxFlow.CostDistribution_AccountsForAllFlow .......................................   Passed    0.07 sec
+        Start 136: KShortestPaths.KEqualsZeroReturnsEmpty
+ 94/170 Test #156: MaskingTests.CombinedNodeAndEdgeMasks .............................................   Passed    0.08 sec
+ 95/170 Test #169: MaskingTests.AlgorithmsAPIMaskedSource ............................................   Passed    0.08 sec
+ 96/170 Test  #86: FlowGraph.RemoveByClassFiltersCorrectly ...........................................   Passed    0.08 sec
+        Start 104: MaxFlow.ECMP_TenPaths_ScalabilityValidation
+        Start 132: MaxFlow.Sensitivity_ShortestPathVsMaxFlow
+        Start 120: MaxFlow.EdgeMask_SelectiveEdgeFiltering
+ 97/170 Test #136: KShortestPaths.KEqualsZeroReturnsEmpty ............................................   Passed    0.07 sec
+        Start 124: MaxFlow.Clos_3Tier_Topology_Proportional_Shortest
+ 98/170 Test #104: MaxFlow.ECMP_TenPaths_ScalabilityValidation .......................................   Passed    0.07 sec
+ 99/170 Test #132: MaxFlow.Sensitivity_ShortestPathVsMaxFlow .........................................   Passed    0.07 sec
+100/170 Test #120: MaxFlow.EdgeMask_SelectiveEdgeFiltering ...........................................   Passed    0.07 sec
+        Start  65: FlowState.ResetRestoresCapacity
+        Start  49: ShortestPaths.RejectsMaskLengthMismatch
+        Start 133: MaxFlow.CompletionPhase_RecoversCancellation
+101/170 Test  #65: FlowState.ResetRestoresCapacity ...................................................   Passed    0.07 sec
+        Start 165: MaskingTests.EmptyNodeMaskAllowsAllNodes
+102/170 Test #124: MaxFlow.Clos_3Tier_Topology_Proportional_Shortest .................................   Passed    0.07 sec
+103/170 Test  #49: ShortestPaths.RejectsMaskLengthMismatch ...........................................   Passed    0.07 sec
+        Start 111: MaxFlow.TwoCostTiers_FullMaxFlow_AllTiers
+        Start 129: MaxFlow.Sensitivity_SinglePath
+104/170 Test #133: MaxFlow.CompletionPhase_RecoversCancellation ......................................   Passed    0.07 sec
+        Start 161: MaskingTests.KSPWithEdgeMask
+105/170 Test #165: MaskingTests.EmptyNodeMaskAllowsAllNodes ..........................................   Passed    0.07 sec
+        Start  32: StrictMultiDiGraph.NegativeCostThrows
+106/170 Test #111: MaxFlow.TwoCostTiers_FullMaxFlow_AllTiers .........................................   Passed    0.07 sec
+107/170 Test #129: MaxFlow.Sensitivity_SinglePath ....................................................   Passed    0.07 sec
+108/170 Test #161: MaskingTests.KSPWithEdgeMask ......................................................   Passed    0.07 sec
+        Start  66: FlowState.CustomInitialResidual
+        Start  42: ShortestPaths.EarlyExitOptimization
+        Start  88: FlowGraph.GetFlowPathForLinearFlow
+109/170 Test  #66: FlowState.CustomInitialResidual ...................................................   Passed    0.07 sec
+        Start  25: StrictMultiDiGraph.MaxCapacityEdges
+110/170 Test  #32: StrictMultiDiGraph.NegativeCostThrows .............................................   Passed    0.07 sec
+111/170 Test  #42: ShortestPaths.EarlyExitOptimization ...............................................   Passed    0.07 sec
+112/170 Test  #88: FlowGraph.GetFlowPathForLinearFlow ................................................   Passed    0.07 sec
+        Start 168: MaskingTests.AllEdgesMaskedNoReachability
+        Start 142: KShortestPaths.LooplessPaths
+        Start 138: KShortestPaths.UniqueModeFiltering
+113/170 Test  #25: StrictMultiDiGraph.MaxCapacityEdges ...............................................   Passed    0.07 sec
+114/170 Test #138: KShortestPaths.UniqueModeFiltering ................................................   Passed    0.07 sec
+        Start   7: FlowPolicyCore.EqualBalanced_SingleDemand_FlowCount3_SaturatesBothPaths
+        Start   3: FlowPolicyCore.Proportional_SingleDemand_SplitsAcrossTwoEqualCostPaths
+115/170 Test #168: MaskingTests.AllEdgesMaskedNoReachability .........................................   Passed    0.07 sec
+116/170 Test #142: KShortestPaths.LooplessPaths ......................................................   Passed    0.07 sec
+        Start 159: MaskingTests.ResidualAndNodeMaskCombined
+        Start 143: KShortestPaths.OutOfOrderNodePredDAGSemantics
+117/170 Test   #7: FlowPolicyCore.EqualBalanced_SingleDemand_FlowCount3_SaturatesBothPaths ...........   Passed    0.07 sec
+118/170 Test #159: MaskingTests.ResidualAndNodeMaskCombined ..........................................   Passed    0.07 sec
+        Start  62: FlowState.ApplyDeltasAdditive
+        Start 131: MaxFlow.Sensitivity_PartialSaturation
+119/170 Test   #3: FlowPolicyCore.Proportional_SingleDemand_SplitsAcrossTwoEqualCostPaths ............   Passed    0.07 sec
+120/170 Test #143: KShortestPaths.OutOfOrderNodePredDAGSemantics .....................................   Passed    0.07 sec
+        Start  83: FlowGraph.EmptyLedgerInitially
+        Start  84: FlowGraph.PlacementCreatesEntry
+121/170 Test  #83: FlowGraph.EmptyLedgerInitially ....................................................   Passed    0.07 sec
+        Start  76: FlowState.RepeatedPlacementAfterResetAndIndependentInstancesStayStable
+122/170 Test  #62: FlowState.ApplyDeltasAdditive .....................................................   Passed    0.07 sec
+123/170 Test #131: MaxFlow.Sensitivity_PartialSaturation .............................................   Passed    0.07 sec
+124/170 Test  #84: FlowGraph.PlacementCreatesEntry ...................................................   Passed    0.07 sec
+        Start 153: MaskingTests.MaskedEdgeBlocksPath
+        Start 102: MaxFlow.ECMP_ThreePaths_Proportional_ShortestPath
+        Start  64: FlowState.MinCutComputation
+125/170 Test  #76: FlowState.RepeatedPlacementAfterResetAndIndependentInstancesStayStable ............   Passed    0.07 sec
+        Start  69: FlowState.ApplyDeltasClampsWithinCapacityBounds
+126/170 Test #153: MaskingTests.MaskedEdgeBlocksPath .................................................   Passed    0.07 sec
+127/170 Test #102: MaxFlow.ECMP_ThreePaths_Proportional_ShortestPath .................................   Passed    0.07 sec
+128/170 Test  #64: FlowState.MinCutComputation .......................................................   Passed    0.07 sec
+        Start  95: MaxFlow.SinglePath_BasicLinear
+        Start 121: MaxFlow.BatchMaxFlow_IndependentMaskApplication
+        Start 116: MaxFlow.MinCut_ValidEdgeIdentification
+129/170 Test  #95: MaxFlow.SinglePath_BasicLinear ....................................................   Passed    0.07 sec
+130/170 Test #121: MaxFlow.BatchMaxFlow_IndependentMaskApplication ...................................   Passed    0.07 sec
+        Start  34: StrictMultiDiGraph.NegativeNodeIdThrows
+        Start  87: FlowGraph.GetFlowEdgesReturnsDeltas
+131/170 Test  #69: FlowState.ApplyDeltasClampsWithinCapacityBounds ...................................   Passed    0.08 sec
+132/170 Test #116: MaxFlow.MinCut_ValidEdgeIdentification ............................................   Passed    0.07 sec
+        Start  50: ShortestPaths.ZeroCostEdges_PredDAGIsAcyclic
+        Start 105: MaxFlow.AsymmetricCapacity_1to100_Proportional
+133/170 Test  #34: StrictMultiDiGraph.NegativeNodeIdThrows ...........................................   Passed    0.07 sec
+134/170 Test  #87: FlowGraph.GetFlowEdgesReturnsDeltas ...............................................   Passed    0.07 sec
+135/170 Test  #50: ShortestPaths.ZeroCostEdges_PredDAGIsAcyclic ......................................   Passed    0.07 sec
+136/170 Test #105: MaxFlow.AsymmetricCapacity_1to100_Proportional ....................................   Passed    0.07 sec
+        Start 128: MaxFlow.ShortestPath_MustSaturateAllEqualCostPaths
+        Start 125: MaxFlow.Clos_3Tier_Topology_EqualBalanced_Shortest
+        Start  98: MaxFlow.DegenerateCase_SourceEqualsSink
+        Start 118: MaxFlow.OptionalOutputs_ResidualAndReachable
+137/170 Test #128: MaxFlow.ShortestPath_MustSaturateAllEqualCostPaths ................................   Passed    0.08 sec
+        Start  90: FlowGraph.CoalescesDuplicateEdgeIds
+138/170 Test #125: MaxFlow.Clos_3Tier_Topology_EqualBalanced_Shortest ................................   Passed    0.08 sec
+139/170 Test  #98: MaxFlow.DegenerateCase_SourceEqualsSink ...........................................   Passed    0.08 sec
+140/170 Test #118: MaxFlow.OptionalOutputs_ResidualAndReachable ......................................   Passed    0.08 sec
+        Start  48: ShortestPaths.LargeGraphStressTest
+        Start 163: MaskingTests.MaxFlowWithEdgeMask
+        Start 164: MaskingTests.MaxFlowAllPathsMasked
+141/170 Test  #90: FlowGraph.CoalescesDuplicateEdgeIds ...............................................   Passed    0.08 sec
+        Start  26: StrictMultiDiGraph.ZeroCostEdges
+142/170 Test #163: MaskingTests.MaxFlowWithEdgeMask ..................................................   Passed    0.08 sec
+143/170 Test #164: MaskingTests.MaxFlowAllPathsMasked ................................................   Passed    0.08 sec
+        Start  60: FlowState.EqualBalancedDistribution
+        Start 141: KShortestPaths.DisconnectedReturnsEmpty
+144/170 Test  #48: ShortestPaths.LargeGraphStressTest ................................................   Passed    0.08 sec
+        Start 154: MaskingTests.MaskedEdgeSelectsAlternativePath
+145/170 Test  #60: FlowState.EqualBalancedDistribution ...............................................   Passed    0.08 sec
+        Start 150: MaskingTests.OutOfRangeSourceInComputeMinCut
+146/170 Test  #26: StrictMultiDiGraph.ZeroCostEdges ..................................................   Passed    0.08 sec
+147/170 Test #141: KShortestPaths.DisconnectedReturnsEmpty ...........................................   Passed    0.08 sec
+148/170 Test #154: MaskingTests.MaskedEdgeSelectsAlternativePath .....................................   Passed    0.08 sec
+        Start 166: MaskingTests.EmptyEdgeMaskAllowsAllEdges
+        Start  70: FlowState.EqualBalancedReconvergentDAGPlacesAll
+        Start 162: MaskingTests.MaxFlowWithNodeMask
+149/170 Test #150: MaskingTests.OutOfRangeSourceInComputeMinCut ......................................   Passed    0.07 sec
+150/170 Test #166: MaskingTests.EmptyEdgeMaskAllowsAllEdges ..........................................   Passed    0.07 sec
+        Start  61: FlowState.ZeroCapacityHandling
+        Start  59: FlowState.ProportionalDistribution
+151/170 Test  #70: FlowState.EqualBalancedReconvergentDAGPlacesAll ...................................   Passed    0.07 sec
+152/170 Test #162: MaskingTests.MaxFlowWithNodeMask ..................................................   Passed    0.07 sec
+        Start 155: MaskingTests.MultipleEdgesMasked
+        Start  57: FlowState.InitialResidualEqualsCapacity
+153/170 Test  #59: FlowState.ProportionalDistribution ................................................   Passed    0.07 sec
+        Start 127: MaxFlow.SimpleParallelPaths_Topology
+154/170 Test  #61: FlowState.ZeroCapacityHandling ....................................................   Passed    0.07 sec
+155/170 Test #155: MaskingTests.MultipleEdgesMasked ..................................................   Passed    0.07 sec
+156/170 Test  #57: FlowState.InitialResidualEqualsCapacity ...........................................   Passed    0.07 sec
+        Start  58: FlowState.PlacementReducesResidual
+        Start  51: ShortestPathsTo.DistancesMatchForwardDistancesToDst
+        Start  52: ShortestPathsTo.ForwardSpfFromPseudoSourceKeepsOnlyNearestSource
+157/170 Test  #58: FlowState.PlacementReducesResidual ................................................   Passed    0.07 sec
+        Start  53: ShortestPathsTo.FanoutEdgesForceEverySourceIntoTheDag
+158/170 Test #127: MaxFlow.SimpleParallelPaths_Topology ..............................................   Passed    0.07 sec
+159/170 Test  #51: ShortestPathsTo.DistancesMatchForwardDistancesToDst ...............................   Passed    0.07 sec
+160/170 Test  #52: ShortestPathsTo.ForwardSpfFromPseudoSourceKeepsOnlyNearestSource ..................   Passed    0.07 sec
+        Start  54: ShortestPathsTo.FanoutSkipsUnreachableAndMaskedHeads
+        Start  55: ShortestPathsTo.FanoutFromInteriorNodeIsRejected
+        Start  56: ShortestPathsTo.SinglePathModeKeepsOneSuccessorPerNode
+161/170 Test  #53: ShortestPathsTo.FanoutEdgesForceEverySourceIntoTheDag .............................   Passed    0.07 sec
+        Start  77: FlowState.EqualBalanced_SaturatedMemberBlocksAdmission
+162/170 Test  #54: ShortestPathsTo.FanoutSkipsUnreachableAndMaskedHeads ..............................   Passed    0.07 sec
+163/170 Test  #55: ShortestPathsTo.FanoutFromInteriorNodeIsRejected ..................................   Passed    0.07 sec
+164/170 Test  #56: ShortestPathsTo.SinglePathModeKeepsOneSuccessorPerNode ............................   Passed    0.07 sec
+        Start  78: FlowState.EqualBalanced_ProgressesOnlyThroughResidualAwareSpf
+        Start  79: FlowState.EqualBalancedLossy_FillAndDropReportsDrops
+        Start  80: FlowState.EqualBalancedLossy_DeficitPropagatesDownstream
+165/170 Test  #79: FlowState.EqualBalancedLossy_FillAndDropReportsDrops ..............................   Passed    0.07 sec
+        Start  81: FlowState.EqualBalancedLossy_InfiniteRequestFillsWithoutDrops
+166/170 Test  #77: FlowState.EqualBalanced_SaturatedMemberBlocksAdmission ............................   Passed    0.07 sec
+167/170 Test  #78: FlowState.EqualBalanced_ProgressesOnlyThroughResidualAwareSpf .....................   Passed    0.07 sec
+168/170 Test  #80: FlowState.EqualBalancedLossy_DeficitPropagatesDownstream ..........................   Passed    0.07 sec
+        Start  82: FlowGraph.LossyPlacementIsReversibleAndDropsStayOutOfLedger
+169/170 Test  #81: FlowState.EqualBalancedLossy_InfiniteRequestFillsWithoutDrops .....................   Passed    0.07 sec
+170/170 Test  #82: FlowGraph.LossyPlacementIsReversibleAndDropsStayOutOfLedger .......................   Passed    0.07 sec
+
+100% tests passed out of 170
+
+Total Test time (real) =   3.00 sec

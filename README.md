@@ -110,6 +110,9 @@ bindings/python/        # pybind11 bindings
 python/netgraph_core/   # Python package
 tests/cpp/              # C++ tests (googletest)
 tests/py/               # Python tests (pytest)
+dev/                    # Developer scripts (not shipped): checks, coverage,
+dev/perf/               #   performance tooling and recorded A/B/A results,
+dev/research/           #   research prototypes and their evidence
 ```
 
 ## Development
@@ -123,6 +126,9 @@ make cpp-test   # C++ tests only
 make cov        # Combined coverage report (C++ + Python)
 ```
 
+Performance work (harnesses, old/new/old protocol, recorded measurements) is
+described in [dev/perf/README.md](dev/perf/README.md).
+
 ## Environment Variables
 
 | Variable | Effect |
@@ -130,6 +136,7 @@ make cov        # Combined coverage report (C++ + Python)
 | `NGRAPH_CORE_PROFILE=1` | Enable profiling of C++ hot paths (`profiling_dump()` / `profiling_reset()`). |
 | `NGRAPH_CORE_BATCH_THREADS` | Worker threads for `batch_max_flow` (default: hardware concurrency). Set to `1` when calling from your own worker pool. |
 | `NGRAPH_CORE_SENSITIVITY_THREADS` | Worker threads for `sensitivity_analysis` (default: hardware concurrency). |
+| `NGRAPH_CORE_SPF_QUEUE` | Frontier queue for SPF: `heap` forces the reference binary heap, `bucket` prefers the bucket queue where the graph is eligible. Unset (default) selects automatically; both give bit-identical results. Read once per process; for benchmarking and diagnosis. |
 
 ## Requirements
 

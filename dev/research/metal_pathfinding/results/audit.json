@@ -1,0 +1,44 @@
+{
+  "a1": {
+    "rows": 108,
+    "queries_checked_including_warmups": 40744
+  },
+  "b": {
+    "rows": 68,
+    "queries_checked_including_warmups": 24761
+  },
+  "a2": {
+    "rows": 108,
+    "queries_checked_including_warmups": 40744
+  },
+  "correctness.csv": {
+    "rows": 36,
+    "queries_checked_including_warmups": 1152
+  },
+  "correctness-sanitized.csv": {
+    "rows": 36,
+    "queries_checked_including_warmups": 1152
+  },
+  "stress.csv": {
+    "rows": 6,
+    "queries_checked_including_warmups": 39168
+  },
+  "stress-sanitized.csv": {
+    "rows": 6,
+    "queries_checked_including_warmups": 8448
+  },
+  "cpu-sanitized.csv": {
+    "rows": 40,
+    "queries_checked_including_warmups": 3228
+  },
+  "experiment.mm_sha256": "1da9ff77bd2ad97e95e951454821b25005859c6f75c27a3c56d925e5fc99f6fc",
+  "sssp.metal_sha256": "2e36b1623a3940bf1f19f5d81141bb1def14f5873fe2a98aab0101bbe68618a3",
+  "core_commit": "fbab119e794c843838f4f3f96d75cb7f32f06845",
+  "quiet_machine_gate_passed": false,
+  "performance_claim_approved": false,
+  "ci_run": false,
+  "production_backend_added": false,
+  "core_cpp_tests": 170,
+  "core_python_tests": 465,
+  "core_sanitizer_tests": 170
+}

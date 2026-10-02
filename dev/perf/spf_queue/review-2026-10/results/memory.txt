@@ -1,0 +1,3 @@
+after 1 graphs: bucket item capacity bytes=16400 N=1027 E=1026 peak_queue=1024
+after 63 graphs: bucket item capacity bytes=1032208 N=1027 E=1026 peak_queue=1024
+after N=2 graph: bucket item capacity bytes=1032208 dist_capacity=2

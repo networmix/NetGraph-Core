@@ -1,0 +1,15 @@
+14:35  up 47 days, 19:11, 3 users, load averages: 3.33 3.01 3.05
+14:36  up 47 days, 19:12, 3 users, load averages: 2.94 2.95 3.03
+14:36  up 47 days, 19:12, 3 users, load averages: 4.08 3.21 3.12
+14:37  up 47 days, 19:12, 3 users, load averages: 3.95 3.25 3.14
+14:37  up 47 days, 19:13, 3 users, load averages: 3.41 3.18 3.11
+14:37  up 47 days, 19:13, 3 users, load averages: 3.16 3.14 3.10
+14:38  up 47 days, 19:13, 3 users, load averages: 3.64 3.25 3.14
+14:38  up 47 days, 19:14, 3 users, load averages: 3.28 3.18 3.12
+14:38  up 47 days, 19:14, 3 users, load averages: 3.21 3.17 3.11
+14:39  up 47 days, 19:14, 3 users, load averages: 3.47 3.24 3.14
+14:39  up 47 days, 19:15, 3 users, load averages: 3.59 3.29 3.16
+14:39  up 47 days, 19:15, 3 users, load averages: 3.55 3.28 3.16
+14:39  up 47 days, 19:15, 3 users, load averages: 3.42 3.26 3.15
+14:39  up 47 days, 19:15, 3 users, load averages: 3.63 3.31 3.17
+14:39  up 47 days, 19:15, 3 users, load averages: 3.63 3.31 3.17

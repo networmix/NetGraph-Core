@@ -1,0 +1,40 @@
+Processes: 1019 total, 2 running, 1017 sleeping, 5187 threads 
+2026/09/27 00:30:29
+Load Avg: 3.19, 3.55, 4.19 
+CPU usage: 5.82% user, 8.66% sys, 85.51% idle 
+SharedLibs: 916M resident, 168M data, 136M linkedit.
+MemRegions: 638542 total, 10G resident, 736M private, 4366M shared.
+PhysMem: 34G used (3986M wired, 626M compressor), 1354M unused.
+VM: 451T vsize, 6144M framework vsize, 2846220(0) swapins, 4729331(0) swapouts.
+Networks: packets: 191149845/161G in, 146612635/163G out.
+Disks: 97828398/2477G read, 117449998/2100G written.
+
+PID    COMMAND          %CPU #TH
+99753  mscamerad-xpc    0.0  2  
+99752  PlugInLibrarySer 0.0  2  
+99750  QuickLookUIServi 0.0  3  
+99749  com.apple.appkit 0.0  3  
+99710  PlugInLibrarySer 0.0  2  
+99709  Preview          0.0  4  
+99428  crashpad_handler 0.0  4  
+98995  crashpad_handler 0.0  4  
+Processes: 1019 total, 4 running, 1015 sleeping, 5180 threads 
+2026/09/27 00:30:30
+Load Avg: 3.19, 3.55, 4.19 
+CPU usage: 6.81% user, 6.18% sys, 86.99% idle 
+SharedLibs: 916M resident, 168M data, 136M linkedit.
+MemRegions: 0 total, 0B resident, 736M private, 4366M shared.
+PhysMem: 34G used (4002M wired, 626M compressor), 1357M unused.
+VM: 451T vsize, 6144M framework vsize, 2846220(0) swapins, 4729331(0) swapouts.
+Networks: packets: 191150177/161G in, 146613141/163G out.
+Disks: 97828398/2477G read, 117450254/2100G written.
+
+PID    COMMAND          %CPU #TH   
+590    WindowServer     25.0 29/1  
+70968  Superset Helper  21.6 32/1  
+0      kernel_task      13.1 850/14
+1      launchd          11.9 3     
+15622  top              8.2  1/1   
+70942  Superset Helper  7.5  19    
+81804  2.1.283          6.7  27    
+70969  Superset         3.6  20    

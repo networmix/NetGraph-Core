@@ -1,0 +1,2 @@
+a976f254eced152b14991ba2198351ec7983506f3f1e177c289852ec2bcaab90  dev/perf/spf_queue/review-2026-10/results/bitgate-old.txt
+a976f254eced152b14991ba2198351ec7983506f3f1e177c289852ec2bcaab90  dev/perf/spf_queue/review-2026-10/results/bitgate-variant.txt

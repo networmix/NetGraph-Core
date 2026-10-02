@@ -1,0 +1,40 @@
+Processes: 1021 total, 3 running, 1018 sleeping, 5225 threads 
+2026/09/27 00:35:39
+Load Avg: 3.30, 3.68, 4.08 
+CPU usage: 23.58% user, 16.59% sys, 59.82% idle 
+SharedLibs: 924M resident, 170M data, 136M linkedit.
+MemRegions: 638937 total, 10G resident, 739M private, 4394M shared.
+PhysMem: 34G used (4923M wired, 625M compressor), 767M unused.
+VM: 451T vsize, 6144M framework vsize, 2846260(0) swapins, 4729331(0) swapouts.
+Networks: packets: 191239397/161G in, 146716076/164G out.
+Disks: 97852171/2478G read, 117481152/2101G written.
+
+PID    COMMAND          %CPU #TH
+99753  mscamerad-xpc    0.0  2  
+99752  PlugInLibrarySer 0.0  2  
+99750  QuickLookUIServi 0.0  3  
+99749  com.apple.appkit 0.0  3  
+99710  PlugInLibrarySer 0.0  2  
+99709  Preview          0.0  4  
+99428  crashpad_handler 0.0  4  
+98995  crashpad_handler 0.0  4  
+Processes: 1020 total, 7 running, 1013 sleeping, 5228 threads 
+2026/09/27 00:35:40
+Load Avg: 3.30, 3.68, 4.08 
+CPU usage: 14.96% user, 7.41% sys, 77.61% idle 
+SharedLibs: 924M resident, 170M data, 136M linkedit.
+MemRegions: 0 total, 0B resident, 739M private, 4394M shared.
+PhysMem: 34G used (4111M wired, 625M compressor), 910M unused.
+VM: 451T vsize, 6144M framework vsize, 2846260(0) swapins, 4729331(0) swapouts.
+Networks: packets: 191239878/161G in, 146716829/164G out.
+Disks: 97852524/2478G read, 117481160/2101G written.
+
+PID    COMMAND          %CPU #TH   
+41532  Google Chrome He 54.7 26/1  
+590    WindowServer     26.7 28/1  
+95916  Google Chrome    17.7 46    
+0      kernel_task      17.2 850/14
+70968  Superset Helper  15.2 32    
+21666  2.1.283          9.4  27    
+41571  top              7.9  1/1   
+28991  Muse             6.2  29    

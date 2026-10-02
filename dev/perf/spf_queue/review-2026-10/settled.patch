@@ -1,0 +1,20 @@
+--- a/src/shortest_paths.cpp
++++ b/src/shortest_paths.cpp
+@@ -580,7 +580,7 @@
+     // Process edges grouped by destination node (parallel edges are consecutive in CSR).
+     while (i < end) {
+       NodeId v = col[i];
+-      if (use_node_mask && !node_mask[static_cast<std::size_t>(v)]) {
++      if (settled[static_cast<std::size_t>(v)] || (use_node_mask && !node_mask[static_cast<std::size_t>(v)])) {
+         std::size_t j_skip = i; while (j_skip < end && col[j_skip] == v) ++j_skip; i = j_skip; continue;
+       }
+ 
+@@ -829,7 +829,7 @@
+     std::size_t i = start;
+     while (i < end) {
+       NodeId u = icol[i];
+-      if (use_node_mask && !node_mask[static_cast<std::size_t>(u)]) {
++      if (settled[static_cast<std::size_t>(u)] || (use_node_mask && !node_mask[static_cast<std::size_t>(u)])) {
+         std::size_t j_skip = i; while (j_skip < end && icol[j_skip] == u) ++j_skip; i = j_skip; continue;
+       }
+       Cost min_edge_cost = kInf;

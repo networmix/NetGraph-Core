@@ -31,6 +31,17 @@ struct PredDAG {
   std::vector<EdgeId> via_edges;              // EdgeId used to reach node from predecessor
 };
 
+// Frontier queue used by shortest_paths / shortest_paths_to. Both queues pop in
+// the same (cost, -bottleneck, node) order and produce bit-identical results;
+// the bucket queue is faster when the graph's costs fit a bounded number of
+// buckets (max_cost / gcd(costs) + 1 <= 65536), and the heap is used otherwise.
+// Auto (the default) applies that rule, or the process-wide override
+// NGRAPH_CORE_SPF_QUEUE=heap|bucket read once from the environment. Heap forces
+// the reference binary heap; Bucket prefers the bucket queue when the graph is
+// eligible. This parameter exists for tests and benchmarks; the Python bindings
+// do not expose it.
+enum class SpfQueue { Auto, Heap, Bucket };
+
 // Compute shortest paths from src using Dijkstra's algorithm.
 // Returns (distances, predecessor_dag) where distances[v] is the shortest cost to reach v
 // (or inf if unreachable), and predecessor_dag encodes the shortest path structure.
@@ -57,7 +68,8 @@ shortest_paths(const StrictMultiDiGraph& g, NodeId src,
                const EdgeSelection& selection,
                std::span<const Cap> residual = {},
                std::span<const bool> node_mask = {},
-               std::span<const bool> edge_mask = {});
+               std::span<const bool> edge_mask = {},
+               SpfQueue queue = SpfQueue::Auto);
 
 // Build the SPF-compatible (distances, PredDAG) pair for one concrete path given
 // as node/edge sequences (nodes[i] -> nodes[i+1] via edges[i]; so nodes.size() ==
@@ -126,6 +138,7 @@ shortest_paths_to(const StrictMultiDiGraph& g, NodeId dst,
                   std::span<const Cap> residual = {},
                   std::span<const bool> node_mask = {},
                   std::span<const bool> edge_mask = {},
-                  std::span<const EdgeId> fanout_edges = {});
+                  std::span<const EdgeId> fanout_edges = {},
+                  SpfQueue queue = SpfQueue::Auto);
 
 } // namespace netgraph::core

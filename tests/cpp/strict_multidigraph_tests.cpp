@@ -316,3 +316,39 @@ TEST(StrictMultiDiGraph, MultipleCostTiers) {
   EXPECT_EQ(cost_view[4], 10);
   EXPECT_EQ(cost_view[5], 10);
 }
+
+TEST(StrictMultiDiGraph, CostSummaryMaxAndGcd) {
+  auto empty = StrictMultiDiGraph::from_arrays(0, {}, {}, {}, {});
+  EXPECT_EQ(empty.max_cost(), 0);
+  EXPECT_EQ(empty.cost_gcd(), 0);
+  {
+    std::vector<std::int32_t> src = {0, 1, 2}, dst = {1, 2, 0};
+    std::vector<double> cap = {1.0, 1.0, 1.0};
+    std::vector<std::int64_t> cost = {6, 9, 0};
+    auto g = StrictMultiDiGraph::from_arrays(3, src, dst, cap, cost);
+    EXPECT_EQ(g.max_cost(), 9);
+    EXPECT_EQ(g.cost_gcd(), 3);
+    StrictMultiDiGraph copy = g;
+    EXPECT_EQ(copy.max_cost(), 9);
+    EXPECT_EQ(copy.cost_gcd(), 3);
+    StrictMultiDiGraph moved = std::move(copy);
+    EXPECT_EQ(moved.max_cost(), 9);
+    EXPECT_EQ(moved.cost_gcd(), 3);
+  }
+  {
+    std::vector<std::int32_t> src = {0, 1}, dst = {1, 0};
+    std::vector<double> cap = {1.0, 1.0};
+    std::vector<std::int64_t> cost = {0, 0};
+    auto g = StrictMultiDiGraph::from_arrays(2, src, dst, cap, cost);
+    EXPECT_EQ(g.max_cost(), 0);
+    EXPECT_EQ(g.cost_gcd(), 0);
+  }
+  {
+    std::vector<std::int32_t> src = {0}, dst = {1};
+    std::vector<double> cap = {1.0};
+    std::vector<std::int64_t> cost = {(std::int64_t{1} << 40) + 7};
+    auto g = StrictMultiDiGraph::from_arrays(2, src, dst, cap, cost);
+    EXPECT_EQ(g.max_cost(), (std::int64_t{1} << 40) + 7);
+    EXPECT_EQ(g.cost_gcd(), (std::int64_t{1} << 40) + 7);
+  }
+}

@@ -4,8 +4,11 @@ repos:
     hooks:
       - id: check-merge-conflict
       - id: check-yaml
+      # Recorded measurement artefacts and review patches must stay byte-exact.
       - id: end-of-file-fixer
+        exclude: ^dev/(research/|perf/.*/(results|review-[^/]+)/)
       - id: trailing-whitespace
+        exclude: ^dev/(research/|perf/.*/(results|review-[^/]+)/)
       - id: mixed-line-ending
       - id: debug-statements
 

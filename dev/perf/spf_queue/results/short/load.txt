@@ -1,0 +1,8 @@
+14:41  up 47 days, 19:17, 3 users, load averages: 3.46 3.26 3.16
+14:41  up 47 days, 19:17, 3 users, load averages: 3.34 3.23 3.15
+14:41  up 47 days, 19:17, 3 users, load averages: 3.23 3.21 3.14
+14:41  up 47 days, 19:17, 3 users, load averages: 3.06 3.18 3.13
+14:42  up 47 days, 19:17, 3 users, load averages: 2.89 3.14 3.12
+14:42  up 47 days, 19:17, 3 users, load averages: 2.82 3.12 3.11
+14:42  up 47 days, 19:17, 3 users, load averages: 2.93 3.13 3.11
+14:42  up 47 days, 19:18, 3 users, load averages: 3.18 3.18 3.13

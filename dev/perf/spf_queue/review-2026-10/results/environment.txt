@@ -1,0 +1,17 @@
+Fri Oct  2 01:24:25 UTC 2026
+Darwin mbp_andrey.lan 25.6.0 Darwin Kernel Version 25.6.0: Sat Jul 11 15:27:27 PDT 2026; root:xnu-12377.161.13~4/RELEASE_ARM64_T6041 arm64
+Apple M4 Max
+fbab119e794c843838f4f3f96d75cb7f32f06845
+Apple clang version 21.0.0 (clang-2100.1.1.101)
+Target: arm64-apple-darwin25.6.0
+Thread model: posix
+InstalledDir: /Library/Developer/CommandLineTools/usr/bin
+08a76164496831181942b976ef2b2034a506df7e530853db315cd6cf956408ac build/perf/review-settled
+d7aa874e4b7dfde3ed53eabf644cb8e6a73a0581638f771276ab2c851b5580c3 build/perf/review-old
+c27c21e0446c0b07881cd2ab671b3ae46978082571c88a0860e71e7d920fb26d build/perf/review-singleton
+493c12c969ecb87fb753796cbae177fb6214db988197fcea5eb72404e38338cc build/perf/review-heapitem
+7452d40d922869ca2ea3d1f0e0f46088f57b5a01782f9c5200dd8b5ada71855f build/perf/review-notouch
+e48e8976f1a0dea1c4bd6edfdd1a4490b7a5e00b40892871a1580ae5680c5106 build/perf/review-baseline
+c0b0cb4d010a706f6c545cfb716fd21e10c3ed0aee4ecec7b346eeb9f9eb7ffc build/perf/cpu-queue
+4e717d373d97fd2789b2292529646d4f81353c8ba205e384c818f121d4cbe167 build/perf/cpu-queue-old
+aa1437b6e04447662c521979eb68b23a354447f634e777442c2dc72404f5bce7 src/shortest_paths.cpp

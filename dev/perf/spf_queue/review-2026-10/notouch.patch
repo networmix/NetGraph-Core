@@ -1,0 +1,29 @@
+--- a/src/shortest_paths.cpp
++++ b/src/shortest_paths.cpp
+@@ -396,7 +396,7 @@
+ // Shared reset policy: sparse when few nodes were touched, wholesale otherwise.
+ // The same predicate decides how outputs are materialised, so the two agree.
+ template <class WS>
+-bool sparse_reset(const WS& ws) { return ws.touched.size() * 4 < ws.dist.size(); }
++bool sparse_reset(const WS&) { return false; }
+ 
+ template <class Vec>
+ void ensure_sized(Vec& v, std::size_t n, typename Vec::value_type init) {
+@@ -644,7 +644,7 @@
+         if (new_cost < dist[v_idx] ||
+             (!multipath && new_cost == dist[v_idx] && !settled[v_idx] &&
+              path_residual > min_residual_to_node[v_idx] + kEpsilon)) {
+-          if (dist[v_idx] == kInf) ws.touched.push_back(v);
++          
+           dist[v_idx] = new_cost;
+           min_residual_to_node[v_idx] = path_residual;
+           pred_clear(v_idx);
+@@ -884,7 +884,7 @@
+         if (new_cost < dist[u_idx] ||
+             (!multipath && new_cost == dist[u_idx] && !settled[u_idx] &&
+              path_residual > min_residual_to_dst[u_idx] + kEpsilon)) {
+-          if (dist[u_idx] == kInf) ws.touched.push_back(u);
++          
+           dist[u_idx] = new_cost;
+           min_residual_to_dst[u_idx] = path_residual;
+           succ_clear(u_idx);

@@ -1,0 +1,24 @@
+--- a/src/shortest_paths.cpp
++++ b/src/shortest_paths.cpp
+@@ -723,9 +723,9 @@
+   ForwardWorkspace& ws = tls_forward;
+   ws.acquire(static_cast<std::size_t>(N));
+   WorkspaceLease<ForwardWorkspace> lease{ws};
++  ws.touched.push_back(src);
+   ws.dist[static_cast<std::size_t>(src)] = static_cast<Cost>(0);
+   ws.min_res[static_cast<std::size_t>(src)] = std::numeric_limits<Cap>::max();
+-  ws.touched.push_back(src);
+   BucketPlan plan;
+   if (use_bucket_queue(g, queue, plan)) {
+     run_forward(ws.bucket, ws, g, src, dst, multipath, selection, residual, node_mask, edge_mask, plan);
+@@ -929,9 +929,9 @@
+   WorkspaceLease<ReverseWorkspace> lease{ws};
+ 
+   if (target_allowed) {
++    ws.touched.push_back(target);
+     ws.dist[static_cast<std::size_t>(target)] = static_cast<Cost>(0);
+     ws.min_res[static_cast<std::size_t>(target)] = std::numeric_limits<Cap>::max();
+-    ws.touched.push_back(target);
+     BucketPlan plan;
+     if (use_bucket_queue(g, queue, plan)) {
+       run_reverse(ws.bucket, ws, g, target, multipath, selection, residual, node_mask, edge_mask, plan);
