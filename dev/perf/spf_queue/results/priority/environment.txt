@@ -1,0 +1,6 @@
+date: 2026-10-02T17:38:30Z
+old: d5717cc (0.11.0) via build.sh old d5717cc; new: working tree with EdgeSelection::priority
+phases: a1-old, b-new (default priority), b-new-residual-single (single-path, PreferHigherResidual, priority=Residual), b-new-capacity, b-new-headroom, a2-old; short mode, 7 samples
+382f443bfde62bc56871d5335af9dc23ddc307a838b0624368217127c78fa499  src/shortest_paths.cpp
+5499dbbdb66f7f63ad6c97f5718d0205c4f2f05992b60f4822a2ddcd5461f5d3  build/perf/cpu-queue
+7de733ce4ec111c3414e2b262b6063a253b5cd790e4beceab893d802f0c5bf6a  build/perf/cpu-queue-old

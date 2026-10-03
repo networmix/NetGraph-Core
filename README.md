@@ -22,7 +22,7 @@ NetGraph-Core provides a specialized graph implementation for networking problem
 - **Shortest Paths (SPF)**:
   - Modified Dijkstra returns a **Predecessor DAG** to capture all equal-cost paths.
   - Supports **ECMP** (Equal-Cost Multi-Path) routing.
-  - Features **node/edge masking** and **residual-aware tie-breaking**.
+  - Features **node/edge masking** and **residual-aware tie-breaking**, with a selectable priority value (residual, static capacity, or headroom = residual / capacity).
 
 - **K-Shortest Paths (KSP)**:
   - Yen's algorithm returning DAG-wrapped paths.
@@ -30,7 +30,8 @@ NetGraph-Core provides a specialized graph implementation for networking problem
 
 - **Explicit Paths**:
   - `PredDAG.from_edges(graph, edges)` builds a path bundle from an operator-supplied
-    edge sequence, usable anywhere a `PredDAG` is accepted.
+    edge sequence, usable anywhere a `PredDAG` is accepted; `PredDAG.from_hops(graph, hops)`
+    does the same for routes whose hops use several parallel edges.
 
 - **Max-Flow**:
   - **Algorithm**: Iterative augmentation using Successive Shortest Path on residual graphs, pushing flow across full ECMP/WCMP DAGs at each step. For `Proportional` placement with `require_capacity=True`, a final residual completion phase augments with reverse arcs so the result is a true maximum flow; the other modes are placement models and may report less.

@@ -122,7 +122,7 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
   // require_capacity=false: Routes based on costs only, ignore capacity (IP/IGP behavior)
   // With require_capacity=false the search ignores residuals, so its inputs
   // are identical on every tier: compute it once and reuse the result.
-  std::pair<std::vector<Cost>, PredDAG> path_result;
+  std::pair<Cost, PredDAG> path_result;
   bool have_path_result = false;
   while (true) {
     EdgeSelection sel;
@@ -130,7 +130,7 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
     sel.require_capacity = require_capacity;
     sel.tie_break = EdgeTieBreak::Deterministic;
     if (require_capacity || !have_path_result) {
-      path_result = shortest_paths(
+      path_result = shortest_paths_dag(
           g, src, dst,
           /*multipath=*/true,
           sel,
@@ -139,7 +139,7 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
           use_edge_mask ? edge_mask : std::span<const bool>{});
       have_path_result = true;
     }
-    const auto& [dist, dag] = path_result;
+    const PredDAG& dag = path_result.second;
 
     // No path if t has no parents in DAG
     if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size() - 1 ||
@@ -147,7 +147,7 @@ calc_max_flow(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
       break;
     }
 
-    Cost path_cost = dist[static_cast<std::size_t>(dst)];
+    Cost path_cost = path_result.first;
     Flow placed = fs.place_on_dag(src, dst, dag, std::numeric_limits<double>::infinity(), placement);
 
     if (placed < kMinFlow) break;

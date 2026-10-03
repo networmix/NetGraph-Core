@@ -6,6 +6,7 @@
 */
 #pragma once
 
+#include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -54,6 +55,22 @@ public:
   //     - A predecessor DAG encoding the shortest paths.
   [[nodiscard]] virtual std::pair<std::vector<Cost>, PredDAG> spf(
       const GraphHandle& gh, NodeId src, const SpfOptions& opts) = 0;
+
+  // Destination-limited search returning dst's cost and the predecessor DAG
+  // without the N-sized distance vector; see shortest_paths_dag() in
+  // shortest_paths.hpp. opts.dst is ignored (dst is the argument). The default
+  // implementation derives the result from spf(), so backends that do not
+  // specialise it stay correct.
+  [[nodiscard]] virtual std::pair<Cost, PredDAG> spf_dag(
+      const GraphHandle& gh, NodeId src, NodeId dst, const SpfOptions& opts) {
+    SpfOptions o = opts;
+    o.dst = dst;
+    auto res = spf(gh, src, o);
+    const Cost cost = (dst >= 0 && static_cast<std::size_t>(dst) < res.first.size())
+                          ? res.first[static_cast<std::size_t>(dst)]
+                          : std::numeric_limits<Cost>::max();
+    return {cost, std::move(res.second)};
+  }
 
   // Computes shortest paths from every node to dst (reverse SPF); see
   // shortest_paths_to() in shortest_paths.hpp. Returns distances to dst and a

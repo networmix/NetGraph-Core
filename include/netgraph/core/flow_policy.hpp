@@ -181,6 +181,9 @@ private:
   [[nodiscard]] FlowRecord* create_flow(FlowGraph& fg, NodeId src, NodeId dst, FlowClass flowClass,
                     std::optional<double> min_flow);
   [[nodiscard]] FlowRecord* reoptimize_flow(FlowGraph& fg, const FlowIndex& idx, double headroom);
+  // Next fresh index for this policy; throws if the FlowGraph already holds it
+  // (another policy managing the same (src, dst, flowClass) on this FlowGraph).
+  [[nodiscard]] FlowIndex next_flow_index(const FlowGraph& fg, NodeId src, NodeId dst, FlowClass flowClass);
 
   // Config
   ExecutionContext ctx_;

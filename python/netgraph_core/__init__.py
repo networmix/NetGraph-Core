@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from _netgraph_core import (
     Algorithms,
     Backend,
+    EdgePriority,
     EdgeSelection,
     EdgeTieBreak,
     FlowGraph,
@@ -43,6 +44,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only
     from ._docs import (  # noqa: I001
         Algorithms as Algorithms,
         Backend as Backend,
+        EdgePriority as EdgePriority,
         EdgeSelection as EdgeSelection,
         EdgeTieBreak as EdgeTieBreak,
         FlowGraph as FlowGraph,
@@ -67,6 +69,7 @@ __all__ = [
     "StrictMultiDiGraph",
     "FlowGraph",
     "Graph",
+    "EdgePriority",
     "EdgeSelection",
     "EdgeTieBreak",
     "PathAlg",

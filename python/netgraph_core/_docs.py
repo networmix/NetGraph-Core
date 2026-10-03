@@ -18,7 +18,12 @@ if TYPE_CHECKING:  # only for typing; runtime comes from extension
 
 
 class EdgeTieBreak:
-    """Tie-break rule among equal-cost parallel edges (pybind11 enum)."""
+    """Tie-break rule among equal-cost parallel edges (pybind11 enum).
+
+    PREFER_HIGHER_RESIDUAL ranks edges by the value EdgeSelection.priority
+    selects (the residual by default); DETERMINISTIC uses the edge order from
+    graph construction.
+    """
 
     DETERMINISTIC: ClassVar[EdgeTieBreak]
     PREFER_HIGHER_RESIDUAL: ClassVar[EdgeTieBreak]
@@ -32,12 +37,40 @@ class EdgeTieBreak:
     def value(self) -> int: ...
 
 
+class EdgePriority:
+    """Per-edge value that ranks equal-cost alternatives (pybind11 enum).
+
+    It drives the PREFER_HIGHER_RESIDUAL edge tie-break and the node-level
+    ordering (equal-cost nodes settle in descending order of the smallest value
+    along their path). It never changes which edges are eligible: capacity
+    gating always uses the residual.
+
+    RESIDUAL: residual capacity when a residual is supplied, otherwise the
+        static capacity. The default and the historical behaviour.
+    CAPACITY: the static capacity even when a residual is supplied.
+    HEADROOM: residual / capacity, the fraction of the edge still free
+        (1 for every edge when no residual is supplied, 0 for zero capacity).
+    """
+
+    RESIDUAL: ClassVar[EdgePriority]
+    CAPACITY: ClassVar[EdgePriority]
+    HEADROOM: ClassVar[EdgePriority]
+    __members__: ClassVar[dict[str, EdgePriority]]
+
+    def __init__(self, value: int) -> None: ...
+
+
 class EdgeSelection:
-    """Edge selection policy. The constructor is keyword-only."""
+    """Edge selection policy. The constructor is keyword-only.
+
+    priority selects the per-edge value that tie_break and the bottleneck
+    ordering rank by (see EdgePriority); the default keeps today's behaviour.
+    """
 
     multi_edge: bool
     require_capacity: bool
     tie_break: EdgeTieBreak
+    priority: EdgePriority
 
     def __init__(
         self,
@@ -45,6 +78,7 @@ class EdgeSelection:
         multi_edge: bool = True,
         require_capacity: bool = False,
         tie_break: EdgeTieBreak = ...,
+        priority: EdgePriority = ...,
     ) -> None: ...
 
 
@@ -92,6 +126,26 @@ class PredDAG:
     parent_offsets: np.ndarray
     parents: np.ndarray
     via_edges: np.ndarray
+
+    @staticmethod
+    def from_hops(
+        graph: "StrictMultiDiGraph", hops: "Sequence[Sequence[int]]"
+    ) -> "PredDAG":
+        """Build a PredDAG for one explicit route with parallel edges per hop.
+
+        hops[i] lists the edge ids of hop i, which must all join the same node
+        pair; consecutive hops must connect and the walk must be a simple
+        path. Every listed edge becomes a parent entry of its hop's head node,
+        so placement splits across the bundle exactly as on an SPF multipath
+        DAG (a 4 x 10 bundle carries 40, where from_edges with one edge
+        carries 10). from_edges is the one-edge-per-hop case.
+
+        Raises:
+            ValueError: If the route or a hop is empty, an id is out of range,
+                an edge is repeated within a hop, a hop's edges are not
+                parallel, hops do not connect, or the walk revisits a node.
+        """
+        ...
 
     @staticmethod
     def from_edges(graph: "StrictMultiDiGraph", edges: "Sequence[int]") -> "PredDAG":
@@ -381,6 +435,21 @@ class StrictMultiDiGraph:
 
     def num_nodes(self) -> int: ...
     def num_edges(self) -> int: ...
+    def max_cost(self) -> int:
+        """Largest edge cost (0 for a graph without edges).
+
+        Shortest-path searches use a bucket queue when
+        ``max_cost() // cost_gcd() + 1 <= 65536`` and a binary heap otherwise.
+        Cost scales that exceed the limit (for example latencies in nanoseconds)
+        can be divided by a common factor before building the graph to stay on
+        the faster route; results are identical either way.
+        """
+        ...
+
+    def cost_gcd(self) -> int:
+        """Greatest common divisor of all edge costs (0 when every cost is 0)."""
+        ...
+
     def capacity_view(self) -> "np.ndarray":
         """Copy of per-edge capacities, float64[E]."""
         ...

@@ -69,38 +69,80 @@ path_to_pred_dag(const StrictMultiDiGraph& g,
   return {std::move(dist), std::move(dag)};
 }
 
-PredDAG make_path_dag(const StrictMultiDiGraph& g, std::span<const EdgeId> edges) {
-  if (edges.empty()) {
-    throw std::invalid_argument("make_path_dag: edges must be non-empty");
-  }
+namespace {
+
+// Shared builder for explicit routes (make_path_dag, make_hops_dag): validates
+// the hop sequence and lays the entries out in PredDAG form.
+PredDAG build_route_dag(const char* what, const StrictMultiDiGraph& g,
+                        std::span<const std::vector<EdgeId>> hops) {
+  const std::string who(what);
+  if (hops.empty()) throw std::invalid_argument(who + ": route must be non-empty");
+  const auto N = g.num_nodes();
   const auto E = static_cast<std::size_t>(g.num_edges());
   const auto esrc = g.edge_src_view();
   const auto edst = g.edge_dst_view();
-  std::vector<NodeId> nodes;
-  nodes.reserve(edges.size() + 1);
-  std::vector<char> seen(static_cast<std::size_t>(g.num_nodes()), 0);
-  for (std::size_t i = 0; i < edges.size(); ++i) {
-    const auto e = edges[i];
-    if (e < 0 || static_cast<std::size_t>(e) >= E) {
-      throw std::invalid_argument("make_path_dag: edge id out of range");
+  std::vector<char> seen(static_cast<std::size_t>(N), 0);
+  PredDAG dag;
+  dag.parent_offsets.assign(static_cast<std::size_t>(N) + 1, 0);
+  NodeId prev = -1;
+  for (std::size_t i = 0; i < hops.size(); ++i) {
+    const auto& hop = hops[i];
+    if (hop.empty()) throw std::invalid_argument(who + ": hop " + std::to_string(i) + " is empty");
+    NodeId hu = -1, hv = -1;
+    for (std::size_t k = 0; k < hop.size(); ++k) {
+      const auto e = hop[k];
+      if (e < 0 || static_cast<std::size_t>(e) >= E) {
+        throw std::invalid_argument(who + ": edge id out of range");
+      }
+      for (std::size_t m = 0; m < k; ++m) {
+        if (hop[m] == e) throw std::invalid_argument(who + ": edge " + std::to_string(e) + " repeated in hop " + std::to_string(i));
+      }
+      const auto u = esrc[static_cast<std::size_t>(e)];
+      const auto v = edst[static_cast<std::size_t>(e)];
+      if (k == 0) { hu = u; hv = v; }
+      else if (u != hu || v != hv) {
+        throw std::invalid_argument(who + ": edges of hop " + std::to_string(i) + " are not parallel (they must join the same node pair)");
+      }
     }
-    const auto u = esrc[static_cast<std::size_t>(e)];
-    const auto v = edst[static_cast<std::size_t>(e)];
     if (i == 0) {
-      nodes.push_back(u);
-      seen[static_cast<std::size_t>(u)] = 1;
-    } else if (u != nodes.back()) {
+      seen[static_cast<std::size_t>(hu)] = 1;
+    } else if (hu != prev) {
       throw std::invalid_argument(
-          "make_path_dag: edges are not contiguous (edge source does not match the "
-          "previous edge's destination)");
+          who + ": hops are not contiguous (edge source does not match the previous hop's destination)");
     }
-    if (seen[static_cast<std::size_t>(v)]) {
-      throw std::invalid_argument("make_path_dag: path revisits a node (must be a simple path)");
+    if (seen[static_cast<std::size_t>(hv)]) {
+      throw std::invalid_argument(who + ": route revisits a node (must be a simple path)");
     }
-    seen[static_cast<std::size_t>(v)] = 1;
-    nodes.push_back(v);
+    seen[static_cast<std::size_t>(hv)] = 1;
+    prev = hv;
+    dag.parent_offsets[static_cast<std::size_t>(hv) + 1] = static_cast<std::int32_t>(hop.size());
   }
-  return path_to_pred_dag(g, nodes, edges).second;
+  for (std::size_t v = 1; v < dag.parent_offsets.size(); ++v) dag.parent_offsets[v] += dag.parent_offsets[v - 1];
+  dag.parents.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
+  dag.via_edges.resize(static_cast<std::size_t>(dag.parent_offsets.back()));
+  for (const auto& hop : hops) {
+    const auto hu = esrc[static_cast<std::size_t>(hop[0])];
+    const auto hv = edst[static_cast<std::size_t>(hop[0])];
+    auto base = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(hv)]);
+    for (std::size_t k = 0; k < hop.size(); ++k) {
+      dag.parents[base + k] = hu;
+      dag.via_edges[base + k] = hop[k];
+    }
+  }
+  return dag;
+}
+
+} // namespace
+
+PredDAG make_path_dag(const StrictMultiDiGraph& g, std::span<const EdgeId> edges) {
+  std::vector<std::vector<EdgeId>> hops;
+  hops.reserve(edges.size());
+  for (auto e : edges) hops.push_back({e});
+  return build_route_dag("make_path_dag", g, hops);
+}
+
+PredDAG make_hops_dag(const StrictMultiDiGraph& g, std::span<const std::vector<EdgeId>> hops) {
+  return build_route_dag("make_hops_dag", g, hops);
 }
 
 std::vector<std::vector<std::pair<NodeId, std::vector<EdgeId>>>>
@@ -413,6 +455,21 @@ struct BucketQueue {
 
 struct BucketPlan { bool eligible = false; std::size_t width = 0; Cost stride = 1; };
 
+// The value equal-cost alternatives are ranked by (EdgeSelection::priority).
+// `rem` is the residual when one was supplied, otherwise the capacity; the
+// default instantiation returns it untouched and never reads `cap`.
+template <EdgePriority P>
+inline Cap priority_of(Cap rem, std::span<const Cap> cap, std::size_t e) {
+  if constexpr (P == EdgePriority::Residual) {
+    (void)cap; (void)e; return rem;
+  } else if constexpr (P == EdgePriority::Capacity) {
+    return cap[e];
+  } else {
+    const Cap c = cap[e];
+    return c > static_cast<Cap>(0) ? rem / c : static_cast<Cap>(0);
+  }
+}
+
 BucketPlan plan_buckets(const StrictMultiDiGraph& g) {
   BucketPlan p;
   p.stride = g.cost_gcd() > 0 ? g.cost_gcd() : 1;
@@ -484,6 +541,19 @@ struct ForwardWorkspace {
   HeapQueue heap;
   BucketQueue bucket;
 
+  // Predecessor lists: pred_head/pred_tail index into the ent_* arrays, whose
+  // entries are (parent, via_edge) pairs appended in discovery order; pred_count
+  // is the live length, so the result is sized without walking the lists twice.
+  void clear_preds(std::size_t v) { pred_head[v] = -1; pred_tail[v] = -1; pred_count[v] = 0; }
+  void append_pred(std::size_t v, NodeId p, EdgeId e) {
+    const auto idx = static_cast<std::int32_t>(ent_parent.size());
+    ent_parent.push_back(p); ent_edge.push_back(e); ent_next.push_back(-1);
+    if (pred_head[v] < 0) pred_head[v] = idx;
+    else ent_next[static_cast<std::size_t>(pred_tail[v])] = idx;
+    pred_tail[v] = idx;
+    ++pred_count[v];
+  }
+
   void acquire(std::size_t n) {
     const bool shrank = ensure_sized(dist, n, kInf);
     ensure_sized(min_res, n, static_cast<Cap>(0));
@@ -516,10 +586,8 @@ struct ForwardWorkspace {
   }
 };
 
-// Reverse search scratch; same invariant. Successor lists per tail node u are
-// a flat intrusive list of (v, e) entries (succ_head/succ_tail into ent_*).
-// has_in_entry[v]: some DAG entry u -> v exists; a fanout edge may not leave
-// such a node.
+// Reverse search scratch; same invariant. has_in_entry[v]: some DAG entry
+// u -> v exists; a fanout edge may not leave such a node.
 struct ReverseWorkspace {
   std::vector<Cost> dist;
   std::vector<Cap> min_res;
@@ -533,6 +601,16 @@ struct ReverseWorkspace {
   std::vector<EdgeId> sel_buf;
   HeapQueue heap;
   BucketQueue bucket;
+
+  // Successor lists per tail node u: (v, e) entries in the ent_* arrays.
+  void clear_succs(std::size_t u) { succ_head[u] = -1; succ_tail[u] = -1; }
+  void append_succ(std::size_t u, NodeId v, EdgeId e) {
+    const auto idx = static_cast<std::int32_t>(ent_node.size());
+    ent_node.push_back(v); ent_edge.push_back(e); ent_next.push_back(-1);
+    if (succ_head[u] < 0) succ_head[u] = idx;
+    else ent_next[static_cast<std::size_t>(succ_tail[u])] = idx;
+    succ_tail[u] = idx;
+  }
 
   void acquire(std::size_t n) {
     const bool shrank = ensure_sized(dist, n, kInf);
@@ -581,7 +659,7 @@ struct WorkspaceLease {
 
 // The search loop, shared by both queues. Precondition: src is allowed and
 // initialised in ws (dist 0, min_res max, touched).
-template <class Queue>
+template <class Queue, EdgePriority P>
 void run_forward(Queue& pq, ForwardWorkspace& ws, const StrictMultiDiGraph& g, NodeId src,
                  std::optional<NodeId> dst, bool multipath, const EdgeSelection& selection,
                  std::span<const Cap> residual, std::span<const bool> node_mask,
@@ -597,32 +675,12 @@ void run_forward(Queue& pq, ForwardWorkspace& ws, const StrictMultiDiGraph& g, N
   // bases around every store (the workspace is a thread-local object).
   Cost* const dist = ws.dist.data();
   Cap* const min_residual_to_node = ws.min_res.data();
-  std::int32_t* const pred_head = ws.pred_head.data();
-  std::int32_t* const pred_tail = ws.pred_tail.data();
-  std::int32_t* const pred_count = ws.pred_count.data();
   char* const settled = ws.settled.data();
-  auto& ent_parent = ws.ent_parent;
-  auto& ent_edge = ws.ent_edge;
-  auto& ent_next = ws.ent_next;
 
   const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(N));
   const bool use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(g.num_edges()));
   const bool has_residual = (residual.size() == static_cast<std::size_t>(g.num_edges()));
   const bool require_cap = selection.require_capacity || has_residual;
-
-  // Predecessor storage as a flat intrusive list: pred_head/pred_tail index into
-  // the ent_* arrays, whose entries are (parent, via_edge) pairs appended in
-  // discovery order. pred_count tracks the live length of each list so the
-  // result can be sized without walking the lists twice.
-  auto pred_clear = [&](std::size_t v){ pred_head[v] = -1; pred_tail[v] = -1; pred_count[v] = 0; };
-  auto pred_append = [&](std::size_t v, NodeId p, EdgeId e){
-    const auto idx = static_cast<std::int32_t>(ent_parent.size());
-    ent_parent.push_back(p); ent_edge.push_back(e); ent_next.push_back(-1);
-    if (pred_head[v] < 0) { pred_head[v] = idx; }
-    else { ent_next[static_cast<std::size_t>(pred_tail[v])] = idx; }
-    pred_tail[v] = idx;
-    ++pred_count[v];
-  };
 
   // Queue items are (cost, -residual, node): cost (minimize) -> residual
   // (maximize) -> node (deterministic). This naturally distributes flows across
@@ -679,6 +737,7 @@ void run_forward(Queue& pq, ForwardWorkspace& ws, const StrictMultiDiGraph& g, N
         if (use_edge_mask && !edge_mask[e]) continue;
         const Cap rem = has_residual ? residual[e] : cap[e];
         if (require_cap && rem < kMinCap) continue;
+        const Cap pri = priority_of<P>(rem, cap, e);
         const Cost ecost = static_cast<Cost>(cost[e]);
         if (ecost < min_edge_cost) {
           min_edge_cost = ecost;
@@ -687,7 +746,7 @@ void run_forward(Queue& pq, ForwardWorkspace& ws, const StrictMultiDiGraph& g, N
             selected_edges.push_back(static_cast<EdgeId>(aei[j]));
           } else {
             best_edge_id = static_cast<int>(e);
-            best_rem_for_min_cost = static_cast<double>(rem);
+            best_rem_for_min_cost = static_cast<double>(pri);
           }
         } else if (ecost == min_edge_cost) {
           if (selection.multi_edge) {
@@ -695,10 +754,10 @@ void run_forward(Queue& pq, ForwardWorkspace& ws, const StrictMultiDiGraph& g, N
           } else {
             // tie-break among equal-cost edges
             if (selection.tie_break == EdgeTieBreak::PreferHigherResidual) {
-              if (static_cast<double>(rem) > best_rem_for_min_cost + kEpsilon) {
+              if (static_cast<double>(pri) > best_rem_for_min_cost + kEpsilon) {
                 best_edge_id = static_cast<int>(e);
-                best_rem_for_min_cost = static_cast<double>(rem);
-              } else if (std::abs(static_cast<double>(rem) - best_rem_for_min_cost) <= kEpsilon) {
+                best_rem_for_min_cost = static_cast<double>(pri);
+              } else if (std::abs(static_cast<double>(pri) - best_rem_for_min_cost) <= kEpsilon) {
                 // further tie-break deterministically by smaller edge id
                 if (best_edge_id < 0 || static_cast<int>(e) < best_edge_id) {
                   best_edge_id = static_cast<int>(e);
@@ -720,12 +779,14 @@ void run_forward(Queue& pq, ForwardWorkspace& ws, const StrictMultiDiGraph& g, N
       if (!selected_edges.empty()) {
         Cost new_cost = static_cast<Cost>(d_u + min_edge_cost);
         auto v_idx = static_cast<std::size_t>(v);
-        // Bottleneck capacity along the path to v through u (node-level tie-breaking).
+        // Bottleneck along the path to v through u (node-level tie-breaking), in
+        // the selected priority value.
         Cap max_edge_residual = static_cast<Cap>(0);
         for (auto edge_id : selected_edges) {
-          const Cap rem = has_residual ? residual[static_cast<std::size_t>(edge_id)]
-                                        : cap[static_cast<std::size_t>(edge_id)];
-          if (rem > max_edge_residual) max_edge_residual = rem;
+          const auto idx = static_cast<std::size_t>(edge_id);
+          const Cap rem = has_residual ? residual[idx] : cap[idx];
+          const Cap pri = priority_of<P>(rem, cap, idx);
+          if (pri > max_edge_residual) max_edge_residual = pri;
         }
         Cap path_residual = std::min(min_residual_to_node[static_cast<std::size_t>(u)], max_edge_residual);
         // Relaxation: shorter path, or equal-cost path with better capacity (single-path mode).
@@ -735,15 +796,15 @@ void run_forward(Queue& pq, ForwardWorkspace& ws, const StrictMultiDiGraph& g, N
           if (dist[v_idx] == kInf) ws.touched.push_back(v);
           dist[v_idx] = new_cost;
           min_residual_to_node[v_idx] = path_residual;
-          pred_clear(v_idx);
-          for (auto sel_e : selected_edges) pred_append(v_idx, u, sel_e);
+          ws.clear_preds(v_idx);
+          for (auto sel_e : selected_edges) ws.append_pred(v_idx, u, sel_e);
           pq.push(new_cost, -path_residual, v);
         }
         // Multipath: equal-cost alternative (only while v is unsettled; see above).
         // min_residual_to_node is not updated here: all equal-cost paths are kept,
         // none is chosen by residual.
         else if (multipath && new_cost == dist[v_idx] && !settled[v_idx]) {
-          for (auto sel_e : selected_edges) pred_append(v_idx, u, sel_e);
+          for (auto sel_e : selected_edges) ws.append_pred(v_idx, u, sel_e);
         }
       }
       i = j;
@@ -752,18 +813,29 @@ void run_forward(Queue& pq, ForwardWorkspace& ws, const StrictMultiDiGraph& g, N
   }
 }
 
-// Materialise (distances, PredDAG) from the forward workspace. Per-node
-// predecessor lists are independent, so visiting only touched nodes yields the
-// same arrays as visiting every node.
-std::pair<std::vector<Cost>, PredDAG> finish_forward(ForwardWorkspace& ws, std::int32_t N) {
+// Runs the forward search on the chosen queue for one priority.
+template <EdgePriority P>
+void forward_with(bool bucket, ForwardWorkspace& ws, const StrictMultiDiGraph& g, NodeId src,
+                  std::optional<NodeId> dst, bool multipath, const EdgeSelection& selection,
+                  std::span<const Cap> residual, std::span<const bool> node_mask,
+                  std::span<const bool> edge_mask, const BucketPlan& plan) {
+  if (bucket) run_forward<BucketQueue, P>(ws.bucket, ws, g, src, dst, multipath, selection, residual, node_mask, edge_mask, plan);
+  else run_forward<HeapQueue, P>(ws.heap, ws, g, src, dst, multipath, selection, residual, node_mask, edge_mask, plan);
+}
+
+// Materialise the distance vector from the forward workspace.
+std::vector<Cost> materialise_dist(const ForwardWorkspace& ws, std::int32_t N) {
+  if (!sparse_reset(ws)) return ws.dist;
+  std::vector<Cost> dist(static_cast<std::size_t>(N), kInf);
+  for (auto v : ws.touched) dist[static_cast<std::size_t>(v)] = ws.dist[static_cast<std::size_t>(v)];
+  return dist;
+}
+
+// Materialise the PredDAG from the forward workspace. Per-node predecessor
+// lists are independent, so visiting only touched nodes yields the same arrays
+// as visiting every node.
+PredDAG materialise_dag(const ForwardWorkspace& ws, std::int32_t N) {
   const bool sparse = sparse_reset(ws);
-  std::vector<Cost> dist;
-  if (sparse) {
-    dist.assign(static_cast<std::size_t>(N), kInf);
-    for (auto v : ws.touched) dist[static_cast<std::size_t>(v)] = ws.dist[static_cast<std::size_t>(v)];
-  } else {
-    dist = ws.dist;
-  }
   PredDAG dag;
   dag.parent_offsets.assign(static_cast<std::size_t>(N+1), 0);
   if (sparse) {
@@ -786,7 +858,40 @@ std::pair<std::vector<Cost>, PredDAG> finish_forward(ForwardWorkspace& ws, std::
   };
   if (sparse) { for (auto v : ws.touched) fill(v); }
   else { for (std::int32_t v = 0; v < N; ++v) fill(v); }
-  return {std::move(dist), std::move(dag)};
+  return dag;
+}
+
+PredDAG empty_dag(std::int32_t N) {
+  PredDAG dag;
+  dag.parent_offsets.assign(static_cast<std::size_t>(N + 1), 0);
+  return dag;
+}
+
+bool source_allowed(const StrictMultiDiGraph& g, NodeId src, std::span<const bool> node_mask) {
+  const auto N = g.num_nodes();
+  const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(N));
+  return src >= 0 && src < N && (!use_node_mask || node_mask[static_cast<std::size_t>(src)]);
+}
+
+// Runs the forward search into the acquired workspace. Precondition: the
+// source is allowed (source_allowed) and the lease is held by the caller.
+void search_forward(ForwardWorkspace& ws, const StrictMultiDiGraph& g, NodeId src,
+                    std::optional<NodeId> dst, bool multipath, const EdgeSelection& selection,
+                    std::span<const Cap> residual, std::span<const bool> node_mask,
+                    std::span<const bool> edge_mask, SpfQueue queue) {
+  ws.touched.push_back(src);   // before the writes: see WorkspaceLease
+  ws.dist[static_cast<std::size_t>(src)] = static_cast<Cost>(0);
+  ws.min_res[static_cast<std::size_t>(src)] = std::numeric_limits<Cap>::max();
+  BucketPlan plan;
+  const bool bucket = use_bucket_queue(g, queue, plan);
+  switch (selection.priority) {
+    case EdgePriority::Capacity:
+      forward_with<EdgePriority::Capacity>(bucket, ws, g, src, dst, multipath, selection, residual, node_mask, edge_mask, plan); break;
+    case EdgePriority::Headroom:
+      forward_with<EdgePriority::Headroom>(bucket, ws, g, src, dst, multipath, selection, residual, node_mask, edge_mask, plan); break;
+    default:
+      forward_with<EdgePriority::Residual>(bucket, ws, g, src, dst, multipath, selection, residual, node_mask, edge_mask, plan); break;
+  }
 }
 
 std::pair<std::vector<Cost>, PredDAG>
@@ -800,27 +905,47 @@ shortest_paths_core(const StrictMultiDiGraph& g, NodeId src,
                     SpfQueue queue) {
   NGRAPH_PROFILE_SCOPE("shortest_paths_core");
   const auto N = g.num_nodes();
-  const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(N));
-  const bool src_allowed = (src >= 0 && src < N && (!use_node_mask || node_mask[static_cast<std::size_t>(src)]));
-  if (!src_allowed) {
+  if (!source_allowed(g, src, node_mask)) {
     // Source is out of range or masked out: no traversal, return empty DAG.
-    PredDAG dag;
-    dag.parent_offsets.assign(static_cast<std::size_t>(N + 1), 0);
-    return {std::vector<Cost>(static_cast<std::size_t>(N), kInf), std::move(dag)};
+    return {std::vector<Cost>(static_cast<std::size_t>(N), kInf), empty_dag(N)};
   }
   ForwardWorkspace& ws = tls_forward;
   ws.acquire(static_cast<std::size_t>(N));
   WorkspaceLease<ForwardWorkspace> lease{ws};
-  ws.touched.push_back(src);   // before the writes: see WorkspaceLease
-  ws.dist[static_cast<std::size_t>(src)] = static_cast<Cost>(0);
-  ws.min_res[static_cast<std::size_t>(src)] = std::numeric_limits<Cap>::max();
-  BucketPlan plan;
-  if (use_bucket_queue(g, queue, plan)) {
-    run_forward(ws.bucket, ws, g, src, dst, multipath, selection, residual, node_mask, edge_mask, plan);
-  } else {
-    run_forward(ws.heap, ws, g, src, dst, multipath, selection, residual, node_mask, edge_mask, plan);
+  search_forward(ws, g, src, dst, multipath, selection, residual, node_mask, edge_mask, queue);
+  return {materialise_dist(ws, N), materialise_dag(ws, N)};
+}
+
+std::pair<Cost, PredDAG>
+shortest_paths_dag_core(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
+                        bool multipath,
+                        const EdgeSelection& selection,
+                        std::span<const Cap> residual,
+                        std::span<const bool> node_mask,
+                        std::span<const bool> edge_mask,
+                        SpfQueue queue) {
+  NGRAPH_PROFILE_SCOPE("shortest_paths_core");
+  const auto N = g.num_nodes();
+  if (!source_allowed(g, src, node_mask)) return {kInf, empty_dag(N)};
+  ForwardWorkspace& ws = tls_forward;
+  ws.acquire(static_cast<std::size_t>(N));
+  WorkspaceLease<ForwardWorkspace> lease{ws};
+  search_forward(ws, g, src, dst, multipath, selection, residual, node_mask, edge_mask, queue);
+  const Cost cost = (dst >= 0 && dst < N) ? ws.dist[static_cast<std::size_t>(dst)] : kInf;
+  return {cost, materialise_dag(ws, N)};
+}
+
+void validate_spans(const char* what, const StrictMultiDiGraph& g, std::span<const Cap> residual,
+                    std::span<const bool> node_mask, std::span<const bool> edge_mask) {
+  if (!node_mask.empty() && node_mask.size() != static_cast<std::size_t>(g.num_nodes())) {
+    throw std::invalid_argument(std::string(what) + ": node_mask length mismatch");
   }
-  return finish_forward(ws, N);
+  if (!edge_mask.empty() && edge_mask.size() != static_cast<std::size_t>(g.num_edges())) {
+    throw std::invalid_argument(std::string(what) + ": edge_mask length mismatch");
+  }
+  if (!residual.empty() && residual.size() != static_cast<std::size_t>(g.num_edges())) {
+    throw std::invalid_argument(std::string(what) + ": residual length mismatch");
+  }
 }
 
 } // namespace
@@ -834,16 +959,20 @@ shortest_paths(const StrictMultiDiGraph& g, NodeId src,
                std::span<const bool> node_mask,
                std::span<const bool> edge_mask,
                SpfQueue queue) {
-  if (!node_mask.empty() && node_mask.size() != static_cast<std::size_t>(g.num_nodes())) {
-    throw std::invalid_argument("shortest_paths: node_mask length mismatch");
-  }
-  if (!edge_mask.empty() && edge_mask.size() != static_cast<std::size_t>(g.num_edges())) {
-    throw std::invalid_argument("shortest_paths: edge_mask length mismatch");
-  }
-  if (!residual.empty() && residual.size() != static_cast<std::size_t>(g.num_edges())) {
-    throw std::invalid_argument("shortest_paths: residual length mismatch");
-  }
+  validate_spans("shortest_paths", g, residual, node_mask, edge_mask);
   return shortest_paths_core(g, src, dst, multipath, selection, residual, node_mask, edge_mask, queue);
+}
+
+std::pair<Cost, PredDAG>
+shortest_paths_dag(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
+                   bool multipath,
+                   const EdgeSelection& selection,
+                   std::span<const Cap> residual,
+                   std::span<const bool> node_mask,
+                   std::span<const bool> edge_mask,
+                   SpfQueue queue) {
+  validate_spans("shortest_paths_dag", g, residual, node_mask, edge_mask);
+  return shortest_paths_dag_core(g, src, dst, multipath, selection, residual, node_mask, edge_mask, queue);
 }
 
 } // namespace netgraph::core
@@ -863,7 +992,7 @@ namespace netgraph::core {
 
 namespace {
 
-template <class Queue>
+template <class Queue, EdgePriority P>
 void run_reverse(Queue& pq, ReverseWorkspace& ws, const StrictMultiDiGraph& g, NodeId target,
                  bool multipath, const EdgeSelection& selection,
                  std::span<const Cap> residual, std::span<const bool> node_mask,
@@ -877,27 +1006,13 @@ void run_reverse(Queue& pq, ReverseWorkspace& ws, const StrictMultiDiGraph& g, N
   const auto cap  = g.capacity_view();
   Cost* const dist = ws.dist.data();
   Cap* const min_residual_to_dst = ws.min_res.data();
-  std::int32_t* const succ_head = ws.succ_head.data();
-  std::int32_t* const succ_tail = ws.succ_tail.data();
   char* const settled = ws.settled.data();
   char* const has_in_entry = ws.has_in_entry.data();
-  auto& ent_node = ws.ent_node;
-  auto& ent_edge = ws.ent_edge;
-  auto& ent_next = ws.ent_next;
 
   const bool use_node_mask = (node_mask.size() == static_cast<std::size_t>(N));
   const bool use_edge_mask = (edge_mask.size() == static_cast<std::size_t>(E));
   const bool has_residual = (residual.size() == static_cast<std::size_t>(E));
   const bool require_cap = selection.require_capacity || has_residual;
-
-  auto succ_clear = [&](std::size_t u){ succ_head[u] = -1; succ_tail[u] = -1; };
-  auto succ_append = [&](std::size_t u, NodeId v, EdgeId e){
-    const auto idx = static_cast<std::int32_t>(ent_node.size());
-    ent_node.push_back(v); ent_edge.push_back(e); ent_next.push_back(-1);
-    if (succ_head[u] < 0) { succ_head[u] = idx; }
-    else { ent_next[static_cast<std::size_t>(succ_tail[u])] = idx; }
-    succ_tail[u] = idx;
-  };
 
   pq.begin(plan.width, plan.stride);
   pq.push(static_cast<Cost>(0), -std::numeric_limits<Cap>::max(), target);
@@ -930,6 +1045,7 @@ void run_reverse(Queue& pq, ReverseWorkspace& ws, const StrictMultiDiGraph& g, N
         if (use_edge_mask && !edge_mask[e]) continue;
         const Cap rem = has_residual ? residual[e] : cap[e];
         if (require_cap && rem < kMinCap) continue;
+        const Cap pri = priority_of<P>(rem, cap, e);
         const Cost ecost = static_cast<Cost>(cost[e]);
         if (ecost < min_edge_cost) {
           min_edge_cost = ecost;
@@ -938,16 +1054,16 @@ void run_reverse(Queue& pq, ReverseWorkspace& ws, const StrictMultiDiGraph& g, N
             selected_edges.push_back(static_cast<EdgeId>(iaei[j]));
           } else {
             best_edge_id = static_cast<int>(e);
-            best_rem_for_min_cost = static_cast<double>(rem);
+            best_rem_for_min_cost = static_cast<double>(pri);
           }
         } else if (ecost == min_edge_cost) {
           if (selection.multi_edge) {
             selected_edges.push_back(static_cast<EdgeId>(iaei[j]));
           } else if (selection.tie_break == EdgeTieBreak::PreferHigherResidual) {
-            if (static_cast<double>(rem) > best_rem_for_min_cost + kEpsilon) {
+            if (static_cast<double>(pri) > best_rem_for_min_cost + kEpsilon) {
               best_edge_id = static_cast<int>(e);
-              best_rem_for_min_cost = static_cast<double>(rem);
-            } else if (std::abs(static_cast<double>(rem) - best_rem_for_min_cost) <= kEpsilon) {
+              best_rem_for_min_cost = static_cast<double>(pri);
+            } else if (std::abs(static_cast<double>(pri) - best_rem_for_min_cost) <= kEpsilon) {
               if (best_edge_id < 0 || static_cast<int>(e) < best_edge_id) best_edge_id = static_cast<int>(e);
             }
           } else {
@@ -964,9 +1080,10 @@ void run_reverse(Queue& pq, ReverseWorkspace& ws, const StrictMultiDiGraph& g, N
         const auto u_idx = static_cast<std::size_t>(u);
         Cap max_edge_residual = static_cast<Cap>(0);
         for (auto edge_id : selected_edges) {
-          const Cap rem = has_residual ? residual[static_cast<std::size_t>(edge_id)]
-                                       : cap[static_cast<std::size_t>(edge_id)];
-          if (rem > max_edge_residual) max_edge_residual = rem;
+          const auto idx = static_cast<std::size_t>(edge_id);
+          const Cap rem = has_residual ? residual[idx] : cap[idx];
+          const Cap pri = priority_of<P>(rem, cap, idx);
+          if (pri > max_edge_residual) max_edge_residual = pri;
         }
         const Cap path_residual = std::min(min_residual_to_dst[static_cast<std::size_t>(v)], max_edge_residual);
         if (new_cost < dist[u_idx] ||
@@ -975,18 +1092,28 @@ void run_reverse(Queue& pq, ReverseWorkspace& ws, const StrictMultiDiGraph& g, N
           if (dist[u_idx] == kInf) ws.touched.push_back(u);
           dist[u_idx] = new_cost;
           min_residual_to_dst[u_idx] = path_residual;
-          succ_clear(u_idx);
-          for (auto sel_e : selected_edges) succ_append(u_idx, v, sel_e);
+          ws.clear_succs(u_idx);
+          for (auto sel_e : selected_edges) ws.append_succ(u_idx, v, sel_e);
           has_in_entry[static_cast<std::size_t>(v)] = 1;
           pq.push(new_cost, -path_residual, u);
         } else if (multipath && new_cost == dist[u_idx] && !settled[u_idx]) {
-          for (auto sel_e : selected_edges) succ_append(u_idx, v, sel_e);
+          for (auto sel_e : selected_edges) ws.append_succ(u_idx, v, sel_e);
           has_in_entry[static_cast<std::size_t>(v)] = 1;
         }
       }
       i = j;
     }
   }
+}
+
+// Runs the reverse search on the chosen queue for one priority.
+template <EdgePriority P>
+void reverse_with(bool bucket, ReverseWorkspace& ws, const StrictMultiDiGraph& g, NodeId target,
+                  bool multipath, const EdgeSelection& selection,
+                  std::span<const Cap> residual, std::span<const bool> node_mask,
+                  std::span<const bool> edge_mask, const BucketPlan& plan) {
+  if (bucket) run_reverse<BucketQueue, P>(ws.bucket, ws, g, target, multipath, selection, residual, node_mask, edge_mask, plan);
+  else run_reverse<HeapQueue, P>(ws.heap, ws, g, target, multipath, selection, residual, node_mask, edge_mask, plan);
 }
 
 std::pair<std::vector<Cost>, PredDAG>
@@ -1021,20 +1148,16 @@ shortest_paths_to_core(const StrictMultiDiGraph& g, NodeId target,
     ws.dist[static_cast<std::size_t>(target)] = static_cast<Cost>(0);
     ws.min_res[static_cast<std::size_t>(target)] = std::numeric_limits<Cap>::max();
     BucketPlan plan;
-    if (use_bucket_queue(g, queue, plan)) {
-      run_reverse(ws.bucket, ws, g, target, multipath, selection, residual, node_mask, edge_mask, plan);
-    } else {
-      run_reverse(ws.heap, ws, g, target, multipath, selection, residual, node_mask, edge_mask, plan);
+    const bool bucket = use_bucket_queue(g, queue, plan);
+    switch (selection.priority) {
+      case EdgePriority::Capacity:
+        reverse_with<EdgePriority::Capacity>(bucket, ws, g, target, multipath, selection, residual, node_mask, edge_mask, plan); break;
+      case EdgePriority::Headroom:
+        reverse_with<EdgePriority::Headroom>(bucket, ws, g, target, multipath, selection, residual, node_mask, edge_mask, plan); break;
+      default:
+        reverse_with<EdgePriority::Residual>(bucket, ws, g, target, multipath, selection, residual, node_mask, edge_mask, plan); break;
     }
   }
-
-  auto succ_append = [&](std::size_t u, NodeId v, EdgeId e){
-    const auto idx = static_cast<std::int32_t>(ws.ent_node.size());
-    ws.ent_node.push_back(v); ws.ent_edge.push_back(e); ws.ent_next.push_back(-1);
-    if (ws.succ_head[u] < 0) { ws.succ_head[u] = idx; }
-    else { ws.ent_next[static_cast<std::size_t>(ws.succ_tail[u])] = idx; }
-    ws.succ_tail[u] = idx;
-  };
 
   // Forced fan-out entries (see the header).
   for (auto e_raw : fanout_edges) {
@@ -1060,7 +1183,7 @@ shortest_paths_to_core(const StrictMultiDiGraph& g, NodeId target,
     }
     if (present) continue;
     if (ws.dist[static_cast<std::size_t>(u)] == kInf) ws.touched.push_back(u);
-    succ_append(static_cast<std::size_t>(u), v, e_raw);
+    ws.append_succ(static_cast<std::size_t>(u), v, e_raw);
     if (ws.dist[static_cast<std::size_t>(u)] == kInf) {
       ws.dist[static_cast<std::size_t>(u)] = static_cast<Cost>(cost[e]) + ws.dist[static_cast<std::size_t>(v)];
     }
@@ -1115,15 +1238,7 @@ shortest_paths_to(const StrictMultiDiGraph& g, NodeId dst,
                   std::span<const bool> edge_mask,
                   std::span<const EdgeId> fanout_edges,
                   SpfQueue queue) {
-  if (!node_mask.empty() && node_mask.size() != static_cast<std::size_t>(g.num_nodes())) {
-    throw std::invalid_argument("shortest_paths_to: node_mask length mismatch");
-  }
-  if (!edge_mask.empty() && edge_mask.size() != static_cast<std::size_t>(g.num_edges())) {
-    throw std::invalid_argument("shortest_paths_to: edge_mask length mismatch");
-  }
-  if (!residual.empty() && residual.size() != static_cast<std::size_t>(g.num_edges())) {
-    throw std::invalid_argument("shortest_paths_to: residual length mismatch");
-  }
+  validate_spans("shortest_paths_to", g, residual, node_mask, edge_mask);
   return shortest_paths_to_core(g, dst, multipath, selection, residual, node_mask, edge_mask, fanout_edges, queue);
 }
 

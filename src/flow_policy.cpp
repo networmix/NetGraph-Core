@@ -179,9 +179,9 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
                   spf_memo_.begin() + hit_idx + 1);
     }
   } else {
-    auto res = ctx_.algorithms->spf(ctx_.graph, src, opts);
+    auto res = ctx_.algorithms->spf_dag(ctx_.graph, src, dst, opts);
     dag = std::move(res.second);
-    dst_cost = res.first[static_cast<std::size_t>(dst)];
+    dst_cost = res.first;
     if (use_memo) {
       SpfMemoEntry entry;
       entry.src = src;
@@ -238,12 +238,22 @@ std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGr
   return std::make_optional(std::make_pair(std::move(dag), dst_cost));
 }
 
+FlowIndex FlowPolicy::next_flow_index(const FlowGraph& fg, NodeId src, NodeId dst, FlowClass flowClass) {
+  FlowIndex idx{src, dst, flowClass, next_flow_id_++};
+  if (fg.has_flow(idx)) {
+    throw std::invalid_argument(
+        "FlowPolicy: flow id " + std::to_string(idx.flowId) + " for (" + std::to_string(src) + ", " +
+        std::to_string(dst) + ", class " + std::to_string(flowClass) + ") already exists in the FlowGraph; "
+        "another policy manages the same demand on this FlowGraph");
+  }
+  return idx;
+}
+
 /* Create a new flow using the current path bundle. Returns nullptr if no
    admissible path is available given constraints. */
 FlowRecord* FlowPolicy::create_flow(FlowGraph& fg, NodeId src, NodeId dst, FlowClass flowClass,
                               std::optional<double> min_flow) {
-  // Generate a unique flow index.
-  FlowIndex idx{src, dst, flowClass, next_flow_id_++};
+  FlowIndex idx = next_flow_index(fg, src, dst, flowClass);
 
   // Request a path DAG from shortest paths algorithm.
   auto pb = get_path_bundle(fg, src, dst, min_flow);
@@ -419,7 +429,7 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
             "Source and destination nodes of static paths do not match demand.");
       }
       for (auto const& b : static_bundles_) {
-        FlowIndex idx{src, dst, flowClass, next_flow_id_++};
+        FlowIndex idx = next_flow_index(fg, src, dst, flowClass);
         flows_.emplace(idx, FlowRecord(idx, src, dst, b.dag, b.cost));
       }
     } else {
@@ -437,7 +447,7 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
       if (initial > 0) {
         if (auto pb = get_path_bundle(fg, src, dst, min_req)) {
           for (int i = 0; i < initial; ++i) {
-            FlowIndex idx{src, dst, flowClass, next_flow_id_++};
+            FlowIndex idx = next_flow_index(fg, src, dst, flowClass);
             FlowRecord f(idx, src, dst, pb->first, pb->second);
             flows_.emplace(idx, std::move(f));
           }

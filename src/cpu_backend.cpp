@@ -37,6 +37,13 @@ public:
                                           opts.residual, opts.node_mask, opts.edge_mask);
   }
 
+  std::pair<Cost, PredDAG> spf_dag(
+      const GraphHandle& gh, NodeId src, NodeId dst, const SpfOptions& opts) override {
+    const StrictMultiDiGraph& g = *gh.graph;
+    return netgraph::core::shortest_paths_dag(g, src, dst, opts.multipath, opts.selection,
+                                              opts.residual, opts.node_mask, opts.edge_mask);
+  }
+
   std::pair<std::vector<Cost>, PredDAG> spf_to(
       const GraphHandle& gh, NodeId dst, const SpfToOptions& opts) override {
     const StrictMultiDiGraph& g = *gh.graph;

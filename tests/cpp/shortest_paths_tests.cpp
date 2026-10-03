@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <limits>
+#include <array>
 #include <memory>
 #include <random>
 #include "netgraph/core/constants.hpp"
@@ -529,11 +530,13 @@ const std::vector<DiffSpec> kDiffSpecs = {
 template <class Fn>
 void for_each_option(const DiffGraph& d, Fn&& fn) {
   for (int mp = 0; mp < 2; ++mp) for (int me = 0; me < 2; ++me) for (int tb = 0; tb < 2; ++tb)
-  for (int rc = 0; rc < 2; ++rc) for (int ur = 0; ur < 2; ++ur) for (int um = 0; um < 2; ++um) {
+  for (int rc = 0; rc < 2; ++rc) for (int ur = 0; ur < 2; ++ur) for (int um = 0; um < 2; ++um)
+  for (EdgePriority pri : {EdgePriority::Residual, EdgePriority::Capacity, EdgePriority::Headroom}) {
     EdgeSelection sel;
     sel.multi_edge = me != 0;
     sel.require_capacity = rc != 0;
     sel.tie_break = tb ? EdgeTieBreak::PreferHigherResidual : EdgeTieBreak::Deterministic;
+    sel.priority = pri;
     auto res = ur ? std::span<const Cap>(d.residual) : std::span<const Cap>{};
     auto nm = um ? d.nm() : std::span<const bool>{};
     auto em = um ? d.em() : std::span<const bool>{};
@@ -568,11 +571,21 @@ TEST(ShortestPaths, QueueDifferential_Forward) {
           // Auto must equal one of the two explicit routes, and both equal each other.
           auto automatic = shortest_paths(d.g, s, dst, mp, sel, res, nm, em);
           ASSERT_TRUE(same_result(expected, automatic));
+          // The DAG-only variant is the same search minus the distance vector.
+          if (dst) {   // *dst may be -1 (no reachable node): then the cost is INT64_MAX
+            const Cost want = (*dst >= 0 && *dst < n) ? expected.first[static_cast<std::size_t>(*dst)]
+                                                       : std::numeric_limits<Cost>::max();
+            for (SpfQueue q : {SpfQueue::Heap, SpfQueue::Bucket}) {
+              auto [cost, dag] = shortest_paths_dag(d.g, s, *dst, mp, sel, res, nm, em, q);
+              ASSERT_EQ(cost, want);
+              ASSERT_TRUE(same_result(expected, SpfResult{expected.first, dag}));
+            }
+          }
         }
       });
     }
   }
-  EXPECT_GT(checked, 20000u);
+  EXPECT_GT(checked, 60000u);
 }
 
 TEST(ShortestPaths, QueueDifferential_Reverse) {
@@ -598,7 +611,7 @@ TEST(ShortestPaths, QueueDifferential_Reverse) {
       });
     }
   }
-  EXPECT_GT(checked, 5000u);
+  EXPECT_GT(checked, 15000u);
 }
 
 TEST(ShortestPaths, QueueDifferential_ComparisonHasTeeth) {
@@ -698,4 +711,127 @@ TEST(ShortestPaths, WorkspaceReuseAcrossGraphSizesAndEmptyGraphs) {
     auto s3 = shortest_paths(small.g, 1, std::nullopt, true, sel, small.residual, small.nm(), small.em(), q);
     EXPECT_TRUE(same_result(s1, s3));
   }
+}
+
+// ---------------------------------------------------------------------------
+// EdgeSelection::priority: which per-edge value ranks equal-cost alternatives.
+// ---------------------------------------------------------------------------
+TEST(ShortestPaths, EdgePriorityRanksParallelEdges) {
+  // Two parallel equal-cost edges 0 -> 1: capacities 10 and 5, residuals 2 and 4.
+  std::vector<std::int32_t> src = {0, 0}, dst = {1, 1};
+  std::vector<Cap> cap = {10.0, 5.0};
+  std::vector<Cost> cost = {1, 1};
+  auto g = StrictMultiDiGraph::from_arrays(2, src, dst, cap, cost);
+  std::vector<Cap> residual = {2.0, 4.0};
+  // Edge ids after construction: both cost 1, same (src,dst): input order kept, so id 0 has cap 10.
+  ASSERT_DOUBLE_EQ(g.capacity_view()[0], 10.0);
+  auto pick = [&](EdgePriority pri, bool with_residual) {
+    EdgeSelection sel; sel.multi_edge = false; sel.tie_break = EdgeTieBreak::PreferHigherResidual; sel.priority = pri;
+    auto [d, dag] = shortest_paths(g, 0, std::nullopt, true, sel,
+                                   with_residual ? std::span<const Cap>(residual) : std::span<const Cap>{}, {}, {});
+    EXPECT_EQ(dag.parent_offsets[2] - dag.parent_offsets[1], 1);
+    return dag.via_edges[static_cast<std::size_t>(dag.parent_offsets[1])];
+  };
+  // With a residual: Residual prefers residual 4 (edge 1); Capacity prefers cap 10 (edge 0);
+  // Headroom prefers 4/5 = 0.8 over 2/10 = 0.2 (edge 1).
+  EXPECT_EQ(pick(EdgePriority::Residual, true), 1);
+  EXPECT_EQ(pick(EdgePriority::Capacity, true), 0);
+  EXPECT_EQ(pick(EdgePriority::Headroom, true), 1);
+  // Without a residual every priority falls back to the capacity (headroom is 1
+  // for both, so the deterministic smaller id wins).
+  EXPECT_EQ(pick(EdgePriority::Residual, false), 0);
+  EXPECT_EQ(pick(EdgePriority::Capacity, false), 0);
+  EXPECT_EQ(pick(EdgePriority::Headroom, false), 0);
+}
+
+TEST(ShortestPaths, EdgePriorityRanksEqualCostPaths) {
+  // 0 -> 1 -> 3 and 0 -> 2 -> 3, both cost 2. Path via 1: capacities 100/100 with
+  // residuals 10/10 (headroom 0.1). Path via 2: capacities 20/20 with residuals
+  // 8/8 (headroom 0.4). Single-path mode keeps the path with the better bottleneck.
+  std::vector<std::int32_t> src = {0, 1, 0, 2}, dst = {1, 3, 2, 3};
+  std::vector<Cap> cap = {100.0, 100.0, 20.0, 20.0};
+  std::vector<Cost> cost = {1, 1, 1, 1};
+  auto g = StrictMultiDiGraph::from_arrays(4, src, dst, cap, cost);
+  std::vector<Cap> residual(4);
+  const auto esrc = g.edge_src_view(), edst = g.edge_dst_view();
+  for (std::size_t e = 0; e < 4; ++e) residual[e] = (esrc[e] == 1 || edst[e] == 1) ? 10.0 : 8.0;
+  auto parent_of_dst = [&](EdgePriority pri) {
+    EdgeSelection sel; sel.multi_edge = true; sel.priority = pri;
+    auto [d, dag] = shortest_paths(g, 0, std::nullopt, /*multipath=*/false, sel, residual, {}, {});
+    EXPECT_EQ(d[3], 2);
+    EXPECT_EQ(dag.parent_offsets[4] - dag.parent_offsets[3], 1);
+    return dag.parents[static_cast<std::size_t>(dag.parent_offsets[3])];
+  };
+  EXPECT_EQ(parent_of_dst(EdgePriority::Residual), 1);   // bottleneck residual 10 > 8
+  EXPECT_EQ(parent_of_dst(EdgePriority::Capacity), 1);   // bottleneck capacity 100 > 20
+  EXPECT_EQ(parent_of_dst(EdgePriority::Headroom), 2);   // headroom 0.4 > 0.1
+  // Both queue routes agree for every priority.
+  for (EdgePriority pri : {EdgePriority::Residual, EdgePriority::Capacity, EdgePriority::Headroom}) {
+    EdgeSelection sel; sel.multi_edge = false; sel.tie_break = EdgeTieBreak::PreferHigherResidual; sel.priority = pri;
+    auto a = shortest_paths(g, 0, std::nullopt, false, sel, residual, {}, {}, SpfQueue::Heap);
+    auto b = shortest_paths(g, 0, std::nullopt, false, sel, residual, {}, {}, SpfQueue::Bucket);
+    EXPECT_TRUE(same_result(a, b));
+    auto ra = shortest_paths_to(g, 3, false, sel, residual, {}, {}, {}, SpfQueue::Heap);
+    auto rb = shortest_paths_to(g, 3, false, sel, residual, {}, {}, {}, SpfQueue::Bucket);
+    EXPECT_TRUE(same_result(ra, rb));
+  }
+}
+
+TEST(ShortestPaths, DagVariantHandlesInvalidEndpoints) {
+  auto d = make_diff_graph(kDiffSpecs[0]);
+  const int n = d.g.num_nodes();
+  EdgeSelection sel;
+  // Unreachable or out-of-range destinations report INT64_MAX; the DAG is the
+  // full-search DAG (nothing stops the search early).
+  auto [c_out, dag_out] = shortest_paths_dag(d.g, 0, NodeId(n + 5), true, sel, {}, {}, {});
+  EXPECT_EQ(c_out, std::numeric_limits<Cost>::max());
+  auto full = shortest_paths(d.g, 0, std::nullopt, true, sel, {}, {}, {});
+  EXPECT_TRUE(same_result(full, SpfResult{full.first, dag_out}));
+  // A masked-out source yields an empty DAG and no cost.
+  auto masked = make_bool_mask(static_cast<std::size_t>(n), true);
+  masked[0] = false;
+  auto [c_m, dag_m] = shortest_paths_dag(d.g, 0, 1, true, sel, {}, std::span<const bool>(masked.get(), static_cast<std::size_t>(n)), {});
+  EXPECT_EQ(c_m, std::numeric_limits<Cost>::max());
+  EXPECT_EQ(dag_m.parents.size(), 0u);
+  EXPECT_EQ(dag_m.parent_offsets.size(), static_cast<std::size_t>(n) + 1);
+}
+
+// ---------------------------------------------------------------------------
+// make_hops_dag: explicit routes with parallel edges per hop.
+// ---------------------------------------------------------------------------
+TEST(ShortestPaths, MakeHopsDagBuildsBundledHops) {
+  // 0 -> 1 via four parallel edges, 1 -> 2 via one edge, 1 -> 3 unrelated.
+  std::vector<std::int32_t> src = {0, 0, 0, 0, 1, 1}, dst = {1, 1, 1, 1, 2, 3};
+  std::vector<Cap> cap = {10, 10, 10, 10, 50, 5};
+  std::vector<Cost> cost = {1, 1, 1, 1, 1, 1};
+  auto g = StrictMultiDiGraph::from_arrays(4, src, dst, cap, cost);
+  std::vector<std::vector<EdgeId>> hops = {{0, 1, 2, 3}, {4}};
+  auto dag = make_hops_dag(g, hops);
+  ASSERT_EQ(dag.parent_offsets, (std::vector<std::int32_t>{0, 0, 4, 5, 5}));
+  EXPECT_EQ(dag.parents, (std::vector<NodeId>{0, 0, 0, 0, 1}));
+  EXPECT_EQ(dag.via_edges, (std::vector<EdgeId>{0, 1, 2, 3, 4}));
+  // Hop order is kept as given.
+  auto reordered = make_hops_dag(g, std::vector<std::vector<EdgeId>>{{3, 1}, {4}});
+  EXPECT_EQ(reordered.via_edges, (std::vector<EdgeId>{3, 1, 4}));
+  // from_edges is the one-edge-per-hop case.
+  auto single = make_path_dag(g, std::array<EdgeId, 2>{2, 4});
+  EXPECT_EQ(single.via_edges, (std::vector<EdgeId>{2, 4}));
+  EXPECT_EQ(single.parent_offsets, (std::vector<std::int32_t>{0, 0, 1, 2, 2}));
+}
+
+TEST(ShortestPaths, MakeHopsDagRejectsMalformedRoutes) {
+  std::vector<std::int32_t> src = {0, 0, 1, 1, 2}, dst = {1, 1, 2, 3, 0};
+  std::vector<Cap> cap = {1, 1, 1, 1, 1};
+  std::vector<Cost> cost = {1, 1, 1, 1, 1};
+  auto g = StrictMultiDiGraph::from_arrays(4, src, dst, cap, cost);
+  using H = std::vector<std::vector<EdgeId>>;
+  EXPECT_THROW((void)make_hops_dag(g, H{}), std::invalid_argument);                 // empty route
+  EXPECT_THROW((void)make_hops_dag(g, H{{0}, {}}), std::invalid_argument);          // empty hop
+  EXPECT_THROW((void)make_hops_dag(g, H{{0, 7}}), std::invalid_argument);           // id out of range
+  EXPECT_THROW((void)make_hops_dag(g, H{{0, 0}}), std::invalid_argument);           // repeated edge in a hop
+  EXPECT_THROW((void)make_hops_dag(g, H{{2, 3}}), std::invalid_argument);           // not parallel (1->2 and 1->3)
+  EXPECT_NO_THROW((void)make_hops_dag(g, H{{0, 1}, {3}}));                          // 0->1 bundle, then 1->3
+  EXPECT_THROW((void)make_hops_dag(g, H{{0}, {4}}), std::invalid_argument);         // 0->1 then 2->0: not contiguous
+  EXPECT_THROW((void)make_hops_dag(g, H{{0}, {2}, {4}}), std::invalid_argument);    // 0->1->2->0 revisits 0
+  EXPECT_THROW((void)make_path_dag(g, std::array<EdgeId, 2>{0, 4}), std::invalid_argument);
 }

@@ -78,7 +78,17 @@ enum class FlowPlacement {
 // Tie-breaking rule when multiple equal-cost edges exist between the same (u,v) pair.
 enum class EdgeTieBreak {
   Deterministic = 1,         // Use edge order from graph construction (reproducible)
-  PreferHigherResidual = 2   // Prefer edge with more available capacity
+  PreferHigherResidual = 2   // Prefer the edge with the higher priority value (EdgePriority)
+};
+
+// Per-edge value that ranks equal-cost alternatives: the PreferHigherResidual
+// edge tie-break and the node-level bottleneck ordering (equal-cost nodes
+// settle in descending order of the smallest value along their path). It does
+// not affect which edges are eligible: capacity gating always uses the residual.
+enum class EdgePriority {
+  Residual = 1,   // residual capacity when a residual is supplied, otherwise capacity (default)
+  Capacity = 2,   // static capacity, even when a residual is supplied
+  Headroom = 3    // residual / capacity: the fraction of the edge still free (1 without a residual)
 };
 
 // Edge selection policy for shortest path algorithms.
@@ -89,6 +99,8 @@ struct EdgeSelection {
   // require_capacity: if true, only consider edges with residual capacity > kMinCap.
   bool require_capacity { false };
   EdgeTieBreak tie_break { EdgeTieBreak::Deterministic };
+  // priority: which per-edge value tie_break and the bottleneck ordering rank by.
+  EdgePriority priority { EdgePriority::Residual };
 };
 
 } // namespace netgraph::core

@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -120,11 +121,19 @@ struct Query {
   bool use_residual; bool use_masks; bool reverse = false;
 };
 
+// SPFX_DAG=1 times shortest_paths_dag for destination queries; its result is
+// folded into the Result shape with the target cost as the only distance.
+static const bool kDagMode = std::getenv("SPFX_DAG") != nullptr;
+
 static Result run_ref(const Case& c, const Query& q) {
   auto res = q.use_residual ? std::span<const Cap>(c.residual) : std::span<const Cap>{};
   auto nm = q.use_masks ? c.nm() : std::span<const bool>{};
   auto em = q.use_masks ? c.em() : std::span<const bool>{};
   if (q.reverse) return shortest_paths_to(c.graph, q.src, q.multipath, q.sel, res, nm, em, {});
+  if (kDagMode && q.dst) {
+    auto [cost, dag] = shortest_paths_dag(c.graph, q.src, *q.dst, q.multipath, q.sel, res, nm, em);
+    return Result{std::vector<Cost>{cost}, std::move(dag)};
+  }
   return shortest_paths(c.graph, q.src, q.dst, q.multipath, q.sel, res, nm, em);
 }
 
@@ -162,6 +171,15 @@ struct Runner {
 static bool same(const Result& a, const Result& b) {
   return a.first == b.first && a.second.parent_offsets == b.second.parent_offsets &&
          a.second.parents == b.second.parents && a.second.via_edges == b.second.via_edges;
+}
+// In DAG mode the expected result is the full search; compare its target cost and DAG.
+static bool same_for_query(const Query& q, const Result& expected, const Result& actual) {
+  if (kDagMode && q.dst && !q.reverse) {
+    return actual.first.size() == 1 && actual.first[0] == expected.first[static_cast<std::size_t>(*q.dst)] &&
+           expected.second.parent_offsets == actual.second.parent_offsets &&
+           expected.second.parents == actual.second.parents && expected.second.via_edges == actual.second.via_edges;
+  }
+  return same(expected, actual);
 }
 
 static NodeId far_node(const std::vector<Cost>& d) {
@@ -251,6 +269,12 @@ static void time_workloads(std::vector<Workload>& wls, const std::string& varian
     std::vector<Query> qs;
     for (int i = 0; i < w.queries; ++i) {
       Query q; q.multipath = true; q.sel = EdgeSelection{}; q.use_residual = true; q.use_masks = true;
+      if (const char* pr = std::getenv("SPFX_PRIORITY")) {   // time a non-default EdgePriority
+        const std::string p(pr);
+        if (p == "capacity") q.sel.priority = EdgePriority::Capacity;
+        else if (p == "headroom") q.sel.priority = EdgePriority::Headroom;
+        q.multipath = false; q.sel.tie_break = EdgeTieBreak::PreferHigherResidual;   // where the value is used most
+      }
       q.src = c.fixed_src >= 0 ? c.fixed_src : (i * 997) % n;
       if (w.dst_mode == "reverse") q.reverse = true;
       else if (w.dst_mode == "fixed") q.dst = c.fixed_dst;
@@ -262,7 +286,16 @@ static void time_workloads(std::vector<Workload>& wls, const std::string& varian
       }
       qs.push_back(q);
     }
-    std::vector<Result> expected; for (auto& q : qs) expected.push_back(run_ref(c, q));
+    std::vector<Result> expected;
+    for (auto& q : qs) {   // reference: the full forward search for DAG-mode destination queries
+      if (kDagMode && q.dst && !q.reverse) {
+        expected.push_back(shortest_paths(c.graph, q.src, q.dst, q.multipath, q.sel,
+                                          q.use_residual ? std::span<const Cap>(c.residual) : std::span<const Cap>{},
+                                          q.use_masks ? c.nm() : std::span<const bool>{}, q.use_masks ? c.em() : std::span<const bool>{}));
+      } else {
+        expected.push_back(run_ref(c, q));
+      }
+    }
     Runner r; r.variant = variant; r.max_width = maxw; r.prepare(c);
     std::vector<double> times;
     for (int rep = -2; rep < samples; ++rep) {
@@ -270,7 +303,8 @@ static void time_workloads(std::vector<Workload>& wls, const std::string& varian
       auto start = Clock::now();
       for (std::size_t i = 0; i < qs.size(); ++i) actual[i] = r.run(c, qs[i]);
       double el = ms(start);
-      for (std::size_t i = 0; i < qs.size(); ++i) if (!same(expected[i], actual[i])) throw std::runtime_error("timed result mismatch in " + w.label);
+      for (std::size_t i = 0; i < qs.size(); ++i) if (!same_for_query(qs[i], expected[i], actual[i]))
+        throw std::runtime_error("timed result mismatch in " + w.label + " query " + std::to_string(i) + " dst=" + (qs[i].dst ? std::to_string(*qs[i].dst) : "none") + " dist sizes " + std::to_string(expected[i].first.size()) + "/" + std::to_string(actual[i].first.size()));
       if (rep >= 0) times.push_back(el);
     }
     std::vector<double> sorted = times; std::sort(sorted.begin(), sorted.end());

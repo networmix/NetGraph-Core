@@ -280,15 +280,15 @@ std::vector<std::pair<std::vector<Cost>, PredDAG>> k_shortest_paths(
         em = std::span<const bool>(em_buf2.get(), static_cast<std::size_t>(g.num_edges()));
       }
       EdgeSelection sel; sel.multi_edge = true; sel.require_capacity = false; sel.tie_break = EdgeTieBreak::Deterministic;
-      auto [dist_spur, dag_spur] = shortest_paths(g, spur_node, dst, /*multipath=*/true, sel, std::span<const Cap>(), nm, em);
+      auto [spur_cost, dag_spur] = shortest_paths_dag(g, spur_node, dst, /*multipath=*/true, sel, std::span<const Cap>(), nm, em);
       // If no spur parents for t, skip
       if (static_cast<std::size_t>(dst + 1) >= dag_spur.parent_offsets.size() ||
           dag_spur.parent_offsets[static_cast<std::size_t>(dst)] == dag_spur.parent_offsets[static_cast<std::size_t>(dst + 1)]) {
         continue;
       }
-      // Every spur path in the DAG costs dist_spur[dst]; skip the whole family
-      // if the resulting candidates would exceed the cost ceiling.
-      if (static_cast<double>(prefix_cost[j]) + static_cast<double>(dist_spur[static_cast<std::size_t>(dst)]) > max_cost) {
+      // Every spur path in the DAG costs spur_cost; skip the whole family if
+      // the resulting candidates would exceed the cost ceiling.
+      if (static_cast<double>(prefix_cost[j]) + static_cast<double>(spur_cost) > max_cost) {
         continue;
       }
       // At most (k - accepted) further paths can ever be accepted, so that many

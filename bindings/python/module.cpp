@@ -95,18 +95,25 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .value("DETERMINISTIC", EdgeTieBreak::Deterministic)
       .value("PREFER_HIGHER_RESIDUAL", EdgeTieBreak::PreferHigherResidual);
 
+  py::enum_<EdgePriority>(m, "EdgePriority")
+      .value("RESIDUAL", EdgePriority::Residual)
+      .value("CAPACITY", EdgePriority::Capacity)
+      .value("HEADROOM", EdgePriority::Headroom);
+
   py::class_<EdgeSelection>(m, "EdgeSelection")
       .def(py::init<>())
-      .def(py::init([](bool multi_edge, bool require_capacity, EdgeTieBreak tie_break){
-        EdgeSelection s; s.multi_edge = multi_edge; s.require_capacity = require_capacity; s.tie_break = tie_break; return s;
+      .def(py::init([](bool multi_edge, bool require_capacity, EdgeTieBreak tie_break, EdgePriority priority){
+        EdgeSelection s; s.multi_edge = multi_edge; s.require_capacity = require_capacity; s.tie_break = tie_break; s.priority = priority; return s;
       }),
         py::kw_only(),
         py::arg("multi_edge") = true,
         py::arg("require_capacity") = false,
-        py::arg("tie_break") = EdgeTieBreak::Deterministic)
+        py::arg("tie_break") = EdgeTieBreak::Deterministic,
+        py::arg("priority") = EdgePriority::Residual)
       .def_readwrite("multi_edge", &EdgeSelection::multi_edge)
       .def_readwrite("require_capacity", &EdgeSelection::require_capacity)
-      .def_readwrite("tie_break", &EdgeSelection::tie_break);
+      .def_readwrite("tie_break", &EdgeSelection::tie_break)
+      .def_readwrite("priority", &EdgeSelection::priority);
 
   py::enum_<FlowPlacement>(m, "FlowPlacement")
       .value("PROPORTIONAL", FlowPlacement::Proportional)
@@ -138,6 +145,8 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
           py::arg("ext_edge_ids"))
       .def("num_nodes", &StrictMultiDiGraph::num_nodes)
       .def("num_edges", &StrictMultiDiGraph::num_edges)
+      .def("max_cost", &StrictMultiDiGraph::max_cost)
+      .def("cost_gcd", &StrictMultiDiGraph::cost_gcd)
       .def("capacity_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<double>(g.capacity_view()); })
       .def("edge_src_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<std::int32_t>(g.edge_src_view()); })
       .def("edge_dst_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<std::int32_t>(g.edge_dst_view()); })
@@ -379,6 +388,16 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .def_property_readonly("via_edges", [](const PredDAG& d){
         return copy_to_numpy<std::int32_t>(std::span<const std::int32_t>(d.via_edges.data(), d.via_edges.size()));
       })
+      .def_static("from_hops", [](const StrictMultiDiGraph& g, py::sequence hops){
+        std::vector<std::vector<EdgeId>> h;
+        h.reserve(static_cast<std::size_t>(py::len(hops)));
+        for (auto hop : hops) {
+          std::vector<EdgeId> edges;
+          for (auto e : py::cast<py::sequence>(hop)) edges.push_back(py::cast<EdgeId>(e));
+          h.push_back(std::move(edges));
+        }
+        return make_hops_dag(g, h);
+      }, py::arg("graph"), py::arg("hops"))
       .def_static("from_edges", [](const StrictMultiDiGraph& g, py::sequence edges){
         std::vector<EdgeId> e;
         e.reserve(py::len(edges));

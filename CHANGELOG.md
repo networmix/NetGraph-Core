@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Shortest Paths**: `shortest_paths_dag(g, src, dst, ...)` (C++) and `Backend::spf_dag` / `Algorithms::spf_dag` return the destination's cost and the predecessor DAG without materialising the N-sized distance vector; `calc_max_flow`, `FlowState::place_max_flow`, `FlowPolicy` and the KSP spur searches now use it (outputs unchanged). `Backend::spf_dag` has a default implementation derived from `spf`, so other backends need no change. Measured old/new/old against 0.11.0: about 1.25x on first-neighbour searches at 16k–262k nodes, unchanged on full searches.
+- **Graph**: `StrictMultiDiGraph.max_cost()` / `cost_gcd()` in Python, the inputs of the bucket-queue dispatch rule (`max_cost // cost_gcd + 1 <= 65536`).
+- **Explicit Paths**: `PredDAG.from_hops(graph, hops)` (C++ `make_hops_dag`) builds a route whose hops may each use several parallel edges, so a pinned bundle carries all of them (a 4 x 10 bundle carries 40 where `from_edges` with one edge carries 10). `from_edges` is the one-edge-per-hop case and shares the validation.
+- **Shortest Paths**: `EdgeSelection.priority` (`EdgePriority.RESIDUAL` | `CAPACITY` | `HEADROOM`) selects the per-edge value that the `PREFER_HIGHER_RESIDUAL` tie-break and the node-level bottleneck ordering rank by: the residual (the default and the previous behaviour), the static capacity even when a residual is supplied, or the headroom `residual / capacity`. Capacity gating is unchanged and always uses the residual. The default route is unaffected (same code, bit-identical outputs); the other priorities cost one extra capacity load (and a division for headroom) per examined edge.
+
+### Fixed
+
+- **Flow Policy**: two policies managing the same `(src, dst, flowClass)` on one `FlowGraph` assign the same flow ids, so they previously merged their allocations under identical ledger keys and `remove_demand` on one zeroed the other's flow. Creating a flow whose index the ledger already holds now raises `ValueError` instead.
+
 ## [0.11.0] - 2026-10-02
 
 ### Changed

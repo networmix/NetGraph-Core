@@ -1,0 +1,8 @@
+date: 2026-10-02T18:15:33Z
+new: d5717cced8a4451258f114d8e78d67ab0dc14248 (dirty: 29 paths)
+old: d5717cced8a4451258f114d8e78d67ab0dc14248
+netgraph: 33fadebf7fe05985cc70647fc422287afaa3221c
+dd3b394c0ba16f7ed0e0e403188f4fcc38dbd9ce2cf594368d2b2a8a19a105a0  dev/perf/spf_queue/bench_netgraph.py
+be97554943acc1301b21dfb4b12d1a8603de1f8017b843243902ef09c8e6b981  /Users/networmix/ws/NetGraph-Core/venv/lib/python3.14/site-packages/_netgraph_core.cpython-314-darwin.so
+9d684e1280714cd8d4b275c418b34cf936e0b340243612bfab40913bbe60610c  /Users/networmix/ws/NetGraph-Core-main/venv/lib/python3.14/site-packages/_netgraph_core.cpython-314-darwin.so
+Apple M4 Max

@@ -21,6 +21,11 @@ public:
     return backend_->spf(gh, src, opts);
   }
 
+  [[nodiscard]] std::pair<Cost, PredDAG>
+  spf_dag(const GraphHandle& gh, NodeId src, NodeId dst, const SpfOptions& opts) const {
+    return backend_->spf_dag(gh, src, dst, opts);
+  }
+
   [[nodiscard]] std::pair<std::vector<Cost>, PredDAG>
   spf_to(const GraphHandle& gh, NodeId dst, const SpfToOptions& opts) const {
     return backend_->spf_to(gh, dst, opts);

@@ -61,6 +61,8 @@ public:
 
   // Inspect: return a copy of the flow's edges and amounts.
   [[nodiscard]] std::vector<std::pair<EdgeId, Flow>> get_flow_edges(const FlowIndex& idx) const;
+  // Whether the ledger holds this flow index (placed and not removed).
+  [[nodiscard]] bool has_flow(const FlowIndex& idx) const noexcept { return ledger_.find(idx) != ledger_.end(); }
 
   // Monotonic stamp identifying the exact residual state of this FlowGraph.
   // uid is process-unique per instance (never reused across FlowGraph

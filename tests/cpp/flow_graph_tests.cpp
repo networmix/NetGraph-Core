@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <array>
 #include "netgraph/core/flow_graph.hpp"
 #include "netgraph/core/shortest_paths.hpp"
 #include "netgraph/core/strict_multidigraph.hpp"
@@ -309,4 +310,23 @@ TEST(FlowGraphStamp, EqualVersionDivergentCopiesCompareUnequal) {
   (void)b.place(idx, 0, 2, dear, 0.5, FlowPlacement::Proportional);
 
   EXPECT_FALSE(a.state_stamp() == b.state_stamp());
+}
+
+TEST(FlowGraph, HopBundleCarriesEveryParallelEdge) {
+  // Four parallel 10-unit links 0 -> 1, then 1 -> 2 (100). A route pinned to one
+  // edge carries 10; the same hop pinned as a bundle carries 40.
+  std::vector<std::int32_t> src = {0, 0, 0, 0, 1}, dst = {1, 1, 1, 1, 2};
+  std::vector<Cap> cap = {10, 10, 10, 10, 100};
+  std::vector<Cost> cost = {1, 1, 1, 1, 1};
+  auto g = StrictMultiDiGraph::from_arrays(3, src, dst, cap, cost);
+  auto one = make_path_dag(g, std::array<EdgeId, 2>{0, 4});
+  auto bundle = make_hops_dag(g, std::vector<std::vector<EdgeId>>{{0, 1, 2, 3}, {4}});
+  FlowGraph fg(g);
+  const FlowIndex a{0, 2, 0, 1}, b{0, 2, 0, 2};
+  EXPECT_DOUBLE_EQ(fg.place(a, 0, 2, one, 100.0, FlowPlacement::Proportional), 10.0);
+  fg.remove(a);
+  EXPECT_DOUBLE_EQ(fg.place(b, 0, 2, bundle, 100.0, FlowPlacement::Proportional), 40.0);
+  const auto flows = fg.edge_flow_view();
+  for (std::size_t e = 0; e < 4; ++e) EXPECT_DOUBLE_EQ(flows[e], 10.0);
+  EXPECT_DOUBLE_EQ(flows[4], 40.0);
 }

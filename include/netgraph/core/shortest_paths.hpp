@@ -71,6 +71,21 @@ shortest_paths(const StrictMultiDiGraph& g, NodeId src,
                std::span<const bool> edge_mask = {},
                SpfQueue queue = SpfQueue::Auto);
 
+// Destination-limited search that returns only what placement needs: the cost
+// of dst (INT64_MAX when unreachable, or when src/dst is invalid or masked) and
+// the predecessor DAG. Semantics and the DAG are exactly those of
+// shortest_paths(g, src, dst, ...); only the N-sized distance vector is not
+// materialised (the DAG is still indexed by node id). Used by max-flow,
+// FlowPolicy and KSP, which inspect no other distance.
+[[nodiscard]] std::pair<Cost, PredDAG>
+shortest_paths_dag(const StrictMultiDiGraph& g, NodeId src, NodeId dst,
+                   bool multipath,
+                   const EdgeSelection& selection,
+                   std::span<const Cap> residual = {},
+                   std::span<const bool> node_mask = {},
+                   std::span<const bool> edge_mask = {},
+                   SpfQueue queue = SpfQueue::Auto);
+
 // Build the SPF-compatible (distances, PredDAG) pair for one concrete path given
 // as node/edge sequences (nodes[i] -> nodes[i+1] via edges[i]; so nodes.size() ==
 // edges.size() + 1, or a single node with no edges). Distances are cumulative edge
@@ -91,6 +106,17 @@ path_to_pred_dag(const StrictMultiDiGraph& g,
 // pinned path is a simple path by definition).
 [[nodiscard]] PredDAG make_path_dag(const StrictMultiDiGraph& g,
                                     std::span<const EdgeId> edges);
+
+// Build a PredDAG for one explicit route whose hops may each use several
+// parallel edges: hops[i] lists the edges of hop i, all joining the same
+// (u, v) pair, and hop i's head is hop i+1's tail. Every listed edge becomes a
+// parent entry of its hop's head node, in the given order, so placement splits
+// across the bundle exactly as it does on an SPF multipath DAG. make_path_dag
+// is the single-edge-per-hop case. Throws std::invalid_argument on an empty
+// route or hop, an id out of range, an edge repeated within a hop, hop edges
+// that are not parallel, non-contiguous hops, or a repeated node.
+[[nodiscard]] PredDAG make_hops_dag(const StrictMultiDiGraph& g,
+                                    std::span<const std::vector<EdgeId>> hops);
 
 // Enumerate concrete paths represented by a PredDAG from src to dst.
 // Each path is returned as a sequence of (node_id, (edge_ids...)) pairs ending with (dst, ()).

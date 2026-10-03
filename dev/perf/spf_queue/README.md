@@ -46,6 +46,14 @@ with the ten-worker batch timings in the research reports.
   each binary was built from (`cpu-queue-old` is built from a `git archive` of
   the base commit); `b-new-heap` forces the heap route in the new binary as an
   in-binary control.
+- `results/priority/`: old/new/old for the `EdgeSelection::priority` addition
+  (default route against 0.11.0, plus the opt-in `capacity` and `headroom`
+  priorities timed in single-path `PreferHigherResidual` mode via
+  `SPFX_PRIORITY=capacity|headroom`).
+- `results/dag/`: old/new/old for `shortest_paths_dag` (the DAG-only
+  destination search used by max-flow, FlowPolicy and KSP), timed via
+  `SPFX_DAG=1` on the destination rows: about 1.25x over 0.11.0 on
+  first-neighbour queries, unchanged elsewhere.
 - `bench_netgraph.py` + `run_netgraph_aba.sh` + `results/netgraph/`: old/new/old
   on NetGraph workloads run through NetGraph's own API and interpreter (full
   SPF, bound-context max-flow with pseudo nodes, failure exclusions, demand

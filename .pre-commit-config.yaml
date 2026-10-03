@@ -6,9 +6,9 @@ repos:
       - id: check-yaml
       # Recorded measurement artefacts and review patches must stay byte-exact.
       - id: end-of-file-fixer
-        exclude: ^dev/(research/|perf/.*/(results|review-[^/]+)/)
+        exclude: ^dev/(research/|perf/.*/(results|review-[^/]+)/|reviews/|design/.*/experiments/)
       - id: trailing-whitespace
-        exclude: ^dev/(research/|perf/.*/(results|review-[^/]+)/)
+        exclude: ^dev/(research/|perf/.*/(results|review-[^/]+)/|reviews/|design/.*/experiments/)
       - id: mixed-line-ending
       - id: debug-statements
 
