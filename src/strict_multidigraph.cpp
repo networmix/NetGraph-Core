@@ -21,15 +21,22 @@
 #include <string>
 #include <utility>
 
+#include "netgraph/core/detail/uid.hpp"
+
 namespace netgraph::core {
+
+namespace detail {
+
+std::uint64_t next_uid() noexcept {
+  static std::atomic<std::uint64_t> counter {0};
+  return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+} // namespace detail
 
 namespace {
 
-std::atomic<std::uint64_t> uid_counter {0};
-
-std::uint64_t next_uid() noexcept {
-  return uid_counter.fetch_add(1, std::memory_order_relaxed) + 1;
-}
+using detail::next_uid;
 
 // The exponent k of a resolution q = 2^k with k in [-32, 32].
 int resolution_exponent(double q) {
@@ -280,6 +287,26 @@ Eligibility StrictMultiDiGraph::eligibility(std::span<const NodeId> excluded_nod
   }
   el.uid_ = (excluded_nodes.empty() && excluded_edges.empty()) ? 0 : next_uid();
   return el;
+}
+
+Eligibility Eligibility::intersect(const Eligibility& a, const Eligibility& b) {
+  if (a.graph_uid_ != b.graph_uid_) {
+    throw std::invalid_argument("Eligibility.intersect: the two values belong to different graphs");
+  }
+  Eligibility out;
+  out.graph_uid_ = a.graph_uid_;
+  out.node_allowed_.resize(a.node_allowed_.size());
+  out.edge_allowed_.resize(a.edge_allowed_.size());
+  for (std::size_t v = 0; v < out.node_allowed_.size(); ++v) {
+    out.node_allowed_[v] = static_cast<std::uint8_t>(a.node_allowed_[v] & b.node_allowed_[v]);
+  }
+  for (std::size_t e = 0; e < out.edge_allowed_.size(); ++e) {
+    out.edge_allowed_[e] = static_cast<std::uint8_t>(a.edge_allowed_[e] & b.edge_allowed_[e]);
+  }
+  if (out.node_allowed_ == a.node_allowed_ && out.edge_allowed_ == a.edge_allowed_) return a;
+  if (out.node_allowed_ == b.node_allowed_ && out.edge_allowed_ == b.edge_allowed_) return b;
+  out.uid_ = next_uid();
+  return out;
 }
 
 } // namespace netgraph::core

@@ -3,10 +3,12 @@
 C++ graph engine for network flow analysis, traffic engineering simulation, and capacity planning.
 
 > **Streamline in progress.** The `streamline` branch rebuilds Core in sub-PRs
-> (`dev/design/2026-10-streamline/`). This build (sub-PR 1a) carries the graph on integer
-> units and the minimum-cost flow core behind a private entry point; the ledger, placement
-> kernels, policies, searches and evaluators return in the following sub-PRs. The previous API
-> (0.12 and earlier) is in git history and on PyPI.
+> (`dev/design/2026-10-streamline/`). This build (sub-PR 1b) carries the graph on integer
+> units, the minimum-cost flow core behind a private entry point, the route structures
+> (`PredDAG`, `Path`), the integer ledger `FlowGraph` and the placement kernels (exercised
+> through private entries until the policy engine arrives); policies, the public searches and
+> the evaluators return in the following sub-PRs. The previous API (0.12 and earlier) is in git
+> history and on PyPI.
 
 ## Overview
 
@@ -31,7 +33,35 @@ C++ graph engine for network flow analysis, traffic engineering simulation, and 
   `input_index()`, `row_offsets()`, `in_row_offsets()`, `in_adj_edge_index()`) return read-only
   NumPy views that keep the graph alive.
 - **`Eligibility`**: immutable, graph-bound static eligibility built by
-  `graph.eligibility(excluded_nodes, excluded_edges)`.
+  `graph.eligibility(excluded_nodes, excluded_edges)`; `Eligibility.intersect(a, b)` returns an
+  operand when the result equals it, otherwise a new value.
+
+### Route structures
+
+- **`PredDAG`**: immutable, graph-bound predecessor DAG in CSR form (`parent_offsets()`,
+  `parents()`, `via_edges()`), entries in ascending via EdgeId within a node.
+  `PredDAG.from_csr(graph, offsets, parents, via)` validates the shape, the ranges and endpoints,
+  duplicates, acyclicity and the canonical order before accepting a DAG.
+- **`Path(graph, hops)`**: an explicit walk whose hops may hold several parallel members;
+  `cost()` is the sum over hops of the minimum member cost and `to_dag()` gives the equivalent
+  `PredDAG`.
+- **`PathSelection(tie_break, priority, multipath=True, multi_edge=True)`** with
+  `EdgeTieBreak` and `EdgePriority`: the selection axes the searches and policies read.
+
+### Ledger and kernels
+
+- **`FlowGraph(graph, residual=None)`**: the integer ledger of one graph: an immutable baseline
+  in units and the records (`FlowRecord`: flow id, owner, endpoints, placement, admission,
+  bundle, route cost, offered, delivered, per-edge allocation and drops) of the flows placed on
+  it. `allocated()` is the exact sum of the records and `residual()` the baseline minus it;
+  `bottleneck(sources)` lists the saturated frontier; `reset()` and `copy()` follow the lifetime
+  rules (rejected while a policy is bound). The ledger is mutated only through policies.
+- **Kernels** (`FlowPlacement`: `MAX_FLOW`, `WEIGHTED`, `EQUAL_BALANCED`; `Admission`:
+  `LOSSLESS`, `LOSSY`): MaxFlow is the flow core on the flow's DAG (a replacement on its own
+  allocation plus the residual), Weighted splits by highest averages over weights frozen at
+  creation, EqualBalanced by round robin; Lossy forwards hop by hop and records drops. Until the
+  policy engine lands, a placement on one bundle runs through the private
+  `_netgraph_core._PinnedFlow`.
 
 ### Flow core
 

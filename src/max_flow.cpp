@@ -38,6 +38,9 @@
 #include <stdexcept>
 #include <string>
 
+#include "netgraph/core/detail/flow_core.hpp"
+#include "netgraph/core/detail/node_map.hpp"
+
 namespace netgraph::core {
 
 namespace {
@@ -105,45 +108,56 @@ private:
   std::size_t size_ {0};
 };
 
+// The input of one solve in local coordinates: real vertices 0..num_nodes-1, the arcs of the
+// active edges in ascending EdgeId (tail, head, cost and capacity per edge), and the endpoint
+// sets as local vertices listed in ascending original NodeId.
+struct SolveInput {
+  std::int32_t num_nodes {0};
+  std::vector<EdgeId> edges {};
+  std::vector<std::int32_t> tail {};
+  std::vector<std::int32_t> head {};
+  std::vector<Cost> cost {};
+  std::vector<Amount> cap {};
+  std::vector<std::int32_t> sources {};
+  std::vector<std::int32_t> destinations {};
+};
+
 // The residual network of one solve: real vertices 0..N-1, s* = N, t* = N + 1. Arcs are stored
 // as slots in adjacency order (the slots of u are [off_[u], off_[u + 1])), each with its head,
 // its cost, its residual and the slot of its partner arc.
 class Solver {
 public:
-  Solver(const StrictMultiDiGraph& g, std::span<const Amount> view, const std::vector<NodeId>& srcs,
-         const std::vector<NodeId>& dsts, const Eligibility* elig)
-      : g_(g), n_(g.num_nodes() + 2), s_(g.num_nodes()), t_(g.num_nodes() + 1) {
-    const auto num_edges = static_cast<std::size_t>(g.num_edges());
-    const auto edge_src = g.edge_src();
-    const auto edge_dst = g.edge_dst();
-    const auto cost = g.cost();
-    active_.reserve(num_edges);
-    for (std::size_t e = 0; e < num_edges; ++e) {
-      if (elig == nullptr || elig->edge_ok(static_cast<EdgeId>(e))) active_.push_back(static_cast<EdgeId>(e));
-    }
-    for (NodeId s : srcs) {
-      if (elig == nullptr || elig->node_ok(s)) srcs_.push_back(s);
-    }
-    for (NodeId d : dsts) {
-      if (elig == nullptr || elig->node_ok(d)) dsts_.push_back(d);
-    }
+  // One reusable instance per thread (`local()`): init() resizes every buffer for the input,
+  // keeping capacity across calls, so repeated solves do not allocate once warm. Not
+  // reentrant (a solve never starts another).
+  static Solver& local() {
+    thread_local Solver solver;
+    return solver;
+  }
+
+  void init(const SolveInput& in) {
+    in_ = &in;
+    n_ = in.num_nodes + 2;
+    s_ = in.num_nodes;
+    t_ = in.num_nodes + 1;
+    mark_epoch_ = 0;
     const auto n = static_cast<std::size_t>(n_);
     off_.assign(n + 1, 0);
     auto deg = [&](std::int32_t v) { ++off_[static_cast<std::size_t>(v) + 1]; };
-    for (EdgeId e : active_) {
-      deg(edge_src[static_cast<std::size_t>(e)]);
-      deg(edge_dst[static_cast<std::size_t>(e)]);
+    for (std::size_t k = 0; k < in.edges.size(); ++k) {
+      deg(in.tail[k]);
+      deg(in.head[k]);
     }
-    for (NodeId s : srcs_) { deg(s); deg(s_); }
-    for (NodeId d : dsts_) { deg(d); deg(t_); }
+    for (std::int32_t s : in.sources) { deg(s); deg(s_); }
+    for (std::int32_t d : in.destinations) { deg(d); deg(t_); }
     for (std::size_t v = 0; v < n; ++v) off_[v + 1] += off_[v];
     const auto num_slots = static_cast<std::size_t>(off_[n]);
     head_.resize(num_slots);
     rev_.resize(num_slots);
     cost_.resize(num_slots);
     res_.resize(num_slots);
-    std::vector<std::int32_t> pos(off_.begin(), off_.end() - 1);
-    auto take = [&](std::int32_t v) { return pos[static_cast<std::size_t>(v)]++; };
+    pos_.assign(off_.begin(), off_.end() - 1);
+    auto take = [&](std::int32_t v) { return pos_[static_cast<std::size_t>(v)]++; };
     auto link = [&](std::int32_t a, std::int32_t to_a, Amount cap, Cost w, std::int32_t b, std::int32_t to_b) {
       const auto ai = static_cast<std::size_t>(a);
       const auto bi = static_cast<std::size_t>(b);
@@ -158,21 +172,25 @@ public:
     };
     // Virtual arcs first at the real endpoints, then the real arcs by ascending EdgeId (forward
     // slot at the tail, reverse slot at the head), then the slots of s* and t*.
-    std::vector<std::int32_t> src_rev(srcs_.size()), dst_fwd(dsts_.size());
-    for (std::size_t i = 0; i < srcs_.size(); ++i) src_rev[i] = take(srcs_[i]);
-    for (std::size_t i = 0; i < dsts_.size(); ++i) dst_fwd[i] = take(dsts_[i]);
-    edge_slot_.resize(active_.size());
-    for (std::size_t k = 0; k < active_.size(); ++k) {
-      const auto ei = static_cast<std::size_t>(active_[k]);
-      const NodeId u = edge_src[ei];
-      const NodeId v = edge_dst[ei];
+    src_rev_.resize(in.sources.size());
+    dst_fwd_.resize(in.destinations.size());
+    for (std::size_t i = 0; i < in.sources.size(); ++i) src_rev_[i] = take(in.sources[i]);
+    for (std::size_t i = 0; i < in.destinations.size(); ++i) dst_fwd_[i] = take(in.destinations[i]);
+    edge_slot_.resize(in.edges.size());
+    for (std::size_t k = 0; k < in.edges.size(); ++k) {
+      const std::int32_t u = in.tail[k];
+      const std::int32_t v = in.head[k];
       const std::int32_t fwd = take(u);
       const std::int32_t bwd = take(v);
-      link(fwd, v, view[ei], cost[ei], bwd, u);
+      link(fwd, v, in.cap[k], in.cost[k], bwd, u);
       edge_slot_[k] = fwd;
     }
-    for (std::size_t i = 0; i < srcs_.size(); ++i) link(take(s_), srcs_[i], kMaxFlowCap, 0, src_rev[i], s_);
-    for (std::size_t i = 0; i < dsts_.size(); ++i) link(dst_fwd[i], t_, kMaxFlowCap, 0, take(t_), dsts_[i]);
+    for (std::size_t i = 0; i < in.sources.size(); ++i) {
+      link(take(s_), in.sources[i], kMaxFlowCap, 0, src_rev_[i], s_);
+    }
+    for (std::size_t i = 0; i < in.destinations.size(); ++i) {
+      link(dst_fwd_[i], t_, kMaxFlowCap, 0, take(t_), in.destinations[i]);
+    }
     pi_.assign(n, 0);
     ever_.assign(n, 0);
     dist_.resize(n);
@@ -181,8 +199,23 @@ public:
     cur_.resize(n);
   }
 
-  FlowCoreResult run(std::span<const Amount> view, Amount limit) {
-    FlowCoreResult out;
+  // The solve to the cap or to disconnection. Output in local coordinates: `flows` aligned with
+  // the input edges, `cut` as input edge indices (positive capacity, from the full residual
+  // closure of the real sources to its complement, ascending EdgeId) when the destinations are
+  // outside the closure, potentials per local vertex (kNeverReached when never settled).
+  struct Output {
+    Amount placed {0};
+    std::vector<std::pair<Cost, Amount>> cost_distribution {};
+    std::vector<Amount> flows {};
+    std::optional<std::vector<std::int32_t>> cut {};
+    std::vector<Cost> potentials {};
+    FlowCoreCounters counters {};
+  };
+
+  // `closure` adds the cut; `potentials` the per-vertex potentials (the edge-subset entry
+  // needs neither).
+  Output run(Amount limit, bool closure, bool potentials = true) {
+    Output out;
     auto& c = out.counters;
     Amount total = 0;
     while (total < limit) {
@@ -213,47 +246,47 @@ public:
     }
     out.placed = total;
 
-    const auto num_edges = static_cast<std::size_t>(g_.num_edges());
-    out.edge_flows.assign(num_edges, 0);
-    for (std::size_t k = 0; k < active_.size(); ++k) {
+    out.flows.resize(in_->edges.size());
+    for (std::size_t k = 0; k < in_->edges.size(); ++k) {
       const auto fwd = static_cast<std::size_t>(edge_slot_[k]);
-      out.edge_flows[static_cast<std::size_t>(active_[k])] = res_[static_cast<std::size_t>(rev_[fwd])];
+      out.flows[k] = res_[static_cast<std::size_t>(rev_[fwd])];
     }
-    // Full residual closure seeded at the real sources (reverse and virtual arcs included).
-    std::vector<std::uint8_t> seen(static_cast<std::size_t>(n_), 0);
-    std::vector<std::int32_t> queue;
-    queue.reserve(static_cast<std::size_t>(n_));
-    for (NodeId s : srcs_) {
-      seen[static_cast<std::size_t>(s)] = 1;
-      queue.push_back(s);
-    }
-    for (std::size_t qi = 0; qi < queue.size(); ++qi) {
-      const auto u = static_cast<std::size_t>(queue[qi]);
-      for (auto p = off_[u]; p < off_[u + 1]; ++p) {
-        const auto pi = static_cast<std::size_t>(p);
-        const auto v = static_cast<std::size_t>(head_[pi]);
-        if (res_[pi] > 0 && seen[v] == 0) {
-          seen[v] = 1;
-          queue.push_back(static_cast<std::int32_t>(v));
+    if (closure) {
+      // Full residual closure seeded at the real sources (reverse and virtual arcs included).
+      std::vector<std::uint8_t> seen(static_cast<std::size_t>(n_), 0);
+      std::vector<std::int32_t> queue;
+      queue.reserve(static_cast<std::size_t>(n_));
+      for (std::int32_t s : in_->sources) {
+        seen[static_cast<std::size_t>(s)] = 1;
+        queue.push_back(s);
+      }
+      for (std::size_t qi = 0; qi < queue.size(); ++qi) {
+        const auto u = static_cast<std::size_t>(queue[qi]);
+        for (auto p = off_[u]; p < off_[u + 1]; ++p) {
+          const auto pi = static_cast<std::size_t>(p);
+          const auto v = static_cast<std::size_t>(head_[pi]);
+          if (res_[pi] > 0 && seen[v] == 0) {
+            seen[v] = 1;
+            queue.push_back(static_cast<std::int32_t>(v));
+          }
         }
       }
-    }
-    if (seen[static_cast<std::size_t>(t_)] == 0) {
-      const auto edge_src = g_.edge_src();
-      const auto edge_dst = g_.edge_dst();
-      std::vector<EdgeId> cut;
-      for (EdgeId e : active_) {
-        const auto ei = static_cast<std::size_t>(e);
-        if (seen[static_cast<std::size_t>(edge_src[ei])] != 0 &&
-            seen[static_cast<std::size_t>(edge_dst[ei])] == 0 && view[ei] > 0) {
-          cut.push_back(e);
+      if (seen[static_cast<std::size_t>(t_)] == 0) {
+        std::vector<std::int32_t> cut;
+        for (std::size_t k = 0; k < in_->edges.size(); ++k) {
+          if (seen[static_cast<std::size_t>(in_->tail[k])] != 0 && seen[static_cast<std::size_t>(in_->head[k])] == 0 &&
+              in_->cap[k] > 0) {
+            cut.push_back(static_cast<std::int32_t>(k));
+          }
         }
+        out.cut = std::move(cut);
       }
-      out.min_cut = std::move(cut);
     }
-    out.potentials.resize(static_cast<std::size_t>(g_.num_nodes()));
-    for (std::size_t v = 0; v < out.potentials.size(); ++v) {
-      out.potentials[v] = ever_[v] != 0 ? pi_[v] : kNeverReached;
+    if (potentials) {
+      out.potentials.resize(static_cast<std::size_t>(in_->num_nodes));
+      for (std::size_t v = 0; v < out.potentials.size(); ++v) {
+        out.potentials[v] = ever_[v] != 0 ? pi_[v] : kNeverReached;
+      }
     }
     return out;
   }
@@ -388,13 +421,13 @@ private:
     return false;
   }
 
-  const StrictMultiDiGraph& g_;
-  std::int32_t n_;
-  std::int32_t s_;
-  std::int32_t t_;
-  std::vector<EdgeId> active_ {};
-  std::vector<NodeId> srcs_ {};
-  std::vector<NodeId> dsts_ {};
+  const SolveInput* in_ {nullptr};
+  std::int32_t n_ {0};
+  std::int32_t s_ {0};
+  std::int32_t t_ {0};
+  std::vector<std::int32_t> pos_ {};
+  std::vector<std::int32_t> src_rev_ {};
+  std::vector<std::int32_t> dst_fwd_ {};
   std::vector<std::int32_t> off_ {};
   std::vector<std::int32_t> head_ {};
   std::vector<std::int32_t> rev_ {};
@@ -458,8 +491,91 @@ FlowCoreResult place_global_units(const StrictMultiDiGraph& g,
     out.potentials.assign(static_cast<std::size_t>(g.num_nodes()), kNeverReached);
     return out;
   }
-  Solver solver(g, view, srcs, dsts, elig);
-  return solver.run(view, cap.value_or(kUncapped));
+  // Identity coordinates: every real vertex, the allowed edges and endpoints.
+  SolveInput in;
+  in.num_nodes = g.num_nodes();
+  const auto edge_src = g.edge_src();
+  const auto edge_dst = g.edge_dst();
+  const auto cost = g.cost();
+  in.edges.reserve(num_edges);
+  for (std::size_t e = 0; e < num_edges; ++e) {
+    if (elig != nullptr && !elig->edge_ok(static_cast<EdgeId>(e))) continue;
+    in.edges.push_back(static_cast<EdgeId>(e));
+    in.tail.push_back(edge_src[e]);
+    in.head.push_back(edge_dst[e]);
+    in.cost.push_back(cost[e]);
+    in.cap.push_back(view[e]);
+  }
+  for (NodeId s : srcs) {
+    if (elig == nullptr || elig->node_ok(s)) in.sources.push_back(s);
+  }
+  for (NodeId d : dsts) {
+    if (elig == nullptr || elig->node_ok(d)) in.destinations.push_back(d);
+  }
+  Solver& solver = Solver::local();
+  solver.init(in);
+  auto r = solver.run(cap.value_or(kUncapped), /*closure=*/true);
+  FlowCoreResult out;
+  out.placed = r.placed;
+  out.cost_distribution = std::move(r.cost_distribution);
+  out.edge_flows.assign(num_edges, 0);
+  for (std::size_t k = 0; k < in.edges.size(); ++k) {
+    out.edge_flows[static_cast<std::size_t>(in.edges[k])] = r.flows[k];
+  }
+  if (r.cut.has_value()) {
+    std::vector<EdgeId> cut;
+    cut.reserve(r.cut->size());
+    for (std::int32_t k : *r.cut) cut.push_back(in.edges[static_cast<std::size_t>(k)]);
+    out.min_cut = std::move(cut);
+  }
+  out.potentials = std::move(r.potentials);
+  out.counters = r.counters;
+  return out;
 }
+
+namespace detail {
+
+SubsetFlow solve_subset(const StrictMultiDiGraph& g, std::span<const EdgeId> edges, std::span<const Amount> caps,
+                        std::span<const NodeId> sources, std::span<const NodeId> destinations,
+                        std::optional<Amount> cap) {
+  SubsetFlow out;
+  out.flows.assign(edges.size(), 0);
+  if (cap.has_value() && *cap == 0) return out;
+  const auto edge_src = g.edge_src();
+  const auto edge_dst = g.edge_dst();
+  const auto cost = g.cost();
+  // Compressed vertices in first-touch order. The numbering changes no flow, curve or path:
+  // the arc order at every vertex is by EdgeId (virtual arc first) and the virtual arcs of s*
+  // and t* follow the endpoint lists, which stay in ascending NodeId.
+  NodeMap& map = NodeMap::local();
+  map.reset(static_cast<std::size_t>(g.num_nodes()));
+  // The input's storage is per thread and reused (every field is rewritten here).
+  thread_local SolveInput in;
+  in.edges.assign(edges.begin(), edges.end());
+  in.tail.clear();
+  in.head.clear();
+  in.cost.clear();
+  in.sources.clear();
+  in.destinations.clear();
+  for (EdgeId e : edges) {
+    const auto ei = static_cast<std::size_t>(e);
+    in.tail.push_back(map.add(edge_src[ei]));
+    in.head.push_back(map.add(edge_dst[ei]));
+    in.cost.push_back(cost[ei]);
+  }
+  for (NodeId v : sources) in.sources.push_back(map.add(v));
+  for (NodeId v : destinations) in.destinations.push_back(map.add(v));
+  in.num_nodes = static_cast<std::int32_t>(map.size());
+  in.cap.assign(caps.begin(), caps.end());
+  Solver& solver = Solver::local();
+  solver.init(in);
+  auto r = solver.run(cap.value_or(kUncapped), /*closure=*/false, /*potentials=*/false);
+  out.placed = r.placed;
+  out.flows = std::move(r.flows);
+  out.cost_distribution = std::move(r.cost_distribution);
+  return out;
+}
+
+} // namespace detail
 
 } // namespace netgraph::core

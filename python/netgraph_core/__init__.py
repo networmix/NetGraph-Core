@@ -6,9 +6,12 @@ downstream users import everything from a single place. Typing shims supplied in
 
 The streamlined Core is being rebuilt in sub-PRs (``dev/design/2026-10-streamline``):
 this build carries the graph on integer units (``StrictMultiDiGraph``,
-``Eligibility``, ``to_units``, ``as_float``) and the private flow-core entry
-``_netgraph_core._place_global_units``; the ledger, policies, searches and
-evaluators return in the following sub-PRs.
+``Eligibility`` with ``intersect``, ``to_units``, ``as_float``), the route structures
+(``PredDAG``, ``Path``), the selection and placement axes (``PathSelection``,
+``EdgeTieBreak``, ``EdgePriority``, ``FlowPlacement``, ``Admission``) and the integer
+ledger (``FlowGraph`` with its ``FlowRecord`` snapshots), plus the private entries
+of the flow core, the kernels and the internal search in ``_netgraph_core``; the
+policies, the public searches and the evaluators return in the following sub-PRs.
 """
 
 # pyright: reportMissingImports=false
@@ -17,7 +20,16 @@ from importlib.metadata import version
 from typing import TYPE_CHECKING
 
 from _netgraph_core import (
+    Admission,
+    EdgePriority,
+    EdgeTieBreak,
     Eligibility,
+    FlowGraph,
+    FlowPlacement,
+    FlowRecord,
+    Path,
+    PathSelection,
+    PredDAG,
     StrictMultiDiGraph,
     as_float,
     to_units,
@@ -32,7 +44,16 @@ __version__ = version("netgraph-core")
 # because it turns "unchecked" into "confidently wrong".
 if TYPE_CHECKING:  # pragma: no cover - typing-only
     from ._docs import (  # noqa: I001
+        Admission as Admission,
+        EdgePriority as EdgePriority,
+        EdgeTieBreak as EdgeTieBreak,
         Eligibility as Eligibility,
+        FlowGraph as FlowGraph,
+        FlowPlacement as FlowPlacement,
+        FlowRecord as FlowRecord,
+        Path as Path,
+        PathSelection as PathSelection,
+        PredDAG as PredDAG,
         StrictMultiDiGraph as StrictMultiDiGraph,
         as_float as as_float,
         to_units as to_units,
@@ -44,4 +65,13 @@ __all__ = [
     "Eligibility",
     "to_units",
     "as_float",
+    "PredDAG",
+    "Path",
+    "EdgeTieBreak",
+    "EdgePriority",
+    "PathSelection",
+    "FlowPlacement",
+    "Admission",
+    "FlowGraph",
+    "FlowRecord",
 ]

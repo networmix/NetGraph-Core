@@ -18,6 +18,10 @@ add_executable(netgraph_core_tests
   tests/cpp/strict_multidigraph_tests.cpp
   tests/cpp/max_flow_tests.cpp
   tests/cpp/masking_tests.cpp
+  tests/cpp/pred_dag_tests.cpp
+  tests/cpp/search_tests.cpp
+  tests/cpp/kernels_tests.cpp
+  tests/cpp/flow_graph_tests.cpp
 )
   target_link_libraries(netgraph_core_tests PRIVATE netgraph_core GTest::gtest_main)
   target_include_directories(netgraph_core_tests PRIVATE tests/cpp)
@@ -29,8 +33,20 @@ add_executable(netgraph_core_tests
     endif()
     target_link_options(netgraph_core_tests PRIVATE --coverage)
   endif()
+  # Allocation-failure tests replace the global operator new: a separate executable.
+  add_executable(netgraph_core_fault_tests tests/cpp/ledger_fault_tests.cpp)
+  target_link_libraries(netgraph_core_fault_tests PRIVATE netgraph_core GTest::gtest_main)
+  target_include_directories(netgraph_core_fault_tests PRIVATE tests/cpp)
+  if(NETGRAPH_CORE_COVERAGE AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
+    target_compile_options(netgraph_core_fault_tests PRIVATE -O0 -g --coverage)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+      target_compile_options(netgraph_core_fault_tests PRIVATE -fprofile-update=atomic)
+    endif()
+    target_link_options(netgraph_core_fault_tests PRIVATE --coverage)
+  endif()
   include(GoogleTest)
   gtest_discover_tests(netgraph_core_tests)
+  gtest_discover_tests(netgraph_core_fault_tests)
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -72,6 +88,11 @@ endif()
 add_library(netgraph_core STATIC
   src/strict_multidigraph.cpp
   src/max_flow.cpp
+  src/pred_dag.cpp
+  src/search.cpp
+  src/kernels.cpp
+  src/flow_graph.cpp
+  src/pinned_flow.cpp
   src/profiling.cpp
 )
 target_include_directories(netgraph_core PUBLIC
@@ -228,9 +249,9 @@ if(NETGRAPH_CORE_SANITIZE)
                   -fno-sanitize-recover=undefined)
     set(SAN_TARGETS netgraph_core _netgraph_core)
     if(TARGET netgraph_core_tests)
-      # The test executable links the sanitized static library, so it must be
+      # The test executables link the sanitized static library, so they must be
       # built and linked with the same flags to pull in the sanitizer runtime.
-      list(APPEND SAN_TARGETS netgraph_core_tests)
+      list(APPEND SAN_TARGETS netgraph_core_tests netgraph_core_fault_tests)
     endif()
     foreach(tgt ${SAN_TARGETS})
       target_compile_options(${tgt} PRIVATE ${SAN_FLAGS})

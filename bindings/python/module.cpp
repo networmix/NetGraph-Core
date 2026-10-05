@@ -1,5 +1,8 @@
 /*
-  Pybind11 module `_netgraph_core`: the graph on integer units and the private flow-core entry.
+  Pybind11 module `_netgraph_core`: the graph on integer units, the flow core's private entry,
+  the ledger with its records, the route structures (PredDAG, Path), Eligibility with
+  intersect, the selection and placement enums, and the private entries of the 1b recorder
+  population (a Pinned placement with one bundle, the internal search, the apportionment).
 
   - Graph accessors return read-only NumPy views that keep the graph alive (no per-call copy).
   - Integer inputs (capacities, costs, ids, views, caps) must be integers: Python ints, NumPy
@@ -10,6 +13,8 @@
   - std::invalid_argument from Core maps to ValueError.
   - _place_global_units is the recorder's private entry point (APPROACH 2.2): it returns the
     payload as a dict of Python ints and lists.
+  - Amounts and counters cross as Python ints (exact, also beyond 64 bits); per-edge arrays as
+    int64 NumPy arrays in EdgeId order; +inf is accepted only as a request (float('inf')).
 */
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -24,7 +29,16 @@
 #include <string>
 #include <vector>
 
+#include "netgraph/core/detail/kernels.hpp"
+#include "netgraph/core/detail/ledger_access.hpp"
+#include "netgraph/core/detail/pinned_flow.hpp"
+#include "netgraph/core/detail/pred_dag_builder.hpp"
+#include "netgraph/core/detail/search.hpp"
+#include "netgraph/core/flow.hpp"
+#include "netgraph/core/flow_graph.hpp"
 #include "netgraph/core/max_flow.hpp"
+#include "netgraph/core/options.hpp"
+#include "netgraph/core/pred_dag.hpp"
 #include "netgraph/core/strict_multidigraph.hpp"
 #include "netgraph/core/types.hpp"
 
@@ -93,6 +107,11 @@ struct WideInts {
   }
   [[nodiscard]] bool in(std::size_t i, std::int64_t lo, std::int64_t hi) const noexcept {
     return sign(i) == 0 && value[i] >= lo && value[i] <= hi;
+  }
+  // The entry as an exact Python int (an overflowing entry compared with another).
+  [[nodiscard]] py::object exact(std::size_t i) const {
+    py::object item = source[py::int_(i)];
+    return py::reinterpret_steal<py::object>(PyNumber_Index(item.ptr()));
   }
   template <typename T>
   [[nodiscard]] std::vector<T> narrow() const {  // after every bound was checked
@@ -336,6 +355,122 @@ std::shared_ptr<StrictMultiDiGraph> make_graph(const py::object& num_nodes, cons
   return std::make_shared<StrictMultiDiGraph>(static_cast<std::int32_t>(n), src_v, dst_v, cap_v, cost_v, resolution);
 }
 
+
+// ---------------------------------------------------------------- 1b helpers
+
+// The exact order of wide integers: a positive overflow above every int64, a negative one
+// below, and two overflows on the same side by their exact values (review-1b D2).
+bool wide_less(const WideInts& w, std::size_t i, std::size_t j) {
+  if (w.sign(i) != w.sign(j)) return w.sign(i) < w.sign(j);
+  if (w.sign(i) == 0) return w.value[i] < w.value[j];
+  const int less = PyObject_RichCompareBool(w.exact(i).ptr(), w.exact(j).ptr(), Py_LT);
+  if (less < 0) throw py::error_already_set();
+  return less == 1;
+}
+
+// A per-edge integer array in [0, capacity_units[e]] (a ledger baseline, a search residual),
+// validated on the unnarrowed values: the length (shape step), then every entry.
+std::vector<Amount> edge_units(const py::object& obj, const StrictMultiDiGraph& g, const char* name) {
+  const auto num_edges = static_cast<std::size_t>(g.num_edges());
+  const std::size_t len = sequence_length(obj, name);
+  if (len != num_edges) {
+    throw py::value_error(std::string(name) + " has length " + std::to_string(len) + ", expected " +
+                          std::to_string(num_edges) + " (one entry per edge)");
+  }
+  const auto v = wide_integers(obj, (std::string(name) + " (units)").c_str());
+  const auto capacity = g.capacity_units();
+  for (std::size_t e = 0; e < num_edges; ++e) {
+    if (!v.in(e, 0, capacity[e])) {
+      throw py::value_error(std::string(name) + "[" + std::to_string(e) + "] = " + v.text(e) + " is outside [0, capacity_units[" +
+                            std::to_string(e) + "] = " + std::to_string(capacity[e]) + "]");
+    }
+  }
+  return v.narrow<Amount>();
+}
+
+// A node set: one NodeId or a sequence of them, ids range-checked before narrowing.
+std::vector<NodeId> node_ids(const py::object& obj, std::int32_t num_nodes, const char* name) {
+  WideInts ids;
+  if (!is_bool(obj) && PyIndex_Check(obj.ptr()) && !py::isinstance<py::array>(obj)) {
+    py::list one;
+    one.append(obj);
+    ids = wide_integers(one, name);
+  } else {
+    ids = wide_integers(obj, name);
+  }
+  if (ids.size() == 0) throw py::value_error(std::string(name) + ": the node set is empty");
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    if (!ids.in(i, 0, static_cast<std::int64_t>(num_nodes) - 1)) {
+      throw py::value_error(std::string(name) + ": node " + ids.text(i) + " out of node range [0, " +
+                            std::to_string(num_nodes) + ")");
+    }
+  }
+  return ids.narrow<NodeId>();
+}
+
+// A request: an integer number of units in [0, 2^62) or +inf (float('inf')); nullopt is +inf.
+std::optional<Amount> request_units(const py::object& volume) {
+  if (py::isinstance<py::float_>(volume) || py::isinstance(volume, py::module_::import("numpy").attr("floating"))) {
+    const double x = volume.cast<double>();
+    if (std::isinf(x) && x > 0) return std::nullopt;
+    throw py::value_error("requests are integer units or +inf (a physical request goes through to_units first; got " +
+                          std::string(py::str(volume)) + ")");
+  }
+  const auto v = integer_value(volume, 0, kDomainLimit - 1, "request (units)");
+  return static_cast<Amount>(v);
+}
+
+py::object counter_int(const Counter128& c) {
+  py::int_ hi(c.hi);
+  py::int_ lo(c.lo);
+  return hi.attr("__lshift__")(py::int_(64)).attr("__or__")(lo);
+}
+
+py::object cost_or_none(Cost c) { return c == kUnreachable ? py::object(py::none()) : py::object(py::int_(c)); }
+
+py::array_t<std::int64_t> int64_array(const std::vector<std::int64_t>& v) {
+  py::array_t<std::int64_t> out(static_cast<py::ssize_t>(v.size()));
+  std::copy(v.begin(), v.end(), out.mutable_data());
+  return out;
+}
+
+const char* termination_name(detail::Termination t) {
+  switch (t) {
+    case detail::Termination::Complete: return "complete";
+    case detail::Termination::LimitFlows: return "limit_flows";
+    case detail::Termination::LimitDiminishing: return "limit_diminishing";
+    case detail::Termination::NoRoute: return "no_route";
+    case detail::Termination::Exhausted: return "exhausted";
+  }
+  return "?";
+}
+
+FlowId flow_id_of(const py::object& obj) {
+  if (!py::isinstance<py::tuple>(obj) || py::len(obj) != 2) {
+    throw py::value_error("a FlowId is a tuple (ledger uid, id)");
+  }
+  auto t = py::reinterpret_borrow<py::tuple>(obj);
+  py::object uid = python_int(t[0], "FlowId ledger uid");
+  py::object id = python_int(t[1], "FlowId id");
+  int o1 = 0, o2 = 0;
+  const unsigned long long u = PyLong_AsUnsignedLongLong(uid.ptr());
+  if (PyErr_Occurred()) {
+    PyErr_Clear();
+    o1 = 1;
+  }
+  const long long i = PyLong_AsLongLongAndOverflow(id.ptr(), &o2);
+  if (o1 != 0 || o2 != 0 || i < 0) {
+    throw py::value_error("FlowId (" + std::string(py::str(uid)) + ", " + std::string(py::str(id)) + ") is retired or unknown");
+  }
+  return FlowId {static_cast<std::uint64_t>(u), static_cast<std::int64_t>(i)};
+}
+
+py::list pairs_list(const std::vector<std::pair<EdgeId, Amount>>& v) {
+  py::list out;
+  for (const auto& [e, x] : v) out.append(py::make_tuple(e, x));
+  return out;
+}
+
 py::list int_list(const std::vector<std::int64_t>& v) {
   py::list out(v.size());
   for (std::size_t i = 0; i < v.size(); ++i) out[i] = py::int_(v[i]);
@@ -345,7 +480,63 @@ py::list int_list(const std::vector<std::int64_t>& v) {
 } // namespace
 
 PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
-  m.doc() = "NetGraph-Core: the graph on integer units and the minimum-cost flow core";
+  m.doc() = "NetGraph-Core: the graph on integer units, the minimum-cost flow core, the ledger and the kernels";
+
+  py::enum_<FlowPlacement>(m, "FlowPlacement",
+                           "The kernel of one flow: MAX_FLOW (the minimum-cost flow core on the flow's split graph,\n"
+                           "a replacement on V = W + own), WEIGHTED (hop-by-hop WCMP: highest averages over frozen\n"
+                           "weights at every node), EQUAL_BALANCED (ECMP: round robin at every node).")
+      .value("MAX_FLOW", FlowPlacement::MaxFlow)
+      .value("WEIGHTED", FlowPlacement::Weighted)
+      .value("EQUAL_BALANCED", FlowPlacement::EqualBalanced);
+
+  py::enum_<Admission>(m, "Admission",
+                       "LOSSLESS admits only what fits; LOSSY forwards hop by hop without admission control and\n"
+                       "drops what does not fit on each edge (EQUAL_BALANCED and WEIGHTED only).")
+      .value("LOSSLESS", Admission::Lossless)
+      .value("LOSSY", Admission::Lossy);
+
+  py::enum_<EdgeTieBreak>(m, "EdgeTieBreak",
+                          "Ties between equal-cost candidates (parallel members and equal-cost walks):\n"
+                          "DETERMINISTIC (lowest EdgeId; capacities ignored) or PREFER_HIGHER_PRIORITY (the higher\n"
+                          "priority value first, then the lowest EdgeId).")
+      .value("DETERMINISTIC", EdgeTieBreak::Deterministic)
+      .value("PREFER_HIGHER_PRIORITY", EdgeTieBreak::PreferHigherPriority);
+
+  py::enum_<EdgePriority>(m, "EdgePriority",
+                          "The per-edge value PREFER_HIGHER_PRIORITY reads, and the Weighted kernel's membership and\n"
+                          "weights: RESIDUAL (residual units), CAPACITY (static capacity units), HEADROOM (the exact\n"
+                          "rational residual / capacity; rejected with WEIGHTED).")
+      .value("RESIDUAL", EdgePriority::Residual)
+      .value("CAPACITY", EdgePriority::Capacity)
+      .value("HEADROOM", EdgePriority::Headroom);
+
+  py::class_<PathSelection>(m, "PathSelection",
+                            "The selection of a search: tie_break and priority are explicit; multipath = True keeps\n"
+                            "every equal-cost walk (the DAG), False the one canonical single path; multi_edge = True\n"
+                            "keeps every eligible parallel member, False one per (u, v) pair.")
+      .def(py::init<EdgeTieBreak, EdgePriority, bool, bool>(), py::arg("tie_break"), py::arg("priority"),
+           py::arg("multipath") = true, py::arg("multi_edge") = true)
+      .def_readonly("tie_break", &PathSelection::tie_break)
+      .def_readonly("priority", &PathSelection::priority)
+      .def_readonly("multipath", &PathSelection::multipath)
+      .def_readonly("multi_edge", &PathSelection::multi_edge)
+      .def("__eq__", [](const PathSelection& a, const py::object& b) {
+        return py::isinstance<PathSelection>(b) && a == b.cast<const PathSelection&>();
+      })
+      .def("__hash__", [](const PathSelection& a) {
+        return py::hash(py::make_tuple(static_cast<int>(a.tie_break), static_cast<int>(a.priority), a.multipath,
+                                       a.multi_edge));
+      })
+      .def("__repr__", [](const PathSelection& a) {
+        return std::string("PathSelection(tie_break=") +
+               (a.tie_break == EdgeTieBreak::Deterministic ? "DETERMINISTIC" : "PREFER_HIGHER_PRIORITY") +
+               ", priority=" +
+               (a.priority == EdgePriority::Residual ? "RESIDUAL"
+                                                     : (a.priority == EdgePriority::Capacity ? "CAPACITY" : "HEADROOM")) +
+               ", multipath=" + (a.multipath ? "True" : "False") + ", multi_edge=" + (a.multi_edge ? "True" : "False") +
+               ")";
+      });
 
   m.def(
       "to_units",
@@ -406,7 +597,20 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
             const auto& el = self.cast<const Eligibility&>();
             return readonly_view(el.edge_allowed(), self, py::dtype("bool"));
           },
-          "bool[E] read-only view (not excluded and both endpoints allowed)");
+          "bool[E] read-only view (not excluded and both endpoints allowed)")
+      .def_static(
+          "intersect",
+          [](const std::shared_ptr<Eligibility>& a, const std::shared_ptr<Eligibility>& b) -> std::shared_ptr<Eligibility> {
+            if (!a || !b) throw py::value_error("Eligibility.intersect takes two Eligibility values");
+            auto r = Eligibility::intersect(*a, *b);
+            if (r.uid() == a->uid()) return a;
+            if (r.uid() == b->uid()) return b;
+            return std::make_shared<Eligibility>(std::move(r));
+          },
+          py::arg("a"), py::arg("b"),
+          "The intersection of two values of one graph (ValueError for values of different graphs):\n"
+          "an operand itself when the result equals it (a first, then b), otherwise a new value with a\n"
+          "fresh uid; equal intersections built separately get distinct uids.");
 
   py::class_<StrictMultiDiGraph, std::shared_ptr<StrictMultiDiGraph>>(
       m, "StrictMultiDiGraph",
@@ -603,4 +807,399 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       "cost_distribution: [[cost, units]], edge_flows, min_cut (None while the destinations stay\n"
       "connected, and on cap 0), potentials (-1 = never reached), counters}. Invalid inputs raise\n"
       "ValueError before any work.");
+
+  // ------------------------------------------------------------------ route structures
+
+  py::class_<PredDAG, std::shared_ptr<PredDAG>>(
+      m, "PredDAG",
+      "Immutable, graph-bound predecessor DAG: the entries of node v are parents()[k], via_edges()[k]\n"
+      "for k in [parent_offsets()[v], parent_offsets()[v + 1]), within a node in strictly ascending\n"
+      "via EdgeId (one canonical form). Equality is structural. Built by PredDAG.from_csr,\n"
+      "Path.to_dag() and the searches.")
+      .def_static(
+          "from_csr",
+          [](const std::shared_ptr<StrictMultiDiGraph>& graph, const py::object& offsets, const py::object& parents,
+             const py::object& via) {
+            if (!graph) throw py::value_error("graph must be a StrictMultiDiGraph");
+            // APPROACH 5's order on unnarrowed values; the C++ constructor re-checks it and adds the
+            // structural checks (endpoints, duplicates, acyclic, ascending).
+            const auto n = static_cast<std::size_t>(graph->num_nodes());
+            const auto m = static_cast<std::int64_t>(graph->num_edges());
+            const std::size_t lo = sequence_length(offsets, "offsets");
+            const std::size_t lp = sequence_length(parents, "parents");
+            const std::size_t lv = sequence_length(via, "via");
+            if (lo != n + 1) {
+              throw py::value_error("PredDAG.from_csr: offsets has length " + std::to_string(lo) +
+                                    ", expected N + 1 = " + std::to_string(n + 1));
+            }
+            const auto o = wide_integers(offsets, "offsets");
+            if (!o.in(0, 0, 0)) throw py::value_error("PredDAG.from_csr: offsets[0] = " + o.text(0) + ", expected 0");
+            for (std::size_t v = 0; v < n; ++v) {
+              if (wide_less(o, v + 1, v)) {
+                throw py::value_error("PredDAG.from_csr: offsets are not monotone at " + std::to_string(v + 1) + " (" +
+                                      o.text(v) + " > " + o.text(v + 1) + ")");
+              }
+            }
+            if (!o.in(n, static_cast<std::int64_t>(lp), static_cast<std::int64_t>(lp)) || lp != lv) {
+              throw py::value_error("PredDAG.from_csr: offsets[N] = " + o.text(n) + " but parents has " +
+                                    std::to_string(lp) + " and via has " + std::to_string(lv) + " entries");
+            }
+            const auto p = wide_integers(parents, "parents");
+            const auto w = wide_integers(via, "via");
+            for (std::size_t k = 0; k < lp; ++k) {
+              if (!p.in(k, 0, static_cast<std::int64_t>(n) - 1)) {
+                throw py::value_error("PredDAG.from_csr: parents[" + std::to_string(k) + "] = " + p.text(k) +
+                                      " out of node range [0, " + std::to_string(n) + ")");
+              }
+              if (!w.in(k, 0, m - 1)) {
+                throw py::value_error("PredDAG.from_csr: via[" + std::to_string(k) + "] = " + w.text(k) +
+                                      " out of edge range [0, " + std::to_string(m) + ")");
+              }
+            }
+            const auto ov = o.narrow<std::int32_t>();
+            const auto pv = p.narrow<NodeId>();
+            const auto wv = w.narrow<EdgeId>();
+            return std::make_shared<PredDAG>(PredDAG::from_csr(*graph, ov, pv, wv));
+          },
+          py::arg("graph"), py::arg("offsets"), py::arg("parents"), py::arg("via"),
+          "Validates, in order, before any traversal (ValueError on the first defect): offsets of\n"
+          "length N + 1, offsets[0] == 0, monotone, offsets[N] == len(parents) == len(via); then every\n"
+          "parent and via in range, every via joining (parent, child), no duplicate (child, via),\n"
+          "acyclic; within a node the entries in ascending via EdgeId.")
+      .def("graph_uid", &PredDAG::graph_uid, "uid of the graph this DAG belongs to")
+      .def(
+          "parent_offsets",
+          [](const py::object& self) { return readonly_view(self.cast<const PredDAG&>().parent_offsets(), self); },
+          "int32[N + 1] CSR offsets (read-only view)")
+      .def(
+          "parents", [](const py::object& self) { return readonly_view(self.cast<const PredDAG&>().parents(), self); },
+          "int32 parent NodeId per entry (read-only view)")
+      .def(
+          "via_edges",
+          [](const py::object& self) { return readonly_view(self.cast<const PredDAG&>().via_edges(), self); },
+          "int32 via EdgeId per entry (read-only view)")
+      .def("__eq__", [](const PredDAG& a, const py::object& b) {
+        return py::isinstance<PredDAG>(b) && a == b.cast<const PredDAG&>();
+      })
+      .def("__hash__", [](const PredDAG& a) {
+        return py::hash(py::make_tuple(a.graph_uid(), py::tuple(py::cast(std::vector<EdgeId>(a.via_edges().begin(),
+                                                                                              a.via_edges().end())))));
+      })
+      .def("__repr__", [](const PredDAG& a) {
+        return "PredDAG(graph_uid=" + std::to_string(a.graph_uid()) + ", entries=" +
+               std::to_string(a.via_edges().size()) + ")";
+      });
+
+  py::class_<Path, std::shared_ptr<Path>>(
+      m, "Path",
+      "Immutable, graph-bound explicit walk of hops; a hop lists one or more parallel members of one\n"
+      "(u, v) pair in the caller's order. cost = sum over hops of the minimum member cost.")
+      .def(py::init([](const std::shared_ptr<StrictMultiDiGraph>& graph, const py::object& hops) {
+             if (!graph) throw py::value_error("graph must be a StrictMultiDiGraph");
+             if (not_a_sequence(hops)) throw py::value_error("Path: hops must be a sequence of hops (sequences of EdgeIds)");
+             auto seq = py::reinterpret_borrow<py::sequence>(hops);
+             std::vector<WideInts> raw;
+             for (std::size_t h = 0; h < seq.size(); ++h) {
+               py::object hop = seq[h];
+               raw.push_back(wide_integers(hop, ("hops[" + std::to_string(h) + "]").c_str()));
+             }
+             // Every member in range before anything else (APPROACH 5), then C++'s order.
+             const auto m = static_cast<std::int64_t>(graph->num_edges());
+             for (std::size_t h = 0; h < raw.size(); ++h) {
+               for (std::size_t i = 0; i < raw[h].size(); ++i) {
+                 if (!raw[h].in(i, 0, m - 1)) {
+                   throw py::value_error("Path: hop " + std::to_string(h) + " member " + raw[h].text(i) +
+                                         " out of edge range [0, " + std::to_string(m) + ")");
+                 }
+               }
+             }
+             std::vector<std::vector<EdgeId>> narrowed;
+             narrowed.reserve(raw.size());
+             for (const auto& r : raw) narrowed.push_back(r.narrow<EdgeId>());
+             return std::make_shared<Path>(*graph, std::move(narrowed));
+           }),
+           py::arg("graph"), py::arg("hops"),
+           "Validates, in order (ValueError on the first defect): every member id in range, no duplicate\n"
+           "member, a non-empty hop list, every hop non-empty, the members of a hop sharing (u, v),\n"
+           "contiguous hops, no repeated node.")
+      .def("graph_uid", &Path::graph_uid, "uid of the graph this path belongs to")
+      .def("hops", [](const Path& p) { return p.hops(); }, "the hops as lists of EdgeIds (the caller's member order)")
+      .def("src", &Path::src)
+      .def("dst", &Path::dst)
+      .def("nodes", [](const Path& p) { return p.nodes(); }, "the visited nodes, src first")
+      .def("cost", &Path::cost, "sum over hops of the minimum member cost")
+      .def(
+          "to_dag", [](const Path& p) { return std::make_shared<PredDAG>(p.to_dag()); },
+          "the equivalent PredDAG (every member of every hop)")
+      .def("__eq__", [](const Path& a, const py::object& b) {
+        return py::isinstance<Path>(b) && a == b.cast<const Path&>();
+      })
+      .def("__hash__",
+           [](const Path& a) {
+             py::list hops;
+             for (const auto& hop : a.hops()) hops.append(py::tuple(py::cast(hop)));
+             return py::hash(py::make_tuple(a.graph_uid(), py::tuple(hops)));
+           })
+      .def("__repr__", [](const Path& a) {
+        return "Path(src=" + std::to_string(a.src()) + ", dst=" + std::to_string(a.dst()) +
+               ", hops=" + std::to_string(a.hops().size()) + ", cost=" + std::to_string(a.cost()) + ")";
+      });
+
+  // ------------------------------------------------------------------ the ledger
+
+  py::class_<FlowRecord>(
+      m, "FlowRecord",
+      "One flow of a ledger, as a snapshot: flow_id (ledger uid, id), owner (the policy's id),\n"
+      "sources, destinations, placement, admission, bundle (PredDAG: the flow's route),\n"
+      "route_cost (its minimum walk cost; None when empty), offered (Lossy only, else None),\n"
+      "delivered, edges [(EdgeId, units)] and drops [(EdgeId, units)] (cumulative, ascending\n"
+      "EdgeId). Counters are exact Python ints (they may exceed 64 bits).")
+      .def_property_readonly("flow_id", [](const FlowRecord& r) { return py::make_tuple(r.flow_id.first, r.flow_id.second); })
+      .def_readonly("owner", &FlowRecord::owner)
+      .def_readonly("sources", &FlowRecord::sources)
+      .def_readonly("destinations", &FlowRecord::destinations)
+      .def_readonly("placement", &FlowRecord::placement)
+      .def_readonly("admission", &FlowRecord::admission)
+      .def_property_readonly("bundle", [](const FlowRecord& r) { return std::const_pointer_cast<PredDAG>(r.bundle); })
+      .def_property_readonly("route_cost", [](const FlowRecord& r) { return cost_or_none(r.route_cost); })
+      .def_property_readonly("offered", [](const FlowRecord& r) -> py::object {
+        return r.offered.has_value() ? counter_int(*r.offered) : py::object(py::none());
+      })
+      .def_readonly("delivered", &FlowRecord::delivered)
+      .def_property_readonly("edges", [](const FlowRecord& r) { return pairs_list(r.edges); })
+      .def_property_readonly("drops", [](const FlowRecord& r) {
+        py::list out;
+        for (const auto& [e, x] : r.drops) out.append(py::make_tuple(e, counter_int(x)));
+        return out;
+      })
+      .def("__repr__", [](const FlowRecord& r) {
+        return "FlowRecord(flow_id=(" + std::to_string(r.flow_id.first) + ", " + std::to_string(r.flow_id.second) +
+               "), owner=" + std::to_string(r.owner) + ", delivered=" + std::to_string(r.delivered) + ")";
+      });
+
+  py::class_<FlowGraph, std::shared_ptr<FlowGraph>>(
+      m, "FlowGraph",
+      "The integer ledger of one graph: an immutable baseline residual in units and the records of\n"
+      "the flows placed on it by policies (the ledger has no public placement or removal).\n"
+      "allocated() is the sum of every record's edges and residual() = baseline - allocated(), both\n"
+      "int64[E] snapshots. reset() and copy() are rejected while a policy is bound.")
+      .def(py::init([](const std::shared_ptr<StrictMultiDiGraph>& graph, const py::object& residual) {
+             if (!graph) throw py::value_error("graph must be a StrictMultiDiGraph");
+             if (residual.is_none()) return std::make_shared<FlowGraph>(graph);
+             const auto r = edge_units(residual, *graph, "residual");
+             return std::make_shared<FlowGraph>(graph, r);
+           }),
+           py::arg("graph"), py::arg("residual") = py::none(),
+           "residual: the baseline as integer units, one entry per edge in [0, capacity_units[e]] (a\n"
+           "physical baseline goes through to_units first); None: the capacities. ValueError otherwise.")
+      .def("uid", &FlowGraph::uid, "process-unique ledger uid (the first half of every FlowId)")
+      .def(
+          "graph", [](const FlowGraph& fg) { return std::const_pointer_cast<StrictMultiDiGraph>(fg.graph()); },
+          "the ledger's graph")
+      .def(
+          "capacity_units",
+          [](const py::object& self) { return readonly_view(self.cast<const FlowGraph&>().capacity_units(), self); },
+          "int64[E] the graph's capacities in units (read-only view)")
+      .def(
+          "residual", [](const FlowGraph& fg) { return int64_array(fg.residual()); },
+          "int64[E] snapshot: baseline - allocated")
+      .def(
+          "allocated", [](const FlowGraph& fg) { return int64_array(fg.allocated()); },
+          "int64[E] snapshot: the sum of every record's edges")
+      .def("records", &FlowGraph::records, "live records (bound and orphaned) as snapshots in FlowId order")
+      .def(
+          "record", [](const FlowGraph& fg, const py::object& flow_id) { return fg.record(flow_id_of(flow_id)); },
+          py::arg("flow_id"),
+          "one record by FlowId (ValueError for a FlowId of another ledger, a retired or an unknown id)")
+      .def(
+          "bottleneck",
+          [](const FlowGraph& fg, const py::object& sources, const std::shared_ptr<Eligibility>& elig) {
+            const auto s = node_ids(sources, fg.graph()->num_nodes(), "sources");
+            return fg.bottleneck(s, elig.get());
+          },
+          py::arg("sources"), py::arg("elig") = nullptr,
+          "Saturation diagnostic: the edges (statically eligible, capacity >= 1 unit) leaving the set\n"
+          "reachable from the allowed sources over eligible forward arcs with residual >= 1 unit, in\n"
+          "ascending EdgeId (not a cut).")
+      .def(
+          "reset",
+          [](FlowGraph& fg, const py::object& residual) {
+            if (residual.is_none()) {
+              fg.reset();
+              return;
+            }
+            const auto r = edge_units(residual, *fg.graph(), "residual");
+            fg.reset(r);
+          },
+          py::arg("residual") = py::none(),
+          "A new baseline (None: the capacities); orphaned records and their allocations are cleared\n"
+          "and their ids retired (ids are never reused). ValueError while a policy is bound.")
+      .def(
+          "copy", [](const FlowGraph& fg) { return std::make_shared<FlowGraph>(fg); },
+          "a new ledger (new uid) with the same baseline and records, ids kept under the new uid;\n"
+          "ValueError while a policy is bound")
+      .def("__copy__", [](const FlowGraph& fg) { return std::make_shared<FlowGraph>(fg); })
+      .def("__deepcopy__", [](const FlowGraph& fg, const py::object&) { return std::make_shared<FlowGraph>(fg); },
+           py::arg("memo"))
+      .def(
+          "_state",
+          [](const FlowGraph& fg) {
+            py::dict out;
+            out["next_flow_id"] = detail::LedgerAccess::next_flow_id(fg);
+            out["bound"] = detail::LedgerAccess::bound_owners(fg);
+            out["orphans"] = detail::LedgerAccess::orphan_owners(fg);
+            return out;
+          },
+          "private diagnostics: {next_flow_id, bound, orphans} (owner ids)");
+
+  // ------------------------------------------------------------------ private 1b recorder entries
+
+  py::class_<detail::PinnedFlow>(
+      m, "_PinnedFlow",
+      "Private (sub-PR 1b): a Pinned placement with one bundle, the single-flow transaction of the\n"
+      "1b recorder population (APPROACH 8: a manual flow is a Pinned policy with one bundle). Sub-PR\n"
+      "1c's FlowPolicy with Pinned routing replaces it.")
+      .def(py::init([](FlowGraph& fg, const py::object& src, const py::object& dst, const std::shared_ptr<PredDAG>& bundle,
+                       FlowPlacement placement, Admission admission, EdgePriority priority,
+                       const std::shared_ptr<Eligibility>& elig) {
+             const auto n = fg.graph()->num_nodes();
+             const auto s = integer_value(src, 0, static_cast<std::int64_t>(n) - 1, "src");
+             const auto d = integer_value(dst, 0, static_cast<std::int64_t>(n) - 1, "dst");
+             if (!bundle) throw py::value_error("bundle must be a PredDAG");
+             return std::make_unique<detail::PinnedFlow>(fg, static_cast<NodeId>(s), static_cast<NodeId>(d), bundle,
+                                                         placement, admission, priority, elig);
+           }),
+           py::keep_alive<1, 2>(), py::arg("flow_graph"), py::arg("src"), py::arg("dst"), py::arg("bundle"),
+           py::arg("placement"), py::arg("admission"), py::arg("priority"), py::arg("elig") = nullptr)
+      .def(
+          "place",
+          [](detail::PinnedFlow& pf, const py::object& volume) {
+            const auto v = request_units(volume);
+            // The GIL stays held: the call mutates the ledger, which other Python threads may
+            // read (one writer per ledger, APPROACH 13).
+            const detail::PinnedResult r = pf.place(v);
+            py::dict out;
+            out["placed"] = py::int_(r.placed);
+            out["remaining"] = r.remaining.has_value() ? py::object(py::int_(*r.remaining))
+                                                       : py::object(py::float_(std::numeric_limits<double>::infinity()));
+            out["termination"] = termination_name(r.termination);
+            out["routes_changed"] = r.routes_changed;
+            out["weights_changed"] = r.weights_changed;
+            out["drops"] = pairs_list(r.drops);
+            out["iterations"] = r.iterations;
+            return out;
+          },
+          py::arg("volume"),
+          "place(volume: int units or float('inf')) -> {placed, remaining, termination, routes_changed,\n"
+          "weights_changed, drops, iterations (diagnostic: bisection steps of the T_max search)}")
+      .def("remove", &detail::PinnedFlow::remove)
+      .def("release", &detail::PinnedFlow::release, "destroy without remove(): the record stays as an orphan")
+      .def("flow_id",
+           [](const detail::PinnedFlow& pf) -> py::object {
+             const auto id = pf.flow_id();
+             return id.has_value() ? py::object(py::make_tuple(id->first, id->second)) : py::object(py::none());
+           })
+      .def("owner", &detail::PinnedFlow::owner)
+      .def("requested", [](const detail::PinnedFlow& pf) { return counter_int(pf.requested()); },
+           "the epoch's cumulative finite request (units)")
+      .def("infinite", &detail::PinnedFlow::infinite, "whether +inf was requested in this epoch")
+      .def("placed_demand", &detail::PinnedFlow::placed_demand)
+      .def("usable_bundles", &detail::PinnedFlow::usable_bundles)
+      .def("plan", [](const detail::PinnedFlow& pf) -> py::object {
+        const auto* plan = pf.plan();
+        if (plan == nullptr) return py::none();
+        py::dict out;
+        out["placement"] = plan->placement;
+        out["admission"] = plan->admission;
+        out["route"] = plan->route;
+        out["members"] = plan->members;
+        out["weights"] = plan->placement == FlowPlacement::Weighted ? py::object(py::cast(plan->weights))
+                                                                     : py::object(py::none());
+        return out;
+      });
+
+  m.def(
+      "_spf",
+      [](const std::shared_ptr<StrictMultiDiGraph>& graph, const py::object& roots, const std::string& direction,
+         const py::object& targets, const PathSelection& selection, const py::object& residual,
+         const py::object& min_residual, const std::shared_ptr<Eligibility>& elig) {
+        if (!graph) throw py::value_error("graph must be a StrictMultiDiGraph");
+        if (direction != "forward" && direction != "reverse") {
+          throw py::value_error("direction must be 'forward' or 'reverse'");
+        }
+        const auto r = node_ids(roots, graph->num_nodes(), "roots");
+        std::optional<std::vector<NodeId>> t;
+        if (!targets.is_none()) t = node_ids(targets, graph->num_nodes(), "targets");
+        // Section 6's order: the endpoint checks (overlap, a single path without targets) come
+        // before the residual is read (review-1b R15); detail::spf repeats them.
+        if (t.has_value()) {
+          detail::check_disjoint(detail::node_set(r, graph->num_nodes(), "roots"),
+                                 detail::node_set(*t, graph->num_nodes(), "targets"));
+        } else if (!selection.multipath) {
+          throw py::value_error("multipath = false requires targets (the single path joins a root to a target)");
+        }
+        std::optional<std::vector<Amount>> res;
+        if (!residual.is_none()) res = edge_units(residual, *graph, "residual");
+        const auto minr = integer_value(min_residual, 1, kDomainLimit - 1, "min_residual");
+        detail::SpfOut o;
+        {
+          py::gil_scoped_release release;
+          std::optional<std::span<const NodeId>> ts;
+          if (t.has_value()) ts = std::span<const NodeId>(*t);
+          std::optional<std::span<const Amount>> rs;
+          if (res.has_value()) rs = std::span<const Amount>(*res);
+          o = detail::spf(*graph, r, direction == "forward" ? detail::Direction::Forward : detail::Direction::Reverse, ts,
+                          selection, rs, minr, elig.get());
+        }
+        py::dict out;
+        if (o.costs.has_value()) {
+          py::list costs;
+          for (Cost c : *o.costs) costs.append(cost_or_none(c));
+          out["costs"] = costs;
+        }
+        out["dag"] = std::make_shared<PredDAG>(detail::PredDAGBuilder::from_edges(*graph, o.edges));
+        if (t.has_value()) {
+          out["target_cost"] = o.target_cost.has_value() ? py::object(py::int_(*o.target_cost)) : py::object(py::none());
+        }
+        if (o.path.has_value()) out["path"] = o.path->walk;
+        return out;
+      },
+      py::arg("graph"), py::arg("roots"), py::arg("direction"), py::arg("targets"), py::arg("selection"),
+      py::arg("residual") = py::none(), py::arg("min_residual") = 1, py::arg("elig") = nullptr,
+      "Private (sub-PR 1b; public spf in 1d): the search of APPROACH 6. Returns {costs (full search),\n"
+      "dag, target_cost (with targets; None when unreachable), path (the single path's walk)}.");
+
+  m.def(
+      "_round_robin",
+      [](const py::object& total, const py::object& k) {
+        const auto t = integer_value(total, 0, kDomainLimit - 1, "total");
+        const auto n = integer_value(k, 1, 1 << 20, "k");
+        std::vector<Amount> out(static_cast<std::size_t>(n));
+        detail::round_robin(t, out);
+        return out;
+      },
+      py::arg("total"), py::arg("k"), "Private: round robin of total units over k members (APPROACH 2.1).");
+
+  m.def(
+      "_highest_averages",
+      [](const py::object& total, const py::object& weights) {
+        const auto t = integer_value(total, 0, kDomainLimit - 1, "total");
+        const auto w = wide_integers(weights, "weights");
+        if (w.size() == 0) throw py::value_error("highest averages over no member");
+        std::uint64_t sum = 0;
+        for (std::size_t i = 0; i < w.size(); ++i) {
+          if (!w.in(i, 1, kDomainLimit - 1)) {
+            throw py::value_error("weights[" + std::to_string(i) + "] = " + w.text(i) + " is outside [1, 2^62)");
+          }
+          sum += static_cast<std::uint64_t>(w.value[i]);
+          if (sum >= static_cast<std::uint64_t>(kDomainLimit)) throw py::value_error("the weights sum to 2^62 or more");
+        }
+        const auto wv = w.narrow<Amount>();
+        std::vector<Amount> out(wv.size());
+        detail::highest_averages(t, wv, out);
+        return out;
+      },
+      py::arg("total"), py::arg("weights"),
+      "Private: highest-averages (D'Hondt) apportionment of total units over positive weights, ties by\n"
+      "the lower index (APPROACH 2.1).");
 }

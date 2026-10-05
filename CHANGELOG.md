@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Streamline sub-PR 1b (breaking; integration branch `streamline`)
+
+- **Ledger**: `FlowGraph(graph, residual=None)` is the integer ledger: a baseline in units
+  (validated within `[0, capacity_units]`), records as snapshots in FlowId order
+  (`records()`, `record(flow_id)` with `FlowId = (ledger uid, id)`, ids never reused),
+  `capacity_units()`, `residual()`, `allocated()`, `bottleneck(sources, elig)`, `reset()` and
+  `copy()` with the lifetime table (bound, orphaned records; reset and copy rejected while a
+  policy is bound). `FlowRecord` carries the flow's endpoints as sets, placement, admission,
+  bundle (`PredDAG`), route cost, `offered` (Lossy only), delivery and per-edge allocations and
+  drops; counters are 128-bit (exact Python ints). Every policy call reaches the ledger as one
+  atomic exchange: a failed call, an allocation failure included, changes nothing.
+- **Kernels**: `FlowPlacement` (`MAX_FLOW`, `WEIGHTED`, `EQUAL_BALANCED`) and `Admission`
+  (`LOSSLESS`, `LOSSY`). MaxFlow solves the flow core on the flow's split graph over
+  `residual + own allocation` (its own allocation cancellable, other owners never); Weighted
+  apportions by highest averages (D'Hondt, EdgeId ties) over weights frozen at creation from
+  `priority`; EqualBalanced by round robin from the lowest EdgeId; the cumulative amount grows
+  to `max(T, min(T + v, T_max))` with `T_max` found exactly on the monotone allocation; Lossy
+  splits each offer per call and records transit drops. Exercised through the private
+  `_netgraph_core._PinnedFlow` (a Pinned placement with one bundle) until the policy engine.
+- **Route structures**: `PredDAG.from_csr(graph, offsets, parents, via)` with the complete
+  validation (shape, ranges, endpoints, duplicates, cycles, ascending via within a node), on
+  the exact integers also beyond int64;
+  `Path(graph, hops)` with `to_dag()`; `PathSelection`, `EdgeTieBreak`
+  (`DETERMINISTIC`, `PREFER_HIGHER_PRIORITY`), `EdgePriority`.
+- **Eligibility**: `Eligibility.intersect(a, b)`.
+- **Search** (internal until sub-PR 1d): the unique shortest-path DAG from a root set in both
+  directions, anycast pruning to the nearest targets, and the staged canonical single path
+  (tight DAG, best attainable bottleneck under `PREFER_HIGHER_PRIORITY`, hops, edge ids).
+
 ### Streamline sub-PR 1a (breaking; integration branch `streamline`)
 
 The release rebuilds Core in sub-PRs (`dev/design/2026-10-streamline/`). Sub-PR 1a:

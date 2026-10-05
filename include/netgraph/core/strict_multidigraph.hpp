@@ -109,6 +109,11 @@ public:
   [[nodiscard]] bool edge_ok(EdgeId e) const noexcept {
     return edge_allowed_[static_cast<std::size_t>(e)] != 0;
   }
+  // The intersection of two values of one graph (std::invalid_argument for values of different
+  // graphs): an operand when the result equals it (a first, then b), keeping that operand's
+  // uid, so a consumer builds each state once and reuses it; otherwise a new value with a fresh
+  // uid (equal intersections built separately get distinct uids).
+  [[nodiscard]] static Eligibility intersect(const Eligibility& a, const Eligibility& b);
 
 private:
   friend class StrictMultiDiGraph;
