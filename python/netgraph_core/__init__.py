@@ -3,6 +3,12 @@
 All public symbols are re-exported from the compiled ``_netgraph_core`` module so
 downstream users import everything from a single place. Typing shims supplied in
 ``_docs.py`` keep editors happy without affecting runtime behavior.
+
+The streamlined Core is being rebuilt in sub-PRs (``dev/design/2026-10-streamline``):
+this build carries the graph on integer units (``StrictMultiDiGraph``,
+``Eligibility``, ``to_units``, ``as_float``) and the private flow-core entry
+``_netgraph_core._place_global_units``; the ledger, policies, searches and
+evaluators return in the following sub-PRs.
 """
 
 # pyright: reportMissingImports=false
@@ -11,26 +17,10 @@ from importlib.metadata import version
 from typing import TYPE_CHECKING
 
 from _netgraph_core import (
-    Algorithms,
-    Backend,
-    EdgePriority,
-    EdgeSelection,
-    EdgeTieBreak,
-    FlowGraph,
-    FlowIndex,
-    FlowPlacement,
-    FlowPolicy,
-    FlowPolicyConfig,
-    FlowState,
-    FlowSummary,
-    Graph,
-    MinCut,
-    PathAlg,
-    PredDAG,
+    Eligibility,
     StrictMultiDiGraph,
-    profiling_dump,
-    profiling_enabled,
-    profiling_reset,
+    as_float,
+    to_units,
 )
 
 __version__ = version("netgraph-core")
@@ -42,48 +32,16 @@ __version__ = version("netgraph-core")
 # because it turns "unchecked" into "confidently wrong".
 if TYPE_CHECKING:  # pragma: no cover - typing-only
     from ._docs import (  # noqa: I001
-        Algorithms as Algorithms,
-        Backend as Backend,
-        EdgePriority as EdgePriority,
-        EdgeSelection as EdgeSelection,
-        EdgeTieBreak as EdgeTieBreak,
-        FlowGraph as FlowGraph,
-        FlowIndex as FlowIndex,
-        FlowPlacement as FlowPlacement,
-        FlowPolicy as FlowPolicy,
-        FlowPolicyConfig as FlowPolicyConfig,
-        FlowState as FlowState,
-        FlowSummary as FlowSummary,
-        Graph as Graph,
-        MinCut as MinCut,
-        PathAlg as PathAlg,
-        PredDAG as PredDAG,
+        Eligibility as Eligibility,
         StrictMultiDiGraph as StrictMultiDiGraph,
-        profiling_dump as profiling_dump,
-        profiling_enabled as profiling_enabled,
-        profiling_reset as profiling_reset,
+        as_float as as_float,
+        to_units as to_units,
     )
 
 __all__ = [
     "__version__",
     "StrictMultiDiGraph",
-    "FlowGraph",
-    "Graph",
-    "EdgePriority",
-    "EdgeSelection",
-    "EdgeTieBreak",
-    "PathAlg",
-    "FlowPlacement",
-    "FlowPolicy",
-    "FlowPolicyConfig",
-    "PredDAG",
-    "FlowIndex",
-    "FlowState",
-    "MinCut",
-    "FlowSummary",
-    "Backend",
-    "Algorithms",
-    "profiling_enabled",
-    "profiling_dump",
-    "profiling_reset",
+    "Eligibility",
+    "to_units",
+    "as_float",
 ]

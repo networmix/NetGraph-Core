@@ -133,8 +133,8 @@ install-pgo:
 	@rm -rf build/ $(PGO_DIR)
 	@mkdir -p $(PGO_DIR)
 	@$(ENV_MACOS) $(ENV_CC) $(ENV_CXX) CMAKE_ARGS="$(strip $(CMAKE_ARGS) -DNETGRAPH_CORE_PGO_GENERATE=ON -DNETGRAPH_CORE_PGO_DIR=$(PGO_DIR) -DNETGRAPH_CORE_NATIVE=ON)" $(PIP) install -e .
-	@echo "📦 PGO Build Phase 2/3: Collecting profile (running benchmark)..."
-	@$(PYTHON) dev/benchmark_profiling_overhead.py --mesh-size 25 --spf-iters 1000 --flow-iters 200 >/dev/null 2>&1
+	@echo "📦 PGO Build Phase 2/3: Collecting profile (running the Python test suite)..."
+	@$(PYTEST) -q tests/py >/dev/null 2>&1
 	@# Clang: merge raw profiles into .profdata (profile may be in cwd or PGO_DIR)
 	@if ls $(PGO_DIR)/*.profraw >/dev/null 2>&1; then \
 		echo "   Merging Clang profile data..."; \

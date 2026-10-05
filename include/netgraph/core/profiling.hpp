@@ -12,12 +12,8 @@ Usage:
         // ... function body ...
     }
 
-From Python:
-    import netgraph_core as ngc
-    # Run with NGRAPH_CORE_PROFILE=1 python script.py
-    if ngc.profiling_enabled():
-        ngc.profiling_dump()   # Print stats to stderr
-        ngc.profiling_reset()  # Clear stats
+From Python: the accessors return with the diagnostics module of the streamlined API
+(sub-PR 1d); until then the statistics are reachable from C++ only.
 */
 #pragma once
 

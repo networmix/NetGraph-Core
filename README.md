@@ -2,84 +2,62 @@
 
 C++ graph engine for network flow analysis, traffic engineering simulation, and capacity planning.
 
+> **Streamline in progress.** The `streamline` branch rebuilds Core in sub-PRs
+> (`dev/design/2026-10-streamline/`). This build (sub-PR 1a) carries the graph on integer
+> units and the minimum-cost flow core behind a private entry point; the ledger, placement
+> kernels, policies, searches and evaluators return in the following sub-PRs. The previous API
+> (0.12 and earlier) is in git history and on PyPI.
+
 ## Overview
 
-NetGraph-Core provides a specialized graph implementation for networking problems. Key design priorities:
-
-- **Determinism**: Guaranteed reproducible edge ordering by (cost, src, dst).
-- **Flow Modeling**: Native support for multi-commodity flow state, residual tracking, and ECMP/WCMP placement.
-- **Performance**: Immutable CSR (Compressed Sparse Row) adjacency, and zero-copy NumPy views over mutable flow state.
+- **Exact integer amounts**: a graph carries an explicit resolution `q` (a power of two in
+  `[2^-32, 2^32]`); capacities and flows are `int64` units of `q`. Physical values enter only
+  through `to_units` (round half up) and leave through `as_float`.
+- **Positive costs**: edge costs are integers `>= 1`, so the shortest-path DAG is unique.
+- **Stable edge ids**: the public `EdgeId` is the rank of an edge in the order
+  `(src, cost, dst, input)`; `input_index()` maps ids back to input positions.
+- **One flow core**: an integer minimum-cost flow (successive shortest paths with potentials,
+  Dinic phases per cost tier) returning the flow value, the marginal cost curve, per-edge
+  flows, the residual minimum cut and the dual potentials.
 
 ## Core Features
 
-### 1. Graph Representations
+### Graph
 
-- **`StrictMultiDiGraph`**: Immutable directed multigraph using CSR adjacency. Supports parallel edges (multi-graph), essential for network topologies.
-- **`FlowGraph`**: Topology overlay managing mutable flow state, per-flow edge allocations, and residual capacities.
+- **`StrictMultiDiGraph(num_nodes, src, dst, capacity_units, cost, resolution)`**: immutable
+  directed multigraph with forward and reverse CSR adjacency; parallel edges and self-loops are
+  allowed. Validation reports the first defect in a fixed order (unit values, shapes, costs,
+  remaining bounds). Accessors (`capacity_units()`, `cost()`, `edge_src()`, `edge_dst()`,
+  `input_index()`, `row_offsets()`, `in_row_offsets()`, `in_adj_edge_index()`) return read-only
+  NumPy views that keep the graph alive.
+- **`Eligibility`**: immutable, graph-bound static eligibility built by
+  `graph.eligibility(excluded_nodes, excluded_edges)`.
 
-### 2. Network Algorithms
+### Flow core
 
-- **Shortest Paths (SPF)**:
-  - Modified Dijkstra returns a **Predecessor DAG** to capture all equal-cost paths.
-  - Supports **ECMP** (Equal-Cost Multi-Path) routing.
-  - Features **node/edge masking** and **residual-aware tie-breaking**, with a selectable priority value (residual, static capacity, or headroom = residual / capacity).
-
-- **K-Shortest Paths (KSP)**:
-  - Yen's algorithm returning DAG-wrapped paths.
-  - Configurable constraints on cost factors (e.g., paths within 1.5x of optimal).
-
-- **Explicit Paths**:
-  - `PredDAG.from_edges(graph, edges)` builds a path bundle from an operator-supplied
-    edge sequence, usable anywhere a `PredDAG` is accepted; `PredDAG.from_hops(graph, hops)`
-    does the same for routes whose hops use several parallel edges.
-
-- **Max-Flow**:
-  - **Algorithm**: Iterative augmentation using Successive Shortest Path on residual graphs, pushing flow across full ECMP/WCMP DAGs at each step. For `Proportional` placement with `require_capacity=True`, a final residual completion phase augments with reverse arcs so the result is a true maximum flow; the other modes are placement models and may report less.
-  - **Traffic Engineering (TE) Mode**: Routing adapts to residual capacity (progressive fill).
-  - **IP Routing Mode**: Cost-only routing (ECMP/WCMP) ignoring capacity constraints.
-
-- **Analysis**:
-  - **Sensitivity Analysis**: Identifies critical edges by removing each saturated edge and measuring how much total flow is *lost*. Supports `shortest_path` mode to analyze only edges used under ECMP routing (IP/IGP networks) vs. full max-flow (SDN/TE networks).
-  - **Min-Cut**: Computes minimum cuts on residual graphs.
-
-### 3. Flow Policy Engine
-
-Unified configuration object (`FlowPolicy`) that models diverse routing behaviors:
-
-- **Modeling**: Unified configuration for **IP Routing** (static costs) and **Traffic Engineering** (dynamic residuals).
-- **Placement Strategies**:
-  - `EqualBalanced`: **ECMP** (equal splitting) - equal distribution across next-hops and parallel edges.
-  - `Proportional`: **WCMP** (weighted splitting) - distribution proportional to residual capacity.
-- **Lifecycle Management**: Handles demand placement, re-optimization of existing flows, and constraints (path cost, stretch factor, flow counts).
-- **Static (Pinned) Paths**: `FlowPolicy.set_static_paths()` pins a demand to explicit path bundles (MPLS-style). One flow per usable bundle; a bundle with no path surviving the failure masks is *down* and carries nothing, since a pinned path does not reroute.
-
-### 4. Python Integration
-
-- **Zero-Copy**: `FlowState` and `FlowGraph` `*_view()` methods expose C++ buffers as read-only NumPy arrays that track mutation in place. `StrictMultiDiGraph.*_view()` returns copies instead, so the graph's immutability cannot be violated.
-- **Concurrency**: Releases the Python GIL during the long-running algorithms (SPF, KSP, max-flow, placement) to enable threading. `PredDAG.resolve_to_paths` holds the GIL. `batch_max_flow` and `sensitivity_analysis` also use internal worker threads, sized by `NGRAPH_CORE_BATCH_THREADS` / `NGRAPH_CORE_SENSITIVITY_THREADS`.
+`_netgraph_core._place_global_units(graph, view, sources, destinations, elig, cap)` computes
+the minimum-cost flow of the maximum value attainable under `cap` (`None`: uncapped) from a
+source set to a destination set over the eligible edges, on the capacities `view` (units, id
+order), starting from zero flow. It returns `{placed, cost_distribution, edge_flows, min_cut,
+potentials, counters}`. It is private: the recorder and the gates use it; the public evaluators
+built on it arrive with the policy engine.
 
 ## Quick Start
 
 ```python
-import numpy as np
 import netgraph_core as ngc
+import _netgraph_core
 
-# Two parallel paths from node 0 to node 3.
-graph = ngc.StrictMultiDiGraph.from_arrays(
-    num_nodes=4,
-    src=np.array([0, 1, 0, 2], dtype=np.int32),
-    dst=np.array([1, 3, 2, 3], dtype=np.int32),
-    capacity=np.array([10.0, 10.0, 5.0, 5.0], dtype=np.float64),
-    cost=np.array([1, 1, 1, 1], dtype=np.int64),
-    ext_edge_ids=np.arange(4, dtype=np.int64),  # your own stable edge ids
+q = 2.0**-12
+# Two parallel paths from node 0 to node 3 (physical capacities 10 and 5).
+caps = ngc.to_units([10.0, 10.0, 5.0, 5.0], q)
+graph = ngc.StrictMultiDiGraph(4, [0, 1, 0, 2], [1, 3, 2, 3], caps, [1, 1, 2, 2], q)
+
+payload = _netgraph_core._place_global_units(
+    graph, graph.capacity_units(), [0], [3], None, None
 )
-
-algs = ngc.Algorithms(ngc.Backend.cpu())
-handle = algs.build_graph(graph)
-
-total, summary = algs.max_flow(handle, 0, 3)
-print(total)                            # 15.0
-print(summary.min_cut.edges.tolist())   # [0, 1] -- bottleneck edge ids
+print(ngc.as_float(payload["placed"], q))   # 15.0
+print(payload["cost_distribution"])         # [[2, 40960], [4, 20480]]
 ```
 
 ## Installation
@@ -134,10 +112,7 @@ described in [dev/perf/README.md](dev/perf/README.md).
 
 | Variable | Effect |
 | --- | --- |
-| `NGRAPH_CORE_PROFILE=1` | Enable profiling of C++ hot paths (`profiling_dump()` / `profiling_reset()`). |
-| `NGRAPH_CORE_BATCH_THREADS` | Worker threads for `batch_max_flow` (default: hardware concurrency). Set to `1` when calling from your own worker pool. |
-| `NGRAPH_CORE_SENSITIVITY_THREADS` | Worker threads for `sensitivity_analysis` (default: hardware concurrency). |
-| `NGRAPH_CORE_SPF_QUEUE` | Frontier queue for SPF: `heap` forces the reference binary heap, `bucket` prefers the bucket queue where the graph is eligible. Unset (default) selects automatically; both give bit-identical results. Read once per process; for benchmarking and diagnosis. |
+| `NGRAPH_CORE_PROFILE=1` | Enable the C++ profiling scopes (`profiling.hpp`); the Python accessors return with `netgraph_core.diagnostics`. |
 
 ## Requirements
 

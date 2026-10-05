@@ -1,705 +1,606 @@
 /*
-  Pybind11 module exposing NetGraph-Core C++ APIs to Python.
-  - Uses NumPy arrays with zero-copy spans where possible for FlowState/FlowGraph views (read-only)
-  - Returns distances as float64 arrays by default (inf for unreachable); dtype='int64' available
-  - Validates edge/node masks for bool dtype and length
-  - StrictMultiDiGraph view methods return copies (by design) to avoid exposing lifetime
+  Pybind11 module `_netgraph_core`: the graph on integer units and the private flow-core entry.
+
+  - Graph accessors return read-only NumPy views that keep the graph alive (no per-call copy).
+  - Integer inputs (capacities, costs, ids, views, caps) must be integers: Python ints, NumPy
+    integer scalars or integer arrays; floats and bools are rejected with ValueError, never
+    truncated. Values are read without narrowing (WideInts) and validated in the contract's
+    order before any conversion to the C++ types (APPROACH 3, revision 25). Physical values
+    enter only through to_units; the resolution is validated before anything else.
+  - std::invalid_argument from Core maps to ValueError.
+  - _place_global_units is the recorder's private entry point (APPROACH 2.2): it returns the
+    payload as a dict of Python ints and lists.
 */
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
-#include <cstring>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
-#include "netgraph/core/k_shortest_paths.hpp"
 #include "netgraph/core/max_flow.hpp"
-#include "netgraph/core/flow_state.hpp"
-#include "netgraph/core/shortest_paths.hpp"
 #include "netgraph/core/strict_multidigraph.hpp"
 #include "netgraph/core/types.hpp"
-#include "netgraph/core/flow_graph.hpp"
-#include "netgraph/core/flow.hpp"
-#include "netgraph/core/flow_policy.hpp"
-#include "netgraph/core/backend.hpp"
-#include "netgraph/core/algorithms.hpp"
-#include "netgraph/core/options.hpp"
-#include "netgraph/core/profiling.hpp"
 
 namespace py = pybind11;
 using namespace netgraph::core;
 
-// Helper opaque wrappers (defined at file scope to ensure stable type identity)
-struct PyBackend { BackendPtr impl; };
-struct PyGraph { GraphHandle handle; py::object keep_alive; std::int32_t num_nodes; std::int32_t num_edges; };
-
-// Helpers to check NumPy arrays
 namespace {
-// Small helper: copy a span into a new NumPy array of the same dtype.
+
+// Read-only NumPy view of a span owned by `owner`.
 template <typename T>
-py::array_t<T> copy_to_numpy(std::span<const T> s) {
-  py::array_t<T> arr(s.size());
-  if (!s.empty()) std::memcpy(arr.mutable_data(), s.data(), s.size()*sizeof(T));
+py::array readonly_view(std::span<const T> s, const py::handle& owner, const py::dtype& dtype) {
+  py::array arr(dtype, {static_cast<py::ssize_t>(s.size())}, {static_cast<py::ssize_t>(sizeof(T))},
+                s.data(), owner);
+  py::detail::array_proxy(arr.ptr())->flags &= ~py::detail::npy_api::NPY_ARRAY_WRITEABLE_;
   return arr;
 }
 
-// Owns a bool[] buffer and exposes a const span view onto it.
-struct BoolSpan {
-  std::unique_ptr<bool[]> buf;
-  std::span<const bool> view;
+template <typename T>
+py::array readonly_view(std::span<const T> s, const py::handle& owner) {
+  return readonly_view(s, owner, py::dtype::of<T>());
+}
+
+bool is_bool(const py::handle& obj) {
+  return PyBool_Check(obj.ptr()) || py::isinstance(obj, py::module_::import("numpy").attr("bool_"));
+}
+
+// The Python int of an integer-like object (a Python int or a NumPy integer scalar); bools and
+// everything else are rejected.
+py::object python_int(const py::handle& item, const std::string& what) {
+  if (is_bool(item) || !PyIndex_Check(item.ptr())) {
+    throw py::value_error(what + " must be an integer (got " +
+                          std::string(py::str(py::type::of(item).attr("__name__"))) + ")");
+  }
+  py::object idx = py::reinterpret_steal<py::object>(PyNumber_Index(item.ptr()));
+  if (!idx) throw py::error_already_set();
+  return idx;
+}
+
+// One integer of [lo, hi] (scalar arguments).
+std::int64_t integer_value(const py::handle& item, std::int64_t lo, std::int64_t hi, const std::string& what) {
+  py::object idx = python_int(item, what);
+  int overflow = 0;
+  const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
+  if (overflow != 0 || v < lo || v > hi) {
+    throw py::value_error(what + " = " + std::string(py::str(idx)) + " is out of range [" +
+                          std::to_string(lo) + ", " + std::to_string(hi) + "]");
+  }
+  return static_cast<std::int64_t>(v);
+}
+
+// A 1-D integer sequence read without narrowing: every entry's int64 value where it fits, and
+// the sign of the overflow where it does not (+1 above INT64_MAX, -1 below INT64_MIN). Only type
+// defects raise here (a non-integer, a bool, a float array, a non-sequence); every value bound
+// is checked by the caller in the contract's order, so the reported error does not depend on
+// the representation of the input (APPROACH 3, revision 25).
+struct WideInts {
+  py::object source;
+  std::vector<std::int64_t> value;
+  std::vector<std::int8_t> overflow;  // empty when no entry overflows
+  [[nodiscard]] std::size_t size() const noexcept { return value.size(); }
+  [[nodiscard]] int sign(std::size_t i) const noexcept { return overflow.empty() ? 0 : overflow[i]; }
+  // The entry as Python prints it (exact also beyond int64).
+  [[nodiscard]] std::string text(std::size_t i) const {
+    if (sign(i) == 0) return std::to_string(value[i]);
+    return std::string(py::str(source[py::int_(i)]));
+  }
+  [[nodiscard]] bool in(std::size_t i, std::int64_t lo, std::int64_t hi) const noexcept {
+    return sign(i) == 0 && value[i] >= lo && value[i] <= hi;
+  }
+  template <typename T>
+  [[nodiscard]] std::vector<T> narrow() const {  // after every bound was checked
+    return std::vector<T>(value.begin(), value.end());
+  }
 };
 
-// Validate 1-D C-contig NumPy bool array and deep-copy into bool[].
-static BoolSpan to_bool_span_from_numpy(py::object obj, std::size_t expected_len, const char* what) {
-  BoolSpan out;
-  if (obj.is_none()) return out;  // empty span
-  py::array arr = obj.cast<py::array>();
-  if (!(arr.flags() & py::array::c_style)) {
-    throw py::type_error(std::string(what) + " must be C-contiguous");
+bool not_a_sequence(const py::handle& obj) {
+  return py::isinstance<py::str>(obj) || py::isinstance<py::bytes>(obj) || !py::isinstance<py::sequence>(obj);
+}
+
+WideInts wide_integers(const py::handle& obj, const char* name) {
+  WideInts out;
+  out.source = py::reinterpret_borrow<py::object>(obj);
+  if (py::isinstance<py::array>(obj)) {
+    auto arr = py::reinterpret_borrow<py::array>(obj);
+    if (arr.ndim() != 1) {
+      throw py::value_error(std::string(name) + " must be a 1-D array (got " + std::to_string(arr.ndim()) +
+                            " dimensions)");
+    }
+    const char kind = arr.dtype().kind();
+    if (kind != 'i' && kind != 'u') {
+      throw py::value_error(std::string(name) + " entries must be integers (got dtype " +
+                            std::string(py::str(arr.dtype())) + ")");
+    }
+    out.value.reserve(static_cast<std::size_t>(arr.size()));
+    if (kind == 'u' && arr.itemsize() == 8) {
+      auto u = py::array_t<std::uint64_t, py::array::forcecast>::ensure(arr);
+      auto r = u.unchecked<1>();
+      constexpr auto kMax = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+      for (py::ssize_t i = 0; i < r.shape(0); ++i) {
+        if (r(i) > kMax) {
+          if (out.overflow.empty()) out.overflow.assign(static_cast<std::size_t>(r.shape(0)), 0);
+          out.overflow[static_cast<std::size_t>(i)] = 1;
+          out.value.push_back(std::numeric_limits<std::int64_t>::max());
+        } else {
+          out.value.push_back(static_cast<std::int64_t>(r(i)));
+        }
+      }
+      return out;
+    }
+    auto a = py::array_t<std::int64_t, py::array::forcecast>::ensure(arr);
+    auto r = a.unchecked<1>();
+    for (py::ssize_t i = 0; i < r.shape(0); ++i) out.value.push_back(r(i));
+    return out;
   }
-  auto b = arr.request();
-  if (b.ndim != 1 || b.format != py::format_descriptor<bool>::format()) {
-    throw py::type_error(std::string(what) + " must be 1-D bool");
+  if (not_a_sequence(obj)) throw py::value_error(std::string(name) + " must be a sequence of integers");
+  auto seq = py::reinterpret_borrow<py::sequence>(obj);
+  const std::size_t n = seq.size();
+  out.value.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    py::object idx = python_int(seq[i], std::string(name) + "[" + std::to_string(i) + "]");
+    int overflow = 0;
+    const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
+    if (overflow != 0) {
+      if (out.overflow.empty()) out.overflow.assign(n, 0);
+      out.overflow[i] = static_cast<std::int8_t>(overflow);
+      out.value.push_back(overflow > 0 ? std::numeric_limits<std::int64_t>::max()
+                                       : std::numeric_limits<std::int64_t>::min());
+    } else {
+      out.value.push_back(static_cast<std::int64_t>(v));
+    }
   }
-  if (static_cast<std::size_t>(b.shape[0]) != expected_len) {
-    throw py::type_error(std::string(what) + " length must equal " + std::to_string(expected_len));
-  }
-  out.buf.reset(new bool[expected_len]);
-  // NumPy bool_ uses 1 byte; C++ bool is 1 byte on supported platforms.
-  std::memcpy(out.buf.get(), b.ptr, expected_len * sizeof(bool));
-  out.view = std::span<const bool>(out.buf.get(), expected_len);
   return out;
 }
-} // namespace
 
-// Helpers to check NumPy arrays
-template <typename T>
-static std::span<const T> as_span(const py::array& arr, const char* name) {
-  if (!py::isinstance<py::array_t<T>>(arr)) {
-    throw py::type_error(std::string(name) + ": expected numpy array of correct dtype");
-  }
-  if (!(arr.flags() & py::array::c_style)) {
-    throw py::type_error(std::string(name) + ": array must be C-contiguous (use np.ascontiguousarray)");
-  }
-  auto buf = arr.request();
-  if (buf.ndim != 1) {
-    throw py::type_error(std::string(name) + ": expected 1-D array");
-  }
-  return std::span<const T>(static_cast<const T*>(buf.ptr), static_cast<std::size_t>(buf.size));
+// An entry that is itself a sequence or an array of rank >= 1 (a shape defect of its argument).
+bool is_nested(const py::handle& item) {
+  if (py::isinstance<py::array>(item)) return py::reinterpret_borrow<py::array>(item).ndim() >= 1;
+  return !py::isinstance<py::str>(item) && !py::isinstance<py::bytes>(item) && PySequence_Check(item.ptr()) != 0;
 }
 
+// The shape step: the length of a rank-1 integer sequence argument. A NumPy array of another
+// rank (0-D included), a nested sequence or a non-sequence is a shape defect. Entry types and
+// values are not read here; their steps come later.
+std::size_t sequence_length(const py::handle& obj, const char* name) {
+  if (py::isinstance<py::array>(obj)) {
+    auto arr = py::reinterpret_borrow<py::array>(obj);
+    if (arr.ndim() != 1) {
+      throw py::value_error(std::string(name) + " must be a 1-D array (got " + std::to_string(arr.ndim()) +
+                            " dimensions)");
+    }
+    return static_cast<std::size_t>(arr.size());
+  }
+  if (not_a_sequence(obj)) {
+    throw py::value_error(std::string(name) + " must be a 1-D sequence of integers (got " +
+                          std::string(py::str(py::type::of(obj).attr("__name__"))) + ")");
+  }
+  auto seq = py::reinterpret_borrow<py::sequence>(obj);
+  const std::size_t n = seq.size();
+  for (std::size_t i = 0; i < n; ++i) {
+    if (is_nested(seq[i])) {
+      throw py::value_error(std::string(name) + " must be a 1-D sequence of integers (entry " + std::to_string(i) +
+                            " is a sequence)");
+    }
+  }
+  return n;
+}
+
+// The unit-value step on the capacity argument whatever its shape (the shape step comes next):
+// every integer entry it holds must lie in [0, 2^62). A NumPy array is read flattened; nested
+// entries of a Python sequence and a non-integer non-sequence are left to the shape step.
+void check_unit_values(const py::handle& capacity_units) {
+  const auto out_of_domain = [](const std::string& what, const std::string& value) {
+    return py::value_error(what + " = " + value + " is outside the units domain [0, 2^62)");
+  };
+  if (py::isinstance<py::array>(capacity_units)) {
+    py::object flat = capacity_units.attr("ravel")();
+    const auto w = wide_integers(flat, "capacity_units");
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      if (!w.in(i, 0, kDomainLimit - 1)) throw out_of_domain("capacity_units[" + std::to_string(i) + "]", w.text(i));
+    }
+    return;
+  }
+  if (!not_a_sequence(capacity_units)) {
+    auto seq = py::reinterpret_borrow<py::sequence>(capacity_units);
+    for (std::size_t i = 0; i < seq.size(); ++i) {
+      py::object item = seq[i];
+      if (is_nested(item)) continue;
+      const std::string what = "capacity_units[" + std::to_string(i) + "]";
+      py::object idx = python_int(item, what);
+      int overflow = 0;
+      const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
+      if (overflow != 0 || v < 0 || v >= kDomainLimit) throw out_of_domain(what, std::string(py::str(idx)));
+    }
+    return;
+  }
+  if (!is_bool(capacity_units) && PyIndex_Check(capacity_units.ptr())) {
+    py::object idx = python_int(capacity_units, "capacity_units");
+    int overflow = 0;
+    const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
+    if (overflow != 0 || v < 0 || v >= kDomainLimit) throw out_of_domain("capacity_units", std::string(py::str(idx)));
+  }
+}
+
+// Validates a resolution (a power of two in [2^-32, 2^32]) and returns its exponent.
+int resolution_exponent(double resolution) {
+  (void)as_float(0, resolution);  // throws the resolution message
+  return std::ilogb(resolution);
+}
+
+// Physical numbers as a float64 array (or a 0-d array for a scalar); bools and strings rejected.
+py::array_t<double> physical_array(const py::handle& x) {
+  if (is_bool(x) || py::isinstance<py::str>(x) || py::isinstance<py::bytes>(x)) {
+    throw py::value_error("to_units takes physical numbers (a float or an array of floats)");
+  }
+  auto np = py::module_::import("numpy");
+  py::array raw = np.attr("asarray")(x);
+  const char kind = raw.dtype().kind();
+  if (kind != 'f' && kind != 'i' && kind != 'u') {
+    throw py::value_error("to_units takes physical numbers (got dtype " + std::string(py::str(raw.dtype())) + ")");
+  }
+  return py::array_t<double, py::array::c_style | py::array::forcecast>::ensure(raw);
+}
+
+// x * 2^k for an unbounded Python int, correctly rounded: Python's int shift and int true
+// division are exact or correctly rounded, so only a result beyond the finite doubles fails.
+double scaled_python_int(const py::object& x, int k) {
+  try {
+    py::object r;
+    if (k >= 0) {
+      r = py::float_(x.attr("__lshift__")(py::int_(k)));
+    } else {
+      r = x.attr("__truediv__")(py::int_(1).attr("__lshift__")(py::int_(-k)));
+    }
+    return r.cast<double>();
+  } catch (py::error_already_set& e) {
+    if (e.matches(PyExc_OverflowError)) {
+      throw py::value_error("as_float: " + std::string(py::str(x)) +
+                            " units times the resolution exceed the largest finite double");
+    }
+    throw;
+  }
+}
+
+// One Amount to a physical double; the resolution's exponent k is already validated.
+double amount_as_float(const py::handle& item, int k, double resolution) {
+  py::object idx = python_int(item, "as_float: x");
+  int overflow = 0;
+  const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
+  if (overflow == 0) return as_float(static_cast<std::int64_t>(v), resolution);
+  return scaled_python_int(idx, k);
+}
+
+std::shared_ptr<StrictMultiDiGraph> make_graph(const py::object& num_nodes, const py::object& src,
+                                               const py::object& dst, const py::object& capacity_units,
+                                               const py::object& cost, double resolution) {
+  // APPROACH 3 (revision 25): the resolution, the unit values, the shapes, zero or negative
+  // costs, the remaining bounds (ids in range, then the sums); every value is read without
+  // narrowing, and the messages are the constructor's, which re-checks the same order.
+  (void)resolution_exponent(resolution);
+  check_unit_values(capacity_units);
+  // The shapes: num_nodes, then every array argument rank 1 (in signature order), then equal
+  // lengths; no entry of src, dst or cost is read before the cost step.
+  const auto n = integer_value(num_nodes, 0, std::numeric_limits<std::int32_t>::max(), "num_nodes");
+  const std::size_t m = sequence_length(src, "src");
+  const std::size_t md = sequence_length(dst, "dst");
+  const std::size_t mu = sequence_length(capacity_units, "capacity_units");
+  const std::size_t mc = sequence_length(cost, "cost");
+  if (md != m || mu != m || mc != m) {
+    throw py::value_error("src, dst, capacity_units and cost must have the same length (got " +
+                          std::to_string(m) + ", " + std::to_string(md) + ", " + std::to_string(mu) + ", " +
+                          std::to_string(mc) + ")");
+  }
+  const auto cap = wide_integers(capacity_units, "capacity_units");  // rank 1, values checked
+  if (m > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+    throw py::value_error("the number of edges exceeds INT32_MAX (array length)");
+  }
+  const auto w = wide_integers(cost, "cost");
+  for (std::size_t i = 0; i < m; ++i) {
+    if (w.sign(i) < 0 || (w.sign(i) == 0 && w.value[i] < 1)) {
+      throw py::value_error("cost[" + std::to_string(i) + "] = " + w.text(i) + ": costs must be positive (cost >= 1)");
+    }
+  }
+  const auto s = wide_integers(src, "src");
+  const auto d = wide_integers(dst, "dst");
+  for (std::size_t i = 0; i < m; ++i) {
+    if (!s.in(i, 0, n - 1) || !d.in(i, 0, n - 1)) {
+      throw py::value_error("edge " + std::to_string(i) + ": endpoint (" + s.text(i) + ", " + d.text(i) +
+                            ") out of node range [0, " + std::to_string(n) + ")");
+    }
+  }
+  constexpr auto kLimit = static_cast<std::uint64_t>(kDomainLimit);
+  std::uint64_t cap_sum = 0;
+  std::uint64_t cost_sum = 0;
+  for (std::size_t i = 0; i < m; ++i) {
+    cap_sum += static_cast<std::uint64_t>(cap.value[i]);  // each below 2^62: no wrap before the check
+    if (cap_sum >= kLimit) {
+      throw py::value_error("the sum of all capacities reaches the bound of the units domain (2^62 units)");
+    }
+    if (w.sign(i) > 0 || static_cast<std::uint64_t>(w.value[i]) >= kLimit - cost_sum) {
+      throw py::value_error("the sum of all edge costs reaches the bound 2^62: path costs would overflow int64");
+    }
+    cost_sum += static_cast<std::uint64_t>(w.value[i]);
+  }
+  auto cap_v = cap.narrow<Amount>();
+  auto cost_v = w.narrow<Cost>();
+  auto src_v = s.narrow<NodeId>();
+  auto dst_v = d.narrow<NodeId>();
+  py::gil_scoped_release release;
+  return std::make_shared<StrictMultiDiGraph>(static_cast<std::int32_t>(n), src_v, dst_v, cap_v, cost_v, resolution);
+}
+
+py::list int_list(const std::vector<std::int64_t>& v) {
+  py::list out(v.size());
+  for (std::size_t i = 0; i < v.size(); ++i) out[i] = py::int_(v[i]);
+  return out;
+}
+
+} // namespace
+
 PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
-  m.doc() = "NetGraph-Core C++ bindings";
+  m.doc() = "NetGraph-Core: the graph on integer units and the minimum-cost flow core";
 
-  py::enum_<EdgeTieBreak>(m, "EdgeTieBreak")
-      .value("DETERMINISTIC", EdgeTieBreak::Deterministic)
-      .value("PREFER_HIGHER_RESIDUAL", EdgeTieBreak::PreferHigherResidual);
+  m.def(
+      "to_units",
+      [](const py::object& x, double resolution) -> py::object {
+        (void)resolution_exponent(resolution);  // before the shape: an empty array is no exemption
+        auto arr = physical_array(x);
+        if (arr.ndim() == 0) return py::int_(to_units(*arr.data(), resolution));
+        if (arr.ndim() != 1) throw py::value_error("to_units takes a float or a 1-D array of floats");
+        py::array_t<std::int64_t> out(arr.size());
+        auto in = arr.unchecked<1>();
+        auto o = out.mutable_unchecked<1>();
+        for (py::ssize_t i = 0; i < in.shape(0); ++i) o(i) = to_units(in(i), resolution);
+        return std::move(out);
+      },
+      py::arg("x"), py::arg("resolution"),
+      "Physical value(s) to units of the resolution q, rounding half up: an int for a scalar, an\n"
+      "int64 array for an array. NaN, infinity, negative values and results at or above 2^62\n"
+      "units raise ValueError; q must be a power of two in [2^-32, 2^32].");
 
-  py::enum_<EdgePriority>(m, "EdgePriority")
-      .value("RESIDUAL", EdgePriority::Residual)
-      .value("CAPACITY", EdgePriority::Capacity)
-      .value("HEADROOM", EdgePriority::Headroom);
+  m.def(
+      "as_float",
+      [](const py::object& x, double resolution) -> py::object {
+        const int k = resolution_exponent(resolution);  // before the shape (review-1a D3)
+        const bool array = py::isinstance<py::array>(x) && py::reinterpret_borrow<py::array>(x).ndim() > 0;
+        if (array || !not_a_sequence(x)) {
+          const auto v = wide_integers(x, "as_float: x");
+          py::array_t<double> out(static_cast<py::ssize_t>(v.size()));
+          auto o = out.mutable_unchecked<1>();
+          for (std::size_t i = 0; i < v.size(); ++i) {
+            o(static_cast<py::ssize_t>(i)) = v.sign(i) == 0 ? as_float(v.value[i], resolution)
+                                                            : amount_as_float(v.source[py::int_(i)], k, resolution);
+          }
+          return std::move(out);
+        }
+        return py::float_(amount_as_float(x, k, resolution));
+      },
+      py::arg("x"), py::arg("resolution"),
+      "Units to physical value(s): x * q, correctly rounded (exact below 2^53 units). An int, of\n"
+      "any size, gives a float, an integer array a float64 array; a result beyond the finite\n"
+      "doubles raises ValueError; q must be a power of two in [2^-32, 2^32].");
 
-  py::class_<EdgeSelection>(m, "EdgeSelection")
-      .def(py::init<>())
-      .def(py::init([](bool multi_edge, bool require_capacity, EdgeTieBreak tie_break, EdgePriority priority){
-        EdgeSelection s; s.multi_edge = multi_edge; s.require_capacity = require_capacity; s.tie_break = tie_break; s.priority = priority; return s;
-      }),
-        py::kw_only(),
-        py::arg("multi_edge") = true,
-        py::arg("require_capacity") = false,
-        py::arg("tie_break") = EdgeTieBreak::Deterministic,
-        py::arg("priority") = EdgePriority::Residual)
-      .def_readwrite("multi_edge", &EdgeSelection::multi_edge)
-      .def_readwrite("require_capacity", &EdgeSelection::require_capacity)
-      .def_readwrite("tie_break", &EdgeSelection::tie_break)
-      .def_readwrite("priority", &EdgeSelection::priority);
-
-  py::enum_<FlowPlacement>(m, "FlowPlacement")
-      .value("PROPORTIONAL", FlowPlacement::Proportional)
-      .value("EQUAL_BALANCED", FlowPlacement::EqualBalanced)
-      .value("EQUAL_BALANCED_LOSSY", FlowPlacement::EqualBalancedLossy);
-
-  py::class_<StrictMultiDiGraph>(m, "StrictMultiDiGraph")
-      .def_static(
-          "from_arrays",
-          [](std::int32_t num_nodes,
-             py::array src, py::array dst,
-             py::array capacity, py::array cost,
-             py::array ext_edge_ids) {
-            // public API: src/dst are int32; pass through as int32 to core
-            auto src_s = as_span<std::int32_t>(src, "src");
-            auto dst_s = as_span<std::int32_t>(dst, "dst");
-            if (src_s.size() != dst_s.size()) throw py::type_error("src and dst must have the same length");
-            auto cap_s = as_span<double>(capacity, "capacity");
-            // Cost dtype must be int64 to match internal Cost type
-            auto cost_s = as_span<std::int64_t>(cost, "cost");
-            // ext_edge_ids required: maps internal edge indices to caller's stable IDs
-            auto ext_s = as_span<std::int64_t>(ext_edge_ids, "ext_edge_ids");
-            return StrictMultiDiGraph::from_arrays(num_nodes,
-                                                  src_s,
-                                                  dst_s,
-                                                  cap_s, cost_s, ext_s);
+  py::class_<Eligibility, std::shared_ptr<Eligibility>>(
+      m, "Eligibility",
+      "Immutable, graph-bound static eligibility: dense node and edge flags. Built by\n"
+      "StrictMultiDiGraph.eligibility(excluded_nodes, excluded_edges).")
+      .def("graph_uid", &Eligibility::graph_uid, "uid of the graph this value belongs to")
+      .def("uid", &Eligibility::uid, "0 for the all-allowed value, a fresh uid otherwise")
+      .def(
+          "node_allowed",
+          [](const py::object& self) {
+            const auto& el = self.cast<const Eligibility&>();
+            return readonly_view(el.node_allowed(), self, py::dtype("bool"));
           },
-          py::arg("num_nodes"), py::arg("src"), py::arg("dst"), py::arg("capacity"), py::arg("cost"),
-          py::arg("ext_edge_ids"))
+          "bool[N] read-only view")
+      .def(
+          "edge_allowed",
+          [](const py::object& self) {
+            const auto& el = self.cast<const Eligibility&>();
+            return readonly_view(el.edge_allowed(), self, py::dtype("bool"));
+          },
+          "bool[E] read-only view (not excluded and both endpoints allowed)");
+
+  py::class_<StrictMultiDiGraph, std::shared_ptr<StrictMultiDiGraph>>(
+      m, "StrictMultiDiGraph",
+      "Immutable directed multigraph on integer units. Edges are given in input order; the\n"
+      "public EdgeId is the rank in the stable order (src, cost, dst, input), input_index()[e]\n"
+      "is the input position of e, and every other per-edge array is in id order. Costs are\n"
+      "positive integers; capacities are int64 units of the explicit resolution q (a power of\n"
+      "two in [2^-32, 2^32]); physical capacities enter through to_units.")
+      .def(py::init(&make_graph), py::arg("num_nodes"), py::arg("src"), py::arg("dst"),
+           py::arg("capacity_units"), py::arg("cost"), py::arg("resolution"),
+           "Validates, in order, and reports the first defect as ValueError: the resolution (a power of\n"
+           "two in [2^-32, 2^32]), the unit values (every capacity in [0, 2^62)), the array shapes,\n"
+           "zero or negative costs (rule 28), the remaining bounds (endpoints in range, then the\n"
+           "capacity and cost sums below 2^62). Integers are read without narrowing, so the error\n"
+           "does not depend on how the input is represented (APPROACH 3).")
+      .def("uid", &StrictMultiDiGraph::uid, "process-unique id (never reused)")
+      .def("resolution", &StrictMultiDiGraph::resolution, "the resolution q (units of capacity)")
       .def("num_nodes", &StrictMultiDiGraph::num_nodes)
       .def("num_edges", &StrictMultiDiGraph::num_edges)
-      .def("max_cost", &StrictMultiDiGraph::max_cost)
-      .def("cost_gcd", &StrictMultiDiGraph::cost_gcd)
-      .def("capacity_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<double>(g.capacity_view()); })
-      .def("edge_src_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<std::int32_t>(g.edge_src_view()); })
-      .def("edge_dst_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<std::int32_t>(g.edge_dst_view()); })
-      .def("ext_edge_ids_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<std::int64_t>(g.ext_edge_ids_view()); })
-      .def("cost_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<std::int64_t>(g.cost_view()); })
-      .def("row_offsets_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<std::int32_t>(g.row_offsets_view()); })
-      .def("col_indices_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<std::int32_t>(g.col_indices_view()); })
-      .def("adj_edge_index_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<std::int32_t>(g.adj_edge_index_view()); })
-      .def("in_row_offsets_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<std::int32_t>(g.in_row_offsets_view()); })
-      .def("in_col_indices_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<std::int32_t>(g.in_col_indices_view()); })
-      .def("in_adj_edge_index_view", [](const StrictMultiDiGraph& g){ return copy_to_numpy<std::int32_t>(g.in_adj_edge_index_view()); });
-
-  // Backend and Algorithms
-
-  // Opaque wrapper types
-  py::class_<PyBackend>(m, "Backend")
-      .def_static("cpu", [](){ return PyBackend{ make_cpu_backend() }; });
-
-  py::class_<PyGraph>(m, "Graph")
-      // Opaque holder; constructed via Algorithms.build_graph
-      .def_property_readonly("num_nodes", [](const PyGraph& pg){ return pg.num_nodes; })
-      .def_property_readonly("num_edges", [](const PyGraph& pg){ return pg.num_edges; });
-
-  py::class_<Algorithms, std::shared_ptr<Algorithms>>(m, "Algorithms")
-      .def(py::init([](const PyBackend& b){ return std::make_shared<Algorithms>(b.impl); }), py::arg("backend"))
-      .def("build_graph", [](const Algorithms& algs, py::object graph_obj){
-        // graph_obj is py::object so PyGraph can keep it alive; check the type
-        // explicitly, since a bare .cast<> failure surfaces as an opaque
-        // "RuntimeError: Unable to cast ... to C++ type '?'".
-        if (!py::isinstance<StrictMultiDiGraph>(graph_obj)) {
-          throw py::type_error("build_graph: graph must be a StrictMultiDiGraph");
-        }
-        const StrictMultiDiGraph& g = graph_obj.cast<const StrictMultiDiGraph&>();
-        auto gh = algs.build_graph(g);
-        // Keep the Python graph object alive alongside the handle when
-        // referencing a non-owned graph instance.
-        return PyGraph{ gh, graph_obj, g.num_nodes(), g.num_edges() };
-      }, py::arg("graph"))
-      .def("spf", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src,
-                       py::object dst, py::object selection_obj, py::object residual_obj,
-                       py::object node_mask, py::object edge_mask, bool multipath, std::string dtype) -> py::tuple {
-        if (src < 0 || src >= pg.num_nodes) throw py::value_error("src out of range");
-        SpfOptions opts; if (!selection_obj.is_none()) opts.selection = py::cast<EdgeSelection>(selection_obj);
-        if (!dst.is_none()) { auto d = py::cast<std::int32_t>(dst); if (d < 0 || d >= pg.num_nodes) throw py::value_error("dst out of range"); opts.dst = static_cast<NodeId>(d); }
-        std::vector<double> residual_vec;
-        if (!residual_obj.is_none()) {
-          auto arr = py::cast<py::array>(residual_obj);
-          if (!(arr.flags() & py::array::c_style)) throw py::type_error("residual must be C-contiguous (np.ascontiguousarray)");
-          auto buf = arr.request();
-          if (buf.ndim != 1 || buf.format != py::format_descriptor<double>::format()) throw py::type_error("residual must be 1-D float64");
-          // Check length here so this matches the TypeError raised by every other
-          // length check (masks, FlowState residual); otherwise the core throws
-          // std::invalid_argument, which reaches Python as ValueError.
-          if (static_cast<std::int32_t>(buf.shape[0]) != pg.num_edges) {
-            throw py::type_error("residual length must equal " + std::to_string(pg.num_edges));
-          }
-          residual_vec.resize(static_cast<std::size_t>(buf.shape[0]));
-          std::memcpy(residual_vec.data(), buf.ptr, residual_vec.size()*sizeof(double));
-          opts.residual = std::span<const double>(residual_vec.data(), residual_vec.size());
-        }
-        auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(pg.num_nodes), "node_mask");
-        auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(pg.num_edges), "edge_mask");
-        opts.node_mask = node_bs.view;
-        opts.edge_mask = edge_bs.view;
-        opts.multipath = multipath;
-        py::gil_scoped_release rel; auto res = algs.spf(pg.handle, src, opts); py::gil_scoped_acquire acq;
-        auto maxc = std::numeric_limits<Cost>::max();
-        if (dtype == "int64") {
-          py::array_t<std::int64_t> dist_arr(res.first.size());
-          auto* out = dist_arr.mutable_data();
-          for (std::size_t i=0;i<res.first.size();++i) out[i] = (res.first[i]==maxc) ? static_cast<std::int64_t>(maxc) : static_cast<std::int64_t>(res.first[i]);
-          return py::make_tuple(std::move(dist_arr), std::move(res.second));
-        } else if (dtype == "float64") {
-          py::array_t<double> dist_arr(res.first.size());
-          auto* out = dist_arr.mutable_data();
-          for (std::size_t i=0;i<res.first.size();++i) out[i] = (res.first[i]==maxc) ? std::numeric_limits<double>::infinity() : static_cast<double>(res.first[i]);
-          return py::make_tuple(std::move(dist_arr), std::move(res.second));
-        } else {
-          throw py::value_error("dtype must be 'float64' or 'int64'");
-        }
-      }, py::arg("graph"), py::arg("src"), py::arg("dst") = py::none(), py::kw_only(), py::arg("selection") = py::none(), py::arg("residual") = py::none(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none(), py::arg("multipath") = true, py::arg("dtype") = "float64")
-      .def("spf_to", [](const Algorithms& algs, const PyGraph& pg, std::int32_t dst,
-                          py::object selection_obj, py::object residual_obj,
-                          py::object node_mask, py::object edge_mask, bool multipath,
-                          py::object fanout_obj, std::string dtype) -> py::tuple {
-        if (dst < 0 || dst >= pg.num_nodes) throw py::value_error("dst out of range");
-        SpfToOptions opts; if (!selection_obj.is_none()) opts.selection = py::cast<EdgeSelection>(selection_obj);
-        std::vector<double> residual_vec;
-        if (!residual_obj.is_none()) {
-          auto arr = py::cast<py::array>(residual_obj);
-          if (!(arr.flags() & py::array::c_style)) throw py::type_error("residual must be C-contiguous (np.ascontiguousarray)");
-          auto buf = arr.request();
-          if (buf.ndim != 1 || buf.format != py::format_descriptor<double>::format()) throw py::type_error("residual must be 1-D float64");
-          if (static_cast<std::int32_t>(buf.shape[0]) != pg.num_edges) {
-            throw py::type_error("residual length must equal " + std::to_string(pg.num_edges));
-          }
-          residual_vec.resize(static_cast<std::size_t>(buf.shape[0]));
-          std::memcpy(residual_vec.data(), buf.ptr, residual_vec.size()*sizeof(double));
-          opts.residual = std::span<const double>(residual_vec.data(), residual_vec.size());
-        }
-        std::vector<EdgeId> fanout_vec;
-        if (!fanout_obj.is_none()) {
-          for (auto item : py::iterable(fanout_obj)) {
-            auto e = py::cast<std::int64_t>(item);
-            if (e < 0 || e >= pg.num_edges) throw py::value_error("fanout edge id out of range");
-            fanout_vec.push_back(static_cast<EdgeId>(e));
-          }
-          opts.fanout_edges = std::span<const EdgeId>(fanout_vec.data(), fanout_vec.size());
-        }
-        auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(pg.num_nodes), "node_mask");
-        auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(pg.num_edges), "edge_mask");
-        opts.node_mask = node_bs.view;
-        opts.edge_mask = edge_bs.view;
-        opts.multipath = multipath;
-        py::gil_scoped_release rel; auto res = algs.spf_to(pg.handle, dst, opts); py::gil_scoped_acquire acq;
-        auto maxc = std::numeric_limits<Cost>::max();
-        if (dtype == "int64") {
-          py::array_t<std::int64_t> dist_arr(res.first.size());
-          auto* out = dist_arr.mutable_data();
-          for (std::size_t i=0;i<res.first.size();++i) out[i] = (res.first[i]==maxc) ? static_cast<std::int64_t>(maxc) : static_cast<std::int64_t>(res.first[i]);
-          return py::make_tuple(std::move(dist_arr), std::move(res.second));
-        } else if (dtype == "float64") {
-          py::array_t<double> dist_arr(res.first.size());
-          auto* out = dist_arr.mutable_data();
-          for (std::size_t i=0;i<res.first.size();++i) out[i] = (res.first[i]==maxc) ? std::numeric_limits<double>::infinity() : static_cast<double>(res.first[i]);
-          return py::make_tuple(std::move(dist_arr), std::move(res.second));
-        } else {
-          throw py::value_error("dtype must be 'float64' or 'int64'");
-        }
-      }, py::arg("graph"), py::arg("dst"), py::kw_only(), py::arg("selection") = py::none(), py::arg("residual") = py::none(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none(), py::arg("multipath") = true, py::arg("fanout_edges") = py::none(), py::arg("dtype") = "float64",
-         "Shortest paths from every node to dst (reverse SPF). Returns (distances_to_dst, dag); the DAG is forward-oriented and valid for placement from any node toward dst. fanout_edges are added to the DAG regardless of cost (see shortest_paths.hpp).")
-      .def("ksp", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src, std::int32_t dst,
-                       int k, py::object max_cost_factor, bool unique, py::object node_mask, py::object edge_mask, std::string dtype){
-        if (src < 0 || src >= pg.num_nodes || dst < 0 || dst >= pg.num_nodes) throw py::value_error("src/dst out of range");
-        if (k <= 0) throw py::value_error("k must be >= 1");
-        if (dtype != "float64" && dtype != "int64") throw py::value_error("dtype must be 'float64' or 'int64'");
-        KspOptions opts; opts.k = k; opts.unique = unique; if (!max_cost_factor.is_none()) opts.max_cost_factor = py::cast<double>(max_cost_factor);
-        auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(pg.num_nodes), "node_mask");
-        auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(pg.num_edges), "edge_mask");
-        opts.node_mask = node_bs.view; opts.edge_mask = edge_bs.view;
-        py::gil_scoped_release rel; auto items = algs.ksp(pg.handle, src, dst, opts); py::gil_scoped_acquire acq;
-        py::list out;
-        auto maxc = std::numeric_limits<Cost>::max();
-        for (auto& pr : items) {
-          auto& dist = pr.first;
-          if (dtype == "int64") {
-            py::array_t<std::int64_t> dist_arr(dist.size());
-            auto* outp = dist_arr.mutable_data();
-            for (std::size_t i=0;i<dist.size();++i) outp[i] = (dist[i]==maxc) ? static_cast<std::int64_t>(maxc) : static_cast<std::int64_t>(dist[i]);
-            out.append(py::make_tuple(std::move(dist_arr), pr.second));
-          } else if (dtype == "float64") {
-            py::array_t<double> dist_arr(dist.size());
-            auto* outp = dist_arr.mutable_data();
-            for (std::size_t i=0;i<dist.size();++i) outp[i] = (dist[i]==maxc) ? std::numeric_limits<double>::infinity() : static_cast<double>(dist[i]);
-            out.append(py::make_tuple(std::move(dist_arr), pr.second));
-          }
-        }
-        return out;
-      }, py::arg("graph"), py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("k"), py::arg("max_cost_factor") = py::none(), py::arg("unique") = true, py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none(), py::arg("dtype") = "float64")
-      .def("max_flow", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src, std::int32_t dst,
-                            FlowPlacement placement, bool shortest_path, bool require_capacity, bool with_edge_flows, bool with_reachable, bool with_residuals,
-                            py::object node_mask, py::object edge_mask){
-        if (src < 0 || src >= pg.num_nodes || dst < 0 || dst >= pg.num_nodes) throw py::value_error("src/dst out of range");
-        MaxFlowOptions o; o.placement = placement; o.shortest_path = shortest_path; o.require_capacity = require_capacity; o.with_edge_flows = with_edge_flows; o.with_reachable = with_reachable; o.with_residuals = with_residuals;
-        auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(pg.num_nodes), "node_mask");
-        auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(pg.num_edges), "edge_mask");
-        o.node_mask = node_bs.view; o.edge_mask = edge_bs.view;
-        py::gil_scoped_release rel; auto res = algs.max_flow(pg.handle, src, dst, o); py::gil_scoped_acquire acq; return res;
-      }, py::arg("graph"), py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false, py::arg("require_capacity") = true, py::arg("with_edge_flows") = false, py::arg("with_reachable") = false, py::arg("with_residuals") = false, py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none())
-      .def("batch_max_flow", [](const Algorithms& algs, const PyGraph& pg, py::array pairs,
-                                 py::object node_masks, py::object edge_masks,
-                                 FlowPlacement placement, bool shortest_path, bool require_capacity,
-                                 bool with_edge_flows, bool with_reachable, bool with_residuals){
-        // Check the dtype, not the buffer format string: NumPy spells int32 as
-        // NPY_LONG ('l') on LLP64 (Windows) and NPY_INT ('i') on LP64, while
-        // format_descriptor<int32_t> is always 'i'. Comparing format strings
-        // therefore rejects a genuine int32 array on Windows. isinstance uses
-        // dtype equivalence, matching as_span() above.
-        if (!py::isinstance<py::array_t<std::int32_t>>(pairs)) throw py::type_error("pairs dtype must be int32");
-        if (!(pairs.flags() & py::array::c_style)) throw py::type_error("pairs must be C-contiguous (use np.ascontiguousarray)");
-        auto buf = pairs.request();
-        if (buf.ndim != 2 || buf.shape[1] != 2) throw py::type_error("pairs must be shape [B,2]");
-        const std::size_t B = static_cast<std::size_t>(buf.shape[0]);
-        std::vector<std::pair<NodeId,NodeId>> pp; pp.reserve(B);
-        auto* p = static_cast<const std::int32_t*>(buf.ptr);
-        for (std::size_t i=0;i<B;++i) { pp.emplace_back(p[2*i], p[2*i+1]); }
-        // Match the single-pair entry points: an out-of-range id is a caller error,
-        // not a zero-flow result that silently disappears into the batch.
-        for (std::size_t i=0;i<pp.size();++i) {
-          if (pp[i].first < 0 || pp[i].first >= pg.num_nodes ||
-              pp[i].second < 0 || pp[i].second >= pg.num_nodes) {
-            throw py::value_error("pairs[" + std::to_string(i) + "] has a src/dst out of range");
-          }
-        }
-        std::vector<BoolSpan> node_bufs, edge_bufs;
-        std::vector<std::span<const bool>> node_spans; std::vector<std::span<const bool>> edge_spans;
-        auto parse_mask_list = [&](py::object list_obj, std::size_t expected_len, const char* what,
-                                   std::vector<BoolSpan>& bufs, std::vector<std::span<const bool>>& spans) {
-          if (list_obj.is_none()) return;
-          auto seq = py::cast<py::sequence>(list_obj);
-          if (static_cast<std::size_t>(py::len(seq)) != B)
-            throw py::type_error(std::string(what) + " length must equal number of pairs");
-          bufs.reserve(B); spans.reserve(B);
-          for (auto item : seq) {
-            auto bs = to_bool_span_from_numpy(item, expected_len, what);
-            spans.push_back(bs.view);
-            bufs.push_back(std::move(bs)); // keep storage alive across GIL release
-          }
-        };
-        parse_mask_list(node_masks, static_cast<std::size_t>(pg.num_nodes), "node_masks", node_bufs, node_spans);
-        parse_mask_list(edge_masks, static_cast<std::size_t>(pg.num_edges), "edge_masks", edge_bufs, edge_spans);
-        MaxFlowOptions o; o.placement = placement; o.shortest_path = shortest_path; o.require_capacity = require_capacity; o.with_edge_flows = with_edge_flows; o.with_reachable = with_reachable; o.with_residuals = with_residuals;
-        py::gil_scoped_release rel; auto out = algs.batch_max_flow(pg.handle, pp, o, node_spans, edge_spans); py::gil_scoped_acquire acq; return out;
-      }, py::arg("graph"), py::arg("pairs"), py::kw_only(), py::arg("node_masks") = py::none(), py::arg("edge_masks") = py::none(), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false, py::arg("require_capacity") = true, py::arg("with_edge_flows") = false, py::arg("with_reachable") = false, py::arg("with_residuals") = false)
-      .def("sensitivity_analysis", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src, std::int32_t dst,
-                                      FlowPlacement placement, bool shortest_path, bool require_capacity,
-                                      py::object node_mask, py::object edge_mask){
-        if (src < 0 || src >= pg.num_nodes || dst < 0 || dst >= pg.num_nodes) throw py::value_error("src/dst out of range");
-        MaxFlowOptions o; o.placement = placement; o.shortest_path = shortest_path; o.require_capacity = require_capacity;
-        auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(pg.num_nodes), "node_mask");
-        auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(pg.num_edges), "edge_mask");
-        o.node_mask = node_bs.view; o.edge_mask = edge_bs.view;
-        py::gil_scoped_release rel; auto res = algs.sensitivity_analysis(pg.handle, src, dst, o); py::gil_scoped_acquire acq;
-        // Return as list of tuples (EdgeId, FlowDelta)
-        py::list out;
-        for (auto const& pr : res) {
-          out.append(py::make_tuple(pr.first, pr.second));
-        }
-        return out;
-      }, py::arg("graph"), py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("flow_placement") = FlowPlacement::Proportional, py::arg("shortest_path") = false, py::arg("require_capacity") = true, py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none());
-
-  py::class_<PredDAG>(m, "PredDAG")
-      .def_property_readonly("parent_offsets", [](const PredDAG& d){
-        return copy_to_numpy<std::int32_t>(std::span<const std::int32_t>(d.parent_offsets.data(), d.parent_offsets.size()));
-      })
-      .def_property_readonly("parents", [](const PredDAG& d){
-        return copy_to_numpy<std::int32_t>(std::span<const std::int32_t>(d.parents.data(), d.parents.size()));
-      })
-      .def_property_readonly("via_edges", [](const PredDAG& d){
-        return copy_to_numpy<std::int32_t>(std::span<const std::int32_t>(d.via_edges.data(), d.via_edges.size()));
-      })
-      .def_static("from_hops", [](const StrictMultiDiGraph& g, py::sequence hops){
-        std::vector<std::vector<EdgeId>> h;
-        h.reserve(static_cast<std::size_t>(py::len(hops)));
-        for (auto hop : hops) {
-          std::vector<EdgeId> edges;
-          for (auto e : py::cast<py::sequence>(hop)) edges.push_back(py::cast<EdgeId>(e));
-          h.push_back(std::move(edges));
-        }
-        return make_hops_dag(g, h);
-      }, py::arg("graph"), py::arg("hops"))
-      .def_static("from_edges", [](const StrictMultiDiGraph& g, py::sequence edges){
-        std::vector<EdgeId> e;
-        e.reserve(py::len(edges));
-        for (auto item : edges) e.push_back(py::cast<EdgeId>(item));
-        return make_path_dag(g, e);
-      }, py::arg("graph"), py::arg("edges"),
-         "Build a single-path PredDAG from a contiguous edge-id sequence.\n"
-         "Validates that each edge exists, consecutive edges connect, and the walk "
-         "is a simple path. The result works anywhere a PredDAG is accepted "
-         "(place_on_dag, FlowGraph.place, FlowPolicy.set_static_paths).")
-      .def("resolve_to_paths", [](const PredDAG& dag, std::int32_t src, std::int32_t dst, bool split_parallel_edges, py::object max_paths){
-        std::optional<std::int64_t> mp;
-        if (!max_paths.is_none()) mp = py::cast<std::int64_t>(max_paths);
-        auto out = netgraph::core::resolve_to_paths(dag, src, dst, split_parallel_edges, mp);
-        py::list paths;
-        for (auto& path : out) {
-          py::list py_elems;
-          for (auto& pr : path) {
-            py::tuple edge_tuple(pr.second.size());
-            for (std::size_t i=0;i<pr.second.size();++i) edge_tuple[i] = py::int_(pr.second[i]);
-            py_elems.append(py::make_tuple(py::int_(pr.first), edge_tuple));
-          }
-          paths.append(py::tuple(py_elems));
-        }
-        return paths;
-      }, py::arg("src"), py::arg("dst"), py::kw_only(), py::arg("split_parallel_edges") = false, py::arg("max_paths") = py::none());
-
-  py::class_<MinCut>(m, "MinCut")
-      .def_property_readonly("edges", [](const MinCut& mc){
-        return copy_to_numpy<std::int32_t>(std::span<const std::int32_t>(mc.edges.data(), mc.edges.size()));
-      });
-
-  py::class_<FlowSummary>(m, "FlowSummary")
-      .def_readonly("total_flow", &FlowSummary::total_flow)
-      .def_readonly("min_cut", &FlowSummary::min_cut)
-      .def_property_readonly("costs", [](const FlowSummary& s){
-        return copy_to_numpy<std::int64_t>(std::span<const std::int64_t>(s.costs.data(), s.costs.size()));
-      })
-      .def_property_readonly("flows", [](const FlowSummary& s){
-        return copy_to_numpy<double>(std::span<const double>(s.flows.data(), s.flows.size()));
-      })
-      .def_property_readonly("edge_flows", [](const FlowSummary& s){
-        return copy_to_numpy<double>(std::span<const double>(s.edge_flows.data(), s.edge_flows.size()));
-      })
-      .def_property_readonly("residual_capacity", [](const FlowSummary& s){
-        return copy_to_numpy<double>(std::span<const double>(s.residual_capacity.data(), s.residual_capacity.size()));
-      })
-      .def_property_readonly("reachable_nodes", [](const FlowSummary& s){
-        // Store as bool array for Python; cast bytes to bool
-        py::array_t<bool> arr(s.reachable_nodes.size());
-        auto* out = arr.mutable_data();
-        for (std::size_t i=0;i<s.reachable_nodes.size();++i) out[i] = static_cast<bool>(s.reachable_nodes[i]);
-        return arr;
-      });
-
-  // FlowState bindings
-  py::class_<FlowState>(m, "FlowState")
-      .def(py::init([](const StrictMultiDiGraph& g){ return FlowState(g); }),
-           py::arg("graph"), py::keep_alive<1, 2>())
-      .def(py::init([](const StrictMultiDiGraph& g, py::array residual){
-        if (!(py::isinstance<py::array_t<double>>(residual))) throw py::type_error("residual must be a numpy float64 array");
-        if (!(residual.flags() & py::array::c_style)) throw py::type_error("residual must be C-contiguous");
-        auto buf = residual.request();
-        if (buf.ndim != 1 || static_cast<std::size_t>(buf.shape[0]) != static_cast<std::size_t>(g.num_edges())) throw py::type_error("residual length must equal num_edges");
-        std::span<const double> rspan(static_cast<const double*>(buf.ptr), static_cast<std::size_t>(buf.shape[0]));
-        return FlowState(g, rspan);
-      }), py::arg("graph"), py::arg("residual"), py::keep_alive<1, 2>())
-      .def("reset", [](FlowState& fs){ fs.reset(); })
-      .def("reset", [](FlowState& fs, py::array residual){
-        if (!(py::isinstance<py::array_t<double>>(residual))) throw py::type_error("residual must be a numpy float64 array");
-        if (!(residual.flags() & py::array::c_style)) throw py::type_error("residual must be C-contiguous");
-        auto buf = residual.request();
-        if (buf.ndim != 1 || static_cast<std::size_t>(buf.shape[0]) != static_cast<std::size_t>(fs.capacity_view().size())) throw py::type_error("residual length must equal num_edges");
-        std::span<const double> rspan(static_cast<const double*>(buf.ptr), static_cast<std::size_t>(buf.shape[0]));
-        fs.reset(rspan);
-      })
-      .def("capacity_view", [](py::object self_obj){
-        const FlowState& fs = py::cast<const FlowState&>(self_obj);
-        auto s = fs.capacity_view();
-        py::array view(py::buffer_info(const_cast<double*>(s.data()), sizeof(double), py::format_descriptor<double>::format(), 1, { s.size() }, { sizeof(double) }), self_obj);
-        view.attr("setflags")(py::arg("write") = false);
-        return view;
-      })
-      .def("residual_view", [](py::object self_obj){
-        const FlowState& fs = py::cast<const FlowState&>(self_obj);
-        auto s = fs.residual_view();
-        py::array view(py::buffer_info(const_cast<double*>(s.data()), sizeof(double), py::format_descriptor<double>::format(), 1, { s.size() }, { sizeof(double) }), self_obj);
-        view.attr("setflags")(py::arg("write") = false);
-        return view;
-      })
-      .def("edge_flow_view", [](py::object self_obj){
-        const FlowState& fs = py::cast<const FlowState&>(self_obj);
-        auto s = fs.edge_flow_view();
-        py::array view(py::buffer_info(const_cast<double*>(s.data()), sizeof(double), py::format_descriptor<double>::format(), 1, { s.size() }, { sizeof(double) }), self_obj);
-        view.attr("setflags")(py::arg("write") = false);
-        return view;
-      })
-      .def("place_on_dag", [](FlowState& fs, std::int32_t src, std::int32_t dst, const PredDAG& dag, double requested_flow, FlowPlacement placement){
-        py::gil_scoped_release rel; auto placed = fs.place_on_dag(src, dst, dag, requested_flow, placement); py::gil_scoped_acquire acq; return placed;
-      }, py::arg("src"), py::arg("dst"), py::arg("dag"), py::arg("requested_flow") = std::numeric_limits<double>::infinity(), py::arg("flow_placement") = FlowPlacement::Proportional)
-      .def("place_max_flow", [](py::object self_obj, std::int32_t src, std::int32_t dst,
-                                 FlowPlacement placement, bool shortest_path, bool require_capacity,
-                                 py::object node_mask, py::object edge_mask){
-        FlowState& fs = py::cast<FlowState&>(self_obj);
-        const StrictMultiDiGraph& g = fs.graph();
-        auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(g.num_nodes()), "node_mask");
-        auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(g.num_edges()), "edge_mask");
-        py::gil_scoped_release rel;
-        auto total = fs.place_max_flow(src, dst, placement, shortest_path, require_capacity,
-                                       node_bs.view, edge_bs.view);
-        py::gil_scoped_acquire acq;
-        return total;
-      }, py::arg("src"), py::arg("dst"),
-         py::arg("flow_placement") = FlowPlacement::Proportional,
-         py::arg("shortest_path") = false, py::arg("require_capacity") = true,
-         py::kw_only(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none())
-      .def("compute_min_cut", [](py::object self_obj, std::int32_t src, py::object node_mask, py::object edge_mask){
-        const FlowState& fs = py::cast<const FlowState&>(self_obj);
-        const StrictMultiDiGraph& g = fs.graph();
-        auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(g.num_nodes()), "node_mask");
-        auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(g.num_edges()), "edge_mask");
-        py::gil_scoped_release rel;
-        auto mc = fs.compute_min_cut(src, node_bs.view, edge_bs.view);
-        py::gil_scoped_acquire acq;
-        return mc;
-      }, py::arg("src"), py::kw_only(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none());
-
-  // FlowIndex and FlowGraph bindings
-  py::class_<FlowIndex>(m, "FlowIndex")
-      .def(py::init<NodeId, NodeId, std::int32_t, std::int64_t>())
-      .def_readonly("src", &FlowIndex::src)
-      .def_readonly("dst", &FlowIndex::dst)
-      .def_readonly("flowClass", &FlowIndex::flowClass)
-      .def_readonly("flowId", &FlowIndex::flowId);
-
-  py::class_<FlowGraph>(m, "FlowGraph")
-      .def(py::init([](const StrictMultiDiGraph& g){ return FlowGraph(g); }),
-           py::arg("graph"), py::keep_alive<1, 2>())
-      .def("capacity_view", [](py::object self_obj){
-        const FlowGraph& fg = py::cast<const FlowGraph&>(self_obj);
-        auto s = fg.capacity_view();
-        py::array view(py::buffer_info(const_cast<double*>(s.data()), sizeof(double), py::format_descriptor<double>::format(), 1, { s.size() }, { sizeof(double) }), self_obj);
-        view.attr("setflags")(py::arg("write") = false);
-        return view;
-      })
-      .def("residual_view", [](py::object self_obj){
-        const FlowGraph& fg = py::cast<const FlowGraph&>(self_obj);
-        auto s = fg.residual_view();
-        py::array view(py::buffer_info(const_cast<double*>(s.data()), sizeof(double), py::format_descriptor<double>::format(), 1, { s.size() }, { sizeof(double) }), self_obj);
-        view.attr("setflags")(py::arg("write") = false);
-        return view;
-      })
-      .def("edge_flow_view", [](py::object self_obj){
-        const FlowGraph& fg = py::cast<const FlowGraph&>(self_obj);
-        auto s = fg.edge_flow_view();
-        py::array view(py::buffer_info(const_cast<double*>(s.data()), sizeof(double), py::format_descriptor<double>::format(), 1, { s.size() }, { sizeof(double) }), self_obj);
-        view.attr("setflags")(py::arg("write") = false);
-        return view;
-      })
-      .def_property_readonly("graph", [](const FlowGraph& fg){ return &fg.graph(); }, py::return_value_policy::reference_internal)
-      .def("place", [](FlowGraph& fg, const FlowIndex& idx, std::int32_t src, std::int32_t dst, const PredDAG& dag, double amount, FlowPlacement placement){ py::gil_scoped_release rel; auto placed = fg.place(idx, src, dst, dag, amount, placement); py::gil_scoped_acquire acq; return placed; }, py::arg("index"), py::arg("src"), py::arg("dst"), py::arg("dag"), py::arg("amount"), py::arg("flow_placement") = FlowPlacement::Proportional)
-      .def("place_with_drops", [](FlowGraph& fg, const FlowIndex& idx, std::int32_t src, std::int32_t dst, const PredDAG& dag, double amount, FlowPlacement placement){
-        std::vector<std::pair<EdgeId, Flow>> drops;
-        double placed;
-        { py::gil_scoped_release rel; placed = fg.place(idx, src, dst, dag, amount, placement, &drops); }
-        py::list out; for (auto const& pr : drops) out.append(py::make_tuple(pr.first, pr.second));
-        return py::make_tuple(placed, out);
-      }, py::arg("index"), py::arg("src"), py::arg("dst"), py::arg("dag"), py::arg("amount"), py::arg("flow_placement") = FlowPlacement::EqualBalancedLossy,
-         "Like place(), but also returns the per-edge dropped volume as a list of (edge_id, dropped) pairs. Only EQUAL_BALANCED_LOSSY drops flow; other placements return an empty list.")
-      .def("remove", [](FlowGraph& fg, const FlowIndex& idx){ py::gil_scoped_release rel; fg.remove(idx); py::gil_scoped_acquire acq; })
-      .def("remove_by_class", [](FlowGraph& fg, std::int32_t cls){ py::gil_scoped_release rel; fg.remove_by_class(cls); py::gil_scoped_acquire acq; })
-      .def("reset", [](FlowGraph& fg){ py::gil_scoped_release rel; fg.reset(); py::gil_scoped_acquire acq; })
-      .def("get_flow_edges", [](const FlowGraph& fg, const FlowIndex& idx){ auto v = fg.get_flow_edges(idx); py::list out; for (auto const& pr : v) { out.append(py::make_tuple(pr.first, pr.second)); } return out; })
-      .def("get_flow_path", [](const FlowGraph& fg, const FlowIndex& idx){ auto v = fg.get_flow_path(idx); py::list out; for (auto e : v) out.append(e); return out; });
-
-  // NOTE: FlowRecord is deliberately not bound. No binding constructs or returns one
-  // (FlowPolicy.flows yields plain tuples), so the class was unreachable, and the
-  // Python name "Flow" collided with the C++ alias `using Flow = double`. If per-flow
-  // records become part of the public API, bind it under an unambiguous name such as
-  // "FlowRecord" and have FlowPolicy.flows return it instead of tuples.
-
-  py::enum_<PathAlg>(m, "PathAlg")
-      .value("SPF", PathAlg::SPF);
-
-  py::class_<FlowPolicyConfig>(m, "FlowPolicyConfig")
-      .def(py::init<>())
-      .def(py::init([](PathAlg path_alg,
-                       FlowPlacement flow_placement,
-                       EdgeSelection selection,
-                       bool require_capacity,
-                       bool multipath,
-                       int min_flow_count,
-                       py::object max_flow_count,
-                       py::object max_path_cost,
-                       py::object max_path_cost_factor,
-                       bool shortest_path,
-                       bool reoptimize_flows_on_each_placement,
-                       int max_no_progress_iterations,
-                       int max_total_iterations,
-                       bool diminishing_returns_enabled,
-                       int diminishing_returns_window,
-                       double diminishing_returns_epsilon_frac){
-            FlowPolicyConfig cfg;
-            cfg.path_alg = path_alg;
-            cfg.flow_placement = flow_placement;
-            cfg.selection = selection;
-            cfg.require_capacity = require_capacity;
-            cfg.multipath = multipath;
-            cfg.min_flow_count = min_flow_count;
-            if (!max_flow_count.is_none()) cfg.max_flow_count = py::cast<int>(max_flow_count);
-            if (!max_path_cost.is_none()) cfg.max_path_cost = py::cast<Cost>(max_path_cost);
-            if (!max_path_cost_factor.is_none()) cfg.max_path_cost_factor = py::cast<double>(max_path_cost_factor);
-            cfg.shortest_path = shortest_path;
-            cfg.reoptimize_flows_on_each_placement = reoptimize_flows_on_each_placement;
-            cfg.max_no_progress_iterations = max_no_progress_iterations;
-            cfg.max_total_iterations = max_total_iterations;
-            cfg.diminishing_returns_enabled = diminishing_returns_enabled;
-            cfg.diminishing_returns_window = diminishing_returns_window;
-            cfg.diminishing_returns_epsilon_frac = diminishing_returns_epsilon_frac;
-            return cfg;
-          }),
-          py::kw_only(),
-          py::arg("path_alg") = PathAlg::SPF,
-          py::arg("flow_placement") = FlowPlacement::Proportional,
-          py::arg("selection") = EdgeSelection{},
-          py::arg("require_capacity") = true,
-          py::arg("multipath") = true,
-          py::arg("min_flow_count") = 1,
-          py::arg("max_flow_count") = py::none(),
-          py::arg("max_path_cost") = py::none(),
-          py::arg("max_path_cost_factor") = py::none(),
-          py::arg("shortest_path") = false,
-          py::arg("reoptimize_flows_on_each_placement") = false,
-          py::arg("max_no_progress_iterations") = 100,
-          py::arg("max_total_iterations") = 10000,
-          py::arg("diminishing_returns_enabled") = true,
-          py::arg("diminishing_returns_window") = 8,
-          py::arg("diminishing_returns_epsilon_frac") = 1e-3)
-      .def_readwrite("path_alg", &FlowPolicyConfig::path_alg)
-      .def_readwrite("flow_placement", &FlowPolicyConfig::flow_placement)
-      .def_readwrite("selection", &FlowPolicyConfig::selection)
-      .def_readwrite("require_capacity", &FlowPolicyConfig::require_capacity)
-      .def_readwrite("multipath", &FlowPolicyConfig::multipath)
-      .def_readwrite("min_flow_count", &FlowPolicyConfig::min_flow_count)
-      .def_readwrite("max_flow_count", &FlowPolicyConfig::max_flow_count)
-      .def_readwrite("max_path_cost", &FlowPolicyConfig::max_path_cost)
-      .def_readwrite("max_path_cost_factor", &FlowPolicyConfig::max_path_cost_factor)
-      .def_readwrite("shortest_path", &FlowPolicyConfig::shortest_path)
-      .def_readwrite("reoptimize_flows_on_each_placement", &FlowPolicyConfig::reoptimize_flows_on_each_placement)
-      .def_readwrite("max_no_progress_iterations", &FlowPolicyConfig::max_no_progress_iterations)
-      .def_readwrite("max_total_iterations", &FlowPolicyConfig::max_total_iterations)
-      .def_readwrite("diminishing_returns_enabled", &FlowPolicyConfig::diminishing_returns_enabled)
-      .def_readwrite("diminishing_returns_window", &FlowPolicyConfig::diminishing_returns_window)
-      .def_readwrite("diminishing_returns_epsilon_frac", &FlowPolicyConfig::diminishing_returns_epsilon_frac);
-
-  py::class_<FlowPolicy>(m, "FlowPolicy")
-      .def("__init__", [](FlowPolicy& self, py::object algs_obj, const PyGraph& pg, FlowPolicyConfig cfg,
-                          py::object node_mask, py::object edge_mask){
-            if (!py::isinstance<Algorithms>(algs_obj)) {
-              throw py::type_error("FlowPolicy: algorithms must be an Algorithms instance");
+      .def("max_cost", &StrictMultiDiGraph::max_cost, "largest edge cost (0 without edges)")
+      .def("cost_gcd", &StrictMultiDiGraph::cost_gcd, "gcd of the edge costs (0 without edges)")
+      .def(
+          "capacity_units", [](const py::object& self) {
+            const auto& g = self.cast<const StrictMultiDiGraph&>();
+            return readonly_view(g.capacity_units(), self);
+          },
+          "int64[E] capacities in units, id order (read-only view)")
+      .def(
+          "cost", [](const py::object& self) {
+            const auto& g = self.cast<const StrictMultiDiGraph&>();
+            return readonly_view(g.cost(), self);
+          },
+          "int64[E] costs, id order (read-only view)")
+      .def(
+          "edge_src", [](const py::object& self) {
+            const auto& g = self.cast<const StrictMultiDiGraph&>();
+            return readonly_view(g.edge_src(), self);
+          },
+          "int32[E] source node per edge (read-only view)")
+      .def(
+          "edge_dst", [](const py::object& self) {
+            const auto& g = self.cast<const StrictMultiDiGraph&>();
+            return readonly_view(g.edge_dst(), self);
+          },
+          "int32[E] destination node per edge (read-only view)")
+      .def(
+          "input_index", [](const py::object& self) {
+            const auto& g = self.cast<const StrictMultiDiGraph&>();
+            return readonly_view(g.input_index(), self);
+          },
+          "int32[E]: id -> input position (read-only view); the inverse is the caller's")
+      .def(
+          "row_offsets", [](const py::object& self) {
+            const auto& g = self.cast<const StrictMultiDiGraph&>();
+            return readonly_view(g.row_offsets(), self);
+          },
+          "int32[N + 1]: the out-edges of u are the ids [row_offsets[u], row_offsets[u + 1])")
+      .def(
+          "in_row_offsets", [](const py::object& self) {
+            const auto& g = self.cast<const StrictMultiDiGraph&>();
+            return readonly_view(g.in_row_offsets(), self);
+          },
+          "int32[N + 1] reverse CSR offsets")
+      .def(
+          "in_adj_edge_index", [](const py::object& self) {
+            const auto& g = self.cast<const StrictMultiDiGraph&>();
+            return readonly_view(g.in_adj_edge_index(), self);
+          },
+          "int32[E]: the in-edges of v in (cost, src, input) order, as EdgeIds")
+      .def(
+          "eligibility",
+          [](const StrictMultiDiGraph& g, const py::object& excluded_nodes, const py::object& excluded_edges) {
+            // Nodes, then edges, each range-checked before narrowing (the constructor's order).
+            const auto xn = wide_integers(excluded_nodes, "excluded_nodes");
+            for (std::size_t i = 0; i < xn.size(); ++i) {
+              if (!xn.in(i, 0, static_cast<std::int64_t>(g.num_nodes()) - 1)) {
+                throw py::value_error("excluded node " + xn.text(i) + " out of node range [0, " +
+                                      std::to_string(g.num_nodes()) + ")");
+              }
             }
-            std::shared_ptr<Algorithms> algs = py::cast<std::shared_ptr<Algorithms>>(algs_obj);
+            const auto xe = wide_integers(excluded_edges, "excluded_edges");
+            for (std::size_t i = 0; i < xe.size(); ++i) {
+              if (!xe.in(i, 0, static_cast<std::int64_t>(g.num_edges()) - 1)) {
+                throw py::value_error("excluded edge " + xe.text(i) + " out of edge range [0, " +
+                                      std::to_string(g.num_edges()) + ")");
+              }
+            }
+            return std::make_shared<Eligibility>(g.eligibility(xn.narrow<NodeId>(), xe.narrow<EdgeId>()));
+          },
+          py::arg("excluded_nodes") = py::tuple(), py::arg("excluded_edges") = py::tuple(),
+          "Static eligibility from excluded node ids and EdgeIds (duplicates and unsorted lists\n"
+          "accepted, out-of-range ids rejected); an edge is allowed when it is not excluded and\n"
+          "both endpoints are allowed. Empty lists mean all allowed (uid 0).");
 
-            auto node_bs = to_bool_span_from_numpy(node_mask, static_cast<std::size_t>(pg.num_nodes), "node_mask");
-            auto edge_bs = to_bool_span_from_numpy(edge_mask, static_cast<std::size_t>(pg.num_edges), "edge_mask");
-
-            cfg.node_mask = node_bs.view;
-            cfg.edge_mask = edge_bs.view;
-
-            ExecutionContext ctx(algs, pg.handle);
-            new (&self) FlowPolicy(ctx, cfg);
-           },
-           py::arg("algorithms"), py::arg("graph"), py::arg("config"),
-           py::kw_only(),
-           py::arg("node_mask") = py::none(),
-           py::arg("edge_mask") = py::none(),
-           py::keep_alive<1, 2>(),   // self keeps algorithms alive
-           py::keep_alive<1, 3>())   // self keeps graph alive
-      .def("flow_count", &FlowPolicy::flow_count)
-      .def("placed_demand", &FlowPolicy::placed_demand)
-      .def("place_demand", [](FlowPolicy& p, FlowGraph& fg, std::int32_t src, std::int32_t dst, FlowClass flowClass, double volume, py::object target_per_flow, py::object min_flow){ std::optional<double> tpf; if (!target_per_flow.is_none()) tpf = py::cast<double>(target_per_flow); std::optional<double> mfl; if (!min_flow.is_none()) mfl = py::cast<double>(min_flow); py::gil_scoped_release rel; auto pr = p.place_demand(fg, src, dst, flowClass, volume, tpf, mfl); py::gil_scoped_acquire acq; return py::make_tuple(pr.first, pr.second); }, py::arg("flow_graph"), py::arg("src"), py::arg("dst"), py::arg("flowClass"), py::arg("volume"), py::arg("target_per_flow") = py::none(), py::arg("min_flow") = py::none())
-      .def("rebalance_demand", [](FlowPolicy& p, FlowGraph& fg, std::int32_t src, std::int32_t dst, FlowClass flowClass, double target){ py::gil_scoped_release rel; auto pr = p.rebalance_demand(fg, src, dst, flowClass, target); py::gil_scoped_acquire acq; return py::make_tuple(pr.first, pr.second); },
-           py::arg("flow_graph"), py::arg("src"), py::arg("dst"), py::arg("flowClass"), py::arg("target"))
-      .def("remove_demand", [](FlowPolicy& p, FlowGraph& fg){ py::gil_scoped_release rel; p.remove_demand(fg); py::gil_scoped_acquire acq; })
-      .def("set_static_paths", [](FlowPolicy& p, std::int32_t src, std::int32_t dst, py::sequence paths){
-        std::vector<PredDAG> bundles;
-        bundles.reserve(py::len(paths));
-        for (auto item : paths) bundles.push_back(py::cast<const PredDAG&>(item));
-        py::gil_scoped_release rel;
-        p.set_static_paths(src, dst, std::move(bundles));
-        py::gil_scoped_acquire acq;
-      }, py::arg("src"), py::arg("dst"), py::arg("paths"),
-         "Pin this policy's demand to explicit path bundles (one flow per usable "
-         "bundle, bound in supply order). See FlowPolicy docs for validation, mask "
-         "(failure) semantics, and which config knobs become inert.")
-      .def_property_readonly("flows", [](const FlowPolicy& p){ py::dict out; for (auto const& kv : p.flows()) { const auto& idx = kv.first; const auto& f = kv.second; out[py::make_tuple(idx.src, idx.dst, idx.flowClass, idx.flowId)] = py::make_tuple(f.src, f.dst, f.cost, f.placed_flow); } return out; });
-
-  // Profiling functions (enabled via NGRAPH_CORE_PROFILE=1 environment variable)
-  m.def("profiling_enabled", &profiling_enabled,
-        "Return True if profiling is enabled (NGRAPH_CORE_PROFILE=1).");
-  m.def("profiling_dump", []{ ProfilingStats::instance().dump(); },
-        "Print profiling statistics to stderr.");
-  m.def("profiling_reset", []{ ProfilingStats::instance().reset(); },
-        "Clear all profiling statistics.");
+  m.def(
+      "_place_global_units",
+      [](const std::shared_ptr<StrictMultiDiGraph>& graph, const py::object& view, const py::object& sources,
+         const py::object& destinations, const std::shared_ptr<Eligibility>& elig,
+         const py::object& cap) -> py::dict {
+        if (!graph) throw py::value_error("graph must be a StrictMultiDiGraph");
+        // The core's order (view length, view entries, sources, destinations, overlap, cap,
+        // Eligibility), every value checked before narrowing; the core re-checks the same order.
+        const auto num_edges = static_cast<std::size_t>(graph->num_edges());
+        const std::size_t view_len = sequence_length(view, "view");
+        if (view_len != num_edges) {
+          throw py::value_error("view has length " + std::to_string(view_len) + ", expected " +
+                                std::to_string(num_edges) + " (one entry per edge)");
+        }
+        const auto v = wide_integers(view, "view (capacity units)");
+        const auto capacity = graph->capacity_units();
+        for (std::size_t e = 0; e < num_edges; ++e) {
+          if (!v.in(e, 0, capacity[e])) {
+            throw py::value_error("view[" + std::to_string(e) + "] = " + v.text(e) + " is outside [0, capacity_units[" +
+                                  std::to_string(e) + "] = " + std::to_string(capacity[e]) + "]");
+          }
+        }
+        const auto endpoints = [&](const py::object& obj, const char* name) {
+          const auto ids = wide_integers(obj, (std::string(name) + " node ids").c_str());
+          if (ids.size() == 0) throw py::value_error(std::string(name) + ": the endpoint set is empty");
+          for (std::size_t i = 0; i < ids.size(); ++i) {
+            if (!ids.in(i, 0, static_cast<std::int64_t>(graph->num_nodes()) - 1)) {
+              throw py::value_error(std::string(name) + ": node " + ids.text(i) + " out of node range [0, " +
+                                    std::to_string(graph->num_nodes()) + ")");
+            }
+          }
+          return ids.narrow<NodeId>();
+        };
+        const auto s = endpoints(sources, "sources");
+        const auto d = endpoints(destinations, "destinations");
+        std::vector<NodeId> ss(s);
+        std::vector<NodeId> dd(d);
+        std::sort(ss.begin(), ss.end());
+        std::sort(dd.begin(), dd.end());
+        for (std::size_t i = 0, k = 0; i < ss.size() && k < dd.size();) {
+          if (ss[i] == dd[k]) {
+            throw py::value_error("node " + std::to_string(ss[i]) +
+                                  " is in both endpoint sets: sources and destinations must not overlap");
+          }
+          if (ss[i] < dd[k]) ++i; else ++k;
+        }
+        std::optional<Amount> c;
+        if (!cap.is_none()) {
+          if (is_bool(cap) || !PyIndex_Check(cap.ptr())) {
+            throw py::value_error("cap must be an integer number of units in [0, 2^63 - 2] or None");
+          }
+          py::object idx = python_int(cap, "cap");
+          int overflow = 0;
+          const long long value = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
+          if (overflow != 0 || value < 0 || value > kMaxFlowCap) {
+            throw py::value_error("cap " + std::string(py::str(idx)) + " is outside [0, 2^63 - 2]");
+          }
+          c = static_cast<Amount>(value);
+        }
+        FlowCoreResult r;
+        {
+          py::gil_scoped_release release;
+          const auto view_units = v.narrow<Amount>();
+          r = place_global_units(*graph, view_units, s, d, elig.get(), c);
+        }
+        py::dict out;
+        out["placed"] = py::int_(r.placed);
+        py::list curve;
+        for (const auto& [cost, units] : r.cost_distribution) {
+          py::list entry;
+          entry.append(py::int_(cost));
+          entry.append(py::int_(units));
+          curve.append(entry);
+        }
+        out["cost_distribution"] = curve;
+        out["edge_flows"] = int_list(r.edge_flows);
+        if (r.min_cut.has_value()) {
+          py::list cut;
+          for (EdgeId e : *r.min_cut) cut.append(py::int_(e));
+          out["min_cut"] = cut;
+        } else {
+          out["min_cut"] = py::none();
+        }
+        out["potentials"] = int_list(r.potentials);
+        py::dict counters;
+        counters["dijkstra_runs"] = py::int_(r.counters.dijkstra_runs);
+        counters["dijkstra_pops"] = py::int_(r.counters.dijkstra_pops);
+        counters["settled"] = py::int_(r.counters.settled);
+        counters["arc_scans"] = py::int_(r.counters.arc_scans);
+        counters["dinic_phases"] = py::int_(r.counters.dinic_phases);
+        counters["augmentations"] = py::int_(r.counters.augmentations);
+        out["counters"] = counters;
+        return out;
+      },
+      py::arg("graph"), py::arg("view"), py::arg("sources"), py::arg("destinations"), py::arg("elig"),
+      py::arg("cap"),
+      "Private recorder entry (APPROACH 2.2): the minimum-cost flow of the maximum value under\n"
+      "cap (None: uncapped) from the source set to the destination set over the eligible edges,\n"
+      "on the capacities `view` (int64 units, id order), from zero flow. Returns {placed,\n"
+      "cost_distribution: [[cost, units]], edge_flows, min_cut (None while the destinations stay\n"
+      "connected, and on cap 0), potentials (-1 = never reached), counters}. Invalid inputs raise\n"
+      "ValueError before any work.");
 }

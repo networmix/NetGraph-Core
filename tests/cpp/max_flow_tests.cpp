@@ -1,1338 +1,551 @@
-/**
- * Comprehensive Max-Flow Algorithm Test Suite
- *
- * This suite systematically validates max-flow correctness across all parameter
- * combinations and network topologies. The test matrix ensures complete coverage
- * of algorithm behavior under various configurations.
- *
- * TEST MATRIX COVERAGE:
- *
- * Dimension 1: Path Structure
- *   - Single path
- *   - Multiple disjoint equal-cost paths (2, 3, 4, 10)
- *   - Multiple cost tiers (2-tier, 3-tier)
- *   - Complex topologies (grids, shared bottlenecks)
- *
- * Dimension 2: Capacity Patterns
- *   - Equal capacities across paths
- *   - Asymmetric capacities (1:100, 1:1M ratios)
- *   - Zero capacity edges
- *   - Bottleneck scenarios
- *
- * Dimension 3: Flow Placement
- *   - PROPORTIONAL: Capacity-weighted distribution
- *   - EQUAL_BALANCED: Uniform distribution across paths
- *
- * Dimension 4: Path Selection
- *   - shortest_path=False: Multi-tier max-flow (use all cost tiers)
- *   - shortest_path=True: Single-tier flow (lowest cost tier only)
- *
- * Dimension 5: Optional Features
- *   - Node/edge masking
- *   - Batch operations
- *   - Flow details (edge flows, residuals, min-cut)
- *
- * INVARIANT PROPERTIES VALIDATED:
- *   - Flow conservation at intermediate nodes
- *   - Capacity constraints on all edges
- *   - Cost distribution consistency
- *   - Min-cut correctness
- */
-
+// The flow core of APPROACH 2.2 through place_global_units: the review witnesses (expected
+// values derived by hand and from prototype 1, `prototypes/p1_amount/flowcore.py`), the
+// certificate in its two branches, input validation, determinism, and randomized graphs
+// certified against an exhaustive optimum (tier a) and an independent solver (tier b).
 #include <gtest/gtest.h>
+
+#include <cmath>
+#include <functional>
+#include <numeric>
+#include <random>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
 #include "netgraph/core/max_flow.hpp"
-#include "netgraph/core/backend.hpp"
-#include "netgraph/core/algorithms.hpp"
-#include "netgraph/core/strict_multidigraph.hpp"
 #include "test_utils.hpp"
 
 using namespace netgraph::core;
 using namespace netgraph::core::test;
 
-//=============================================================================
-// SECTION 1: BASIC CORRECTNESS - SINGLE PATH SCENARIOS
-//=============================================================================
+namespace {
 
-TEST(MaxFlow, SinglePath_BasicLinear) {
-  // Validates basic max-flow computation on simplest topology
-  auto g = make_line_graph(3);
+constexpr Amount kL62m1 = (Amount{1} << 62) - 1;
 
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = false;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 2, opts);
-
-  EXPECT_NEAR(total, 1.0, 1e-9) << "Single path with unit capacity";
+// The counters fixed by the normative per-tier order and the augmenting-path sequence, compared
+// with prototype 1: dijkstra_runs, dijkstra_pops, settled, dinic_phases, augmentations. arc_scans
+// is the implementation's own diagnostic (the level search here first marks the vertices that
+// reach t* and stops at t*'s level, so it examines a different number of arcs than the
+// prototype's full BFS); it is checked for determinism and presence only.
+using Counters = std::vector<std::int64_t>;
+Counters counters_of(const FlowCoreResult& r) {
+  const auto& c = r.counters;
+  EXPECT_GE(c.arc_scans, c.dijkstra_runs > 0 ? 1 : 0);
+  return {c.dijkstra_runs, c.dijkstra_pops, c.settled, c.dinic_phases, c.augmentations};
 }
 
-TEST(MaxFlow, SinglePath_BottleneckConstraint) {
-  // Validates that bottleneck edge correctly limits total flow
-  // Topology: 0→1 (cap 10), 1→2 (cap 2), 2→3 (cap 10)
-  std::int32_t src[3] = {0, 1, 2};
-  std::int32_t dst[3] = {1, 2, 3};
-  double cap[3] = {10.0, 2.0, 10.0};
-  std::int64_t cost[3] = {1, 1, 1};
-
-  auto g = StrictMultiDiGraph::from_arrays(4,
-    std::span(src, 3), std::span(dst, 3),
-    std::span(cap, 3), std::span(cost, 3));
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-
-  EXPECT_NEAR(total, 2.0, 1e-9) << "Flow limited by bottleneck edge capacity";
+std::vector<InEdge> chain_plus_bypasses(Cost factor = 1) {
+  // Chain 0-1-2-3 of cost 1 with bypasses 0->2 and 1->3 of cost 3, unit capacities.
+  return {{0, 1, 1, factor}, {1, 2, 1, factor}, {2, 3, 1, factor}, {0, 2, 1, 3 * factor}, {1, 3, 1, 3 * factor}};
 }
 
-TEST(MaxFlow, SinglePath_ShortestPathEquivalence) {
-  // For single-path networks, shortest_path=True/False should be identical
-  auto g = make_line_graph(3);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts_full;
-  opts_full.placement = FlowPlacement::Proportional;
-  opts_full.shortest_path = false;
-  auto [total_full, _] = algs.max_flow(gh, 0, 2, opts_full);
-
-  MaxFlowOptions opts_sp;
-  opts_sp.placement = FlowPlacement::Proportional;
-  opts_sp.shortest_path = true;
-  auto [total_sp, __] = algs.max_flow(gh, 0, 2, opts_sp);
-
-  EXPECT_NEAR(total_full, 1.0, 1e-9);
-  EXPECT_NEAR(total_sp, 1.0, 1e-9);
-  EXPECT_NEAR(total_full, total_sp, 1e-9)
-      << "shortest_path flag should not affect single-path networks";
+void expect_certified(const StrictMultiDiGraph& g, const std::vector<NodeId>& s, const std::vector<NodeId>& d,
+                      std::optional<Amount> cap, const FlowCoreResult& r, const std::vector<Amount>* view = nullptr,
+                      const Eligibility* elig = nullptr, bool tier_a = true) {
+  std::vector<Amount> full(g.capacity_units().begin(), g.capacity_units().end());
+  const auto& v = view ? *view : full;
+  const auto fails = certify(g, v, s, d, cap, elig, r, tier_a);
+  EXPECT_TRUE(fails.empty()) << (fails.empty() ? "" : fails.front());
 }
 
-TEST(MaxFlow, DegenerateCase_SourceEqualsSink) {
-  // Validates handling of degenerate case where source = sink
-  auto g = make_line_graph(3);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-
-  auto [total, summary] = algs.max_flow(gh, 1, 1, opts);
-
-  EXPECT_NEAR(total, 0.0, 1e-12) << "Flow from node to itself must be zero";
-}
-
-//=============================================================================
-// SECTION 2: EQUAL-COST MULTIPATH (ECMP) - CORE VALIDATION
-//
-// This section systematically validates that when multiple paths have equal
-// cost, the algorithm correctly utilizes ALL paths to maximize throughput.
-// This is critical for data center fabrics (Clos, spine-leaf) where ECMP
-// load balancing across equal-cost paths is the primary traffic distribution
-// mechanism.
-//=============================================================================
-
-TEST(MaxFlow, ECMP_TwoPaths_Proportional_ShortestPath) {
-  // Validates ECMP with 2 parallel equal-cost paths
-  // Topology: Two disjoint paths from 0→3, each with capacity 10.0
-  // shortest_path=True should saturate both paths (not just one)
-  auto g = make_n_disjoint_paths(2, 10.0);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-
-  EXPECT_NEAR(total, 20.0, 1e-9)
-      << "shortest_path=True must saturate all equal-cost paths";
-
-  // Verify both paths carry significant flow
-  EXPECT_GT(summary.edge_flows[0], 5.0) << "Path 1 should be utilized";
-  EXPECT_GT(summary.edge_flows[2], 5.0) << "Path 2 should be utilized";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 3);
-}
-
-TEST(MaxFlow, ECMP_TwoPaths_Proportional_FullMaxFlow) {
-  // Same topology, but shortest_path=False for comparison
-  auto g = make_n_disjoint_paths(2, 10.0);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = false;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-
-  EXPECT_NEAR(total, 20.0, 1e-9) << "Full max-flow should use both paths";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 3);
-}
-
-TEST(MaxFlow, ECMP_TwoPaths_EqualBalanced_ShortestPath) {
-  // Same topology with EQUAL_BALANCED placement
-  // Should distribute flow uniformly across both paths
-  auto g = make_n_disjoint_paths(2, 10.0);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::EqualBalanced;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-
-  EXPECT_NEAR(total, 20.0, 1e-9) << "Equal-balanced should use both paths";
-
-  // With equal capacities, both paths should have equal flow
-  EXPECT_NEAR(summary.edge_flows[0], 10.0, 1e-9) << "Path 1 should be saturated";
-  EXPECT_NEAR(summary.edge_flows[2], 10.0, 1e-9) << "Path 2 should be saturated";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 3);
-}
-
-TEST(MaxFlow, ECMP_ThreePaths_Proportional_ShortestPath) {
-  // Extends ECMP validation to 3 equal-cost paths
-  auto g = make_n_disjoint_paths(3, 10.0);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 4, opts);
-
-  EXPECT_NEAR(total, 30.0, 1e-9)
-      << "Should saturate all 3 equal-cost paths";
-
-  // Each path should carry significant flow (~10.0)
-  for (int i = 0; i < 3; ++i) {
-    EXPECT_GT(summary.edge_flows[i * 2], 5.0)
-        << "Path " << i << " should be utilized";
+std::string error_of(const std::function<void()>& fn) {
+  try {
+    fn();
+  } catch (const std::invalid_argument& e) {
+    return e.what();
   }
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 4);
+  return "";
 }
 
-TEST(MaxFlow, ECMP_FourPaths_ClosFabric_Simulation) {
-  // Simulates 4-spine Clos fabric (common data center topology)
-  // Each spine provides an equal-cost path with 100 Gbps capacity
-  auto g = make_n_disjoint_paths(4, 100.0);
+} // namespace
 
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 5, opts);
-
-  EXPECT_NEAR(total, 400.0, 1e-9)
-      << "4-spine Clos: aggregate bandwidth should be 400 Gbps";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 5);
+TEST(FlowCore, QuantisedCapacitiesFamily) {
+  // Physical 2.5q is 3 units and 0.5q is 1 unit (review-2 R1 at 1a: the quantised network).
+  const double q = std::ldexp(1.0, -12);
+  const Amount a = to_units(2.5 * q, q);
+  const Amount b = to_units(0.5 * q, q);
+  ASSERT_EQ(a, 3);
+  ASSERT_EQ(b, 1);
+  auto g = make_graph(3, {{0, 1, a, 1}, {1, 2, a, 1}, {0, 2, b, 3}}, q);
+  auto r = solve(g, {0}, {2}, std::nullopt);
+  EXPECT_EQ(r.placed, 4);
+  EXPECT_EQ(r.cost_distribution, curve({{2, 3}, {3, 1}}));
+  ASSERT_TRUE(r.min_cut.has_value());
+  EXPECT_EQ(ids_to_input(g, *r.min_cut), (std::vector<std::int32_t>{0, 2}));
+  EXPECT_EQ(r.potentials, (std::vector<Cost>{0, 2, 3}));
+  EXPECT_EQ(counters_of(r), (Counters{3, 13, 12, 4, 2}));
+  expect_certified(g, {0}, {2}, std::nullopt, r);
 }
 
-TEST(MaxFlow, ECMP_TenPaths_ScalabilityValidation) {
-  // Validates algorithm scalability with many parallel equal-cost paths
-  auto g = make_n_disjoint_paths(10, 10.0);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 11, opts);
-
-  EXPECT_NEAR(total, 100.0, 1e-9)
-      << "Should saturate all 10 equal-cost paths";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 11);
+TEST(FlowCore, ChainPlusBypassesCancellation) {
+  // review-14 flow.chain, review-1 C7: value 2 needs the middle edge cancelled.
+  auto g = make_graph(4, chain_plus_bypasses());
+  auto one = solve(g, {0}, {3}, 1);
+  EXPECT_EQ(one.placed, 1);
+  EXPECT_EQ(one.cost_distribution, curve({{3, 1}}));
+  EXPECT_EQ(to_input(g, one.edge_flows), (std::vector<Amount>{1, 1, 1, 0, 0}));
+  EXPECT_FALSE(one.min_cut.has_value());  // review-14 flow.finite_cap: value 1 of a maximum 2
+  EXPECT_EQ(counters_of(one), (Counters{1, 8, 6, 1, 1}));
+  expect_certified(g, {0}, {3}, 1, one);
+  auto two = solve(g, {0}, {3}, 2);
+  EXPECT_EQ(two.placed, 2);
+  EXPECT_EQ(two.cost_distribution, curve({{3, 1}, {5, 1}}));  // C(1) = 3, C(2) = 8
+  EXPECT_EQ(to_input(g, two.edge_flows), (std::vector<Amount>{1, 0, 1, 1, 1}));
+  ASSERT_TRUE(two.min_cut.has_value());
+  EXPECT_EQ(ids_to_input(g, *two.min_cut), (std::vector<std::int32_t>{0, 3}));
+  EXPECT_EQ(two.potentials, (std::vector<Cost>{0, 2, 3, 5}));
+  EXPECT_EQ(counters_of(two), (Counters{2, 14, 12, 3, 2}));
+  expect_certified(g, {0}, {3}, 2, two);
+  auto inf = solve(g, {0}, {3}, std::nullopt);
+  EXPECT_EQ(inf.placed, 2);
+  EXPECT_EQ(inf.cost_distribution, two.cost_distribution);
+  EXPECT_EQ(inf.edge_flows, two.edge_flows);
+  EXPECT_EQ(inf.min_cut, two.min_cut);
+  EXPECT_EQ(counters_of(inf), (Counters{3, 16, 14, 4, 2}));  // the final failed Dijkstra
+  expect_certified(g, {0}, {3}, std::nullopt, inf);
 }
 
-//=============================================================================
-// SECTION 3: ASYMMETRIC CAPACITY PATTERNS
-//
-// Real networks often have paths with very different capacities due to
-// heterogeneous equipment, upgrades, or failures. These tests validate
-// correct behavior under capacity asymmetry.
-//=============================================================================
-
-TEST(MaxFlow, AsymmetricCapacity_1to100_Proportional) {
-  // Two equal-cost paths with 100x capacity difference
-  // Path 1: capacity 1.0, Path 2: capacity 100.0
-  std::int32_t src_arr[4] = {0, 1, 0, 2};
-  std::int32_t dst_arr[4] = {1, 3, 2, 3};
-  double cap_arr[4] = {1.0, 1.0, 100.0, 100.0};
-  std::int64_t cost_arr[4] = {1, 1, 1, 1};  // Equal cost
-
-  auto g = StrictMultiDiGraph::from_arrays(4,
-    std::span(src_arr, 4), std::span(dst_arr, 4),
-    std::span(cap_arr, 4), std::span(cost_arr, 4));
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-
-  // Should use both paths despite capacity asymmetry
-  EXPECT_NEAR(total, 101.0, 1e-9) << "Total flow should be 1.0 + 100.0";
-
-  // Validate per-edge flows by (u,v) lookup instead of relying on edge indices
-  auto row = g.row_offsets_view();
-  auto col = g.col_indices_view();
-  auto aei = g.adj_edge_index_view();
-  auto eid_uv = [&](int u, int v) -> std::size_t {
-    auto s = static_cast<std::size_t>(row[static_cast<std::size_t>(u)]);
-    auto e = static_cast<std::size_t>(row[static_cast<std::size_t>(u) + 1]);
-    for (std::size_t j = s; j < e; ++j) {
-      if (static_cast<int>(col[j]) == v) return static_cast<std::size_t>(aei[j]);
+TEST(FlowCore, ChainPlusBypassesMasksAndCostFactors) {
+  // The middle edge disabled by a zero view or excluded by Eligibility: curve [(4, 2)].
+  auto g = make_graph(4, chain_plus_bypasses());
+  const auto inv = id_of_input(g);
+  std::vector<Amount> view(g.capacity_units().begin(), g.capacity_units().end());
+  view[static_cast<std::size_t>(inv[1])] = 0;
+  auto zero = solve(g, {0}, {3}, std::nullopt, &view);
+  EXPECT_EQ(zero.cost_distribution, curve({{4, 2}}));
+  EXPECT_EQ(to_input(g, zero.edge_flows), (std::vector<Amount>{1, 0, 1, 1, 1}));
+  EXPECT_EQ(zero.potentials, (std::vector<Cost>{0, 1, 3, 4}));
+  expect_certified(g, {0}, {3}, std::nullopt, zero, &view);
+  const std::vector<EdgeId> excluded = {inv[1]};
+  auto el = g.eligibility({}, excluded);
+  auto masked = solve(g, {0}, {3}, std::nullopt, nullptr, &el);
+  EXPECT_EQ(masked.cost_distribution, curve({{4, 2}}));
+  EXPECT_EQ(masked.edge_flows, zero.edge_flows);
+  EXPECT_EQ(masked.min_cut, zero.min_cut);
+  expect_certified(g, {0}, {3}, std::nullopt, masked, nullptr, &el);
+  // Excluding node 1 leaves 0 -> 2 -> 3 only.
+  const std::vector<NodeId> xn = {1};
+  auto el_node = g.eligibility(xn, {});
+  auto node_masked = solve(g, {0}, {3}, std::nullopt, nullptr, &el_node);
+  EXPECT_EQ(node_masked.cost_distribution, curve({{4, 1}}));
+  EXPECT_EQ(node_masked.potentials[1], kNeverReached);
+  expect_certified(g, {0}, {3}, std::nullopt, node_masked, nullptr, &el_node);
+  // Scaling every cost by a factor scales the curve and the potentials; the flows, the cut and
+  // the operation counters are unchanged.
+  for (Cost factor : {2, 7, 1000003}) {
+    auto gf = make_graph(4, chain_plus_bypasses(factor));
+    auto base = solve(g, {0}, {3}, std::nullopt);
+    auto scaled = solve(gf, {0}, {3}, std::nullopt);
+    ASSERT_EQ(scaled.cost_distribution.size(), base.cost_distribution.size());
+    for (std::size_t i = 0; i < base.cost_distribution.size(); ++i) {
+      EXPECT_EQ(scaled.cost_distribution[i].first, factor * base.cost_distribution[i].first);
+      EXPECT_EQ(scaled.cost_distribution[i].second, base.cost_distribution[i].second);
     }
-    ADD_FAILURE() << "Edge (" << u << "->" << v << ") not found";
-    return static_cast<std::size_t>(-1);
+    for (std::size_t v = 0; v < base.potentials.size(); ++v) {
+      EXPECT_EQ(scaled.potentials[v], factor * base.potentials[v]);
+    }
+    EXPECT_EQ(scaled.edge_flows, base.edge_flows);
+    EXPECT_EQ(scaled.min_cut, base.min_cut);
+    EXPECT_EQ(counters_of(scaled), counters_of(base));
+    expect_certified(gf, {0}, {3}, std::nullopt, scaled);
+  }
+}
+
+TEST(FlowCore, EqualCostTierNeedsTwoDinicPhases) {
+  // review-14 flow.equal_cost_multiple_hop_tiers, review-16 solver.multiple_dinic_phases:
+  // C = {0: 0, 1: 3, 2: 6} in one tier of cost 3 drained by two successful level builds (plus the
+  // tier's last unsuccessful one).
+  auto g = make_graph(4, {{0, 3, 1, 3}, {0, 1, 1, 1}, {1, 2, 1, 1}, {2, 3, 1, 1}});
+  auto r = solve(g, {0}, {3}, std::nullopt);
+  EXPECT_EQ(r.placed, 2);
+  EXPECT_EQ(r.cost_distribution, curve({{3, 2}}));
+  EXPECT_EQ(r.counters.dijkstra_runs, 2);
+  EXPECT_EQ(r.counters.dinic_phases, 3);
+  EXPECT_EQ(counters_of(r), (Counters{2, 8, 8, 3, 2}));
+  expect_certified(g, {0}, {3}, std::nullopt, r);
+}
+
+TEST(FlowCore, CyclicAdmissibleNeedsUpdateBeforeDrain) {
+  // review-16 solver.cyclic_admissible: two parallel cost-1 links. Potentials are updated by
+  // the first Dijkstra before the drain (on the zero potentials no arc has reduced cost 0), and
+  // the zero-reduced-cost residual cycle 0 -> 1 -> 0 left after the first push is drained in
+  // the same tier.
+  auto g = make_graph(2, {{0, 1, 1, 1}, {0, 1, 1, 1}});
+  auto r = solve(g, {0}, {1}, 2);
+  EXPECT_EQ(r.placed, 2);
+  EXPECT_EQ(r.cost_distribution, curve({{1, 2}}));
+  EXPECT_EQ(counters_of(r), (Counters{1, 4, 4, 1, 2}));
+  expect_certified(g, {0}, {1}, 2, r);
+  // review-17 partial_drain: cap 1 stops inside the tier; the destinations stay connected.
+  auto p = solve(g, {0}, {1}, 1);
+  EXPECT_EQ(p.placed, 1);
+  EXPECT_EQ(p.cost_distribution, curve({{1, 1}}));
+  EXPECT_FALSE(p.min_cut.has_value());
+  EXPECT_EQ(counters_of(p), (Counters{1, 4, 4, 1, 1}));
+  expect_certified(g, {0}, {1}, 1, p);
+}
+
+TEST(FlowCore, FailedFinalRunRaisesPotentials) {
+  // review-17 failed_final_run: the side branch 3 is reached at 8 by the first run and at 10 by
+  // the failed final run; dual feasibility is claimed inside the closure {0, 3} only.
+  auto g = make_graph(4, {{0, 1, 1, 1}, {1, 2, 1, 1}, {1, 3, 1, 7}, {0, 3, 1, 10}});
+  auto r = solve(g, {0}, {2}, std::nullopt);
+  EXPECT_EQ(r.placed, 1);
+  EXPECT_EQ(r.cost_distribution, curve({{2, 1}}));
+  EXPECT_EQ(r.potentials, (std::vector<Cost>{0, 1, 2, 10}));
+  ASSERT_TRUE(r.min_cut.has_value());
+  EXPECT_EQ(ids_to_input(g, *r.min_cut), (std::vector<std::int32_t>{0}));
+  EXPECT_EQ(counters_of(r), (Counters{2, 10, 9, 2, 1}));
+  expect_certified(g, {0}, {2}, std::nullopt, r);
+}
+
+TEST(FlowCore, FreshSolveUsesReleasedCheapEdge) {
+  // review-14 flow.release_no_growth, review-15 fresh.owner_release_atomic: on the view W + own
+  // = [1, 1, 1] the solve at value 1 takes the cheap link (cost 2), not the old cost-4 one.
+  auto g = make_graph(3, {{0, 1, 1, 1}, {0, 1, 2, 3}, {1, 2, 2, 1}});
+  const std::vector<Amount> view = to_ids(g, std::vector<Amount>{1, 1, 1});
+  auto r = solve(g, {0}, {2}, 1, &view);
+  EXPECT_EQ(to_input(g, r.edge_flows), (std::vector<Amount>{1, 0, 1}));
+  EXPECT_EQ(r.cost_distribution, curve({{2, 1}}));
+  std::vector<Amount> residual(view.size());
+  for (std::size_t e = 0; e < view.size(); ++e) residual[e] = view[e] - r.edge_flows[e];
+  EXPECT_EQ(to_input(g, residual), (std::vector<Amount>{0, 1, 0}));
+  expect_certified(g, {0}, {2}, 1, r, &view);
+  EXPECT_TRUE(same_payload(r, solve(g, {0}, {2}, 1, &view)));
+}
+
+TEST(FlowCore, AttainedValueUnderCapAndInfinity) {
+  // review-15 C1 and review-16 certificate.internal_cap on one edge of capacity 3 and cost 7.
+  auto g = make_graph(2, {{0, 1, 3, 7}});
+  auto c2 = solve(g, {0}, {1}, 2);
+  EXPECT_EQ(c2.placed, 2);
+  EXPECT_FALSE(c2.min_cut.has_value());
+  EXPECT_EQ(counters_of(c2), (Counters{1, 4, 4, 1, 1}));
+  expect_certified(g, {0}, {1}, 2, c2);
+  auto c3 = solve(g, {0}, {1}, 3);
+  EXPECT_EQ(c3.placed, 3);
+  ASSERT_TRUE(c3.min_cut.has_value());
+  EXPECT_EQ(*c3.min_cut, (std::vector<EdgeId>{0}));
+  EXPECT_EQ(counters_of(c3), (Counters{1, 4, 4, 1, 1}));  // the cap stops before a failed run
+  auto inf = solve(g, {0}, {1}, std::nullopt);
+  EXPECT_EQ(inf.placed, 3);
+  EXPECT_EQ(inf.cost_distribution, curve({{7, 3}}));
+  EXPECT_EQ(counters_of(inf), (Counters{2, 6, 6, 2, 1}));
+  expect_certified(g, {0}, {1}, std::nullopt, inf);
+  // The internal cap 2^63 - 2: the solve runs to disconnection (no clamp, APPROACH 2.2 r25).
+  auto big = solve(g, {0}, {1}, kMaxFlowCap);
+  EXPECT_TRUE(same_payload(big, inf));
+  expect_certified(g, {0}, {1}, kMaxFlowCap, big);
+}
+
+TEST(FlowCore, ZeroCapIsThePrescribedZeroPayload) {
+  // review-16 certificate.zero_cap, review-17 C2.zero_cap_branch.
+  auto g = make_graph(4, {{0, 1, 2, 1}, {1, 2, 2, 2}, {3, 2, 1, 1}});
+  auto r = solve(g, {0}, {2}, 0);
+  EXPECT_EQ(r.placed, 0);
+  EXPECT_TRUE(r.cost_distribution.empty());
+  EXPECT_EQ(r.edge_flows, (std::vector<Amount>{0, 0, 0}));
+  EXPECT_FALSE(r.min_cut.has_value());
+  EXPECT_EQ(r.potentials, (std::vector<Cost>(4, kNeverReached)));
+  EXPECT_EQ(counters_of(r), (Counters{0, 0, 0, 0, 0}));
+  expect_certified(g, {0}, {2}, 0, r);
+}
+
+TEST(FlowCore, PositiveCapOnZeroView) {
+  // review-17 C2.positive_cap_no_out_capacity: a positive cap runs one failed Dijkstra even when
+  // the view gives the sources no out-capacity; roots at 0, min_cut [].
+  auto g = make_graph(3, {{0, 1, 5, 1}, {1, 2, 5, 1}});
+  const std::vector<Amount> view = to_ids(g, std::vector<Amount>{0, 5});
+  auto r = solve(g, {0}, {2}, 4, &view);
+  EXPECT_EQ(r.placed, 0);
+  EXPECT_TRUE(r.cost_distribution.empty());
+  ASSERT_TRUE(r.min_cut.has_value());
+  EXPECT_TRUE(r.min_cut->empty());
+  EXPECT_EQ(r.potentials, (std::vector<Cost>{0, kNeverReached, kNeverReached}));
+  EXPECT_EQ(counters_of(r), (Counters{1, 2, 2, 0, 0}));
+  expect_certified(g, {0}, {2}, 4, r, &view);
+  // An all-zero view behaves the same way.
+  const std::vector<Amount> zeros(2, 0);
+  auto z = solve(g, {0}, {2}, 1, &zeros);
+  EXPECT_EQ(z.placed, 0);
+  ASSERT_TRUE(z.min_cut.has_value());
+  EXPECT_TRUE(z.min_cut->empty());
+  EXPECT_EQ(z.potentials[0], 0);
+}
+
+TEST(FlowCore, LegalMaximumUnits) {
+  // review-17 terminal_saturation: one edge at 2^62 - 1 units; the closure is seeded at the real
+  // sources, so the cut holds the real edge (virtual arcs never saturate).
+  auto g = make_graph(2, {{0, 1, kL62m1, 1}});
+  auto r = solve(g, {0}, {1}, std::nullopt);
+  EXPECT_EQ(r.placed, kL62m1);
+  EXPECT_EQ(r.cost_distribution, curve({{1, kL62m1}}));
+  ASSERT_TRUE(r.min_cut.has_value());
+  EXPECT_EQ(*r.min_cut, (std::vector<EdgeId>{0}));
+  EXPECT_EQ(r.potentials, (std::vector<Cost>{0, 1}));
+  expect_certified(g, {0}, {1}, std::nullopt, r, nullptr, nullptr, /*tier_a=*/false);
+  // A sum of capacities at 2^62 - 1 split over parallel paths with large costs.
+  auto h = make_graph(3, {{0, 1, kL62m1 - 10, (Amount{1} << 60)}, {0, 2, 5, 3}, {2, 1, 5, (Amount{1} << 60)}});
+  auto rh = solve(h, {0}, {1}, std::nullopt);
+  EXPECT_EQ(rh.placed, kL62m1 - 5);
+  EXPECT_EQ(rh.cost_distribution, curve({{(Amount{1} << 60), kL62m1 - 10}, {(Amount{1} << 60) + 3, 5}}));
+  expect_certified(h, {0}, {1}, std::nullopt, rh, nullptr, nullptr, /*tier_a=*/false);
+  auto capped = solve(h, {0}, {1}, kL62m1 - 6);
+  EXPECT_EQ(capped.placed, kL62m1 - 6);
+  EXPECT_FALSE(capped.min_cut.has_value());
+  expect_certified(h, {0}, {1}, kL62m1 - 6, capped, nullptr, nullptr, /*tier_a=*/false);
+}
+
+TEST(FlowCore, EndpointSetsAndVirtualTerminals) {
+  // review-17 C2.reverse_virtual and review-16 global.all_destinations: both destinations have
+  // inflow, so both carry pi(t*) = 2.
+  auto g = make_graph(3, {{0, 1, 1, 1}, {0, 2, 1, 2}});
+  auto r = solve(g, {0}, {1, 2}, std::nullopt);
+  EXPECT_EQ(r.placed, 2);
+  EXPECT_EQ(r.cost_distribution, curve({{1, 1}, {2, 1}}));
+  EXPECT_EQ(r.potentials, (std::vector<Cost>{0, 2, 2}));
+  expect_certified(g, {0}, {1, 2}, std::nullopt, r);
+  // Source transit is dominated: source 0 supplies nothing.
+  auto t = make_graph(3, {{0, 1, 1, 1}, {1, 2, 2, 1}});
+  auto rt = solve(t, {0, 1}, {2}, std::nullopt);
+  EXPECT_EQ(rt.placed, 2);
+  EXPECT_EQ(to_input(t, rt.edge_flows), (std::vector<Amount>{0, 2}));
+  EXPECT_EQ(rt.potentials, (std::vector<Cost>{0, 0, 1}));
+  expect_certified(t, {0, 1}, {2}, std::nullopt, rt);
+  // Duplicates are removed.
+  EXPECT_TRUE(same_payload(solve(t, {1, 0, 1}, {2, 2}, std::nullopt), rt));
+}
+
+TEST(FlowCore, ClosureAndSentinels) {
+  // review-14 flow.cut: the closure follows reverse arcs, so the forward-only boundary is wrong.
+  auto g = make_graph(5, {{0, 1, 1, 1}, {0, 2, 1, 1}, {1, 3, 1, 1}, {2, 3, 1, 1}, {3, 4, 1, 1}});
+  auto r = solve(g, {0}, {4}, std::nullopt);
+  EXPECT_EQ(r.placed, 1);
+  ASSERT_TRUE(r.min_cut.has_value());
+  EXPECT_EQ(ids_to_input(g, *r.min_cut), (std::vector<std::int32_t>{4}));
+  expect_certified(g, {0}, {4}, std::nullopt, r);
+  // Node 3 is never settled when the cap stops the solve with the destination connected.
+  auto h = make_graph(4, {{0, 1, 2, 1}, {1, 2, 2, 2}, {3, 2, 1, 1}});
+  auto rh = solve(h, {0}, {2}, 1);
+  EXPECT_FALSE(rh.min_cut.has_value());
+  EXPECT_EQ(rh.potentials, (std::vector<Cost>{0, 1, 3, kNeverReached}));
+  expect_certified(h, {0}, {2}, 1, rh);
+}
+
+TEST(FlowCore, ExcludedEndpointsAreSkipped) {
+  auto g = make_graph(3, {{0, 1, 2, 1}, {1, 2, 2, 1}});
+  const std::vector<NodeId> x0 = {0};
+  auto no_source = g.eligibility(x0, {});
+  auto r = solve(g, {0}, {2}, std::nullopt, nullptr, &no_source);
+  EXPECT_EQ(r.placed, 0);
+  ASSERT_TRUE(r.min_cut.has_value());
+  EXPECT_TRUE(r.min_cut->empty());
+  EXPECT_EQ(r.potentials, (std::vector<Cost>(3, kNeverReached)));
+  expect_certified(g, {0}, {2}, std::nullopt, r, nullptr, &no_source);
+  const std::vector<NodeId> x2 = {2};
+  auto no_dest = g.eligibility(x2, {});
+  auto rd = solve(g, {0}, {2}, std::nullopt, nullptr, &no_dest);
+  EXPECT_EQ(rd.placed, 0);
+  EXPECT_EQ(rd.potentials, (std::vector<Cost>{0, 1, kNeverReached}));
+  expect_certified(g, {0}, {2}, std::nullopt, rd, nullptr, &no_dest);
+  // One allowed source of two.
+  auto rs = solve(g, {0, 1}, {2}, std::nullopt, nullptr, &no_source);
+  EXPECT_EQ(rs.placed, 2);
+  expect_certified(g, {0, 1}, {2}, std::nullopt, rs, nullptr, &no_source);
+}
+
+TEST(FlowCore, Review13MasksEqualTheirCuts) {
+  // Sources {0, 1}, destinations {3, 4} under three Eligibilities.
+  auto g = make_graph(5, {{0, 2, 2, 2}, {1, 2, 1, 1}, {2, 3, 2, 3}, {2, 4, 1, 5}});
+  const auto inv = id_of_input(g);
+  for (auto [mask, expect] : std::vector<std::pair<std::vector<std::int32_t>, Amount>>{{{}, 3}, {{1}, 2}, {{2}, 1}}) {
+    std::vector<EdgeId> excluded;
+    for (auto i : mask) excluded.push_back(inv[static_cast<std::size_t>(i)]);
+    auto el = g.eligibility({}, excluded);
+    auto r = solve(g, {0, 1}, {3, 4}, std::nullopt, nullptr, &el);
+    EXPECT_EQ(r.placed, expect);
+    expect_certified(g, {0, 1}, {3, 4}, std::nullopt, r, nullptr, &el);
+  }
+}
+
+TEST(FlowCore, InputValidationBeforeAnyWork) {
+  auto g = make_graph(3, {{0, 1, 2, 1}, {1, 2, 2, 1}});
+  auto h = make_graph(3, {{0, 1, 2, 1}, {1, 2, 2, 1}});
+  const std::vector<Amount> view = {2, 2};
+  const std::vector<NodeId> s = {0}, d = {2};
+  auto call = [&](std::vector<Amount> v, std::vector<NodeId> src, std::vector<NodeId> dst, std::optional<Amount> cap,
+                  const Eligibility* el = nullptr) {
+    return error_of([&] { (void)place_global_units(g, v, src, dst, el, cap); });
   };
-  auto e01 = eid_uv(0, 1);
-  auto e13 = eid_uv(1, 3);
-  auto e02 = eid_uv(0, 2);
-  auto e23 = eid_uv(2, 3);
-  ASSERT_NE(e01, static_cast<std::size_t>(-1));
-  ASSERT_NE(e13, static_cast<std::size_t>(-1));
-  ASSERT_NE(e02, static_cast<std::size_t>(-1));
-  ASSERT_NE(e23, static_cast<std::size_t>(-1));
-  // Small path saturated
-  EXPECT_NEAR(summary.edge_flows[e01], 1.0, 1e-9)
-      << "Low-capacity first hop should be fully utilized";
-  EXPECT_NEAR(summary.edge_flows[e13], 1.0, 1e-9)
-      << "Low-capacity second hop should be fully utilized";
-  // Large path saturated
-  EXPECT_NEAR(summary.edge_flows[e02], 100.0, 1e-9)
-      << "High-capacity first hop should be fully utilized";
-  EXPECT_NEAR(summary.edge_flows[e23], 100.0, 1e-9)
-      << "High-capacity second hop should be fully utilized";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 3);
+  EXPECT_NE(call({2}, s, d, 1).find("view has length 1, expected 2"), std::string::npos);
+  EXPECT_NE(call({2, 3}, s, d, 1).find("capacity_units"), std::string::npos);
+  EXPECT_NE(call({-1, 2}, s, d, 1).find("outside"), std::string::npos);
+  EXPECT_NE(call(view, {}, d, 1).find("sources: the endpoint set is empty"), std::string::npos);
+  EXPECT_NE(call(view, s, {}, 1).find("destinations: the endpoint set is empty"), std::string::npos);
+  EXPECT_NE(call(view, {3}, d, 1).find("out of node range"), std::string::npos);
+  EXPECT_NE(call(view, s, {-1}, 1).find("out of node range"), std::string::npos);
+  EXPECT_NE(call(view, {0, 2}, {2}, 1).find("both endpoint sets"), std::string::npos);
+  EXPECT_NE(call(view, s, d, -1).find("cap"), std::string::npos);
+  EXPECT_NE(call(view, s, d, kMaxFlowCap + 1).find("cap"), std::string::npos);
+  auto foreign = h.eligibility();
+  EXPECT_NE(call(view, s, d, 1, &foreign).find("foreign Eligibility"), std::string::npos);
+  // The overlap is checked on the full sets, also when an Eligibility excludes the vertex.
+  const std::vector<NodeId> x0 = {0};
+  auto el = g.eligibility(x0, {});
+  EXPECT_NE(call(view, {0}, {0}, 1, &el).find("both endpoint sets"), std::string::npos);
+  // Order: the view before the endpoints, the endpoints before the cap.
+  EXPECT_NE(call({2}, {}, d, -1).find("view"), std::string::npos);
+  EXPECT_NE(call(view, {}, d, -1).find("sources"), std::string::npos);
 }
 
-TEST(MaxFlow, AsymmetricCapacity_1to1M_NumericalStability) {
-  // Extreme capacity asymmetry: 1M:1 ratio
-  // Tests numerical stability of proportional placement
-  std::int32_t src_arr[4] = {0, 1, 0, 2};
-  std::int32_t dst_arr[4] = {1, 3, 2, 3};
-  double cap_arr[4] = {1.0, 1.0, 1000000.0, 1000000.0};
-  std::int64_t cost_arr[4] = {1, 1, 1, 1};
-
-  auto g = StrictMultiDiGraph::from_arrays(4,
-    std::span(src_arr, 4), std::span(dst_arr, 4),
-    std::span(cap_arr, 4), std::span(cost_arr, 4));
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-
-  // Should handle extreme asymmetry without numerical issues
-  EXPECT_NEAR(total, 1000001.0, 1e-6) << "Should use both paths";
-
-  // Small path saturated
-  EXPECT_NEAR(summary.edge_flows[0], 1.0, 1e-9)
-      << "Small path should be saturated";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 3);
-}
-
-TEST(MaxFlow, AsymmetricCapacity_1to100_EqualBalanced) {
-  // Equal-balanced placement with asymmetric capacities
-  // Should be limited by minimum capacity across paths
-  std::int32_t src_arr[4] = {0, 1, 0, 2};
-  std::int32_t dst_arr[4] = {1, 3, 2, 3};
-  double cap_arr[4] = {1.0, 1.0, 100.0, 100.0};
-  std::int64_t cost_arr[4] = {1, 1, 1, 1};
-
-  auto g = StrictMultiDiGraph::from_arrays(4,
-    std::span(src_arr, 4), std::span(dst_arr, 4),
-    std::span(cap_arr, 4), std::span(cost_arr, 4));
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::EqualBalanced;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-
-  // Equal-balanced: both paths get same flow, limited by min capacity
-  EXPECT_NEAR(total, 2.0, 1e-9)
-      << "Equal-balanced: 1.0 per path × 2 paths = 2.0";
-
-  // Both paths should have equal flow
-  EXPECT_NEAR(summary.edge_flows[0], 1.0, 1e-9) << "Path 1 saturated at min";
-  EXPECT_NEAR(summary.edge_flows[2], 1.0, 1e-9) << "Path 2 limited to min";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 3);
-}
-
-TEST(MaxFlow, EqualBalanced_NodeMask_ReducesECMPWidth) {
-  // Two equal-cost paths 0->1->3 and 0->2->3 with cap=5 each.
-  // Mask out node 2; EB should place only on path via 1, limited by 5.
-  std::int32_t src_arr[4] = {0, 1, 0, 2};
-  std::int32_t dst_arr[4] = {1, 3, 2, 3};
-  double cap_arr[4] = {5.0, 5.0, 5.0, 5.0};
-  std::int64_t cost_arr[4] = {1, 1, 1, 1};
-  auto g = StrictMultiDiGraph::from_arrays(4,
-    std::span(src_arr, 4), std::span(dst_arr, 4),
-    std::span(cap_arr, 4), std::span(cost_arr, 4));
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::EqualBalanced;
-  opts.shortest_path = false;
-  opts.with_edge_flows = true;
-  // Node mask: disable node 2
-  auto node_mask_vec = make_bool_mask(g.num_nodes());
-  node_mask_vec[2] = false;
-  opts.node_mask = std::span<const bool>(node_mask_vec.get(), static_cast<std::size_t>(g.num_nodes()));
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-  EXPECT_NEAR(total, 5.0, 1e-9) << "Only unmasked path should carry flow";
-  // Validate that only path via 1 carries 5
-  auto row = g.row_offsets_view();
-  auto col = g.col_indices_view();
-  auto aei = g.adj_edge_index_view();
-  auto eid_uv = [&](int u, int v) -> std::size_t {
-    auto s = static_cast<std::size_t>(row[static_cast<std::size_t>(u)]);
-    auto e = static_cast<std::size_t>(row[static_cast<std::size_t>(u) + 1]);
-    for (std::size_t j = s; j < e; ++j) {
-      if (static_cast<int>(col[j]) == v) return static_cast<std::size_t>(aei[j]);
+TEST(FlowCore, IdenticalCallsIdenticalPayloads) {
+  std::mt19937 rng(7);
+  for (int trial = 0; trial < 20; ++trial) {
+    std::vector<InEdge> edges;
+    for (int e = 0; e < 40; ++e) {
+      edges.push_back({static_cast<NodeId>(rng() % 12), static_cast<NodeId>(rng() % 12),
+                       static_cast<Amount>(rng() % 9), static_cast<Cost>(1 + rng() % 6)});
     }
-    return static_cast<std::size_t>(-1);
-  };
-  auto e01 = eid_uv(0, 1);
-  auto e13 = eid_uv(1, 3);
-  auto e02 = eid_uv(0, 2);
-  auto e23 = eid_uv(2, 3);
-  ASSERT_NE(e01, static_cast<std::size_t>(-1));
-  ASSERT_NE(e13, static_cast<std::size_t>(-1));
-  ASSERT_NE(e02, static_cast<std::size_t>(-1));
-  ASSERT_NE(e23, static_cast<std::size_t>(-1));
-  EXPECT_NEAR(summary.edge_flows[e01], 5.0, 1e-9);
-  EXPECT_NEAR(summary.edge_flows[e13], 5.0, 1e-9);
-  EXPECT_NEAR(summary.edge_flows[e02], 0.0, 1e-9);
-  EXPECT_NEAR(summary.edge_flows[e23], 0.0, 1e-9);
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 3);
-}
-TEST(MaxFlow, ZeroCapacityPath_CorrectFiltering) {
-  // One path with zero capacity should be ignored
-  // Tests correct residual capacity filtering
-  std::int32_t src_arr[4] = {0, 1, 0, 2};
-  std::int32_t dst_arr[4] = {1, 3, 2, 3};
-  double cap_arr[4] = {10.0, 10.0, 0.0, 0.0};  // Path 2 has zero capacity
-  std::int64_t cost_arr[4] = {1, 1, 1, 1};
-
-  auto g = StrictMultiDiGraph::from_arrays(4,
-    std::span(src_arr, 4), std::span(dst_arr, 4),
-    std::span(cap_arr, 4), std::span(cost_arr, 4));
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-
-  EXPECT_NEAR(total, 10.0, 1e-9)
-      << "Should route all flow via non-zero capacity path";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 3);
-}
-
-//=============================================================================
-// SECTION 4: COST TIER VALIDATION
-//
-// Networks often have paths with different costs (distance, latency, monetary).
-// The shortest_path parameter controls whether to use only lowest-cost paths
-// or to utilize higher-cost paths for additional capacity.
-//=============================================================================
-
-TEST(MaxFlow, TwoCostTiers_ShortestPath_SingleTierOnly) {
-  // Validates that shortest_path=True uses only lowest-cost tier
-  // Tier 1: cost=1, capacity=5
-  // Tier 2: cost=2, capacity=100
-  auto g = make_tiered_graph(5.0, 100.0);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-
-  // Should use ONLY cost=1 tier, NOT cost=2 tier
-  EXPECT_NEAR(total, 5.0, 1e-9)
-      << "shortest_path=True: use only lowest-cost tier";
-
-  // Tier 1 (cost=1) should be saturated
-  EXPECT_NEAR(summary.edge_flows[0], 5.0, 1e-9)
-      << "Lowest-cost path should be saturated";
-
-  // Tier 2 (cost=2) should NOT be used
-  EXPECT_NEAR(summary.edge_flows[2], 0.0, 1e-9)
-      << "Higher-cost tier should not be used";
-
-  // Verify cost distribution contains only one tier
-  EXPECT_EQ(summary.costs.size(), 1) << "Only one cost tier used";
-  EXPECT_EQ(summary.costs[0], 2) << "Total cost = 2 (sum of 2 edges @ cost 1)";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 3);
-}
-
-TEST(MaxFlow, TwoCostTiers_FullMaxFlow_AllTiers) {
-  // Validates that shortest_path=False uses all available tiers
-  auto g = make_tiered_graph(5.0, 100.0);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = false;  // Full max-flow
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-
-  // Should use BOTH tiers
-  EXPECT_NEAR(total, 105.0, 1e-9)
-      << "Full max-flow should use all tiers (5 + 100 = 105)";
-
-  // Both tiers should be saturated
-  EXPECT_NEAR(summary.edge_flows[0], 5.0, 1e-9) << "Tier 1 saturated";
-  EXPECT_NEAR(summary.edge_flows[2], 100.0, 1e-9) << "Tier 2 saturated";
-
-  // Verify cost distribution has TWO tiers
-  EXPECT_EQ(summary.costs.size(), 2) << "Two cost tiers used";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 3);
-}
-
-TEST(MaxFlow, EqualCost_ShortestVsFull_Equivalent) {
-  // When all paths have equal cost, shortest_path and full should be identical
-  auto g = make_n_disjoint_paths(3, 10.0);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts_full;
-  opts_full.placement = FlowPlacement::Proportional;
-  opts_full.shortest_path = false;
-  auto [total_full, _] = algs.max_flow(gh, 0, 4, opts_full);
-
-  MaxFlowOptions opts_sp;
-  opts_sp.placement = FlowPlacement::Proportional;
-  opts_sp.shortest_path = true;
-  auto [total_sp, __] = algs.max_flow(gh, 0, 4, opts_sp);
-
-  EXPECT_NEAR(total_full, total_sp, 1e-9)
-      << "With all equal-cost paths, both modes should be equivalent";
-  EXPECT_NEAR(total_full, 30.0, 1e-9) << "Should saturate all 3 paths";
-}
-
-TEST(MaxFlow, ThreeCostTiers_ShortestPath_LowestTierOnly) {
-  // Validates shortest_path with 3+ cost tiers
-  // Path 1: 0→1→4 (cost=1 per edge, cap=5)
-  // Path 2: 0→2→4 (cost=2 per edge, cap=10)
-  // Path 3: 0→3→4 (cost=3 per edge, cap=20)
-  std::int32_t src_arr[6] = {0, 1, 0, 2, 0, 3};
-  std::int32_t dst_arr[6] = {1, 4, 2, 4, 3, 4};
-  double cap_arr[6] = {5.0, 5.0, 10.0, 10.0, 20.0, 20.0};
-  std::int64_t cost_arr[6] = {1, 1, 2, 2, 3, 3};
-
-  auto g = StrictMultiDiGraph::from_arrays(5,
-    std::span(src_arr, 6), std::span(dst_arr, 6),
-    std::span(cap_arr, 6), std::span(cost_arr, 6));
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 4, opts);
-
-  // Should use ONLY cost=1 tier
-  EXPECT_NEAR(total, 5.0, 1e-9)
-      << "Should use only lowest-cost tier (cost=1)";
-
-  // Only first path should have flow
-  EXPECT_NEAR(summary.edge_flows[0], 5.0, 1e-9) << "Path 1 (cost=1) saturated";
-  EXPECT_NEAR(summary.edge_flows[2], 0.0, 1e-9) << "Path 2 (cost=2) unused";
-  EXPECT_NEAR(summary.edge_flows[4], 0.0, 1e-9) << "Path 3 (cost=3) unused";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 4);
-}
-
-//=============================================================================
-// SECTION 5: PLACEMENT MODE COMPARISON
-//
-// Direct comparison of PROPORTIONAL vs EQUAL_BALANCED behavior under
-// various conditions.
-//=============================================================================
-
-TEST(MaxFlow, PlacementModes_EqualCapacity_IdenticalResult) {
-  // With equal capacities, both modes should give same total flow
-  auto g = make_n_disjoint_paths(2, 10.0);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts_prop;
-  opts_prop.placement = FlowPlacement::Proportional;
-  opts_prop.shortest_path = true;
-  auto [total_prop, _] = algs.max_flow(gh, 0, 3, opts_prop);
-
-  MaxFlowOptions opts_eq;
-  opts_eq.placement = FlowPlacement::EqualBalanced;
-  opts_eq.shortest_path = true;
-  auto [total_eq, __] = algs.max_flow(gh, 0, 3, opts_eq);
-
-  // Both should saturate both paths
-  EXPECT_NEAR(total_prop, 20.0, 1e-9);
-  EXPECT_NEAR(total_eq, 20.0, 1e-9);
-  EXPECT_NEAR(total_prop, total_eq, 1e-9)
-      << "With equal capacities, both modes give same total";
-}
-
-//=============================================================================
-// SECTION 6: FLOW PROPERTIES & INVARIANTS
-//
-// Validates fundamental flow properties: conservation, capacity constraints,
-// min-cut correctness, cost distribution consistency.
-//=============================================================================
-
-TEST(MaxFlow, FlowConservation_IntermediateNodes) {
-  // Validates flow conservation: inflow = outflow at intermediate nodes
-  auto g = make_square_graph(1);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 2, opts);
-
-  EXPECT_EQ(summary.edge_flows.size(), static_cast<std::size_t>(g.num_edges()));
-
-  // Use helper to validate conservation at all intermediate nodes
-  validate_flow_conservation(g, summary, 0, 2);
-}
-
-TEST(MaxFlow, MinCut_ValidEdgeIdentification) {
-  // Min-cut should separate source from sink with valid edge IDs
-  auto g = make_square_graph(1);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 2, opts);
-
-  // Min cut should contain edges
-  EXPECT_GT(summary.min_cut.edges.size(), 0)
-      << "Min-cut must separate source from sink";
-
-  // All cut edges should have valid IDs
-  for (auto eid : summary.min_cut.edges) {
-    EXPECT_GE(eid, 0) << "Edge ID must be non-negative";
-    EXPECT_LT(eid, g.num_edges()) << "Edge ID must be in valid range";
+    auto g = make_graph(12, edges);
+    auto a = solve(g, {0, 1}, {10, 11}, std::nullopt);
+    auto b = solve(g, {0, 1}, {10, 11}, std::nullopt);
+    EXPECT_TRUE(same_payload(a, b));
   }
 }
 
-TEST(MaxFlow, CostDistribution_AccountsForAllFlow) {
-  // Cost distribution should account for all flow
-  auto g = make_square_graph(1);
+namespace {
 
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
+struct RandomCase {
+  StrictMultiDiGraph g;
+  std::vector<NodeId> s, d;
+  std::vector<Amount> view;
+  std::optional<Amount> cap;
+  std::vector<NodeId> xn;
+  std::vector<EdgeId> xe;
+};
 
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 2, opts);
-
-  // Cost distribution flows should sum to total flow
-  double cost_sum = 0.0;
-  for (auto flow : summary.flows) {
-    cost_sum += flow;
+RandomCase random_case(std::mt19937& rng, int n, int m, Amount max_cap, Cost max_cost, bool masks) {
+  std::vector<InEdge> edges;
+  for (int e = 0; e < m; ++e) {
+    edges.push_back({static_cast<NodeId>(rng() % n), static_cast<NodeId>(rng() % n),
+                     static_cast<Amount>(rng() % (max_cap + 1)), static_cast<Cost>(1 + rng() % max_cost)});
   }
-
-  EXPECT_NEAR(cost_sum, total, 1e-9)
-      << "Cost distribution must account for all flow";
-}
-
-//=============================================================================
-// SECTION 7: ADVANCED FEATURES
-//=============================================================================
-
-TEST(MaxFlow, OptionalOutputs_ResidualAndReachable) {
-  // Validates optional residual capacity and reachable nodes outputs
-  auto g = make_square_graph(1);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.with_edge_flows = true;
-  opts.with_reachable = true;
-  opts.with_residuals = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 2, opts);
-
-  // Verify output dimensions
-  EXPECT_EQ(summary.residual_capacity.size(),
-            static_cast<std::size_t>(g.num_edges()))
-      << "Residual capacity vector size must match edge count";
-  EXPECT_EQ(summary.reachable_nodes.size(),
-            static_cast<std::size_t>(g.num_nodes()))
-      << "Reachable nodes vector size must match node count";
-}
-
-TEST(MaxFlow, NodeMask_BlocksFlowThroughNode) {
-  // Validates that node masking prevents flow through masked nodes
-  auto g = make_line_graph(3);
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  // Mask out node 1 (middle node)
-  auto node_mask_vec = make_bool_mask(g.num_nodes());
-  node_mask_vec[1] = false;
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.node_mask = std::span<const bool>(node_mask_vec.get(),
-                                        static_cast<std::size_t>(g.num_nodes()));
-
-  auto [total, summary] = algs.max_flow(gh, 0, 2, opts);
-
-  EXPECT_NEAR(total, 0.0, 1e-12)
-      << "Masking middle node should prevent all flow";
-}
-
-TEST(MaxFlow, EdgeMask_SelectiveEdgeFiltering) {
-  // Validates edge mask functionality
-  auto g = make_n_disjoint_paths(2, 10.0);
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  // Create mask with all edges enabled
-  auto edge_mask_vec = make_bool_mask(g.num_edges(), true);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.with_edge_flows = true;
-  opts.edge_mask = std::span<const bool>(edge_mask_vec.get(),
-                                        static_cast<std::size_t>(g.num_edges()));
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-
-  // With all edges enabled, should use both paths
-  EXPECT_NEAR(total, 20.0, 1e-9)
-      << "With all edges enabled, both paths should be used";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 3);
-}
-
-TEST(MaxFlow, BatchMaxFlow_IndependentMaskApplication) {
-  // Validates batch max-flow with different masks per pair
-  auto g = make_line_graph(3);
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  std::vector<std::pair<NodeId, NodeId>> pairs = {{0, 2}, {0, 2}};
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-
-  // First pair: no mask (should find flow)
-  // Second pair: mask node 1 (should find no flow)
-  std::vector<std::span<const bool>> node_masks;
-  auto nm0 = make_bool_mask(g.num_nodes());  // all true
-  auto nm1 = make_bool_mask(g.num_nodes());
-  nm1[1] = false;  // block middle node for second pair
-  node_masks.push_back(std::span<const bool>(nm0.get(),
-                                            static_cast<std::size_t>(g.num_nodes())));
-  node_masks.push_back(std::span<const bool>(nm1.get(),
-                                            static_cast<std::size_t>(g.num_nodes())));
-
-  auto summaries = algs.batch_max_flow(gh, pairs, opts, node_masks, {});
-
-  ASSERT_EQ(summaries.size(), 2u);
-  EXPECT_GT(summaries[0].total_flow, 0.0)
-      << "First pair (unmasked) should find flow";
-  EXPECT_NEAR(summaries[1].total_flow, 0.0, 1e-12)
-      << "Second pair (masked) should find no flow";
-}
-
-//=============================================================================
-// SECTION 8: COMPLEX TOPOLOGIES
-//
-// Validates algorithm correctness on realistic network topologies beyond
-// simple test graphs.
-//=============================================================================
-
-TEST(MaxFlow, GridGraph_3x3_MultipleEqualCostPaths) {
-  // Grid graphs have many equal-cost paths between corners
-  // Validates ECMP behavior in complex topology
-  auto g = make_grid_graph(3, 3);
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  // Flow from top-left (0) to bottom-right (8)
-  auto [total, summary] = algs.max_flow(gh, 0, 8, opts);
-
-  // Should find flow through multiple equal-cost paths
-  EXPECT_GT(total, 0.0) << "Should find flow in grid topology";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 8);
-}
-
-TEST(MaxFlow, SharedBottleneck_MultiplePathsMerge) {
-  // Two paths that merge at an intermediate node before reaching sink
-  // Validates correct handling of shared edges
-  auto g = make_shared_bottleneck_graph(10.0, 5.0);
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-
-  // Shared bottleneck should limit total flow
-  // Path 1: 0→1 (10), 1→3 (5) - bottleneck at 1→3
-  // Path 2: 0→2 (10), 2→3 (10)
-  // Total limited by bottleneck + other path = 5 + 10 = 15
-  EXPECT_NEAR(total, 15.0, 1e-9)
-      << "Flow limited by shared bottleneck plus alternate path";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 3);
-}
-
-//=============================================================================
-// SECTION 10: REAL-WORLD TOPOLOGY VALIDATION (NetGraph Integration Tests)
-//=============================================================================
-//
-// These tests validate that NetGraph-Core produces the same maxflow results
-// as the original NetGraph repository for important real-world topologies.
-// Reference: NetGraph tests/integration/test_scenario_3.py and test_maxflow_api.py
-
-TEST(MaxFlow, Clos_3Tier_Topology_Proportional_Shortest) {
-  /**
-   * Validates 3-tier Clos fabric maxflow matches NetGraph scenario_3 expectations.
-   *
-   * Topology: 2 interconnected 3-tier Clos fabrics
-   * Source: Clos1 T1 nodes (0-3, 8-11) = 8 nodes
-   * Sink: Clos2 T1 nodes (32-35, 40-43) = 8 nodes
-   *
-   * Expected: 3200.0 Gbps (from NetGraph integration test expectations.py)
-   * Bottleneck: 8 active inter-clos spine links × 400 Gbps = 3200 Gbps
-   */
-  auto g = make_3tier_clos_graph();
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  // Test with PROPORTIONAL placement (matches NetGraph scenario_3 "capacity_analysis_forward")
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = true;  // shortest_path: true in scenario_3.yaml
-  opts.with_edge_flows = true;
-
-  // Compute maxflow from all Clos1 T1 nodes to all Clos2 T1 nodes
-  // We'll compute from representative nodes and verify total capacity
-  // For simplicity, test one representative path: node 0 (clos1/b1/t1-1) to node 32 (clos2/b1/t1-1)
-  auto [total, summary] = algs.max_flow(gh, 0, 32, opts);
-
-  // Expected: Each T1 node can push 400 Gbps through the network
-  // (4 T2 paths × 100 Gbps = 400 Gbps from T1 to T2 layer)
-  // But bottleneck at inter-clos spines limits per-T1 flow
-  EXPECT_NEAR(total, 400.0, 1.0)
-      << "Single T1-to-T1 maxflow should be ~400 Gbps";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 32);
-}
-
-TEST(MaxFlow, Clos_3Tier_Topology_EqualBalanced_Shortest) {
-  /**
-   * Validates 3-tier Clos with EQUAL_BALANCED placement.
-   * Reference: NetGraph scenario_3 "capacity_analysis_forward_balanced"
-   */
-  auto g = make_3tier_clos_graph();
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::EqualBalanced;
-  opts.shortest_path = true;
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 32, opts);
-
-  // With EQUAL_BALANCED, flow is split equally across paths
-  // Expected similar capacity as PROPORTIONAL for this balanced topology
-  EXPECT_GT(total, 0.0) << "Should find positive flow";
-  EXPECT_LE(total, 400.0 + 1.0) << "Should not exceed topology capacity";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 32);
-}
-
-TEST(MaxFlow, Triangle_Topology_Combine_Mode) {
-  /**
-   * Triangle topology from NetGraph solver tests.
-   * Reference: test_maxflow_api.py::test_max_flow_combine_basic()
-   *
-   * Expected maxflow A->C: 2.0 (1 direct + 1 via B)
-   */
-  auto g = make_triangle_topology();
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = false;  // Use all paths
-  opts.with_edge_flows = true;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 2, opts);
-
-  EXPECT_NEAR(total, 2.0, 1e-9)
-      << "Triangle A->C maxflow should be 2.0 (1 direct + 1 via B)";
-
-  validate_capacity_constraints(g, summary);
-  validate_flow_conservation(g, summary, 0, 2);
-}
-
-TEST(MaxFlow, SimpleParallelPaths_Topology) {
-  /**
-   * Two disjoint parallel paths topology.
-   * Reference: test_maxflow_api.py::test_max_flow_combine_basic() using _simple_network()
-   *
-   * Expected maxflow S->T: 2.0 (both paths saturated)
-   */
-  auto g = make_simple_parallel_paths_topology();
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  // Test with shortest_path=True (should use both equal-cost paths)
-  MaxFlowOptions opts_sp;
-  opts_sp.placement = FlowPlacement::Proportional;
-  opts_sp.shortest_path = true;
-  opts_sp.with_edge_flows = true;
-
-  auto [total_sp, summary_sp] = algs.max_flow(gh, 0, 3, opts_sp);
-
-  EXPECT_NEAR(total_sp, 2.0, 1e-9)
-      << "Should saturate both equal-cost parallel paths with shortest_path=True";
-
-  validate_capacity_constraints(g, summary_sp);
-  validate_flow_conservation(g, summary_sp, 0, 3);
-
-  // Test with shortest_path=False (should also be 2.0 since all paths are equal cost)
-  MaxFlowOptions opts_full;
-  opts_full.placement = FlowPlacement::Proportional;
-  opts_full.shortest_path = false;
-  opts_full.with_edge_flows = true;
-
-  auto [total_full, summary_full] = algs.max_flow(gh, 0, 3, opts_full);
-
-  EXPECT_NEAR(total_full, 2.0, 1e-9)
-      << "Should saturate both paths with shortest_path=False";
-
-  validate_capacity_constraints(g, summary_full);
-  validate_flow_conservation(g, summary_full, 0, 3);
-}
-
-TEST(MaxFlow, ShortestPath_MustSaturateAllEqualCostPaths) {
-  /**
-   * Validates that shortest_path=True correctly saturates ALL equal-cost paths,
-   * not just a single path.
-   * Reference: test_maxflow_api.py::test_shortest_path_vs_full_max_flow()
-   *
-   * When multiple parallel paths have equal cost, the algorithm must utilize
-   * all of them to maximize throughput, even with shortest_path=True.
-   */
-  auto g = make_simple_parallel_paths_topology();
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = true;
-
-  auto [total, _] = algs.max_flow(gh, 0, 3, opts);
-
-  // Two equal-cost paths with capacity 1.0 each should yield total flow of 2.0
-  EXPECT_NEAR(total, 2.0, 1e-9)
-      << "shortest_path=True must saturate all equal-cost paths, not just one";
-}
-
-//=============================================================================
-// SECTION 11: SENSITIVITY ANALYSIS
-//=============================================================================
-
-TEST(MaxFlow, Sensitivity_SinglePath) {
-  auto g = make_line_graph(3);
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-
-  auto results = algs.sensitivity_analysis(gh, 0, 2, opts);
-
-  // Path: 0->1->2. Both edges saturated and critical.
-  // Capacity is 1.0. Flow is 1.0.
-  // Removing any edge drops flow to 0. Delta = 1.0.
-  EXPECT_EQ(results.size(), 2u);
-  for (const auto& p : results) {
-    EXPECT_NEAR(p.second, 1.0, 1e-9);
+  auto g = make_graph(n, edges);
+  std::vector<NodeId> nodes(static_cast<std::size_t>(n));
+  std::iota(nodes.begin(), nodes.end(), 0);
+  std::shuffle(nodes.begin(), nodes.end(), rng);
+  const int ns = 1 + static_cast<int>(rng() % static_cast<unsigned>(std::min(2, n - 1)));
+  const int nd = 1 + static_cast<int>(rng() % static_cast<unsigned>(std::min(2, n - ns)));
+  std::vector<NodeId> s(nodes.begin(), nodes.begin() + ns);
+  std::vector<NodeId> d(nodes.begin() + ns, nodes.begin() + std::min(n, ns + nd));
+  std::vector<Amount> view;
+  for (Amount c : g.capacity_units()) view.push_back(rng() % 4 == 0 ? static_cast<Amount>(rng() % (c + 1)) : c);
+  std::optional<Amount> cap;
+  switch (rng() % 5) {
+    case 0: cap = std::nullopt; break;
+    case 1: cap = 0; break;
+    case 2: cap = 1; break;
+    case 3: cap = static_cast<Amount>(rng() % (2 * max_cap + 2)); break;
+    default: cap = kMaxFlowCap; break;
   }
-}
-
-TEST(MaxFlow, Sensitivity_TwoParallelPaths) {
-  // Two paths, capacity 10 each. Total 20.
-  auto g = make_n_disjoint_paths(2, 10.0);
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-
-  auto results = algs.sensitivity_analysis(gh, 0, 3, opts);
-
-  // All 4 edges are saturated.
-  // Removing any edge kills one path (flow 20 -> 10). Delta = 10.
-  EXPECT_EQ(results.size(), 4u);
-  for (const auto& p : results) {
-    EXPECT_NEAR(p.second, 10.0, 1e-9);
+  std::vector<NodeId> xn;
+  std::vector<EdgeId> xe;
+  if (masks && rng() % 2 == 0) {
+    if (rng() % 3 == 0) xn.push_back(static_cast<NodeId>(rng() % n));
+    for (int k = 0; k < 2; ++k) if (m > 0 && rng() % 2 == 0) xe.push_back(static_cast<EdgeId>(rng() % m));
   }
+  return {std::move(g), s, d, view, cap, xn, xe};
 }
 
-TEST(MaxFlow, Sensitivity_PartialSaturation) {
-  // Topology: S->A (cap 10), S->B (cap 5)
-  //           A->T (cap 5),  B->T (cap 10)
-  // Flow: S->A->T limited by A->T (5). S->B->T limited by S->B (5). Total 10.
-  // Saturated: A->T (edge 2), S->B (edge 1).
-  // Non-Saturated: S->A (edge 0), B->T (edge 3).
+} // namespace
 
-  std::int32_t src[4] = {0, 0, 1, 2};
-  std::int32_t dst[4] = {1, 2, 3, 3};
-  double cap[4] = {10.0, 5.0, 5.0, 10.0};
-  std::int64_t cost[4] = {1, 1, 1, 1};
+TEST(FlowCore, RandomGraphsTierAExhaustive) {
+  // Nonuniform costs, parallel edges, self-loops, partial views, endpoint sets, masks and caps;
+  // every payload certified, the curve against the minimum cost of every integer value.
+  std::mt19937 rng(20261004);
+  int positive = 0;
+  for (int trial = 0; trial < 2000; ++trial) {
+    const int n = 2 + static_cast<int>(rng() % 4);
+    const int m = 1 + static_cast<int>(rng() % 6);
+    auto c = random_case(rng, n, m, 2, 5, true);
+    std::optional<Eligibility> el;
+    if (!c.xn.empty() || !c.xe.empty()) el = c.g.eligibility(c.xn, c.xe);
+    const Eligibility* elp = el ? &*el : nullptr;
+    auto r = place_global_units(c.g, c.view, c.s, c.d, elp, c.cap);
+    const auto fails = certify(c.g, c.view, c.s, c.d, c.cap, elp, r, true);
+    ASSERT_TRUE(fails.empty()) << "trial " << trial << ": " << fails.front();
+    positive += r.placed > 0;
+  }
+  EXPECT_GT(positive, 250);  // the population is not vacuous
+}
 
-  auto g = StrictMultiDiGraph::from_arrays(4,
-    std::span(src, 4), std::span(dst, 4),
-    std::span(cap, 4), std::span(cost, 4));
+TEST(FlowCore, RandomGraphsTierBIndependent) {
+  std::mt19937 rng(1816);
+  int multi_tier = 0;
+  for (int trial = 0; trial < 150; ++trial) {
+    const int n = 6 + static_cast<int>(rng() % 20);
+    const int m = n + static_cast<int>(rng() % (4 * n));
+    auto c = random_case(rng, n, m, 1000, 40, true);
+    std::optional<Eligibility> el;
+    if (!c.xn.empty() || !c.xe.empty()) el = c.g.eligibility(c.xn, c.xe);
+    const Eligibility* elp = el ? &*el : nullptr;
+    auto r = place_global_units(c.g, c.view, c.s, c.d, elp, c.cap);
+    const auto fails = certify(c.g, c.view, c.s, c.d, c.cap, elp, r, false);
+    ASSERT_TRUE(fails.empty()) << "trial " << trial << ": " << fails.front();
+    multi_tier += r.cost_distribution.size() > 1;
+  }
+  EXPECT_GT(multi_tier, 30);
+}
 
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = false;
-
-  auto results = algs.sensitivity_analysis(gh, 0, 3, opts);
-
-  // Should only report saturated edges: S->B and A->T.
-  // (We assume edge indices follow insertion order: 0, 1, 2, 3)
-  // S->B is index 1. A->T is index 2.
-
-  // Check results
-  int count = 0;
-  for (const auto& p : results) {
-    if (p.first == 1 || p.first == 2) {
-      EXPECT_NEAR(p.second, 5.0, 1e-9);
-      count++;
-    } else {
-      // If non-saturated edges are reported (which they shouldn't be based on logic), fail.
-      FAIL() << "Reported sensitivity for non-saturated edge " << p.first;
+TEST(FlowCore, RandomLargeUnitsTierB) {
+  // Capacities near the domain bound (sum below 2^62) and costs near 2^40.
+  std::mt19937_64 rng(62);
+  for (int trial = 0; trial < 40; ++trial) {
+    const int n = 4 + static_cast<int>(rng() % 6);
+    const int m = 3 + static_cast<int>(rng() % 12);
+    std::vector<InEdge> edges;
+    const Amount per = ((Amount{1} << 62) - 1) / m;
+    for (int e = 0; e < m; ++e) {
+      edges.push_back({static_cast<NodeId>(rng() % n), static_cast<NodeId>(rng() % n),
+                       static_cast<Amount>(rng() % static_cast<std::uint64_t>(per)),
+                       static_cast<Cost>(1 + rng() % (std::uint64_t{1} << 40))});
     }
-  }
-  EXPECT_EQ(count, 2);
-}
-
-TEST(MaxFlow, Sensitivity_ShortestPathVsMaxFlow) {
-  // Tests that shortest_path mode produces different sensitivity results
-  // than full max-flow mode when there are paths of different costs.
-  //
-  // Topology: S(0) -> A(1) -> T(2) [cost 1+1=2, cap 10 each]
-  //           S(0) -> B(3) -> T(2) [cost 2+2=4, cap 5 each]
-  //
-  // With shortest_path=false (full max-flow):
-  //   - Uses both paths: S->A->T (10) + S->B->T (5) = 15 total
-  //   - All 4 edges are saturated and critical
-  //
-  // With shortest_path=true (single-pass, IP/IGP mode):
-  //   - Only uses cheapest path: S->A->T (10)
-  //   - Edges 2,3 (S->B->T path) are NOT used, so NOT critical
-
-  std::int32_t src[4] = {0, 1, 0, 3};
-  std::int32_t dst[4] = {1, 2, 3, 2};
-  double cap[4] = {10.0, 10.0, 5.0, 5.0};
-  std::int64_t cost[4] = {1, 1, 2, 2};  // S->A->T costs 2, S->B->T costs 4
-
-  auto g = StrictMultiDiGraph::from_arrays(4,
-    std::span(src, 4), std::span(dst, 4),
-    std::span(cap, 4), std::span(cost, 4));
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  // Step 1: Verify baseline flow values with max_flow
-  // This validates the routing semantics before testing sensitivity
-  {
-    MaxFlowOptions opts;
-    opts.placement = FlowPlacement::Proportional;
-    opts.shortest_path = false;
-    auto [flow_full, _] = algs.max_flow(gh, 0, 2, opts);
-    EXPECT_NEAR(flow_full, 15.0, 1e-9) << "Full max-flow should be 15";
-  }
-  {
-    MaxFlowOptions opts;
-    opts.placement = FlowPlacement::Proportional;
-    opts.shortest_path = true;
-    auto [flow_sp, _] = algs.max_flow(gh, 0, 2, opts);
-    EXPECT_NEAR(flow_sp, 10.0, 1e-9) << "Shortest-path flow should be 10";
-  }
-
-  // Step 2: Test sensitivity with shortest_path=false (full max-flow)
-  {
-    MaxFlowOptions opts;
-    opts.placement = FlowPlacement::Proportional;
-    opts.shortest_path = false;
-
-    auto results = algs.sensitivity_analysis(gh, 0, 2, opts);
-
-    // All 4 edges should be saturated and critical
-    EXPECT_EQ(results.size(), 4u) << "Full max-flow should report all 4 edges as critical";
-
-    // Edges 0,1 (S->A->T path) have delta 10 when removed
-    // Edges 2,3 (S->B->T path) have delta 5 when removed
-    for (const auto& p : results) {
-      if (p.first == 0 || p.first == 1) {
-        EXPECT_NEAR(p.second, 10.0, 1e-9);
-      } else {
-        EXPECT_NEAR(p.second, 5.0, 1e-9);
-      }
-    }
-  }
-
-  // Step 3: Test sensitivity with shortest_path=true (IP/IGP mode)
-  {
-    MaxFlowOptions opts;
-    opts.placement = FlowPlacement::Proportional;
-    opts.shortest_path = true;
-
-    auto results = algs.sensitivity_analysis(gh, 0, 2, opts);
-
-    // Only edges 0,1 (S->A->T path) should be critical
-    // Edges 2,3 (S->B->T path) are not used under shortest-path routing
-    EXPECT_EQ(results.size(), 2u) << "Shortest-path mode should only report 2 edges as critical";
-
-    for (const auto& p : results) {
-      EXPECT_TRUE(p.first == 0 || p.first == 1)
-          << "Edge " << p.first << " should not be critical in shortest-path mode";
-      // Baseline=10, removing either S->A or A->T forces traffic to S->B->T (cap 5)
-      // Delta = 10 - 5 = 5
-      EXPECT_NEAR(p.second, 5.0, 1e-9);
-    }
+    auto g = make_graph(n, edges);
+    std::vector<Amount> view(g.capacity_units().begin(), g.capacity_units().end());
+    auto r = place_global_units(g, view, std::vector<NodeId>{0}, std::vector<NodeId>{static_cast<NodeId>(n - 1)},
+                                nullptr, std::nullopt);
+    const auto fails = certify(g, view, {0}, {n - 1}, std::nullopt, nullptr, r, false);
+    ASSERT_TRUE(fails.empty()) << "trial " << trial << ": " << fails.front();
   }
 }
 
-// ============================================================================
-// Regression: residual completion phase (flow cancellation)
-// ============================================================================
-
-// Successive shortest paths over forward-only SPF DAGs can strand capacity that
-// only reverse-arc cancellation can recover. On this full-duplex topology the
-// first tier routes 0->1->2->3 (cost 3), blocking both the direct 1->3 exit and
-// the 2->3 exit; the true maximum needs to reroute it. Expected max flow is 3:
-//   0->1->3 (1), 0->2->1->3 (1), 0->2->3 (1); the cut {0,2}|{1,3} has capacity 3.
-TEST(MaxFlow, CompletionPhase_RecoversCancellation) {
-  std::vector<std::int32_t> src, dst;
-  std::vector<double> cap;
-  std::vector<std::int64_t> cost;
-  auto add_duplex = [&](std::int32_t u, std::int32_t v, double c, std::int64_t k) {
-    src.push_back(u); dst.push_back(v); cap.push_back(c); cost.push_back(k);
-    src.push_back(v); dst.push_back(u); cap.push_back(c); cost.push_back(k);
-  };
-  add_duplex(1, 3, 3.0, 17);
-  add_duplex(0, 2, 8.0, 17);
-  add_duplex(1, 2, 1.0, 1);
-  add_duplex(1, 0, 1.0, 1);
-  add_duplex(3, 2, 1.0, 1);
-  auto g = StrictMultiDiGraph::from_arrays(4, src, dst, cap, cost);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = false;
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-  EXPECT_NEAR(total, 3.0, 1e-9) << "true max flow requires cancelling the first tier";
-
-  // Max-flow/min-cut duality: the reported cut capacity must equal the flow.
-  double cut_cap = 0.0;
-  auto capv = g.capacity_view();
-  for (auto eid : summary.min_cut.edges) cut_cap += capv[static_cast<std::size_t>(eid)];
-  EXPECT_NEAR(cut_cap, total, 1e-9) << "min-cut capacity must equal total flow";
-
-  // Cost distribution must account for exactly the total flow.
-  double dist_sum = 0.0;
-  for (auto f : summary.flows) dist_sum += f;
-  EXPECT_NEAR(dist_sum, total, 1e-9);
-}
-
-// The completion phase must respect masks: masking node 2 on the topology above
-// limits the flow to the direct 0->1->3 route.
-TEST(MaxFlow, CompletionPhase_RespectsNodeMask) {
-  std::vector<std::int32_t> src, dst;
-  std::vector<double> cap;
-  std::vector<std::int64_t> cost;
-  auto add_duplex = [&](std::int32_t u, std::int32_t v, double c, std::int64_t k) {
-    src.push_back(u); dst.push_back(v); cap.push_back(c); cost.push_back(k);
-    src.push_back(v); dst.push_back(u); cap.push_back(c); cost.push_back(k);
-  };
-  add_duplex(1, 3, 3.0, 17);
-  add_duplex(0, 2, 8.0, 17);
-  add_duplex(1, 2, 1.0, 1);
-  add_duplex(1, 0, 1.0, 1);
-  add_duplex(3, 2, 1.0, 1);
-  auto g = StrictMultiDiGraph::from_arrays(4, src, dst, cap, cost);
-
-  auto be = make_cpu_backend();
-  Algorithms algs(be);
-  auto gh = algs.build_graph(g);
-
-  auto mask = make_bool_mask(4);
-  mask[2] = false;
-
-  MaxFlowOptions opts;
-  opts.placement = FlowPlacement::Proportional;
-  opts.shortest_path = false;
-  opts.node_mask = std::span<const bool>(mask.get(), 4);
-
-  auto [total, summary] = algs.max_flow(gh, 0, 3, opts);
-  EXPECT_NEAR(total, 1.0, 1e-9) << "without node 2 only 0->1->3 remains (bottleneck 1)";
+TEST(FlowCore, CertificateRejectsMutatedPayloads) {
+  // The test oracle itself is not vacuous: the review-17 negative controls are rejected.
+  auto one = make_graph(2, {{0, 1, 3, 7}});
+  std::vector<Amount> v1 = {3};
+  auto under = solve(one, {0}, {1}, 1);
+  EXPECT_FALSE(certify(one, v1, {0}, {1}, 2, nullptr, under, true).empty());  // underfill under cap 2
+  auto slope = solve(one, {0}, {1}, 2);
+  slope.cost_distribution = curve({{6, 2}});
+  EXPECT_FALSE(certify(one, v1, {0}, {1}, 2, nullptr, slope, true).empty());
+  auto cut = solve(one, {0}, {1}, std::nullopt);
+  cut.min_cut = std::vector<EdgeId>{};
+  EXPECT_FALSE(certify(one, v1, {0}, {1}, std::nullopt, nullptr, cut, true).empty());
+  auto par = make_graph(2, {{0, 1, 1, 1}, {0, 1, 1, 3}});
+  std::vector<Amount> vp = {1, 1};
+  auto omitted = solve(par, {0}, {1}, std::nullopt);
+  omitted.cost_distribution = curve({{2, 2}});  // same moment, omitted breakpoint at 1
+  EXPECT_FALSE(certify(par, vp, {0}, {1}, std::nullopt, nullptr, omitted, true).empty());
+  EXPECT_FALSE(certify(par, vp, {0}, {1}, std::nullopt, nullptr, omitted, false).empty());
+  auto any = make_graph(3, {{0, 1, 1, 1}, {0, 2, 1, 2}});
+  std::vector<Amount> va = {1, 1};
+  auto pot = solve(any, {0}, {1, 2}, std::nullopt);
+  pot.potentials[1] = 1;  // an inflow destination below pi(t*)
+  EXPECT_FALSE(certify(any, va, {0}, {1, 2}, std::nullopt, nullptr, pot, true).empty());
+  auto sentinel = solve(one, {0}, {1}, 1);
+  sentinel.potentials = {kNeverReached, kNeverReached};
+  EXPECT_FALSE(certify(one, v1, {0}, {1}, 1, nullptr, sentinel, true).empty());
+  auto zero = solve(one, {0}, {1}, 0);
+  zero.counters.dijkstra_runs = 1;
+  EXPECT_FALSE(certify(one, v1, {0}, {1}, 0, nullptr, zero, true).empty());
 }

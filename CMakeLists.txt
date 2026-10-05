@@ -15,13 +15,8 @@ if(NETGRAPH_CORE_BUILD_TESTS)
   enable_testing()
 add_executable(netgraph_core_tests
   tests/cpp/smoke_test.cpp
-  tests/cpp/flow_policy_tests.cpp
   tests/cpp/strict_multidigraph_tests.cpp
-  tests/cpp/shortest_paths_tests.cpp
-  tests/cpp/flow_state_tests.cpp
-  tests/cpp/flow_graph_tests.cpp
   tests/cpp/max_flow_tests.cpp
-  tests/cpp/k_shortest_paths_tests.cpp
   tests/cpp/masking_tests.cpp
 )
   target_link_libraries(netgraph_core_tests PRIVATE netgraph_core GTest::gtest_main)
@@ -76,13 +71,7 @@ endif()
 
 add_library(netgraph_core STATIC
   src/strict_multidigraph.cpp
-  src/shortest_paths.cpp
-  src/k_shortest_paths.cpp
   src/max_flow.cpp
-  src/flow_state.cpp
-  src/flow_graph.cpp
-  src/flow_policy.cpp
-  src/cpu_backend.cpp
   src/profiling.cpp
 )
 target_include_directories(netgraph_core PUBLIC
@@ -209,9 +198,9 @@ endif()
 if(NETGRAPH_CORE_COVERAGE)
   message(STATUS "Enabling coverage instrumentation (disables optimizations)")
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    # batch_max_flow and sensitivity_analysis run worker threads, and the default
-    # non-atomic profile counters corrupt under concurrent updates (gcov then
-    # emits impossible values such as "branch 4 taken -1").
+    # Worker threads (batch and sensitivity evaluators from 1c on) corrupt the default
+    # non-atomic profile counters under concurrent updates (gcov then emits impossible
+    # values such as "branch 4 taken -1").
     set(COV_FLAGS -O0 -g --coverage)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
       list(APPEND COV_FLAGS -fprofile-update=atomic)

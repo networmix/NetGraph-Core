@@ -1,479 +1,416 @@
 #pragma once
 
 #include <gtest/gtest.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <map>
+#include <optional>
+#include <set>
 #include <span>
+#include <string>
 #include <vector>
-#include "netgraph/core/strict_multidigraph.hpp"
-#include "netgraph/core/shortest_paths.hpp"
+
 #include "netgraph/core/max_flow.hpp"
+#include "netgraph/core/strict_multidigraph.hpp"
 
 namespace netgraph::core::test {
 
-// Helper to create bool arrays for masks (avoids std::vector<bool> issues with .data())
-inline std::unique_ptr<bool[]> make_bool_mask(std::size_t n, bool default_val = true) {
-  auto mask = std::make_unique<bool[]>(n);
-  std::fill_n(mask.get(), n, default_val);
-  return mask;
+// An edge in input coordinates.
+struct InEdge {
+  NodeId u;
+  NodeId v;
+  Amount cap;
+  Cost cost;
+};
+
+inline StrictMultiDiGraph make_graph(std::int32_t n, const std::vector<InEdge>& edges, double q = 1.0) {
+  std::vector<NodeId> src, dst;
+  std::vector<Amount> cap;
+  std::vector<Cost> cost;
+  for (const auto& e : edges) {
+    src.push_back(e.u);
+    dst.push_back(e.v);
+    cap.push_back(e.cap);
+    cost.push_back(e.cost);
+  }
+  return StrictMultiDiGraph(n, src, dst, cap, cost, q);
 }
 
-// Graph builders matching Python fixtures
-inline StrictMultiDiGraph make_line_graph(int n) {
-  // Create a simple line graph 0->1->2->...->n-1
-  if (n <= 1) {
-    return StrictMultiDiGraph::from_arrays(n, {}, {}, {}, {});
-  }
-  std::vector<std::int32_t> src, dst;
-  std::vector<double> cap;
-  std::vector<std::int64_t> cost;
-  for (int i = 0; i < n - 1; ++i) {
-    src.push_back(i);
-    dst.push_back(i + 1);
-    cap.push_back(1.0);
-    cost.push_back(1);
-  }
-  return StrictMultiDiGraph::from_arrays(n, src, dst, cap, cost);
+// The caller's inverse of input_index(): input position -> EdgeId.
+inline std::vector<EdgeId> id_of_input(const StrictMultiDiGraph& g) {
+  auto ii = g.input_index();
+  std::vector<EdgeId> inv(ii.size());
+  for (std::size_t e = 0; e < ii.size(); ++e) inv[static_cast<std::size_t>(ii[e])] = static_cast<EdgeId>(e);
+  return inv;
 }
 
-inline StrictMultiDiGraph make_square_graph(int type = 1) {
-  // Type 1: one shortest route and one longer alternative
-  // 0->1->2 (cost 2) vs 0->3->2 (cost 4)
-  if (type == 1) {
-    std::int32_t src_arr[4] = {0, 1, 0, 3};
-    std::int32_t dst_arr[4] = {1, 2, 3, 2};
-    double cap_arr[4] = {1.0, 1.0, 2.0, 2.0};
-    std::int64_t cost_arr[4] = {1, 1, 2, 2};
-    return StrictMultiDiGraph::from_arrays(4,
-      std::span(src_arr, 4), std::span(dst_arr, 4),
-      std::span(cap_arr, 4), std::span(cost_arr, 4));
-  }
-  // Type 2: two equal-cost shortest routes
-  std::int32_t src_arr[4] = {0, 1, 0, 3};
-  std::int32_t dst_arr[4] = {1, 2, 3, 2};
-  double cap_arr[4] = {1.0, 1.0, 2.0, 2.0};
-  std::int64_t cost_arr[4] = {1, 1, 1, 1};
-  return StrictMultiDiGraph::from_arrays(4,
-    std::span(src_arr, 4), std::span(dst_arr, 4),
-    std::span(cap_arr, 4), std::span(cost_arr, 4));
+// A per-edge array in input order, permuted to id order.
+template <typename T>
+std::vector<T> to_ids(const StrictMultiDiGraph& g, const std::vector<T>& by_input) {
+  auto ii = g.input_index();
+  std::vector<T> out(ii.size());
+  for (std::size_t e = 0; e < ii.size(); ++e) out[e] = by_input[static_cast<std::size_t>(ii[e])];
+  return out;
 }
 
-inline StrictMultiDiGraph make_grid_graph(int rows, int cols) {
-  // Create a grid graph with edges going right and down
-  int n = rows * cols;
-  std::vector<std::int32_t> src, dst;
-  std::vector<double> cap;
-  std::vector<std::int64_t> cost;
+// A per-edge array in id order, permuted to input order.
+template <typename T>
+std::vector<T> to_input(const StrictMultiDiGraph& g, std::span<const T> by_id) {
+  auto ii = g.input_index();
+  std::vector<T> out(ii.size());
+  for (std::size_t e = 0; e < ii.size(); ++e) out[static_cast<std::size_t>(ii[e])] = by_id[e];
+  return out;
+}
 
-  for (int r = 0; r < rows; ++r) {
-    for (int c = 0; c < cols; ++c) {
-      int node = r * cols + c;
-      // Right edge
-      if (c < cols - 1) {
-        src.push_back(node);
-        dst.push_back(node + 1);
-        cap.push_back(1.0);
-        cost.push_back(1);
+template <typename T>
+std::vector<T> to_input(const StrictMultiDiGraph& g, const std::vector<T>& by_id) {
+  return to_input(g, std::span<const T>(by_id));
+}
+
+// EdgeIds translated to sorted input positions.
+inline std::vector<std::int32_t> ids_to_input(const StrictMultiDiGraph& g, const std::vector<EdgeId>& ids) {
+  std::vector<std::int32_t> out;
+  for (EdgeId e : ids) out.push_back(g.input_index()[static_cast<std::size_t>(e)]);
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+inline std::vector<std::pair<Cost, Amount>> curve(std::initializer_list<std::pair<Cost, Amount>> c) { return c; }
+
+inline FlowCoreResult solve(const StrictMultiDiGraph& g, std::vector<NodeId> s, std::vector<NodeId> d,
+                            std::optional<Amount> cap, const std::vector<Amount>* view = nullptr,
+                            const Eligibility* elig = nullptr) {
+  std::vector<Amount> full(g.capacity_units().begin(), g.capacity_units().end());
+  return place_global_units(g, view ? std::span<const Amount>(*view) : std::span<const Amount>(full), s, d, elig, cap);
+}
+
+inline bool same_payload(const FlowCoreResult& a, const FlowCoreResult& b) {
+  const auto& x = a.counters;
+  const auto& y = b.counters;
+  return a.placed == b.placed && a.cost_distribution == b.cost_distribution && a.edge_flows == b.edge_flows &&
+         a.min_cut == b.min_cut && a.potentials == b.potentials && x.dijkstra_runs == y.dijkstra_runs &&
+         x.dijkstra_pops == y.dijkstra_pops && x.settled == y.settled && x.arc_scans == y.arc_scans &&
+         x.dinic_phases == y.dinic_phases && x.augmentations == y.augmentations;
+}
+
+// Value -> minimum cost of every integer flow value, by enumerating every integer flow on the
+// eligible edges (small graphs only). Independent of the solver.
+inline std::map<Amount, __int128> exhaustive_costs(const StrictMultiDiGraph& g, std::span<const Amount> view,
+                                                   const std::vector<NodeId>& srcs, const std::vector<NodeId>& dsts,
+                                                   const Eligibility* elig) {
+  const auto m = static_cast<std::size_t>(g.num_edges());
+  const auto n = static_cast<std::size_t>(g.num_nodes());
+  std::vector<std::size_t> free;
+  for (std::size_t e = 0; e < m; ++e) {
+    if (elig == nullptr || elig->edge_ok(static_cast<EdgeId>(e))) free.push_back(e);
+  }
+  std::set<NodeId> S, D;
+  for (NodeId s : srcs) if (elig == nullptr || elig->node_ok(s)) S.insert(s);
+  for (NodeId d : dsts) if (elig == nullptr || elig->node_ok(d)) D.insert(d);
+  std::map<Amount, __int128> best;
+  std::vector<Amount> f(free.size(), 0);
+  while (true) {
+    std::vector<Amount> bal(n, 0);
+    __int128 cost = 0;
+    for (std::size_t k = 0; k < free.size(); ++k) {
+      const auto e = free[k];
+      bal[static_cast<std::size_t>(g.edge_src()[e])] -= f[k];
+      bal[static_cast<std::size_t>(g.edge_dst()[e])] += f[k];
+      cost += static_cast<__int128>(g.cost()[e]) * f[k];
+    }
+    bool ok = true;
+    Amount value = 0;
+    for (std::size_t v = 0; v < n && ok; ++v) {
+      const auto node = static_cast<NodeId>(v);
+      if (S.count(node)) { ok = bal[v] <= 0; value -= bal[v]; }
+      else if (D.count(node)) ok = bal[v] >= 0;
+      else ok = bal[v] == 0;
+    }
+    if (ok) {
+      auto it = best.find(value);
+      if (it == best.end() || cost < it->second) best[value] = cost;
+    }
+    std::size_t k = 0;
+    while (k < free.size() && f[k] == view[free[k]]) f[k++] = 0;
+    if (k == free.size()) break;
+    ++f[k];
+  }
+  return best;
+}
+
+// Breakpoints [(value, cost)] of the min-cost curve by successive shortest paths with
+// Bellman-Ford on the residual (no potentials, no Dinic, its own arc order); run to
+// disconnection. Independent of the solver.
+inline std::vector<std::pair<Amount, __int128>> independent_curve(const StrictMultiDiGraph& g,
+                                                                  std::span<const Amount> view,
+                                                                  const std::vector<NodeId>& srcs,
+                                                                  const std::vector<NodeId>& dsts,
+                                                                  const Eligibility* elig) {
+  struct Arc { int u, v; Amount cap; Cost w; Amount flow; };
+  const int n = g.num_nodes();
+  const int S = n, T = n + 1;
+  std::vector<Arc> arcs;
+  for (std::size_t e = 0; e < static_cast<std::size_t>(g.num_edges()); ++e) {
+    if (elig != nullptr && !elig->edge_ok(static_cast<EdgeId>(e))) continue;
+    arcs.push_back({g.edge_src()[e], g.edge_dst()[e], view[e], g.cost()[e], 0});
+  }
+  for (NodeId s : srcs) if (elig == nullptr || elig->node_ok(s)) arcs.push_back({S, s, kMaxFlowCap, 0, 0});
+  for (NodeId d : dsts) if (elig == nullptr || elig->node_ok(d)) arcs.push_back({d, T, kMaxFlowCap, 0, 0});
+  std::vector<std::pair<Amount, __int128>> pts{{0, 0}};
+  while (true) {
+    const __int128 inf = std::numeric_limits<__int128>::max();
+    std::vector<__int128> dist(static_cast<std::size_t>(n + 2), inf);
+    std::vector<std::pair<int, int>> parent(static_cast<std::size_t>(n + 2), {-1, 0});
+    dist[static_cast<std::size_t>(S)] = 0;
+    for (int it = 0; it < n + 2; ++it) {
+      bool changed = false;
+      for (int i = 0; i < static_cast<int>(arcs.size()); ++i) {
+        const auto& a = arcs[static_cast<std::size_t>(i)];
+        const auto du = dist[static_cast<std::size_t>(a.u)];
+        const auto dv = dist[static_cast<std::size_t>(a.v)];
+        if (a.flow < a.cap && du != inf && du + a.w < dv) {
+          dist[static_cast<std::size_t>(a.v)] = du + a.w;
+          parent[static_cast<std::size_t>(a.v)] = {i, 1};
+          changed = true;
+        }
+        if (a.flow > 0 && dist[static_cast<std::size_t>(a.v)] != inf &&
+            dist[static_cast<std::size_t>(a.v)] - a.w < dist[static_cast<std::size_t>(a.u)]) {
+          dist[static_cast<std::size_t>(a.u)] = dist[static_cast<std::size_t>(a.v)] - a.w;
+          parent[static_cast<std::size_t>(a.u)] = {i, -1};
+          changed = true;
+        }
       }
-      // Down edge
-      if (r < rows - 1) {
-        src.push_back(node);
-        dst.push_back(node + cols);
-        cap.push_back(1.0);
-        cost.push_back(1);
+      if (!changed) break;
+    }
+    if (dist[static_cast<std::size_t>(T)] == inf) return pts;
+    std::vector<std::pair<int, int>> path;
+    for (int v = T; v != S;) {
+      auto [i, sign] = parent[static_cast<std::size_t>(v)];
+      path.emplace_back(i, sign);
+      const auto& a = arcs[static_cast<std::size_t>(i)];
+      v = sign == 1 ? a.u : a.v;
+    }
+    Amount amount = std::numeric_limits<Amount>::max();
+    for (auto [i, sign] : path) {
+      const auto& a = arcs[static_cast<std::size_t>(i)];
+      amount = std::min(amount, sign == 1 ? a.cap - a.flow : a.flow);
+    }
+    for (auto [i, sign] : path) arcs[static_cast<std::size_t>(i)].flow += sign * amount;
+    pts.emplace_back(pts.back().first + amount, pts.back().second + dist[static_cast<std::size_t>(T)] * amount);
+  }
+}
+
+// Cost of a piecewise-linear curve at an integer value inside its domain. Every segment of both
+// curves has an integer slope (the cost per unit of one tier or one augmenting path), so the
+// value is exact in 128 bits: costs stay below 2^62 per unit and amounts below 2^62.
+inline __int128 curve_at(const std::vector<std::pair<Amount, __int128>>& pts, Amount x) {
+  for (std::size_t i = 1; i < pts.size(); ++i) {
+    const auto [a, ca] = pts[i - 1];
+    const auto [b, cb] = pts[i];
+    if (a <= x && x <= b) {
+      const __int128 slope = (cb - ca) / (b - a);
+      return ca + slope * (x - a);
+    }
+  }
+  return pts.back().second;
+}
+
+inline std::vector<std::pair<Amount, __int128>> payload_points(const FlowCoreResult& r) {
+  std::vector<std::pair<Amount, __int128>> pts{{0, 0}};
+  for (const auto& [c, u] : r.cost_distribution) {
+    pts.emplace_back(pts.back().first + u, pts.back().second + static_cast<__int128>(c) * u);
+  }
+  return pts;
+}
+
+// The certificate of APPROACH 2.2 in two ordered branches. Returns the failed clauses. With
+// `tier_a`, the complete curve is compared with the exhaustive optimum of every value; else with
+// the independent Bellman-Ford curve at the union of both breakpoint sets.
+inline std::vector<std::string> certify(const StrictMultiDiGraph& g, std::span<const Amount> view,
+                                        std::vector<NodeId> srcs, std::vector<NodeId> dsts,
+                                        std::optional<Amount> cap, const Eligibility* elig,
+                                        const FlowCoreResult& r, bool tier_a) {
+  std::vector<std::string> fails;
+  const auto m = static_cast<std::size_t>(g.num_edges());
+  const auto n = static_cast<std::size_t>(g.num_nodes());
+  std::sort(srcs.begin(), srcs.end());
+  srcs.erase(std::unique(srcs.begin(), srcs.end()), srcs.end());
+  std::sort(dsts.begin(), dsts.end());
+  dsts.erase(std::unique(dsts.begin(), dsts.end()), dsts.end());
+  auto edge_ok = [&](std::size_t e) { return elig == nullptr || elig->edge_ok(static_cast<EdgeId>(e)); };
+  auto node_ok = [&](NodeId v) { return elig == nullptr || elig->node_ok(v); };
+  if (r.edge_flows.size() != m || r.potentials.size() != n) {
+    fails.push_back("shape");
+    return fails;
+  }
+  if (cap.has_value() && *cap == 0) {
+    const auto& c = r.counters;
+    if (r.placed != 0 || !r.cost_distribution.empty() || r.min_cut.has_value() ||
+        std::any_of(r.edge_flows.begin(), r.edge_flows.end(), [](Amount x) { return x != 0; }) ||
+        std::any_of(r.potentials.begin(), r.potentials.end(), [](Cost p) { return p != kNeverReached; }) ||
+        c.dijkstra_runs || c.dijkstra_pops || c.settled || c.arc_scans || c.dinic_phases || c.augmentations) {
+      fails.push_back("zero cap: the prescribed zero payload");
+    }
+    return fails;
+  }
+  std::vector<__int128> bal(n, 0);
+  __int128 moment = 0;
+  for (std::size_t e = 0; e < m; ++e) {
+    const Amount f = r.edge_flows[e];
+    if (f < 0 || f > view[e]) fails.push_back("feasibility at edge " + std::to_string(e));
+    if (!edge_ok(e) && f != 0) fails.push_back("flow on an ineligible edge " + std::to_string(e));
+    bal[static_cast<std::size_t>(g.edge_src()[e])] -= f;
+    bal[static_cast<std::size_t>(g.edge_dst()[e])] += f;
+    moment += static_cast<__int128>(g.cost()[e]) * f;
+  }
+  std::set<NodeId> S(srcs.begin(), srcs.end()), D(dsts.begin(), dsts.end());
+  __int128 supply = 0, inflow = 0;
+  std::vector<__int128> sup(n, 0), inf_d(n, 0);
+  for (std::size_t v = 0; v < n; ++v) {
+    const auto node = static_cast<NodeId>(v);
+    if (S.count(node)) {
+      if (bal[v] > 0) fails.push_back("source absorbs flow");
+      if (!node_ok(node) && bal[v] != 0) fails.push_back("excluded source supplies");
+      sup[v] = -bal[v];
+      supply += -bal[v];
+    } else if (D.count(node)) {
+      if (bal[v] < 0) fails.push_back("destination emits flow");
+      if (!node_ok(node) && bal[v] != 0) fails.push_back("excluded destination receives");
+      inf_d[v] = bal[v];
+      inflow += bal[v];
+    } else if (bal[v] != 0) {
+      fails.push_back("conservation at node " + std::to_string(v));
+    }
+  }
+  if (supply != r.placed || inflow != r.placed) fails.push_back("value differs from supply or inflow");
+  if (r.placed < 0 || (cap.has_value() && r.placed > *cap)) fails.push_back("placed outside [0, cap]");
+  // Full residual closure seeded at the allowed real sources.
+  const std::size_t s_star = n, t_star = n + 1;
+  std::vector<std::vector<std::pair<std::size_t, Cost>>> out(n + 2);
+  for (std::size_t e = 0; e < m; ++e) {
+    if (!edge_ok(e)) continue;
+    const auto u = static_cast<std::size_t>(g.edge_src()[e]);
+    const auto v = static_cast<std::size_t>(g.edge_dst()[e]);
+    if (r.edge_flows[e] < view[e]) out[u].emplace_back(v, g.cost()[e]);
+    if (r.edge_flows[e] > 0) out[v].emplace_back(u, -g.cost()[e]);
+  }
+  for (NodeId s : srcs) {
+    if (!node_ok(s)) continue;
+    out[s_star].emplace_back(static_cast<std::size_t>(s), 0);
+    if (sup[static_cast<std::size_t>(s)] > 0) out[static_cast<std::size_t>(s)].emplace_back(s_star, 0);
+  }
+  for (NodeId d : dsts) {
+    if (!node_ok(d)) continue;
+    out[static_cast<std::size_t>(d)].emplace_back(t_star, 0);
+    if (inf_d[static_cast<std::size_t>(d)] > 0) out[t_star].emplace_back(static_cast<std::size_t>(d), 0);
+  }
+  std::vector<char> seen(n + 2, 0);
+  std::vector<std::size_t> queue;
+  for (NodeId s : srcs) {
+    if (node_ok(s)) { seen[static_cast<std::size_t>(s)] = 1; queue.push_back(static_cast<std::size_t>(s)); }
+  }
+  for (std::size_t qi = 0; qi < queue.size(); ++qi) {
+    for (auto [v, w] : out[queue[qi]]) {
+      (void)w;
+      if (!seen[v]) { seen[v] = 1; queue.push_back(v); }
+    }
+  }
+  const bool connected = seen[t_star] != 0;
+  if (!cap.has_value() && connected) fails.push_back("uncapped solve left the destinations connected");
+  if (cap.has_value() && r.placed != *cap && connected) fails.push_back("attained value: early stop");
+  if (connected) {
+    if (r.min_cut.has_value()) fails.push_back("min_cut present on a connected solve");
+  } else {
+    std::vector<EdgeId> expect;
+    __int128 cut_value = 0;
+    for (std::size_t e = 0; e < m; ++e) {
+      if (!edge_ok(e)) continue;
+      if (seen[static_cast<std::size_t>(g.edge_src()[e])] && !seen[static_cast<std::size_t>(g.edge_dst()[e])] &&
+          view[e] > 0) {
+        expect.push_back(static_cast<EdgeId>(e));
+        cut_value += view[e];
       }
     }
+    if (!r.min_cut.has_value()) fails.push_back("min_cut missing on a maximal solve");
+    else if (*r.min_cut != expect) fails.push_back("min_cut differs from the closure cut");
+    if (cut_value != r.placed) fails.push_back("cut value differs from placed");
   }
-  return StrictMultiDiGraph::from_arrays(n, src, dst, cap, cost);
-}
-
-inline StrictMultiDiGraph make_n_disjoint_paths(int n, double capacity, std::int64_t cost = 1) {
-  // Create N disjoint equal-cost paths from source to sink
-  // Topology: 0 → [1..n] → (n+1)
-  // Each path has 2 hops with specified capacity and cost
-  int num_nodes = n + 2;  // source, n intermediates, sink
-  std::vector<std::int32_t> src, dst;
-  std::vector<double> cap;
-  std::vector<std::int64_t> cost_vec;
-
-  for (int i = 0; i < n; ++i) {
-    // First hop: 0 → (i+1)
-    src.push_back(0);
-    dst.push_back(i + 1);
-    cap.push_back(capacity);
-    cost_vec.push_back(cost);
-
-    // Second hop: (i+1) → (n+1)
-    src.push_back(i + 1);
-    dst.push_back(n + 1);
-    cap.push_back(capacity);
-    cost_vec.push_back(cost);
+  for (std::size_t v = 0; v < n; ++v) {
+    if (r.potentials[v] < kNeverReached) fails.push_back("potential below the sentinel");
+    if (seen[v] && r.potentials[v] == kNeverReached) fails.push_back("closure vertex holds NEVER_REACHED");
   }
-
-  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost_vec);
-}
-
-inline StrictMultiDiGraph make_tiered_graph(double cap_tier1, double cap_tier2,
-                                             std::int64_t cost_tier1 = 1,
-                                             std::int64_t cost_tier2 = 2) {
-  // Create topology with two different-cost paths
-  // Path 1: 0→1→3 (tier1 cost and capacity)
-  // Path 2: 0→2→3 (tier2 cost and capacity)
-  std::int32_t src_arr[4] = {0, 1, 0, 2};
-  std::int32_t dst_arr[4] = {1, 3, 2, 3};
-  double cap_arr[4] = {cap_tier1, cap_tier1, cap_tier2, cap_tier2};
-  std::int64_t cost_arr[4] = {cost_tier1, cost_tier1, cost_tier2, cost_tier2};
-
-  return StrictMultiDiGraph::from_arrays(4,
-    std::span(src_arr, 4), std::span(dst_arr, 4),
-    std::span(cap_arr, 4), std::span(cost_arr, 4));
-}
-
-inline StrictMultiDiGraph make_shared_bottleneck_graph(double path_cap, double bottleneck_cap) {
-  // Create topology with shared bottleneck
-  // Two paths: 0→1→3 and 0→2→3, where edge 1→3 is shared
-  // Path 1: 0→1 (path_cap), 1→3 (bottleneck_cap)
-  // Path 2: 0→2 (path_cap), 2→3 (path_cap)
-  // Bottleneck: 1→3 limits total flow
-  std::int32_t src_arr[4] = {0, 1, 0, 2};
-  std::int32_t dst_arr[4] = {1, 3, 2, 3};
-  double cap_arr[4] = {path_cap, bottleneck_cap, path_cap, path_cap};
-  std::int64_t cost_arr[4] = {1, 1, 1, 1};
-
-  return StrictMultiDiGraph::from_arrays(4,
-    std::span(src_arr, 4), std::span(dst_arr, 4),
-    std::span(cap_arr, 4), std::span(cost_arr, 4));
-}
-
-inline StrictMultiDiGraph make_3tier_clos_graph() {
-  /**
-   * Build a 3-tier Clos topology matching NetGraph scenario_3.yaml structure.
-   *
-   * Structure (replicates scenario_3 from NetGraph integration tests):
-   * - 2 Clos instances (clos1, clos2)
-   * - Each Clos has:
-   *   - 2 bricks (b1, b2)
-   *   - Each brick has:
-   *     - 4 T1 nodes (tier1/leaf layer)
-   *     - 4 T2 nodes (tier2/aggregation layer)
-   *     - Mesh: all T1->T2 edges within brick (100 Gbps, cost 1)
-   *   - 16 spine nodes (T3)
-   *   - Connections: Each brick's 4 T2 nodes connect one-to-one to 4 spines (400 Gbps, cost 1)
-   * - Inter-Clos: 16 spine-to-spine links (400 Gbps, cost 1)
-   *
-   * Node numbering:
-   * - Clos1:
-   *   - b1/t1: nodes 0-3
-   *   - b1/t2: nodes 4-7
-   *   - b2/t1: nodes 8-11
-   *   - b2/t2: nodes 12-15
-   *   - spine: nodes 16-31
-   * - Clos2:
-   *   - b1/t1: nodes 32-35
-   *   - b1/t2: nodes 36-39
-   *   - b2/t1: nodes 40-43
-   *   - b2/t2: nodes 44-47
-   *   - spine: nodes 48-63
-   *
-   * Total nodes: 64
-   *
-   * Expected max flow from clos1 T1 nodes to clos2 T1 nodes: 3200.0 Gbps
-   * (8 inter-clos spine links × 400 Gbps = 3200 Gbps bottleneck)
-   */
-
-  constexpr int num_nodes = 64;
-  std::vector<std::int32_t> src, dst;
-  std::vector<double> cap;
-  std::vector<std::int64_t> cost;
-
-  // Helper to add mesh connections between two groups
-  auto add_mesh = [&](int group1_start, int group1_count, int group2_start, int group2_count, double capacity) {
-    for (int i = 0; i < group1_count; ++i) {
-      for (int j = 0; j < group2_count; ++j) {
-        src.push_back(group1_start + i);
-        dst.push_back(group2_start + j);
-        cap.push_back(capacity);
-        cost.push_back(1);
-      }
-    }
-  };
-
-  // Helper to add one-to-one connections
-  auto add_one_to_one = [&](int group1_start, int group1_count, int group2_start, double capacity) {
-    for (int i = 0; i < group1_count; ++i) {
-      src.push_back(group1_start + i);
-      dst.push_back(group2_start + i);
-      cap.push_back(capacity);
-      cost.push_back(1);
-    }
-  };
-
-  // Clos1 brick1: T1 (0-3) mesh to T2 (4-7)
-  add_mesh(0, 4, 4, 4, 100.0);
-
-  // Clos1 brick2: T1 (8-11) mesh to T2 (12-15)
-  add_mesh(8, 4, 12, 4, 100.0);
-
-  // Clos1 b1/T2 (4-7) one-to-one to spine (16-19)
-  add_one_to_one(4, 4, 16, 400.0);
-
-  // Clos1 b2/T2 (12-15) one-to-one to spine (20-23)
-  add_one_to_one(12, 4, 20, 400.0);
-
-  // Inter-Clos: Clos1 spine (16-31) one-to-one to Clos2 spine (48-63)
-  add_one_to_one(16, 16, 48, 400.0);
-
-  // Clos2 spine (48-63) to b1/T2 (36-39) - only first 4 spines connect
-  add_one_to_one(48, 4, 36, 400.0);
-
-  // Clos2 spine (52-55) to b2/T2 (44-47)
-  add_one_to_one(52, 4, 44, 400.0);
-
-  // Clos2 brick1: T2 (36-39) mesh to T1 (32-35)
-  add_mesh(36, 4, 32, 4, 100.0);
-
-  // Clos2 brick2: T2 (44-47) mesh to T1 (40-43)
-  add_mesh(44, 4, 40, 4, 100.0);
-
-  return StrictMultiDiGraph::from_arrays(num_nodes, src, dst, cap, cost);
-}
-
-inline StrictMultiDiGraph make_triangle_topology() {
-  /**
-   * Triangle topology from NetGraph solver tests.
-   * Used in test_maxflow_api.py::_triangle_network()
-   *
-   * Topology:
-   *   A(0) -> B(1) (cap 2)
-   *   B(1) -> C(2) (cap 1)
-   *   A(0) -> C(2) (cap 1)
-   *
-   * Expected max flow A->C: 2.0 (1 direct + 1 via B)
-   */
-  std::int32_t src_arr[3] = {0, 1, 0};
-  std::int32_t dst_arr[3] = {1, 2, 2};
-  double cap_arr[3] = {2.0, 1.0, 1.0};
-  std::int64_t cost_arr[3] = {1, 1, 1};
-
-  return StrictMultiDiGraph::from_arrays(3,
-    std::span(src_arr, 3), std::span(dst_arr, 3),
-    std::span(cap_arr, 3), std::span(cost_arr, 3));
-}
-
-inline StrictMultiDiGraph make_simple_parallel_paths_topology() {
-  /**
-   * Simple network with two disjoint parallel paths.
-   * From NetGraph solver tests: test_maxflow_api.py::_simple_network()
-   *
-   * Topology:
-   *   S(0) -> A(1) (cap 1) -> T(3) (cap 1)
-   *   S(0) -> B(2) (cap 1) -> T(3) (cap 1)
-   *
-   * Expected max flow S->T: 2.0
-   */
-  std::int32_t src_arr[4] = {0, 1, 0, 2};
-  std::int32_t dst_arr[4] = {1, 3, 2, 3};
-  double cap_arr[4] = {1.0, 1.0, 1.0, 1.0};
-  std::int64_t cost_arr[4] = {1, 1, 1, 1};
-
-  return StrictMultiDiGraph::from_arrays(4,
-    std::span(src_arr, 4), std::span(dst_arr, 4),
-    std::span(cap_arr, 4), std::span(cost_arr, 4));
-}
-
-// Assertion helpers
-inline void expect_csr_valid(const StrictMultiDiGraph& g) {
-  auto row = g.row_offsets_view();
-  auto col = g.col_indices_view();
-  auto aei = g.adj_edge_index_view();
-  auto edge_src = g.edge_src_view();
-  auto edge_dst = g.edge_dst_view();
-  const auto M = static_cast<std::size_t>(g.num_edges());
-  const auto N = static_cast<std::size_t>(g.num_nodes());
-
-  // --- Forward CSR structural checks ---
-
-  // Offsets should be monotonic
-  EXPECT_EQ(row.size(), N + 1);
-  for (std::size_t i = 0; i < row.size() - 1; ++i) {
-    EXPECT_LE(row[i], row[i + 1]) << "Row offsets not monotonic at " << i;
+  for (NodeId s : srcs) {
+    const auto p = r.potentials[static_cast<std::size_t>(s)];
+    if (node_ok(s) && p != 0) fails.push_back("allowed root with potential other than 0");
   }
-
-  // Total edges match
-  EXPECT_EQ(static_cast<std::size_t>(row[row.size() - 1]), M);
-  EXPECT_EQ(col.size(), M);
-  EXPECT_EQ(aei.size(), M);
-
-  // All column indices and edge indices in range
-  for (std::size_t i = 0; i < col.size(); ++i) {
-    EXPECT_GE(col[i], 0) << "Invalid column index at " << i;
-    EXPECT_LT(col[i], g.num_nodes()) << "Column index out of range at " << i;
-    EXPECT_GE(aei[i], 0) << "Invalid edge index at " << i;
-    EXPECT_LT(aei[i], g.num_edges()) << "Edge index out of range at " << i;
-  }
-
-  // --- Forward CSR semantic checks ---
-
-  // Bijection: every edge appears exactly once in the CSR
-  std::vector<int> edge_count(M, 0);
-  for (std::size_t u = 0; u < N; ++u) {
-    auto s = static_cast<std::size_t>(row[u]);
-    auto e = static_cast<std::size_t>(row[u + 1]);
-    for (std::size_t j = s; j < e; ++j) {
-      auto eid = static_cast<std::size_t>(aei[j]);
-      ASSERT_LT(eid, M) << "Edge index out of range at CSR pos " << j;
-      edge_count[eid]++;
-
-      // Source consistency: edge must originate from node u
-      EXPECT_EQ(static_cast<std::size_t>(edge_src[eid]), u)
-          << "Forward CSR: edge " << eid << " in node " << u
-          << "'s adjacency has src=" << edge_src[eid];
-
-      // Destination consistency: col_indices must match edge destination
-      EXPECT_EQ(col[j], edge_dst[eid])
-          << "Forward CSR: col_indices[" << j << "]=" << col[j]
-          << " doesn't match edge_dst[" << eid << "]=" << edge_dst[eid];
-    }
-  }
-  for (std::size_t eid = 0; eid < M; ++eid) {
-    EXPECT_EQ(edge_count[eid], 1)
-        << "Edge " << eid << " appears " << edge_count[eid]
-        << " times in forward CSR (expected exactly 1)";
-  }
-
-  // --- Reverse CSR checks ---
-  auto in_row = g.in_row_offsets_view();
-  auto in_col = g.in_col_indices_view();
-  auto in_aei = g.in_adj_edge_index_view();
-
-  EXPECT_EQ(in_row.size(), N + 1);
-  for (std::size_t i = 0; i < in_row.size() - 1; ++i) {
-    EXPECT_LE(in_row[i], in_row[i + 1]) << "Reverse row offsets not monotonic at " << i;
-  }
-  EXPECT_EQ(static_cast<std::size_t>(in_row[in_row.size() - 1]), M);
-  EXPECT_EQ(in_col.size(), M);
-  EXPECT_EQ(in_aei.size(), M);
-
-  // Bijection and consistency for reverse CSR
-  std::vector<int> rev_edge_count(M, 0);
-  for (std::size_t v = 0; v < N; ++v) {
-    auto s = static_cast<std::size_t>(in_row[v]);
-    auto e = static_cast<std::size_t>(in_row[v + 1]);
-    for (std::size_t j = s; j < e; ++j) {
-      auto eid = static_cast<std::size_t>(in_aei[j]);
-      ASSERT_LT(eid, M) << "Reverse edge index out of range at CSR pos " << j;
-      rev_edge_count[eid]++;
-
-      // Destination consistency: edge must point to node v
-      EXPECT_EQ(static_cast<std::size_t>(edge_dst[eid]), v)
-          << "Reverse CSR: edge " << eid << " in node " << v
-          << "'s incoming list has dst=" << edge_dst[eid];
-
-      // Source consistency: in_col_indices must match edge source
-      EXPECT_EQ(in_col[j], edge_src[eid])
-          << "Reverse CSR: in_col_indices[" << j << "]=" << in_col[j]
-          << " doesn't match edge_src[" << eid << "]=" << edge_src[eid];
-    }
-  }
-  for (std::size_t eid = 0; eid < M; ++eid) {
-    EXPECT_EQ(rev_edge_count[eid], 1)
-        << "Edge " << eid << " appears " << rev_edge_count[eid]
-        << " times in reverse CSR (expected exactly 1)";
-  }
-}
-
-inline void expect_pred_dag_valid(const PredDAG& dag, int num_nodes) {
-  EXPECT_EQ(dag.parent_offsets.size(), static_cast<std::size_t>(num_nodes + 1));
-
-  // Offsets monotonic
-  for (std::size_t i = 0; i < dag.parent_offsets.size() - 1; ++i) {
-    EXPECT_LE(dag.parent_offsets[i], dag.parent_offsets[i + 1]);
-  }
-
-  auto total = static_cast<std::size_t>(dag.parent_offsets.back());
-  EXPECT_EQ(dag.parents.size(), total);
-  EXPECT_EQ(dag.via_edges.size(), total);
-
-  // Node IDs in range
-  for (auto p : dag.parents) {
-    EXPECT_GE(p, 0);
-    EXPECT_LT(p, num_nodes);
-  }
-}
-
-// Extended PredDAG validation that also checks semantic correctness against a graph.
-// Verifies that each entry refers to an actual edge from parent to node, and that
-// distances are consistent (dist[v] == dist[parent] + edge_cost).
-inline void expect_pred_dag_semantically_valid(const StrictMultiDiGraph& g,
-                                               const PredDAG& dag,
-                                               const std::vector<Cost>& dist) {
-  const auto N = g.num_nodes();
-  const auto edge_src = g.edge_src_view();
-  const auto edge_dst = g.edge_dst_view();
-  const auto edge_cost = g.cost_view();
-
-  expect_pred_dag_valid(dag, N);
-
-  for (std::int32_t v = 0; v < N; ++v) {
-    auto s = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v)]);
-    auto e = static_cast<std::size_t>(dag.parent_offsets[static_cast<std::size_t>(v) + 1]);
-    for (std::size_t i = s; i < e; ++i) {
-      auto parent = dag.parents[i];
-      auto eid = static_cast<std::size_t>(dag.via_edges[i]);
-      ASSERT_LT(eid, static_cast<std::size_t>(g.num_edges()));
-      // Edge must go from parent -> v
-      EXPECT_EQ(edge_src[eid], parent)
-          << "Node " << v << ": via_edge " << eid << " src mismatch";
-      EXPECT_EQ(edge_dst[eid], v)
-          << "Node " << v << ": via_edge " << eid << " dst mismatch";
-      // Distance consistency
-      auto d_v = dist[static_cast<std::size_t>(v)];
-      auto d_p = dist[static_cast<std::size_t>(parent)];
-      if (d_v < std::numeric_limits<Cost>::max() && d_p < std::numeric_limits<Cost>::max()) {
-        EXPECT_EQ(d_v, d_p + edge_cost[eid])
-            << "Distance inconsistency at node " << v;
+  for (std::size_t u = 0; u < n; ++u) {
+    if (!seen[u] || r.potentials[u] == kNeverReached) continue;
+    for (auto [v, w] : out[u]) {
+      if (v >= n || !seen[v] || r.potentials[v] == kNeverReached) continue;
+      if (static_cast<__int128>(w) + r.potentials[u] - r.potentials[v] < 0) {
+        fails.push_back("negative reduced cost inside the closure");
       }
     }
   }
-}
-
-// FlowSummary validation helpers
-inline void validate_capacity_constraints(const StrictMultiDiGraph& g, const FlowSummary& summary) {
-  ASSERT_EQ(summary.edge_flows.size(), static_cast<std::size_t>(g.num_edges()))
-      << "Edge flow vector size mismatch";
-
-  auto caps = g.capacity_view();
-  for (std::size_t i = 0; i < summary.edge_flows.size(); ++i) {
-    EXPECT_GE(summary.edge_flows[i], 0.0)
-        << "Edge " << i << " has negative flow: " << summary.edge_flows[i];
-    EXPECT_LE(summary.edge_flows[i], caps[i] + 1e-9)
-        << "Edge " << i << " exceeds capacity: flow=" << summary.edge_flows[i]
-        << " cap=" << caps[i];
+  std::optional<Cost> pt;
+  for (NodeId d : dsts) {
+    const auto p = r.potentials[static_cast<std::size_t>(d)];
+    if (p != kNeverReached) pt = pt ? std::min(*pt, p) : p;
   }
-}
-
-inline void validate_flow_conservation(const StrictMultiDiGraph& g, const FlowSummary& summary,
-                                       NodeId src, NodeId dst) {
-  auto row = g.row_offsets_view();
-  auto aei = g.adj_edge_index_view();
-  auto in_row = g.in_row_offsets_view();
-  auto in_aei = g.in_adj_edge_index_view();
-
-  for (std::int32_t u = 0; u < g.num_nodes(); ++u) {
-    if (u == src || u == dst) continue;  // Skip source and sink
-
-    double outflow = 0.0;
-    for (std::size_t j = row[u]; j < row[u + 1]; ++j) {
-      outflow += summary.edge_flows[aei[j]];
+  if (pt) {
+    for (NodeId d : dsts) {
+      const auto p = r.potentials[static_cast<std::size_t>(d)];
+      if (p == kNeverReached) continue;
+      if (inf_d[static_cast<std::size_t>(d)] > 0 && p != *pt) fails.push_back("inflow destination potential differs from pi(t*)");
     }
-
-    double inflow = 0.0;
-    for (std::size_t j = in_row[u]; j < in_row[u + 1]; ++j) {
-      inflow += summary.edge_flows[in_aei[j]];
+    if (!r.cost_distribution.empty() && r.cost_distribution.back().first != *pt) {
+      fails.push_back("pi(t*) differs from the last curve cost");
     }
-
-    EXPECT_NEAR(inflow, outflow, 1e-9)
-        << "Flow not conserved at node " << u
-        << ": inflow=" << inflow << " outflow=" << outflow;
+  } else if (r.placed != 0) {
+    fails.push_back("flow delivered but no destination reached");
   }
+  __int128 total = 0, curve_moment = 0;
+  for (std::size_t i = 0; i < r.cost_distribution.size(); ++i) {
+    const auto [c, u] = r.cost_distribution[i];
+    if (u <= 0) fails.push_back("curve volume not positive");
+    if (i > 0 && c <= r.cost_distribution[i - 1].first) fails.push_back("curve costs not strictly increasing");
+    total += u;
+    curve_moment += static_cast<__int128>(c) * u;
+  }
+  if (total != r.placed) fails.push_back("curve total differs from placed");
+  if (curve_moment != moment) fails.push_back("curve moment differs from the flow cost");
+  const auto pts = payload_points(r);
+  if (tier_a) {
+    const auto best = exhaustive_costs(g, view, srcs, dsts, elig);
+    const Amount fmax = best.rbegin()->first;
+    const Amount top = cap.has_value() ? std::min(*cap, fmax) : fmax;
+    if (r.placed != top) fails.push_back("placed differs from min(cap, F_max)");
+    for (Amount x = 0; x <= std::min(top, r.placed); ++x) {
+      auto it = best.find(x);
+      if (it == best.end() || curve_at(pts, x) != it->second) {
+        fails.push_back("curve differs from the exhaustive optimum at " + std::to_string(x));
+        break;
+      }
+    }
+  } else {
+    const auto ref = independent_curve(g, view, srcs, dsts, elig);
+    const Amount fmax = ref.back().first;
+    const Amount top = cap.has_value() ? std::min(*cap, fmax) : fmax;
+    if (r.placed != top) fails.push_back("placed differs from min(cap, F_max)");
+    std::set<Amount> xs;
+    for (auto [x, c] : pts) { (void)c; xs.insert(x); }
+    for (auto [x, c] : ref) { (void)c; xs.insert(x); }
+    for (Amount x : xs) {
+      if (x > std::min(top, r.placed)) continue;
+      if (curve_at(pts, x) != curve_at(ref, x)) {
+        fails.push_back("curve differs from the independent solver at " + std::to_string(x));
+        break;
+      }
+    }
+  }
+  return fails;
 }
 
 } // namespace netgraph::core::test

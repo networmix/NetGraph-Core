@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Streamline sub-PR 1a (breaking; integration branch `streamline`)
+
+The release rebuilds Core in sub-PRs (`dev/design/2026-10-streamline/`). Sub-PR 1a:
+
+- **Removed**: the previous library and its bindings: `FlowState`, `FlowGraph`, `FlowPolicy`
+  and their configuration, the backend and algorithms facade, the search entry points
+  (`shortest_paths`, `shortest_paths_to`, `spf_dag`, `k_shortest_paths`), max-flow, batch
+  max-flow and sensitivity, the SPF memo and `StateStamp`, `kMinFlow`, `kEpsilon`,
+  `constants.hpp`, the Python profiling accessors, and their tests. The ledger, kernels,
+  policies, searches and evaluators return in sub-PRs 1b to 1d; the entries below the 1a block
+  describe the removed API.
+- **Graph**: `StrictMultiDiGraph(num_nodes, src, dst, capacity_units, cost, resolution)` is the
+  one constructor: capacities are `int64` units of an explicit resolution (a power of two in
+  `[2^-32, 2^32]`), costs are positive integers, and the public `EdgeId` is the rank of an edge in
+  `(src, cost, dst, input)` with `input_index()` mapping ids to input positions. Validation
+  reports the first defect in a fixed order (unit values, shapes, costs, remaining bounds,
+  including the cost-sum guard). Accessors return read-only NumPy views. `Eligibility` is built
+  from excluded node ids and EdgeIds. `to_units` (round half up) and `as_float` are the only
+  conversions between physical values and units.
+- **Flow core**: one integer minimum-cost flow (successive shortest paths with potentials, Dinic
+  phases per cost tier, every edge its own arc, arcs at a node in ascending EdgeId) behind the
+  private entry `_netgraph_core._place_global_units`, returning the value, the marginal cost
+  curve, edge flows, the residual minimum cut, the potentials and six operation counters.
+
 ### Added
 
 - **Shortest Paths**: `shortest_paths_dag(g, src, dst, ...)` (C++) and `Backend::spf_dag` / `Algorithms::spf_dag` return the destination's cost and the predecessor DAG without materialising the N-sized distance vector; `calc_max_flow`, `FlowState::place_max_flow`, `FlowPolicy` and the KSP spur searches now use it (outputs unchanged). `Backend::spf_dag` has a default implementation derived from `spf`, so other backends need no change. Measured old/new/old against 0.11.0: about 1.25x on first-neighbour searches at 16k–262k nodes, unchanged on full searches.
