@@ -4,6 +4,10 @@ project(netgraph_core LANGUAGES CXX)
 set(PYBIND11_FINDPYTHON NEW CACHE STRING "Use modern FindPython in pybind11")
 # Optional C++ tests
 option(NETGRAPH_CORE_BUILD_TESTS "Build C++ unit tests" OFF)
+# The private hooks (test controls and prototype-parity diagnostics the contract does not name):
+# ON for the editable development build (pyproject.toml) and the test suites (dev/cpp-tests.sh),
+# OFF for an installed wheel.
+option(NETGRAPH_CORE_PRIVATE_HOOKS "Build the private test hooks into the library and the extension" OFF)
 if(NETGRAPH_CORE_BUILD_TESTS)
   include(FetchContent)
   FetchContent_Declare(
@@ -14,17 +18,20 @@ if(NETGRAPH_CORE_BUILD_TESTS)
   FetchContent_MakeAvailable(googletest)
   enable_testing()
 add_executable(netgraph_core_tests
-  tests/cpp/smoke_test.cpp
-  tests/cpp/strict_multidigraph_tests.cpp
-  tests/cpp/max_flow_tests.cpp
-  tests/cpp/masking_tests.cpp
+  tests/cpp/graph_tests.cpp
+  tests/cpp/flow_core_tests.cpp
+  tests/cpp/flow_core_deletion_tests.cpp
+  tests/cpp/eligibility_tests.cpp
   tests/cpp/pred_dag_tests.cpp
   tests/cpp/search_tests.cpp
   tests/cpp/kernels_tests.cpp
-  tests/cpp/flow_graph_tests.cpp
+  tests/cpp/flow_ledger_tests.cpp
+  tests/cpp/flow_policy_fixture_tests.cpp
+  tests/cpp/flow_policy_tests.cpp
 )
   target_link_libraries(netgraph_core_tests PRIVATE netgraph_core GTest::gtest_main)
   target_include_directories(netgraph_core_tests PRIVATE tests/cpp)
+  target_compile_definitions(netgraph_core_tests PRIVATE NETGRAPH_CORE_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
   if(NETGRAPH_CORE_COVERAGE AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
     # Atomic counters: see the NETGRAPH_CORE_COVERAGE block below.
     target_compile_options(netgraph_core_tests PRIVATE -O0 -g --coverage)
@@ -34,7 +41,8 @@ add_executable(netgraph_core_tests
     target_link_options(netgraph_core_tests PRIVATE --coverage)
   endif()
   # Allocation-failure tests replace the global operator new: a separate executable.
-  add_executable(netgraph_core_fault_tests tests/cpp/ledger_fault_tests.cpp)
+  add_executable(netgraph_core_fault_tests tests/cpp/flow_ledger_fault_tests.cpp tests/cpp/flow_policy_fault_tests.cpp
+                 tests/cpp/flow_core_deletion_fault_tests.cpp)
   target_link_libraries(netgraph_core_fault_tests PRIVATE netgraph_core GTest::gtest_main)
   target_include_directories(netgraph_core_fault_tests PRIVATE tests/cpp)
   if(NETGRAPH_CORE_COVERAGE AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
@@ -86,19 +94,23 @@ endif()
 
 
 add_library(netgraph_core STATIC
-  src/strict_multidigraph.cpp
-  src/max_flow.cpp
+  src/graph.cpp
+  src/eligibility.cpp
+  src/flow_core.cpp
   src/pred_dag.cpp
   src/search.cpp
   src/kernels.cpp
-  src/flow_graph.cpp
-  src/pinned_flow.cpp
-  src/profiling.cpp
+  src/flow_ledger.cpp
+  src/dag_cache.cpp
+  src/flow_policy.cpp
+  src/evaluators.cpp
 )
 target_include_directories(netgraph_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
+# PUBLIC: the library, the extension and the tests see one value (0 or 1).
+target_compile_definitions(netgraph_core PUBLIC NETGRAPH_CORE_PRIVATE_HOOKS=$<BOOL:${NETGRAPH_CORE_PRIVATE_HOOKS}>)
 ## C++ standard is set globally above.
 target_compile_features(netgraph_core PUBLIC cxx_std_20)
 
@@ -219,9 +231,8 @@ endif()
 if(NETGRAPH_CORE_COVERAGE)
   message(STATUS "Enabling coverage instrumentation (disables optimizations)")
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    # Worker threads (batch and sensitivity evaluators from 1c on) corrupt the default
-    # non-atomic profile counters under concurrent updates (gcov then emits impossible
-    # values such as "branch 4 taken -1").
+    # The evaluators' worker threads corrupt the default non-atomic profile counters under
+    # concurrent updates (gcov then emits impossible values such as "branch 4 taken -1").
     set(COV_FLAGS -O0 -g --coverage)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
       list(APPEND COV_FLAGS -fprofile-update=atomic)

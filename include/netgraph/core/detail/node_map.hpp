@@ -3,7 +3,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <span>
 #include <vector>
 
 #include "netgraph/core/types.hpp"
@@ -47,7 +46,6 @@ public:
   }
   [[nodiscard]] std::int32_t of(NodeId v) const noexcept { return slot_[static_cast<std::size_t>(v)]; }
   [[nodiscard]] std::size_t size() const noexcept { return count_; }
-  [[nodiscard]] std::span<const NodeId> nodes() const noexcept { return {nodes_.data(), count_}; }
 
   static NodeMap& local() {
     thread_local NodeMap map;

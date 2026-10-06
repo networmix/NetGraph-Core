@@ -5,11 +5,10 @@
 #include <span>
 #include <vector>
 
+#include "netgraph/core/eligibility.hpp"
 #include "netgraph/core/types.hpp"
 
 namespace netgraph::core {
-
-class Eligibility;
 
 // Converts a physical value to units of the resolution q, rounding half up. The only way a
 // physical number enters Core. Throws std::invalid_argument for NaN, infinity, a negative value,
@@ -36,19 +35,19 @@ class Eligibility;
 //
 // A copy is a new graph: same ids and input map, a new uid. Uids come from one process-wide
 // 64-bit counter and are never reused.
-class StrictMultiDiGraph {
+class Graph {
 public:
-  StrictMultiDiGraph(std::int32_t num_nodes,
-                     std::span<const NodeId> src,
-                     std::span<const NodeId> dst,
-                     std::span<const Amount> capacity_units,
-                     std::span<const Cost> cost,
-                     double resolution);
-  StrictMultiDiGraph(const StrictMultiDiGraph& other);
-  StrictMultiDiGraph(StrictMultiDiGraph&& other) noexcept;
-  StrictMultiDiGraph& operator=(const StrictMultiDiGraph&) = delete;
-  StrictMultiDiGraph& operator=(StrictMultiDiGraph&&) = delete;
-  ~StrictMultiDiGraph() noexcept = default;
+  Graph(std::int32_t num_nodes,
+        std::span<const NodeId> src,
+        std::span<const NodeId> dst,
+        std::span<const Amount> capacity_units,
+        std::span<const Cost> cost,
+        double resolution);
+  Graph(const Graph& other);
+  Graph(Graph&& other) noexcept;
+  Graph& operator=(const Graph&) = delete;
+  Graph& operator=(Graph&&) = delete;
+  ~Graph() noexcept = default;
 
   [[nodiscard]] std::uint64_t uid() const noexcept { return uid_; }
   [[nodiscard]] double resolution() const noexcept { return resolution_; }
@@ -74,7 +73,8 @@ public:
   [[nodiscard]] std::span<const EdgeId> in_adj_edge_index() const noexcept { return in_adj_edge_index_; }
 
   // Static eligibility from excluded ids (duplicates and unsorted lists accepted, out-of-range
-  // ids rejected). Empty lists mean all allowed (uid 0).
+  // ids rejected). Empty lists mean all allowed (uid 0). The one public construction of an
+  // Eligibility (eligibility.hpp).
   [[nodiscard]] Eligibility eligibility(std::span<const NodeId> excluded_nodes = {},
                                         std::span<const EdgeId> excluded_edges = {}) const;
 
@@ -92,36 +92,6 @@ private:
   std::vector<std::int32_t> row_offsets_ {};
   std::vector<std::int32_t> in_row_offsets_ {};
   std::vector<EdgeId> in_adj_edge_index_ {};
-};
-
-// Immutable, graph-bound static eligibility: dense node and edge flags. An edge is allowed when
-// it is not excluded and both of its endpoints are allowed.
-class Eligibility {
-public:
-  [[nodiscard]] std::uint64_t graph_uid() const noexcept { return graph_uid_; }
-  // 0 for the all-allowed value; a fresh uid otherwise.
-  [[nodiscard]] std::uint64_t uid() const noexcept { return uid_; }
-  [[nodiscard]] std::span<const std::uint8_t> node_allowed() const noexcept { return node_allowed_; }
-  [[nodiscard]] std::span<const std::uint8_t> edge_allowed() const noexcept { return edge_allowed_; }
-  [[nodiscard]] bool node_ok(NodeId v) const noexcept {
-    return node_allowed_[static_cast<std::size_t>(v)] != 0;
-  }
-  [[nodiscard]] bool edge_ok(EdgeId e) const noexcept {
-    return edge_allowed_[static_cast<std::size_t>(e)] != 0;
-  }
-  // The intersection of two values of one graph (std::invalid_argument for values of different
-  // graphs): an operand when the result equals it (a first, then b), keeping that operand's
-  // uid, so a consumer builds each state once and reuses it; otherwise a new value with a fresh
-  // uid (equal intersections built separately get distinct uids).
-  [[nodiscard]] static Eligibility intersect(const Eligibility& a, const Eligibility& b);
-
-private:
-  friend class StrictMultiDiGraph;
-  Eligibility() = default;
-  std::uint64_t graph_uid_ {0};
-  std::uint64_t uid_ {0};
-  std::vector<std::uint8_t> node_allowed_ {};
-  std::vector<std::uint8_t> edge_allowed_ {};
 };
 
 } // namespace netgraph::core

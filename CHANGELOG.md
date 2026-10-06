@@ -7,69 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Streamline sub-PR 1b (breaking; integration branch `streamline`)
+The streamlined Core (breaking; integration branch `streamline`): one numeric domain (integer
+units), one flow core, one placement engine. It replaces the 0.11 API.
 
-- **Ledger**: `FlowGraph(graph, residual=None)` is the integer ledger: a baseline in units
-  (validated within `[0, capacity_units]`), records as snapshots in FlowId order
-  (`records()`, `record(flow_id)` with `FlowId = (ledger uid, id)`, ids never reused),
-  `capacity_units()`, `residual()`, `allocated()`, `bottleneck(sources, elig)`, `reset()` and
-  `copy()` with the lifetime table (bound, orphaned records; reset and copy rejected while a
-  policy is bound). `FlowRecord` carries the flow's endpoints as sets, placement, admission,
-  bundle (`PredDAG`), route cost, `offered` (Lossy only), delivery and per-edge allocations and
-  drops; counters are 128-bit (exact Python ints). Every policy call reaches the ledger as one
-  atomic exchange: a failed call, an allocation failure included, changes nothing.
-- **Kernels**: `FlowPlacement` (`MAX_FLOW`, `WEIGHTED`, `EQUAL_BALANCED`) and `Admission`
-  (`LOSSLESS`, `LOSSY`). MaxFlow solves the flow core on the flow's split graph over
-  `residual + own allocation` (its own allocation cancellable, other owners never); Weighted
-  apportions by highest averages (D'Hondt, EdgeId ties) over weights frozen at creation from
-  `priority`; EqualBalanced by round robin from the lowest EdgeId; the cumulative amount grows
-  to `max(T, min(T + v, T_max))` with `T_max` found exactly on the monotone allocation; Lossy
-  splits each offer per call and records transit drops. Exercised through the private
-  `_netgraph_core._PinnedFlow` (a Pinned placement with one bundle) until the policy engine.
+### Changed
+
+- **Graph**: `Graph(num_nodes, src, dst, capacity_units, cost, resolution)` (replacing 0.11's
+  `StrictMultiDiGraph`) is the one constructor: capacities are `int64` units of an explicit
+  resolution (a power of two in `[2^-32, 2^32]`), costs are positive integers, and the public
+  `EdgeId` is the rank of an edge in `(src, cost, dst, input)` with `input_index()` mapping ids
+  to input positions. Validation reports the first defect in a fixed order (the resolution, the
+  unit values, the shapes, zero or negative costs, the remaining bounds including the cost-sum
+  guard), on the exact integers also beyond int64. Accessors return read-only NumPy views.
+  `Eligibility` is built from excluded node ids and EdgeIds, with `Eligibility.intersect(a, b)`.
+  `to_units` (round half up) and `as_float` are the only conversions between physical values and
+  units.
 - **Route structures**: `PredDAG.from_csr(graph, offsets, parents, via)` with the complete
-  validation (shape, ranges, endpoints, duplicates, cycles, ascending via within a node), on
-  the exact integers also beyond int64;
-  `Path(graph, hops)` with `to_dag()`; `PathSelection`, `EdgeTieBreak`
-  (`DETERMINISTIC`, `PREFER_HIGHER_PRIORITY`), `EdgePriority`.
-- **Eligibility**: `Eligibility.intersect(a, b)`.
-- **Search** (internal until sub-PR 1d): the unique shortest-path DAG from a root set in both
-  directions, anycast pruning to the nearest targets, and the staged canonical single path
-  (tight DAG, best attainable bottleneck under `PREFER_HIGHER_PRIORITY`, hops, edge ids).
+  validation (shape, ranges, endpoints, duplicates, cycles, ascending via within a node); a DAG
+  is stored over its member nodes and presents the CSR shape on demand. `Path(graph, hops)`
+  with `to_dag()`. `PathSelection`, `EdgeTieBreak` (`DETERMINISTIC`, `PREFER_HIGHER_PRIORITY`),
+  `EdgePriority` (`RESIDUAL`, `CAPACITY`, `HEADROOM`).
+- **Ledger**: `FlowLedger(graph, residual=None)` (replacing 0.11's `FlowGraph`) is the integer
+  ledger: a baseline in units (validated within `[0, capacity_units]`), records as snapshots in
+  FlowId order (`records()`, `record(flow_id)` with `FlowId = (ledger uid, id)`, ids never
+  reused), `capacity_units()`, `residual()`, `allocated()`, `bottleneck(sources, elig)`,
+  `reset()` and `copy()` with the lifetime table (bound and orphaned records; reset and copy
+  rejected while a policy is bound). `FlowRecord` carries the flow's endpoints as sets,
+  placement, admission, bundle (`PredDAG`), route cost, `offered` (Lossy only), delivery and
+  per-edge allocations and drops; counters are 128-bit (exact Python ints). The ledger is
+  mutated only through policies.
+- **Kernels**: `FlowPlacement` (`MAX_FLOW`, `WEIGHTED`, `EQUAL_BALANCED`) and `Admission`
+  (`LOSSLESS`, `LOSSY`). MaxFlow solves the flow core on the flow's split graph over the residual
+  plus its own allocation; Weighted apportions by highest averages (D'Hondt, EdgeId ties) over
+  weights frozen at creation from `priority`; EqualBalanced by round robin from the lowest
+  EdgeId; Lossy splits each offer per call and records transit drops.
+- **Policies**: `FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)`
+  is the one placement engine. `FlowPolicyConfig(routing=..., placement=..., admission=...,
+  selection=...)` has four explicit axes; the routing is `CostOnly()`, `CapacityAware(...)`
+  (flow count, an optional maximum, an `Absolute` or `Stretch` cost ceiling, a minimum flow
+  bandwidth in units, reoptimisation, `DiminishingReturns(window, fraction)`), `Global()` or
+  `Pinned(bundles)`; values outside an enumeration raise `ValueError`. `place(volume,
+  outputs=None)` runs the per-source transaction (creation, reoptimisation, amounts, growth; at
+  most `MAX_FLOWS_PER_CALL` creations per call) or, on Global, the cumulative minimum-cost flow on
+  the residual plus the policy's own allocation, and returns `PlacementResult` (`placed`,
+  `remaining`, `termination`, `local_outcomes`, `routes_changed`, `weights_changed`, `drops`,
+  Global's `cost_distribution`, and `edge_flows`, `residual`, `bottleneck` and Global's
+  `min_cut` when requested through `OutputOptions`). Validation precedes the zero-volume shortcut.
+  `remove()`, `records()`, `record(flow_id)` (the policy's own records), `placed_demand()` and
+  `usable_bundles()` complete the policy.
+- **Failure guarantee**: every public call is all-or-nothing up to its caller, an allocation
+  failure included, across worker threads and the Python result. Two limits: the pybind11 object
+  machinery (a construction or conversion outside the staged calls allocates through
+  `make_new_instance`, which does not check `tp_alloc`: a Python allocation failure there
+  crashes the process, Core state unchanged), and a supplied building `DagCache`, a memo that
+  keeps the complete entries and statistics of the lookups that succeeded before a failure.
+- **DagCache**: `DagCache(graph)` in building mode: keyed by the root set, the direction and
+  the Eligibility, its values the full static supports (immutable, shared, valid after
+  `clear()`), with `stats()` (`hits`, `misses`, `entries`, `bytes`, `live_values`).
+- **Evaluators**: `capacity(graph, sources, destinations, CapacityOptions(...))` (with Global
+  and MaxFlow the exact maximum flow, its marginal cost curve and its minimum cut),
+  `batch_capacity(graph, pairs, opts, per_pair_elig=None, workers=None)` (pair order; the lowest
+  failing index raises; a supplied cache needs `workers == 1`) and `sensitivity(graph, sources,
+  destinations, SensitivityOptions(...), workers=None)` (every candidate edge, the signed
+  unthresholded loss in units, unevaluable edges with their reason). The default worker counts
+  read `NGRAPH_CORE_BATCH_THREADS` and `NGRAPH_CORE_SENSITIVITY_THREADS` (1 when unset).
+- **Flow core**: one integer minimum-cost flow (successive shortest paths with potentials,
+  Dinic phases per cost tier, every edge its own arc, arcs at a node in ascending EdgeId) serves
+  Global routing, the MaxFlow kernel and the evaluators (the exact sensitivity model re-solves
+  each deletion from the baseline solve's final state); the private entry
+  `_netgraph_core._place_global_units` returns the value, the marginal cost curve, edge flows,
+  the residual minimum cut, the potentials and six operation counters.
+- **C++ headers** (under `netgraph/core/`): `types.hpp`, `graph.hpp` (`Graph`, `to_units`,
+  `as_float`; it includes `eligibility.hpp`), `eligibility.hpp`, `options.hpp` (the selection
+  axes, `FlowPlacement`, `Admission`), `pred_dag.hpp`, `flow_record.hpp` (`FlowId`,
+  `Counter128`, `FlowRecord`), `flow_ledger.hpp`, `flow_policy.hpp`, `dag_cache.hpp` and
+  `evaluators.hpp`; each compiles alone and includes no `detail/` header. Python spells the
+  creation cap `MAX_FLOWS_PER_CALL` (C++ `kMaxFlowsPerCall`).
 
-### Streamline sub-PR 1a (breaking; integration branch `streamline`)
+### Removed
 
-The release rebuilds Core in sub-PRs (`dev/design/2026-10-streamline/`). Sub-PR 1a:
-
-- **Removed**: the previous library and its bindings: `FlowState`, `FlowGraph`, `FlowPolicy`
-  and their configuration, the backend and algorithms facade, the search entry points
-  (`shortest_paths`, `shortest_paths_to`, `spf_dag`, `k_shortest_paths`), max-flow, batch
-  max-flow and sensitivity, the SPF memo and `StateStamp`, `kMinFlow`, `kEpsilon`,
-  `constants.hpp`, the Python profiling accessors, and their tests. The ledger, kernels,
-  policies, searches and evaluators return in sub-PRs 1b to 1d; the entries below the 1a block
-  describe the removed API.
-- **Graph**: `StrictMultiDiGraph(num_nodes, src, dst, capacity_units, cost, resolution)` is the
-  one constructor: capacities are `int64` units of an explicit resolution (a power of two in
-  `[2^-32, 2^32]`), costs are positive integers, and the public `EdgeId` is the rank of an edge in
-  `(src, cost, dst, input)` with `input_index()` mapping ids to input positions. Validation
-  reports the first defect in a fixed order (unit values, shapes, costs, remaining bounds,
-  including the cost-sum guard). Accessors return read-only NumPy views. `Eligibility` is built
-  from excluded node ids and EdgeIds. `to_units` (round half up) and `as_float` are the only
-  conversions between physical values and units.
-- **Flow core**: one integer minimum-cost flow (successive shortest paths with potentials, Dinic
-  phases per cost tier, every edge its own arc, arcs at a node in ascending EdgeId) behind the
-  private entry `_netgraph_core._place_global_units`, returning the value, the marginal cost
-  curve, edge flows, the residual minimum cut, the potentials and six operation counters.
-
-### Added
-
-- **Shortest Paths**: `shortest_paths_dag(g, src, dst, ...)` (C++) and `Backend::spf_dag` / `Algorithms::spf_dag` return the destination's cost and the predecessor DAG without materialising the N-sized distance vector; `calc_max_flow`, `FlowState::place_max_flow`, `FlowPolicy` and the KSP spur searches now use it (outputs unchanged). `Backend::spf_dag` has a default implementation derived from `spf`, so other backends need no change. Measured old/new/old against 0.11.0: about 1.25x on first-neighbour searches at 16k–262k nodes, unchanged on full searches.
-- **Graph**: `StrictMultiDiGraph.max_cost()` / `cost_gcd()` in Python, the inputs of the bucket-queue dispatch rule (`max_cost // cost_gcd + 1 <= 65536`).
-- **Explicit Paths**: `PredDAG.from_hops(graph, hops)` (C++ `make_hops_dag`) builds a route whose hops may each use several parallel edges, so a pinned bundle carries all of them (a 4 x 10 bundle carries 40 where `from_edges` with one edge carries 10). `from_edges` is the one-edge-per-hop case and shares the validation.
-- **Shortest Paths**: `EdgeSelection.priority` (`EdgePriority.RESIDUAL` | `CAPACITY` | `HEADROOM`) selects the per-edge value that the `PREFER_HIGHER_RESIDUAL` tie-break and the node-level bottleneck ordering rank by: the residual (the default and the previous behaviour), the static capacity even when a residual is supplied, or the headroom `residual / capacity`. Capacity gating is unchanged and always uses the residual. The default route is unaffected (same code, bit-identical outputs); the other priorities cost one extra capacity load (and a division for headroom) per examined edge.
-
-### Fixed
-
-- **Flow Policy**: two policies managing the same `(src, dst, flowClass)` on one `FlowGraph` assign the same flow ids, so they previously merged their allocations under identical ledger keys and `remove_demand` on one zeroed the other's flow. Creating a flow whose index the ledger already holds now raises `ValueError` instead.
+- The 0.11 library and its bindings: `FlowState`, the previous `FlowGraph` and `FlowPolicy` and
+  their configuration, the backend and algorithms facade (with its `Graph` handle), the search
+  entry points (`shortest_paths`, `shortest_paths_to`, `spf_dag`, `k_shortest_paths`), max-flow,
+  batch max-flow and the previous sensitivity, the SPF memo and `StateStamp`, `kMinFlow`,
+  `kEpsilon`, `constants.hpp`, and the profiling facility (the Python accessors, the C++ scopes
+  and `NGRAPH_CORE_PROFILE`).
 
 ## [0.11.0] - 2026-10-02
 

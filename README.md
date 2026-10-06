@@ -2,13 +2,12 @@
 
 C++ graph engine for network flow analysis, traffic engineering simulation, and capacity planning.
 
-> **Streamline in progress.** The `streamline` branch rebuilds Core in sub-PRs
-> (`dev/design/2026-10-streamline/`). This build (sub-PR 1b) carries the graph on integer
-> units, the minimum-cost flow core behind a private entry point, the route structures
-> (`PredDAG`, `Path`), the integer ledger `FlowGraph` and the placement kernels (exercised
-> through private entries until the policy engine arrives); policies, the public searches and
-> the evaluators return in the following sub-PRs. The previous API (0.12 and earlier) is in git
-> history and on PyPI.
+> **Streamline in progress.** The `streamline` branch rebuilds Core. This build carries the
+> graph on integer units, the minimum-cost flow core, the route structures (`PredDAG`, `Path`),
+> the integer ledger `FlowLedger` with the placement kernels, the policy engine `FlowPolicy`, the
+> `DagCache` (building mode) and the evaluators `capacity`, `batch_capacity` and `sensitivity`.
+> The public search API (shortest paths, k shortest paths, path resolution) and the frozen cache
+> are not part of it yet. The previous API (0.11 and earlier) is in git history and on PyPI.
 
 ## Overview
 
@@ -26,10 +25,10 @@ C++ graph engine for network flow analysis, traffic engineering simulation, and 
 
 ### Graph
 
-- **`StrictMultiDiGraph(num_nodes, src, dst, capacity_units, cost, resolution)`**: immutable
+- **`Graph(num_nodes, src, dst, capacity_units, cost, resolution)`**: immutable
   directed multigraph with forward and reverse CSR adjacency; parallel edges and self-loops are
-  allowed. Validation reports the first defect in a fixed order (unit values, shapes, costs,
-  remaining bounds). Accessors (`capacity_units()`, `cost()`, `edge_src()`, `edge_dst()`,
+  allowed. Validation reports the first defect in a fixed order (the resolution, the unit
+  values, the shapes, zero or negative costs, the remaining bounds). Accessors (`capacity_units()`, `cost()`, `edge_src()`, `edge_dst()`,
   `input_index()`, `row_offsets()`, `in_row_offsets()`, `in_adj_edge_index()`) return read-only
   NumPy views that keep the graph alive.
 - **`Eligibility`**: immutable, graph-bound static eligibility built by
@@ -38,8 +37,9 @@ C++ graph engine for network flow analysis, traffic engineering simulation, and 
 
 ### Route structures
 
-- **`PredDAG`**: immutable, graph-bound predecessor DAG in CSR form (`parent_offsets()`,
-  `parents()`, `via_edges()`), entries in ascending via EdgeId within a node.
+- **`PredDAG`**: immutable, graph-bound predecessor DAG, stored over its member nodes and
+  presented in CSR form (`parent_offsets()` built on demand, `parents()`, `via_edges()`),
+  entries in ascending via EdgeId within a node.
   `PredDAG.from_csr(graph, offsets, parents, via)` validates the shape, the ranges and endpoints,
   duplicates, acyclicity and the canonical order before accepting a DAG.
 - **`Path(graph, hops)`**: an explicit walk whose hops may hold several parallel members;
@@ -50,7 +50,7 @@ C++ graph engine for network flow analysis, traffic engineering simulation, and 
 
 ### Ledger and kernels
 
-- **`FlowGraph(graph, residual=None)`**: the integer ledger of one graph: an immutable baseline
+- **`FlowLedger(graph, residual=None)`**: the integer ledger of one graph: an immutable baseline
   in units and the records (`FlowRecord`: flow id, owner, endpoints, placement, admission,
   bundle, route cost, offered, delivered, per-edge allocation and drops) of the flows placed on
   it. `allocated()` is the exact sum of the records and `residual()` the baseline minus it;
@@ -59,35 +59,84 @@ C++ graph engine for network flow analysis, traffic engineering simulation, and 
 - **Kernels** (`FlowPlacement`: `MAX_FLOW`, `WEIGHTED`, `EQUAL_BALANCED`; `Admission`:
   `LOSSLESS`, `LOSSY`): MaxFlow is the flow core on the flow's DAG (a replacement on its own
   allocation plus the residual), Weighted splits by highest averages over weights frozen at
-  creation, EqualBalanced by round robin; Lossy forwards hop by hop and records drops. Until the
-  policy engine lands, a placement on one bundle runs through the private
-  `_netgraph_core._PinnedFlow`.
+  creation, EqualBalanced by round robin; Lossy forwards hop by hop and records drops.
+
+### Policies
+
+- **`FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)`**: the one
+  placement engine, bound to its ledger. `FlowPolicyConfig(routing=..., placement=...,
+  admission=..., selection=...)` has four explicit axes; the routing is `CostOnly()` (static
+  shortest paths), `CapacityAware(flow_count=1, max_flow_count=None, max_path_cost=None,
+  min_flow_bandwidth=0, reoptimize=False, diminishing=None)` (residual-aware searches with an
+  `Absolute` or `Stretch` cost ceiling, a `DiminishingReturns(window, fraction)` guard, and at
+  most `MAX_FLOWS_PER_CALL` (10,000) creations per call), `Global()` (the minimum-cost flow of the policy's
+  sources to its destinations on the residual plus its own allocation) or `Pinned(bundles)`
+  (fixed `PredDAG`s).
+- **`place(volume, outputs=None)`** runs one transaction per call (per source for CostOnly and
+  CapacityAware, cumulative on Global) and returns a `PlacementResult` (`placed`, `remaining`,
+  `termination`, `local_outcomes`, `routes_changed`, `weights_changed`, `drops` and the
+  optional `cost_distribution` (Global) and, when requested through `OutputOptions`, `edge_flows`,
+  `residual`, `bottleneck` and, on Global with `OutputOptions(bottleneck=True)`, `min_cut`).
+  `remove()` reverts the policy's flows; `records()`, `record(flow_id)`, `placed_demand()` and
+  `usable_bundles()` read its state.
+- **Failure guarantee**: every public call is all-or-nothing up to its caller: a failure
+  anywhere (validation, allocation, a worker thread, the construction of the Python result)
+  leaves every ledger, policy, cache and scratch buffer as it was and raises one exception.
+  Two limits: the pybind11 object machinery is outside the guarantee (constructing a bound
+  object from Python, or a conversion into a new bound object or container outside the staged
+  calls, allocates through pybind11's `make_new_instance`, which does not check `tp_alloc`, so a
+  Python allocation failure there crashes the process, with Core state unchanged); and a
+  supplied building `DagCache` is a memo that keeps the complete entries and statistics of the
+  lookups that succeeded before a later failure of the call.
+
+### DagCache
+
+`DagCache(graph)` keeps the static shortest-path supports policies build, keyed by the root
+set, the direction and the Eligibility; values are immutable and shared, and `stats()` reports
+hits, misses, entries, retained bytes and live values. This build has the building mode (one
+writer); the frozen mode follows.
+
+### Evaluators
+
+`capacity(graph, sources, destinations, CapacityOptions(config, elig=None, cache=None,
+outputs=None))` is `place(+inf)` of a policy on a fresh ledger; Global with MaxFlow gives the
+exact maximum flow with its marginal cost curve, and its minimum cut with
+`outputs=OutputOptions(bottleneck=True)`. `batch_capacity(graph, pairs,
+opts, per_pair_elig=None, workers=None)` evaluates pairs in pair order (the lowest failing
+index raises). `sensitivity(graph, sources, destinations, SensitivityOptions(...),
+workers=None)` reports, for every candidate edge, the signed loss in placed units when the
+edge is removed. The default worker counts come from `NGRAPH_CORE_BATCH_THREADS` and
+`NGRAPH_CORE_SENSITIVITY_THREADS`.
 
 ### Flow core
 
-`_netgraph_core._place_global_units(graph, view, sources, destinations, elig, cap)` computes
-the minimum-cost flow of the maximum value attainable under `cap` (`None`: uncapped) from a
-source set to a destination set over the eligible edges, on the capacities `view` (units, id
-order), starting from zero flow. It returns `{placed, cost_distribution, edge_flows, min_cut,
-potentials, counters}`. It is private: the recorder and the gates use it; the public evaluators
-built on it arrive with the policy engine.
+One native integer minimum-cost flow core serves Global routing, the MaxFlow kernel and the
+evaluators: the minimum-cost flow of the maximum value attainable under a cap from a source set
+to a destination set over the eligible edges, starting from zero flow; the exact sensitivity
+model re-solves each deletion from the baseline solve's final state. Its private Python entry
+`_netgraph_core._place_global_units(graph, view, sources, destinations, elig, cap)` returns the
+payload `{placed, cost_distribution, edge_flows, min_cut, potentials, counters}` for the
+equivalence recorder and the oracle checks.
 
 ## Quick Start
 
 ```python
 import netgraph_core as ngc
-import _netgraph_core
 
 q = 2.0**-12
 # Two parallel paths from node 0 to node 3 (physical capacities 10 and 5).
 caps = ngc.to_units([10.0, 10.0, 5.0, 5.0], q)
-graph = ngc.StrictMultiDiGraph(4, [0, 1, 0, 2], [1, 3, 2, 3], caps, [1, 1, 2, 2], q)
+graph = ngc.Graph(4, [0, 1, 0, 2], [1, 3, 2, 3], caps, [1, 1, 2, 2], q)
 
-payload = _netgraph_core._place_global_units(
-    graph, graph.capacity_units(), [0], [3], None, None
+config = ngc.FlowPolicyConfig(
+    routing=ngc.Global(),
+    placement=ngc.FlowPlacement.MAX_FLOW,
+    admission=ngc.Admission.LOSSLESS,
+    selection=ngc.PathSelection(ngc.EdgeTieBreak.DETERMINISTIC, ngc.EdgePriority.CAPACITY),
 )
-print(ngc.as_float(payload["placed"], q))   # 15.0
-print(payload["cost_distribution"])         # [[2, 40960], [4, 20480]]
+result = ngc.capacity(graph, 0, 3, ngc.CapacityOptions(config))
+print(ngc.as_float(result.placed, q))   # 15.0
+print(result.cost_distribution)         # [(2, 40960), (4, 20480)]
 ```
 
 ## Installation
@@ -138,11 +187,16 @@ make cov        # Combined coverage report (C++ + Python)
 Performance work (harnesses, old/new/old protocol, recorded measurements) is
 described in [dev/perf/README.md](dev/perf/README.md).
 
+The editable development build (`make install`, `make dev`) carries the private test hooks
+(CMake option `NETGRAPH_CORE_PRIVATE_HOOKS`; a wheel build does not); the test suites skip the
+tests that need them when they are absent.
+
 ## Environment Variables
 
 | Variable | Effect |
 | --- | --- |
-| `NGRAPH_CORE_PROFILE=1` | Enable the C++ profiling scopes (`profiling.hpp`); the Python accessors return with `netgraph_core.diagnostics`. |
+| `NGRAPH_CORE_BATCH_THREADS` | Default worker count of `batch_capacity` (an integer in [1, 4096]; 1 when unset or invalid; an explicit `workers` wins). |
+| `NGRAPH_CORE_SENSITIVITY_THREADS` | Default worker count of `sensitivity` (as above). |
 
 ## Requirements
 

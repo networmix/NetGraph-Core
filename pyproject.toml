@@ -55,11 +55,16 @@ sdist.exclude = ["dev/"]
 # Include Python sources from the "python/" directory
 wheel.packages = ["python/netgraph_core"]
 
-[tool.scikit-build.cmake.define]
-# No optional backends yet; defaults are built-in CPU-only
+[[tool.scikit-build.overrides]]
+# The editable development build carries the private test hooks (CMake option
+# NETGRAPH_CORE_PRIVATE_HOOKS); a wheel or sdist build does not.
+if.state = "^editable$"
+cmake.define.NETGRAPH_CORE_PRIVATE_HOOKS = "ON"
 
 [tool.pytest.ini_options]
 addopts = "-q"
+# pytest without arguments collects the repository tests only, not saved evidence under dev/.
+testpaths = ["tests"]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 
 [tool.ruff]

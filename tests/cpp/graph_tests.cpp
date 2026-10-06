@@ -10,7 +10,7 @@
 #include <tuple>
 #include <vector>
 
-#include "netgraph/core/strict_multidigraph.hpp"
+#include "netgraph/core/graph.hpp"
 #include "test_utils.hpp"
 
 using namespace netgraph::core;
@@ -31,9 +31,9 @@ std::string error_of(F&& fn) {
   return "";
 }
 
-StrictMultiDiGraph build(std::int32_t n, std::vector<NodeId> src, std::vector<NodeId> dst, std::vector<Amount> cap,
-                         std::vector<Cost> cost, double q = 1.0) {
-  return StrictMultiDiGraph(n, src, dst, cap, cost, q);
+Graph build(std::int32_t n, std::vector<NodeId> src, std::vector<NodeId> dst, std::vector<Amount> cap,
+            std::vector<Cost> cost, double q = 1.0) {
+  return Graph(n, src, dst, cap, cost, q);
 }
 
 bool contains(const std::string& s, const std::string& part) { return s.find(part) != std::string::npos; }
@@ -143,7 +143,7 @@ TEST(Graph, ExactUnitsAboveTwo53) {
 
 TEST(Graph, CopyIsANewGraph) {
   auto g = make_graph(3, {{0, 2, 4, 2}, {0, 1, 3, 1}});
-  StrictMultiDiGraph c(g);
+  Graph c(g);
   EXPECT_NE(c.uid(), g.uid());
   EXPECT_EQ(std::vector<std::int32_t>(c.input_index().begin(), c.input_index().end()),
             std::vector<std::int32_t>(g.input_index().begin(), g.input_index().end()));

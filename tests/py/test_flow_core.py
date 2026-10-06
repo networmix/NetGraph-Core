@@ -24,7 +24,7 @@ CHAIN = [(0, 1, 1, 1), (1, 2, 1, 1), (2, 3, 1, 1), (0, 2, 1, 3), (1, 3, 1, 3)]
 
 
 def build(n, edges, q=1.0):
-    return ngc.StrictMultiDiGraph(
+    return ngc.Graph(
         n,
         [e[0] for e in edges],
         [e[1] for e in edges],
@@ -151,8 +151,8 @@ def test_release_witness_fresh_solve():
         ({"view": [1, 6]}, "capacity_units"),
         ({"view": [1.0, 1.0]}, "view"),
         ({"view": [-1, 0]}, "outside"),
-        ({"sources": []}, "sources: the endpoint set is empty"),
-        ({"destinations": []}, "destinations: the endpoint set is empty"),
+        ({"sources": []}, "sources: the node set is empty"),
+        ({"destinations": []}, "destinations: the node set is empty"),
         ({"sources": [3]}, "out of node range"),
         ({"sources": [0, 2]}, "both endpoint sets"),
         ({"sources": [0.0]}, "sources"),

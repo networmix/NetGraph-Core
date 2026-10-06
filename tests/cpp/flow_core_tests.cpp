@@ -1,4 +1,5 @@
-// The flow core of APPROACH 2.2 through place_global_units: the review witnesses (expected
+// The flow core of APPROACH 2.2 through place_global_units: a first solve on a fresh graph, the
+// review witnesses (expected
 // values derived by hand and from prototype 1, `prototypes/p1_amount/flowcore.py`), the
 // certificate in its two branches, input validation, determinism, and randomized graphs
 // certified against an exhaustive optimum (tier a) and an independent solver (tier b).
@@ -12,7 +13,7 @@
 #include <string>
 #include <vector>
 
-#include "netgraph/core/max_flow.hpp"
+#include "netgraph/core/detail/flow_core.hpp"
 #include "test_utils.hpp"
 
 using namespace netgraph::core;
@@ -39,7 +40,7 @@ std::vector<InEdge> chain_plus_bypasses(Cost factor = 1) {
   return {{0, 1, 1, factor}, {1, 2, 1, factor}, {2, 3, 1, factor}, {0, 2, 1, 3 * factor}, {1, 3, 1, 3 * factor}};
 }
 
-void expect_certified(const StrictMultiDiGraph& g, const std::vector<NodeId>& s, const std::vector<NodeId>& d,
+void expect_certified(const Graph& g, const std::vector<NodeId>& s, const std::vector<NodeId>& d,
                       std::optional<Amount> cap, const FlowCoreResult& r, const std::vector<Amount>* view = nullptr,
                       const Eligibility* elig = nullptr, bool tier_a = true) {
   std::vector<Amount> full(g.capacity_units().begin(), g.capacity_units().end());
@@ -58,6 +59,18 @@ std::string error_of(const std::function<void()>& fn) {
 }
 
 } // namespace
+
+TEST(FlowCore, ConstructAndSolve) {
+  // 0 -> 1 (cost 10), 1 -> 2 (cost 20), 0 -> 2 (cost 100); capacities 10 units each.
+  const auto g = make_graph(3, {{0, 1, 10, 10}, {1, 2, 10, 20}, {0, 2, 10, 100}});
+  EXPECT_EQ(g.num_nodes(), 3);
+  EXPECT_EQ(g.num_edges(), 3);
+  const auto r = solve(g, {0}, {2}, std::nullopt);
+  EXPECT_EQ(r.placed, 20);
+  ASSERT_EQ(r.cost_distribution.size(), 2u);
+  EXPECT_EQ(r.cost_distribution[0], (std::pair<Cost, Amount> {30, 10}));   // 0 -> 1 -> 2 first
+  EXPECT_EQ(r.cost_distribution[1], (std::pair<Cost, Amount> {100, 10}));  // then the direct edge
+}
 
 TEST(FlowCore, QuantisedCapacitiesFamily) {
   // Physical 2.5q is 3 units and 0.5q is 1 unit (review-2 R1 at 1a: the quantised network).
@@ -380,8 +393,8 @@ TEST(FlowCore, InputValidationBeforeAnyWork) {
   EXPECT_NE(call({2}, s, d, 1).find("view has length 1, expected 2"), std::string::npos);
   EXPECT_NE(call({2, 3}, s, d, 1).find("capacity_units"), std::string::npos);
   EXPECT_NE(call({-1, 2}, s, d, 1).find("outside"), std::string::npos);
-  EXPECT_NE(call(view, {}, d, 1).find("sources: the endpoint set is empty"), std::string::npos);
-  EXPECT_NE(call(view, s, {}, 1).find("destinations: the endpoint set is empty"), std::string::npos);
+  EXPECT_NE(call(view, {}, d, 1).find("sources: the node set is empty"), std::string::npos);
+  EXPECT_NE(call(view, s, {}, 1).find("destinations: the node set is empty"), std::string::npos);
   EXPECT_NE(call(view, {3}, d, 1).find("out of node range"), std::string::npos);
   EXPECT_NE(call(view, s, {-1}, 1).find("out of node range"), std::string::npos);
   EXPECT_NE(call(view, {0, 2}, {2}, 1).find("both endpoint sets"), std::string::npos);
@@ -416,7 +429,7 @@ TEST(FlowCore, IdenticalCallsIdenticalPayloads) {
 namespace {
 
 struct RandomCase {
-  StrictMultiDiGraph g;
+  Graph g;
   std::vector<NodeId> s, d;
   std::vector<Amount> view;
   std::optional<Amount> cap;

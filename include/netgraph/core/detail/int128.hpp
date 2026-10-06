@@ -1,12 +1,22 @@
-/* Portable unsigned 128-bit products and comparisons for exact rational arithmetic (internal).
+/* Portable 128-bit values (internal).
 
-   Used by the highest-averages apportionment (quotients w / d compared by cross products, lower
-   quotas floor(I * w / W)) and by the Headroom priority (residual / capacity compared by cross
-   products). Every operand is below 2^63, so every product is below 2^126 and every quotient
-   that is formed fits 64 bits. Compilers with __int128 use it; others use 32-bit limbs.
+   U128, unsigned, for exact rational arithmetic: the highest-averages apportionment (quotients
+   w / d compared by cross products, lower quotas floor(I * w / W)), the Headroom priority
+   (residual / capacity compared by cross products), the comparisons with a double factor read
+   as the exact dyadic rational it is (the Stretch ceiling, the diminishing guard) and the
+   cumulative counters (Counter128). Every product operand is below 2^63, so every product is
+   below 2^126 and every quotient that is formed fits 64 bits. Compilers with __int128 use it;
+   others use 32-bit limbs.
+
+   I128, signed, for the deletion re-solve of the flow core (APPROACH 2.2): working potentials,
+   distance keys and sums of tier maxima, which stay within (22 n + 15) C for n vertices and the
+   cost sum C < 2^62. Only addition, subtraction and comparison, on two limbs everywhere.
 */
 #pragma once
 
+#include <bit>
+#include <cmath>
+#include <compare>
 #include <cstdint>
 
 namespace netgraph::core::detail {
@@ -63,5 +73,61 @@ inline std::uint64_t div_u128(U128 n, std::uint64_t d) noexcept {
 }
 
 #endif
+
+// The number of significant bits of v (0 for 0).
+inline int bits(U128 v) noexcept { return v.hi != 0 ? 64 + std::bit_width(v.hi) : std::bit_width(v.lo); }
+
+// v * 2^k for 0 <= k < 128; the caller keeps the result below 2^128 (bits(v) + k <= 128).
+inline U128 shl(U128 v, int k) noexcept {
+  if (k == 0) return v;
+  if (k >= 64) return {v.lo << (k - 64), 0};
+  return {(v.hi << k) | (v.lo >> (64 - k)), v.lo << k};
+}
+
+// A signed 128-bit integer in two's complement, value = hi * 2^64 + lo. The member order makes
+// the defaulted comparison (hi signed, then lo unsigned) the numeric order.
+struct I128 {
+  std::int64_t hi {0};
+  std::uint64_t lo {0};
+
+  constexpr I128() noexcept = default;
+  // Implicit, so int64 costs and amounts enter the arithmetic directly.
+  constexpr I128(std::int64_t v) noexcept : hi(v < 0 ? -1 : 0), lo(static_cast<std::uint64_t>(v)) {}
+
+  friend constexpr bool operator==(const I128&, const I128&) noexcept = default;
+  friend constexpr std::strong_ordering operator<=>(const I128&, const I128&) noexcept = default;
+
+  friend constexpr I128 operator+(I128 a, I128 b) noexcept {
+    I128 r;
+    r.lo = a.lo + b.lo;
+    const std::uint64_t carry = r.lo < a.lo ? 1U : 0U;
+    r.hi = static_cast<std::int64_t>(static_cast<std::uint64_t>(a.hi) + static_cast<std::uint64_t>(b.hi) + carry);
+    return r;
+  }
+  friend constexpr I128 operator-(I128 a, I128 b) noexcept {
+    I128 r;
+    r.lo = a.lo - b.lo;
+    const std::uint64_t borrow = a.lo < b.lo ? 1U : 0U;
+    r.hi = static_cast<std::int64_t>(static_cast<std::uint64_t>(a.hi) - static_cast<std::uint64_t>(b.hi) - borrow);
+    return r;
+  }
+  constexpr I128& operator+=(I128 b) noexcept { return *this = *this + b; }
+};
+
+// A positive finite double as the exact dyadic rational it is: f = m * 2^x with m odd and
+// below 2^53.
+struct Dyadic {
+  std::uint64_t m {0};
+  int x {0};
+};
+inline Dyadic dyadic(double f) noexcept {
+  int e = 0;
+  const double frac = std::frexp(f, &e);  // f = frac * 2^e, frac in [0.5, 1)
+  Dyadic d {static_cast<std::uint64_t>(std::ldexp(frac, 53)), e - 53};
+  const int tz = std::countr_zero(d.m);
+  d.m >>= tz;
+  d.x += tz;
+  return d;
+}
 
 } // namespace netgraph::core::detail

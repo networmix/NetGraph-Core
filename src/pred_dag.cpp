@@ -18,7 +18,7 @@ std::string idx(std::size_t i) { return std::to_string(i); }
 
 } // namespace
 
-PredDAG PredDAG::from_csr(const StrictMultiDiGraph& g, std::span<const std::int32_t> offsets,
+PredDAG PredDAG::from_csr(const Graph& g, std::span<const std::int32_t> offsets,
                           std::span<const NodeId> parents, std::span<const EdgeId> via) {
   const auto n = static_cast<std::size_t>(g.num_nodes());
   const auto m = static_cast<std::int64_t>(g.num_edges());
@@ -123,7 +123,13 @@ PredDAG PredDAG::from_csr(const StrictMultiDiGraph& g, std::span<const std::int3
   }
   PredDAG out;
   out.graph_uid_ = g.uid();
-  out.offsets_.assign(offsets.begin(), offsets.end());
+  out.num_nodes_ = g.num_nodes();
+  for (std::size_t v = 0; v < n; ++v) {
+    if (offsets[v + 1] != offsets[v]) {
+      out.nodes_.push_back(static_cast<NodeId>(v));
+      out.node_offsets_.push_back(offsets[v + 1]);
+    }
+  }
   out.parents_.assign(parents.begin(), parents.end());
   out.via_.assign(via.begin(), via.end());
   out.edges_ = out.via_;
@@ -131,43 +137,71 @@ PredDAG PredDAG::from_csr(const StrictMultiDiGraph& g, std::span<const std::int3
   return out;
 }
 
+std::vector<std::int32_t> PredDAG::parent_offsets() const {
+  std::vector<std::int32_t> out(static_cast<std::size_t>(num_nodes_) + 1, 0);
+  std::size_t i = 0;
+  for (std::size_t v = 0; v < static_cast<std::size_t>(num_nodes_); ++v) {
+    if (i < nodes_.size() && static_cast<std::size_t>(nodes_[i]) == v) ++i;
+    out[v + 1] = node_offsets_[i];
+  }
+  return out;
+}
+
 namespace detail {
 
-PredDAG PredDAGBuilder::from_edges(const StrictMultiDiGraph& g, std::span<const EdgeId> edges) {
-  const auto n = static_cast<std::size_t>(g.num_nodes());
+PredDAG PredDAGBuilder::of_edges(const Graph& g, std::span<const EdgeId> edges) {
   const auto edge_src = g.edge_src();
   const auto edge_dst = g.edge_dst();
   PredDAG out;
   out.graph_uid_ = g.uid();
-  out.offsets_.assign(n + 1, 0);
+  out.num_nodes_ = g.num_nodes();
   std::vector<EdgeId> sorted(edges.begin(), edges.end());
-  std::sort(sorted.begin(), sorted.end());
-  for (EdgeId e : sorted) ++out.offsets_[static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)]) + 1];
-  for (std::size_t v = 0; v < n; ++v) out.offsets_[v + 1] += out.offsets_[v];
-  out.parents_.resize(sorted.size());
-  out.via_.resize(sorted.size());
-  std::vector<std::int32_t> pos(out.offsets_.begin(), out.offsets_.end() - 1);
-  for (EdgeId e : sorted) {  // ascending: each node's entries stay ascending
-    const auto ei = static_cast<std::size_t>(e);
-    const auto k = static_cast<std::size_t>(pos[static_cast<std::size_t>(edge_dst[ei])]++);
-    out.parents_[k] = edge_src[ei];
-    out.via_[k] = e;
+  if (!std::is_sorted(sorted.begin(), sorted.end())) std::sort(sorted.begin(), sorted.end());
+  // Entries grouped by child (ascending NodeId), ascending via within a child: a stable
+  // counting sort of the ascending edges by their child.
+  std::vector<std::int32_t> slot(static_cast<std::size_t>(out.num_nodes_) + 1, 0);
+  for (EdgeId e : sorted) ++slot[static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)]) + 1];
+  for (std::size_t v = 1; v < slot.size(); ++v) slot[v] += slot[v - 1];
+  std::vector<EdgeId> by_child(sorted.size());
+  for (EdgeId e : sorted) {
+    by_child[static_cast<std::size_t>(slot[static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)])]++)] = e;
   }
+  out.parents_.resize(by_child.size());
+  out.via_.resize(by_child.size());
+  for (std::size_t k = 0; k < by_child.size(); ++k) {
+    const auto ei = static_cast<std::size_t>(by_child[k]);
+    const NodeId child = edge_dst[ei];
+    if (out.nodes_.empty() || out.nodes_.back() != child) {
+      if (!out.nodes_.empty()) out.node_offsets_.push_back(static_cast<std::int32_t>(k));
+      out.nodes_.push_back(child);
+    }
+    out.parents_[k] = edge_src[ei];
+    out.via_[k] = by_child[k];
+  }
+  if (!out.nodes_.empty()) out.node_offsets_.push_back(static_cast<std::int32_t>(by_child.size()));
   out.edges_ = std::move(sorted);
   return out;
 }
 
-PredDAG PredDAGBuilder::from_children(std::uint64_t graph_uid, const std::vector<std::vector<EdgeId>>& per_child,
-                                      const std::vector<NodeId>& parent_of) {
+PredDAG PredDAGBuilder::of_path(std::uint64_t graph_uid, std::int32_t num_nodes,
+                                  const std::vector<std::vector<EdgeId>>& hops, const std::vector<NodeId>& nodes) {
+  // Hop h's child is nodes[h + 1]; the children are distinct, so ordering the hops by child
+  // gives the grouped entries.
+  std::vector<std::size_t> order(hops.size());
+  for (std::size_t h = 0; h < hops.size(); ++h) order[h] = h;
+  std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return nodes[a + 1] < nodes[b + 1]; });
   PredDAG out;
   out.graph_uid_ = graph_uid;
-  out.offsets_.assign(per_child.size() + 1, 0);
-  for (std::size_t v = 0; v < per_child.size(); ++v) {
-    out.offsets_[v + 1] = out.offsets_[v] + static_cast<std::int32_t>(per_child[v].size());
-    for (EdgeId e : per_child[v]) {
-      out.parents_.push_back(parent_of[v]);
+  out.num_nodes_ = num_nodes;
+  for (std::size_t h : order) {
+    std::vector<EdgeId> members(hops[h]);
+    std::sort(members.begin(), members.end());
+    out.nodes_.push_back(nodes[h + 1]);
+    for (EdgeId e : members) {
+      out.parents_.push_back(nodes[h]);
       out.via_.push_back(e);
     }
+    out.node_offsets_.push_back(static_cast<std::int32_t>(out.via_.size()));
   }
   out.edges_ = out.via_;
   std::sort(out.edges_.begin(), out.edges_.end());
@@ -176,9 +210,18 @@ PredDAG PredDAGBuilder::from_children(std::uint64_t graph_uid, const std::vector
 
 std::span<const EdgeId> PredDAGBuilder::ascending(const PredDAG& dag) noexcept { return dag.edges_; }
 
+std::span<const NodeId> PredDAGBuilder::member_nodes(const PredDAG& dag) noexcept { return dag.nodes_; }
+
+std::span<const std::int32_t> PredDAGBuilder::member_offsets(const PredDAG& dag) noexcept { return dag.node_offsets_; }
+
+std::size_t PredDAGBuilder::payload_bytes(const PredDAG& dag) noexcept {
+  return sizeof(NodeId) * (dag.nodes_.size() + dag.parents_.size()) + sizeof(std::int32_t) * dag.node_offsets_.size() +
+         sizeof(EdgeId) * (dag.via_.size() + dag.edges_.size());
+}
+
 } // namespace detail
 
-Path::Path(const StrictMultiDiGraph& g, std::vector<std::vector<EdgeId>> hops) {
+Path::Path(const Graph& g, std::vector<std::vector<EdgeId>> hops) {
   const auto m = static_cast<std::int64_t>(g.num_edges());
   // Every member in range before any endpoint is read.
   for (std::size_t h = 0; h < hops.size(); ++h) {
@@ -251,18 +294,10 @@ Path::Path(const StrictMultiDiGraph& g, std::vector<std::vector<EdgeId>> hops) {
 }
 
 PredDAG Path::to_dag() const {
-  // Built here (not through the builder) because a Path keeps no graph reference: the parent of
-  // every member of hop h is nodes_[h], its child nodes_[h + 1]; no node repeats, so each node
-  // holds the members of at most one hop.
-  std::vector<std::vector<EdgeId>> per_child(static_cast<std::size_t>(num_nodes_));
-  std::vector<NodeId> parent_of(static_cast<std::size_t>(num_nodes_), -1);
-  for (std::size_t h = 0; h < hops_.size(); ++h) {
-    const auto child = static_cast<std::size_t>(nodes_[h + 1]);
-    per_child[child] = hops_[h];
-    std::sort(per_child[child].begin(), per_child[child].end());
-    parent_of[child] = nodes_[h];
-  }
-  return detail::PredDAGBuilder::from_children(graph_uid_, per_child, parent_of);
+  // From the hops and the visited nodes, as a Path keeps no graph reference: the parent of every
+  // member of hop h is nodes_[h], its child nodes_[h + 1]; no node repeats, so each node holds
+  // the members of at most one hop.
+  return detail::PredDAGBuilder::of_path(graph_uid_, num_nodes_, hops_, nodes_);
 }
 
 } // namespace netgraph::core

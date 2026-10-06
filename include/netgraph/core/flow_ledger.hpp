@@ -1,4 +1,4 @@
-/* The integer ledger FlowGraph (APPROACH 8). */
+/* The integer ledger FlowLedger (APPROACH 8). */
 #pragma once
 
 #include <cstddef>
@@ -9,8 +9,8 @@
 #include <span>
 #include <vector>
 
-#include "netgraph/core/flow.hpp"
-#include "netgraph/core/strict_multidigraph.hpp"
+#include "netgraph/core/flow_record.hpp"
+#include "netgraph/core/graph.hpp"
 #include "netgraph/core/types.hpp"
 
 namespace netgraph::core {
@@ -31,20 +31,20 @@ struct LedgerAccess;
 // ledger is empty and unusable (every call throws std::logic_error). A policy destroyed
 // without remove() leaves its records and allocations as orphans (readable, never changed
 // again) until reset().
-class FlowGraph {
+class FlowLedger {
 public:
   // `residual`: the baseline in units, one entry per edge in [0, capacity_units[e]]
   // (std::invalid_argument otherwise); absent: the capacities.
-  explicit FlowGraph(std::shared_ptr<const StrictMultiDiGraph> graph);
-  FlowGraph(std::shared_ptr<const StrictMultiDiGraph> graph, std::span<const Amount> residual);
-  FlowGraph(const FlowGraph& other);
-  FlowGraph(FlowGraph&& other);
-  FlowGraph& operator=(const FlowGraph&) = delete;
-  FlowGraph& operator=(FlowGraph&&) = delete;
-  ~FlowGraph() = default;
+  explicit FlowLedger(std::shared_ptr<const Graph> graph);
+  FlowLedger(std::shared_ptr<const Graph> graph, std::span<const Amount> residual);
+  FlowLedger(const FlowLedger& other);
+  FlowLedger(FlowLedger&& other);
+  FlowLedger& operator=(const FlowLedger&) = delete;
+  FlowLedger& operator=(FlowLedger&&) = delete;
+  ~FlowLedger() = default;
 
   [[nodiscard]] std::uint64_t uid() const;
-  [[nodiscard]] const std::shared_ptr<const StrictMultiDiGraph>& graph() const;
+  [[nodiscard]] const std::shared_ptr<const Graph>& graph() const;
   // The graph's static capacities (the ledger's view of them).
   [[nodiscard]] std::span<const Amount> capacity_units() const;
   [[nodiscard]] std::vector<Amount> residual() const;
@@ -68,7 +68,7 @@ private:
   void check_usable() const;
   std::vector<Amount> checked_baseline(std::span<const Amount> residual) const;
 
-  std::shared_ptr<const StrictMultiDiGraph> graph_ {};
+  std::shared_ptr<const Graph> graph_ {};
   std::uint64_t uid_ {0};
   bool usable_ {true};
   std::vector<Amount> baseline_ {};

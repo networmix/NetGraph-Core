@@ -1,12 +1,12 @@
-// Eligibility (APPROACH 4) as the 1a graph builds it: dense node and edge flags from excluded
-// ids, graph-bound, uid 0 for the all-allowed value.
+// Eligibility (APPROACH 4) as the graph builds it: dense node and edge flags from excluded ids,
+// graph-bound, uid 0 for the all-allowed value.
 #include <gtest/gtest.h>
 
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "netgraph/core/strict_multidigraph.hpp"
+#include "netgraph/core/graph.hpp"
 #include "test_utils.hpp"
 
 using namespace netgraph::core;
@@ -73,7 +73,7 @@ TEST(Eligibility, OutOfRangeIdsRejected) {
   EXPECT_THROW((void)g.eligibility(neg_node, {}), std::invalid_argument);
 }
 
-// Eligibility.intersect (sub-PR 1b): an operand when the result equals it (its uid kept, a
+// Eligibility.intersect: an operand when the result equals it (its uid kept, a
 // first), otherwise a new value with a fresh uid; values of different graphs rejected.
 TEST(Eligibility, IntersectReturnsAnOperandWhenEqual) {
   auto g = make_graph(3, {{0, 1, 1, 1}, {1, 2, 1, 1}, {0, 2, 1, 5}});

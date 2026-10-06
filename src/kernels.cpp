@@ -15,21 +15,14 @@
 #include <stdexcept>
 #include <string>
 
+#include "netgraph/core/detail/enum_domain.hpp"
 #include "netgraph/core/detail/flow_core.hpp"
 #include "netgraph/core/detail/int128.hpp"
-#include "netgraph/core/detail/node_map.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
 
 namespace netgraph::core::detail {
 
 // ---------------------------------------------------------------- apportionment
-
-void round_robin(Amount total, std::span<Amount> out) noexcept {
-  const auto k = static_cast<Amount>(out.size());
-  const Amount base = total / k;
-  const Amount extra = total % k;
-  for (Amount i = 0; i < k; ++i) out[static_cast<std::size_t>(i)] = base + (i < extra ? 1 : 0);
-}
 
 namespace {
 
@@ -88,6 +81,9 @@ void highest_averages(Amount total, std::span<const Amount> weights, std::span<A
 // ---------------------------------------------------------------- plans
 
 void check_kernel(FlowPlacement placement, Admission admission, EdgePriority priority) {
+  check_member(placement, "placement");
+  check_member(admission, "admission");
+  check_member(priority, "priority");
   if (admission == Admission::Lossy && placement == FlowPlacement::MaxFlow) {
     throw std::invalid_argument(
         "Lossy admission is rejected with the MaxFlow kernel: a controller never drops (EqualBalanced or "
@@ -100,208 +96,7 @@ void check_kernel(FlowPlacement placement, Admission admission, EdgePriority pri
 
 namespace {
 
-// Per-thread scratch of build_split; nothing in it survives a call.
-struct SplitScratch {
-  std::vector<EdgeId> edge;              // candidate arcs, ascending EdgeId
-  std::vector<std::int32_t> tail;        // local tail per arc
-  std::vector<std::int32_t> head;        // local head per arc
-  std::vector<std::int32_t> in_off;      // in-CSR over local heads
-  std::vector<std::int32_t> in_arc;
-  std::vector<std::int32_t> cursor;
-  std::vector<std::uint8_t> state;       // backward DFS: 0 unseen, 1 open, 2 done (reaches a destination)
-  std::vector<std::uint8_t> fwd;         // reached from the source over arcs of reached tails
-  std::vector<std::int32_t> order;       // postorder: every node after all of its parents
-  std::vector<std::pair<std::int32_t, std::int32_t>> stack;  // (node, next in-arc)
-  std::vector<std::int32_t> member_arc;  // per member its arc
-  std::vector<std::int32_t> position;
-  std::vector<std::int32_t> first;       // per local tail: its first member
-  std::vector<std::int32_t> count;       // per local tail: its number of members
-  std::vector<Cost> dist;                // the cost DP
-};
-
-SplitScratch& split_scratch() {
-  thread_local SplitScratch s;
-  return s;
-}
-
-// The split structure of a flow from src to the destination set over `edges` (ascending
-// EdgeId), restricted to the edges `keep(i, e)` accepts: the kept edges on some walk from src to
-// a destination (destinations terminal) become plan.members, with the plan's topological fields.
-// One pass: a backward DFS from the destinations over the in-arcs lists the nodes that reach a
-// destination in postorder (every node after its parents, a topological order); a forward pass
-// over that order marks the nodes the source reaches. Members ascend by EdgeId and B' ids rank
-// edges by source first, so the members of one tail are consecutive. Any topological order gives
-// the same allocation (a node splits once its inflow is complete).
-//
-// With `cost`, the forward pass also computes the minimum walk cost from the source to a
-// destination over the members (kUnreachable without members): the DP runs in the same
-// topological order.
-template <class Keep>
-void build_split(const StrictMultiDiGraph& g, std::span<const EdgeId> edges, NodeId src, std::span<const NodeId> dsts,
-                 Keep keep, KernelPlan& plan, Cost* cost = nullptr) {
-  plan.members.clear();
-  plan.topo.clear();
-  plan.terminal.clear();
-  plan.out_begin.clear();
-  plan.out_end.clear();
-  plan.head_pos.clear();
-  if (cost != nullptr) *cost = kUnreachable;
-  plan.src_out_begin = 0;
-  plan.src_out_end = 0;
-  const auto edge_src = g.edge_src();
-  const auto edge_dst = g.edge_dst();
-  NodeMap& map = NodeMap::local();
-  map.reset(static_cast<std::size_t>(g.num_nodes()));
-  (void)map.add(src);  // local 0
-  for (NodeId d : dsts) (void)map.add(d);
-  const auto num_dst = static_cast<std::int32_t>(map.size());  // locals 1 .. num_dst - 1
-  auto is_dst = [num_dst](std::int32_t v) { return v >= 1 && v < num_dst; };
-  SplitScratch& s = split_scratch();
-  s.edge.clear();
-  s.tail.clear();
-  s.head.clear();
-  NodeId last_src = -1;
-  std::int32_t last_tail = -1;
-  for (std::size_t i = 0; i < edges.size(); ++i) {
-    const EdgeId e = edges[i];
-    if (!keep(i, e)) continue;
-    const auto ei = static_cast<std::size_t>(e);
-    if (edge_src[ei] != last_src) {
-      last_src = edge_src[ei];
-      last_tail = map.add(last_src);
-    }
-    if (is_dst(last_tail)) continue;  // destinations are terminal
-    s.edge.push_back(e);
-    s.tail.push_back(last_tail);
-    s.head.push_back(map.add(edge_dst[ei]));
-  }
-  const std::size_t n = map.size();
-  const std::size_t k = s.edge.size();
-  s.in_off.assign(n + 1, 0);
-  for (std::size_t a = 0; a < k; ++a) ++s.in_off[static_cast<std::size_t>(s.head[a]) + 1];
-  for (std::size_t v = 0; v < n; ++v) s.in_off[v + 1] += s.in_off[v];
-  s.in_arc.resize(k);
-  s.cursor.assign(s.in_off.begin(), s.in_off.end() - 1);
-  for (std::size_t a = 0; a < k; ++a) {
-    s.in_arc[static_cast<std::size_t>(s.cursor[static_cast<std::size_t>(s.head[a])]++)] = static_cast<std::int32_t>(a);
-  }
-  // Backward DFS from the destinations, postorder.
-  s.state.assign(n, 0);
-  s.order.clear();
-  for (std::int32_t d = 1; d < num_dst; ++d) {
-    if (s.state[static_cast<std::size_t>(d)] != 0) continue;
-    s.state[static_cast<std::size_t>(d)] = 1;
-    s.stack.clear();
-    s.stack.emplace_back(d, s.in_off[static_cast<std::size_t>(d)]);
-    while (!s.stack.empty()) {
-      const auto [v, it] = s.stack.back();
-      if (it < s.in_off[static_cast<std::size_t>(v) + 1]) {
-        s.stack.back().second = it + 1;
-        const std::int32_t u = s.tail[static_cast<std::size_t>(s.in_arc[static_cast<std::size_t>(it)])];
-        const auto su = s.state[static_cast<std::size_t>(u)];
-        if (su == 0) {
-          s.state[static_cast<std::size_t>(u)] = 1;
-          s.stack.emplace_back(u, s.in_off[static_cast<std::size_t>(u)]);
-        } else if (su == 1) {
-          throw std::logic_error("kernel plan: the route is cyclic");
-        }
-      } else {
-        s.state[static_cast<std::size_t>(v)] = 2;
-        s.order.push_back(v);
-        s.stack.pop_back();
-      }
-    }
-  }
-  // Forward over the postorder (with the cost DP when asked).
-  s.fwd.assign(n, 0);
-  if (s.state[0] == 2) s.fwd[0] = 1;
-  if (cost == nullptr) {
-    for (std::int32_t v : s.order) {
-      if (v == 0) continue;
-      const auto vi = static_cast<std::size_t>(v);
-      for (auto it = s.in_off[vi]; it < s.in_off[vi + 1]; ++it) {
-        if (s.fwd[static_cast<std::size_t>(s.tail[static_cast<std::size_t>(s.in_arc[static_cast<std::size_t>(it)])])] != 0) {
-          s.fwd[vi] = 1;
-          break;
-        }
-      }
-    }
-  } else {
-    const auto edge_cost = g.cost();
-    s.dist.assign(n, kUnreachable);
-    s.dist[0] = 0;
-    Cost best = kUnreachable;
-    for (std::int32_t v : s.order) {
-      const auto vi = static_cast<std::size_t>(v);
-      if (v != 0) {
-        Cost dv = kUnreachable;
-        for (auto it = s.in_off[vi]; it < s.in_off[vi + 1]; ++it) {
-          const auto a = static_cast<std::size_t>(s.in_arc[static_cast<std::size_t>(it)]);
-          const auto u = static_cast<std::size_t>(s.tail[a]);
-          if (s.fwd[u] == 0) continue;
-          dv = std::min(dv, s.dist[u] + edge_cost[static_cast<std::size_t>(s.edge[a])]);
-        }
-        if (dv == kUnreachable) continue;
-        s.fwd[vi] = 1;
-        s.dist[vi] = dv;
-      }
-      if (s.fwd[vi] != 0 && is_dst(v)) best = std::min(best, s.dist[vi]);
-    }
-    *cost = best;
-  }
-  // Members: the arcs from a reached tail to a head that reaches a destination, ascending.
-  s.member_arc.clear();
-  for (std::size_t a = 0; a < k; ++a) {
-    if (s.fwd[static_cast<std::size_t>(s.tail[a])] != 0 && s.state[static_cast<std::size_t>(s.head[a])] == 2) {
-      s.member_arc.push_back(static_cast<std::int32_t>(a));
-    }
-  }
-  const std::size_t num_members = s.member_arc.size();
-  if (num_members == 0) return;
-  plan.members.reserve(num_members);
-  for (std::int32_t a : s.member_arc) plan.members.push_back(s.edge[static_cast<std::size_t>(a)]);
-  // Positions: the postorder restricted to reached nodes; the source precedes every node it
-  // reaches, so it is first.
-  s.position.assign(n, -1);
-  std::int32_t num_pos = 0;
-  for (std::int32_t v : s.order) {
-    if (s.fwd[static_cast<std::size_t>(v)] != 0) s.position[static_cast<std::size_t>(v)] = num_pos++;
-  }
-  if (s.position[0] != 0) throw std::logic_error("kernel plan: the split graph does not start at its source");
-  s.first.assign(n, -1);
-  s.count.assign(n, 0);
-  for (std::size_t m = 0; m < num_members; ++m) {
-    const auto t = static_cast<std::size_t>(s.tail[static_cast<std::size_t>(s.member_arc[m])]);
-    if (s.count[t] == 0) {
-      s.first[t] = static_cast<std::int32_t>(m);
-    } else if (static_cast<std::size_t>(s.first[t] + s.count[t]) != m) {
-      throw std::logic_error("kernel plan: the members of a node are not consecutive (EdgeIds not in B' order)");
-    }
-    ++s.count[t];
-  }
-  const auto P = static_cast<std::size_t>(num_pos);
-  plan.topo.reserve(P);
-  plan.terminal.reserve(P);
-  plan.out_begin.reserve(P);
-  plan.out_end.reserve(P);
-  for (std::int32_t v : s.order) {
-    const auto vi = static_cast<std::size_t>(v);
-    if (s.fwd[vi] == 0) continue;
-    plan.topo.push_back(map.nodes()[vi]);
-    plan.terminal.push_back(is_dst(v) ? 1 : 0);
-    const std::int32_t b = s.count[vi] == 0 ? 0 : s.first[vi];
-    plan.out_begin.push_back(b);
-    plan.out_end.push_back(b + s.count[vi]);
-  }
-  plan.head_pos.resize(num_members);
-  for (std::size_t m = 0; m < num_members; ++m) {
-    plan.head_pos[m] = s.position[static_cast<std::size_t>(s.head[static_cast<std::size_t>(s.member_arc[m])])];
-  }
-  plan.src_out_begin = plan.out_begin[0];
-  plan.src_out_end = plan.out_end[0];
-}
-
-// Per-thread per-node state of build_split_dag, indexed by NodeId and valid for a node only
+// Per-thread per-node state of build_split, indexed by NodeId and valid for a node only
 // when its stamp is the current epoch (no clearing between calls; a call that throws leaves stale
 // entries behind an old epoch). One array of slots, so growing it either succeeds whole or leaves
 // the previous array in place (review-1b-fixes N1: separately grown arrays could be left at
@@ -315,6 +110,8 @@ struct DagScratch {
     std::int32_t position {0};
     std::int32_t first {0};   // the node's first member
     std::int32_t count {0};   // the node's number of members
+    std::int32_t entry_begin {0};  // the node's predecessor entries in the DAG's sparse storage
+    std::int32_t entry_end {0};
     Cost dist {0};
   };
   std::uint32_t epoch {0};
@@ -345,28 +142,40 @@ DagScratch& dag_scratch() {
   return s;
 }
 
-// build_split over a PredDAG, on the DAG's own predecessor lists (no local renumbering, no
-// arc arrays, no CSR to build): the same members and structure as build_split over the DAG's
-// ascending edge set. `keep(e)` filters edges.
+// The split structure of a flow from src to the destination set over a DAG, on the DAG's own
+// predecessor lists (no local renumbering, no arc arrays, no CSR to build), restricted to the
+// edges `keep(e)` accepts: the kept edges on some walk from src to a destination (destinations
+// terminal) become plan.members, with the plan's topological fields. One pass: a backward DFS
+// from the destinations over the predecessor entries lists the nodes that reach a destination in
+// postorder (every node after its parents, a topological order); a forward pass over that order
+// marks the nodes the source reaches. Members ascend by EdgeId and B' ids rank edges by source
+// first, so the members of one tail are consecutive. Any topological order gives the same
+// allocation (a node splits once its inflow is complete).
+//
+// With `cost`, the forward pass also computes the minimum walk cost from the source to a
+// destination over the members (kUnreachable without members): the DP runs in the same
+// topological order. Without `out` (route_cost) the pass ends with the DP: no plan is built.
 template <class Keep>
-void build_split_dag(const StrictMultiDiGraph& g, const PredDAG& dag, NodeId src, std::span<const NodeId> dsts,
-                     Keep keep, KernelPlan& plan, Cost* cost) {
-  plan.members.clear();
-  plan.topo.clear();
-  plan.terminal.clear();
-  plan.out_begin.clear();
-  plan.out_end.clear();
-  plan.head_pos.clear();
-  plan.src_out_begin = 0;
-  plan.src_out_end = 0;
+void build_split(const Graph& g, const PredDAG& dag, NodeId src, std::span<const NodeId> dsts, Keep keep,
+                 KernelPlan* out, Cost* cost) {
   if (cost != nullptr) *cost = kUnreachable;
-  const auto off = dag.parent_offsets();
   const auto parents = dag.parents();
   const auto via = dag.via_edges();
   DagScratch& s = dag_scratch();
   s.begin(static_cast<std::size_t>(g.num_nodes()));
+  // The DAG's sparse storage scattered into the per-node slots (O(member nodes)); every other
+  // node is touched with no entries.
+  {
+    const auto nodes = PredDAGBuilder::member_nodes(dag);
+    const auto offs = PredDAGBuilder::member_offsets(dag);
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+      s.touch(nodes[i]);
+      s.at(nodes[i]).entry_begin = offs[i];
+      s.at(nodes[i]).entry_end = offs[i + 1];
+    }
+  }
   for (NodeId d : dsts) {
-    s.touch(d);
+    if (!s.seen(d)) s.touch(d);
     s.at(d).target = 1;
   }
   if (!s.seen(src)) s.touch(src);
@@ -378,10 +187,10 @@ void build_split_dag(const StrictMultiDiGraph& g, const PredDAG& dag, NodeId src
     if (s.at(d).state != 0) continue;
     s.at(d).state = 1;
     s.stack.clear();
-    s.stack.emplace_back(d, off[static_cast<std::size_t>(d)]);
+    s.stack.emplace_back(d, s.at(d).entry_begin);
     while (!s.stack.empty()) {
       const auto [v, k] = s.stack.back();
-      if (k < off[static_cast<std::size_t>(v) + 1]) {
+      if (k < s.at(v).entry_end) {
         s.stack.back().second = k + 1;
         const auto ki = static_cast<std::size_t>(k);
         const NodeId u = parents[ki];
@@ -390,7 +199,7 @@ void build_split_dag(const StrictMultiDiGraph& g, const PredDAG& dag, NodeId src
         const auto su = s.at(u).state;
         if (su == 0) {
           s.at(u).state = 1;
-          s.stack.emplace_back(u, off[static_cast<std::size_t>(u)]);
+          s.stack.emplace_back(u, s.at(u).entry_begin);
         } else if (su == 1) {
           throw std::logic_error("kernel plan: the route is cyclic");
         }
@@ -409,12 +218,11 @@ void build_split_dag(const StrictMultiDiGraph& g, const PredDAG& dag, NodeId src
     s.at(src).dist = 0;
   }
   for (NodeId v : s.order) {
-    const auto vi = static_cast<std::size_t>(v);
     auto& nv = s.at(v);
     if (v != src) {
       Cost dv = kUnreachable;
       bool reached = false;
-      for (auto k = off[vi]; k < off[vi + 1]; ++k) {
+      for (auto k = nv.entry_begin; k < nv.entry_end; ++k) {
         const auto ki = static_cast<std::size_t>(k);
         const NodeId u = parents[ki];
         if (!s.seen(u)) continue;
@@ -431,23 +239,44 @@ void build_split_dag(const StrictMultiDiGraph& g, const PredDAG& dag, NodeId src
     if (cost != nullptr && nv.fwd != 0 && nv.target != 0) best = std::min(best, nv.dist);
   }
   if (cost != nullptr) *cost = best;
+  if (out == nullptr) return;
+  KernelPlan& plan = *out;
+  plan.members.clear();
+  plan.topo.clear();
+  plan.terminal.clear();
+  plan.out_begin.clear();
+  plan.out_end.clear();
+  plan.head_pos.clear();
+  plan.src_out_begin = 0;
+  plan.src_out_end = 0;
   // Members, ascending: the DAG's edges kept, from a reached tail (not a destination) to a head
   // that reaches a destination.
   const auto edge_src = g.edge_src();
   const auto edge_dst = g.edge_dst();
-  s.member_tail.clear();
-  s.member_head.clear();
-  for (EdgeId e : PredDAGBuilder::ascending(dag)) {
+  // The member and node loops write by index into vectors sized to a known bound (the DAG's edges
+  // here, the reached nodes below): libc++ 22's emplace_back (a fast-path and a slow-path lambda)
+  // made the push_back form about ten percent slower on the kernel rows under Xcode 27.
+  const auto asc = PredDAGBuilder::ascending(dag);
+  const std::size_t bound = asc.size();
+  plan.members.resize(bound);
+  s.member_tail.resize(bound);
+  s.member_head.resize(bound);
+  std::size_t n_members = 0;
+  for (EdgeId e : asc) {
     const auto ei = static_cast<std::size_t>(e);
     const NodeId u = edge_src[ei];
     const NodeId v = edge_dst[ei];
     if (!s.seen(u) || s.at(u).fwd == 0 || s.at(u).target != 0) continue;
     if (!s.seen(v) || s.at(v).state != 2 || !keep(e)) continue;
-    plan.members.push_back(e);
-    s.member_tail.push_back(u);
-    s.member_head.push_back(v);
+    plan.members[n_members] = e;
+    s.member_tail[n_members] = u;
+    s.member_head[n_members] = v;
+    ++n_members;
   }
-  const std::size_t num_members = plan.members.size();
+  plan.members.resize(n_members);
+  s.member_tail.resize(n_members);
+  s.member_head.resize(n_members);
+  const std::size_t num_members = n_members;
   if (num_members == 0) return;
   std::int32_t num_pos = 0;
   for (NodeId v : s.order) {
@@ -466,18 +295,20 @@ void build_split_dag(const StrictMultiDiGraph& g, const PredDAG& dag, NodeId src
     ++nt.count;
   }
   const auto P = static_cast<std::size_t>(num_pos);
-  plan.topo.reserve(P);
-  plan.terminal.reserve(P);
-  plan.out_begin.reserve(P);
-  plan.out_end.reserve(P);
+  plan.topo.resize(P);
+  plan.terminal.resize(P);
+  plan.out_begin.resize(P);
+  plan.out_end.resize(P);
+  std::size_t pos = 0;
   for (NodeId v : s.order) {
     const auto& nv = s.at(v);
     if (nv.fwd == 0) continue;
-    plan.topo.push_back(v);
-    plan.terminal.push_back(nv.target);
+    plan.topo[pos] = v;
+    plan.terminal[pos] = nv.target;
     const std::int32_t b = nv.count == 0 ? 0 : nv.first;
-    plan.out_begin.push_back(b);
-    plan.out_end.push_back(b + nv.count);
+    plan.out_begin[pos] = b;
+    plan.out_end[pos] = b + nv.count;
+    ++pos;
   }
   plan.head_pos.resize(num_members);
   for (std::size_t m = 0; m < num_members; ++m) {
@@ -487,85 +318,57 @@ void build_split_dag(const StrictMultiDiGraph& g, const PredDAG& dag, NodeId src
   plan.src_out_end = plan.out_end[0];
 }
 
-// The minimum walk cost from the source to a terminal over a split structure (positions in
-// topological order, the source first).
-Cost split_cost(const StrictMultiDiGraph& g, const KernelPlan& plan) {
-  if (plan.members.empty()) return kUnreachable;
-  const auto cost = g.cost();
-  thread_local std::vector<Cost> dist;
-  dist.assign(plan.topo.size(), kUnreachable);
-  dist[0] = 0;
-  Cost best = kUnreachable;
-  for (std::size_t p = 0; p < plan.topo.size(); ++p) {
-    if (dist[p] == kUnreachable) continue;
-    if (plan.terminal[p] != 0) {
-      best = std::min(best, dist[p]);
-      continue;
-    }
-    for (auto k = plan.out_begin[p]; k < plan.out_end[p]; ++k) {
-      const auto m = static_cast<std::size_t>(k);
-      const auto h = static_cast<std::size_t>(plan.head_pos[m]);
-      dist[h] = std::min(dist[h], dist[p] + cost[static_cast<std::size_t>(plan.members[m])]);
-    }
-  }
-  return best;
-}
-
 } // namespace
 
-std::vector<EdgeId> prune(const StrictMultiDiGraph& g, std::span<const EdgeId> edges, NodeId src,
-                          std::span<const NodeId> dsts) {
-  std::vector<EdgeId> sorted;
-  if (!std::is_sorted(edges.begin(), edges.end())) {
-    sorted.assign(edges.begin(), edges.end());
-    std::sort(sorted.begin(), sorted.end());
-    edges = sorted;
-  }
+std::vector<EdgeId> prune(const Graph& g, const PredDAG& dag, NodeId src, std::span<const NodeId> dsts) {
   KernelPlan plan;
-  build_split(g, edges, src, dsts, [](std::size_t, EdgeId) { return true; }, plan);
+  build_split(g, dag, src, dsts, [](EdgeId) { return true; }, &plan, nullptr);
   return std::move(plan.members);
 }
 
-KernelPlan make_plan(const StrictMultiDiGraph& g, FlowPlacement placement, Admission admission, EdgePriority priority,
-                     NodeId src, std::span<const NodeId> dsts, std::span<const EdgeId> route,
-                     std::span<const Amount> creation_view) {
+Cost route_cost(const Graph& g, const PredDAG& route, NodeId src, std::span<const NodeId> dsts) {
+  Cost cost = kUnreachable;
+  build_split(g, route, src, dsts, [](EdgeId) { return true; }, nullptr, &cost);
+  return cost;
+}
+
+KernelPlan make_plan(const Graph& g, FlowPlacement placement, Admission admission, EdgePriority priority,
+                     NodeId src, std::span<const NodeId> dsts, const PredDAG& route,
+                     std::span<const Amount> creation_view, Cost* cost) {
   check_kernel(placement, admission, priority);
-  if (!std::is_sorted(route.begin(), route.end())) throw std::logic_error("make_plan: the route is not ascending");
+  const auto edges = PredDAGBuilder::ascending(route);
   const bool by_view = placement == FlowPlacement::Weighted && priority == EdgePriority::Residual;
-  if (by_view && creation_view.size() != route.size()) {
+  if (by_view && creation_view.size() != edges.size()) {
     throw std::logic_error("make_plan: the creation view is not route-aligned");
   }
   const auto capacity = g.capacity_units();
   KernelPlan plan;
   plan.placement = placement;
   plan.admission = admission;
-  plan.priority = priority;
   plan.src = src;
   plan.dsts.assign(dsts.begin(), dsts.end());
-  plan.route.assign(route.begin(), route.end());
+  plan.route.assign(edges.begin(), edges.end());
+  // The creation view of a route edge (the route ascends: a binary search).
+  auto creation = [&](EdgeId e) {
+    return creation_view[static_cast<std::size_t>(std::lower_bound(edges.begin(), edges.end(), e) - edges.begin())];
+  };
   // Membership: MaxFlow every route edge (its view decides), Weighted Residual creation view
   // >= 1 unit, every other kernel static capacity >= 1 unit.
-  auto member = [&](std::size_t i, EdgeId e) {
-    if (by_view) return creation_view[i] >= 1;
+  auto member = [&](EdgeId e) {
+    if (by_view) return creation(e) >= 1;
     return placement == FlowPlacement::MaxFlow || capacity[static_cast<std::size_t>(e)] >= 1;
   };
-  build_split(g, route, src, dsts, member, plan);
+  build_split(g, route, src, dsts, member, &plan, cost);
+  // The route's cost is the members' only when every route edge is a member.
+  if (cost != nullptr && plan.members.size() != plan.route.size()) *cost = route_cost(g, route, src, dsts);
   if (placement == FlowPlacement::Weighted) {
     plan.weights.reserve(plan.members.size());
-    std::size_t i = 0;
-    for (EdgeId e : plan.members) {
-      if (by_view) {
-        while (route[i] != e) ++i;  // members are a subsequence of the route
-        plan.weights.push_back(creation_view[i]);
-      } else {
-        plan.weights.push_back(capacity[static_cast<std::size_t>(e)]);
-      }
-    }
+    for (EdgeId e : plan.members) plan.weights.push_back(by_view ? creation(e) : capacity[static_cast<std::size_t>(e)]);
   }
   return plan;
 }
 
-KernelPlan make_route_plan(const StrictMultiDiGraph& g, FlowPlacement placement, Admission admission,
+KernelPlan make_route_plan(const Graph& g, FlowPlacement placement, Admission admission,
                            EdgePriority priority, NodeId src, std::span<const NodeId> dsts, const PredDAG& bundle,
                            const Eligibility* elig, Cost* cost) {
   check_kernel(placement, admission, priority);
@@ -573,32 +376,18 @@ KernelPlan make_route_plan(const StrictMultiDiGraph& g, FlowPlacement placement,
   KernelPlan plan;
   plan.placement = placement;
   plan.admission = admission;
-  plan.priority = priority;
   plan.src = src;
   plan.dsts.assign(dsts.begin(), dsts.end());
   auto usable = [&](EdgeId e) {
     return capacity[static_cast<std::size_t>(e)] >= 1 && (elig == nullptr || elig->edge_ok(e));
   };
-  build_split_dag(g, bundle, src, dsts, usable, plan, cost);
+  build_split(g, bundle, src, dsts, usable, &plan, cost);
   plan.route = plan.members;
   if (placement == FlowPlacement::Weighted && priority == EdgePriority::Capacity) {
     plan.weights.reserve(plan.members.size());
     for (EdgeId e : plan.members) plan.weights.push_back(capacity[static_cast<std::size_t>(e)]);
   }
   return plan;
-}
-
-Cost route_cost(const StrictMultiDiGraph& g, const KernelPlan& plan) {
-  // The bundle's minimum walk cost (APPROACH 8, rule 12): over the route (the record's
-  // bundle), not the split graph, so a Weighted plan whose membership excludes a zero-residual
-  // edge keeps its route's cost. members == route (members are a subset): the plan's own
-  // structure serves.
-  if (plan.route.empty()) return kUnreachable;
-  if (plan.members.size() == plan.route.size()) return split_cost(g, plan);
-  KernelPlan whole;
-  Cost cost = kUnreachable;
-  build_split(g, plan.route, plan.src, plan.dsts, [](std::size_t, EdgeId) { return true; }, whole, &cost);
-  return cost;
 }
 
 // ---------------------------------------------------------------- allocation
@@ -628,17 +417,19 @@ bool allocate(const KernelPlan& plan, Amount total, std::span<Amount> out, std::
         inflow[static_cast<std::size_t>(plan.head_pos[m])] += x;
       }
     } else {
-      // Round robin inline: floor(amount / k) each, one more to the first amount mod k.
-      const auto kk = static_cast<Amount>(k);
-      const Amount base = amount / kk;
-      const auto extra = b + static_cast<std::size_t>(amount % kk);
-      const std::size_t used = base == 0 ? extra : e;  // members beyond carry 0
-      for (std::size_t m = b; m < used; ++m) {
-        const Amount x = base + (m < extra ? 1 : 0);
-        if (limited && x > limit[m]) return false;
+      // Only the members with a positive share are written and visited (the rest stay 0).
+      bool fits = true;
+      round_robin(amount, k, [&](std::size_t i, Amount x) {
+        const std::size_t m = b + i;
+        if (limited && x > limit[m]) {
+          fits = false;
+          return false;
+        }
         out[m] = x;
         inflow[static_cast<std::size_t>(plan.head_pos[m])] += x;
-      }
+        return true;
+      });
+      if (!fits) return false;
     }
   }
   return true;
@@ -768,7 +559,7 @@ TMax t_max(const KernelPlan& plan, std::span<const Amount> view_m) {
   return out;
 }
 
-LosslessStep lossless_step(const StrictMultiDiGraph& g, const KernelPlan& plan, Amount total,
+LosslessStep lossless_step(const Graph& g, const KernelPlan& plan, Amount total,
                            std::span<const Amount> view_m, std::span<const Amount> own_m,
                            std::optional<Amount> request) {
   if (plan.admission != Admission::Lossless) throw std::logic_error("lossless_step on a Lossy plan");
@@ -782,6 +573,7 @@ LosslessStep lossless_step(const StrictMultiDiGraph& g, const KernelPlan& plan, 
     if (r.placed < total) throw std::logic_error("MaxFlow kernel: the replacement solve lost committed flow");
     out.total = r.placed;
     out.alloc = std::move(r.flows);
+    out.cost_distribution = std::move(r.cost_distribution);
     return out;
   }
   if (plan.members.empty()) {
@@ -832,6 +624,7 @@ LossyStep lossy_step(const KernelPlan& plan, std::optional<Amount> offer, std::s
     const std::size_t k = e - b;
     part.resize(k);
     Amount amount = p == 0 ? offer.value_or(0) : inflow[p];
+    std::size_t n = k;  // the members with a share (round robin leaves the rest at 0, unwritten)
     if (p == 0 && !offer.has_value()) {
       for (std::size_t i = 0; i < k; ++i) part[i] = w_m[b + i];
     } else {
@@ -839,10 +632,13 @@ LossyStep lossy_step(const KernelPlan& plan, std::optional<Amount> offer, std::s
       if (weighted) {
         highest_averages(amount, std::span<const Amount>(plan.weights.data() + b, k), std::span<Amount>(part.data(), k));
       } else {
-        round_robin(amount, std::span<Amount>(part.data(), k));
+        n = round_robin(amount, k, [&](std::size_t i, Amount x) {
+          part[i] = x;
+          return true;
+        });
       }
     }
-    for (std::size_t i = 0; i < k; ++i) {
+    for (std::size_t i = 0; i < n; ++i) {
       const Amount x = part[i];
       if (p == 0) out.injected += x;
       if (x == 0) continue;

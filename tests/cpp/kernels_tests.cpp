@@ -74,33 +74,38 @@ std::vector<Amount> on_members(const KernelPlan& plan, const std::vector<Amount>
 }
 
 // A member-aligned allocation as a dense per-edge array in input coordinates.
-std::vector<Amount> dense_input(const StrictMultiDiGraph& g, const KernelPlan& plan, const std::vector<Amount>& alloc_m) {
+std::vector<Amount> dense_input(const Graph& g, const KernelPlan& plan, const std::vector<Amount>& alloc_m) {
   std::vector<Amount> by_id(static_cast<std::size_t>(g.num_edges()), 0);
   for (std::size_t m = 0; m < plan.members.size(); ++m) by_id[static_cast<std::size_t>(plan.members[m])] = alloc_m[m];
   return to_input(g, by_id);
 }
 
-std::vector<EdgeId> all_ids(const StrictMultiDiGraph& g) {
+std::vector<EdgeId> all_ids(const Graph& g) {
   std::vector<EdgeId> out(static_cast<std::size_t>(g.num_edges()));
   std::iota(out.begin(), out.end(), 0);
   return out;
 }
 
-KernelPlan plan_of(const StrictMultiDiGraph& g, FlowPlacement p, NodeId src, std::vector<NodeId> dsts,
+KernelPlan plan_of(const Graph& g, FlowPlacement p, NodeId src, std::vector<NodeId> dsts,
                    std::vector<EdgeId> route, const std::vector<Amount>& view,
                    EdgePriority prio = EdgePriority::Residual, Admission adm = Admission::Lossless) {
   std::sort(route.begin(), route.end());
   std::vector<Amount> on_route;  // the creation view is route-aligned
   for (EdgeId e : route) on_route.push_back(view[static_cast<std::size_t>(e)]);
-  return make_plan(g, p, adm, prio, src, dsts, route, on_route);
+  return make_plan(g, p, adm, prio, src, dsts, PredDAGBuilder::of_edges(g, route), on_route);
 }
 
-std::vector<Amount> caps(const StrictMultiDiGraph& g) {
+// The route cost of a plan's route (its record's bundle).
+Cost cost_of(const Graph& g, const KernelPlan& plan) {
+  return route_cost(g, PredDAGBuilder::of_edges(g, plan.route), plan.src, plan.dsts);
+}
+
+std::vector<Amount> caps(const Graph& g) {
   return std::vector<Amount>(g.capacity_units().begin(), g.capacity_units().end());
 }
 
 // One Lossless step on a fresh flow at T = 0.
-LosslessStep first_step(const StrictMultiDiGraph& g, const KernelPlan& plan, const std::vector<Amount>& view,
+LosslessStep first_step(const Graph& g, const KernelPlan& plan, const std::vector<Amount>& view,
                         std::optional<Amount> request) {
   const auto v = on_members(plan, view);
   const std::vector<Amount> own(plan.members.size(), 0);
@@ -120,6 +125,39 @@ TEST(Apportion, RoundRobinAndReviewValues) {
   EXPECT_EQ(ha(11, {3, 9, 9}), (std::vector<Amount>{1, 5, 5}));
   EXPECT_EQ(ha(4, {1, 3, 3}), (std::vector<Amount>{0, 2, 2}));
   EXPECT_EQ(ha(7, {1, 3, 3}), (std::vector<Amount>{1, 3, 3}));
+}
+
+// The callback form hands out the span form's shares (positive ones only, in index order) and
+// stops at the first share its callback refuses.
+TEST(Apportion, RoundRobinCallbackFormEqualsSpanFormAndStopsEarly) {
+  for (Amount total : {Amount {0}, Amount {1}, Amount {2}, Amount {7}, Amount {23}, kDomainLimit - 1}) {
+    for (std::size_t k : {std::size_t {1}, std::size_t {3}, std::size_t {4}, std::size_t {8}}) {
+      std::vector<Amount> span_out(k);
+      const std::size_t n = round_robin(total, span_out);
+      std::vector<Amount> cb_out(k);
+      std::vector<std::size_t> visited;
+      const std::size_t m = round_robin(total, k, [&](std::size_t i, Amount x) {
+        visited.push_back(i);
+        cb_out[i] = x;
+        return x > 0;
+      });
+      std::vector<std::size_t> leading(total < static_cast<Amount>(k) ? static_cast<std::size_t>(total) : k);
+      std::iota(leading.begin(), leading.end(), std::size_t {0});
+      EXPECT_EQ(n, leading.size()) << total << " over " << k;
+      EXPECT_EQ(m, n) << total << " over " << k;
+      EXPECT_EQ(visited, leading) << total << " over " << k;
+      EXPECT_EQ(cb_out, span_out) << total << " over " << k;
+    }
+  }
+  // 7 over 3 is {3, 2, 2}: refusing the share at index 1 returns 1 and visits nothing after it.
+  std::vector<std::size_t> seen;
+  const std::size_t stop = round_robin(7, 3, [&](std::size_t i, Amount x) {
+    seen.push_back(i);
+    return x > 2;
+  });
+  EXPECT_EQ(stop, 1u);
+  EXPECT_EQ(seen, (std::vector<std::size_t>{0, 1}));
+  EXPECT_EQ(round_robin(7, 3, [](std::size_t, Amount) { return false; }), 0u);
 }
 
 TEST(Apportion, ClosedFormEqualsSequentialAndIsHouseMonotone) {
@@ -252,20 +290,23 @@ TEST(Plans, SplitGraphPruning) {
   std::vector<EdgeId> want2 = {inv2[0], inv2[2]};  // 1->2 leaves destination 1; 2->3 leaves 2
   std::sort(want2.begin(), want2.end());
   EXPECT_EQ(any.members, want2);
-  EXPECT_EQ(route_cost(g2, any), 1);
+  EXPECT_EQ(cost_of(g2, any), 1);
   // An empty split graph: route cost unreachable, T_max 0.
   auto none = plan_of(g, FlowPlacement::EqualBalanced, 0, {3}, std::vector<EdgeId> {inv[1], inv[3]}, caps(g));
   EXPECT_TRUE(none.members.empty());
-  EXPECT_EQ(route_cost(g, none), kUnreachable);
+  EXPECT_EQ(cost_of(g, none), kUnreachable);
   EXPECT_EQ(t_max(none, {}).value, 0);
 }
 
-TEST(Plans, RoutePlanOnTheDagEqualsTheEdgeListPlan) {
-  // make_route_plan walks the bundle's own predecessor lists; make_plan prunes an ascending edge
-  // list. On random DAGs (parallel edges, zero capacities, statically excluded edges and nodes,
-  // edges into the source and out of a destination, one or two destinations) both give the same
-  // split graph (members, topological structure, weights), the same route cost and the same
-  // allocations.
+TEST(Plans, SplitGraphEqualsTheWalkDefinition) {
+  // On random DAGs (parallel edges, zero capacities, statically excluded edges and nodes, edges
+  // into the source and out of a destination, one or two destinations) the split graph of a
+  // bundle is, by definition, the usable edges (capacity >= 1 unit, allowed) on some walk from
+  // the source to a destination that enters no destination before its end: the members equal an
+  // independent reachability computation, the route cost equals an independent shortest walk,
+  // the topological structure orders every member's tail before its head, and an allocation
+  // conserves its total. make_plan on the DAG of the usable edges gives the same plan as
+  // make_route_plan filtering the bundle (the two entry points of the one builder).
   std::mt19937 rng(2024);
   int compared = 0;
   for (int trial = 0; trial < 2000; ++trial) {
@@ -284,7 +325,7 @@ TEST(Plans, RoutePlanOnTheDagEqualsTheEdgeListPlan) {
     for (EdgeId e : all) {
       if ((rng() % 5) != 0) in_bundle.push_back(e);
     }
-    const auto bundle = PredDAGBuilder::from_edges(g, in_bundle);
+    const auto bundle = PredDAGBuilder::of_edges(g, in_bundle);
     const NodeId src = static_cast<NodeId>(rng() % static_cast<std::uint32_t>(n));
     std::vector<NodeId> dsts;
     for (int k = 0; k < 1 + static_cast<int>(rng() % 2); ++k) {
@@ -304,34 +345,102 @@ TEST(Plans, RoutePlanOnTheDagEqualsTheEdgeListPlan) {
       elig = g.eligibility(xn, xe);
     }
     const auto capacity = g.capacity_units();
+    const auto edge_src = g.edge_src();
+    const auto edge_dst = g.edge_dst();
+    const auto cost = g.cost();
     std::vector<EdgeId> usable;
     for (EdgeId e : PredDAGBuilder::ascending(bundle)) {
       if (capacity[static_cast<std::size_t>(e)] >= 1 && (!elig || elig->edge_ok(e))) usable.push_back(e);
     }
-    for (const auto kernel : {FlowPlacement::EqualBalanced, FlowPlacement::Weighted}) {
-      Cost cost = -1;
-      const auto on_dag = make_route_plan(g, kernel, Admission::Lossless, EdgePriority::Capacity, src, dsts, bundle,
-                                          elig ? &*elig : nullptr, &cost);
-      const auto on_list = make_plan(g, kernel, Admission::Lossless, EdgePriority::Capacity, src, dsts, usable, {});
-      ASSERT_EQ(on_dag.members, on_list.members) << "trial " << trial;
-      EXPECT_EQ(on_dag.route, on_list.members);
-      EXPECT_EQ(on_dag.topo, on_list.topo);
-      EXPECT_EQ(on_dag.out_begin, on_list.out_begin);
-      EXPECT_EQ(on_dag.out_end, on_list.out_end);
-      EXPECT_EQ(on_dag.head_pos, on_list.head_pos);
-      EXPECT_EQ(on_dag.terminal, on_list.terminal);
-      EXPECT_EQ(on_dag.weights, on_list.weights);
-      EXPECT_EQ(cost, route_cost(g, on_list)) << "trial " << trial;
-      EXPECT_EQ(cost, route_cost(g, on_dag));
-      std::vector<Amount> a(on_dag.members.size());
-      std::vector<Amount> b(on_list.members.size());
-      for (Amount t : {Amount {0}, Amount {1}, Amount {7}, Amount {50}}) {
-        if (on_dag.members.empty() && t != 0) continue;
-        EXPECT_TRUE(allocate(on_dag, t, a));
-        EXPECT_TRUE(allocate(on_list, t, b));
-        EXPECT_EQ(a, b);
+    // The definition: forward from src and backward from the destinations over the usable edges
+    // that leave no destination, by fixpoint; the shortest walk by Bellman-Ford over the same.
+    std::vector<std::uint8_t> is_dst(static_cast<std::size_t>(n), 0);
+    for (NodeId d : dsts) is_dst[static_cast<std::size_t>(d)] = 1;
+    std::vector<EdgeId> open;
+    for (EdgeId e : usable) {
+      if (is_dst[static_cast<std::size_t>(edge_src[static_cast<std::size_t>(e)])] == 0) open.push_back(e);
+    }
+    std::vector<std::uint8_t> fwd(static_cast<std::size_t>(n), 0), bwd(static_cast<std::size_t>(n), 0);
+    fwd[static_cast<std::size_t>(src)] = 1;
+    for (NodeId d : dsts) bwd[static_cast<std::size_t>(d)] = 1;
+    std::vector<Cost> dist(static_cast<std::size_t>(n), kUnreachable);
+    dist[static_cast<std::size_t>(src)] = 0;
+    for (int round = 0; round < n; ++round) {
+      for (EdgeId e : open) {
+        const auto u = static_cast<std::size_t>(edge_src[static_cast<std::size_t>(e)]);
+        const auto v = static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)]);
+        if (fwd[u] != 0) fwd[v] = 1;
+        if (bwd[v] != 0) bwd[u] = 1;
+        if (dist[u] != kUnreachable) dist[v] = std::min(dist[v], dist[u] + cost[static_cast<std::size_t>(e)]);
       }
-      if (!on_dag.members.empty()) ++compared;
+    }
+    std::vector<EdgeId> want;
+    for (EdgeId e : open) {
+      if (fwd[static_cast<std::size_t>(edge_src[static_cast<std::size_t>(e)])] != 0 &&
+          bwd[static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)])] != 0) {
+        want.push_back(e);
+      }
+    }
+    Cost want_cost = kUnreachable;
+    if (!want.empty()) {
+      for (NodeId d : dsts) want_cost = std::min(want_cost, dist[static_cast<std::size_t>(d)]);
+    }
+    const auto usable_dag = PredDAGBuilder::of_edges(g, usable);
+    for (const auto kernel : {FlowPlacement::EqualBalanced, FlowPlacement::Weighted}) {
+      Cost got_cost = -1;
+      const auto on_bundle = make_route_plan(g, kernel, Admission::Lossless, EdgePriority::Capacity, src, dsts, bundle,
+                                             elig ? &*elig : nullptr, &got_cost);
+      ASSERT_EQ(on_bundle.members, want) << "trial " << trial;
+      EXPECT_EQ(on_bundle.route, want);
+      EXPECT_EQ(got_cost, want_cost) << "trial " << trial;
+      EXPECT_EQ(prune(g, usable_dag, src, dsts), want);
+      Cost plan_cost = -1;
+      const auto on_usable =
+          make_plan(g, kernel, Admission::Lossless, EdgePriority::Capacity, src, dsts, usable_dag, {}, &plan_cost);
+      EXPECT_EQ(on_usable.members, on_bundle.members);
+      EXPECT_EQ(on_usable.topo, on_bundle.topo);
+      EXPECT_EQ(on_usable.out_begin, on_bundle.out_begin);
+      EXPECT_EQ(on_usable.out_end, on_bundle.out_end);
+      EXPECT_EQ(on_usable.head_pos, on_bundle.head_pos);
+      EXPECT_EQ(on_usable.terminal, on_bundle.terminal);
+      EXPECT_EQ(on_usable.weights, on_bundle.weights);
+      // The route cost is over the route (every usable edge), not only the members.
+      dist.assign(static_cast<std::size_t>(n), kUnreachable);
+      dist[static_cast<std::size_t>(src)] = 0;
+      for (int round = 0; round < n; ++round) {
+        for (EdgeId e : usable) {
+          const auto u = static_cast<std::size_t>(edge_src[static_cast<std::size_t>(e)]);
+          const auto v = static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)]);
+          if (is_dst[u] == 0 && dist[u] != kUnreachable) dist[v] = std::min(dist[v], dist[u] + cost[static_cast<std::size_t>(e)]);
+        }
+      }
+      Cost route_want = kUnreachable;
+      for (NodeId d : dsts) route_want = std::min(route_want, dist[static_cast<std::size_t>(d)]);
+      EXPECT_EQ(plan_cost, route_want) << "trial " << trial;
+      EXPECT_EQ(route_cost(g, usable_dag, src, dsts), route_want) << "trial " << trial;  // the cost pass alone
+      if (on_bundle.members.empty()) continue;
+      // Topology: the source first, every member's tail before its head, members of a node
+      // consecutive.
+      EXPECT_EQ(on_bundle.topo.front(), src);
+      for (std::size_t p = 0; p < on_bundle.topo.size(); ++p) {
+        for (auto k = on_bundle.out_begin[p]; k < on_bundle.out_end[p]; ++k) {
+          EXPECT_EQ(edge_src[static_cast<std::size_t>(on_bundle.members[static_cast<std::size_t>(k)])], on_bundle.topo[p]);
+          EXPECT_GT(on_bundle.head_pos[static_cast<std::size_t>(k)], static_cast<std::int32_t>(p));
+        }
+      }
+      // Conservation: what enters the destinations is the total.
+      std::vector<Amount> a(on_bundle.members.size());
+      for (Amount t : {Amount {1}, Amount {7}, Amount {50}}) {
+        ASSERT_TRUE(allocate(on_bundle, t, a));
+        Amount delivered = 0;
+        for (std::size_t m = 0; m < a.size(); ++m) {
+          if (is_dst[static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(on_bundle.members[m])])] != 0) {
+            delivered += a[m];
+          }
+        }
+        EXPECT_EQ(delivered, t) << "trial " << trial;
+      }
+      ++compared;
     }
   }
   EXPECT_GT(compared, 1000);
@@ -583,7 +692,7 @@ TEST(MaxFlowKernel, ReleaseWitnessAndMixedCostBundle) {
   auto g2 = make_graph(4, {{0, 1, 1, 1}, {1, 2, 1, 1}, {2, 3, 1, 1}, {0, 3, 1, 4}});
   const auto p2 = plan_of(g2, FlowPlacement::MaxFlow, 0, {3}, all_ids(g2), caps(g2));
   EXPECT_EQ(dense_input(g2, p2, first_step(g2, p2, caps(g2), 1).alloc), (std::vector<Amount>{1, 1, 1, 0}));
-  EXPECT_EQ(route_cost(g2, p2), 3);
+  EXPECT_EQ(cost_of(g2, p2), 3);
 }
 
 TEST(WeightedKernel, CapacityVersusResidualMembershipAfterOccupancy) {

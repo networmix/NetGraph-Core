@@ -258,7 +258,7 @@ cov:
 		mkdir -p "$$BUILD_DIR"; \
 		GEN_ARGS=""; \
 		if command -v ninja >/dev/null 2>&1; then GEN_ARGS="-G Ninja"; fi; \
-		cmake -S . -B "$$BUILD_DIR" -DNETGRAPH_CORE_BUILD_TESTS=ON -DNETGRAPH_CORE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug $$GEN_ARGS; \
+		cmake -S . -B "$$BUILD_DIR" -DNETGRAPH_CORE_BUILD_TESTS=ON -DNETGRAPH_CORE_PRIVATE_HOOKS=ON -DNETGRAPH_CORE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug $$GEN_ARGS; \
 		cmake --build "$$BUILD_DIR" --config Debug -j; \
 		ctest --test-dir "$$BUILD_DIR" --output-on-failure || echo "⚠️  Some C++ tests failed (continuing for coverage)"
 	@echo "📈 Generating C++ coverage XML (gcovr)..."

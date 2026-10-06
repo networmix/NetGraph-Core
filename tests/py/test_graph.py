@@ -1,4 +1,4 @@
-"""StrictMultiDiGraph on integer units (APPROACH 3): construction, validation order, B' ids,
+"""Graph on integer units (APPROACH 3): construction, validation order, B' ids,
 read-only views, Eligibility."""
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ EDGES = [
 
 
 def build(n, edges, q=1.0):
-    return ngc.StrictMultiDiGraph(
+    return ngc.Graph(
         n,
         [e[0] for e in edges],
         [e[1] for e in edges],
@@ -96,7 +96,7 @@ def test_views_are_read_only_and_keep_the_graph_alive():
 
 def test_numpy_integer_inputs_and_exact_large_units():
     big = (1 << 53) + 1
-    g = ngc.StrictMultiDiGraph(
+    g = ngc.Graph(
         np.int64(2),
         np.array([0, 0], dtype=np.int32),
         np.array([1, 1], dtype=np.uint8),
@@ -109,10 +109,10 @@ def test_numpy_integer_inputs_and_exact_large_units():
 
 
 def test_empty_and_isolated():
-    g = ngc.StrictMultiDiGraph(0, [], [], [], [], 1)
+    g = ngc.Graph(0, [], [], [], [], 1)
     assert g.row_offsets().tolist() == [0] and g.in_row_offsets().tolist() == [0]
     assert g.max_cost() == 0 and g.cost_gcd() == 0
-    h = ngc.StrictMultiDiGraph(3, [], [], [], [], 1)
+    h = ngc.Graph(3, [], [], [], [], 1)
     assert h.row_offsets().tolist() == [0, 0, 0, 0]
 
 
@@ -152,26 +152,26 @@ def test_uids_are_distinct():
 )
 def test_validation_errors(args, pattern):
     with pytest.raises(ValueError, match=pattern):
-        ngc.StrictMultiDiGraph(*args)
+        ngc.Graph(*args)
 
 
 def test_validation_order():
     # The unit values before the shapes, the shapes before the costs, the costs before the
     # remaining bounds (endpoints and sums).
     with pytest.raises(ValueError, match="capacity_units"):
-        ngc.StrictMultiDiGraph(2, [0, 1], [1], [-1], [1], 1)
+        ngc.Graph(2, [0, 1], [1], [-1], [1], 1)
     with pytest.raises(ValueError, match="same length"):
-        ngc.StrictMultiDiGraph(2, [0, 1], [1], [1], [0], 1)
+        ngc.Graph(2, [0, 1], [1], [1], [0], 1)
     with pytest.raises(ValueError, match="cost"):
-        ngc.StrictMultiDiGraph(2, [0], [9], [1], [0], 1)
+        ngc.Graph(2, [0], [9], [1], [0], 1)
     with pytest.raises(ValueError, match="cost"):
-        ngc.StrictMultiDiGraph(2, [0, 0], [1, 1], [L62 // 2, L62 // 2], [0, 1], 1)
+        ngc.Graph(2, [0, 0], [1, 1], [L62 // 2, L62 // 2], [0, 1], 1)
     with pytest.raises(ValueError, match="node range"):
-        ngc.StrictMultiDiGraph(2, [0, 5], [1, 1], [L62 // 2, L62 // 2], [1, 1], 1)
+        ngc.Graph(2, [0, 5], [1, 1], [L62 // 2, L62 // 2], [1, 1], 1)
 
 
 def test_bounds_just_below_are_accepted():
-    g = ngc.StrictMultiDiGraph(
+    g = ngc.Graph(
         2, [0, 0], [1, 1], [L62 // 2, L62 // 2 - 1], [L62 // 2, L62 // 2 - 1], 1
     )
     assert sum(int(x) for x in g.capacity_units()) == L62 - 1
@@ -251,7 +251,7 @@ def test_eligibility():
 )
 def test_validation_order_before_narrowing(args, pattern):
     with pytest.raises(ValueError, match=pattern):
-        ngc.StrictMultiDiGraph(*args)
+        ngc.Graph(*args)
 
 
 def test_validation_independent_of_representation():
@@ -268,15 +268,13 @@ def test_validation_independent_of_representation():
     messages = []
     for args in (as_lists, as_arrays):
         with pytest.raises(ValueError) as info:
-            ngc.StrictMultiDiGraph(*args)
+            ngc.Graph(*args)
         messages.append(str(info.value))
     assert (
         messages[0] == messages[1] == "cost[0] = 0: costs must be positive (cost >= 1)"
     )
     with pytest.raises(ValueError, match=r"endpoint \(9223372036854775808, 1\)"):
-        ngc.StrictMultiDiGraph(
-            2, np.array([2**63], dtype=np.uint64), [1], [1], [1], 1.0
-        )
+        ngc.Graph(2, np.array([2**63], dtype=np.uint64), [1], [1], [1], 1.0)
 
 
 def test_eligibility_ids_checked_before_narrowing():
@@ -309,7 +307,7 @@ def test_array_rank_is_a_shape_defect_before_costs(name, ndim, cost):
     args[ARG_INDEX[name]] = bad.reshape(1, 1) if ndim == 2 else bad
     pattern = rf"^{name} must be a 1-D array \(got {ndim} dimensions\)$"
     with pytest.raises(ValueError, match=pattern):
-        ngc.StrictMultiDiGraph(*args)
+        ngc.Graph(*args)
 
 
 @pytest.mark.parametrize("name", list(ARG_INDEX))
@@ -320,39 +318,37 @@ def test_nested_and_scalar_arguments_are_shape_defects(name):
     with pytest.raises(
         ValueError, match=rf"^{name} must be a 1-D sequence of integers \(entry 0"
     ):
-        ngc.StrictMultiDiGraph(*nested)
+        ngc.Graph(*nested)
     scalar = [2, [0], [1], [1], [0], 1.0]
     scalar[ARG_INDEX[name]] = value
     with pytest.raises(
         ValueError, match=rf"^{name} must be a 1-D sequence of integers \(got int\)$"
     ):
-        ngc.StrictMultiDiGraph(*scalar)
+        ngc.Graph(*scalar)
 
 
 def test_shape_step_keeps_its_place_in_the_order():
     # The resolution and the unit values still come before the shapes, whatever the shape.
     with pytest.raises(ValueError, match="resolution"):
-        ngc.StrictMultiDiGraph(2, np.array([[0]]), [1], [1], [0], 3.0)
+        ngc.Graph(2, np.array([[0]]), [1], [1], [0], 3.0)
     with pytest.raises(
         ValueError, match=r"capacity_units\[0\] = 4611686018427387904 is outside"
     ):
-        ngc.StrictMultiDiGraph(
-            2, [0], [1], np.array([[2**62]], dtype=np.int64), [0], 1.0
-        )
+        ngc.Graph(2, [0], [1], np.array([[2**62]], dtype=np.int64), [0], 1.0)
     with pytest.raises(ValueError, match=r"capacity_units\[0\] = -1 is outside"):
-        ngc.StrictMultiDiGraph(2, [0], [1], np.array(-1, dtype=np.int64), [0], 1.0)
+        ngc.Graph(2, [0], [1], np.array(-1, dtype=np.int64), [0], 1.0)
     with pytest.raises(ValueError, match=r"capacity_units\[1\] = -5 is outside"):
-        ngc.StrictMultiDiGraph(2, [0], [1], [[1], -5], [0], 1.0)
+        ngc.Graph(2, [0], [1], [[1], -5], [0], 1.0)
     with pytest.raises(ValueError, match=r"capacity_units = -5 is outside"):
-        ngc.StrictMultiDiGraph(2, [0], [1], -5, [0], 1.0)
+        ngc.Graph(2, [0], [1], -5, [0], 1.0)
     # With valid values the misshapen capacity is a shape defect, before the costs.
     with pytest.raises(ValueError, match="capacity_units must be a 1-D array"):
-        ngc.StrictMultiDiGraph(2, [0], [1], np.array([[1]]), [0], 1.0)
+        ngc.Graph(2, [0], [1], np.array([[1]]), [0], 1.0)
     # Rank before lengths.
     with pytest.raises(ValueError, match="dst must be a 1-D array"):
-        ngc.StrictMultiDiGraph(2, [0, 1], np.array([[1, 0]]), [1, 1], [1, 1], 1.0)
+        ngc.Graph(2, [0, 1], np.array([[1, 0]]), [1, 1], [1, 1], 1.0)
     # A valid graph from 1-D arrays of every integer kind still builds.
-    g = ngc.StrictMultiDiGraph(
+    g = ngc.Graph(
         2, np.array([0]), np.array([1], dtype=np.uint8), np.array([7]), (3,), 1.0
     )
     assert g.capacity_units().tolist() == [7]

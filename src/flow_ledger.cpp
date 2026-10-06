@@ -1,43 +1,43 @@
 /*
-  The integer ledger FlowGraph (APPROACH 8).
+  The integer ledger FlowLedger (APPROACH 8).
 
   The aggregate allocation is kept exactly (integers) and changed only by an atomic commit or a
   detach; residual() is derived from it (baseline - allocated). Records are kept by id (FlowId
   order); ids come from a per-ledger counter and are never reused, also across reset().
 */
-#include "netgraph/core/flow_graph.hpp"
+#include "netgraph/core/flow_ledger.hpp"
 
 #include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 
+#include "netgraph/core/detail/endpoints.hpp"
 #include "netgraph/core/detail/ledger_access.hpp"
-#include "netgraph/core/detail/search.hpp"
 #include "netgraph/core/detail/uid.hpp"
 
 namespace netgraph::core {
 
-FlowGraph::FlowGraph(std::shared_ptr<const StrictMultiDiGraph> graph) {
-  if (!graph) throw std::invalid_argument("FlowGraph: graph is null");
+FlowLedger::FlowLedger(std::shared_ptr<const Graph> graph) {
+  if (!graph) throw std::invalid_argument("FlowLedger: graph is null");
   graph_ = std::move(graph);
   baseline_.assign(graph_->capacity_units().begin(), graph_->capacity_units().end());
   allocated_.assign(baseline_.size(), 0);
   uid_ = detail::next_uid();
 }
 
-FlowGraph::FlowGraph(std::shared_ptr<const StrictMultiDiGraph> graph, std::span<const Amount> residual) {
-  if (!graph) throw std::invalid_argument("FlowGraph: graph is null");
+FlowLedger::FlowLedger(std::shared_ptr<const Graph> graph, std::span<const Amount> residual) {
+  if (!graph) throw std::invalid_argument("FlowLedger: graph is null");
   graph_ = std::move(graph);
   baseline_ = checked_baseline(residual);
   allocated_.assign(baseline_.size(), 0);
   uid_ = detail::next_uid();
 }
 
-FlowGraph::FlowGraph(const FlowGraph& other) {
+FlowLedger::FlowLedger(const FlowLedger& other) {
   other.check_usable();
   if (other.num_bound_ != 0) {
-    throw std::invalid_argument("FlowGraph: a ledger with bound policies cannot be copied");
+    throw std::invalid_argument("FlowLedger: a ledger with bound policies cannot be copied");
   }
   graph_ = other.graph_;
   uid_ = detail::next_uid();
@@ -51,10 +51,10 @@ FlowGraph::FlowGraph(const FlowGraph& other) {
   owners_ = other.owners_;  // orphans only
 }
 
-FlowGraph::FlowGraph(FlowGraph&& other) {
+FlowLedger::FlowLedger(FlowLedger&& other) {
   other.check_usable();
   if (other.num_bound_ != 0) {
-    throw std::invalid_argument("FlowGraph: a ledger with bound policies cannot be moved");
+    throw std::invalid_argument("FlowLedger: a ledger with bound policies cannot be moved");
   }
   graph_ = std::move(other.graph_);
   uid_ = other.uid_;
@@ -73,11 +73,11 @@ FlowGraph::FlowGraph(FlowGraph&& other) {
   other.owners_.clear();
 }
 
-void FlowGraph::check_usable() const {
-  if (!usable_) throw std::logic_error("FlowGraph: a moved-from ledger is empty and unusable");
+void FlowLedger::check_usable() const {
+  if (!usable_) throw std::logic_error("FlowLedger: a moved-from ledger is empty and unusable");
 }
 
-std::vector<Amount> FlowGraph::checked_baseline(std::span<const Amount> residual) const {
+std::vector<Amount> FlowLedger::checked_baseline(std::span<const Amount> residual) const {
   const auto capacity = graph_->capacity_units();
   if (residual.size() != capacity.size()) {
     throw std::invalid_argument("residual has length " + std::to_string(residual.size()) + ", expected " +
@@ -93,34 +93,34 @@ std::vector<Amount> FlowGraph::checked_baseline(std::span<const Amount> residual
   return std::vector<Amount>(residual.begin(), residual.end());
 }
 
-std::uint64_t FlowGraph::uid() const {
+std::uint64_t FlowLedger::uid() const {
   check_usable();
   return uid_;
 }
 
-const std::shared_ptr<const StrictMultiDiGraph>& FlowGraph::graph() const {
+const std::shared_ptr<const Graph>& FlowLedger::graph() const {
   check_usable();
   return graph_;
 }
 
-std::span<const Amount> FlowGraph::capacity_units() const {
+std::span<const Amount> FlowLedger::capacity_units() const {
   check_usable();
   return graph_->capacity_units();
 }
 
-std::vector<Amount> FlowGraph::residual() const {
+std::vector<Amount> FlowLedger::residual() const {
   check_usable();
   std::vector<Amount> out(baseline_.size());
   for (std::size_t e = 0; e < out.size(); ++e) out[e] = baseline_[e] - allocated_[e];
   return out;
 }
 
-std::vector<Amount> FlowGraph::allocated() const {
+std::vector<Amount> FlowLedger::allocated() const {
   check_usable();
   return allocated_;
 }
 
-std::vector<FlowRecord> FlowGraph::records() const {
+std::vector<FlowRecord> FlowLedger::records() const {
   check_usable();
   std::vector<FlowRecord> out;
   out.reserve(records_.size());
@@ -128,7 +128,7 @@ std::vector<FlowRecord> FlowGraph::records() const {
   return out;
 }
 
-FlowRecord FlowGraph::record(const FlowId& flow_id) const {
+FlowRecord FlowLedger::record(const FlowId& flow_id) const {
   check_usable();
   if (flow_id.first != uid_) {
     throw std::invalid_argument("FlowId (" + std::to_string(flow_id.first) + ", " + std::to_string(flow_id.second) +
@@ -142,13 +142,20 @@ FlowRecord FlowGraph::record(const FlowId& flow_id) const {
   return it->second;
 }
 
-std::vector<EdgeId> FlowGraph::bottleneck(std::span<const NodeId> sources, const Eligibility* elig) const {
+std::vector<EdgeId> FlowLedger::bottleneck(std::span<const NodeId> sources, const Eligibility* elig) const {
   check_usable();
   const auto& g = *graph_;
   const auto srcs = detail::node_set(sources, g.num_nodes(), "sources");
   if (elig != nullptr && elig->graph_uid() != g.uid()) {
     throw std::invalid_argument("foreign Eligibility: built for another graph");
   }
+  return detail::bottleneck_of(g, residual(), srcs, elig);
+}
+
+namespace detail {
+
+std::vector<EdgeId> bottleneck_of(const Graph& g, std::span<const Amount> residual,
+                                  std::span<const NodeId> sources, const Eligibility* elig) {
   const auto n = static_cast<std::size_t>(g.num_nodes());
   const auto m = static_cast<std::size_t>(g.num_edges());
   const auto edge_src = g.edge_src();
@@ -157,8 +164,9 @@ std::vector<EdgeId> FlowGraph::bottleneck(std::span<const NodeId> sources, const
   const auto row = g.row_offsets();
   std::vector<std::uint8_t> seen(n, 0);
   std::vector<NodeId> stack;
-  for (NodeId s : srcs) {
+  for (NodeId s : sources) {
     if (elig != nullptr && !elig->node_ok(s)) continue;
+    if (seen[static_cast<std::size_t>(s)] != 0) continue;
     seen[static_cast<std::size_t>(s)] = 1;
     stack.push_back(s);
   }
@@ -168,7 +176,7 @@ std::vector<EdgeId> FlowGraph::bottleneck(std::span<const NodeId> sources, const
     for (auto e = row[u]; e < row[u + 1]; ++e) {
       const auto ei = static_cast<std::size_t>(e);
       if (elig != nullptr && !elig->edge_ok(e)) continue;
-      if (baseline_[ei] - allocated_[ei] < 1) continue;
+      if (residual[ei] < 1) continue;
       const auto v = static_cast<std::size_t>(edge_dst[ei]);
       if (seen[v] == 0) {
         seen[v] = 1;
@@ -186,15 +194,17 @@ std::vector<EdgeId> FlowGraph::bottleneck(std::span<const NodeId> sources, const
   return out;
 }
 
-void FlowGraph::reset() {
+} // namespace detail
+
+void FlowLedger::reset() {
   check_usable();
   reset(graph_->capacity_units());
 }
 
-void FlowGraph::reset(std::span<const Amount> residual) {
+void FlowLedger::reset(std::span<const Amount> residual) {
   check_usable();
   if (num_bound_ != 0) {
-    throw std::invalid_argument("FlowGraph.reset is rejected while a policy is bound (" +
+    throw std::invalid_argument("FlowLedger.reset is rejected while a policy is bound (" +
                                 std::to_string(num_bound_) + " bound)");
   }
   auto baseline = checked_baseline(residual);
@@ -265,20 +275,10 @@ private:
 };
 
 FlowRecord record_of(std::uint64_t uid, std::int64_t id, std::int64_t owner, Draft& d) {
-  FlowRecord rec;
+  FlowRecord rec = std::move(d.record);
   rec.flow_id = FlowId {uid, id};
   rec.owner = owner;
-  rec.sources = std::move(d.sources);
-  rec.destinations = std::move(d.destinations);
-  rec.placement = d.placement;
-  rec.admission = d.admission;
-  rec.bundle = std::move(d.bundle);
-  rec.route_cost = d.route_cost;
-  rec.offered = d.offered;
-  rec.delivered = d.delivered;
-  rec.edges = std::move(d.edges);
   std::erase_if(rec.edges, [](const auto& p) { return p.second == 0; });
-  rec.drops = std::move(d.drops);
   std::erase_if(rec.drops, [](const auto& p) { return p.second.is_zero(); });
   return rec;
 }
@@ -289,7 +289,7 @@ static_assert(std::is_nothrow_swappable_v<std::vector<std::int64_t>>);
 
 } // namespace
 
-std::int64_t LedgerAccess::bind(FlowGraph& fg) {
+std::int64_t LedgerAccess::bind(FlowLedger& fg) {
   fg.check_usable();
   const std::int64_t owner = fg.next_owner_;
   fg.owners_.emplace(owner, true);  // the only allocation: nothing changes if it throws
@@ -298,14 +298,14 @@ std::int64_t LedgerAccess::bind(FlowGraph& fg) {
   return owner;
 }
 
-void LedgerAccess::release(FlowGraph& fg, std::int64_t owner) noexcept {
+void LedgerAccess::release(FlowLedger& fg, std::int64_t owner) noexcept {
   const auto it = fg.owners_.find(owner);
   if (it == fg.owners_.end() || !it->second) return;
   it->second = false;
   --fg.num_bound_;
 }
 
-std::vector<std::int64_t> LedgerAccess::detach(FlowGraph& fg, std::int64_t owner) {
+std::vector<std::int64_t> LedgerAccess::detach(FlowLedger& fg, std::int64_t owner) {
   fg.check_usable();
   if (!is_bound(fg.owners_, owner)) throw std::logic_error("ledger: detach by an unbound owner");
   std::vector<std::int64_t> ids;
@@ -322,7 +322,7 @@ std::vector<std::int64_t> LedgerAccess::detach(FlowGraph& fg, std::int64_t owner
   return ids;
 }
 
-std::vector<FlowId> LedgerAccess::commit(FlowGraph& fg, std::int64_t owner, std::span<Draft> drafts) {
+std::vector<FlowId> LedgerAccess::commit(FlowLedger& fg, std::int64_t owner, std::span<Draft> drafts) {
   fg.check_usable();
   if (!is_bound(fg.owners_, owner)) throw std::logic_error("ledger: commit by an unbound owner");
   // The drafts carry exactly the owner's live records plus new ones.
@@ -352,7 +352,8 @@ std::vector<FlowId> LedgerAccess::commit(FlowGraph& fg, std::int64_t owner, std:
   }
   bool negative = false;
   for (const auto& d : drafts) {
-    for (const auto& [e, x] : d.edges) {
+    const FlowRecord& r = d.record;
+    for (const auto& [e, x] : r.edges) {
       negative = negative || x < 0;
       delta.add(e, x);
     }
@@ -411,34 +412,34 @@ std::vector<FlowId> LedgerAccess::commit(FlowGraph& fg, std::int64_t owner, std:
   return created;
 }
 
-const FlowRecord& LedgerAccess::live(const FlowGraph& fg, std::int64_t id) {
+const FlowRecord& LedgerAccess::live(const FlowLedger& fg, std::int64_t id) {
   const auto it = fg.records_.find(id);
   if (it == fg.records_.end()) throw std::invalid_argument("ledger: retired or unknown flow id " + std::to_string(id));
   return it->second;
 }
 
-void LedgerAccess::residual_into(const FlowGraph& fg, std::vector<Amount>& out) {
+void LedgerAccess::residual_into(const FlowLedger& fg, std::vector<Amount>& out) {
   fg.check_usable();
   out.resize(fg.baseline_.size());
   for (std::size_t e = 0; e < out.size(); ++e) out[e] = fg.baseline_[e] - fg.allocated_[e];
 }
 
-std::span<const Amount> LedgerAccess::baseline(const FlowGraph& fg) {
+std::span<const Amount> LedgerAccess::baseline(const FlowLedger& fg) {
   fg.check_usable();
   return fg.baseline_;
 }
 
-std::span<const Amount> LedgerAccess::allocated(const FlowGraph& fg) {
+std::span<const Amount> LedgerAccess::allocated(const FlowLedger& fg) {
   fg.check_usable();
   return fg.allocated_;
 }
 
-std::int64_t LedgerAccess::next_flow_id(const FlowGraph& fg) {
+std::int64_t LedgerAccess::next_flow_id(const FlowLedger& fg) {
   fg.check_usable();
   return fg.next_id_;
 }
 
-std::vector<std::int64_t> LedgerAccess::bound_owners(const FlowGraph& fg) {
+std::vector<std::int64_t> LedgerAccess::bound_owners(const FlowLedger& fg) {
   fg.check_usable();
   std::vector<std::int64_t> out;
   for (const auto& [owner, bound] : fg.owners_) {
@@ -447,7 +448,7 @@ std::vector<std::int64_t> LedgerAccess::bound_owners(const FlowGraph& fg) {
   return out;
 }
 
-std::vector<std::int64_t> LedgerAccess::orphan_owners(const FlowGraph& fg) {
+std::vector<std::int64_t> LedgerAccess::orphan_owners(const FlowLedger& fg) {
   fg.check_usable();
   std::vector<std::int64_t> out;
   for (const auto& [owner, bound] : fg.owners_) {

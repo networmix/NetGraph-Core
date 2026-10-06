@@ -1,6 +1,7 @@
-"""The integer ledger FlowGraph through the bindings (APPROACH 8): baselines on unnarrowed
-values, snapshots and records, FlowIds, bottleneck, and the lifetime table driven by the
-private single-bundle Pinned entry of sub-PR 1b (``_netgraph_core._PinnedFlow``)."""
+"""The integer ledger FlowLedger through the bindings (APPROACH 8): baselines on unnarrowed
+values, snapshots and records, FlowIds, bottleneck, and the lifetime table driven by manual
+placements: FlowPolicy with Pinned routing and one bundle (the contract's manual flow), whose
+PlacementResult the tests read."""
 
 from __future__ import annotations
 
@@ -8,18 +9,19 @@ import copy
 import gc
 import math
 
-import _netgraph_core as ext
 import numpy as np
 import pytest
+from private_hooks import HOOKS
 
 import netgraph_core as ngc
 
 L62 = 1 << 62
 INF = math.inf
+T = ngc.Termination
 
 
 def build(n, edges, q=1.0):
-    return ngc.StrictMultiDiGraph(
+    return ngc.Graph(
         n,
         [e[0] for e in edges],
         [e[1] for e in edges],
@@ -44,17 +46,22 @@ def dag_of(g, edges):
 
 
 def pinned(fg, src, dst, edges, placement, admission=None, priority=None, elig=None):
-    g = fg.graph()
-    return ext._PinnedFlow(
-        fg,
-        src,
-        dst,
-        dag_of(g, edges),
-        placement,
-        admission if admission is not None else ngc.Admission.LOSSLESS,
-        priority if priority is not None else ngc.EdgePriority.RESIDUAL,
-        elig,
+    """A manual flow: a FlowPolicy with Pinned routing and one bundle (the edges' DAG)."""
+    cfg = ngc.FlowPolicyConfig(
+        routing=ngc.Pinned([dag_of(fg.graph(), edges)]),
+        placement=placement,
+        admission=admission if admission is not None else ngc.Admission.LOSSLESS,
+        selection=ngc.PathSelection(
+            ngc.EdgeTieBreak.DETERMINISTIC,
+            priority if priority is not None else ngc.EdgePriority.RESIDUAL,
+        ),
     )
+    return ngc.FlowPolicy(fg, src, dst, cfg, elig)
+
+
+def flow_id(policy):
+    recs = policy.records()
+    return recs[0].flow_id if recs else None
 
 
 EB = ngc.FlowPlacement.EQUAL_BALANCED
@@ -65,7 +72,7 @@ LOSSY = ngc.Admission.LOSSY
 
 def test_baseline_validation_order_and_snapshots():
     g = build(2, [(0, 1, 5, 1), (1, 0, 3, 1)])
-    fg = ngc.FlowGraph(g)
+    fg = ngc.FlowLedger(g)
     assert list(fg.residual()) == [5, 3]
     assert fg.residual().dtype == np.int64
     assert list(fg.allocated()) == [0, 0]
@@ -82,23 +89,31 @@ def test_baseline_validation_order_and_snapshots():
         (np.zeros((1, 2), dtype=np.int64), "1-D"),
     ):
         with pytest.raises(ValueError, match=msg):
-            ngc.FlowGraph(g, bad)
-    fg2 = ngc.FlowGraph(graph=g, residual=np.array([1, 2], dtype=np.uint64))
+            ngc.FlowLedger(g, bad)
+    fg2 = ngc.FlowLedger(graph=g, residual=np.array([1, 2], dtype=np.uint64))
     assert list(fg2.residual()) == [1, 2]
     assert fg2.uid() != fg.uid()
 
 
 def test_lifetime_bound_rows_and_epochs():
     g = build(2, [(0, 1, 5, 1)])
-    fg = ngc.FlowGraph(g)
+    fg = ngc.FlowLedger(g)
     p = pinned(fg, 0, 1, [0], EB)
     r = p.place(0)
-    assert (r["termination"], r["routes_changed"], fg.records()) == (
-        "complete",
+    assert (r.placed, r.remaining, r.termination, r.local_outcomes) == (
+        0,
+        0,
+        T.COMPLETE,
+        [(0, T.COMPLETE)],
+    )
+    assert (r.routes_changed, r.weights_changed, r.drops, fg.records()) == (
+        False,
         False,
         [],
+        [],
     )
-    assert fg._state()["next_flow_id"] == 0
+    if HOOKS:
+        assert fg._state()["next_flow_id"] == 0
     with pytest.raises(ValueError, match="bound"):
         fg.reset()
     with pytest.raises(ValueError, match="bound"):
@@ -106,40 +121,59 @@ def test_lifetime_bound_rows_and_epochs():
     with pytest.raises(ValueError, match="bound"):
         copy.copy(fg)
     r = p.place(2)
-    assert (r["placed"], r["routes_changed"], p.flow_id()[1]) == (2, True, 0)
+    assert (r.placed, r.termination, r.routes_changed, flow_id(p)[1]) == (
+        2,
+        T.COMPLETE,
+        True,
+        0,
+    )
     r = p.place(INF)
-    assert (r["placed"], r["termination"], r["remaining"]) == (3, "exhausted", INF)
+    assert (r.placed, r.termination, r.remaining, r.local_outcomes) == (
+        3,
+        T.EXHAUSTED,
+        INF,
+        [(0, T.EXHAUSTED)],
+    )
+    assert (r.routes_changed, r.weights_changed, r.cost_distribution) == (
+        False,
+        False,
+        None,
+    )
     with pytest.raises(ValueError, match=r"after \+inf"):
         p.place(1)
     with pytest.raises(ValueError, match=r"after \+inf"):
         p.place(0)
-    old = p.flow_id()
+    old = flow_id(p)
     p.remove()
     assert list(fg.allocated()) == [0]
     with pytest.raises(ValueError, match="retired or unknown"):
         fg.record(old)
     r = p.place(1)
-    assert (r["placed"], p.flow_id()[1]) == (1, 1)
+    assert (r.placed, r.routes_changed, flow_id(p)[1]) == (1, True, 1)
     p.remove()
     p.remove()
-    assert (p.requested(), p.infinite()) == (0, False)
-    assert fg._state() == {"next_flow_id": 2, "bound": [0], "orphans": []}
+    assert p.records() == []
+    if HOOKS:
+        assert (p._state()["requested"], p._state()["infinite"]) == (0, False)
+        assert fg._state() == {"next_flow_id": 2, "bound": [0], "orphans": []}
 
 
 def test_orphans_from_destruction_reset_and_copy():
     g = build(2, [(0, 1, 5, 1)])
-    fg = ngc.FlowGraph(g)
+    fg = ngc.FlowLedger(g)
     q = pinned(fg, 0, 1, [0], EB)
     q.place(2)
     del q
     gc.collect()  # destroyed without remove(): an orphan
-    assert fg._state()["orphans"] == [0]
+    if HOOKS:
+        assert fg._state()["orphans"] == [0]
     assert fg.records()[0].delivered == 2
     p = pinned(fg, 0, 1, [0], EB)
-    assert p.place(5)["placed"] == 3
-    p.release()
-    with pytest.raises(Exception, match="released"):
-        p.place(1)
+    assert p.place(5).placed == 3
+    with pytest.raises(ValueError, match="bound"):
+        fg.copy()
+    del p
+    gc.collect()  # the second orphan; the ledger has no bound policy left
     c = fg.copy()
     assert c.uid() != fg.uid()
     assert [r.flow_id for r in c.records()] == [(c.uid(), 0), (c.uid(), 1)]
@@ -148,26 +182,32 @@ def test_orphans_from_destruction_reset_and_copy():
     assert list(d.allocated()) == [5]
     fg.reset([4])
     assert (fg.records(), list(fg.residual())) == ([], [4])
-    assert fg._state() == {"next_flow_id": 2, "bound": [], "orphans": []}
+    if HOOKS:
+        assert fg._state() == {"next_flow_id": 2, "bound": [], "orphans": []}
     assert len(c.records()) == 2  # the copy is independent
 
 
 def test_policy_keeps_the_ledger_alive():
     g = build(2, [(0, 1, 5, 1)])
-    fg = ngc.FlowGraph(g)
+    fg = ngc.FlowLedger(g)
     p = pinned(fg, 0, 1, [0], MF)
     del fg
     gc.collect()
-    assert p.place(2)["placed"] == 2
+    assert p.place(2).placed == 2
     assert p.placed_demand() == 2
 
 
 def test_records_fields_and_counters_beyond_64_bits():
     g = build(4, [(0, 1, 10, 1), (0, 2, 10, 1), (1, 3, 1, 1), (2, 3, 10, 1)])
-    fg = ngc.FlowGraph(g)
+    fg = ngc.FlowLedger(g)
     p = pinned(fg, 0, 3, range(4), EB, LOSSY)
     r = p.place(10)
-    assert (r["placed"], r["termination"], r["drops"]) == (6, "complete", [(2, 4)])
+    assert (r.placed, r.remaining, r.termination, r.drops) == (
+        6,
+        4,
+        T.COMPLETE,
+        [(2, 4)],
+    )
     rec = fg.records()[0]
     assert rec.flow_id == (fg.uid(), 0)
     assert (rec.owner, rec.sources, rec.destinations) == (0, [0], [3])
@@ -179,7 +219,7 @@ def test_records_fields_and_counters_beyond_64_bits():
     assert fg.record(rec.flow_id).delivered == 6
     # Lossless records: no offered; a route without a walk at creation: route_cost None.
     g2 = build(2, [(0, 1, 1, 1)])
-    fg2 = ngc.FlowGraph(g2)
+    fg2 = ngc.FlowLedger(g2)
     pinned(fg2, 0, 1, [0], MF).place(1)
     assert fg2.records()[0].offered is None
     # Every unit dropped on a saturated link, nine times: the counters pass 2^64.
@@ -189,7 +229,8 @@ def test_records_fields_and_counters_beyond_64_bits():
     lossy = fg2.records()[1]
     assert lossy.offered == 9 * (L62 - 1)
     assert lossy.drops == [(0, 9 * (L62 - 1))]
-    assert sat.requested() == 9 * (L62 - 1)
+    if HOOKS:
+        assert sat._state()["requested"] == 9 * (L62 - 1)
     assert lossy.offered > 1 << 64
 
 
@@ -198,27 +239,30 @@ def test_empty_split_graph_keeps_the_route_cost():
     # record exists at zero delivery with an empty split graph; route_cost is the bundle's
     # minimum walk cost (APPROACH 8), not a split-graph value.
     g = build(2, [(0, 1, 2, 3)])
-    fg = ngc.FlowGraph(g)
+    fg = ngc.FlowLedger(g)
     pinned(fg, 0, 1, [0], MF).place(2)
     w = pinned(fg, 0, 1, [0], W)
     r = w.place(1)
-    assert (r["placed"], r["termination"], r["routes_changed"]) == (
+    assert (r.placed, r.termination, r.routes_changed, r.weights_changed) == (
         0,
-        "exhausted",
+        T.EXHAUSTED,
         True,
+        False,
     )
-    rec = fg.record(w.flow_id())
+    rec = fg.record(flow_id(w))
     assert (rec.route_cost, rec.delivered, rec.edges) == (3, 0, [])
-    assert w.plan()["members"] == []
+    if HOOKS:
+        flows = next(iter(w._state()["cohorts"].values()))
+        assert flows[0]["members"] == []
 
 
 def test_flow_ids_of_other_ledgers_and_bad_shapes():
     g = build(2, [(0, 1, 5, 1)])
-    a, b = ngc.FlowGraph(g), ngc.FlowGraph(g)
+    a, b = ngc.FlowLedger(g), ngc.FlowLedger(g)
     p = pinned(a, 0, 1, [0], MF)
     p.place(1)
     with pytest.raises(ValueError, match="another ledger"):
-        b.record(p.flow_id())
+        b.record(flow_id(p))
     with pytest.raises(ValueError, match="tuple"):
         a.record(0)
     with pytest.raises(ValueError, match="retired or unknown"):
@@ -227,7 +271,7 @@ def test_flow_ids_of_other_ledgers_and_bad_shapes():
 
 def test_requests_are_integer_units_or_inf():
     g = build(2, [(0, 1, 5, 1)])
-    fg = ngc.FlowGraph(g)
+    fg = ngc.FlowLedger(g)
     p = pinned(fg, 0, 1, [0], EB)
     for bad, msg in (
         (1.5, "integer units or"),
@@ -240,14 +284,15 @@ def test_requests_are_integer_units_or_inf():
         with pytest.raises(ValueError, match=msg):
             p.place(bad)
     assert fg.records() == []
-    assert p.place(np.int64(2))["placed"] == 2
+    assert p.place(np.int64(2)).placed == 2
 
 
 def test_bottleneck_versus_min_cut():
     g = build(4, [(0, 1, 1, 1), (0, 2, 2, 3), (1, 2, 1, 1), (2, 3, 2, 1)])
-    fg = ngc.FlowGraph(g)
+    fg = ngc.FlowLedger(g)
     p = pinned(fg, 0, 3, range(4), MF)
-    assert p.place(INF)["placed"] == 2
+    r = p.place(INF)
+    assert (r.placed, r.termination) == (2, T.EXHAUSTED)
     inv = [0] * 4
     for e, pos in enumerate(g.input_index()):
         inv[pos] = e
@@ -264,7 +309,7 @@ def test_bottleneck_versus_min_cut():
 
 def test_pinned_construction_errors():
     g = build(3, [(0, 1, 5, 1), (2, 1, 5, 1)])
-    fg = ngc.FlowGraph(g)
+    fg = ngc.FlowLedger(g)
     with pytest.raises(ValueError, match="malformed bundle"):
         pinned(fg, 0, 2, [0, 1], MF)
     with pytest.raises(ValueError, match="Lossy"):
@@ -274,15 +319,14 @@ def test_pinned_construction_errors():
     with pytest.raises(ValueError, match="both endpoint sets"):
         pinned(fg, 1, 1, [0], MF)
     other = build(3, [(0, 1, 5, 1), (2, 1, 5, 1)])
+    foreign = ngc.FlowPolicyConfig(
+        routing=ngc.Pinned([dag_of(other, [0])]),
+        placement=MF,
+        admission=ngc.Admission.LOSSLESS,
+        selection=ngc.PathSelection(
+            ngc.EdgeTieBreak.DETERMINISTIC, ngc.EdgePriority.RESIDUAL
+        ),
+    )
     with pytest.raises(ValueError, match="foreign PredDAG"):
-        ext._PinnedFlow(
-            fg,
-            0,
-            1,
-            dag_of(other, [0]),
-            MF,
-            ngc.Admission.LOSSLESS,
-            ngc.EdgePriority.RESIDUAL,
-            None,
-        )
-    assert fg._state()["bound"] == []
+        ngc.FlowPolicy(fg, 0, 1, foreign)
+    fg.reset()  # no policy is bound

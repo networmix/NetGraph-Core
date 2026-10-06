@@ -1,4 +1,4 @@
-// The internal search of APPROACH 6 (sub-PR 1b; public spf in 1d): the member graph and
+// The internal search of APPROACH 6: the member graph and
 // select_adjacency, the unique DAG in both directions, anycast pruning, the staged canonical
 // single path on the review witnesses and against exhaustive enumeration, validation.
 #include <gtest/gtest.h>
@@ -13,12 +13,11 @@
 #include <vector>
 
 #include "netgraph/core/detail/search.hpp"
-#include "netgraph/core/flow.hpp"
+#include "netgraph/core/options.hpp"
 #include "test_utils.hpp"
 
 using namespace netgraph::core;
 using namespace netgraph::core::test;
-using netgraph::core::detail::Direction;
 
 namespace {
 
@@ -44,7 +43,7 @@ std::string error_of(const std::function<void()>& fn) {
   return "";
 }
 
-detail::SpfOut run(const StrictMultiDiGraph& g, std::vector<NodeId> roots, Direction dir,
+detail::SpfOut run(const Graph& g, std::vector<NodeId> roots, Direction dir,
                    std::optional<std::vector<NodeId>> targets, const PathSelection& s,
                    std::optional<std::vector<Amount>> residual = std::nullopt, Amount min_residual = 1,
                    const Eligibility* elig = nullptr) {
@@ -204,8 +203,6 @@ TEST(Search, StagedPathBottleneckThenHopsThenIds) {
   auto pri = run(g, {0}, Direction::Forward, std::vector<NodeId> {3},
                  sel(false, true, EdgeTieBreak::PreferHigherPriority, EdgePriority::Capacity));
   EXPECT_EQ(pri.path->walk, (std::vector<EdgeId>{inv[2], inv[3]}));
-  ASSERT_TRUE(pri.path->b_star.has_value());
-  EXPECT_EQ(pri.path->b_star->num, 3);
   // Residual priority reads the residual: on capacities 5 everywhere and residuals by input
   // [5, 4, 1, 3, 2], 0->1->3 has bottleneck 4, 0->2->3 has 1, the direct edge 2: B* = 4.
   auto g5 = make_graph(4, {{0, 1, 5, 1}, {1, 3, 5, 1}, {0, 2, 5, 1}, {2, 3, 5, 1}, {0, 3, 5, 2}});
@@ -226,7 +223,7 @@ TEST(Search, StagedPathBottleneckThenHopsThenIds) {
 namespace {
 
 // Every simple path from a source to a destination over the members (tiny graphs).
-void enumerate(const StrictMultiDiGraph& g, const std::vector<std::uint8_t>& member, NodeId u,
+void enumerate(const Graph& g, const std::vector<std::uint8_t>& member, NodeId u,
                const std::vector<NodeId>& dsts, std::vector<EdgeId>& walk, std::vector<std::uint8_t>& on,
                std::vector<std::vector<EdgeId>>& out) {
   if (std::find(dsts.begin(), dsts.end(), u) != dsts.end()) {
@@ -330,7 +327,7 @@ TEST(Search, StagedPathReview13CanonicalWitnesses) {
   // (all capacities 1: priority ties), both directions.
   auto c2 = make_graph(4, {{0, 1, 1, 9}, {0, 2, 1, 1}, {1, 3, 1, 1}, {2, 3, 1, 9}});
   auto three = make_graph(6, {{0, 2, 1, 1}, {2, 3, 1, 1}, {3, 5, 1, 1}, {0, 1, 1, 1}, {1, 4, 1, 1}, {4, 5, 1, 1}});
-  auto nodes_of = [](const StrictMultiDiGraph& g, const std::vector<EdgeId>& walk) {
+  auto nodes_of = [](const Graph& g, const std::vector<EdgeId>& walk) {
     std::vector<NodeId> out = {g.edge_src()[static_cast<std::size_t>(walk.front())]};
     for (EdgeId e : walk) out.push_back(g.edge_dst()[static_cast<std::size_t>(e)]);
     return out;

@@ -15,7 +15,7 @@ L64 = 1 << 64
 
 
 def build(n, edges, q=1.0):
-    return ngc.StrictMultiDiGraph(
+    return ngc.Graph(
         n,
         [e[0] for e in edges],
         [e[1] for e in edges],
@@ -114,7 +114,6 @@ def test_path_cost_hops_and_to_dag():
     p = ngc.Path(g, [[1, 0], [3]])
     assert (p.src(), p.dst(), p.cost()) == (0, 2, 2)
     assert p.hops() == [[1, 0], [3]]  # the caller's member order is kept
-    assert p.nodes() == [0, 1, 2]
     dag = p.to_dag()
     assert list(dag.parent_offsets()) == [0, 0, 2, 3]
     assert list(dag.via_edges()) == [0, 1, 3]

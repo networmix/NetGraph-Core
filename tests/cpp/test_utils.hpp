@@ -12,10 +12,15 @@
 #include <string>
 #include <vector>
 
-#include "netgraph/core/max_flow.hpp"
-#include "netgraph/core/strict_multidigraph.hpp"
+#include "netgraph/core/detail/flow_core.hpp"
+#include "netgraph/core/graph.hpp"
 
 namespace netgraph::core::test {
+
+using detail::FlowCoreResult;
+using detail::kMaxFlowCap;
+using detail::kNeverReached;
+using detail::place_global_units;
 
 // An edge in input coordinates.
 struct InEdge {
@@ -25,7 +30,7 @@ struct InEdge {
   Cost cost;
 };
 
-inline StrictMultiDiGraph make_graph(std::int32_t n, const std::vector<InEdge>& edges, double q = 1.0) {
+inline Graph make_graph(std::int32_t n, const std::vector<InEdge>& edges, double q = 1.0) {
   std::vector<NodeId> src, dst;
   std::vector<Amount> cap;
   std::vector<Cost> cost;
@@ -35,11 +40,11 @@ inline StrictMultiDiGraph make_graph(std::int32_t n, const std::vector<InEdge>& 
     cap.push_back(e.cap);
     cost.push_back(e.cost);
   }
-  return StrictMultiDiGraph(n, src, dst, cap, cost, q);
+  return Graph(n, src, dst, cap, cost, q);
 }
 
 // The caller's inverse of input_index(): input position -> EdgeId.
-inline std::vector<EdgeId> id_of_input(const StrictMultiDiGraph& g) {
+inline std::vector<EdgeId> id_of_input(const Graph& g) {
   auto ii = g.input_index();
   std::vector<EdgeId> inv(ii.size());
   for (std::size_t e = 0; e < ii.size(); ++e) inv[static_cast<std::size_t>(ii[e])] = static_cast<EdgeId>(e);
@@ -48,7 +53,7 @@ inline std::vector<EdgeId> id_of_input(const StrictMultiDiGraph& g) {
 
 // A per-edge array in input order, permuted to id order.
 template <typename T>
-std::vector<T> to_ids(const StrictMultiDiGraph& g, const std::vector<T>& by_input) {
+std::vector<T> to_ids(const Graph& g, const std::vector<T>& by_input) {
   auto ii = g.input_index();
   std::vector<T> out(ii.size());
   for (std::size_t e = 0; e < ii.size(); ++e) out[e] = by_input[static_cast<std::size_t>(ii[e])];
@@ -57,7 +62,7 @@ std::vector<T> to_ids(const StrictMultiDiGraph& g, const std::vector<T>& by_inpu
 
 // A per-edge array in id order, permuted to input order.
 template <typename T>
-std::vector<T> to_input(const StrictMultiDiGraph& g, std::span<const T> by_id) {
+std::vector<T> to_input(const Graph& g, std::span<const T> by_id) {
   auto ii = g.input_index();
   std::vector<T> out(ii.size());
   for (std::size_t e = 0; e < ii.size(); ++e) out[static_cast<std::size_t>(ii[e])] = by_id[e];
@@ -65,12 +70,12 @@ std::vector<T> to_input(const StrictMultiDiGraph& g, std::span<const T> by_id) {
 }
 
 template <typename T>
-std::vector<T> to_input(const StrictMultiDiGraph& g, const std::vector<T>& by_id) {
+std::vector<T> to_input(const Graph& g, const std::vector<T>& by_id) {
   return to_input(g, std::span<const T>(by_id));
 }
 
 // EdgeIds translated to sorted input positions.
-inline std::vector<std::int32_t> ids_to_input(const StrictMultiDiGraph& g, const std::vector<EdgeId>& ids) {
+inline std::vector<std::int32_t> ids_to_input(const Graph& g, const std::vector<EdgeId>& ids) {
   std::vector<std::int32_t> out;
   for (EdgeId e : ids) out.push_back(g.input_index()[static_cast<std::size_t>(e)]);
   std::sort(out.begin(), out.end());
@@ -79,7 +84,7 @@ inline std::vector<std::int32_t> ids_to_input(const StrictMultiDiGraph& g, const
 
 inline std::vector<std::pair<Cost, Amount>> curve(std::initializer_list<std::pair<Cost, Amount>> c) { return c; }
 
-inline FlowCoreResult solve(const StrictMultiDiGraph& g, std::vector<NodeId> s, std::vector<NodeId> d,
+inline FlowCoreResult solve(const Graph& g, std::vector<NodeId> s, std::vector<NodeId> d,
                             std::optional<Amount> cap, const std::vector<Amount>* view = nullptr,
                             const Eligibility* elig = nullptr) {
   std::vector<Amount> full(g.capacity_units().begin(), g.capacity_units().end());
@@ -97,7 +102,7 @@ inline bool same_payload(const FlowCoreResult& a, const FlowCoreResult& b) {
 
 // Value -> minimum cost of every integer flow value, by enumerating every integer flow on the
 // eligible edges (small graphs only). Independent of the solver.
-inline std::map<Amount, __int128> exhaustive_costs(const StrictMultiDiGraph& g, std::span<const Amount> view,
+inline std::map<Amount, __int128> exhaustive_costs(const Graph& g, std::span<const Amount> view,
                                                    const std::vector<NodeId>& srcs, const std::vector<NodeId>& dsts,
                                                    const Eligibility* elig) {
   const auto m = static_cast<std::size_t>(g.num_edges());
@@ -143,7 +148,7 @@ inline std::map<Amount, __int128> exhaustive_costs(const StrictMultiDiGraph& g, 
 // Breakpoints [(value, cost)] of the min-cost curve by successive shortest paths with
 // Bellman-Ford on the residual (no potentials, no Dinic, its own arc order); run to
 // disconnection. Independent of the solver.
-inline std::vector<std::pair<Amount, __int128>> independent_curve(const StrictMultiDiGraph& g,
+inline std::vector<std::pair<Amount, __int128>> independent_curve(const Graph& g,
                                                                   std::span<const Amount> view,
                                                                   const std::vector<NodeId>& srcs,
                                                                   const std::vector<NodeId>& dsts,
@@ -228,7 +233,7 @@ inline std::vector<std::pair<Amount, __int128>> payload_points(const FlowCoreRes
 // The certificate of APPROACH 2.2 in two ordered branches. Returns the failed clauses. With
 // `tier_a`, the complete curve is compared with the exhaustive optimum of every value; else with
 // the independent Bellman-Ford curve at the union of both breakpoint sets.
-inline std::vector<std::string> certify(const StrictMultiDiGraph& g, std::span<const Amount> view,
+inline std::vector<std::string> certify(const Graph& g, std::span<const Amount> view,
                                         std::vector<NodeId> srcs, std::vector<NodeId> dsts,
                                         std::optional<Amount> cap, const Eligibility* elig,
                                         const FlowCoreResult& r, bool tier_a) {

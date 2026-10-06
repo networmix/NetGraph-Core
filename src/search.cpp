@@ -1,5 +1,6 @@
 /*
-  The search semantics of APPROACH 6 as internal routines (sub-PR 1b; public in 1d).
+  The search semantics of APPROACH 6 as internal routines, and the constructor of their
+  PathSelection.
 
   Distances are int64 path costs: every cost is positive and the sum of all costs is below
   2^62, so no simple path cost overflows and kUnreachable (INT64_MAX) never collides. Dijkstra
@@ -15,8 +16,10 @@
 #include <string>
 #include <utility>
 
+#include "netgraph/core/detail/endpoints.hpp"
+#include "netgraph/core/detail/enum_domain.hpp"
 #include "netgraph/core/detail/int128.hpp"
-#include "netgraph/core/flow.hpp"
+#include "netgraph/core/detail/pred_dag_builder.hpp"
 
 namespace netgraph::core::detail {
 
@@ -28,39 +31,20 @@ int compare(const Priority& a, const Priority& b) noexcept {
   return left < right ? -1 : 1;
 }
 
+Priority priority_value(EdgePriority priority, Amount residual, Amount capacity) noexcept {
+  if (priority == EdgePriority::Capacity) return {capacity, 1, false};
+  if (priority == EdgePriority::Residual) return {residual, 1, false};
+  return {residual, capacity, false};
+}
+
 Priority PriorityValues::of(EdgeId e) const noexcept {
   const auto ei = static_cast<std::size_t>(e);
   const Amount cap = g->capacity_units()[ei];
-  if (residual.empty() || priority == EdgePriority::Capacity) return {cap, 1, false};
-  if (priority == EdgePriority::Residual) return {residual[ei], 1, false};
-  return {residual[ei], cap, false};
+  if (residual.empty()) return {cap, 1, false};
+  return priority_value(priority, residual[ei], cap);
 }
 
-std::vector<NodeId> node_set(std::span<const NodeId> nodes, std::int32_t num_nodes, const char* name) {
-  if (nodes.empty()) throw std::invalid_argument(std::string(name) + ": the node set is empty");
-  std::vector<NodeId> out(nodes.begin(), nodes.end());
-  for (NodeId v : out) {
-    if (v < 0 || v >= num_nodes) {
-      throw std::invalid_argument(std::string(name) + ": node " + std::to_string(v) + " out of node range [0, " +
-                                  std::to_string(num_nodes) + ")");
-    }
-  }
-  std::sort(out.begin(), out.end());
-  out.erase(std::unique(out.begin(), out.end()), out.end());
-  return out;
-}
-
-void check_disjoint(std::span<const NodeId> a, std::span<const NodeId> b) {
-  for (std::size_t i = 0, k = 0; i < a.size() && k < b.size();) {
-    if (a[i] == b[k]) {
-      throw std::invalid_argument("node " + std::to_string(a[i]) +
-                                  " is in both endpoint sets: the sets must not overlap");
-    }
-    if (a[i] < b[k]) ++i; else ++k;
-  }
-}
-
-std::vector<std::uint8_t> member_mask(const StrictMultiDiGraph& g, const Eligibility* elig,
+std::vector<std::uint8_t> member_mask(const Graph& g, const Eligibility* elig,
                                       const PathSelection& selection, std::span<const Amount> residual,
                                       Amount min_residual) {
   const auto m = static_cast<std::size_t>(g.num_edges());
@@ -75,8 +59,8 @@ std::vector<std::uint8_t> member_mask(const StrictMultiDiGraph& g, const Eligibi
   if (selection.multi_edge) return member;
   // Collapse: one member per (u, v) by select_adjacency.
   const PriorityValues prio {&g, selection.priority, residual};
+  const auto value = [&prio](EdgeId e) { return prio.of(e); };
   const bool prefer = selection.tie_break == EdgeTieBreak::PreferHigherPriority;
-  const auto cost = g.cost();
   const auto edge_dst = g.edge_dst();
   const auto row = g.row_offsets();
   std::vector<EdgeId> best(static_cast<std::size_t>(g.num_nodes()), -1);
@@ -93,15 +77,7 @@ std::vector<std::uint8_t> member_mask(const StrictMultiDiGraph& g, const Eligibi
         touched.push_back(static_cast<NodeId>(v));
         continue;
       }
-      const auto ci = static_cast<std::size_t>(cur);
-      bool better = false;
-      if (cost[ei] != cost[ci]) {
-        better = cost[ei] < cost[ci];
-      } else if (prefer) {
-        const int c = compare(prio.of(e), prio.of(cur));
-        better = c > 0;  // equal priority: the lower EdgeId (cur, seen first) stays
-      }
-      if (better) best[v] = e;
+      if (replaces(g, e, cur, prefer, value)) best[v] = e;
     }
     for (std::size_t e = static_cast<std::size_t>(row[static_cast<std::size_t>(u)]);
          e < static_cast<std::size_t>(row[static_cast<std::size_t>(u) + 1]); ++e) {
@@ -119,7 +95,7 @@ using MinHeap = std::priority_queue<HeapEntry, std::vector<HeapEntry>, std::grea
 
 } // namespace
 
-std::vector<Cost> distances(const StrictMultiDiGraph& g, std::span<const std::uint8_t> member,
+std::vector<Cost> distances(const Graph& g, std::span<const std::uint8_t> member,
                             std::span<const NodeId> roots, Direction direction) {
   const auto n = static_cast<std::size_t>(g.num_nodes());
   std::vector<Cost> dist(n, kUnreachable);
@@ -166,7 +142,7 @@ std::vector<Cost> distances(const StrictMultiDiGraph& g, std::span<const std::ui
   return dist;
 }
 
-std::vector<EdgeId> full_dag(const StrictMultiDiGraph& g, std::span<const std::uint8_t> member,
+std::vector<EdgeId> full_dag(const Graph& g, std::span<const std::uint8_t> member,
                              std::span<const Cost> dist, Direction direction) {
   const auto cost = g.cost();
   const auto edge_src = g.edge_src();
@@ -183,7 +159,7 @@ std::vector<EdgeId> full_dag(const StrictMultiDiGraph& g, std::span<const std::u
   return out;
 }
 
-TightDag tight_dag(const StrictMultiDiGraph& g, std::span<const std::uint8_t> member, std::span<const NodeId> sources,
+TightDag tight_dag(const Graph& g, std::span<const std::uint8_t> member, std::span<const NodeId> sources,
                    std::span<const NodeId> destinations) {
   const auto n = static_cast<std::size_t>(g.num_nodes());
   const auto cost = g.cost();
@@ -260,9 +236,9 @@ TightDag tight_dag(const StrictMultiDiGraph& g, std::span<const std::uint8_t> me
   return out;
 }
 
-std::optional<SinglePath> canonical_path(const StrictMultiDiGraph& g, std::span<const std::uint8_t> member,
+std::optional<SinglePath> canonical_path(const Graph& g, std::span<const std::uint8_t> member,
                                          std::span<const NodeId> sources, std::span<const NodeId> destinations,
-                                         const PriorityValues* priority, std::optional<Priority> prefix_cap) {
+                                         const PriorityValues* priority) {
   TightDag tight = tight_dag(g, member, sources, destinations);
   if (tight.cost == kUnreachable) return std::nullopt;
   const auto n = static_cast<std::size_t>(g.num_nodes());
@@ -303,8 +279,6 @@ std::optional<SinglePath> canonical_path(const StrictMultiDiGraph& g, std::span<
       if (!b_star.has_value() || compare(*best[ti], *b_star) > 0) b_star = best[ti];
     }
     if (!b_star.has_value()) return std::nullopt;
-    if (prefix_cap.has_value() && compare(*prefix_cap, *b_star) < 0) b_star = prefix_cap;
-    out.b_star = b_star;
     std::vector<EdgeId> kept;
     for (EdgeId e : dag) {
       if (compare(priority->of(e), *b_star) >= 0) kept.push_back(e);
@@ -367,25 +341,19 @@ std::optional<SinglePath> canonical_path(const StrictMultiDiGraph& g, std::span<
   Cost walk_cost = 0;
   for (EdgeId e : out.walk) walk_cost += cost[static_cast<std::size_t>(e)];
   if (walk_cost != out.cost) throw std::logic_error("canonical path: the walk is not tight");
-  if (priority != nullptr) {
-    Priority b {0, 1, true};
-    for (EdgeId e : out.walk) {
-      const Priority p = priority->of(e);
-      if (compare(p, b) < 0) b = p;
-    }
-    out.bottleneck = b;
-  }
   return out;
 }
 
-SpfOut spf(const StrictMultiDiGraph& g, std::span<const NodeId> roots, Direction direction,
+SpfOut spf(const Graph& g, std::span<const NodeId> roots, Direction direction,
            std::optional<std::span<const NodeId>> targets, const PathSelection& selection,
            std::optional<std::span<const Amount>> residual_arg, Amount min_residual, const Eligibility* elig) {
+  check_member(direction, "direction");
+  check_selection(selection);
   const auto root_set = node_set(roots, g.num_nodes(), "roots");
   std::vector<NodeId> target_set;
   if (targets.has_value()) {
     target_set = node_set(*targets, g.num_nodes(), "targets");
-    check_disjoint(root_set, target_set);
+    check_disjoint(root_set, target_set, "roots", "targets");
   } else if (!selection.multipath) {
     throw std::invalid_argument("multipath = false requires targets (the single path joins a root to a target)");
   }
@@ -449,4 +417,22 @@ SpfOut spf(const StrictMultiDiGraph& g, std::span<const NodeId> roots, Direction
   return out;
 }
 
+PredDAG static_support(const Graph& g, std::span<const NodeId> roots, Direction direction,
+                       const Eligibility* elig) {
+  const PathSelection full(EdgeTieBreak::Deterministic, EdgePriority::Capacity, true, true);
+  const auto out = spf(g, roots, direction, std::nullopt, full, std::nullopt, 1, elig);
+  return PredDAGBuilder::of_edges(g, out.edges);
+}
+
 } // namespace netgraph::core::detail
+
+namespace netgraph::core {
+
+// The selection of a search (options.hpp): its two enum-typed fields inside their enumerations.
+PathSelection::PathSelection(EdgeTieBreak tie_break_, EdgePriority priority_, bool multipath_, bool multi_edge_)
+    : tie_break(tie_break_), priority(priority_), multipath(multipath_), multi_edge(multi_edge_) {
+  detail::check_member(tie_break, "tie_break");
+  detail::check_member(priority, "priority");
+}
+
+} // namespace netgraph::core

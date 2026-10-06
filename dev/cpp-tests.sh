@@ -17,7 +17,7 @@ if [[ "$(uname -s)" == Darwin ]]; then
 else
     leak_detection=1
 fi
-cmake -S . -B "$build_dir" -DNETGRAPH_CORE_BUILD_TESTS=ON \
+cmake -S . -B "$build_dir" -DNETGRAPH_CORE_BUILD_TESTS=ON -DNETGRAPH_CORE_PRIVATE_HOOKS=ON \
     -DNETGRAPH_CORE_SANITIZE="$sanitize" -DCMAKE_BUILD_TYPE="$build_type"
 cmake --build "$build_dir" --config "$build_type" --parallel "$jobs"
 if [[ "$sanitize" == ON ]]; then

@@ -1,10 +1,11 @@
-"""The private entries of sub-PR 1b: the internal search (``_spf``, APPROACH 6) and the
-apportionment (``_round_robin``, ``_highest_averages``, APPROACH 2.1)."""
+"""The internal search through its private entry (``_spf``, APPROACH 6) and the apportionment
+through the private hooks (``_round_robin``, ``_highest_averages``, APPROACH 2.1)."""
 
 from __future__ import annotations
 
 import _netgraph_core as ext
 import pytest
+from private_hooks import needs_hooks
 
 import netgraph_core as ngc
 
@@ -14,7 +15,7 @@ CAP = ngc.EdgePriority.CAPACITY
 
 
 def build(n, edges, q=1.0):
-    return ngc.StrictMultiDiGraph(
+    return ngc.Graph(
         n,
         [e[0] for e in edges],
         [e[1] for e in edges],
@@ -83,6 +84,7 @@ def test_search_validation():
         )
 
 
+@needs_hooks
 def test_apportionment_entries():
     assert ext._round_robin(7, 3) == [3, 2, 2]
     assert ext._highest_averages(10, [3, 9, 9]) == [1, 5, 4]
