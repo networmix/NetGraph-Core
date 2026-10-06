@@ -134,6 +134,33 @@ TEST(Graph, ShapesOfEmptyAndIsolated) {
   EXPECT_EQ(g.cost_gcd(), 2);
 }
 
+// The cost loop after the running GCD reaches 1: every later edge is still checked for a
+// positive cost (in input order: the first bad index is named) and still counts for the
+// maximum; the sums are still validated; the GCD stays 1, and 0 without edges.
+TEST(Graph, CostChecksAndMaximumAfterTheGcdReachesOne) {
+  // The GCD is 1 from the second edge on; the maximum comes later.
+  auto g = build(2, {0, 0, 0, 0}, {1, 1, 1, 1}, {1, 1, 1, 1}, {3, 2, 9, 4});
+  EXPECT_EQ(g.cost_gcd(), 1);
+  EXPECT_EQ(g.max_cost(), 9);
+  auto late = build(2, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, {4, 6, 9});
+  EXPECT_EQ(late.cost_gcd(), 1);  // 1 only at the last edge
+  EXPECT_EQ(late.max_cost(), 9);
+  auto ones = build(2, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, {1, 1, L62 / 4});
+  EXPECT_EQ(ones.cost_gcd(), 1);
+  EXPECT_EQ(ones.max_cost(), L62 / 4);
+  EXPECT_EQ(build(2, {0}, {1}, {1}, {6}).cost_gcd(), 6);
+  EXPECT_EQ(build(2, {0, 0}, {1, 1}, {1, 1}, {6, 4}).cost_gcd(), 2);
+  EXPECT_EQ(build(0, {}, {}, {}, {}).cost_gcd(), 0);
+  // A non-positive cost after the GCD reached 1 is still found, at its own index.
+  const auto zero = error_of([] { (void)build(2, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, {2, 3, 0}); });
+  EXPECT_TRUE(contains(zero, "cost[2] = 0")) << zero;
+  const auto negative = error_of([] { (void)build(2, {0, 0, 0, 0}, {1, 1, 1, 1}, {1, 1, 1, 1}, {1, 5, -7, 0}); });
+  EXPECT_TRUE(contains(negative, "cost[2] = -7")) << negative;
+  // The cost sum after the GCD reached 1.
+  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, {1, L62 / 2, L62 / 2}); }),
+                       "sum of all edge costs"));
+}
+
 TEST(Graph, ExactUnitsAboveTwo53) {
   const Amount big = (Amount{1} << 53) + 1;
   auto g = make_graph(2, {{0, 1, big, 1}});

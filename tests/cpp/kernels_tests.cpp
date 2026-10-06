@@ -8,12 +8,15 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <random>
 #include <stdexcept>
 #include <vector>
 
+#include "netgraph/core/detail/int128.hpp"
 #include "netgraph/core/detail/kernels.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
 #include "test_utils.hpp"
@@ -212,6 +215,64 @@ TEST(Apportion, HighestAveragesNearTheDomainBound) {
       EXPECT_TRUE(left > right || (left == right && i <= j));
     }
   }
+}
+
+// The lower-quota division floor(n / d) on both sides of 2^64: dividends with a zero high word
+// (the 64-bit path) and with a nonzero one (the 128-bit path), divisors near 1, near the units
+// domain bound 2^62 (the call sites divide by a weight sum below it) and near 2^64, against the
+// unsigned __int128 quotient and the defining bounds q * d <= n < (q + 1) * d.
+TEST(Apportion, QuotaDivisionOnBothSidesOfTheSixtyFourBitBoundary) {
+  using u64 = std::uint64_t;
+  using u128 = unsigned __int128;
+  constexpr u64 kMax = std::numeric_limits<u64>::max();
+  const auto domain = static_cast<u64>(kDomainLimit);
+  int narrow = 0, wide = 0;
+  auto check = [&](u64 hi, u64 lo, u64 d) {
+    ASSERT_GT(d, 0u);
+    ASSERT_LT(hi, d);  // the quotient fits 64 bits
+    const u128 n = (static_cast<u128>(hi) << 64) | lo;
+    const u64 q = div_u128(U128 {hi, lo}, d);
+    ASSERT_EQ(q, static_cast<u64>(n / d)) << hi << ":" << lo << " / " << d;
+    const u128 qd = static_cast<u128>(q) * d;
+    ASSERT_TRUE(qd <= n && n - qd < d) << hi << ":" << lo << " / " << d;
+    ++(hi == 0 ? narrow : wide);
+  };
+  const std::vector<u64> divisors = {1,          2,          3,          7,          domain - 2, domain - 1,
+                                     domain,     domain + 1, kMax / 2,   kMax - 1,   kMax};
+  const std::vector<u64> lows = {0, 1, 2, 3, domain - 1, domain, u64 {1} << 63, kMax - 1, kMax};
+  for (u64 d : divisors) {
+    for (u64 lo : lows) {
+      check(0, lo, d);
+      for (u64 hi : {u64 {1}, u64 {2}, d / 2, d - 2, d - 1}) {
+        if (hi > 0 && hi < d) check(hi, lo, d);
+      }
+    }
+    // The dividends next to a multiple of d on both sides of 2^64.
+    for (u64 q : {u64 {1}, u64 {2}, kMax / d, kMax - 1, kMax}) {
+      const u128 at = static_cast<u128>(q) * d;
+      for (u128 n : {at - 1, at, at + 1}) {
+        if (n >> 64 < d) check(static_cast<u64>(n >> 64), static_cast<u64>(n), d);
+      }
+    }
+  }
+  // The call-site shape: total * w / W with total and the weights below 2^62, W the weight sum.
+  for (u64 total : {u64 {1}, u64 {50}, domain - 2, domain - 1}) {
+    for (u64 w : {u64 {1}, u64 {3}, domain / 3, domain - 1}) {
+      for (u64 sum : {w, w + 1, domain - 1}) {
+        if (sum < w) continue;
+        const U128 n = mul_u64(total, w);
+        check(n.hi, n.lo, sum);
+      }
+    }
+  }
+  std::mt19937_64 rng(20261006);
+  for (int i = 0; i < 20000; ++i) {
+    const u64 d = i % 3 == 0 ? 1 + rng() % 4096 : (i % 3 == 1 ? 1 + rng() % (domain - 1) : 1 + rng() % kMax);
+    const u64 hi = i % 2 == 0 ? 0 : rng() % d;
+    check(hi, rng(), d);
+  }
+  EXPECT_GT(narrow, 10000);
+  EXPECT_GT(wide, 10000);
 }
 
 TEST(Apportion, HamiltonHoleControl) {

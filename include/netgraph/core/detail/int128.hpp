@@ -39,6 +39,9 @@ inline U128 mul_u64(std::uint64_t a, std::uint64_t b) noexcept {
 
 // floor(n / d) for d > 0 and a quotient below 2^64 (n.hi < d).
 inline std::uint64_t div_u128(U128 n, std::uint64_t d) noexcept {
+  // A dividend below 2^64 (the common lower quota) takes the 64-bit division: the same quotient
+  // without the 128-bit division helper.
+  if (n.hi == 0) return n.lo / d;
   const unsigned __int128 x = (static_cast<unsigned __int128>(n.hi) << 64) | n.lo;
   return static_cast<std::uint64_t>(x / d);
 }

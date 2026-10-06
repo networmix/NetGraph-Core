@@ -126,7 +126,8 @@ Graph::Graph(std::int32_t num_nodes,
                                   ": costs must be positive (cost >= 1)");
     }
     max_cost = std::max(max_cost, cost[i]);
-    cost_gcd = std::gcd(cost_gcd, cost[i]);
+    // A running GCD of 1 stays 1 (gcd(1, c) = 1): the remaining edges are only checked.
+    if (cost_gcd != 1) cost_gcd = std::gcd(cost_gcd, cost[i]);
   }
   // The remaining bounds.
   for (std::size_t i = 0; i < m; ++i) {
