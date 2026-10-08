@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -71,6 +72,13 @@ struct PolicyEngine {
 struct PolicyAccess {
   [[nodiscard]] static const PolicyEngine& engine(const FlowPolicy& policy) noexcept { return *policy.engine_; }
   [[nodiscard]] static PolicyEngine& engine(FlowPolicy& policy) noexcept { return *policy.engine_; }
+  // A policy constructed inside another public call, whose tally records a supplied frozen
+  // cache's hits (NOTES R27); returned as a prvalue (FlowPolicy does not move).
+  [[nodiscard]] static FlowPolicy make(FlowLedger& ledger, std::span<const NodeId> sources,
+                                       std::span<const NodeId> destinations, FlowPolicyConfig config,
+                                       const Eligibility* elig, DagCache* cache, FrozenTally& tally) {
+    return FlowPolicy(ledger, sources, destinations, std::move(config), elig, cache, tally);
+  }
 };
 
 // The configuration checks of FlowPolicy (APPROACH 9; enumeration values first, rule 13),

@@ -8,12 +8,15 @@
 */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <utility>
 #include <vector>
 
+#include "netgraph/core/detail/traversal.hpp"
 #include "netgraph/core/graph.hpp"
 #include "netgraph/core/options.hpp"
 #include "netgraph/core/pred_dag.hpp"
@@ -67,21 +70,47 @@ struct KernelPlan {
   FlowPlacement placement {FlowPlacement::MaxFlow};
   Admission admission {Admission::Lossless};
   NodeId src {0};
-  std::vector<NodeId> dsts {};       // ascending
   std::vector<EdgeId> route {};      // ascending: the flow's route (its record's bundle)
   std::vector<EdgeId> members {};    // ascending: the split graph
   std::vector<Amount> weights {};    // Weighted: per member (positive), frozen; else empty
-  // The split graph's nodes in a topological order (the source first), with per position its
-  // out-members members[out_begin[p] .. out_end[p]) (consecutive in ascending EdgeId: B' ids
-  // rank edges by source first) and per member the position of its head. Empty when the split
-  // graph is empty.
-  std::vector<NodeId> topo {};
-  std::vector<std::int32_t> out_begin {};
-  std::vector<std::int32_t> out_end {};
-  std::vector<std::int32_t> head_pos {};
-  std::vector<std::uint8_t> terminal {};
+  // The destinations (ascending) and the split graph's nodes in a topological order (the source
+  // first), with per position its out-members members[out_begin[p] .. out_end[p]) (consecutive in
+  // ascending EdgeId: B' ids rank edges by source first) and per member the position of its head;
+  // the structure is empty when the split graph is empty. Views of one block the plan owns
+  // (layout()), so a plan costs one allocation for all of them.
+  std::span<const NodeId> dsts {};
+  std::span<const NodeId> topo {};
+  std::span<const std::int32_t> out_begin {};
+  std::span<const std::int32_t> out_end {};
+  std::span<const std::int32_t> head_pos {};
+  std::span<const std::uint8_t> terminal {};
   std::int32_t src_out_begin {0};
   std::int32_t src_out_end {0};
+
+  KernelPlan() = default;
+  KernelPlan(const KernelPlan& other);
+  KernelPlan(KernelPlan&& other) noexcept;
+  KernelPlan& operator=(const KernelPlan& other);
+  KernelPlan& operator=(KernelPlan&& other) noexcept;
+  ~KernelPlan() = default;
+
+  // The writable views of a new block: the destinations copied in, the structure for `positions`
+  // nodes and `num_members` members zeroed. One allocation, made before anything changes (a
+  // failure leaves the plan as it was); the previous block is released.
+  struct Layout {
+    std::span<NodeId> topo;
+    std::span<std::int32_t> out_begin;
+    std::span<std::int32_t> out_end;
+    std::span<std::int32_t> head_pos;
+    std::span<std::uint8_t> terminal;
+  };
+  Layout layout(std::span<const NodeId> destinations, std::size_t positions, std::size_t num_members);
+
+private:
+  // Points the views into store_ for these sizes (the layout's order: dsts, topo, out_begin,
+  // out_end, head_pos, then terminal as bytes).
+  Layout point(std::size_t num_dsts, std::size_t positions, std::size_t num_members) noexcept;
+  std::vector<std::int32_t> store_ {};
 };
 
 // The edges of `dag` that lie on some walk from `src` to the destination set (edges leaving a
@@ -119,6 +148,38 @@ struct KernelPlan {
 [[nodiscard]] KernelPlan make_route_plan(const Graph& g, FlowPlacement placement, Admission admission,
                                          EdgePriority priority, NodeId src, std::span<const NodeId> dsts,
                                          const PredDAG& bundle, const Eligibility* elig, Cost* cost = nullptr);
+
+// ---------------------------------------------------------------- CostOnly creation (9.1, 10)
+
+// std::lower_bound(a, x) on an ascending `a`, found from position `hint` (the creation walk's
+// previous range): a galloping probe toward x (1, 2, 4, ... away from the hint), then a binary
+// search inside the last step. The answer is std::lower_bound's whatever the hint (the first
+// position holding a value >= x, a.size() when none); only the probes differ.
+[[nodiscard]] std::size_t lower_bound_from(std::span<const EdgeId> a, std::size_t hint, EdgeId x) noexcept;
+
+// The creation products of a CostOnly flow: its record bundle, its plan and its route cost.
+struct CreationProducts {
+  std::shared_ptr<const PredDAG> bundle {};
+  KernelPlan plan {};
+  Cost cost {kUnreachable};
+};
+
+// The products of a CostOnly flow of `src` created on its policy's static support (`support`: a
+// reverse multipath support rooted at the destination set `dsts`) in one pass over its route:
+// support_route's route for `selection` (Collapse on `view`), its record bundle (`support` itself
+// when the route is the whole support, else PredDAGBuilder::of_edges of the route), and make_plan's
+// plan and cost on that bundle, identical to those functions' for every input it accepts. It
+// accepts a multipath selection with a kernel of static membership (every kernel but Weighted with
+// Residual priority) and checks, while it builds, that the plan's members are the whole route:
+// every route edge a member candidate, none leaving a destination, every route node reaching a
+// destination, the source first in the topological order, no cycle, the members of a tail
+// consecutive. Otherwise, and when src reaches no destination, it returns nullopt, and the caller
+// takes those functions' path. Nothing proportional to the graph's size is allocated per call.
+[[nodiscard]] std::optional<CreationProducts> cost_only_creation(const Graph& g,
+                                                                 const std::shared_ptr<const PredDAG>& support,
+                                                                 NodeId src, std::span<const NodeId> dsts,
+                                                                 const PathSelection& selection, PriorityFn view,
+                                                                 FlowPlacement placement, Admission admission);
 
 // ---------------------------------------------------------------- allocation (16.2, 16.3)
 

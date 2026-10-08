@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <bit>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -92,6 +93,81 @@ void check_kernel(FlowPlacement placement, Admission admission, EdgePriority pri
   if (placement == FlowPlacement::Weighted && priority == EdgePriority::Headroom) {
     throw std::invalid_argument("the Weighted kernel is rejected with priority Headroom (weights are units)");
   }
+}
+
+KernelPlan::Layout KernelPlan::point(std::size_t num_dsts, std::size_t positions, std::size_t num_members) noexcept {
+  std::int32_t* at = store_.data();
+  dsts = std::span<const NodeId>(at, num_dsts);
+  at += num_dsts;
+  Layout w;
+  w.topo = std::span<NodeId>(at, positions);
+  at += positions;
+  w.out_begin = std::span<std::int32_t>(at, positions);
+  at += positions;
+  w.out_end = std::span<std::int32_t>(at, positions);
+  at += positions;
+  w.head_pos = std::span<std::int32_t>(at, num_members);
+  at += num_members;
+  w.terminal = std::span<std::uint8_t>(reinterpret_cast<std::uint8_t*>(at), positions);
+  topo = w.topo;
+  out_begin = w.out_begin;
+  out_end = w.out_end;
+  head_pos = w.head_pos;
+  terminal = w.terminal;
+  return w;
+}
+
+KernelPlan::Layout KernelPlan::layout(std::span<const NodeId> destinations, std::size_t positions,
+                                      std::size_t num_members) {
+  const std::size_t words = destinations.size() + 3 * positions + num_members + (positions + 3) / 4;
+  std::vector<std::int32_t> store(words, 0);  // the one allocation
+  store_.swap(store);
+  const Layout w = point(destinations.size(), positions, num_members);
+  std::copy(destinations.begin(), destinations.end(), store_.begin());
+  return w;
+}
+
+KernelPlan::KernelPlan(const KernelPlan& other)
+    : placement(other.placement), admission(other.admission), src(other.src), route(other.route),
+      members(other.members), weights(other.weights), src_out_begin(other.src_out_begin),
+      src_out_end(other.src_out_end), store_(other.store_) {
+  (void)point(other.dsts.size(), other.topo.size(), other.head_pos.size());
+}
+
+KernelPlan::KernelPlan(KernelPlan&& other) noexcept
+    : placement(other.placement), admission(other.admission), src(other.src), route(std::move(other.route)),
+      members(std::move(other.members)), weights(std::move(other.weights)), src_out_begin(other.src_out_begin),
+      src_out_end(other.src_out_end), store_(std::move(other.store_)) {
+  (void)point(other.dsts.size(), other.topo.size(), other.head_pos.size());
+  (void)other.point(0, 0, 0);
+}
+
+KernelPlan& KernelPlan::operator=(const KernelPlan& other) {
+  if (this != &other) {
+    KernelPlan copy(other);
+    *this = std::move(copy);
+  }
+  return *this;
+}
+
+KernelPlan& KernelPlan::operator=(KernelPlan&& other) noexcept {
+  if (this != &other) {
+    placement = other.placement;
+    admission = other.admission;
+    src = other.src;
+    route = std::move(other.route);
+    members = std::move(other.members);
+    weights = std::move(other.weights);
+    src_out_begin = other.src_out_begin;
+    src_out_end = other.src_out_end;
+    const std::size_t nd = other.dsts.size();
+    const std::size_t np = other.topo.size();
+    const std::size_t nm = other.head_pos.size();
+    store_ = std::move(other.store_);
+    (void)point(nd, np, nm);
+    (void)other.point(0, 0, 0);
+  }
+  return *this;
 }
 
 namespace {
@@ -242,11 +318,6 @@ void build_split(const Graph& g, const PredDAG& dag, NodeId src, std::span<const
   if (out == nullptr) return;
   KernelPlan& plan = *out;
   plan.members.clear();
-  plan.topo.clear();
-  plan.terminal.clear();
-  plan.out_begin.clear();
-  plan.out_end.clear();
-  plan.head_pos.clear();
   plan.src_out_begin = 0;
   plan.src_out_end = 0;
   // Members, ascending: the DAG's edges kept, from a reached tail (not a destination) to a head
@@ -277,7 +348,10 @@ void build_split(const Graph& g, const PredDAG& dag, NodeId src, std::span<const
   s.member_tail.resize(n_members);
   s.member_head.resize(n_members);
   const std::size_t num_members = n_members;
-  if (num_members == 0) return;
+  if (num_members == 0) {
+    (void)plan.layout(dsts, 0, 0);
+    return;
+  }
   std::int32_t num_pos = 0;
   for (NodeId v : s.order) {
     if (s.at(v).fwd != 0) s.at(v).position = num_pos++;
@@ -295,24 +369,20 @@ void build_split(const Graph& g, const PredDAG& dag, NodeId src, std::span<const
     ++nt.count;
   }
   const auto P = static_cast<std::size_t>(num_pos);
-  plan.topo.resize(P);
-  plan.terminal.resize(P);
-  plan.out_begin.resize(P);
-  plan.out_end.resize(P);
+  const KernelPlan::Layout w = plan.layout(dsts, P, num_members);
   std::size_t pos = 0;
   for (NodeId v : s.order) {
     const auto& nv = s.at(v);
     if (nv.fwd == 0) continue;
-    plan.topo[pos] = v;
-    plan.terminal[pos] = nv.target;
+    w.topo[pos] = v;
+    w.terminal[pos] = nv.target;
     const std::int32_t b = nv.count == 0 ? 0 : nv.first;
-    plan.out_begin[pos] = b;
-    plan.out_end[pos] = b + nv.count;
+    w.out_begin[pos] = b;
+    w.out_end[pos] = b + nv.count;
     ++pos;
   }
-  plan.head_pos.resize(num_members);
   for (std::size_t m = 0; m < num_members; ++m) {
-    plan.head_pos[m] = s.at(s.member_head[m]).position;
+    w.head_pos[m] = s.at(s.member_head[m]).position;
   }
   plan.src_out_begin = plan.out_begin[0];
   plan.src_out_end = plan.out_end[0];
@@ -346,7 +416,6 @@ KernelPlan make_plan(const Graph& g, FlowPlacement placement, Admission admissio
   plan.placement = placement;
   plan.admission = admission;
   plan.src = src;
-  plan.dsts.assign(dsts.begin(), dsts.end());
   plan.route.assign(edges.begin(), edges.end());
   // The creation view of a route edge (the route ascends: a binary search).
   auto creation = [&](EdgeId e) {
@@ -377,7 +446,6 @@ KernelPlan make_route_plan(const Graph& g, FlowPlacement placement, Admission ad
   plan.placement = placement;
   plan.admission = admission;
   plan.src = src;
-  plan.dsts.assign(dsts.begin(), dsts.end());
   auto usable = [&](EdgeId e) {
     return capacity[static_cast<std::size_t>(e)] >= 1 && (elig == nullptr || elig->edge_ok(e));
   };
@@ -388,6 +456,310 @@ KernelPlan make_route_plan(const Graph& g, FlowPlacement placement, Admission ad
     for (EdgeId e : plan.members) plan.weights.push_back(capacity[static_cast<std::size_t>(e)]);
   }
   return plan;
+}
+
+// ---------------------------------------------------------------- CostOnly creation
+
+namespace {
+
+// Per-thread state of cost_only_creation. Per node (by NodeId) a slot valid only under the
+// current epoch (DagScratch's pattern: nothing is cleared between calls, a call that throws leaves
+// stale slots behind an old epoch, and the one array of slots grows whole or not at all); every
+// other buffer is indexed by the reached nodes' local indices (their rank in ascending NodeId) or
+// by route position, and is rewritten before it is read.
+struct CreationScratch {
+  struct Node {
+    std::uint32_t stamp {0};
+    std::uint8_t reached {0};
+    std::uint8_t target {0};
+    std::int32_t local {0};  // rank among the reached nodes (ascending NodeId)
+    std::int32_t lo {0};     // the node's support out-edges: support[lo, hi)
+    std::int32_t hi {0};
+  };
+  std::uint32_t epoch {0};
+  std::vector<Node> node;
+  std::vector<NodeId> reached;  // the walk's nodes (its queue), then ascending
+  std::vector<EdgeId> route;                               // ascending
+  std::vector<std::int32_t> tail;                          // per route edge: its tail's local index
+  std::vector<std::int32_t> head;                          // per route edge: its head's local index
+  std::vector<std::int32_t> parent;                        // per entry: its parent's local index
+  std::vector<std::int32_t> entry;                         // per local node + 1: its entries (by child)
+  std::vector<std::int32_t> fill;
+  std::vector<EdgeId> via;                                 // the entries: by child, ascending via
+  std::vector<std::uint8_t> state;                         // per local node: DFS 1 open, 2 done
+  std::vector<std::pair<std::int32_t, std::int32_t>> dfs;  // (local node, next entry)
+  std::vector<std::int32_t> order;                         // local nodes, every one after its parents
+  std::vector<std::int32_t> position;                      // per local node
+  std::vector<std::int32_t> first;                         // per local node: its first member
+  std::vector<std::int32_t> count;                         // per local node: its number of members
+  std::vector<Cost> dist;                                  // per local node
+
+  void begin(std::size_t n) {
+    if (node.size() < n) node.resize(n);  // strong guarantee; new slots carry stamp 0
+    if (++epoch == 0) {
+      for (auto& v : node) v.stamp = 0;
+      epoch = 1;
+    }
+  }
+  Node& at(NodeId v) noexcept { return node[static_cast<std::size_t>(v)]; }
+  // The slot of v, reset on its first use in this call.
+  Node& touch(NodeId v) noexcept {
+    auto& x = at(v);
+    if (x.stamp != epoch) {
+      x = Node {};
+      x.stamp = epoch;
+    }
+    return x;
+  }
+};
+
+CreationScratch& creation_scratch() {
+  thread_local CreationScratch s;
+  return s;
+}
+
+} // namespace
+
+std::size_t lower_bound_from(std::span<const EdgeId> a, std::size_t hint, EdgeId x) noexcept {
+  const std::size_t n = a.size();
+  std::size_t lo = 0;
+  std::size_t hi = 0;
+  if (hint < n && a[hint] < x) {
+    // The answer lies in (hint, n]: a[lo - 1] < x throughout.
+    lo = hint + 1;
+    hi = lo;
+    for (std::size_t step = 1; hi < n && a[hi] < x; step <<= 1) {
+      lo = hi + 1;
+      hi = lo + step;
+    }
+    hi = std::min(hi, n);
+  } else {
+    // The answer lies in [0, hint] (hint == n, or a[hint] >= x): a[hi] >= x or hi == n throughout.
+    hi = std::min(hint, n);
+    for (std::size_t step = 1;; step <<= 1) {
+      if (hi < step) {
+        lo = 0;
+        break;
+      }
+      const std::size_t probe = hi - step;
+      if (a[probe] < x) {
+        lo = probe + 1;
+        break;
+      }
+      hi = probe;
+    }
+  }
+  return static_cast<std::size_t>(std::lower_bound(a.begin() + static_cast<std::ptrdiff_t>(lo),
+                                                   a.begin() + static_cast<std::ptrdiff_t>(hi), x) -
+                                  a.begin());
+}
+
+std::optional<CreationProducts> cost_only_creation(const Graph& g, const std::shared_ptr<const PredDAG>& support,
+                                                   NodeId src, std::span<const NodeId> dsts,
+                                                   const PathSelection& selection, PriorityFn view,
+                                                   FlowPlacement placement, Admission admission) {
+  const EdgePriority priority = selection.priority;
+  if (!selection.multipath || (placement == FlowPlacement::Weighted && priority == EdgePriority::Residual)) {
+    return std::nullopt;
+  }
+  check_kernel(placement, admission, priority);
+  const auto sup = PredDAGBuilder::ascending(*support);
+  const auto row = g.row_offsets();
+  const auto edst = g.edge_dst();
+  const auto edge_cost = g.cost();
+  const auto capacity = g.capacity_units();
+  CreationScratch& s = creation_scratch();
+  s.begin(static_cast<std::size_t>(g.num_nodes()));
+  for (NodeId d : dsts) s.touch(d).target = 1;
+  // support_route's walk over the support from src: every reached node keeps its support
+  // out-edges as one range (B' ids rank edges by source first: one tail's edges are consecutive).
+  s.reached.clear();
+  s.touch(src).reached = 1;
+  s.reached.push_back(src);
+  bool any_target = false;
+  std::size_t m = 0;
+  std::size_t hint = 0;
+  for (std::size_t q = 0; q < s.reached.size(); ++q) {  // the reached list is the walk's queue
+    const NodeId u = s.reached[q];
+    const auto ui = static_cast<std::size_t>(u);
+    const std::size_t lo = lower_bound_from(sup, hint, row[ui]);
+    std::size_t hi = lo;
+    for (; hi < sup.size() && sup[hi] < row[ui + 1]; ++hi) {
+      const NodeId v = edst[static_cast<std::size_t>(sup[hi])];
+      auto& nv = s.touch(v);
+      if (nv.reached != 0) continue;
+      nv.reached = 1;
+      s.reached.push_back(v);
+    }
+    auto& nu = s.at(u);
+    any_target = any_target || nu.target != 0;
+    nu.lo = static_cast<std::int32_t>(lo);
+    nu.hi = static_cast<std::int32_t>(hi);
+    m += hi - lo;
+    hint = lo;
+  }
+  if (!any_target || m == 0) return std::nullopt;
+  // The route in ascending EdgeId: the reached nodes' ranges in ascending NodeId (ascending in the
+  // support, checked), each with Collapse when multi_edge is false (support_route's: one member per
+  // (u, v) by select_adjacency on the view), every route edge with its tail's local index. A
+  // destination with route edges, or a route edge that is no member candidate, means build_split
+  // would not keep the whole route: the caller's path then runs.
+  std::sort(s.reached.begin(), s.reached.end());
+  const std::size_t r = s.reached.size();
+  for (std::size_t i = 0; i < r; ++i) s.at(s.reached[i]).local = static_cast<std::int32_t>(i);
+  s.route.resize(m);
+  s.tail.resize(m);
+  s.first.resize(r);
+  s.count.resize(r);
+  const bool collapse = !selection.multi_edge;
+  const bool prefer = selection.tie_break == EdgeTieBreak::PreferHigherPriority;
+  std::size_t w = 0;
+  std::int32_t prev_hi = 0;
+  for (std::size_t i = 0; i < r; ++i) {
+    const auto& nu = s.at(s.reached[i]);
+    s.first[i] = static_cast<std::int32_t>(w);
+    if (nu.hi > nu.lo) {
+      if (nu.lo < prev_hi || nu.target != 0) return std::nullopt;
+      prev_hi = nu.hi;
+    }
+    for (auto k = nu.lo; k < nu.hi;) {
+      EdgeId best = sup[static_cast<std::size_t>(k)];
+      auto j = k + 1;
+      if (collapse) {
+        const NodeId v = edst[static_cast<std::size_t>(best)];
+        for (; j < nu.hi && edst[static_cast<std::size_t>(sup[static_cast<std::size_t>(j)])] == v; ++j) {
+          if (replaces(g, sup[static_cast<std::size_t>(j)], best, prefer, view)) best = sup[static_cast<std::size_t>(j)];
+        }
+      }
+      if (placement != FlowPlacement::MaxFlow && capacity[static_cast<std::size_t>(best)] < 1) return std::nullopt;
+      s.route[w] = best;
+      s.tail[w] = static_cast<std::int32_t>(i);
+      ++w;
+      k = j;
+    }
+    s.count[i] = static_cast<std::int32_t>(w) - s.first[i];
+  }
+  const std::span<const EdgeId> route(s.route.data(), w);
+  // The entries grouped by child (ascending NodeId), ascending via within a child: a counting pass
+  // over the heads' local indices, the route scattered in ascending order with each entry's parent.
+  s.head.resize(w);
+  s.entry.assign(r + 1, 0);
+  for (std::size_t k = 0; k < w; ++k) {
+    const auto h = s.at(edst[static_cast<std::size_t>(route[k])]).local;
+    s.head[k] = h;
+    ++s.entry[static_cast<std::size_t>(h) + 1];
+  }
+  std::size_t children = 0;
+  for (std::size_t i = 0; i < r; ++i) {
+    if (s.entry[i + 1] != 0) ++children;
+    s.entry[i + 1] += s.entry[i];
+  }
+  s.fill.assign(s.entry.begin(), s.entry.end() - 1);
+  s.via.resize(w);
+  s.parent.resize(w);
+  for (std::size_t k = 0; k < w; ++k) {
+    const auto at = static_cast<std::size_t>(s.fill[static_cast<std::size_t>(s.head[k])]++);
+    s.via[at] = route[k];
+    s.parent[at] = s.tail[k];
+  }
+  // build_split's order: a backward DFS from the destinations, in their order, over the entries,
+  // listing every node after its parents (postorder). A destination the walk did not reach has no
+  // entry and no position there, so it is skipped.
+  s.state.assign(r, 0);
+  s.order.clear();
+  for (NodeId d : dsts) {
+    const auto& nd = s.at(d);
+    if (nd.reached == 0) continue;
+    const auto di = nd.local;
+    if (s.state[static_cast<std::size_t>(di)] != 0) continue;
+    s.state[static_cast<std::size_t>(di)] = 1;
+    s.dfs.clear();
+    s.dfs.emplace_back(di, s.entry[static_cast<std::size_t>(di)]);
+    while (!s.dfs.empty()) {
+      const auto [v, k] = s.dfs.back();
+      if (k < s.entry[static_cast<std::size_t>(v) + 1]) {
+        s.dfs.back().second = k + 1;
+        const auto u = s.parent[static_cast<std::size_t>(k)];
+        const auto su = s.state[static_cast<std::size_t>(u)];
+        if (su == 0) {
+          s.state[static_cast<std::size_t>(u)] = 1;
+          s.dfs.emplace_back(u, s.entry[static_cast<std::size_t>(u)]);
+        } else if (su == 1) {
+          return std::nullopt;  // a cycle (build_split throws)
+        }
+      } else {
+        s.state[static_cast<std::size_t>(v)] = 2;
+        s.order.push_back(v);
+        s.dfs.pop_back();
+      }
+    }
+  }
+  const auto src_local = s.at(src).local;
+  if (s.order.size() != r || s.order.front() != src_local) return std::nullopt;
+  s.position.resize(r);
+  for (std::size_t p = 0; p < r; ++p) s.position[static_cast<std::size_t>(s.order[p])] = static_cast<std::int32_t>(p);
+  // make_plan's cost: the minimum walk cost from src to a destination over the members, by the
+  // order (every member is a route edge, so route_cost is not called).
+  s.dist.resize(r);
+  Cost best = kUnreachable;
+  for (const auto v : s.order) {
+    const auto vi = static_cast<std::size_t>(v);
+    Cost dv = 0;
+    if (v != src_local) {
+      dv = kUnreachable;
+      for (auto k = s.entry[vi]; k < s.entry[vi + 1]; ++k) {
+        const auto ki = static_cast<std::size_t>(k);
+        dv = std::min(dv, s.dist[static_cast<std::size_t>(s.parent[ki])] + edge_cost[static_cast<std::size_t>(s.via[ki])]);
+      }
+    }
+    s.dist[vi] = dv;
+    if (s.at(s.reached[vi]).target != 0) best = std::min(best, dv);
+  }
+  CreationProducts out;
+  out.cost = best;
+  KernelPlan& plan = out.plan;
+  plan.placement = placement;
+  plan.admission = admission;
+  plan.src = src;
+  plan.route.assign(route.begin(), route.end());
+  plan.members.assign(route.begin(), route.end());
+  if (placement == FlowPlacement::Weighted) {
+    plan.weights.resize(route.size());
+    for (std::size_t k = 0; k < route.size(); ++k) plan.weights[k] = capacity[static_cast<std::size_t>(route[k])];
+  }
+  const KernelPlan::Layout lay = plan.layout(dsts, r, route.size());
+  for (std::size_t p = 0; p < r; ++p) {
+    const auto v = static_cast<std::size_t>(s.order[p]);
+    const NodeId x = s.reached[v];
+    lay.topo[p] = x;
+    lay.terminal[p] = s.at(x).target;
+    const std::int32_t b = s.count[v] == 0 ? 0 : s.first[v];
+    lay.out_begin[p] = b;
+    lay.out_end[p] = b + s.count[v];
+  }
+  for (std::size_t k = 0; k < route.size(); ++k) lay.head_pos[k] = s.position[static_cast<std::size_t>(s.head[k])];
+  plan.src_out_begin = plan.out_begin[0];
+  plan.src_out_end = plan.out_end[0];
+  // The record bundle: the support itself when the route is all of it (bundle_of's share).
+  if (route.size() == sup.size()) {
+    out.bundle = support;
+  } else {
+    std::vector<NodeId> nodes(children);
+    std::vector<std::int32_t> offsets(children + 1);
+    offsets[0] = 0;
+    for (std::size_t i = 0, c = 0; i < r; ++i) {
+      if (s.entry[i + 1] == s.entry[i]) continue;
+      nodes[c] = s.reached[i];
+      offsets[++c] = s.entry[i + 1];
+    }
+    std::vector<EdgeId> via(s.via.begin(), s.via.begin() + static_cast<std::ptrdiff_t>(w));
+    std::vector<NodeId> parents(w);
+    for (std::size_t k = 0; k < w; ++k) parents[k] = s.reached[static_cast<std::size_t>(s.parent[k])];
+    std::vector<EdgeId> asc(route.begin(), route.end());
+    out.bundle = std::make_shared<const PredDAG>(PredDAGBuilder::of_parts(
+        g, std::move(nodes), std::move(offsets), std::move(parents), std::move(via), std::move(asc)));
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- allocation

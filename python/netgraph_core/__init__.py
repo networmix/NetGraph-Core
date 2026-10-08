@@ -11,10 +11,10 @@ with ``intersect``, ``to_units``, ``as_float``), the route structures (``PredDAG
 with its ``FlowRecord`` snapshots), the policy engine (``FlowPolicy`` with
 ``FlowPolicyConfig`` over the routing variants ``CostOnly``, ``CapacityAware``,
 ``Global``, ``Pinned``; ``PlacementResult``, ``OutputOptions``, ``Termination``), the
-``DagCache`` (building mode) and the evaluators (``capacity``, ``batch_capacity``,
-``sensitivity``). The public search API (shortest paths, k shortest paths, path
-resolution) and the frozen cache are not part of this build; ``_netgraph_core`` also holds the private entries
-of the flow core and the internal search, which are never re-exported here.
+``DagCache`` (building and frozen modes, ``DagCacheMiss``) and the evaluators (``capacity``, ``batch_capacity``,
+``sensitivity``) and the public search (``spf`` with ``Direction``, ``SpfOptions``,
+``SpfResult`` and the ``UNREACHABLE`` sentinel; ``ksp`` with ``KspOptions``; ``resolve_to_paths``). ``_netgraph_core`` also holds the private
+entry of the flow core, which is never re-exported here.
 """
 
 # pyright: reportMissingImports=false
@@ -24,14 +24,17 @@ from typing import TYPE_CHECKING
 
 from _netgraph_core import (
     MAX_FLOWS_PER_CALL,
+    UNREACHABLE,
     Absolute,
     Admission,
     CapacityAware,
     CapacityOptions,
     CostOnly,
     DagCache,
+    DagCacheMiss,
     DagCacheStats,
     DiminishingReturns,
+    Direction,
     EdgePriority,
     EdgeTieBreak,
     Eligibility,
@@ -42,6 +45,7 @@ from _netgraph_core import (
     FlowRecord,
     Global,
     Graph,
+    KspOptions,
     OutputOptions,
     Path,
     PathSelection,
@@ -52,12 +56,17 @@ from _netgraph_core import (
     SensitivityOptions,
     SensitivityResult,
     SensitivityStatus,
+    SpfOptions,
+    SpfResult,
     Stretch,
     Termination,
     as_float,
     batch_capacity,
     capacity,
+    ksp,
+    resolve_to_paths,
     sensitivity,
+    spf,
     to_units,
 )
 
@@ -71,14 +80,17 @@ __version__ = version("netgraph-core")
 if TYPE_CHECKING:  # pragma: no cover - typing-only
     from ._docs import (  # noqa: I001
         MAX_FLOWS_PER_CALL as MAX_FLOWS_PER_CALL,
+        UNREACHABLE as UNREACHABLE,
         Absolute as Absolute,
         Admission as Admission,
         CapacityAware as CapacityAware,
         CapacityOptions as CapacityOptions,
         CostOnly as CostOnly,
         DagCache as DagCache,
+        DagCacheMiss as DagCacheMiss,
         DagCacheStats as DagCacheStats,
         DiminishingReturns as DiminishingReturns,
+        Direction as Direction,
         EdgePriority as EdgePriority,
         EdgeTieBreak as EdgeTieBreak,
         Eligibility as Eligibility,
@@ -89,6 +101,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only
         FlowRecord as FlowRecord,
         Global as Global,
         Graph as Graph,
+        KspOptions as KspOptions,
         OutputOptions as OutputOptions,
         Path as Path,
         PathSelection as PathSelection,
@@ -99,12 +112,17 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only
         SensitivityOptions as SensitivityOptions,
         SensitivityResult as SensitivityResult,
         SensitivityStatus as SensitivityStatus,
+        SpfOptions as SpfOptions,
+        SpfResult as SpfResult,
         Stretch as Stretch,
         Termination as Termination,
         as_float as as_float,
         batch_capacity as batch_capacity,
         capacity as capacity,
+        ksp as ksp,
+        resolve_to_paths as resolve_to_paths,
         sensitivity as sensitivity,
+        spf as spf,
         to_units as to_units,
     )
 
@@ -137,6 +155,7 @@ __all__ = [
     "FlowPolicy",
     "MAX_FLOWS_PER_CALL",
     "DagCache",
+    "DagCacheMiss",
     "DagCacheStats",
     "CapacityOptions",
     "SensitivityOptions",
@@ -146,4 +165,12 @@ __all__ = [
     "capacity",
     "batch_capacity",
     "sensitivity",
+    "Direction",
+    "SpfOptions",
+    "SpfResult",
+    "UNREACHABLE",
+    "spf",
+    "KspOptions",
+    "ksp",
+    "resolve_to_paths",
 ]

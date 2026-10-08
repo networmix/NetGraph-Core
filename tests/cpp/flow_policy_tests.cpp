@@ -20,10 +20,10 @@
 #include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
 #include "netgraph/core/detail/private_hooks.hpp"
-#include "netgraph/core/detail/search.hpp"
 #include "netgraph/core/evaluators.hpp"
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/flow_policy.hpp"
+#include "netgraph/core/search.hpp"
 #include "test_utils.hpp"
 
 using namespace netgraph::core;
@@ -259,15 +259,16 @@ TEST(FlowPolicyConfig, EnumValuesOutsideTheirEnumerationAreRejected) {
                        "admission: 99"));
   EXPECT_TRUE(contains(error_of([&] { detail::check_kernel(FlowPlacement::MaxFlow, Admission::Lossless, bad_priority); }),
                        "priority: 99"));
-  EXPECT_TRUE(contains(
-      error_of([&] { (void)detail::spf(*g, v({0}), bad_direction, std::nullopt, sel(), std::nullopt, 1, nullptr); }),
-      "direction: 99 is not a value of Direction"));
-  EXPECT_TRUE(contains(
-      error_of([&] { (void)detail::spf(*g, v({0}), Direction::Forward, std::nullopt, tie_sel, std::nullopt, 1, nullptr); }),
-      "selection.tie_break: 99"));
-  EXPECT_TRUE(contains(
-      error_of([&] { (void)detail::spf(*g, v({0}), Direction::Forward, std::nullopt, priority_sel, std::nullopt, 1, nullptr); }),
-      "selection.priority: 99"));
+  {
+    SpfOptions o(Direction::Forward, sel());
+    o.direction = bad_direction;
+    EXPECT_TRUE(contains(error_of([&] { (void)spf(*g, v({0}), o); }), "direction: 99 is not a value of Direction"));
+    EXPECT_TRUE(contains(error_of([&] { SpfOptions bad(bad_direction, sel()); }), "direction: 99 is not a value of Direction"));
+    SpfOptions t(Direction::Forward, tie_sel);
+    EXPECT_TRUE(contains(error_of([&] { (void)spf(*g, v({0}), t); }), "selection.tie_break: 99"));
+    SpfOptions p(Direction::Forward, priority_sel);
+    EXPECT_TRUE(contains(error_of([&] { (void)spf(*g, v({0}), p); }), "selection.priority: 99"));
+  }
   DagCache cache(*g);
   EXPECT_TRUE(contains(error_of([&] { (void)cache.lookup(*g, v({3}), bad_direction, nullptr); }), "direction: 99"));
   const auto st = cache.stats();

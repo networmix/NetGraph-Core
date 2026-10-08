@@ -89,12 +89,31 @@ C++ graph engine for network flow analysis, traffic engineering simulation, and 
   supplied building `DagCache` is a memo that keeps the complete entries and statistics of the
   lookups that succeeded before a later failure of the call.
 
+### Search
+
+`spf(graph, roots, SpfOptions(direction, selection, targets=None, residual=None,
+min_residual=1, elig=None))` searches from a root set, forward or reverse.
+- **Without targets:** it returns `costs` (`UNREACHABLE` for nodes not reached) and the full
+  DAG of tight edges, the edges that lie on some shortest path.
+- **With targets:** it stops at the nearest targets and returns `target_cost` and the DAG of
+  the walks between the roots and the nearest targets (for a reverse search, from a target to
+  a root).
+- **With `multipath=False`:** it returns the canonical single path, the one walk that minimises
+  cost, then bottleneck, then hops, then edge ids.
+
+`ksp(graph, src, dst, KspOptions(k, selection, max_path_cost=None, residual=None, elig=None))`
+returns the K shortest simple paths as `(cost, Path)` pairs, in the contract's order and up to
+an inclusive cost ceiling. `resolve_to_paths(graph, dag, src, dst, split_parallel_edges=False,
+max_paths=None)` lists a DAG's walks as `Path` values.
+
 ### DagCache
 
-`DagCache(graph)` keeps the static shortest-path supports policies build, keyed by the root
-set, the direction and the Eligibility; values are immutable and shared, and `stats()` reports
-hits, misses, entries, retained bytes and live values. This build has the building mode (one
-writer); the frozen mode follows.
+`DagCache(graph)` keeps the static shortest-path supports that policies build, keyed by the
+root set, the direction and the Eligibility. Values are immutable and shared, and `stats()`
+reports hits, misses, entries, retained bytes and live values.
+- **Building mode (new caches):** one writer; a miss searches and inserts.
+- **Frozen mode (`freeze()`):** read-only and shared by every worker of an evaluator; a miss
+  raises `DagCacheMiss`. `thaw()` returns to building mode once every reader has finished.
 
 ### Evaluators
 

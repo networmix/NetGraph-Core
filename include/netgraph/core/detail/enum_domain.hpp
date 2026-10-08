@@ -8,6 +8,7 @@
 #include <string>
 
 #include "netgraph/core/options.hpp"
+#include "netgraph/core/search.hpp"
 
 namespace netgraph::core::detail {
 
@@ -55,6 +56,14 @@ inline void check_member(Direction v, const char* field) {
     case Direction::Reverse: return;
   }
   not_a_member(field, static_cast<int>(v), "Direction");
+}
+
+inline void check_member(SpfQueue v, const char* field) {
+  switch (v) {
+    case SpfQueue::Auto:
+    case SpfQueue::Heap: return;
+  }
+  not_a_member(field, static_cast<int>(v), "SpfQueue");
 }
 
 // The two enum-typed fields of a selection.

@@ -49,6 +49,10 @@ struct SensitivityResult {
   std::vector<SensitivityEntry> entries {};  // ascending EdgeId; an absent edge has loss 0
 };
 
+// Each evaluator is one public call on a supplied frozen cache's statistics (dag_cache.hpp): its
+// hits count when it returns; a failed call changes no statistic, except one miss when it raises
+// DagCacheMiss.
+
 // place(+inf) of a FlowPolicy with opts.cfg on a fresh ledger of g (its capacities).
 [[nodiscard]] PlacementResult capacity(const Graph& g, std::span<const NodeId> sources,
                                        std::span<const NodeId> destinations, const CapacityOptions& opts);
@@ -56,13 +60,17 @@ struct SensitivityResult {
 // capacity() per pair, in pair order, with opts.elig intersected with per_pair_elig[i] (null
 // entries allowed; an empty span means none: the Python binding checks the length of every
 // sequence it is given). Validated before any worker starts, the arguments first (workers >= 1,
-// opts.elig's and the cache's graph, a supplied cache only with workers == 1: a building cache
-// has one writer; Pinned rejected: bundles bind endpoints; the per_pair_elig length; the
+// opts.elig's and the cache's graph, a supplied building cache only with workers == 1: it has
+// one writer, while a frozen cache is shared by every worker; Pinned rejected: bundles bind
+// endpoints; the per_pair_elig length; the
 // configuration), then each pair completely in pair order (its endpoint sets, their overlap,
 // its Eligibility's graph), so the lowest failing pair index is reported. Without a supplied
 // cache each worker owns a private building cache, allocated before any thread starts. A worker
 // exception aborts the batch and the exception of the lowest pair index is raised; an empty
-// batch returns an empty list.
+// batch returns an empty list. A frozen cache's DagCacheMiss propagates unchanged; a per-pair
+// intersection that differs from both operands has a fresh uid, absent from a frozen cache
+// (APPROACH 10: already effective per-pair values with a null common value, or a common value
+// containing them, reuse the prepopulated operand).
 [[nodiscard]] std::vector<PlacementResult> batch_capacity(
     const Graph& g, const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>>& pairs,
     const CapacityOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers);
@@ -81,7 +89,9 @@ struct SensitivityResult {
 // the entry unevaluable with its message as the reason. Every other exception propagates (the
 // lowest candidate's). Workers and the cache
 // rule as batch_capacity; a worker's private cache is cleared per candidate (fresh Eligibility
-// uids never hit).
+// uids never hit). CostOnly is the one model reading the cache: with a frozen cache a
+// placed deletion raises DagCacheMiss (a fresh uid), which propagates unchanged (it is not a
+// std::runtime_error, so never `unevaluable`); the other models read no cache.
 [[nodiscard]] SensitivityResult sensitivity(const Graph& g, std::span<const NodeId> sources,
                                             std::span<const NodeId> destinations, const SensitivityOptions& opts,
                                             std::int32_t workers);

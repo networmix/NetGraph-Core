@@ -328,6 +328,46 @@ std::vector<FlowId> LedgerAccess::commit(FlowLedger& fg, std::int64_t owner, std
   // The drafts carry exactly the owner's live records plus new ones.
   const auto owned = fg.owner_ids_.find(owner);
   const std::size_t num_current = owned == fg.owner_ids_.end() ? 0 : owned->second.size();
+  if (owned == fg.owner_ids_.end() && drafts.size() == 1 && !drafts[0].id.has_value() &&
+      std::adjacent_find(drafts[0].record.edges.begin(), drafts[0].record.edges.end(),
+                         [](const auto& a, const auto& b) { return a.first >= b.first; }) ==
+          drafts[0].record.edges.end()) {
+    // One new record for an owner without live records (a fresh placement), its edges strictly
+    // ascending: each touched edge's delta is the draft's own amount, touched in the draft's order,
+    // so the checks below run on the draft itself, in the general path's order and with its
+    // messages (negative amounts first, then feasibility edge by edge); the staging and the
+    // publication are the general path's for one new record.
+    Draft& d = drafts[0];
+    for (const auto& [e, x] : d.record.edges) {
+      if (x < 0) throw std::logic_error("ledger: a negative allocation in a commit");
+    }
+    for (const auto& [e, x] : d.record.edges) {
+      const auto ei = static_cast<std::size_t>(e);
+      const Amount next = fg.allocated_[ei] + x;
+      if (next < 0 || next > fg.baseline_[ei]) {
+        throw std::logic_error("ledger: infeasible commit on edge " + std::to_string(e) + " (" +
+                               std::to_string(next) + " of " + std::to_string(fg.baseline_[ei]) + ")");
+      }
+    }
+    std::vector<FlowId> created;
+    created.reserve(1);
+    std::vector<std::int64_t> live;
+    live.reserve(1);
+    const std::int64_t id = fg.next_id_;
+    std::map<std::int64_t, FlowRecord> fresh;
+    const auto node = fresh.emplace_hint(fresh.end(), id, record_of(fg.uid_, id, owner, d));
+    created.emplace_back(fg.uid_, id);
+    live.push_back(id);
+    std::map<std::int64_t, std::vector<std::int64_t>> index_node;
+    index_node.emplace(owner, std::move(live));
+    // Publication: nothing below allocates or throws (the record's dropped zero entries add
+    // nothing).
+    for (const auto& [e, x] : node->second.edges) fg.allocated_[static_cast<std::size_t>(e)] += x;
+    fg.records_.merge(fresh);
+    fg.owner_ids_.merge(index_node);
+    fg.next_id_ = id + 1;
+    return created;
+  }
   std::vector<std::int64_t> kept;
   std::size_t num_new = 0;
   for (const auto& d : drafts) {

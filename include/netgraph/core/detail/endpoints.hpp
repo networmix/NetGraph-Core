@@ -25,14 +25,20 @@ inline std::string overlap_error(NodeId v, const char* a, const char* b) {
   return "node " + std::to_string(v) + " is in both endpoint sets: " + a + " and " + b + " must not overlap";
 }
 
-// The sorted, duplicate-free node set; std::invalid_argument for an empty set or an id out of
-// range (`name` labels the message).
-[[nodiscard]] inline std::vector<NodeId> node_set(std::span<const NodeId> nodes, std::int32_t num_nodes,
-                                                  const char* name) {
+// node_set's checks without the set: std::invalid_argument for an empty set or an id out of range
+// (the first one, in input order; `name` labels the message).
+inline void check_range(std::span<const NodeId> nodes, std::int32_t num_nodes, const char* name) {
   if (nodes.empty()) throw std::invalid_argument(empty_set_error(name));
   for (NodeId v : nodes) {
     if (v < 0 || v >= num_nodes) throw std::invalid_argument(node_range_error(name, std::to_string(v), num_nodes));
   }
+}
+
+// The sorted, duplicate-free node set; std::invalid_argument for an empty set or an id out of
+// range (`name` labels the message).
+[[nodiscard]] inline std::vector<NodeId> node_set(std::span<const NodeId> nodes, std::int32_t num_nodes,
+                                                  const char* name) {
+  check_range(nodes, num_nodes, name);
   std::vector<NodeId> out(nodes.begin(), nodes.end());
   std::sort(out.begin(), out.end());
   out.erase(std::unique(out.begin(), out.end()), out.end());

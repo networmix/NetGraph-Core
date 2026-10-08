@@ -2,8 +2,8 @@
   Pybind11 module `_netgraph_core`: the graph on integer units with Eligibility and the unit
   conversions, the route structures (PredDAG, Path), the selection and placement axes, the
   ledger with its records, the policy engine with its configuration and results, the DagCache
-  and the evaluators (capacity, batch_capacity, sensitivity); and two private entries: the flow
-  core's _place_global_units (the recorder's entry, APPROACH 2.2) and the internal search _spf.
+  , the evaluators (capacity, batch_capacity, sensitivity) and the public search (spf); and one
+  private entry: the flow core's _place_global_units (the recorder's entry, APPROACH 2.2).
   A build with the private hooks (CMake NETGRAPH_CORE_PRIVATE_HOOKS: the editable development
   build) adds the test controls and the parity diagnostics.
 
@@ -39,11 +39,12 @@
 
 #include "netgraph/core/dag_cache.hpp"
 #include "netgraph/core/detail/endpoints.hpp"
+#include "netgraph/core/detail/enum_domain.hpp"
 #include "netgraph/core/detail/evaluator_checks.hpp"
 #include "netgraph/core/detail/flow_core.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
 #include "netgraph/core/detail/private_hooks.hpp"
-#include "netgraph/core/detail/search.hpp"
+#include "netgraph/core/detail/traversal.hpp"
 #include "netgraph/core/eligibility.hpp"
 #include "netgraph/core/evaluators.hpp"
 #include "netgraph/core/flow_ledger.hpp"
@@ -52,6 +53,7 @@
 #include "netgraph/core/graph.hpp"
 #include "netgraph/core/options.hpp"
 #include "netgraph/core/pred_dag.hpp"
+#include "netgraph/core/search.hpp"
 #include "netgraph/core/types.hpp"
 #if NETGRAPH_CORE_PRIVATE_HOOKS
 #include <atomic>
@@ -429,6 +431,29 @@ std::vector<NodeId> node_ids(const py::object& obj, std::int32_t num_nodes, cons
   return checked_ids(wide_integers(obj, name), num_nodes, name);
 }
 
+// One NodeId of [0, num_nodes) (a single endpoint); the range message of detail/endpoints.hpp.
+NodeId endpoint(const py::object& obj, std::int32_t num_nodes, const char* name) {
+  const py::object idx = python_int(obj, name);
+  int overflow = 0;
+  const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
+  if (overflow != 0 || v < 0 || v >= num_nodes) {
+    throw py::value_error(detail::node_range_error(name, std::string(py::str(idx)), num_nodes));
+  }
+  return static_cast<NodeId>(v);
+}
+
+// A count of at least 1 (KSP's k, the resolver's max_paths): the rule-13 message below 1; a count
+// above INT64_MAX means the same as INT64_MAX (no list reaches it).
+std::int64_t count_of(const py::object& obj, const char* name) {
+  const py::object idx = python_int(obj, name);
+  if (PyObject_RichCompareBool(idx.ptr(), py::int_(1).ptr(), Py_LT) == 1) {
+    throw py::value_error(std::string(name) + " must be >= 1 (got " + std::string(py::str(idx)) + ")");
+  }
+  int overflow = 0;
+  const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
+  return overflow != 0 ? std::numeric_limits<std::int64_t>::max() : static_cast<std::int64_t>(v);
+}
+
 // A request: an integer number of units in [0, 2^62) or +inf (float('inf')); nullopt is +inf.
 std::optional<Amount> request_units(const py::object& volume) {
   if (py::isinstance<py::float_>(volume) || py::isinstance(volume, py::module_::import("numpy").attr("floating"))) {
@@ -501,6 +526,36 @@ struct PySensitivityOptions {
   std::shared_ptr<Eligibility> elig;
   std::shared_ptr<DagCache> cache;
   OutputOptions outputs;
+};
+
+// The Python form of SpfOptions: the arguments as given (targets, residual and min_residual are
+// validated at the call, in the contract's order, on their unnarrowed values); the Eligibility is
+// held by reference count.
+struct PySpfOptions {
+  Direction direction;
+  PathSelection selection;
+  py::object targets;
+  py::object residual;
+  py::object min_residual;
+  std::shared_ptr<Eligibility> elig;
+};
+
+// The Python form of KspOptions: the arguments as given (k, max_path_cost and residual are
+// validated at the call, in the contract's order, on their unnarrowed values).
+struct PyKspOptions {
+  py::object k;
+  PathSelection selection;
+  py::object max_path_cost;
+  py::object residual;
+  std::shared_ptr<Eligibility> elig;
+};
+
+// The Python form of SpfResult: every field already a Python object (made by the call through
+// the checked allocations), so reading one allocates nothing.
+struct PySpfResult {
+  py::object costs;        // a read-only int64 array (full searches) or None
+  py::object dag;          // PredDAG
+  py::object target_cost;  // an int, or None (no target reached, or a full search)
 };
 
 // ---------------------------------------------------------------- policies and evaluators
@@ -604,6 +659,26 @@ py::object object_of(T value) {
   auto [obj, slot] = new_object<T>();
   *slot = std::move(value);
   return std::move(obj);
+}
+
+// A new Python object of the bound class T (held by std::shared_ptr) owning `value`, through the
+// same checked allocation as new_object: for the values without a default constructor (PredDAG,
+// Path) that a search returns. A failure raises and releases everything made so far.
+template <class T>
+py::object object_from(T value) {
+  const py::detail::type_info* tinfo = py::detail::get_type_info(typeid(T), /*throw_if_missing=*/true);
+  PyTypeObject* type = tinfo->type;
+  PyObject* raw = type->tp_alloc(type, 0);
+  if (raw == nullptr) throw py::error_already_set();
+  auto obj = py::reinterpret_steal<py::object>(raw);
+  auto* inst = reinterpret_cast<py::detail::instance*>(raw);
+  inst->allocate_layout();
+  inst->owned = false;
+  auto* held = new T(std::move(value));
+  py::detail::values_and_holders(inst).begin()->value_ptr() = held;
+  inst->owned = true;
+  tinfo->init_instance(inst, nullptr);
+  return obj;
 }
 
 
@@ -754,6 +829,12 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .value("RESIDUAL", EdgePriority::Residual)
       .value("CAPACITY", EdgePriority::Capacity)
       .value("HEADROOM", EdgePriority::Headroom);
+
+  py::enum_<Direction>(m, "Direction",
+                       "The orientation of a search: FORWARD from the roots, or REVERSE (rooted at the roots over\n"
+                       "reversed arcs; the DAG it returns is forward-oriented, toward the roots).")
+      .value("FORWARD", Direction::Forward)
+      .value("REVERSE", Direction::Reverse);
 
   py::class_<PathSelection>(m, "PathSelection",
                             "The selection of a search: tie_break and priority are explicit; multipath = True keeps\n"
@@ -1499,21 +1580,33 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       .def_readonly("bytes", &DagCache::Stats::bytes)
       .def_readonly("live_values", &DagCache::Stats::live_values);
 
+  py::register_exception<DagCacheMiss>(m, "DagCacheMiss", PyExc_Exception);
+  m.attr("DagCacheMiss").attr("__doc__") =
+      "A lookup in a frozen DagCache whose key is absent (APPROACH 10): a dedicated exception (not a\n"
+      "RuntimeError or ValueError); the evaluators propagate it unchanged, never as a status.";
+
   py::class_<DagCache, std::shared_ptr<DagCache>>(
       m, "DagCache",
       "A cache of static shortest-path supports bound to one graph, keyed (roots as a set, direction,\n"
-      "Eligibility uid); building mode (one writer, no concurrent readers). CostOnly policies and the\n"
-      "evaluators read it; selection is projected at creation, never cached. clear() empties it (the\n"
-      "hit and miss counters persist); held values stay valid. A supplied building cache is a memo\n"
-      "(APPROACH 13, limit 2): a public call that fails keeps the complete entries and statistics of the\n"
-      "lookups that succeeded before; never a partial entry, and a retained entry never changes a result.")
+      "Eligibility uid). Building mode (a new cache): one writer, no concurrent readers; a miss searches\n"
+      "and inserts. Frozen mode (freeze()): read-only and shareable by every worker; a miss counts one miss\n"
+      "and raises DagCacheMiss; clear() raises ValueError; thaw() returns to building once the caller has\n"
+      "joined every reader. CostOnly policies and the evaluators read it; selection is projected at\n"
+      "creation, never cached. clear() empties a building cache (the hit and miss counters persist); held\n"
+      "values stay valid. A supplied building cache is a memo (APPROACH 13, limit 2): a public call that\n"
+      "fails keeps the complete entries and statistics of the lookups that succeeded before; never a\n"
+      "partial entry, and a retained entry never changes a result. A frozen cache's statistics follow the\n"
+      "public call that reads it: its hits count when the call succeeds, its Python result included; a\n"
+      "failed call changes no statistic, except that a call raising DagCacheMiss counts one miss.")
       .def(py::init([](const std::shared_ptr<Graph>& graph) {
              if (!graph) throw py::value_error("graph must be a Graph");
              return std::make_shared<DagCache>(*graph);
            }),
            py::arg("graph"))
       .def("graph_uid", &DagCache::graph_uid, "uid of the graph this cache is bound to")
-      .def("clear", &DagCache::clear)
+      .def("freeze", &DagCache::freeze, "enter frozen mode (no effect when frozen)")
+      .def("thaw", &DagCache::thaw, "return to building mode (no effect when building); join every reader first")
+      .def("clear", &DagCache::clear, "empty a building cache; ValueError when frozen")
       .def("stats", &DagCache::stats);
 
   auto flow_policy = py::class_<FlowPolicy>(
@@ -1652,18 +1745,23 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
         const auto s = node_ids(sources, graph->num_nodes(), "sources");
         const auto d = node_ids(destinations, graph->num_nodes(), "destinations");
         const CapacityOptions c {o.config, o.elig.get(), o.cache.get(), o.outputs};
-        PlacementResult r;
-        {
-          py::gil_scoped_release release;
-          r = capacity(*graph, s, d, c);
-        }
-        return object_of(std::move(r));
+        // One public call on a frozen cache's statistics, its result object included (NOTES R27).
+        return detail::frozen_call(c.cache, [&](detail::FrozenTally& tally) {
+          PlacementResult r;
+          {
+            py::gil_scoped_release release;
+            r = detail::capacity_in_call(*graph, s, d, c, tally);
+          }
+          return object_of(std::move(r));
+        });
       },
       py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("opts"),
       "place(+inf) of a FlowPolicy with opts.config on a fresh ledger of the graph -> PlacementResult.\n"
-      "The exact maximum flow is the Global + MaxFlow configuration.\n"
+      "The exact maximum flow is the Global + MaxFlow configuration. A supplied frozen cache raises\n"
+      "DagCacheMiss for an absent key, unchanged.\n"
       "A failed call raises; a supplied building cache keeps the entries and statistics of the lookups\n"
-      "that succeeded before the failure (a memo: APPROACH 13, limit 2).");
+      "that succeeded before the failure (a memo: APPROACH 13, limit 2); a supplied frozen cache's\n"
+      "statistics are unchanged, except one miss when the call raises DagCacheMiss.");
 
   m.def(
       "batch_capacity",
@@ -1714,16 +1812,18 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
           detail::check_batch_pair(*graph, src, dst, e, i);
           ps.emplace_back(std::move(src), std::move(dst));
         }
-        std::vector<PlacementResult> rs;
-        {
-          py::gil_scoped_release release;
-          rs = batch_capacity(*graph, ps, c, per, w);
-        }
-        py::list out(rs.size());
-        for (std::size_t i = 0; i < rs.size(); ++i) {
-          PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), object_of(std::move(rs[i])).release().ptr());
-        }
-        return out;
+        return detail::frozen_call(c.cache, [&](detail::FrozenTally& tally) {
+          std::vector<PlacementResult> rs;
+          {
+            py::gil_scoped_release release;
+            rs = detail::batch_capacity_in_call(*graph, ps, c, per, w, tally);
+          }
+          py::list out(rs.size());
+          for (std::size_t i = 0; i < rs.size(); ++i) {
+            PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), object_of(std::move(rs[i])).release().ptr());
+          }
+          return py::object(std::move(out));
+        });
       },
       py::arg("graph"), py::arg("pairs"), py::arg("opts"), py::arg("per_pair_elig") = py::none(),
       py::arg("workers") = py::none(),
@@ -1732,9 +1832,14 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       "empty); workers >= 1 (None: NGRAPH_CORE_BATCH_THREADS or 1; 1 with a supplied cache).\n"
       "Everything is validated before a worker starts, the arguments first, then each pair\n"
       "completely in pair order, so the error of the lowest failing pair index is raised; Pinned is\n"
-      "rejected; an empty batch returns [].\n"
+      "rejected; an empty batch returns []. A supplied building cache needs workers == 1; a frozen cache\n"
+      "is shared by every worker (pass workers explicitly) and its DagCacheMiss reaches the caller\n"
+      "unchanged (the lowest failing pair's); a per-pair intersection that differs from both operands\n"
+      "has a new uid, absent from a frozen cache (pass effective per-pair values with elig None, or a\n"
+      "common value containing them).\n"
       "A failed call raises; a supplied building cache keeps the entries and statistics of the lookups\n"
-      "that succeeded before the failure (a memo: APPROACH 13, limit 2).");
+      "that succeeded before the failure (a memo: APPROACH 13, limit 2); a supplied frozen cache's\n"
+      "statistics are unchanged, except one miss when the call raises DagCacheMiss.");
 
   m.def(
       "sensitivity",
@@ -1746,12 +1851,14 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
         const auto d = node_ids(destinations, graph->num_nodes(), "destinations");
         const auto w = workers_of(workers, true, static_cast<bool>(o.cache));
         const SensitivityOptions c {o.config, o.elig.get(), o.cache.get(), o.outputs};
-        SensitivityResult r;
-        {
-          py::gil_scoped_release release;
-          r = sensitivity(*graph, s, d, c, w);
-        }
-        return object_of(std::move(r));
+        return detail::frozen_call(c.cache, [&](detail::FrozenTally& tally) {
+          SensitivityResult r;
+          {
+            py::gil_scoped_release release;
+            r = detail::sensitivity_in_call(*graph, s, d, c, w, tally);
+          }
+          return object_of(std::move(r));
+        });
       },
       py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("opts"), py::arg("workers") = py::none(),
       "The baseline capacity() and one entry per candidate edge (Global: the baseline's positive-flow\n"
@@ -1760,63 +1867,232 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       "flow core's deletion re-solve from the baseline's final state, and CostOnly gives edges no route\n"
       "uses loss 0 without a placement, result-equivalent forms of that definition); a placed deletion\n"
       "raising a model exception is UNEVALUABLE with the message as reason.\n"
-      "workers as batch_capacity (NGRAPH_CORE_SENSITIVITY_THREADS).\n"
+      "workers as batch_capacity (NGRAPH_CORE_SENSITIVITY_THREADS); a CostOnly deletion (the one\n"
+      "model reading the cache) looks up a new Eligibility uid, so a frozen cache raises DagCacheMiss\n"
+      "there (unchanged, never UNEVALUABLE); other models read no cache.\n"
       "A failed call raises; a supplied building cache keeps the entries and statistics of the lookups\n"
-      "that succeeded before the failure (a memo: APPROACH 13, limit 2).");
+      "that succeeded before the failure (a memo: APPROACH 13, limit 2); a supplied frozen cache's\n"
+      "statistics are unchanged, except one miss when the call raises DagCacheMiss.");
+
+  py::class_<PyKspOptions>(
+      m, "KspOptions",
+      "The options of ksp (APPROACH 6, rule 10): k (>= 1) and selection are explicit (its multi_edge is\n"
+      "the member rule, Expand or Collapse; multipath is ignored); max_path_cost (None, Absolute(c) with\n"
+      "c >= 0, or Stretch(f) with f finite in [1, inf) times the static shortest cost under the\n"
+      "Eligibility, residual ignored; inclusive); residual (int64 units per EdgeId, each in\n"
+      "[0, capacity_units]: gating at 1 unit and the priority values); elig (None: everything allowed).\n"
+      "The fields are validated by ksp, in the contract's order.")
+      .def(py::init([](const py::object& k, const PathSelection& selection, const py::object& max_path_cost,
+                       const py::object& residual, const std::shared_ptr<Eligibility>& elig) {
+             return PyKspOptions {k, selection, max_path_cost, residual, elig};
+           }),
+           py::arg("k"), py::arg("selection"), py::kw_only(), py::arg("max_path_cost") = py::none(),
+           py::arg("residual") = py::none(), py::arg("elig") = nullptr)
+      .def_readonly("k", &PyKspOptions::k)
+      .def_readonly("selection", &PyKspOptions::selection)
+      .def_readonly("max_path_cost", &PyKspOptions::max_path_cost)
+      .def_readonly("residual", &PyKspOptions::residual)
+      .def_readonly("elig", &PyKspOptions::elig);
+
+  m.def(
+      "ksp",
+      [](const std::shared_ptr<Graph>& graph, const py::object& src, const py::object& dst, const py::object& opts) {
+        if (!graph) throw py::value_error("graph must be a Graph");
+        const auto o = options_of<PyKspOptions>(opts, "KspOptions");
+        const auto n = graph->num_nodes();
+        // APPROACH 6's order on unnarrowed values (Core repeats every check): the selection, src,
+        // dst, src == dst, k, the ceiling, the residual, then a foreign Eligibility.
+        detail::check_selection(o.selection);
+        const NodeId s = endpoint(src, n, "src");
+        const NodeId t = endpoint(dst, n, "dst");
+        if (s == t) throw py::value_error(detail::overlap_error(s, "src", "dst"));
+        KspOptions c(count_of(o.k, "k"), o.selection);
+        if (!o.max_path_cost.is_none()) {
+          if (py::isinstance<Absolute>(o.max_path_cost)) {
+            c.max_path_cost = o.max_path_cost.cast<Absolute>();
+          } else if (py::isinstance<Stretch>(o.max_path_cost)) {
+            c.max_path_cost = o.max_path_cost.cast<Stretch>();
+          } else {
+            throw py::type_error("max_path_cost must be Absolute, Stretch or None (got " +
+                                 std::string(py::str(py::type::of(o.max_path_cost).attr("__name__"))) + ")");
+          }
+          detail::check_ceiling(c.max_path_cost);
+        }
+        std::optional<std::vector<Amount>> res;
+        if (!o.residual.is_none()) res = edge_units(o.residual, *graph, "residual");
+        if (res.has_value()) c.residual = std::span<const Amount>(*res);
+        c.elig = o.elig.get();
+        std::vector<std::pair<Cost, Path>> paths;
+        {
+          py::gil_scoped_release release;
+          paths = ksp(*graph, s, t, c);
+        }
+        // Every object through a checked allocation: a failure raises.
+        py::list out(paths.size());
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+          py::tuple item(2);
+          py::int_ cost(paths[i].first);
+          py::object path = object_from<Path>(std::move(paths[i].second));
+          PyTuple_SET_ITEM(item.ptr(), 0, cost.release().ptr());
+          PyTuple_SET_ITEM(item.ptr(), 1, path.release().ptr());
+          PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), item.release().ptr());
+        }
+        return out;
+      },
+      py::arg("graph"), py::arg("src"), py::arg("dst"), py::arg("opts"),
+      "The K shortest simple src -> dst paths of the member graph (APPROACH 6, rule 10) -> [(cost, Path)],\n"
+      "in increasing (cost, -bottleneck under PREFER_HIGHER_PRIORITY, hops, edge-id sequence), the\n"
+      "bottleneck being the minimum priority value along a path: the minimal prefix of that order,\n"
+      "truncated at k and at the inclusive ceiling; each Path has single-member hops. Validated in this\n"
+      "order before any work (ValueError): src and dst in range, src == dst, k >= 1, the ceiling, the\n"
+      "residual (length, then every entry), a foreign Eligibility. An excluded endpoint, no static route\n"
+      "under Stretch, or no path gives [].");
+
+  m.def(
+      "resolve_to_paths",
+      [](const std::shared_ptr<Graph>& graph, const std::shared_ptr<PredDAG>& dag, const py::object& src,
+         const py::object& dst, bool split_parallel_edges, const py::object& max_paths) {
+        if (!graph) throw py::value_error("graph must be a Graph");
+        if (!dag) throw py::value_error("dag must be a PredDAG");
+        if (dag->graph_uid() != graph->uid()) throw py::value_error("foreign PredDAG: built for another graph");
+        const auto n = graph->num_nodes();
+        const NodeId s = endpoint(src, n, "src");
+        const NodeId t = endpoint(dst, n, "dst");
+        if (s == t) throw py::value_error(detail::overlap_error(s, "src", "dst"));
+        std::optional<std::int64_t> mp;
+        if (!max_paths.is_none()) mp = count_of(max_paths, "max_paths");
+        std::vector<Path> paths;
+        {
+          py::gil_scoped_release release;
+          paths = resolve_to_paths(*graph, *dag, s, t, split_parallel_edges, mp);
+        }
+        py::list out(paths.size());
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+          PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), object_from<Path>(std::move(paths[i])).release().ptr());
+        }
+        return out;
+      },
+      py::arg("graph"), py::arg("dag"), py::arg("src"), py::arg("dst"), py::arg("split_parallel_edges") = false,
+      py::arg("max_paths") = py::none(),
+      "The src -> dst walks of a DAG (APPROACH 5) -> [Path], in increasing (cost, hops, edge-id sequence):\n"
+      "a hop costs its cheapest member and is keyed by its lowest member id. split_parallel_edges = False\n"
+      "keeps every parallel member of a (u, v) pair in one hop (members ascending); True gives one path\n"
+      "per member combination in the same order. max_paths (>= 1) truncates; None lists every walk.\n"
+      "ValueError: a DAG of another graph, src or dst out of range, src == dst, max_paths < 1. An\n"
+      "endpoint outside the DAG, or no walk, gives [].");
 
   // ------------------------------------------------------------------ private recorder entries
 
+  // ------------------------------------------------------------------ the public search
+
+  m.attr("UNREACHABLE") = py::int_(kUnreachable);
+
+  py::class_<PySpfOptions>(
+      m, "SpfOptions",
+      "The options of spf (APPROACH 6): direction and selection are explicit; targets (one NodeId or a\n"
+      "sequence; None: a full search) stops the search at the nearest targets (anycast); residual (int64\n"
+      "units per EdgeId, each in [0, capacity_units]) adds residual gating at min_residual units (an\n"
+      "integer >= 1; it gates a supplied residual only) and supplies the priority values; elig (None:\n"
+      "everything allowed). A direction outside its enumeration raises ValueError here; the other fields\n"
+      "are validated by spf, in the contract's order.")
+      .def(py::init([](Direction direction, const PathSelection& selection, const py::object& targets,
+                       const py::object& residual, const py::object& min_residual,
+                       const std::shared_ptr<Eligibility>& elig) {
+             detail::check_member(direction, "direction");
+             return PySpfOptions {direction, selection, targets, residual, min_residual, elig};
+           }),
+           py::arg("direction"), py::arg("selection"), py::kw_only(), py::arg("targets") = py::none(),
+           py::arg("residual") = py::none(), py::arg("min_residual") = 1, py::arg("elig") = nullptr)
+      .def_readonly("direction", &PySpfOptions::direction)
+      .def_readonly("selection", &PySpfOptions::selection)
+      .def_readonly("targets", &PySpfOptions::targets)
+      .def_readonly("residual", &PySpfOptions::residual)
+      .def_readonly("min_residual", &PySpfOptions::min_residual)
+      .def_readonly("elig", &PySpfOptions::elig);
+
+  py::class_<PySpfResult>(m, "SpfResult",
+                          "The result of spf: costs (full searches: a read-only int64 array, UNREACHABLE for the\n"
+                          "nodes not reached; None with targets), dag (PredDAG: the unique DAG of the edges tight in\n"
+                          "the traversal direction, in their original orientation; with targets pruned to the walks\n"
+                          "between the roots and a nearest target, from the target to a root for REVERSE, or the\n"
+                          "canonical single path for multipath = False) and target_cost (with targets: the nearest\n"
+                          "targets' cost, None when no target is reached; None for a full search).")
+      .def_property_readonly("costs", [](const PySpfResult& r) { return r.costs ? r.costs : py::object(py::none()); })
+      .def_property_readonly("dag", [](const PySpfResult& r) { return r.dag; })
+      .def_property_readonly("target_cost",
+                             [](const PySpfResult& r) { return r.target_cost ? r.target_cost : py::object(py::none()); })
+      .def("__repr__", [](const PySpfResult& r) {
+        std::string tc = r.target_cost && !r.target_cost.is_none() ? std::string(py::str(r.target_cost)) : "None";
+        return "SpfResult(costs=" + std::string(r.costs ? "array" : "None") +
+               ", dag_entries=" + std::to_string(r.dag.cast<const PredDAG&>().via_edges().size()) +
+               ", target_cost=" + tc + ")";
+      });
+
   m.def(
-      "_spf",
-      [](const std::shared_ptr<Graph>& graph, const py::object& roots, const std::string& direction,
-         const py::object& targets, const PathSelection& selection, const py::object& residual,
-         const py::object& min_residual, const std::shared_ptr<Eligibility>& elig) {
+      "spf",
+      [](const std::shared_ptr<Graph>& graph, const py::object& roots, const py::object& opts) {
         if (!graph) throw py::value_error("graph must be a Graph");
-        if (direction != "forward" && direction != "reverse") {
-          throw py::value_error("direction must be 'forward' or 'reverse'");
-        }
-        const auto r = node_ids(roots, graph->num_nodes(), "roots");
+        const auto o = options_of<PySpfOptions>(opts, "SpfOptions");
+        const auto n = graph->num_nodes();
+        // APPROACH 6's order on unnarrowed values (Core repeats every check): the enumerations,
+        // the roots, the targets, their overlap, a single path without targets, the residual, then
+        // min_residual and a foreign Eligibility.
+        detail::check_member(o.direction, "direction");
+        detail::check_selection(o.selection);
+        const auto r = node_ids(roots, n, "roots");
         std::optional<std::vector<NodeId>> t;
-        if (!targets.is_none()) t = node_ids(targets, graph->num_nodes(), "targets");
-        // Section 6's order: the endpoint checks (overlap, a single path without targets) come
-        // before the residual is read (review-1b R15); detail::spf repeats them.
-        if (t.has_value()) {
-          detail::check_disjoint(detail::node_set(r, graph->num_nodes(), "roots"),
-                                 detail::node_set(*t, graph->num_nodes(), "targets"), "roots", "targets");
-        } else if (!selection.multipath) {
+        if (!o.targets.is_none()) {
+          t = node_ids(o.targets, n, "targets");
+          detail::check_disjoint(detail::node_set(r, n, "roots"), detail::node_set(*t, n, "targets"), "roots",
+                                 "targets");
+        } else if (!o.selection.multipath) {
           throw py::value_error("multipath = false requires targets (the single path joins a root to a target)");
         }
         std::optional<std::vector<Amount>> res;
-        if (!residual.is_none()) res = edge_units(residual, *graph, "residual");
-        const auto minr = integer_value(min_residual, 1, kDomainLimit - 1, "min_residual");
-        detail::SpfOut o;
+        if (!o.residual.is_none()) res = edge_units(o.residual, *graph, "residual");
+        const auto minr = python_int(o.min_residual, "min_residual");
+        if (PyObject_RichCompareBool(minr.ptr(), py::int_(1).ptr(), Py_LT) == 1) {
+          throw py::value_error("min_residual must be at least 1 unit (got " + std::string(py::str(minr)) + ")");
+        }
+        int overflow = 0;
+        const long long mv = PyLong_AsLongLongAndOverflow(minr.ptr(), &overflow);
+        SpfOptions c(o.direction, o.selection);
+        c.targets = std::move(t);
+        if (res.has_value()) c.residual = std::span<const Amount>(*res);
+        // Above INT64_MAX it gates every residual edge exactly as INT64_MAX does (residuals < 2^62).
+        c.min_residual = overflow != 0 ? std::numeric_limits<Amount>::max() : static_cast<Amount>(mv);
+        c.elig = o.elig.get();
+        std::optional<SpfResult> result;
         {
           py::gil_scoped_release release;
-          std::optional<std::span<const NodeId>> ts;
-          if (t.has_value()) ts = std::span<const NodeId>(*t);
-          std::optional<std::span<const Amount>> rs;
-          if (res.has_value()) rs = std::span<const Amount>(*res);
-          o = detail::spf(*graph, r, direction == "forward" ? Direction::Forward : Direction::Reverse, ts, selection, rs,
-                          minr, elig.get());
+          result.emplace(spf(*graph, r, c));
         }
-        py::dict out;
-        if (o.costs.has_value()) {
-          py::list costs;
-          for (Cost c : *o.costs) costs.append(cost_or_none(c));
-          out["costs"] = costs;
+        // The result's Python objects, each through a checked allocation: a failure raises.
+        auto [obj, slot] = new_object<PySpfResult>();
+        if (result->costs.has_value()) {
+          py::array_t<std::int64_t> costs(static_cast<py::ssize_t>(result->costs->size()));
+          std::copy(result->costs->begin(), result->costs->end(), costs.mutable_data());
+          py::detail::array_proxy(costs.ptr())->flags &= ~py::detail::npy_api::NPY_ARRAY_WRITEABLE_;
+          slot->costs = std::move(costs);
         }
-        out["dag"] = std::make_shared<PredDAG>(detail::PredDAGBuilder::of_edges(*graph, o.edges));
-        if (t.has_value()) {
-          out["target_cost"] = o.target_cost.has_value() ? py::object(py::int_(*o.target_cost)) : py::object(py::none());
+        slot->dag = object_from<PredDAG>(std::move(result->dag));
+        if (result->target_cost.has_value() && *result->target_cost != kUnreachable) {
+          slot->target_cost = py::int_(*result->target_cost);
         }
-        if (o.path.has_value()) out["path"] = o.path->walk;
-        return out;
+        return std::move(obj);
       },
-      py::arg("graph"), py::arg("roots"), py::arg("direction"), py::arg("targets"), py::arg("selection"),
-      py::arg("residual") = py::none(), py::arg("min_residual") = 1, py::arg("elig") = nullptr,
-      "private: the internal search of APPROACH 6 (the recorder's entry; the public spf replaces it).\n"
-      "Returns {costs (full search), dag, target_cost (with targets; None when unreachable), path (the\n"
-      "single path's walk)}.");
+      py::arg("graph"), py::arg("roots"), py::arg("opts"),
+      "Shortest paths from the roots (one NodeId or a sequence; every root at distance 0), FORWARD or\n"
+      "REVERSE (APPROACH 6) -> SpfResult. Without targets every reachable node is settled: costs and the\n"
+      "full DAG of tight edges. With targets the search stops at the nearest targets' cost: target_cost\n"
+      "and the DAG pruned to the walks between the roots and a nearest target (anycast; for REVERSE, from\n"
+      "the target to a root in the edges' orientation), or for multipath = False\n"
+      "the canonical single path, the walk minimising (cost, -bottleneck under PREFER_HIGHER_PRIORITY,\n"
+      "hops, edge-id sequence). Validated in this order before any work (ValueError): the roots (non-\n"
+      "empty, ids in range), the targets (the same), a vertex in both sets, multipath = False without\n"
+      "targets, the residual (length, then every entry in [0, capacity_units]), min_residual >= 1, a\n"
+      "foreign Eligibility. Excluded roots and targets are skipped; all roots excluded gives an empty\n"
+      "result.");
 
   // ------------------------------------------------------------------ private hooks
 

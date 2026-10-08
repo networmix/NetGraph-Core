@@ -20,6 +20,7 @@
 #include <string>
 #include <thread>
 
+#include "netgraph/core/detail/cache_access.hpp"
 #include "netgraph/core/detail/endpoints.hpp"
 #include "netgraph/core/detail/evaluator_checks.hpp"
 #include "netgraph/core/detail/flow_core.hpp"
@@ -36,11 +37,12 @@ std::shared_ptr<const Graph> borrowed(const Graph& g) {
   return std::shared_ptr<const Graph>(std::shared_ptr<const void> {}, &g);
 }
 
+// One evaluation inside a public call: a supplied frozen cache's hit goes to the call's tally.
 PlacementResult evaluate(const Graph& g, std::span<const NodeId> sources,
                          std::span<const NodeId> destinations, const FlowPolicyConfig& cfg, const Eligibility* elig,
-                         DagCache* cache, const OutputOptions& outputs) {
+                         DagCache* cache, const OutputOptions& outputs, detail::FrozenTally& tally) {
   FlowLedger fg(borrowed(g));
-  FlowPolicy policy(fg, sources, destinations, cfg, elig, cache);
+  FlowPolicy policy = detail::PolicyAccess::make(fg, sources, destinations, cfg, elig, cache, tally);
   return policy.place(std::nullopt, outputs);
 }
 
@@ -52,10 +54,10 @@ void check_common(const Graph& g, const Eligibility* elig, const DagCache* cache
   if (cache != nullptr && cache->graph_uid() != g.uid()) {
     throw std::invalid_argument("foreign DagCache: bound to another graph");
   }
-  if (cache != nullptr && workers != 1) {
+  if (cache != nullptr && workers != 1 && !detail::DagCacheAccess::frozen(*cache)) {
     throw std::invalid_argument(
         "a supplied building DagCache has one writer: it is rejected unless workers == 1 (got workers = " +
-        std::to_string(workers) + ")");
+        std::to_string(workers) + "; a frozen cache may be shared by every worker)");
   }
 }
 
@@ -65,8 +67,8 @@ std::size_t worker_threads(std::size_t n, std::int32_t workers) {
 }
 
 // Runs task(i, cache, t) for i in [0, n) on worker_threads(n, workers) threads (t the worker's
-// index), each with its own private building cache unless `shared` is given (workers == 1
-// then). Indices are taken in increasing
+// index), each with its own private building cache unless `shared` is given (a supplied cache:
+// building with workers == 1, or frozen and shared by every worker). Indices are taken in increasing
 // order and a taken index always runs, so after an exception every lower index has run: the
 // lowest failing index is the one a sequential run would report, and its exception is rethrown.
 // Everything a worker needs (the result slots, the private caches) is allocated here, before
@@ -173,32 +175,22 @@ void check_batch_pair(const Graph& g, std::span<const NodeId> sources,
   }
 }
 
-std::int32_t default_workers(bool sensitivity) noexcept {
-  const char* v = sensitivity ? std::getenv("NGRAPH_CORE_SENSITIVITY_THREADS") : std::getenv("NGRAPH_CORE_BATCH_THREADS");
-  if (v == nullptr) return 1;
-  char* end = nullptr;
-  const long n = std::strtol(v, &end, 10);
-  if (end == v || *end != '\0' || n < 1 || n > 4096) return 1;
-  return static_cast<std::int32_t>(n);
+PlacementResult capacity_in_call(const Graph& g, std::span<const NodeId> sources,
+                                 std::span<const NodeId> destinations, const CapacityOptions& opts, FrozenTally& tally) {
+  return evaluate(g, sources, destinations, opts.cfg, opts.elig, opts.cache, opts.outputs, tally);
 }
 
-} // namespace detail
-
-PlacementResult capacity(const Graph& g, std::span<const NodeId> sources,
-                         std::span<const NodeId> destinations, const CapacityOptions& opts) {
-  return evaluate(g, sources, destinations, opts.cfg, opts.elig, opts.cache, opts.outputs);
-}
-
-std::vector<PlacementResult> batch_capacity(
+std::vector<PlacementResult> batch_capacity_in_call(
     const Graph& g, const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>>& pairs,
-    const CapacityOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers) {
-  detail::check_batch_arguments(g, opts, workers);
+    const CapacityOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers,
+    FrozenTally& tally) {
+  check_batch_arguments(g, opts, workers);
   if (!per_pair_elig.empty() && per_pair_elig.size() != pairs.size()) {
     throw std::invalid_argument("per_pair_elig has " + std::to_string(per_pair_elig.size()) + " entries for " +
                                 std::to_string(pairs.size()) + " pairs");
   }
   for (std::size_t i = 0; i < pairs.size(); ++i) {
-    detail::check_batch_pair(g, pairs[i].first, pairs[i].second, per_pair_elig.empty() ? nullptr : per_pair_elig[i], i);
+    check_batch_pair(g, pairs[i].first, pairs[i].second, per_pair_elig.empty() ? nullptr : per_pair_elig[i], i);
   }
   std::vector<std::optional<PlacementResult>> results(pairs.size());
   run_indexed(pairs.size(), workers, g, opts.cache, [&](std::size_t i, DagCache& cache, std::size_t /*t*/) {
@@ -213,7 +205,7 @@ std::vector<PlacementResult> batch_capacity(
         elig = &*both;
       }
     }
-    results[i] = evaluate(g, pairs[i].first, pairs[i].second, opts.cfg, elig, &cache, opts.outputs);
+    results[i] = evaluate(g, pairs[i].first, pairs[i].second, opts.cfg, elig, &cache, opts.outputs, tally);
   });
   std::vector<PlacementResult> out;
   out.reserve(results.size());
@@ -221,9 +213,9 @@ std::vector<PlacementResult> batch_capacity(
   return out;
 }
 
-SensitivityResult sensitivity(const Graph& g, std::span<const NodeId> sources,
-                              std::span<const NodeId> destinations, const SensitivityOptions& opts,
-                              std::int32_t workers) {
+SensitivityResult sensitivity_in_call(const Graph& g, std::span<const NodeId> sources,
+                                      std::span<const NodeId> destinations, const SensitivityOptions& opts,
+                                      std::int32_t workers, FrozenTally& tally) {
   check_common(g, opts.elig, opts.cache, workers);
   const bool global = std::holds_alternative<Global>(opts.cfg.routing);
   const bool cost_only = std::holds_alternative<CostOnly>(opts.cfg.routing);
@@ -238,8 +230,8 @@ SensitivityResult sensitivity(const Graph& g, std::span<const NodeId> sources,
       cache = own.get();
     }
     FlowLedger fg(borrowed(g));
-    FlowPolicy policy(fg, sources, destinations, opts.cfg, opts.elig, cache);
-    auto& pe = detail::PolicyAccess::engine(policy);
+    FlowPolicy policy = PolicyAccess::make(fg, sources, destinations, opts.cfg, opts.elig, cache, tally);
+    auto& pe = PolicyAccess::engine(policy);
     if (global) pe.capture = &capture;
     out.baseline = policy.place(std::nullopt, opts.outputs);
     pe.capture = nullptr;
@@ -298,7 +290,7 @@ SensitivityResult sensitivity(const Graph& g, std::span<const NodeId> sources,
         const EdgeId one[1] = {e};
         Eligibility deleted = g.eligibility({}, one);
         if (opts.elig != nullptr) deleted = Eligibility::intersect(*opts.elig, deleted);
-        const auto r = evaluate(g, sources, destinations, opts.cfg, &deleted, &cache, OutputOptions {});
+        const auto r = evaluate(g, sources, destinations, opts.cfg, &deleted, &cache, OutputOptions {}, tally);
         entry.loss = base - r.placed;
       }
       entry.status = SensitivityStatus::Evaluated;
@@ -310,6 +302,41 @@ SensitivityResult sensitivity(const Graph& g, std::span<const NodeId> sources,
     if (&cache != opts.cache) cache.clear();
   });
   return out;
+}
+
+std::int32_t default_workers(bool sensitivity) noexcept {
+  const char* v = sensitivity ? std::getenv("NGRAPH_CORE_SENSITIVITY_THREADS") : std::getenv("NGRAPH_CORE_BATCH_THREADS");
+  if (v == nullptr) return 1;
+  char* end = nullptr;
+  const long n = std::strtol(v, &end, 10);
+  if (end == v || *end != '\0' || n < 1 || n > 4096) return 1;
+  return static_cast<std::int32_t>(n);
+}
+
+} // namespace detail
+
+// Each evaluator is one public call on a supplied frozen cache's statistics (NOTES R27).
+PlacementResult capacity(const Graph& g, std::span<const NodeId> sources,
+                         std::span<const NodeId> destinations, const CapacityOptions& opts) {
+  return detail::frozen_call(opts.cache, [&](detail::FrozenTally& tally) {
+    return detail::capacity_in_call(g, sources, destinations, opts, tally);
+  });
+}
+
+std::vector<PlacementResult> batch_capacity(
+    const Graph& g, const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>>& pairs,
+    const CapacityOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers) {
+  return detail::frozen_call(opts.cache, [&](detail::FrozenTally& tally) {
+    return detail::batch_capacity_in_call(g, pairs, opts, per_pair_elig, workers, tally);
+  });
+}
+
+SensitivityResult sensitivity(const Graph& g, std::span<const NodeId> sources,
+                              std::span<const NodeId> destinations, const SensitivityOptions& opts,
+                              std::int32_t workers) {
+  return detail::frozen_call(opts.cache, [&](detail::FrozenTally& tally) {
+    return detail::sensitivity_in_call(g, sources, destinations, opts, workers, tally);
+  });
 }
 
 } // namespace netgraph::core

@@ -1,6 +1,6 @@
 # NetGraph-Core Development Makefile
 
-.PHONY: help venv clean-venv dev install install-native install-pgo check check-ci lint format test qt build clean check-dist publish-test publish info hooks check-python cpp-test cov sanitize-test rebuild
+.PHONY: help venv clean-venv dev install install-native install-pgo check check-ci lint format test qt build clean check-dist publish-test publish info hooks check-python cpp-test cov sanitize-test tsan-test rebuild
 
 .DEFAULT_GOAL := help
 
@@ -57,6 +57,7 @@ help:
 	@echo "  make cpp-test      - Build and run C++ tests"
 	@echo "  make cov           - Coverage summary + XML + single-page combined HTML"
 	@echo "  make sanitize-test - Build and run C++ tests with sanitizers"
+	@echo "  make tsan-test     - Build and run C++ tests with ThreadSanitizer"
 	@echo ""
 	@echo "Build & Package:"
 	@echo "  make build         - Build distribution packages"
@@ -277,6 +278,9 @@ cov:
 
 sanitize-test:
 	@PATH="$(VENV_BIN):$$PATH" bash dev/cpp-tests.sh sanitize
+
+tsan-test:
+	@PATH="$(VENV_BIN):$$PATH" bash dev/cpp-tests.sh tsan
 
 # Clean + reinstall in dev mode (respects CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET)
 # Uses active PYTHON (venv or PATH) to avoid environment mismatches

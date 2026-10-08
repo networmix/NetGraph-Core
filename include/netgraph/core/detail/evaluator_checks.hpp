@@ -1,11 +1,15 @@
-/* The evaluators' argument checks and worker default (internal), shared with the Python
-   binding so that both report the same first error (APPROACH 4 and 11). */
+/* The evaluators' argument checks, worker default and in-call forms (internal), shared with the
+   Python binding so that both report the same first error (APPROACH 4 and 11) and publish a frozen
+   cache's statistics at the same boundary (NOTES R27). */
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <utility>
+#include <vector>
 
+#include "netgraph/core/detail/cache_access.hpp"
 #include "netgraph/core/evaluators.hpp"
 #include "netgraph/core/graph.hpp"
 #include "netgraph/core/types.hpp"
@@ -24,5 +28,19 @@ void check_batch_pair(const Graph& g, std::span<const NodeId> sources,
 // else 1. An explicit workers >= 1 is always honoured; the environment supplies defaults only
 // (APPROACH 11).
 std::int32_t default_workers(bool sensitivity) noexcept;
+
+// The evaluators inside a public call: as capacity, batch_capacity and sensitivity, with a
+// supplied frozen cache's hits recorded in `tally` and nothing published. The public evaluators
+// are frozen_call over these; the Python binding runs frozen_call over these and the construction
+// of its result object, so the hits count only once that object exists.
+PlacementResult capacity_in_call(const Graph& g, std::span<const NodeId> sources,
+                                 std::span<const NodeId> destinations, const CapacityOptions& opts, FrozenTally& tally);
+std::vector<PlacementResult> batch_capacity_in_call(
+    const Graph& g, const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>>& pairs,
+    const CapacityOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers,
+    FrozenTally& tally);
+SensitivityResult sensitivity_in_call(const Graph& g, std::span<const NodeId> sources,
+                                      std::span<const NodeId> destinations, const SensitivityOptions& opts,
+                                      std::int32_t workers, FrozenTally& tally);
 
 } // namespace netgraph::core::detail

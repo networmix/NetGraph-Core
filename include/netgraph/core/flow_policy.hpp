@@ -22,6 +22,7 @@ namespace netgraph::core {
 namespace detail {
 struct PolicyEngine;
 struct PolicyAccess;
+class FrozenTally;
 } // namespace detail
 
 // CapacityAware creations per call (stage 1 and accepted growth, across sources) before the
@@ -154,6 +155,10 @@ public:
 
 private:
   friend struct detail::PolicyAccess;
+  // Construction inside another public call (an evaluator): a supplied frozen cache's hits are
+  // recorded in that call's tally (NOTES R27).
+  FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
+             FlowPolicyConfig config, const Eligibility* elig, DagCache* cache, detail::FrozenTally& tally);
   std::unique_ptr<detail::PolicyEngine> engine_;
 };
 

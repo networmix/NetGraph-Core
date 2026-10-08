@@ -30,6 +30,7 @@
 #include <string>
 #include <utility>
 
+#include "netgraph/core/detail/cache_access.hpp"
 #include "netgraph/core/detail/endpoints.hpp"
 #include "netgraph/core/detail/enum_domain.hpp"
 #include "netgraph/core/detail/flow_core.hpp"
@@ -40,8 +41,8 @@
 #include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
 #include "netgraph/core/detail/private_hooks.hpp"
-#include "netgraph/core/detail/search.hpp"
 #include "netgraph/core/detail/trace.hpp"
+#include "netgraph/core/detail/traversal.hpp"
 
 namespace netgraph::core {
 
@@ -174,20 +175,6 @@ int rank(Termination t) noexcept {
 
 Trace amount_or_inf(std::optional<Amount> v) { return v.has_value() ? Trace::integer(*v) : Trace::str("inf"); }
 
-// cost <= f * base, exactly: f is the dyadic rational it is (f >= 1, finite), base >= 1.
-// f = m * 2^x with m odd below 2^53; products stay within 128 bits (APPROACH 6).
-bool stretch_le(Cost cost, Cost base, double f) {
-  const auto [m, x] = dyadic(f);
-  const U128 rhs = mul_u64(static_cast<std::uint64_t>(base), m);  // below 2^115
-  if (x >= 0) {
-    if (bits(rhs) + x > 64) return true;  // rhs * 2^x >= 2^64 > cost
-    return !(shl(rhs, x) < U128 {0, static_cast<std::uint64_t>(cost)});
-  }
-  // f >= 1 with m < 2^53: -x < 53, so cost * 2^-x < 2^116.
-  const U128 lhs = shl(U128 {0, static_cast<std::uint64_t>(cost)}, -x);
-  return !(rhs < lhs);
-}
-
 // The member-aligned amounts of a record's (EdgeId, amount) pairs (both ascending).
 template <class T>
 void align(std::span<const EdgeId> members, const std::vector<std::pair<EdgeId, T>>& pairs, std::vector<T>& out) {
@@ -203,20 +190,17 @@ void align(std::span<const EdgeId> members, const std::vector<std::pair<EdgeId, 
 }
 
 // Round robin of a cumulative 128-bit request: the per-source increment of the share when the
-// cumulative request goes from R to R + v over k sources (APPROACH 9.3). It depends only on
-// r = R mod k: floor((r + v) / k) + [i < (r + v) mod k] - [i < r].
-std::vector<Amount> cumulative_offers(const Counter128& requested, Amount v, std::size_t k) {
+// cumulative request goes from R to R + v over k sources (APPROACH 9.3), offer(i, increment) for
+// i in [0, k). It depends only on r = R mod k: floor((r + v) / k) + [i < (r + v) mod k] - [i < r].
+template <class Offer>
+void cumulative_offers(const Counter128& requested, Amount v, std::size_t k, Offer&& offer) {
   const auto kk = static_cast<std::uint64_t>(k);
   const std::uint64_t two64 = ((std::numeric_limits<std::uint64_t>::max() % kk) + 1) % kk;
   const std::uint64_t r = ((requested.hi % kk) * two64 % kk + requested.lo % kk) % kk;
   const auto total = static_cast<std::uint64_t>(v) + r;
   const auto base = static_cast<Amount>(total / kk);
   const std::uint64_t extra = total % kk;
-  std::vector<Amount> out(k);
-  for (std::size_t i = 0; i < k; ++i) {
-    out[i] = base + (i < extra ? 1 : 0) - (i < r ? 1 : 0);
-  }
-  return out;
+  for (std::size_t i = 0; i < k; ++i) offer(i, base + (i < extra ? 1 : 0) - (i < r ? 1 : 0));
 }
 
 // ================================================================ working flows
@@ -298,85 +282,49 @@ std::shared_ptr<const PredDAG> bundle_of(const Graph& g, std::span<const EdgeId>
   return std::make_shared<const PredDAG>(PredDAGBuilder::of_edges(g, route));
 }
 
-// CostOnly: the static support restricted to the walks from src (a forward reachability over the
-// support's edges: B' ids rank edges by source, so a node's support out-edges are one range of
-// the ascending edge list), then the selection projected on the creation view W (APPROACH 9.1,
-// 10): Collapse by (cost, priority under PreferHigherPriority, lowest EdgeId), and the staged
-// canonical single path for multipath = false.
+// CostOnly: the static support restricted to the walks from src, then the selection projected on
+// the creation view W (APPROACH 9.1, 10): Collapse by (cost, priority under PreferHigherPriority,
+// lowest EdgeId), and the staged canonical single path for multipath = false, both reading W's
+// priority values and never gating on them (the traversal core's support projection).
 Route cost_only_route(const Call& c, NodeId src) {
   const auto& g = c.g;
   const auto& pe = c.pe;
   const auto& sel = pe.config.selection;
-  const auto support = PredDAGBuilder::ascending(*pe.support);
-  const auto row = g.row_offsets();
-  const auto edge_dst = g.edge_dst();
-  const auto edge_src = g.edge_src();
-  std::vector<EdgeId> route;
-  {
-    // Visited nodes in the per-thread node map (released before any routine that uses it).
-    NodeMap& map = NodeMap::local();
-    map.reset(static_cast<std::size_t>(g.num_nodes()));
-    std::vector<NodeId> stack {src};
-    (void)map.add(src);
-    while (!stack.empty()) {
-      const NodeId u = stack.back();
-      stack.pop_back();
-      auto it = std::lower_bound(support.begin(), support.end(), row[static_cast<std::size_t>(u)]);
-      for (; it != support.end() && *it < row[static_cast<std::size_t>(u) + 1]; ++it) {
-        route.push_back(*it);
-        const NodeId v = edge_dst[static_cast<std::size_t>(*it)];
-        if (map.of(v) < 0) {
-          (void)map.add(v);
-          stack.push_back(v);
-        }
-      }
-    }
-    std::sort(route.begin(), route.end());
-  }
+  const auto capacity = g.capacity_units();
+  struct View {
+    const Working* W;
+    std::span<const Amount> capacity;
+    EdgePriority priority;
+  };
+  const View view {&c.W, capacity, sel.priority};
+  const PriorityFn on_w {&view, [](const void* ctx, EdgeId e) noexcept {
+                           const auto& v = *static_cast<const View*>(ctx);
+                           return priority_value(v.priority, v.W->at(e), v.capacity[static_cast<std::size_t>(e)]);
+                         }};
+  auto r = support_route(g, PredDAGBuilder::ascending(*pe.support), src, pe.dests_ok, sel, on_w);
   Route out;
-  if (!sel.multi_edge) {
-    // One member per (u, v) by select_adjacency on the creation view W (the support has no
-    // residual gating, so the projection reads W's priority values, never gates on them): the
-    // members of a pair are consecutive in id order (B' ranks by (src, cost, dst, input)).
-    const bool prefer = sel.tie_break == EdgeTieBreak::PreferHigherPriority;
-    const auto capacity = g.capacity_units();
-    auto value = [&](EdgeId e) { return priority_value(sel.priority, c.W.at(e), capacity[static_cast<std::size_t>(e)]); };
-    std::vector<EdgeId> kept;
-    for (std::size_t i = 0; i < route.size();) {
-      const auto ui = static_cast<std::size_t>(route[i]);
-      EdgeId best = route[i];
-      std::size_t j = i + 1;
-      for (; j < route.size() && edge_src[static_cast<std::size_t>(route[j])] == edge_src[ui] &&
-             edge_dst[static_cast<std::size_t>(route[j])] == edge_dst[ui];
-           ++j) {
-        if (replaces(g, route[j], best, prefer, value)) best = route[j];
-      }
-      kept.push_back(best);
-      i = j;
-    }
-    route = std::move(kept);
-  }
-  if (sel.multipath) {
-    out.edges = std::move(route);
-    return out;
-  }
-  // The staged canonical single path over the (collapsed) support of the source.
-  std::vector<std::uint8_t> member(static_cast<std::size_t>(g.num_edges()), 0);
-  for (EdgeId e : route) member[static_cast<std::size_t>(e)] = 1;
-  std::vector<Amount> wd;
-  std::optional<PriorityValues> prio;
-  if (sel.tie_break == EdgeTieBreak::PreferHigherPriority) {
-    c.W.dense(wd);
-    prio = PriorityValues {&g, sel.priority, wd};
-  }
-  const NodeId s[1] = {src};
-  auto path = canonical_path(g, member, s, pe.dests_ok, prio ? &*prio : nullptr);
-  if (path.has_value()) {
-    out.edges = path->walk;
-    std::sort(out.edges.begin(), out.edges.end());
-    out.cost = path->cost;
-  }
+  out.edges = std::move(r.edges);
+  if (!sel.multipath && !out.edges.empty()) out.cost = r.cost;
   return out;
+}
+
+// CostOnly's creation products in one pass (kernels' cost_only_creation, identical to
+// cost_only_route, bundle_of and plan_on where it applies); nullopt elsewhere.
+std::optional<CreationProducts> creation_products(const Call& c, NodeId src) {
+  const auto& pe = c.pe;
+  const auto& sel = pe.config.selection;
+  struct View {
+    const Working* W;
+    std::span<const Amount> capacity;
+    EdgePriority priority;
+  };
+  const View view {&c.W, c.g.capacity_units(), sel.priority};
+  const PriorityFn on_w {&view, [](const void* ctx, EdgeId e) noexcept {
+                           const auto& v = *static_cast<const View*>(ctx);
+                           return priority_value(v.priority, v.W->at(e), v.capacity[static_cast<std::size_t>(e)]);
+                         }};
+  return cost_only_creation(c.g, pe.support, src, pe.dests_ok, sel, on_w, pe.config.placement,
+                                    pe.config.admission);
 }
 
 // CapacityAware: the canonical route of section 6 on the selection view `view` (dense): static
@@ -387,24 +335,12 @@ std::optional<Route> search(const Call& c, std::size_t ri, std::span<const Amoun
   const auto& g = c.g;
   const auto& ca = std::get<CapacityAware>(pe.config.routing);
   const auto& sel = pe.config.selection;
-  const Amount threshold = std::max<Amount>(1, ca.min_flow_bandwidth);
-  const auto member = member_mask(g, pe.elig, sel, view, threshold);
-  const NodeId s[1] = {pe.roster[ri]};
+  const Gate gate {pe.elig, view, std::max<Amount>(1, ca.min_flow_bandwidth)};
+  auto found = route_search(g, gate, sel, pe.roster[ri], pe.dests_ok);
+  if (!found.has_value()) return std::nullopt;
   Route out;
-  if (sel.multipath) {
-    auto tight = tight_dag(g, member, s, pe.dests_ok);
-    if (tight.cost == kUnreachable) return std::nullopt;
-    out.edges = std::move(tight.edges);
-    out.cost = tight.cost;
-  } else {
-    const PriorityValues prio {&g, sel.priority, view};
-    const bool prefer = sel.tie_break == EdgeTieBreak::PreferHigherPriority;
-    auto path = canonical_path(g, member, s, pe.dests_ok, prefer ? &prio : nullptr);
-    if (!path.has_value()) return std::nullopt;
-    out.edges = std::move(path->walk);
-    std::sort(out.edges.begin(), out.edges.end());
-    out.cost = path->cost;
-  }
+  out.edges = std::move(found->edges);
+  out.cost = found->cost;
   if (ca.max_path_cost.has_value()) {
     if (const auto* a = std::get_if<Absolute>(&*ca.max_path_cost)) {
       if (out.cost > a->cost) return std::nullopt;
@@ -615,9 +551,17 @@ void stage1(Call& c, SourceRun& st) {
   auto& pe = c.pe;
   Trace tr = Trace::map();
   if (is<CostOnly>(pe)) {
-    const Route route = cost_only_route(c, st.src);
-    if (kTraced && c.trace) tr.set("route", route_trace(route.edges));
-    WorkFlow f = new_flow(c, st.src, bundle_of(c.g, route.edges, pe.support), route.cost, nullptr);
+    WorkFlow f;
+    if (auto made = creation_products(c, st.src)) {
+      // The route, its bundle and its plan in one pass (multipath, static membership).
+      if (kTraced && c.trace) tr.set("route", route_trace(made->plan.route));
+      f = new_flow(c, st.src, std::move(made->bundle), made->cost, nullptr,
+                   std::make_shared<const KernelPlan>(std::move(made->plan)));
+    } else {
+      const Route route = cost_only_route(c, st.src);
+      if (kTraced && c.trace) tr.set("route", route_trace(route.edges));
+      f = new_flow(c, st.src, bundle_of(c.g, route.edges, pe.support), route.cost, nullptr);
+    }
     f.seq = ++c.seq;
     st.flows.push_back(std::move(f));
   } else if (is<Pinned>(pe)) {
@@ -1119,17 +1063,18 @@ Draft draft_of(const PolicyEngine& pe, const WorkFlow& f) {
   r.bundle = f.bundle;
   r.route_cost = f.cost;
   const auto members = f.members();
-  r.edges.reserve(static_cast<std::size_t>(std::count_if(f.alloc.begin(), f.alloc.end(), [](Amount x) { return x != 0; })));
-  for (std::size_t m = 0; m < members.size(); ++m) {
-    if (f.alloc[m] != 0) r.edges.emplace_back(members[m], f.alloc[m]);
+  // Exactly sized, written by index (the nonzero members in member order).
+  r.edges.resize(static_cast<std::size_t>(std::count_if(f.alloc.begin(), f.alloc.end(), [](Amount x) { return x != 0; })));
+  for (std::size_t m = 0, k = 0; m < members.size(); ++m) {
+    if (f.alloc[m] != 0) r.edges[k++] = {members[m], f.alloc[m]};
   }
   if (pe.config.admission == Admission::Lossy) {
     r.offered = f.offered;
     r.delivered = f.delivered;
-    r.drops.reserve(static_cast<std::size_t>(
+    r.drops.resize(static_cast<std::size_t>(
         std::count_if(f.drops.begin(), f.drops.end(), [](const Counter128& x) { return !x.is_zero(); })));
-    for (std::size_t m = 0; m < members.size(); ++m) {
-      if (!f.drops[m].is_zero()) r.drops.emplace_back(members[m], f.drops[m]);
+    for (std::size_t m = 0, k = 0; m < members.size(); ++m) {
+      if (!f.drops[m].is_zero()) r.drops[k++] = {members[m], f.drops[m]};
     }
   } else {
     r.delivered = f.T;
@@ -1177,8 +1122,7 @@ PlacementResult place_flows(PolicyEngine& pe, std::optional<Amount> v, const Out
   if (is<Pinned>(pe)) {
     runs[0].offer = v;
   } else if (v.has_value()) {
-    const auto inc = cumulative_offers(pe.requested, *v, k);
-    for (std::size_t i = 0; i < k; ++i) runs[i].offer = inc[i];
+    cumulative_offers(pe.requested, *v, k, [&](std::size_t i, Amount x) { runs[i].offer = x; });
   }
   Trace sources_tr = Trace::map();
   for (std::size_t i = 0; i < k; ++i) {
@@ -1463,14 +1407,6 @@ PlacementResult place_global(PolicyEngine& pe, std::optional<Amount> v, const Ou
 
 // ---------------------------------------------------------------- construction
 
-// The static reverse distances toward the allowed destinations over the statically eligible
-// member graph (capacity >= 1 unit, no residual).
-std::vector<Cost> static_distances(const Graph& g, const Eligibility* elig, std::span<const NodeId> dests) {
-  const PathSelection full(EdgeTieBreak::Deterministic, EdgePriority::Capacity, true, true);
-  const auto member = member_mask(g, elig, full, {}, 1);
-  return distances(g, member, dests, Direction::Reverse);
-}
-
 } // namespace
 
 void validate_config(const FlowPolicyConfig& cfg, std::size_t num_sources, std::size_t num_destinations) {
@@ -1497,16 +1433,7 @@ void validate_config(const FlowPolicyConfig& cfg, std::size_t num_sources, std::
     if (ca->min_flow_bandwidth < 0 || ca->min_flow_bandwidth >= kDomainLimit) {
       invalid("CapacityAware min_flow_bandwidth must be in [0, 2^62) units (got " + str(ca->min_flow_bandwidth) + ")");
     }
-    if (ca->max_path_cost.has_value()) {
-      if (const auto* a = std::get_if<Absolute>(&*ca->max_path_cost)) {
-        if (a->cost < 0) invalid("max_path_cost Absolute cost must be >= 0 (got " + str(a->cost) + ")");
-      } else {
-        const double f = std::get<Stretch>(*ca->max_path_cost).factor;
-        if (!(f >= 1.0) || !std::isfinite(f)) {
-          invalid("max_path_cost Stretch factor must be finite and in [1, inf) (got " + std::to_string(f) + ")");
-        }
-      }
-    }
+    check_ceiling(ca->max_path_cost);
     if (ca->diminishing.has_value()) {
       const auto& d = *ca->diminishing;
       if (d.window < 1) invalid("diminishing window must be >= 1 (got " + str(d.window) + ")");
@@ -1538,8 +1465,14 @@ FlowPolicyConfig::FlowPolicyConfig(Routing routing_, FlowPlacement placement_, A
 using detail::LedgerAccess;
 using detail::PolicyEngine;
 
-FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
-                       FlowPolicyConfig config, const Eligibility* elig, DagCache* cache) {
+namespace {
+
+// The engine of a new policy, bound to its ledger as the last step. A supplied frozen cache's hit
+// is recorded in `tally` (NOTES R27): the public constructor publishes it once construction has
+// succeeded, an evaluator once its whole call has.
+std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const NodeId> sources,
+                                          std::span<const NodeId> destinations, FlowPolicyConfig config,
+                                          const Eligibility* elig, DagCache* cache, detail::FrozenTally& tally) {
   auto pe = std::make_unique<PolicyEngine>(ledger, std::move(config));
   pe->graph = ledger.graph();
   const auto& g = *pe->graph;
@@ -1590,7 +1523,7 @@ FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std:
     if (!pe->usable.empty()) pe->roster.push_back(src);
   } else if (detail::is<CostOnly>(*pe)) {
     pe->support = cache != nullptr
-                      ? cache->lookup(g, pe->destinations, Direction::Reverse, elig)
+                      ? detail::DagCacheAccess::lookup(*cache, g, pe->destinations, Direction::Reverse, elig, tally)
                       : std::make_shared<const PredDAG>(detail::static_support(g, pe->destinations, Direction::Reverse, elig));
     const auto edges = detail::PredDAGBuilder::ascending(*pe->support);
     const auto row = g.row_offsets();
@@ -1600,17 +1533,31 @@ FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std:
       if (it != edges.end() && *it < row[static_cast<std::size_t>(s) + 1]) pe->roster.push_back(s);
     }
   } else {
-    const auto dist = detail::static_distances(g, elig, pe->dests_ok);
-    for (NodeId s : pe->sources) {
-      if (!node_ok(s) || dist[static_cast<std::size_t>(s)] == kUnreachable) continue;
+    const auto dist = detail::static_costs(g, elig, pe->dests_ok, pe->sources);
+    for (std::size_t i = 0; i < pe->sources.size(); ++i) {
+      const NodeId s = pe->sources[i];
+      if (!node_ok(s) || dist[i] == kUnreachable) continue;
       pe->roster.push_back(s);
-      pe->baseline.push_back(dist[static_cast<std::size_t>(s)]);
+      pe->baseline.push_back(dist[i]);
     }
   }
   pe->cohorts.resize(pe->roster.size());
   pe->owner = LedgerAccess::bind(ledger);  // last: nothing is bound when construction fails
-  engine_ = std::move(pe);
+  return pe;
 }
+
+} // namespace
+
+// A public call of its own: a supplied frozen cache counts the hit once the policy exists.
+FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
+                       FlowPolicyConfig config, const Eligibility* elig, DagCache* cache)
+    : engine_(detail::frozen_call(cache, [&](detail::FrozenTally& tally) {
+        return make_engine(ledger, sources, destinations, std::move(config), elig, cache, tally);
+      })) {}
+
+FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
+                       FlowPolicyConfig config, const Eligibility* elig, DagCache* cache, detail::FrozenTally& tally)
+    : engine_(make_engine(ledger, sources, destinations, std::move(config), elig, cache, tally)) {}
 
 // The destruction law (section 8): the records stay in the ledger as orphans.
 FlowPolicy::~FlowPolicy() { LedgerAccess::release(engine_->fg, engine_->owner); }

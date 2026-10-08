@@ -13,7 +13,9 @@
 #include <numeric>
 #include <optional>
 #include <random>
+#include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include "netgraph/core/detail/int128.hpp"
@@ -67,6 +69,12 @@ std::vector<Amount> hamilton(Amount total, const std::vector<Amount>& w) {
   Amount left = total - std::accumulate(a.begin(), a.end(), Amount {0});
   for (std::size_t i = 0; i < order.size() && left > 0; ++i, --left) ++a[order[i]];
   return a;
+}
+
+// A plan's structure field (a view of the plan's block) as a vector.
+template <class T>
+std::vector<std::remove_const_t<T>> vec(std::span<T> v) {
+  return std::vector<std::remove_const_t<T>>(v.begin(), v.end());
 }
 
 // Member-aligned view of a dense per-edge array.
@@ -459,11 +467,12 @@ TEST(Plans, SplitGraphEqualsTheWalkDefinition) {
       const auto on_usable =
           make_plan(g, kernel, Admission::Lossless, EdgePriority::Capacity, src, dsts, usable_dag, {}, &plan_cost);
       EXPECT_EQ(on_usable.members, on_bundle.members);
-      EXPECT_EQ(on_usable.topo, on_bundle.topo);
-      EXPECT_EQ(on_usable.out_begin, on_bundle.out_begin);
-      EXPECT_EQ(on_usable.out_end, on_bundle.out_end);
-      EXPECT_EQ(on_usable.head_pos, on_bundle.head_pos);
-      EXPECT_EQ(on_usable.terminal, on_bundle.terminal);
+      EXPECT_EQ(vec(on_usable.dsts), vec(on_bundle.dsts));
+      EXPECT_EQ(vec(on_usable.topo), vec(on_bundle.topo));
+      EXPECT_EQ(vec(on_usable.out_begin), vec(on_bundle.out_begin));
+      EXPECT_EQ(vec(on_usable.out_end), vec(on_bundle.out_end));
+      EXPECT_EQ(vec(on_usable.head_pos), vec(on_bundle.head_pos));
+      EXPECT_EQ(vec(on_usable.terminal), vec(on_bundle.terminal));
       EXPECT_EQ(on_usable.weights, on_bundle.weights);
       // The route cost is over the route (every usable edge), not only the members.
       dist.assign(static_cast<std::size_t>(n), kUnreachable);

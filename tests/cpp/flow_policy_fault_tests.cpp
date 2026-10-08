@@ -9,6 +9,7 @@
 // (fault_injection.hpp).
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <new>
@@ -22,7 +23,7 @@
 #include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
-#include "netgraph/core/detail/search.hpp"
+#include "netgraph/core/detail/traversal.hpp"
 #include "netgraph/core/evaluators.hpp"
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/flow_policy.hpp"
@@ -120,6 +121,13 @@ std::vector<Mode> modes(const Graph& g) {
                  std::make_shared<const PredDAG>(detail::PredDAGBuilder::of_edges(g, std::vector<EdgeId> {inv[1], inv[6]}))};
   out.push_back({"pinned eb cohort", {two, FlowPlacement::EqualBalanced, Admission::Lossless, det}, {0}, {5}});
   out.push_back({"pinned lossy", {two, FlowPlacement::Weighted, Admission::Lossy, det}, {0}, {5}});
+  // CostOnly creation in one pass (task 1d-msd): its Collapse branch (multipath, multi_edge false,
+  // on the creation view) and its Weighted weights (Capacity priority).
+  out.push_back({"costonly eb multipath collapse",
+                 {CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossless,
+                  sel(EdgeTieBreak::PreferHigherPriority, EdgePriority::Residual, true, false)},
+                 S, D});
+  out.push_back({"costonly weighted capacity", {CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, det}, S, D});
   return out;
 }
 
@@ -199,7 +207,7 @@ TEST(PolicyFaults, EveryAllocationOfEveryRoutingModeFailsAtomically) {
       }
     }
   }
-  EXPECT_EQ(sweeps, 11 * 5);
+  EXPECT_EQ(sweeps, 13 * 5);
   EXPECT_GT(injected, sweeps * 3);  // not vacuous
 }
 
@@ -299,7 +307,9 @@ TEST(PolicyFaults, DagCacheInsertionIsAllOrNothing) {
     EXPECT_EQ(s.bytes, before.bytes) << w;
     EXPECT_EQ(s.live_values, before.live_values) << w;
     EXPECT_EQ(s.hits, before.hits) << w;
-    EXPECT_LE(s.misses, before.misses + 1) << w;  // a failed search counts its miss
+    // The key is the lookup's first allocation: its failure counts nothing; a failed search (or
+    // insertion) after it counts its miss.
+    EXPECT_EQ(s.misses, before.misses + (at == 0 ? 0 : 1)) << w;
     const auto v = cache.lookup(*g, roots, Direction::Reverse, nullptr);  // a clean retry inserts
     EXPECT_EQ(cache.stats().entries, 2) << w;
     EXPECT_TRUE(*v == detail::static_support(*g, roots, Direction::Reverse, nullptr)) << w;
@@ -459,4 +469,273 @@ TEST(PolicyFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
     if (!failed) break;
   }
   EXPECT_GT(failures, 4);
+}
+
+TEST(PolicyFaults, FrozenLookupsFailWithoutCounting) {
+  // A frozen hit allocates only the key of roots that are not already a sorted set (roots that are
+  // one are borrowed: nothing; task 1d-msd), a frozen miss its key and the DagCacheMiss message,
+  // all before counting: a failure there counts nothing and changes no entry; a clean retry counts.
+  const auto g = graph();
+  DagCache cache(*g);
+  const std::vector<NodeId> unsorted = {6, 5};
+  const std::vector<NodeId> sorted = {5, 6};
+  const std::vector<NodeId> absent = {5};
+  const auto value = cache.lookup(*g, unsorted, Direction::Reverse, nullptr);
+  cache.freeze();
+  for (const int kind : {0, 1, 2}) {  // a hit on unsorted roots, a hit on a sorted set, a miss
+    const bool hit = kind != 2;
+    const auto& present = kind == 0 ? unsorted : sorted;
+    long failures = 0;
+    for (long at = 0;; ++at) {
+      const auto before = cache.stats();
+      bool missed = false;
+      const auto call = [&] {
+        try {
+          if (cache.lookup(*g, hit ? present : absent, Direction::Reverse, nullptr).get() != value.get()) ADD_FAILURE();
+        } catch (const DagCacheMiss&) {
+          missed = true;
+        }
+      };
+      const bool failed = fails_at(at, call);
+      const auto s = cache.stats();
+      const std::string w = std::string(hit ? "hit" : "miss") + " allocation " + std::to_string(at);
+      EXPECT_EQ(s.entries, 1) << w;
+      EXPECT_EQ(s.bytes, before.bytes) << w;
+      EXPECT_EQ(s.live_values, before.live_values) << w;
+      if (failed) {
+        ++failures;
+        EXPECT_EQ(s.hits, before.hits) << w;
+        EXPECT_EQ(s.misses, before.misses) << w;
+        continue;
+      }
+      EXPECT_EQ(missed, !hit) << w;
+      EXPECT_EQ(s.hits - before.hits, hit ? 1 : 0) << w;
+      EXPECT_EQ(s.misses - before.misses, hit ? 0 : 1) << w;
+      break;
+    }
+    if (kind == 1) {
+      EXPECT_EQ(failures, 0) << "hit on a sorted set";  // borrowed: no allocation at all
+    } else {
+      EXPECT_GE(failures, hit ? 1 : 2) << (hit ? "hit" : "miss");  // the key; the message (and a key)
+    }
+  }
+}
+
+namespace {
+
+void expect_stats(const DagCache::Stats& got, const DagCache::Stats& want, const std::string& where) {
+  EXPECT_EQ(got.hits, want.hits) << where;
+  EXPECT_EQ(got.misses, want.misses) << where;
+  EXPECT_EQ(got.entries, want.entries) << where;
+  EXPECT_EQ(got.bytes, want.bytes) << where;
+  EXPECT_EQ(got.live_values, want.live_values) << where;
+}
+
+// One public call reading a supplied frozen cache, under every injected failure (every `step`-th
+// allocation in any thread, or every third in the worker threads only): a call failing with
+// std::bad_alloc leaves all five statistics as they were; the call that completes adds exactly
+// `hits` hits, or, when its outcome is the DagCacheMiss (`miss`), exactly one miss and no hit
+// (NOTES R27). Returns the number of injected failures.
+long sweep_frozen_stats(const std::string& name, const DagCache& cache, bool in_workers, long step, std::int64_t hits,
+                        bool miss, const std::function<void()>& call) {
+  long failures = 0;
+  for (long at = 0;; at += in_workers ? 3 : step) {
+    const auto before = cache.stats();
+    bool missed = false;
+    const auto fn = [&] {
+      try {
+        call();
+      } catch (const DagCacheMiss&) {
+        missed = true;
+      }
+    };
+    const bool failed = in_workers ? fails_in_workers_at(at, fn) : fails_at(at, fn);
+    const std::string w = name + " allocation " + std::to_string(at) + (in_workers ? " (worker threads)" : "");
+    auto want = before;
+    if (failed) {
+      ++failures;
+      EXPECT_FALSE(missed) << w;
+    } else {
+      EXPECT_EQ(missed, miss) << w;
+      if (miss) {
+        want.misses += 1;
+      } else {
+        want.hits += hits;
+      }
+    }
+    expect_stats(cache.stats(), want, w);
+    if (!failed || ::testing::Test::HasFailure()) break;
+  }
+  return failures;
+}
+
+} // namespace
+
+TEST(PolicyFaults, FrozenStatisticsFollowThePublicCall) {
+  // review-1d F1: a frozen cache's statistics are observable state (APPROACH 13; the building
+  // cache's limit 2 does not cover them). Every public call that can read a supplied frozen cache
+  // (the policy constructor in every mode, capacity in every mode, batch_capacity and sensitivity
+  // at 1, 2 and 4 workers, in any thread and in the worker threads only) is swept: hits, misses,
+  // entries, bytes and live values after a failed call equal those before it.
+  const auto g = graph();
+  const auto all = modes(*g);
+  DagCache cache(*g);
+  for (const auto& t : {std::vector<NodeId> {5, 6}, std::vector<NodeId> {6}, std::vector<NodeId> {5}}) {
+    (void)cache.lookup(*g, t, Direction::Reverse, nullptr);
+  }
+  cache.freeze();
+  const auto reads = [](const Mode& m) -> std::int64_t { return std::holds_alternative<CostOnly>(m.cfg.routing) ? 1 : 0; };
+  for (const auto& m : all) {
+    const long built = sweep_frozen_stats(m.name + " frozen construction", cache, false, 1, reads(m), false, [&] {
+      FlowLedger fg(g);
+      FlowPolicy p(fg, m.sources, m.destinations, m.cfg, nullptr, &cache);
+    });
+    EXPECT_GT(built, 2) << m.name;
+    const CapacityOptions opts {m.cfg, nullptr, &cache, OutputOptions {true, true, true}};
+    const long placed = sweep_frozen_stats(m.name + " frozen capacity", cache, false, 3, reads(m), false,
+                                           [&] { (void)capacity(*g, m.sources, m.destinations, opts); });
+    EXPECT_GT(placed, 2) << m.name;
+    if (::testing::Test::HasFailure()) return;
+  }
+  // A CostOnly policy whose key is absent: the constructor's outcome is the miss.
+  const auto& eb = all[1];  // costonly eb
+  ASSERT_TRUE(std::holds_alternative<CostOnly>(eb.cfg.routing));
+  const std::vector<NodeId> absent = {4};
+  EXPECT_GT(sweep_frozen_stats("frozen construction miss", cache, false, 1, 0, true,
+                               [&] {
+                                 FlowLedger fg(g);
+                                 FlowPolicy p(fg, eb.sources, absent, eb.cfg, nullptr, &cache);
+                               }),
+            1);
+  const CapacityOptions shared {eb.cfg, nullptr, &cache};
+  const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {
+      {eb.sources, eb.destinations}, {{1}, {6}}, {{0}, {5}}};
+  // Pair 0 hits, pair 1 misses: a lower pair's hit is not kept by the failed batch.
+  const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> with_miss = {{eb.sources, eb.destinations},
+                                                                                     {{0}, absent}};
+  for (const std::int32_t workers : {1, 2, 4}) {
+    for (const bool in_workers : {false, true}) {
+      if (in_workers && workers == 1) continue;  // one worker runs on the calling thread
+      const std::string w = " workers " + std::to_string(workers);
+      EXPECT_GT(sweep_frozen_stats("frozen batch" + w, cache, in_workers, 5, 3, false,
+                                   [&] { (void)batch_capacity(*g, pairs, shared, {}, workers); }),
+                2)
+          << w;
+      EXPECT_GT(sweep_frozen_stats("frozen batch with a miss" + w, cache, in_workers, 3, 0, true,
+                                   [&] { (void)batch_capacity(*g, with_miss, shared, {}, workers); }),
+                1)
+          << w;
+      if (::testing::Test::HasFailure()) return;
+    }
+    // CostOnly sensitivity from a source that reaches no destination: one lookup (the baseline's
+    // hit), no placed deletion, and the call succeeds; its failures happen after the hit.
+    EXPECT_GT(sweep_frozen_stats("frozen costonly sensitivity" + std::string(" workers ") + std::to_string(workers),
+                                 cache, false, 3, 1, false,
+                                 [&] {
+                                   (void)sensitivity(*g, std::vector<NodeId> {5}, std::vector<NodeId> {6},
+                                                     SensitivityOptions {eb.cfg, nullptr, &cache}, workers);
+                                 }),
+              2);
+  }
+  // CostOnly sensitivity whose deletions miss (a fresh uid per deletion): the baseline's hit is
+  // dropped with the failed call, and the miss counts once.
+  EXPECT_GT(sweep_frozen_stats("frozen costonly sensitivity miss", cache, false, 1, 0, true,
+                               [&] {
+                                 (void)sensitivity(*g, eb.sources, eb.destinations,
+                                                   SensitivityOptions {eb.cfg, nullptr, &cache}, 1);
+                               }),
+            2);
+  EXPECT_EQ(cache.stats().entries, 3);
+}
+
+TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
+  // batch_capacity and CostOnly sensitivity with a frozen cache shared by two and four workers:
+  // a failure anywhere, or in the worker threads only, propagates as std::bad_alloc after the
+  // join, the cache keeps its entries, and a clean retry gives the reference.
+  const auto g = graph();
+  const auto all = modes(*g);
+  const auto& m = all[1];  // costonly eb: reads the cache
+  const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {
+      {m.sources, m.destinations}, {{1}, {6}}, {{0}, {5}}};
+  DagCache cache(*g);
+  for (const auto& [s, t] : pairs) (void)cache.lookup(*g, t, Direction::Reverse, nullptr);
+  const auto entries = cache.stats().entries;
+  cache.freeze();
+  const auto want = batch_capacity(*g, pairs, CapacityOptions {m.cfg}, {}, 1);
+  const CapacityOptions shared {m.cfg, nullptr, &cache};
+  for (const std::int32_t workers : {2, 4}) {
+    for (const bool in_workers : {false, true}) {
+      const long failures = sweep_evaluator(
+          "frozen batch", workers, in_workers, 5,
+          [&](std::int32_t w) { (void)batch_capacity(*g, pairs, shared, {}, w); },
+          [&](std::int32_t w) {
+            EXPECT_EQ(cache.stats().entries, entries);
+            const auto b = batch_capacity(*g, pairs, shared, {}, w);
+            ASSERT_EQ(b.size(), want.size());
+            for (std::size_t i = 0; i < b.size(); ++i) expect_same(b[i], want[i], "frozen batch retry");
+          });
+      EXPECT_GT(failures, 2) << "frozen batch workers " << workers;
+    }
+  }
+  // CostOnly sensitivity through a frozen cache: every re-evaluated deletion misses (a fresh
+  // uid), so the reference outcome is the DagCacheMiss itself (its key; the uid is fresh per
+  // call). With one worker an injected failure before that miss gives std::bad_alloc, and the
+  // retry raises the same miss. (With several workers a lower candidate's miss may win over a
+  // worker's std::bad_alloc: the lowest index's exception is raised.)
+  const auto key_of = [](const DagCacheMiss& e) {
+    const std::string w = e.what();
+    return w.substr(0, w.find(", Eligibility uid "));
+  };
+  const auto costonly_sensitivity = [&](std::int32_t w) {
+    (void)sensitivity(*g, m.sources, m.destinations, SensitivityOptions {m.cfg, nullptr, &cache}, w);
+  };
+  std::string want_miss;
+  try {
+    costonly_sensitivity(1);
+  } catch (const DagCacheMiss& e) {
+    want_miss = key_of(e);
+  }
+  EXPECT_EQ(want_miss, "DagCache: the frozen cache has no entry for roots {5, 6}, direction Reverse");
+  const long failures = sweep_evaluator(
+      "frozen sensitivity", 1, false, 1,
+      [&](std::int32_t w) {
+        try {
+          costonly_sensitivity(w);
+        } catch (const DagCacheMiss&) {
+        }
+      },
+      [&](std::int32_t w) {
+        EXPECT_EQ(cache.stats().entries, entries);
+        try {
+          costonly_sensitivity(w);
+          ADD_FAILURE() << "no DagCacheMiss";
+        } catch (const DagCacheMiss& e) {
+          EXPECT_EQ(key_of(e), want_miss);
+        }
+      });
+  EXPECT_GT(failures, 2) << "frozen sensitivity";
+  // Global (deletion-mode) sensitivity with the frozen cache shared by every worker: it reads no
+  // cache, and fails and retries as without one.
+  const auto git = std::find_if(all.begin(), all.end(), [](const Mode& x) { return x.name == "global"; });
+  ASSERT_NE(git, all.end());
+  const auto& gm = *git;
+  const auto want_global = sensitivity(*g, gm.sources, gm.destinations, SensitivityOptions {gm.cfg}, 1);
+  const SensitivityOptions gopts {gm.cfg, nullptr, &cache};
+  for (const std::int32_t workers : {2, 4}) {
+    for (const bool in_workers : {false, true}) {
+      const long global_failures = sweep_evaluator(
+          "frozen global sensitivity", workers, in_workers, 11,
+          [&](std::int32_t w) { (void)sensitivity(*g, gm.sources, gm.destinations, gopts, w); },
+          [&](std::int32_t w) {
+            const auto r = sensitivity(*g, gm.sources, gm.destinations, gopts, w);
+            ASSERT_EQ(r.entries.size(), want_global.entries.size());
+            for (std::size_t i = 0; i < r.entries.size(); ++i) {
+              EXPECT_EQ(r.entries[i].edge, want_global.entries[i].edge);
+              EXPECT_EQ(r.entries[i].loss, want_global.entries[i].loss);
+            }
+          });
+      EXPECT_GT(global_failures, 2) << "frozen global sensitivity workers " << workers;
+    }
+  }
+  EXPECT_EQ(cache.stats().entries, entries);
 }

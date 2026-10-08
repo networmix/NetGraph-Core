@@ -9,6 +9,7 @@
 // | orphaned records  | n/a                           | n/a                | n/a        | clears   | copied   |
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -705,4 +706,118 @@ TEST(FlowLedger, RandomMultiOwnerCommitsMatchAModel) {
   EXPECT_GT(accepted, 1000);
   EXPECT_GT(rejected, 100);
   for (auto owner : owners) LedgerAccess::release(fg, owner);
+}
+
+TEST(FlowLedger, FreshSingleRecordCommitsMatchTheGeneralRule) {
+  // Task 1d-msd: a commit of one new record by an owner without live records takes a shortcut
+  // when its edges strictly ascend (no aggregation). Against an independent model of the general
+  // rule, for drafts that ascend, repeat an edge, run backwards, hold zeros or negatives, and
+  // overflow at any position (another owner holding part of the capacity): the same outcome, the
+  // same message (negative amounts first, then the first infeasible edge in first-touch order with
+  // its aggregated total), and nothing changed by a rejected commit.
+  std::mt19937 rng(1007);
+  auto g = shared(make_graph(6, {{0, 1, 4, 1}, {1, 2, 3, 1}, {2, 3, 5, 1}, {0, 3, 2, 1}, {3, 4, 4, 1}, {4, 5, 3, 1}}));
+  const auto dag = all_edges(*g);
+  const auto m = static_cast<std::size_t>(g->num_edges());
+  FlowLedger fg(g);
+  const auto other = LedgerAccess::bind(fg);
+  std::vector<detail::Draft> held {draft_on(dag, {{0, 1}, {2, 2}, {5, 1}})};
+  (void)LedgerAccess::commit(fg, other, held);
+  int ascending = 0;
+  int general = 0;
+  int negative = 0;
+  int infeasible = 0;
+  int accepted = 0;
+  for (int step = 0; step < 4000; ++step) {
+    const auto owner = LedgerAccess::bind(fg);
+    std::vector<std::pair<EdgeId, Amount>> edges;
+    const auto k = rng() % 5;
+    for (std::size_t i = 0; i < k; ++i) {
+      edges.emplace_back(static_cast<EdgeId>(rng() % m), rng() % 9 == 0 ? Amount {-1} : static_cast<Amount>(rng() % 4));
+    }
+    const int shape = static_cast<int>(rng() % 3);  // ascending, sorted with repeats kept, as drawn
+    if (shape < 2) std::sort(edges.begin(), edges.end());
+    if (shape == 0) {
+      edges.erase(std::unique(edges.begin(), edges.end(), [](const auto& a, const auto& b) { return a.first == b.first; }),
+                  edges.end());
+    }
+    const bool strictly = std::adjacent_find(edges.begin(), edges.end(), [](const auto& a, const auto& b) {
+                            return a.first >= b.first;
+                          }) == edges.end();
+    ++(strictly ? ascending : general);
+    // The general rule: negatives first; then each touched edge in first-touch order with its sum.
+    std::string want;
+    for (const auto& [e, x] : edges) {
+      if (x < 0) want = "ledger: a negative allocation in a commit";
+    }
+    std::vector<Amount> delta(m, 0);
+    std::vector<EdgeId> touched;
+    for (const auto& [e, x] : edges) {
+      if (std::find(touched.begin(), touched.end(), e) == touched.end()) touched.push_back(e);
+      delta[static_cast<std::size_t>(e)] += x;
+    }
+    const auto before = fg.allocated();
+    const auto before_records = fg.records();
+    const auto next_id = LedgerAccess::next_flow_id(fg);
+    if (want.empty()) {
+      for (EdgeId e : touched) {
+        const auto ei = static_cast<std::size_t>(e);
+        const Amount next = before[ei] + delta[ei];
+        if (next < 0 || next > g->capacity_units()[ei]) {
+          want = "ledger: infeasible commit on edge " + std::to_string(e) + " (" + std::to_string(next) + " of " +
+                 std::to_string(g->capacity_units()[ei]) + ")";
+          break;
+        }
+      }
+    }
+    std::vector<detail::Draft> drafts {draft_on(dag, edges)};
+    if (!want.empty()) {
+      try {
+        (void)LedgerAccess::commit(fg, owner, drafts);
+        ADD_FAILURE() << "step " << step << ": accepted, want " << want;
+      } catch (const std::logic_error& e) {
+        EXPECT_EQ(std::string(e.what()), want) << "step " << step;
+      }
+      ++(want.find("negative") != std::string::npos ? negative : infeasible);
+      EXPECT_EQ(fg.allocated(), before) << "step " << step;
+      EXPECT_EQ(fg.records().size(), before_records.size()) << "step " << step;
+      EXPECT_EQ(LedgerAccess::next_flow_id(fg), next_id) << "step " << step;
+    } else {
+      const auto ids = LedgerAccess::commit(fg, owner, drafts);
+      ASSERT_EQ(ids.size(), 1U);
+      EXPECT_EQ(ids[0], (FlowId {fg.uid(), next_id}));
+      const auto rec = fg.record(ids[0]);
+      std::vector<std::pair<EdgeId, Amount>> kept;
+      for (const auto& p : edges) {
+        if (p.second != 0) kept.push_back(p);
+      }
+      EXPECT_EQ(rec.edges, kept) << "step " << step;
+      EXPECT_EQ(rec.owner, owner);
+      for (std::size_t e = 0; e < m; ++e) EXPECT_EQ(fg.allocated()[e], before[e] + delta[e]) << "step " << step;
+      ++accepted;
+      if (rng() % 2 == 0) (void)LedgerAccess::detach(fg, owner);
+    }
+    LedgerAccess::release(fg, owner);
+    if (::testing::Test::HasFailure()) return;
+  }
+  EXPECT_GT(ascending, 1000);
+  EXPECT_GT(general, 1000);
+  EXPECT_GT(negative, 300);
+  EXPECT_GT(infeasible, 300);
+  EXPECT_GT(accepted, 1000);
+  LedgerAccess::release(fg, other);
+  // An owner with a live record, and a draft naming an id the owner does not hold, keep the
+  // general path and its rule (a fresh ledger).
+  FlowLedger fg2(g);
+  const auto owner = LedgerAccess::bind(fg2);
+  std::vector<detail::Draft> one {draft_on(dag, {{3, 1}})};
+  const auto ids = LedgerAccess::commit(fg2, owner, one);
+  std::vector<detail::Draft> without_it {draft_on(dag, {{4, 1}})};
+  EXPECT_THROW((void)LedgerAccess::commit(fg2, owner, without_it), std::logic_error);
+  const auto fresh = LedgerAccess::bind(fg2);
+  std::vector<detail::Draft> claims {draft_on(dag, {{4, 1}}, ids[0].second)};
+  EXPECT_THROW((void)LedgerAccess::commit(fg2, fresh, claims), std::logic_error);
+  EXPECT_EQ(fg2.records().size(), 1U);
+  LedgerAccess::release(fg2, owner);
+  LedgerAccess::release(fg2, fresh);
 }

@@ -12,6 +12,7 @@ namespace netgraph::core {
 
 namespace detail {
 struct PredDAGBuilder;
+struct PathBuilder;
 } // namespace detail
 
 // An immutable, graph-bound DAG in predecessor CSR form: the predecessor entries of node v are
@@ -81,6 +82,8 @@ public:
   }
 
 private:
+  friend struct detail::PathBuilder;
+  Path() = default;
   std::uint64_t graph_uid_ {0};
   std::int32_t num_nodes_ {0};
   std::vector<std::vector<EdgeId>> hops_ {};

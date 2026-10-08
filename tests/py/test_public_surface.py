@@ -1,7 +1,8 @@
 """The public surface: the graph on units, Eligibility, the conversions, the route structures,
-the selection and placement axes, the ledger, the policy engine, the DagCache and the
-evaluators; the extension's private entries, which netgraph_core never re-exports; and the
-spellings the interface grooming retired (APPROACH 12), which exist nowhere, without aliases."""
+the selection and placement axes, the ledger, the policy engine, the DagCache, the evaluators
+and the public search; the extension's private entry, which netgraph_core never re-exports;
+the spellings the interface grooming retired and the retired search entry points (APPROACH 12),
+which exist nowhere, without aliases."""
 
 import _netgraph_core
 import pytest
@@ -37,6 +38,7 @@ PUBLIC = {
     "FlowPolicy",
     "MAX_FLOWS_PER_CALL",
     "DagCache",
+    "DagCacheMiss",
     "DagCacheStats",
     "CapacityOptions",
     "SensitivityOptions",
@@ -46,10 +48,18 @@ PUBLIC = {
     "capacity",
     "batch_capacity",
     "sensitivity",
+    "Direction",
+    "SpfOptions",
+    "SpfResult",
+    "UNREACHABLE",
+    "spf",
+    "KspOptions",
+    "ksp",
+    "resolve_to_paths",
 }
 
-# Shipped private entries: the flow core's recorder entry (APPROACH 2.2) and the internal search.
-PRIVATE = {"_place_global_units", "_spf"}
+# The shipped private entry: the flow core's recorder entry (APPROACH 2.2).
+PRIVATE = {"_place_global_units"}
 
 # The private hooks (NETGRAPH_CORE_PRIVATE_HOOKS: the development build only): module functions
 # and class members.
@@ -103,15 +113,36 @@ RETIRED = {
     "kMaxFlowsPerCall",
 }
 
+# The retired search entry points (APPROACH 12) and the 1b private search: never bound.
+RETIRED_SEARCH = {
+    "shortest_paths",
+    "shortest_paths_to",
+    "spf_dag",
+    "spf_to",
+    "spf_reverse",
+    "k_shortest_paths",
+    "_spf",
+    "EdgeSelection",
+    "PathAlg",
+}
+
 
 def test_retired_spellings_are_absent():
-    for name in RETIRED:
+    for name in RETIRED | RETIRED_SEARCH:
         assert not hasattr(_netgraph_core, name), name
         assert not hasattr(ngc, name), name
     assert ngc.Graph.__name__ == "Graph"
     assert ngc.FlowLedger.__name__ == "FlowLedger"
     assert ngc.OutputOptions.__name__ == "OutputOptions"
     assert ngc.DiminishingReturns.__name__ == "DiminishingReturns"
+    # PredDAG and Path carry no resolver or alternative constructors (APPROACH 12).
+    for name in ("resolve_to_paths", "from_edges", "from_hops"):
+        assert not hasattr(ngc.PredDAG, name), name
+    for name in ("from_edges", "from_hops"):
+        assert not hasattr(ngc.Path, name), name
+    # The search queue is C++ only.
+    assert not hasattr(ngc, "SpfQueue")
+    assert ngc.UNREACHABLE == 2**63 - 1
 
 
 def _config():

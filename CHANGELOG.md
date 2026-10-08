@@ -61,9 +61,33 @@ units), one flow core, one placement engine. It replaces the 0.11 API.
   `make_new_instance`, which does not check `tp_alloc`: a Python allocation failure there
   crashes the process, Core state unchanged), and a supplied building `DagCache`, a memo that
   keeps the complete entries and statistics of the lookups that succeeded before a failure.
-- **DagCache**: `DagCache(graph)` in building mode: keyed by the root set, the direction and
-  the Eligibility, its values the full static supports (immutable, shared, valid after
-  `clear()`), with `stats()` (`hits`, `misses`, `entries`, `bytes`, `live_values`).
+- **Search**: `spf(graph, roots, SpfOptions(direction, selection, targets=None, residual=None,
+  min_residual=1, elig=None))` returns `SpfResult`. It searches from a root set (every root at
+  distance 0), `Direction.FORWARD` or `REVERSE`. Without targets it settles every reachable node
+  and returns `costs` (`UNREACHABLE` for the nodes not reached) and the full DAG of tight edges,
+  the edges on some shortest path. With targets it stops at the nearest targets' cost and
+  returns `target_cost` and the DAG of the walks between the roots and a nearest target (for a
+  reverse search, from the target to a root). With
+  `multipath=False` it returns the canonical single path: the one walk that minimises cost,
+  then the bottleneck under `PREFER_HIGHER_PRIORITY`, then hops, then the edge-id sequence. A
+  residual adds residual gating, which keeps only the edges with at least `min_residual`
+  residual units. Every search runs on one traversal core, with a bucket queue when the cost
+  width allows and a heap otherwise.
+- **KSP and paths**: `ksp(graph, src, dst, KspOptions(k, selection, max_path_cost=None,
+  residual=None, elig=None))` returns the K shortest simple paths as `(cost, Path)` pairs. They
+  come in increasing (cost, -bottleneck under `PREFER_HIGHER_PRIORITY`, hops, edge ids) order,
+  truncated at `k` and at an inclusive `Absolute` or `Stretch` ceiling. The selection's
+  `multi_edge` lists parallel members as separate paths (`True`) or keeps one per node pair.
+  `resolve_to_paths(graph, dag, src, dst, split_parallel_edges=False, max_paths=None)` lists a
+  DAG's walks in (cost, hops, edge ids) order.
+- **DagCache**: `DagCache(graph)` is keyed by the root set, the direction and the Eligibility.
+  Its values are the full static supports (immutable, shared, valid after `clear()`), and
+  `stats()` reports `hits`, `misses`, `entries`, `bytes` and `live_values`.
+  - **Building mode:** one writer; a miss searches and inserts.
+  - **Frozen mode:** `freeze()` makes the cache read-only and shareable by every worker of an
+    evaluator. A frozen lookup miss raises `DagCacheMiss`, an exception the evaluators pass on
+    unchanged, never as a status. `clear()` raises when frozen, and `thaw()` returns to
+    building mode after the caller has joined every reader.
 - **Evaluators**: `capacity(graph, sources, destinations, CapacityOptions(...))` (with Global
   and MaxFlow the exact maximum flow, its marginal cost curve and its minimum cut),
   `batch_capacity(graph, pairs, opts, per_pair_elig=None, workers=None)` (pair order; the lowest
@@ -80,15 +104,18 @@ units), one flow core, one placement engine. It replaces the 0.11 API.
 - **C++ headers** (under `netgraph/core/`): `types.hpp`, `graph.hpp` (`Graph`, `to_units`,
   `as_float`; it includes `eligibility.hpp`), `eligibility.hpp`, `options.hpp` (the selection
   axes, `FlowPlacement`, `Admission`), `pred_dag.hpp`, `flow_record.hpp` (`FlowId`,
-  `Counter128`, `FlowRecord`), `flow_ledger.hpp`, `flow_policy.hpp`, `dag_cache.hpp` and
-  `evaluators.hpp`; each compiles alone and includes no `detail/` header. Python spells the
+  `Counter128`, `FlowRecord`), `flow_ledger.hpp`, `flow_policy.hpp`, `dag_cache.hpp`,
+  `evaluators.hpp` and `search.hpp` (`spf`, `ksp`, `resolve_to_paths` and their options; the
+  queue choice `SpfQueue { Auto, Heap }` is a C++-only trailing parameter of `spf`); each
+  compiles alone and includes no `detail/` header. Python spells the
   creation cap `MAX_FLOWS_PER_CALL` (C++ `kMaxFlowsPerCall`).
 
 ### Removed
 
 - The 0.11 library and its bindings: `FlowState`, the previous `FlowGraph` and `FlowPolicy` and
   their configuration, the backend and algorithms facade (with its `Graph` handle), the search
-  entry points (`shortest_paths`, `shortest_paths_to`, `spf_dag`, `k_shortest_paths`), max-flow,
+  entry points (`shortest_paths`, `shortest_paths_to`, `spf_dag`, `spf_to`, `k_shortest_paths`
+  with its `unique` flag, `PredDAG.resolve_to_paths`, `NGRAPH_CORE_SPF_QUEUE`), max-flow,
   batch max-flow and the previous sensitivity, the SPF memo and `StateStamp`, `kMinFlow`,
   `kEpsilon`, `constants.hpp`, and the profiling facility (the Python accessors, the C++ scopes
   and `NGRAPH_CORE_PROFILE`).

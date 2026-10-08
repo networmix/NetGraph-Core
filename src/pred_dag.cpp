@@ -157,14 +157,22 @@ PredDAG PredDAGBuilder::of_edges(const Graph& g, std::span<const EdgeId> edges) 
   out.num_nodes_ = g.num_nodes();
   std::vector<EdgeId> sorted(edges.begin(), edges.end());
   if (!std::is_sorted(sorted.begin(), sorted.end())) std::sort(sorted.begin(), sorted.end());
-  // Entries grouped by child (ascending NodeId), ascending via within a child: a stable
-  // counting sort of the ascending edges by their child.
-  std::vector<std::int32_t> slot(static_cast<std::size_t>(out.num_nodes_) + 1, 0);
-  for (EdgeId e : sorted) ++slot[static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)]) + 1];
-  for (std::size_t v = 1; v < slot.size(); ++v) slot[v] += slot[v - 1];
+  // Entries grouped by child (ascending NodeId), ascending via within a child: a small set by
+  // sorting (child, via) pairs, a larger one by a stable counting sort of the ascending edges by
+  // their child over an N + 1 temporary.
   std::vector<EdgeId> by_child(sorted.size());
-  for (EdgeId e : sorted) {
-    by_child[static_cast<std::size_t>(slot[static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)])]++)] = e;
+  if (sorted.size() * 8 < static_cast<std::size_t>(out.num_nodes_)) {
+    std::vector<std::pair<NodeId, EdgeId>> keyed(sorted.size());
+    for (std::size_t k = 0; k < sorted.size(); ++k) keyed[k] = {edge_dst[static_cast<std::size_t>(sorted[k])], sorted[k]};
+    std::sort(keyed.begin(), keyed.end());
+    for (std::size_t k = 0; k < keyed.size(); ++k) by_child[k] = keyed[k].second;
+  } else {
+    std::vector<std::int32_t> slot(static_cast<std::size_t>(out.num_nodes_) + 1, 0);
+    for (EdgeId e : sorted) ++slot[static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)]) + 1];
+    for (std::size_t v = 1; v < slot.size(); ++v) slot[v] += slot[v - 1];
+    for (EdgeId e : sorted) {
+      by_child[static_cast<std::size_t>(slot[static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)])]++)] = e;
+    }
   }
   out.parents_.resize(by_child.size());
   out.via_.resize(by_child.size());
@@ -180,6 +188,27 @@ PredDAG PredDAGBuilder::of_edges(const Graph& g, std::span<const EdgeId> edges) 
   }
   if (!out.nodes_.empty()) out.node_offsets_.push_back(static_cast<std::int32_t>(by_child.size()));
   out.edges_ = std::move(sorted);
+  return out;
+}
+
+PredDAG PredDAGBuilder::empty(const Graph& g) {
+  PredDAG out;
+  out.graph_uid_ = g.uid();
+  out.num_nodes_ = g.num_nodes();
+  return out;
+}
+
+PredDAG PredDAGBuilder::of_parts(const Graph& g, std::vector<NodeId> nodes, std::vector<std::int32_t> offsets,
+                                 std::vector<NodeId> parents, std::vector<EdgeId> via,
+                                 std::vector<EdgeId> ascending) {
+  PredDAG out;
+  out.graph_uid_ = g.uid();
+  out.num_nodes_ = g.num_nodes();
+  out.nodes_ = std::move(nodes);
+  out.node_offsets_ = std::move(offsets);
+  out.parents_ = std::move(parents);
+  out.via_ = std::move(via);
+  out.edges_ = std::move(ascending);
   return out;
 }
 
@@ -205,6 +234,32 @@ PredDAG PredDAGBuilder::of_path(std::uint64_t graph_uid, std::int32_t num_nodes,
   }
   out.edges_ = out.via_;
   std::sort(out.edges_.begin(), out.edges_.end());
+  return out;
+}
+
+Path PathBuilder::of_walk(const Graph& g, std::span<const EdgeId> walk) {
+  std::vector<std::vector<EdgeId>> hops;
+  hops.reserve(walk.size());
+  for (EdgeId e : walk) hops.push_back({e});
+  return of_hops(g, std::move(hops));
+}
+
+Path PathBuilder::of_hops(const Graph& g, std::vector<std::vector<EdgeId>> hops) {
+  const auto edge_src = g.edge_src();
+  const auto edge_dst = g.edge_dst();
+  const auto cost = g.cost();
+  Path out;
+  out.nodes_.reserve(hops.size() + 1);
+  out.nodes_.push_back(edge_src[static_cast<std::size_t>(hops.front().front())]);
+  for (const auto& hop : hops) {
+    out.nodes_.push_back(edge_dst[static_cast<std::size_t>(hop.front())]);
+    Cost best = cost[static_cast<std::size_t>(hop.front())];
+    for (EdgeId e : hop) best = std::min(best, cost[static_cast<std::size_t>(e)]);
+    out.cost_ += best;
+  }
+  out.graph_uid_ = g.uid();
+  out.num_nodes_ = g.num_nodes();
+  out.hops_ = std::move(hops);
   return out;
 }
 

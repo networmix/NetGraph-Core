@@ -24,7 +24,10 @@ add_executable(netgraph_core_tests
   tests/cpp/eligibility_tests.cpp
   tests/cpp/pred_dag_tests.cpp
   tests/cpp/search_tests.cpp
+  tests/cpp/ksp_tests.cpp
+  tests/cpp/dag_cache_tests.cpp
   tests/cpp/kernels_tests.cpp
+  tests/cpp/cost_only_creation_tests.cpp
   tests/cpp/flow_ledger_tests.cpp
   tests/cpp/flow_policy_fixture_tests.cpp
   tests/cpp/flow_policy_tests.cpp
@@ -42,7 +45,7 @@ add_executable(netgraph_core_tests
   endif()
   # Allocation-failure tests replace the global operator new: a separate executable.
   add_executable(netgraph_core_fault_tests tests/cpp/flow_ledger_fault_tests.cpp tests/cpp/flow_policy_fault_tests.cpp
-                 tests/cpp/flow_core_deletion_fault_tests.cpp)
+                 tests/cpp/flow_core_deletion_fault_tests.cpp tests/cpp/search_fault_tests.cpp)
   target_link_libraries(netgraph_core_fault_tests PRIVATE netgraph_core GTest::gtest_main)
   target_include_directories(netgraph_core_fault_tests PRIVATE tests/cpp)
   if(NETGRAPH_CORE_COVERAGE AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
@@ -137,6 +140,11 @@ endif()
 
 option(NETGRAPH_CORE_COVERAGE "Enable C++ coverage instrumentation" OFF)
 option(NETGRAPH_CORE_SANITIZE "Enable Address/Undefined sanitizers" OFF)
+option(NETGRAPH_CORE_TSAN "Enable ThreadSanitizer" OFF)
+if(NETGRAPH_CORE_SANITIZE AND NETGRAPH_CORE_TSAN)
+  # ThreadSanitizer cannot be combined with AddressSanitizer in one binary.
+  message(FATAL_ERROR "NETGRAPH_CORE_SANITIZE and NETGRAPH_CORE_TSAN are mutually exclusive")
+endif()
 option(NETGRAPH_CORE_NATIVE "Optimize for current CPU (not portable)" OFF)
 option(NETGRAPH_CORE_FAST_MATH "Enable fast math (may affect precision)" OFF)
 option(NETGRAPH_CORE_PGO_GENERATE "Instrument for PGO profile collection" OFF)
@@ -144,7 +152,7 @@ option(NETGRAPH_CORE_PGO_USE "Use PGO profile data (set NETGRAPH_CORE_PGO_DIR)" 
 set(NETGRAPH_CORE_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Directory for PGO profile data")
 
 # Only apply optimizations when not in debug/instrumentation mode
-if(NOT NETGRAPH_CORE_COVERAGE AND NOT NETGRAPH_CORE_SANITIZE)
+if(NOT NETGRAPH_CORE_COVERAGE AND NOT NETGRAPH_CORE_SANITIZE AND NOT NETGRAPH_CORE_TSAN)
   # LTO (Link Time Optimization) - enables cross-module inlining
   include(CheckIPOSupported)
   check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
@@ -270,6 +278,30 @@ if(NETGRAPH_CORE_SANITIZE)
     endforeach()
   else()
     message(WARNING "NETGRAPH_CORE_SANITIZE requires GCC or Clang")
+  endif()
+endif()
+
+if(NETGRAPH_CORE_TSAN)
+  message(STATUS "Enabling ThreadSanitizer (disables optimizations)")
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # The data-race check of the evaluators' worker threads and the shared DagCache. A CMake
+    # list, as SAN_FLAGS above. A report makes the process exit non-zero (TSan's exit code 66,
+    # or an abort under the halt_on_error=1 of dev/cpp-tests.sh), so ctest fails on any race. -O1
+    # as the TSan documentation advises (the Debug build type adds -g); the instrumented
+    # suites at -O0 would be several times slower for no extra coverage.
+    set(TSAN_FLAGS -fsanitize=thread -fno-omit-frame-pointer -O1)
+    set(TSAN_TARGETS netgraph_core _netgraph_core)
+    if(TARGET netgraph_core_tests)
+      # The test executables link the instrumented static library: same compile and link
+      # flags, so they carry the TSan runtime and their own accesses are instrumented too.
+      list(APPEND TSAN_TARGETS netgraph_core_tests netgraph_core_fault_tests)
+    endif()
+    foreach(tgt ${TSAN_TARGETS})
+      target_compile_options(${tgt} PRIVATE ${TSAN_FLAGS})
+      target_link_options(${tgt} PRIVATE ${TSAN_FLAGS})
+    endforeach()
+  else()
+    message(WARNING "NETGRAPH_CORE_TSAN requires GCC or Clang")
   endif()
 endif()
 

@@ -133,4 +133,19 @@ inline Dyadic dyadic(double f) noexcept {
   return d;
 }
 
+// cost <= f * base, exactly (the Stretch ceiling of APPROACH 6 and 9.1): f is the dyadic rational
+// it is (finite, f >= 1), cost >= 0 and base >= 1 below 2^63. f = m * 2^x with m odd below 2^53;
+// bit lengths are compared before any shift, so no product exceeds 128 bits.
+inline bool stretch_le(std::int64_t cost, std::int64_t base, double f) noexcept {
+  const auto [m, x] = dyadic(f);
+  const U128 rhs = mul_u64(static_cast<std::uint64_t>(base), m);  // below 2^116
+  if (x >= 0) {
+    if (bits(rhs) + x > 64) return true;  // rhs * 2^x >= 2^64 > cost
+    return !(shl(rhs, x) < U128 {0, static_cast<std::uint64_t>(cost)});
+  }
+  // f >= 1 with m < 2^53: -x < 53, so cost * 2^-x < 2^116.
+  const U128 lhs = shl(U128 {0, static_cast<std::uint64_t>(cost)}, -x);
+  return !(rhs < lhs);
+}
+
 } // namespace netgraph::core::detail

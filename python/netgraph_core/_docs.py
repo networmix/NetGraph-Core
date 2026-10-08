@@ -9,10 +9,12 @@ or reading an attribute or method value converted into a new bound object or con
 the staged calls, allocates through pybind11's ``make_new_instance``, which does not check the
 result of ``tp_alloc``, so a Python allocation failure at that point crashes the process, with
 Core state unchanged; (2) a supplied building DagCache is a memo: it keeps the complete entries
-and statistics of the lookups that succeeded before a later failure of the call.
+and statistics of the lookups that succeeded before a later failure of the call. A frozen
+DagCache's statistics are part of the guarantee: a failed call changes none of them, except one
+miss when it raises ``DagCacheMiss``.
 
-Generated ``.pyi`` stubs (pybind11-stubgen, APPROACH 13) arrive with the public search (PLAN,
-sub-PR 1d); this hand-written shim is deleted in Phase 5.
+This hand-written shim is the package's type declaration until Phase 5, which replaces it by
+generated ``.pyi`` stubs (pybind11-stubgen, APPROACH 13) with their override file and drift check.
 """
 
 from __future__ import annotations
@@ -200,7 +202,8 @@ class Graph:
 
 
 class EdgeTieBreak:
-    """Ties between equal-cost candidates, at both tie levels (parallel members and walks).
+    """Ties between equal-cost candidates, at both tie levels (parallel members and walks;
+    APPROACH 6).
 
     ``DETERMINISTIC`` takes the lowest EdgeId and ignores capacities;
     ``PREFER_HIGHER_PRIORITY`` prefers the higher ``priority`` value first.
@@ -221,7 +224,7 @@ class EdgeTieBreak:
 
 class EdgePriority:
     """The per-edge value ``PREFER_HIGHER_PRIORITY`` reads, and the Weighted kernel's
-    membership and weights: ``RESIDUAL`` (residual units), ``CAPACITY`` (static capacity
+    membership and weights (APPROACH 6, 7): ``RESIDUAL`` (residual units), ``CAPACITY`` (static capacity
     units), ``HEADROOM`` (the exact rational residual / capacity; rejected with WEIGHTED).
     A search given no residual reads static capacities for every priority."""
 
@@ -229,6 +232,24 @@ class EdgePriority:
     CAPACITY: ClassVar["EdgePriority"]
     HEADROOM: ClassVar["EdgePriority"]
     __members__: ClassVar[dict[str, "EdgePriority"]]
+
+    def __init__(self, value: int) -> None: ...
+    def __int__(self) -> int: ...
+    def __index__(self) -> int: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+
+
+class Direction:
+    """The orientation of a search (APPROACH 6): ``FORWARD`` from the roots, or ``REVERSE``
+    rooted at the roots over reversed arcs. A reverse search returns the forward-oriented DAG
+    of the walks toward its roots."""
+
+    FORWARD: ClassVar["Direction"]
+    REVERSE: ClassVar["Direction"]
+    __members__: ClassVar[dict[str, "Direction"]]
 
     def __init__(self, value: int) -> None: ...
     def __int__(self) -> int: ...
@@ -720,22 +741,57 @@ class DagCacheStats:
     def live_values(self) -> int: ...
 
 
+class DagCacheMiss(Exception):
+    """A lookup in a frozen DagCache whose key is absent (APPROACH 10).
+
+    A dedicated exception (neither a RuntimeError nor a ValueError): every evaluator
+    propagates it unchanged, never as a sensitivity status. A frozen cache never searches,
+    so a miss means the caller did not prepopulate that (roots, direction, Eligibility uid).
+    """
+
+
 class DagCache:
     """A cache of static shortest-path supports bound to one graph (APPROACH 10).
 
     Keyed ``(roots as a set, direction, Eligibility uid)``; the value is the full static
     support (``multipath``, ``multi_edge``, no residual) as an immutable shared value, valid
-    after ``clear()``. Selection is projected at creation, never cached. Building mode: one
-    writer, no concurrent readers (a supplied cache needs ``workers == 1``). A supplied
-    building cache is a memo (APPROACH 13, limit 2): a public call that fails keeps the
-    complete entries and statistics of the lookups that succeeded before; it never holds a
-    partial entry, held values stay valid, and a retained entry never changes a result.
+    after ``clear()`` and after the cache is gone. Selection is projected at creation, never
+    cached.
+
+    Building mode (a new cache): one writer, no concurrent readers; a miss searches and
+    inserts; a supplied building cache needs ``workers == 1``. Frozen mode (``freeze()``):
+    read-only, shareable by every worker; a miss counts one miss and raises
+    ``DagCacheMiss``; ``clear()`` raises ValueError; ``freeze()`` again has no effect;
+    ``thaw()`` returns to building mode once the caller has joined every reader. A per-pair
+    or per-candidate Eligibility built inside a batch or a sensitivity has a new uid, so
+    its key is absent from a frozen cache unless the intersection returned a prepopulated
+    operand.
+
+    A supplied building cache is a memo (APPROACH 13, limit 2): a public call that fails
+    keeps the complete entries and statistics of the lookups that succeeded before; it never
+    holds a partial entry, held values stay valid, and a retained entry never changes a
+    result. A frozen cache's statistics follow the public call that reads it (a policy
+    constructor, an evaluator): its hits count when the call succeeds, its Python result
+    included; a failed call changes no statistic, except that a call raising
+    ``DagCacheMiss`` counts one miss.
     """
 
     def __init__(self, graph: Graph) -> None: ...
-    def graph_uid(self) -> int: ...
+    def graph_uid(self) -> int:
+        """uid of the graph this cache is bound to."""
+        ...
+
+    def freeze(self) -> None:
+        """Enter frozen mode (no effect when already frozen)."""
+        ...
+
+    def thaw(self) -> None:
+        """Return to building mode (no effect when building); join every reader first."""
+        ...
+
     def clear(self) -> None:
-        """Empties the cache; the hit and miss counters persist; held values stay valid."""
+        """Empty a building cache (the hit and miss counters persist; held values stay
+        valid); ValueError when frozen."""
         ...
 
     def stats(self) -> DagCacheStats: ...
@@ -903,9 +959,11 @@ def capacity(
     """``place(+inf)`` of a FlowPolicy with ``opts.config`` on a fresh ledger of the graph.
 
     The exact maximum flow is the Global + MaxFlow configuration (the minimum-cost maximum
-    flow; ``cost_distribution`` its marginal curve). A failed call raises and returns no
+    flow; ``cost_distribution`` its marginal curve). A supplied frozen cache raises
+    ``DagCacheMiss`` for an absent key, unchanged. A failed call raises and returns no
     result; a supplied building cache keeps the entries and statistics of the lookups that
-    succeeded before the failure (a memo: APPROACH 13, limit 2).
+    succeeded before the failure (a memo: APPROACH 13, limit 2); a supplied frozen
+    cache's statistics are unchanged, except one miss when the call raises ``DagCacheMiss``.
     """
     ...
 
@@ -925,10 +983,16 @@ def batch_capacity(
     rejected; the ``per_pair_elig`` length), then each pair completely in pair order (its
     endpoints, their overlap, its Eligibility), so the error of the lowest failing pair index
     is raised; an empty batch returns ``[]``. ``workers``: an explicit int >= 1 is honoured; ``None`` takes
-    ``NGRAPH_CORE_BATCH_THREADS`` (or 1), and 1 when a cache is supplied (a supplied
-    building cache is rejected unless ``workers == 1``). A failed call raises and returns
+    ``NGRAPH_CORE_BATCH_THREADS`` (or 1), and 1 when a cache is supplied. A supplied
+    building cache is rejected unless ``workers == 1``; a frozen cache is shared by every
+    worker (pass ``workers`` explicitly), and its ``DagCacheMiss`` for an absent key reaches
+    the caller unchanged (the lowest failing pair index's). A per-pair intersection that
+    differs from both operands has a new uid, absent from a frozen cache: pass already
+    effective per-pair values with ``opts.elig`` ``None``, or a common value containing them,
+    so the intersection returns the prepopulated operand. A failed call raises and returns
     no result; a supplied building cache keeps the entries and statistics of the lookups
-    that succeeded before the failure (a memo: APPROACH 13, limit 2).
+    that succeeded before the failure (a memo: APPROACH 13, limit 2); a supplied frozen
+    cache's statistics are unchanged, except one miss when the call raises ``DagCacheMiss``.
     """
     ...
 
@@ -951,8 +1015,169 @@ def sensitivity(
     source's reachable part of the static support loss 0 without a placement, a
     result-equivalent predicate; every other deletion is placed on a fresh ledger, where a
     model exception makes the entry ``UNEVALUABLE`` with the message as reason. ``workers`` as ``batch_capacity`` (``NGRAPH_CORE_SENSITIVITY_THREADS``).
+    The cache: a supplied building cache needs ``workers == 1``, a frozen one is shared by
+    every worker; CostOnly is the one model reading the cache, and its deletion looks up a
+    new Eligibility (a new uid), so with a frozen cache it raises ``DagCacheMiss``
+    (unchanged, never ``UNEVALUABLE``); the other models read no cache.
     A failed call raises and returns no result; a supplied building cache keeps the
     entries and statistics of the lookups that succeeded before the failure (a memo:
-    APPROACH 13, limit 2).
+    APPROACH 13, limit 2); a supplied frozen cache's statistics are unchanged, except one
+    miss when the call raises ``DagCacheMiss``.
+    """
+    ...
+
+
+# ---------------------------------------------------------------- the public search (APPROACH 6)
+
+UNREACHABLE: int
+"""The path-cost sentinel of an unreachable node (``2**63 - 1``) in ``SpfResult.costs``; the
+result accessors that return a single cost give ``None`` instead."""
+
+
+class SpfOptions:
+    """The options of ``spf`` (APPROACH 6).
+
+    ``direction`` and ``selection`` are explicit. ``targets`` (one NodeId or a sequence;
+    ``None``: a full search) stops the search at the nearest targets (anycast). ``residual``
+    (int64 units per EdgeId, each in ``[0, capacity_units]``) adds residual gating at
+    ``min_residual`` units and supplies the priority values of the selection; ``min_residual``
+    (an integer ``>= 1``) gates a supplied residual only (static eligibility, the Eligibility
+    and capacity ``>= 1`` unit, is unconditional). ``elig``: ``None`` allows everything.
+    A direction outside its enumeration raises ValueError here; every other field is
+    validated by ``spf``, in the contract's order.
+    """
+
+    def __init__(
+        self,
+        direction: Direction,
+        selection: PathSelection,
+        *,
+        targets: "int | Sequence[int] | None" = None,
+        residual: "Sequence[int] | np.ndarray | None" = None,
+        min_residual: int = 1,
+        elig: Eligibility | None = None,
+    ) -> None: ...
+    @property
+    def direction(self) -> Direction: ...
+    @property
+    def selection(self) -> PathSelection: ...
+    @property
+    def targets(self) -> "int | Sequence[int] | None": ...
+    @property
+    def residual(self) -> "Sequence[int] | np.ndarray | None": ...
+    @property
+    def min_residual(self) -> int: ...
+    @property
+    def elig(self) -> Eligibility | None: ...
+
+
+class SpfResult:
+    """The result of ``spf`` (APPROACH 6).
+
+    ``costs``: full searches only, a read-only int64 array with one entry per node and
+    ``UNREACHABLE`` for the nodes the search did not reach (``None`` with targets).
+    ``dag``: the unique DAG of the member graph's edges that are tight in the traversal
+    direction, returned in their original orientation ``u -> v`` (``d`` the search's distance:
+    ``d(u) + cost = d(v)`` for a forward search, ``d(v) + cost = d(u)`` for a reverse one);
+    with targets, pruned to the walks between the roots and a nearest target (forward: from a
+    root to the target; reverse: from the target to a root), or the canonical single path for
+    ``multipath = False``. ``target_cost``: with targets, the nearest targets' cost, ``None``
+    when no target is reached (and ``None`` for a full search).
+    """
+
+    @property
+    def costs(self) -> "np.ndarray | None": ...
+    @property
+    def dag(self) -> PredDAG: ...
+    @property
+    def target_cost(self) -> int | None: ...
+
+
+def spf(graph: Graph, roots: "int | Sequence[int]", opts: SpfOptions) -> SpfResult:
+    """Shortest paths from the roots (every root at distance 0), forward or reverse (APPROACH 6).
+
+    The member graph is every statically eligible edge of at least 1 unit (and, with a
+    residual, at least ``min_residual`` residual units); ``multi_edge = False`` keeps one
+    member per ``(u, v)`` pair (minimum cost, then the higher priority under
+    PREFER_HIGHER_PRIORITY, then the lowest EdgeId). Without targets every reachable node is
+    settled (``costs`` and the full DAG). With targets the search stops at the nearest
+    targets' cost (``target_cost``) and the DAG keeps only the walks between the roots and a
+    nearest target (for a reverse search, from the target to a root); with ``multipath = False`` it is the canonical single path, the walk minimising
+    ``(cost, -bottleneck under PREFER_HIGHER_PRIORITY, hops, edge-id sequence)`` (the same
+    walk from both directions with the roles swapped). Validated in this order before any
+    work (ValueError): the roots (non-empty, ids in range), the targets (the same), a vertex
+    in both sets, ``multipath = False`` without targets, the residual (its length, then every
+    entry in ``[0, capacity_units]``), ``min_residual >= 1``, a foreign Eligibility. A root or
+    target excluded by the Eligibility is skipped; all roots excluded gives an empty result.
+    """
+    ...
+
+
+class KspOptions:
+    """The options of ``ksp`` (APPROACH 6, rule 10).
+
+    ``k`` (an integer ``>= 1``) and ``selection`` are explicit; the selection's ``multi_edge``
+    is the member rule (Expand keeps every eligible parallel member, Collapse one per
+    ``(u, v)`` pair by ``select_adjacency``) and ``multipath`` is ignored. ``max_path_cost``:
+    ``None``, ``Absolute(c)`` (``c >= 0``) or ``Stretch(f)`` (``f`` finite in ``[1, inf)``, the
+    exact dyadic rational it is, times the static shortest cost of the member graph under the
+    Eligibility, residual ignored); the ceiling is inclusive. ``residual`` (int64 units per
+    EdgeId, each in ``[0, capacity_units]``) gates at 1 unit and supplies the priority values.
+    Every field is validated by ``ksp``, in the contract's order.
+    """
+
+    def __init__(
+        self,
+        k: int,
+        selection: PathSelection,
+        *,
+        max_path_cost: "Absolute | Stretch | None" = None,
+        residual: "Sequence[int] | np.ndarray | None" = None,
+        elig: Eligibility | None = None,
+    ) -> None: ...
+    @property
+    def k(self) -> int: ...
+    @property
+    def selection(self) -> PathSelection: ...
+    @property
+    def max_path_cost(self) -> "Absolute | Stretch | None": ...
+    @property
+    def residual(self) -> "Sequence[int] | np.ndarray | None": ...
+    @property
+    def elig(self) -> Eligibility | None: ...
+
+
+def ksp(graph: Graph, src: int, dst: int, opts: KspOptions) -> "list[tuple[int, Path]]":
+    """The K shortest simple ``src -> dst`` paths of the member graph (APPROACH 6, rule 10).
+
+    In increasing ``(cost, -bottleneck under PREFER_HIGHER_PRIORITY, hops, edge-id sequence)``,
+    the bottleneck being the minimum priority value along a path: the minimal prefix of that
+    order, truncated at ``k`` and at the inclusive ceiling. Each Path has single-member hops.
+    Built by Yen deviations whose first path and spur paths are the canonical single path of
+    ``spf`` (the spur's bottleneck target capped by the root prefix's bottleneck), so ``k = 1``
+    gives the single path of a forward or reverse ``spf``. Validated in this order before any
+    work (ValueError): ``src`` and ``dst`` in range, ``src == dst``, ``k >= 1``, the ceiling, the
+    residual (its length, then every entry), a foreign Eligibility. An excluded endpoint, no
+    static route under ``Stretch``, or no path gives ``[]``.
+    """
+    ...
+
+
+def resolve_to_paths(
+    graph: Graph,
+    dag: PredDAG,
+    src: int,
+    dst: int,
+    split_parallel_edges: bool = False,
+    max_paths: int | None = None,
+) -> "list[Path]":
+    """The ``src -> dst`` walks of a DAG (APPROACH 5) in increasing ``(cost, hops, edge-id
+    sequence)``: a hop costs its cheapest member and is keyed by its lowest member id.
+
+    ``split_parallel_edges = False`` keeps every parallel member of a ``(u, v)`` pair in one
+    hop (members ascending); ``True`` gives one path per member combination, in the same
+    order. ``max_paths`` (``>= 1``) truncates the sorted list; ``None`` lists every walk.
+    ValueError: a DAG of another graph, ``src`` or ``dst`` out of range, ``src == dst``,
+    ``max_paths < 1``. An endpoint outside the DAG, or no walk, gives ``[]``.
     """
     ...
