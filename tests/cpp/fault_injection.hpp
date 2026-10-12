@@ -19,6 +19,8 @@
 
 // Allocations left before the injected failure; negative: no injection.
 extern std::atomic<long> g_countdown;
+// Live allocations of the replacement operator new (leak accounting).
+extern std::atomic<long> g_live;
 
 // Runs fn with the k-th allocation (from 0) failing; returns whether that failure happened
 // (and expects that a reached failure propagated as std::bad_alloc).

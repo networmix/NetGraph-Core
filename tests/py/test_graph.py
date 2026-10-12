@@ -4,6 +4,7 @@ read-only views, Eligibility."""
 from __future__ import annotations
 
 import gc
+import weakref
 
 import numpy as np
 import pytest
@@ -352,3 +353,108 @@ def test_shape_step_keeps_its_place_in_the_order():
         2, np.array([0]), np.array([1], dtype=np.uint8), np.array([7]), (3,), 1.0
     )
     assert g.capacity_units().tolist() == [7]
+
+
+def test_repeated_views_share_storage_and_refuse_write_access():
+    g = build(3, EDGES)
+    for name in (
+        "capacity_units",
+        "cost",
+        "edge_src",
+        "edge_dst",
+        "input_index",
+        "row_offsets",
+        "in_row_offsets",
+        "in_adj_edge_index",
+    ):
+        a, b = getattr(g, name)(), getattr(g, name)()
+        assert np.shares_memory(a, b), name
+        with pytest.raises(ValueError):
+            a.setflags(write=True)
+        assert not a.flags.writeable
+
+
+VIEW_DTYPES = {
+    "capacity_units": np.int64,
+    "cost": np.int64,
+    "edge_src": np.int32,
+    "edge_dst": np.int32,
+    "input_index": np.int32,
+    "row_offsets": np.int32,
+    "in_row_offsets": np.int32,
+    "in_adj_edge_index": np.int32,
+}
+
+
+@pytest.mark.parametrize(
+    ("n", "edges"),
+    [(0, []), (100, []), (3, EDGES)],
+    ids=["empty", "isolated", "nonempty"],
+)
+def test_every_view_keeps_its_graph_alive_and_refuses_write_access(n, edges):
+    # An empty view has no bytes to share, so the owner is checked by identity and a weak
+    # reference rather than by np.shares_memory.
+    for name, dtype in VIEW_DTYPES.items():
+        g = build(n, edges)
+        ref = weakref.ref(g)
+        view = getattr(g, name)()
+        assert view.base is g, name
+        assert view.dtype == dtype, name
+        assert not view.flags.writeable, name
+        with pytest.raises(ValueError):
+            view[...] = 0
+        with pytest.raises(ValueError):
+            view.setflags(write=True)
+        del g
+        gc.collect()
+        assert ref() is not None, name
+        del view
+        gc.collect()
+        assert ref() is None, name
+
+
+def _reference_layout(n, src, dst, cap, cost):
+    # B' ids: (src, cost, dst, input); the reverse slots: (dst, cost, src, input).
+    i = np.arange(len(src))
+    order = np.lexsort((i, dst, cost, src))
+    pos = np.empty_like(order)
+    pos[order] = np.arange(len(order))
+    rev = pos[np.lexsort((i, src, cost, dst))]
+    return order, np.searchsorted(src[order], np.arange(n + 1)), rev
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["hash", "combined_keys", "all_cost_sort", "reversed", "edgeless"],
+)
+def test_construction_orders_match_a_reference(shape):
+    # One input per construction path of APPROACH 3: distinct-cost hashing, the combined-key
+    # passes (N * K < E), the all-cost sort (K > 65,536), a reversed B' order, no edges.
+    rng = np.random.default_rng(7)
+    n, e = 300, 1000  # N * K = 1500 > E: the separate passes
+    if shape == "combined_keys":
+        n, e = 20, 4000  # N * K = 100 < E
+    if shape == "edgeless":
+        e = 0
+    src = rng.integers(0, n, e)
+    dst = rng.integers(0, n, e)
+    cost = rng.integers(1, 6, e)
+    if shape == "all_cost_sort":
+        e = 70000
+        src, dst = rng.integers(0, n, e), rng.integers(0, n, e)
+        cost = rng.permutation(np.arange(1, e + 1))
+    cap = rng.integers(0, 1 << 40, e)
+    if shape == "reversed":
+        order, _, _ = _reference_layout(n, src, dst, cap, cost)
+        src, dst, cap, cost = (a[order[::-1]] for a in (src, dst, cap, cost))
+    g = ngc.Graph(n, src, dst, cap, cost, 1)
+    order, row, rev = _reference_layout(n, src, dst, cap, cost)
+    assert g.input_index().tolist() == order.tolist()
+    assert g.row_offsets().tolist() == row.tolist()
+    assert g.in_adj_edge_index().tolist() == rev.tolist()
+    assert (
+        g.in_row_offsets().tolist()
+        == np.searchsorted(np.sort(dst), np.arange(n + 1)).tolist()
+    )
+    assert g.capacity_units().tolist() == cap[order].tolist()
+    assert g.max_cost() == (int(cost.max()) if e else 0)

@@ -25,6 +25,7 @@
 
 #include "netgraph/core/detail/endpoints.hpp"
 #include "netgraph/core/detail/enum_domain.hpp"
+#include "netgraph/core/detail/graph_access.hpp"
 #include "netgraph/core/detail/int128.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
 #include "netgraph/core/detail/traversal.hpp"
@@ -412,11 +413,11 @@ Cost loop(Workspace& ws, Q& q, const SearchIn& in) {
   const Graph& g = *in.g;
   const Cost* const cost = g.cost().data();
   const Amount* const cap = g.capacity_units().data();
-  const NodeId* const esrc = g.edge_src().data();
   const NodeId* const edst = g.edge_dst().data();
   const std::int32_t* const row = g.row_offsets().data();
   const std::int32_t* const in_row = g.in_row_offsets().data();
   const EdgeId* const in_adj = g.in_adj_edge_index().data();
+  const NodeId* const in_col = detail::GraphAccess::in_col_indices(g).data();  // in_col[s] = esrc[in_adj[s]]
   const std::uint8_t* const allowed = in.gate.elig != nullptr ? in.gate.elig->edge_allowed().data() : nullptr;
   const Amount* const res = in.gate.residual.empty() ? nullptr : in.gate.residual.data();
   const Amount minr = in.gate.min_residual;
@@ -475,7 +476,7 @@ Cost loop(Workspace& ws, Q& q, const SearchIn& in) {
       for (auto s = static_cast<std::size_t>(in_row[ui]); s < static_cast<std::size_t>(in_row[ui + 1]); ++s) {
         const auto e = static_cast<std::size_t>(in_adj[s]);
         if (!candidate(e)) continue;
-        relax(esrc[e], d + cost[e], static_cast<EdgeId>(e));
+        relax(in_col[s], d + cost[e], static_cast<EdgeId>(e));
       }
     }
   }

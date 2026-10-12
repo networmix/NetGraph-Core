@@ -19,6 +19,8 @@ if(NETGRAPH_CORE_BUILD_TESTS)
   enable_testing()
 add_executable(netgraph_core_tests
   tests/cpp/graph_tests.cpp
+  tests/cpp/graph_layout_tests.cpp
+  tests/cpp/graph_concurrency_tests.cpp
   tests/cpp/flow_core_tests.cpp
   tests/cpp/flow_core_deletion_tests.cpp
   tests/cpp/eligibility_tests.cpp
@@ -45,7 +47,8 @@ add_executable(netgraph_core_tests
   endif()
   # Allocation-failure tests replace the global operator new: a separate executable.
   add_executable(netgraph_core_fault_tests tests/cpp/flow_ledger_fault_tests.cpp tests/cpp/flow_policy_fault_tests.cpp
-                 tests/cpp/flow_core_deletion_fault_tests.cpp tests/cpp/search_fault_tests.cpp)
+                 tests/cpp/flow_core_deletion_fault_tests.cpp tests/cpp/search_fault_tests.cpp
+                 tests/cpp/graph_fault_tests.cpp)
   target_link_libraries(netgraph_core_fault_tests PRIVATE netgraph_core GTest::gtest_main)
   target_include_directories(netgraph_core_fault_tests PRIVATE tests/cpp)
   if(NETGRAPH_CORE_COVERAGE AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))

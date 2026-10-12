@@ -27,6 +27,10 @@
 // Allocations left before the injected failure; negative: no injection (fault_injection.hpp).
 // Shared by every thread; with g_workers_only the calling test thread's allocations do not count.
 std::atomic<long> g_countdown {-1};
+// Live allocations of the replacement operator new (a successful allocation counts up, the
+// delete of a non-null pointer counts down): the sweeps compare it before and after an operation
+// to count leaks, which ASan's leak detection (off on macOS) would not.
+std::atomic<long> g_live {0};
 static std::atomic<bool> g_workers_only {false};
 static thread_local bool t_test_thread = false;
 
@@ -36,14 +40,20 @@ void* operator new(std::size_t n) {
       g_countdown.fetch_sub(1, std::memory_order_relaxed) == 0) {
     throw std::bad_alloc();
   }
-  if (void* p = std::malloc(n == 0 ? 1 : n)) return p;
+  if (void* p = std::malloc(n == 0 ? 1 : n)) {
+    g_live.fetch_add(1, std::memory_order_relaxed);
+    return p;
+  }
   throw std::bad_alloc();
 }
 void* operator new[](std::size_t n) { return ::operator new(n); }
-void operator delete(void* p) noexcept { std::free(p); }
-void operator delete[](void* p) noexcept { std::free(p); }
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p) noexcept {
+  if (p != nullptr) g_live.fetch_sub(1, std::memory_order_relaxed);
+  std::free(p);
+}
+void operator delete[](void* p) noexcept { ::operator delete(p); }
+void operator delete(void* p, std::size_t) noexcept { ::operator delete(p); }
+void operator delete[](void* p, std::size_t) noexcept { ::operator delete(p); }
 
 using namespace netgraph::core;
 using namespace netgraph::core::test;

@@ -72,8 +72,9 @@ namespace {
 // Read-only NumPy view of a span owned by `owner`.
 template <typename T>
 py::array readonly_view(std::span<const T> s, const py::handle& owner, const py::dtype& dtype) {
+  static constexpr T empty_element {};
   py::array arr(dtype, {static_cast<py::ssize_t>(s.size())}, {static_cast<py::ssize_t>(sizeof(T))},
-                s.data(), owner);
+                s.empty() ? &empty_element : s.data(), owner);
   py::detail::array_proxy(arr.ptr())->flags &= ~py::detail::npy_api::NPY_ARRAY_WRITEABLE_;
   return arr;
 }

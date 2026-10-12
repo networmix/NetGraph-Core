@@ -109,6 +109,14 @@ class Graph:
     position of edge ``e`` (the inverse permutation is the caller's). Every other
     per-edge array is in id order. Accessors return read-only NumPy views that keep the
     graph alive.
+
+    Construction uses stable counting passes, not comparison sorts: expected time is
+    linear in ``E + N`` while the number of distinct costs is bounded, and at most
+    ``O(N + E log(E + 1))`` in the worst case (more than 65,536 distinct costs, or
+    costs that collide too often in the hash table, fall back to one sort of all
+    costs). A graph without edges costs only validation and its two offset arrays. The
+    graph keeps ``36 E + 8 (N + 1)`` bytes of arrays: the eight views plus an internal
+    copy of each reverse slot's source node, which the reverse search reads.
     """
 
     def __init__(

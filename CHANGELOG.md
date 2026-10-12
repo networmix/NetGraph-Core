@@ -18,7 +18,12 @@ units), one flow core, one placement engine. It replaces the 0.11 API.
   `EdgeId` is the rank of an edge in `(src, cost, dst, input)` with `input_index()` mapping ids
   to input positions. Validation reports the first defect in a fixed order (the resolution, the
   unit values, the shapes, zero or negative costs, the remaining bounds including the cost-sum
-  guard), on the exact integers also beyond int64. Accessors return read-only NumPy views.
+  guard), on the exact integers also beyond int64. Accessors return read-only NumPy views that
+  keep their graph alive, also when empty.
+  Construction uses stable counting passes: expected linear in edges plus nodes for bounded,
+  well-distributed distinct costs. It sorts all costs above 65,536 distinct costs or when the
+  cumulative hash-probe budget is exhausted. An edgeless graph needs validation and two
+  zero-filled offset arrays. Moving a graph no longer allocates.
   `Eligibility` is built from excluded node ids and EdgeIds, with `Eligibility.intersect(a, b)`.
   `to_units` (round half up) and `as_float` are the only conversions between physical values and
   units.
