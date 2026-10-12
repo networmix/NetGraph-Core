@@ -1,6 +1,6 @@
 # NetGraph-Core Development Makefile
 
-.PHONY: help venv clean-venv dev install install-native check check-ci lint format test build clean check-dist publish-test publish info hooks check-python cpp-test cpp-test-off cov sanitize-test tsan-test stubs-check rebuild
+.PHONY: help venv clean-venv dev install install-native check check-ci lint format test build clean check-dist publish-test publish info hooks check-python cpp-test cpp-test-off cov sanitize-test tsan-test stubs-check perf-tool-test rebuild
 
 .DEFAULT_GOAL := help
 
@@ -61,6 +61,7 @@ help:
 	@echo "  make tsan-test     - Build and run C++ tests with ThreadSanitizer"
 	@echo "  make stubs-check   - Type stub: drift, wheel/sdist contents, typed clients (own venvs)"
 	@echo "                       (regenerate the stub: bash dev/stubs/run.sh generate)"
+	@echo "  make perf-tool-test - Tests of the A/B/A timing tool in dev/perf (after changing it; CI: macOS)"
 	@echo ""
 	@echo "Build & Package:"
 	@echo "  make build         - Build distribution packages"
@@ -247,6 +248,9 @@ tsan-test:
 
 stubs-check:
 	@PYTHON=$(PYTHON) bash dev/stubs/run.sh check
+
+perf-tool-test:
+	@$(PYTHON) -B dev/perf/test_tool.py
 
 # Clean + reinstall in dev mode (respects CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET)
 # Uses active PYTHON (venv or PATH) to avoid environment mismatches

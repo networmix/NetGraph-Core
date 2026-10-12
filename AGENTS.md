@@ -17,4 +17,6 @@ cost ceilings (Absolute, Stretch).
 A binding signature or docstring change needs the regenerated type stub
 (`bash dev/stubs/run.sh generate`; `make stubs-check` checks drift, package
 contents and typed clients). Performance claims need correctness checks and
-A/B/A on one quiet machine. Local checks do not replace CI.
+A/B/A on one quiet machine (`dev/perf/README.md`; `make perf-tool-test` after
+changing that tool; CI runs it on one macOS job, as a library change can break
+it). Local checks do not replace CI.

@@ -30,3 +30,6 @@ dist/
 
 # Personal Superset lifecycle overrides
 .superset/config.local.json
+
+# The performance tool's default output directory
+/dev/perf/results/

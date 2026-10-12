@@ -1,0 +1,545 @@
+{
+ "format": "storage-inputs/1",
+ "capacities": "positive integers (physical); the adapter converts them to units of 1/4096 exactly",
+ "input_sha256_rule": "sha256 of src int32, dst int32, cost int64, capacity float64 (little-endian), concatenated",
+ "inputs": {
+  "wgrid256": {
+   "generator": "gen_wgrid256(): 256x256 grid, both directions, costs 1..31 drawn per direction, mt19937(1729)",
+   "shape": {
+    "n": 65536,
+    "e": 261120,
+    "k": 31,
+    "max_out": 4,
+    "max_in": 4,
+    "gcd": 1,
+    "max_cost": 31,
+    "isolated": 0,
+    "src_descents": 130305,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "14812220864904460480"
+   },
+   "rows": [
+    "construct.wgrid256",
+    "spf.to.wgrid256"
+   ],
+   "input_sha256": "d307d7797682fadb6c168cef20c1a5efd4c74446538d5ba05421e9db8fd395de"
+  },
+  "fanout_clos": {
+   "generator": "gen_fanout_clos(): Clos 400x400 at cost 1, hubs 800 -> leaves 0..99 and leaves 300..399 -> 801 at cost 2, mt19937(1729)",
+   "shape": {
+    "n": 802,
+    "e": 320200,
+    "k": 2,
+    "max_out": 401,
+    "max_in": 401,
+    "gcd": 1,
+    "max_cost": 2,
+    "isolated": 0,
+    "src_descents": 160000,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "5230821760560145505"
+   },
+   "rows": [
+    "construct.fanout_clos"
+   ],
+   "input_sha256": "408fd7321f41a7f8931ab999cf6aa9299e11eae5f5efdd4cd826ac47692e67cd"
+  },
+  "random1m_nat": {
+   "generator": "gen_random1m(false): ring + 7 random out-edges per node, 131,072 nodes, costs 1..31, mt19937(1729)",
+   "shape": {
+    "n": 131072,
+    "e": 1048576,
+    "k": 31,
+    "max_out": 8,
+    "max_in": 24,
+    "gcd": 1,
+    "max_cost": 31,
+    "isolated": 0,
+    "src_descents": 0,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "16852305707948996038"
+   },
+   "rows": [
+    "construct.random1m_nat"
+   ],
+   "input_sha256": "b395d1bc9952a3c0d6ece00c9c48300edffd5de39696ffe98728d31b094c3382"
+  },
+  "random1m_scat": {
+   "generator": "gen_random1m(true): random1m_nat permuted by Fisher-Yates over mt19937_64(4242)",
+   "shape": {
+    "n": 131072,
+    "e": 1048576,
+    "k": 31,
+    "max_out": 8,
+    "max_in": 24,
+    "gcd": 1,
+    "max_cost": 31,
+    "isolated": 0,
+    "src_descents": 524810,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "10807403047943366003"
+   },
+   "rows": [
+    "construct.random1m_scat",
+    "spf.to.random1m",
+    "spf.full.random1m"
+   ],
+   "input_sha256": "658928f7c0a60dbe388482a0bd5dc034f6cd163cc412895800a1f7561ac9631b"
+  },
+  "wide65k": {
+   "generator": "gen_wide65k(): ring + 7 random out-edges, 65,536 nodes, costs 1..2^30, mt19937(1031)",
+   "shape": {
+    "n": 65536,
+    "e": 524288,
+    "k": 524146,
+    "max_out": 8,
+    "max_in": 21,
+    "gcd": 1,
+    "max_cost": 1073738528,
+    "isolated": 0,
+    "src_descents": 0,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "13538344444856380895"
+   },
+   "rows": [
+    "construct.wide65k"
+   ],
+   "input_sha256": "ccc9b83bdd040c6f9e2c401dcb4ab126bc10349d52f34d1b505bff876787b957"
+  },
+  "k65536": {
+   "generator": "gen_kcosts(65536): ring + 7 random out-edges, 65,536 nodes (mt19937(1032)), exactly the costs 1..65,536",
+   "shape": {
+    "n": 65536,
+    "e": 524288,
+    "k": 65536,
+    "max_out": 8,
+    "max_in": 21,
+    "gcd": 1,
+    "max_cost": 65536,
+    "isolated": 0,
+    "src_descents": 0,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "10929368686095504329"
+   },
+   "rows": [
+    "construct.k65536"
+   ],
+   "input_sha256": "2dec5408f2e7f5829b5f6dcfdfcdc931eca4cf31c32df06c1fb2abfecb078dc9"
+  },
+  "k65537": {
+   "generator": "gen_kcosts(65537): the k65536 topology and capacities, exactly the costs 1..65,537",
+   "shape": {
+    "n": 65536,
+    "e": 524288,
+    "k": 65537,
+    "max_out": 8,
+    "max_in": 21,
+    "gcd": 1,
+    "max_cost": 65537,
+    "isolated": 0,
+    "src_descents": 0,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "758208004199587604"
+   },
+   "rows": [
+    "construct.k65537"
+   ],
+   "input_sha256": "1b92d4c2c5a7cb69ce0417cd7162ab29e3f05b63a2dc575fa5d195d6ff1db90d"
+  },
+  "star1m": {
+   "generator": "gen_star1m(): node 0 -> 1,048,576 targets drawn from 131,072 nodes, costs 1..2^20, mt19937(1034)",
+   "shape": {
+    "n": 131072,
+    "e": 1048576,
+    "k": 662682,
+    "max_out": 1048576,
+    "max_in": 27,
+    "gcd": 1,
+    "max_cost": 1048575,
+    "isolated": 41,
+    "src_descents": 0,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "15197849622511790248"
+   },
+   "rows": [
+    "construct.star1m"
+   ],
+   "input_sha256": "a3694088fe43fcdbbdc32b093f4fe67bb3261d3af2d39d8017d22c29f7ddbe3b"
+  },
+  "sparse1m": {
+   "generator": "gen_sparse1m(): 1,048,576 nodes, 4,096 edges with endpoints drawn over the node range, costs 1..31, mt19937(1035)",
+   "shape": {
+    "n": 1048576,
+    "e": 4096,
+    "k": 31,
+    "max_out": 2,
+    "max_in": 2,
+    "gcd": 1,
+    "max_cost": 31,
+    "isolated": 1040409,
+    "src_descents": 2050,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "12990156200638721186"
+   },
+   "rows": [
+    "construct.sparse1m"
+   ],
+   "input_sha256": "5afbaee69477cbf72c55adda097cdca617dd42f7279600226b639010bc52ae80"
+  },
+  "empty1m": {
+   "generator": "gen_empty1m(): 1,048,576 nodes, no edge",
+   "shape": {
+    "n": 1048576,
+    "e": 0,
+    "k": 0,
+    "max_out": 0,
+    "max_in": 0,
+    "gcd": 0,
+    "max_cost": 0,
+    "isolated": 1048576,
+    "src_descents": 0,
+    "key_sorted": true,
+    "key_reversed": true,
+    "digest": "18109181668318218688"
+   },
+   "rows": [
+    "construct.empty1m"
+   ],
+   "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "random65k_bprime": {
+   "generator": "gen_random65k_bprime(false): gen_random(65536, 8, 11) with capacities 1 + k, stably sorted by (src, cost, dst)",
+   "shape": {
+    "n": 65536,
+    "e": 524288,
+    "k": 31,
+    "max_out": 8,
+    "max_in": 21,
+    "gcd": 1,
+    "max_cost": 31,
+    "isolated": 0,
+    "src_descents": 0,
+    "key_sorted": true,
+    "key_reversed": false,
+    "digest": "12833760064757678648"
+   },
+   "rows": [
+    "construct.random65k_bprime"
+   ],
+   "input_sha256": "6980bf923ad851f797f2b03bd473d6a21a5d589904321df228dd40d817fd1c44"
+  },
+  "random65k_reversed": {
+   "generator": "gen_random65k_bprime(true): the preceding input reversed",
+   "shape": {
+    "n": 65536,
+    "e": 524288,
+    "k": 31,
+    "max_out": 8,
+    "max_in": 21,
+    "gcd": 1,
+    "max_cost": 31,
+    "isolated": 0,
+    "src_descents": 65535,
+    "key_sorted": false,
+    "key_reversed": true,
+    "digest": "11592727304513109687"
+   },
+   "rows": [
+    "construct.random65k_reversed"
+   ],
+   "input_sha256": "8bffe4a301176138124aa6c98f16f7247d7abf6079eb2807cc61cb13532019b6"
+  },
+  "star1m_smallk": {
+   "generator": "gen_star1m_smallk(false): node 0 -> 1,048,576 targets, costs 1..31, capacity 1 + input position, mt19937(1036)",
+   "shape": {
+    "n": 131072,
+    "e": 1048576,
+    "k": 31,
+    "max_out": 1048576,
+    "max_in": 23,
+    "gcd": 1,
+    "max_cost": 31,
+    "isolated": 46,
+    "src_descents": 0,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "8802474158293546069"
+   },
+   "rows": [
+    "construct.star1m_smallk"
+   ],
+   "input_sha256": "568bb27e12240968d40acba5d3227eac7cb03124c3545c6711a8d470db86f95c"
+  },
+  "instar1m_smallk": {
+   "generator": "gen_star1m_smallk(true): the preceding edges turned around",
+   "shape": {
+    "n": 131072,
+    "e": 1048576,
+    "k": 31,
+    "max_out": 23,
+    "max_in": 1048576,
+    "gcd": 1,
+    "max_cost": 31,
+    "isolated": 46,
+    "src_descents": 524217,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "10839275545656040073"
+   },
+   "rows": [
+    "construct.instar1m_smallk"
+   ],
+   "input_sha256": "3ae01017c142485b2a99be76f5749d11988ed37e09354812677c4776f5c97356"
+  },
+  "wide_fallback16k": {
+   "generator": "gen_wide_fallback16k(): ring + 7 random out-edges, 16,384 nodes, costs 1..2^20, mt19937(1037)",
+   "shape": {
+    "n": 16384,
+    "e": 131072,
+    "k": 123230,
+    "max_out": 8,
+    "max_in": 23,
+    "gcd": 1,
+    "max_cost": 1048557,
+    "isolated": 0,
+    "src_descents": 0,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "1535512841938229597"
+   },
+   "rows": [
+    "spf.to.wide_fallback16k"
+   ],
+   "input_sha256": "1cbec6cfbcbb07a49b61a609da523cbc68829abe7f9ec9d8c7befb456af22400"
+  },
+  "width65536": {
+   "generator": "gen_width(65534): ring + 7 random out-edges, 16,384 nodes (mt19937(1038)), costs 65,534 + one drawn bit",
+   "shape": {
+    "n": 16384,
+    "e": 131072,
+    "k": 2,
+    "max_out": 8,
+    "max_in": 20,
+    "gcd": 1,
+    "max_cost": 65535,
+    "isolated": 0,
+    "src_descents": 0,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "6236947617789042840"
+   },
+   "rows": [
+    "spf.to.width65536"
+   ],
+   "input_sha256": "0b7d0ca1b9c5c648a637f7b6f9f8f8c132d0f600e9bba7611c0dc770964e7f1d"
+  },
+  "width65537": {
+   "generator": "gen_width(65535): the width65536 topology, costs 65,535 + the same bit",
+   "shape": {
+    "n": 16384,
+    "e": 131072,
+    "k": 2,
+    "max_out": 8,
+    "max_in": 20,
+    "gcd": 1,
+    "max_cost": 65536,
+    "isolated": 0,
+    "src_descents": 0,
+    "key_sorted": false,
+    "key_reversed": false,
+    "digest": "9851477194174659493"
+   },
+   "rows": [
+    "spf.to.width65537"
+   ],
+   "input_sha256": "71e2e6dad1037a2bd7bcc8460ff82b940286364042e37233145aecacbefc36ab"
+  }
+ },
+ "rows": {
+  "construct.wgrid256": {
+   "input": "wgrid256",
+   "kind": "construct"
+  },
+  "construct.fanout_clos": {
+   "input": "fanout_clos",
+   "kind": "construct"
+  },
+  "construct.random1m_nat": {
+   "input": "random1m_nat",
+   "kind": "construct"
+  },
+  "construct.random1m_scat": {
+   "input": "random1m_scat",
+   "kind": "construct"
+  },
+  "construct.wide65k": {
+   "input": "wide65k",
+   "kind": "construct"
+  },
+  "construct.k65536": {
+   "input": "k65536",
+   "kind": "construct"
+  },
+  "construct.k65537": {
+   "input": "k65537",
+   "kind": "construct"
+  },
+  "construct.star1m": {
+   "input": "star1m",
+   "kind": "construct"
+  },
+  "construct.sparse1m": {
+   "input": "sparse1m",
+   "kind": "construct"
+  },
+  "construct.empty1m": {
+   "input": "empty1m",
+   "kind": "construct"
+  },
+  "construct.random65k_bprime": {
+   "input": "random65k_bprime",
+   "kind": "construct"
+  },
+  "construct.random65k_reversed": {
+   "input": "random65k_reversed",
+   "kind": "construct"
+  },
+  "construct.star1m_smallk": {
+   "input": "star1m_smallk",
+   "kind": "construct"
+  },
+  "construct.instar1m_smallk": {
+   "input": "instar1m_smallk",
+   "kind": "construct"
+  },
+  "spf.to.wgrid256": {
+   "input": "wgrid256",
+   "kind": "search",
+   "direction": "reverse",
+   "roots": [
+    1,
+    998,
+    1995,
+    2992,
+    3989,
+    4986,
+    5983,
+    6980
+   ],
+   "roots_rule": "(i * 997 + 1) mod N, i = 0..7",
+   "queue": {
+    "width": 32,
+    "buckets": true
+   }
+  },
+  "spf.to.random1m": {
+   "input": "random1m_scat",
+   "kind": "search",
+   "direction": "reverse",
+   "roots": [
+    1,
+    998,
+    1995,
+    2992,
+    3989,
+    4986,
+    5983,
+    6980
+   ],
+   "roots_rule": "(i * 997 + 1) mod N, i = 0..7",
+   "queue": {
+    "width": 32,
+    "buckets": true
+   }
+  },
+  "spf.to.wide_fallback16k": {
+   "input": "wide_fallback16k",
+   "kind": "search",
+   "direction": "reverse",
+   "roots": [
+    1,
+    998,
+    1995,
+    2992,
+    3989,
+    4986,
+    5983,
+    6980
+   ],
+   "roots_rule": "(i * 997 + 1) mod N, i = 0..7",
+   "queue": {
+    "width": 1048558,
+    "buckets": false
+   }
+  },
+  "spf.to.width65536": {
+   "input": "width65536",
+   "kind": "search",
+   "direction": "reverse",
+   "roots": [
+    1,
+    998,
+    1995,
+    2992,
+    3989,
+    4986,
+    5983,
+    6980
+   ],
+   "roots_rule": "(i * 997 + 1) mod N, i = 0..7",
+   "queue": {
+    "width": 65536,
+    "buckets": true
+   }
+  },
+  "spf.to.width65537": {
+   "input": "width65537",
+   "kind": "search",
+   "direction": "reverse",
+   "roots": [
+    1,
+    998,
+    1995,
+    2992,
+    3989,
+    4986,
+    5983,
+    6980
+   ],
+   "roots_rule": "(i * 997 + 1) mod N, i = 0..7",
+   "queue": {
+    "width": 65537,
+    "buckets": false
+   }
+  },
+  "spf.full.random1m": {
+   "input": "random1m_scat",
+   "kind": "search",
+   "direction": "forward",
+   "roots": [
+    1,
+    998,
+    1995,
+    2992,
+    3989,
+    4986,
+    5983,
+    6980
+   ],
+   "roots_rule": "(i * 997 + 1) mod N, i = 0..7",
+   "queue": {
+    "width": 32,
+    "buckets": true
+   }
+  }
+ }
+}

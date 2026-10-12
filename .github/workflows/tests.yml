@@ -46,6 +46,14 @@ jobs:
       - name: Run Python tests (Windows)
         if: runner.os == 'Windows'
         run: python -m pytest tests/py/ -v
+      # The timing tool of dev/perf compiles against the library (its adapter uses the public
+      # API and two private functions of the queue rule), and nothing else builds it: its own
+      # tests, which compile its driver with this checkout's library, run on one job, so a
+      # library change that breaks the tool fails here. macOS: the platform the tool is made
+      # and checked on (its build record and memory reading are macOS-first).
+      - name: Timing tool tests (macOS, py3.14)
+        if: runner.os == 'macOS' && matrix.python-version == '3.14'
+        run: make perf-tool-test
 
   test-centos-stream-9:
     name: CentOS Stream 9 (py${{ matrix.python-version }})

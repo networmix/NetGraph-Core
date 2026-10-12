@@ -219,7 +219,8 @@ bindings/python/        # pybind11 bindings
 python/netgraph_core/   # Python package
 tests/cpp/              # C++ tests (googletest)
 tests/py/               # Python tests (pytest)
-dev/                    # Developer scripts (not shipped): checks and coverage
+dev/                    # Developer scripts (not shipped): checks, coverage,
+dev/perf/               #   and the A/B/A timing tool
 ```
 
 ## Development
@@ -239,6 +240,10 @@ make format        # Apply ruff formatting (make hooks runs every pre-commit fix
 ```
 
 `make check` and `make check-ci` only verify; they never edit a file.
+
+Performance claims are timed with the A/B/A tool (old build, new build, then the old build again
+on one machine, so drift shows), described in [dev/perf/README.md](dev/perf/README.md)
+(`make perf-tool-test` tests the tool itself; CI runs it on one macOS job).
 
 The editable development build (`make install`, `make dev`) carries the private test hooks
 (CMake option `NETGRAPH_CORE_PRIVATE_HOOKS`; a wheel build does not); the test suites skip the

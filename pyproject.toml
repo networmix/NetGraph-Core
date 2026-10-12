@@ -121,6 +121,8 @@ cmake.define.NETGRAPH_CORE_PRIVATE_HOOKS = "ON"
 
 [tool.pytest.ini_options]
 addopts = "-q"
+# pytest without arguments collects the repository tests only, not the timing tool's own tests
+# (dev/perf/test_tool.py, run by make perf-tool-test).
 testpaths = ["tests"]
 
 [tool.ruff]

@@ -1,0 +1,47 @@
+{
+ "format": "frozen-queries/1",
+ "row": "spf.dag.far16k",
+ "list": "far16k",
+ "input": {
+  "generator": "gen_random(16384, 8, 8)",
+  "num_nodes": 16384,
+  "num_edges": 131072,
+  "arrays_sha256": "0e082572f1af743dc27102d03914d2571204d38989af970e497b145289cb848e",
+  "input_digest": 5806366537376710903
+ },
+ "rule": "sources s_i = (i * 997 + 1) mod n, i = 0..7; target t_i = the reachable node with the largest shortest-path distance from s_i over every input edge (positive integer costs), ties to the lowest node id",
+ "pairs": [
+  [
+   1,
+   5378
+  ],
+  [
+   998,
+   9128
+  ],
+  [
+   1995,
+   11844
+  ],
+  [
+   2992,
+   10152
+  ],
+  [
+   3989,
+   10152
+  ],
+  [
+   4986,
+   7529
+  ],
+  [
+   5983,
+   16342
+  ],
+  [
+   6980,
+   16342
+  ]
+ ]
+}
