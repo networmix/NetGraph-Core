@@ -116,7 +116,9 @@ def frozen_cache_capacity():
 
 def with_orphan(call):
     """A ledger holding an orphaned record (its policy destroyed without remove()); call(ledger)
-    gives (fn, args), and the snapshot is the ledger's state."""
+    gives (fn, args), and the snapshot is the ledger's state. A successful reset can have a
+    negative native live balance: it frees the old baseline and orphan records allocated before
+    the hook was armed, while their deletions are counted inside the call."""
 
     def make():
         g = graph()
@@ -343,8 +345,9 @@ CONTROLS = {
     "control.crashes": exiting(3, 0),
     "control.never_completes": walks,
     "control.exits": exiting(0, 1),
-    # reset under the floor of ten (its own scenario has a floor of its own, FEW)
-    "control.few": with_orphan(lambda fg: (fg.reset, (half(fg.graph()),))),
+    # A plain Python call makes exactly zero extension operator-new allocations on every
+    # platform. A native operation's count (even reset's) depends on the standard library.
+    "control.few": stateless(lambda g: (lambda: None, ())),
     "control.raises_when_done": by_turn(raises_after),
     "control.other_value": by_turn(lambda m, g: lambda o: ngc.spf(g, 1 if m else 0, o)),
     "control.other_state": appending,

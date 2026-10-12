@@ -5,6 +5,7 @@ all-or-nothing construction of the result objects."""
 from __future__ import annotations
 
 import itertools
+import operator
 import traceback
 
 import numpy as np
@@ -264,8 +265,18 @@ def test_the_python_allocation_sweep_rejects_a_wrong_call():
     root0, root1 = root(0), root(1)
     full = ngc.spf(g, 0, opts())
 
-    def prebuilt(o):
-        return full
+    def fewer_allocations():
+        made = itertools.count()
+        # This C callable returns the existing result without allocating a Python object
+        # or entering a Python frame, so a tracer cannot add allocations to that call.
+        prebuilt = operator.itemgetter(0)
+
+        def make():
+            if next(made) >= 3:
+                return prebuilt, ([full],), list
+            return ngc.spf, (g, 0, opts()), list
+
+        return make
 
     def raising():
         # The completing call raises after its result. It raises in the frame the sweep calls:
@@ -274,27 +285,42 @@ def test_the_python_allocation_sweep_rejects_a_wrong_call():
 
         def make():
             m = next(made)
-            calls = itertools.count()
+            injected_call = False
+
+            def snapshot():
+                # The sweep reads this before injection and again before a clean retry.
+                # A tracer can fail before raises() enters its body, so body-entry counts
+                # cannot distinguish those two calls.
+                nonlocal injected_call
+                injected_call = not injected_call
+                return []
 
             def raises(o):
-                first = not next(calls)
                 result = ngc.spf(g, 0, o)
-                if m and first:
+                if m and injected_call:
                     raise LookupError("after its result")
                 return result
 
-            return raises, (opts(),), list
+            return raises, (opts(),), snapshot
 
         return make
 
     def by_turn(turns):
-        # The c-th call within the m-th make() runs turns(m, c); m = 0 is the sweep's reference.
+        # m = 0 is the reference, c = 0 the injected call, c = 1 its clean retry.
+        # Advance at snapshot boundaries, even if a tracer failed before entering the call.
         made = itertools.count()
 
         def make():
             m = next(made)
-            calls = itertools.count()
-            return (lambda o: turns(m, next(calls))(o)), (opts(),), list
+            snapshots = itertools.count()
+            c = 0
+
+            def snapshot():
+                nonlocal c
+                c = next(snapshots)
+                return []
+
+            return (lambda o: turns(m, c)(o)), (opts(),), snapshot
 
         return make
 
@@ -311,7 +337,7 @@ def test_the_python_allocation_sweep_rejects_a_wrong_call():
             "assert plain(value) == want, where",
         ),
         (
-            by_turn(lambda m, c: prebuilt if m >= 3 and not c else root0),
+            fewer_allocations(),
             "assert seen == failures, (where, seen)  # every allocation failed once",
         ),
         (
@@ -319,9 +345,13 @@ def test_the_python_allocation_sweep_rejects_a_wrong_call():
             "assert plain(fn(*args)) == want, where",
         ),
     ):
-        with pytest.raises(AssertionError) as info:
+        try:
             sweep_python_allocation(make, 200)
-        assert traceback.extract_tb(info.tb)[-1].line == clause
+        except AssertionError as error:
+            actual = traceback.extract_tb(error.__traceback__)[-1].line
+            assert actual == clause, (actual, clause)
+        else:
+            pytest.fail(f"the planted bug passed its clause: {clause}")
     # A call that needs more attempts than the limit: the sweep fails, never passes.
     with pytest.raises(pytest.fail.Exception) as info:
         sweep_python_allocation(lambda: (ngc.spf, (g, 0, opts()), list), 2)
