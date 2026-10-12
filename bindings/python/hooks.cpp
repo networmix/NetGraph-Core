@@ -27,6 +27,25 @@ namespace netgraph::core::bindings {
 
 namespace {
 
+// Take the normalized exception, including its traceback, without replacing an existing
+// exception instance. PyErr_GetRaisedException was added in Python 3.12.
+py::object take_raised_exception() {
+#if PY_VERSION_HEX >= 0x030C0000
+  return py::reinterpret_steal<py::object>(PyErr_GetRaisedException());
+#else
+  PyObject* type = nullptr;
+  PyObject* value = nullptr;
+  PyObject* traceback = nullptr;
+  PyErr_Fetch(&type, &value, &traceback);
+  PyErr_NormalizeException(&type, &value, &traceback);
+  const auto kind = py::reinterpret_steal<py::object>(type);
+  auto error = py::reinterpret_steal<py::object>(value);
+  const auto trace = py::reinterpret_steal<py::object>(traceback);
+  if (trace && PyException_SetTraceback(error.ptr(), trace.ptr()) < 0) throw py::error_already_set();
+  return error;
+#endif
+}
+
 // The allocation-failure hook: the k-th object-domain allocation fails (Python's allocator
 // wrapped for one call, then restored). The allocator is process-wide while the call runs, so
 // the hook serves one caller at a time (the tests); its counters are atomics because the module
@@ -129,7 +148,7 @@ void register_private_hooks(py::module_& m) {
         g_fail_countdown.store(-1);
         py::object result = r != nullptr ? py::reinterpret_steal<py::object>(r) : py::object(py::none());
         py::object error = py::none();
-        if (r == nullptr) error = py::reinterpret_steal<py::object>(PyErr_GetRaisedException());
+        if (r == nullptr) error = take_raised_exception();
         return py::make_tuple(g_fail_hit.load(), g_fail_seen.load(), result, error);
       },
       py::arg("fn"), py::arg("args"), py::arg("k"),
@@ -152,7 +171,7 @@ void register_private_hooks(py::module_& m) {
         g_native_countdown.store(-1);
         py::object result = r != nullptr ? py::reinterpret_steal<py::object>(r) : py::object(py::none());
         py::object error = py::none();
-        if (r == nullptr) error = py::reinterpret_steal<py::object>(PyErr_GetRaisedException());
+        if (r == nullptr) error = take_raised_exception();
         return py::make_tuple(g_native_hit.load(), g_native_seen.load(), result, error, g_native_live.load());
       },
       py::arg("fn"), py::arg("args"), py::arg("k"),

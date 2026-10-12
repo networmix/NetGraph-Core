@@ -437,7 +437,7 @@ void expect_whole_entries(const std::optional<DagCache>& cache, std::int64_t cle
   if (cache) expect_whole_entries(cache->stats(), clean, where);
 }
 
-void sweep_batch(const Mode& m, const Graph& g, std::span<const std::int32_t> workers_set, long step,
+long sweep_batch(const Mode& m, const Graph& g, std::span<const std::int32_t> workers_set, long step,
                  const Options& o = {}) {
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {
       {m.sources, m.destinations}, {{1}, {6}}, {{0}, {5}}};
@@ -450,6 +450,7 @@ void sweep_batch(const Mode& m, const Graph& g, std::span<const std::int32_t> wo
   cache.reset();  // each attempt gets a fresh one (setup)
   const std::string name = m.name + " batch" + o.name;
   long kept = 0;  // failed calls whose cache kept the entries of the lookups before the failure
+  long attempts = 0;
   for (const std::int32_t workers : workers_set) {
     for (const bool in_workers : {false, true}) {
       if (in_workers && workers == 1) continue;  // one worker runs on the calling thread
@@ -467,13 +468,15 @@ void sweep_batch(const Mode& m, const Graph& g, std::span<const std::int32_t> wo
             if (o.cache) cache.emplace(g);
           },
           [&] { cache.reset(); });
+      attempts += failures + 1;
       EXPECT_GT(failures, 2) << name << " workers " << workers;  // not vacuous
     }
   }
   if (o.cache) EXPECT_GT(kept, 0) << name;
+  return attempts;
 }
 
-void sweep_sensitivity(const Mode& m, const Graph& g, std::span<const std::int32_t> workers_set, long step,
+long sweep_sensitivity(const Mode& m, const Graph& g, std::span<const std::int32_t> workers_set, long step,
                        const Options& o = {}) {
   std::optional<DagCache> cache;
   const auto opts = [&] { return SensitivityOptions {m.cfg, o.elig, cache ? &*cache : nullptr}; };
@@ -483,6 +486,7 @@ void sweep_sensitivity(const Mode& m, const Graph& g, std::span<const std::int32
   cache.reset();  // each attempt gets a fresh one (setup)
   const std::string name = m.name + " sensitivity" + o.name;
   long kept = 0;  // failed calls whose cache kept the entries of the lookups before the failure
+  long attempts = 0;
   for (const std::int32_t workers : workers_set) {
     for (const bool in_workers : {false, true}) {
       if (in_workers && workers == 1) continue;
@@ -504,10 +508,12 @@ void sweep_sensitivity(const Mode& m, const Graph& g, std::span<const std::int32
             if (o.cache) cache.emplace(g);
           },
           [&] { cache.reset(); });
+      attempts += failures + 1;
       EXPECT_GT(failures, 2) << name << " workers " << workers;
     }
   }
   if (o.cache) EXPECT_GT(kept, 0) << name;
+  return attempts;
 }
 
 } // namespace
@@ -561,6 +567,7 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
   const std::vector<std::string> exhaustive_sensitivity = {"costonly eb", "capacityaware weighted diminishing", "global",
                                                            "pinned eb cohort"};
   int swept_sensitivity = 0;
+  long attempts = 0;
   for (const auto& m : modes(*g)) {
     const bool reads_cache = std::holds_alternative<CostOnly>(m.cfg.routing);
     const bool every_sensitivity_allocation =
@@ -581,6 +588,7 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
       long kept = 0;  // failed calls whose cache kept the entry of the lookup before the failure
       long empty = 0;
       for (long at = 0;; ++at) {
+        ++attempts;
         const std::string w = name + " allocation " + std::to_string(at);
         // Everything an attempt allocates is freed when it ends, the supplied cache with it (its
         // kept entries are no leak), so an allocation left live is a leak of the failed call.
@@ -617,16 +625,17 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
         EXPECT_GT(kept, 0) << name;  // failures after the lookup, and before it
         EXPECT_GT(empty, 0) << name;
       }
-      if (!std::holds_alternative<Pinned>(m.cfg.routing)) sweep_batch(m, *g, one, 1, o);  // batch rejects Pinned
+      if (!std::holds_alternative<Pinned>(m.cfg.routing)) attempts += sweep_batch(m, *g, one, 1, o);  // batch rejects Pinned
       if (every_sensitivity_allocation) {
-        sweep_sensitivity(m, *g, one, 1, o);
+        attempts += sweep_sensitivity(m, *g, one, 1, o);
         ++swept_sensitivity;
       } else if (o.elig == nullptr && !o.cache) {
-        sweep_sensitivity(m, *g, one, 11, o);
+        attempts += sweep_sensitivity(m, *g, one, 11, o);
       }
       if (::testing::Test::HasFailure()) return;
     }
   }
+  RecordProperty("allocation_attempts", std::to_string(attempts));
   EXPECT_EQ(swept_sensitivity, 4 * 2 + 1);  // four modes with two option sets, CostOnly's with three
 }
 
@@ -643,10 +652,12 @@ TEST(PolicyFaults, BatchWorkersFailWithoutTerminating) {
 TEST(PolicyFaults, SensitivityWorkersFailWithoutTerminating) {
   const auto g = graph();
   const std::int32_t several[] = {2, 4};
+  long attempts = 0;
   for (const auto& m : modes(*g)) {
-    sweep_sensitivity(m, *g, several, 11);
+    attempts += sweep_sensitivity(m, *g, several, 11);
     if (::testing::Test::HasFailure()) return;
   }
+  RecordProperty("allocation_attempts", std::to_string(attempts));
 }
 
 TEST(PolicyFaults, RemovalAndReleaseNeverAllocate) {

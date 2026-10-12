@@ -191,7 +191,15 @@ if(NETGRAPH_CORE_BUILD_TESTS)
   list(APPEND NETGRAPH_CORE_PROJECT_TARGETS netgraph_core_tests netgraph_core_fault_tests)
   include(GoogleTest)
   gtest_discover_tests(netgraph_core_tests)
-  gtest_discover_tests(netgraph_core_fault_tests)
+  # These sweeps make about 19,000 and 13,000 injection attempts, each with a clean retry;
+  # sensitivity also creates and joins worker threads. Debug sanitizer runs on small runners
+  # can exceed the runner's 120-second default. Keep every attempt and allow ten minutes only
+  # for these two tests; all other tests retain the runner's timeout.
+  set(NETGRAPH_CORE_LONG_FAULT_TESTS
+      "PolicyFaults.EvaluatorsLeaveNoPoisonedScratch:PolicyFaults.SensitivityWorkersFailWithoutTerminating")
+  gtest_discover_tests(netgraph_core_fault_tests TEST_FILTER "-${NETGRAPH_CORE_LONG_FAULT_TESTS}")
+  gtest_discover_tests(netgraph_core_fault_tests TEST_FILTER "${NETGRAPH_CORE_LONG_FAULT_TESTS}"
+                      PROPERTIES TIMEOUT 600)
 endif()
 
 # Warnings: the project's set on the library, the extension and the test executables (the list

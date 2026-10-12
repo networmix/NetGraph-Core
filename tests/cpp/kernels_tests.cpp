@@ -76,7 +76,7 @@ std::vector<Amount> ha_by_rank(Amount total, const std::vector<Amount>& w) {
       for (std::size_t j = 0; j < w.size(); ++j) {
         const Int128 product = static_cast<Int128>(w[j]) * k;
         rank += (product - 1) / w[i];
-        if (product % w[i] == 0 && j <= i) ++rank;
+        if (product % w[i] == 0 && j <= i) rank += 1;
       }
       if (rank <= total) lo = k;
       else hi = k - 1;

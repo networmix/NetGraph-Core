@@ -63,6 +63,7 @@ tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_ch
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[spf.full]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[spf.single_path]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[spf.targets_residual]
+tests/py/test_native_allocation.py::test_allocation_hooks_preserve_exception_identity
 tests/py/test_native_allocation.py::test_the_row_checks_reject_a_wrong_call
 tests/py/test_search.py::test_python_result_construction_is_all_or_nothing
 tests/py/test_search.py::test_the_python_allocation_sweep_rejects_a_wrong_call

@@ -1,9 +1,10 @@
 """Native allocation failures in the staged result constructions and in FlowLedger.reset: the
 k-th C++ allocation of spf, ksp, resolve_to_paths, of the calls whose result objects are made
 before anything is published (place, capacity, batch_capacity, sensitivity) and of reset fails,
-for every k in turn (the private hook _fail_native_allocation). Every reached failure
+for every k in turn (the private hook _fail_native_allocation). Every unabsorbed failure
 raises MemoryError, never aborts, leaves nothing it allocated behind and the observable state as
-it was; the call that completes returns the value of a call without failure.
+it was. Standard-library optional buffers may absorb a failure; every successful call, including
+such a fallback, must return the same value and leave the same state as a call without failure.
 
 Each sweep runs in a child interpreter, so a crash (a double free) fails its test instead of
 the whole session: python -B test_native_allocation.py SCENARIO EXTENSION loads the parent's
@@ -318,15 +319,15 @@ def prebuilt(m, g):
     return call
 
 
-def discarding(g):
-    """A wrong call for the row checks' controls: it drops its result and returns a plain value,
-    so the completing call holds no native allocation."""
+def discarding(m, g):
+    """Keep the reference result, then discard it in each swept call. Comparing the returned
+    value detects the discard even if thread-local scratch keeps native allocations live."""
 
     def discards(o):
-        ngc.spf(g, 0, o)
-        return 7
+        result = ngc.spf(g, 0, o)
+        return 7 if m else result
 
-    return discards, (spf_opts(),)
+    return discards
 
 
 MADE = itertools.count()  # make() calls of a control in the child (each child runs one)
@@ -348,7 +349,7 @@ CONTROLS = {
     "control.other_value": by_turn(lambda m, g: lambda o: ngc.spf(g, 1 if m else 0, o)),
     "control.other_state": appending,
     "control.fewer_allocations": by_turn(prebuilt),
-    "control.discards": stateless(discarding),
+    "control.discards": by_turn(discarding),
 }
 
 
@@ -409,32 +410,109 @@ if __name__ != "__main__":
 
     def check(name, proc, rows, started):
         """The checks of one scenario's rows."""
-        failed = [r for r in rows if r["k"] is not None and r["hit"]]
-        for row in failed:
-            # A reached failure propagates as MemoryError (a call that raised returns no value):
-            # nothing absorbs it, nothing it allocated stays allocated, and the state is as
-            # before the call.
-            assert row["error"] is not None, row
-            assert row["error"].startswith("MemoryError"), row
-            assert row["live"] == 0, row
-            assert row["state_ok"], row
+        reached = [r for r in rows if r["k"] is not None and r["hit"]]
+        for row in reached:
+            if row["error"] is None:
+                # std::stable_partition's optional nothrow buffer may fail and fall back.
+                # Absorption is valid only with exactly the reference result and state.
+                assert row["value_ok"], row
+                assert row["state_ok"], row
+            else:
+                assert row["error"].startswith("MemoryError"), row
+                assert row["live"] == 0, row
+                assert row["state_ok"], row
         assert proc.returncode == 0, (
             f"{name}: the child died (rc {proc.returncode}) in attempt {started}\n"
             f"{proc.stderr[-2000:]}"
         )
         assert rows and rows[-1]["k"] is not None, f"{name}: the call never completed"
-        # The child stops after the first call that completes: every earlier row is a reached
-        # failure (a child that ended early with status 0 leaves a failure last).
-        assert len(failed) == len(rows) - 1, f"{name}: {len(failed)} attempts"
-        assert len(failed) >= FEW.get(name, 10), f"{name}: {len(failed)} attempts"
+        # Stop only when k is not reached; an absorbed failure still advances the sweep.
+        # A child that ended early with status 0 leaves a reached failure last.
+        assert len(reached) == len(rows) - 1, f"{name}: {len(reached)} attempts"
+        assert len(reached) >= FEW.get(name, 10), f"{name}: {len(reached)} attempts"
         done = rows[-1]
         assert done["error"] is None, done
         assert done["value_ok"], done
         assert done["state_ok"], done
-        assert done["seen"] == len(failed), done
+        assert done["seen"] == len(reached), done
+        for row in reached:
+            if row["error"] is None:
+                # A successful fallback holds exactly the result's native allocations,
+                # not an extra temporary buffer or a leaked staged result.
+                assert row["live"] == done["live"], row
         if done["returns"]:
             # The probe counts what the result object holds.
             assert done["live"] > 0, done
+
+    def test_absorbed_rows_require_identical_success():
+        # Exercise fallback acceptance on every platform, even when its standard library
+        # does not request an optional buffer for this small graph.
+        proc = subprocess.CompletedProcess([], 0, stderr="")
+        rows = [
+            {
+                "k": k,
+                "hit": True,
+                "seen": k + 1,
+                "live": 0,
+                "error": "MemoryError: std::bad_alloc",
+                "state_ok": True,
+            }
+            for k in range(10)
+        ]
+        rows[0].update(error=None, live=3, value_ok=True)
+        rows.append(
+            {
+                "k": 10,
+                "hit": False,
+                "seen": 10,
+                "live": 3,
+                "error": None,
+                "value_ok": True,
+                "state_ok": True,
+                "returns": True,
+            }
+        )
+        check("fallback", proc, rows, 10)
+        for field, wrong in (("value_ok", False), ("state_ok", False), ("live", 4)):
+            corrupted = [dict(row) for row in rows]
+            corrupted[0][field] = wrong
+            with pytest.raises(AssertionError) as info:
+                check("fallback", proc, corrupted, 10)
+            clause = (
+                'assert row["live"] == done["live"], row'
+                if field == "live"
+                else f'assert row["{field}"], row'
+            )
+            assert traceback.extract_tb(info.tb)[-1].line == clause
+        corrupted = [dict(row) for row in rows]
+        corrupted[-1]["live"] = 0
+        corrupted[0]["live"] = 0
+        with pytest.raises(AssertionError) as info:
+            check("fallback", proc, corrupted, 10)
+        assert traceback.extract_tb(info.tb)[-1].line == 'assert done["live"] > 0, done'
+
+    @needs_hooks
+    def test_allocation_hooks_preserve_exception_identity():
+        class MarkedError(Exception):
+            pass
+
+        for hook in (ext._fail_python_allocation, ext._fail_native_allocation):
+            cause = LookupError("cause")
+            expected = MarkedError("instance")
+            expected.marker = object()
+
+            def raises(expected=expected, cause=cause):
+                raise expected from cause
+
+            hit, _, value, error, *_ = hook(raises, (), -1)
+            assert not hit
+            assert value is None
+            assert error is expected
+            assert error.marker is expected.marker
+            assert error.__cause__ is cause
+            assert error.__traceback__.tb_frame.f_code is raises.__code__
+            # The pending exception was cleared; another call returns normally.
+            assert hook(lambda: 7, (), -1)[2:4] == (7, None)
 
     @needs_hooks
     @pytest.mark.parametrize("name", list(SCENARIOS))
@@ -443,18 +521,17 @@ if __name__ != "__main__":
 
     @needs_hooks
     def test_the_row_checks_reject_a_wrong_call():
-        # Each row check rejects its wrong call: one that absorbs the injected failure, raises
-        # another exception in its place, keeps native allocations live past it or changes the
-        # observable state before it; one that crashes the child, needs more attempts than the
-        # sweep makes, or ends the child with status 0 after a failure; one with fewer
-        # allocations than the floor; and one whose completing call raises, returns another
-        # value, leaves another state, makes fewer allocations than failed before it, or returns
-        # a value that holds no native allocation.
+        # Each row check rejects its wrong call: one that absorbs a failure with a wrong
+        # result, raises another exception, leaks native allocations or changes the state;
+        # one that crashes, outlasts its sweep, or exits with status 0 after a failure;
+        # one with fewer allocations than the floor; and one whose completing call raises,
+        # returns another value or state, makes fewer allocations than failed before it, or returns
+        # a plain value in place of its result.
         attempts = (
-            'assert len(failed) == len(rows) - 1, f"{name}: {len(failed)} attempts"'
+            'assert len(reached) == len(rows) - 1, f"{name}: {len(reached)} attempts"'
         )
         for name, clause in (
-            ("control.absorbs", 'assert row["error"] is not None, row'),
+            ("control.absorbs", 'assert row["value_ok"], row'),
             ("control.replaces", 'assert row["error"].startswith("MemoryError"), row'),
             ("control.leaks", 'assert row["live"] == 0, row'),
             ("control.changes_state", 'assert row["state_ok"], row'),
@@ -466,17 +543,22 @@ if __name__ != "__main__":
             ("control.exits", attempts),
             (
                 "control.few",
-                'assert len(failed) >= FEW.get(name, 10), f"{name}: {len(failed)} attempts"',
+                'assert len(reached) >= FEW.get(name, 10), f"{name}: {len(reached)} attempts"',
             ),
             ("control.raises_when_done", 'assert done["error"] is None, done'),
             ("control.other_value", 'assert done["value_ok"], done'),
             ("control.other_state", 'assert done["state_ok"], done'),
-            ("control.fewer_allocations", 'assert done["seen"] == len(failed), done'),
-            ("control.discards", 'assert done["live"] > 0, done'),
+            ("control.fewer_allocations", 'assert done["seen"] == len(reached), done'),
+            ("control.discards", 'assert done["value_ok"], done'),
         ):
-            with pytest.raises(AssertionError) as info:
-                check(name, *run_child(name))
-            assert traceback.extract_tb(info.tb)[-1].line == clause, name
+            proc, rows, started = run_child(name)
+            try:
+                check(name, proc, rows, started)
+            except AssertionError as error:
+                actual = traceback.extract_tb(error.__traceback__)[-1].line
+                assert actual == clause, name
+            else:
+                pytest.fail(f"{name}: the planted bug passed; last row: {rows[-1:]}")
 
 else:
     if ngc.spf is not ext.spf:  # the package binds to the loaded extension
