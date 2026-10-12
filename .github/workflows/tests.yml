@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Every job installs its Python tools with the pins of .github/ci-constraints.txt, pip itself
+# first. An editable install builds the package in an isolated environment of pip's own, which
+# since pip 26.2 takes only build constraints (--build-constraint), never -c: both name the same
+# file.
 jobs:
   test:
     name: Unit tests (${{ matrix.os }}, py${{ matrix.python-version }})
@@ -15,21 +19,41 @@ jobs:
       matrix:
         os: [ubuntu-22.04, macos-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          # Free-threaded CPython (no GIL): the module declares py::mod_gil_not_used().
+          - os: ubuntu-22.04
+            python-version: "3.14t"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # bash on every OS: PowerShell would not stop when the first command fails.
       - name: Install deps
+        shell: bash
         run: |
-          python -m pip install -U pip wheel
-          python -m pip install -e .[dev]
-      - name: Run CI checks (lint + C++/Python tests)
+          python -m pip install -U -c .github/ci-constraints.txt pip
+          python -m pip install -c .github/ci-constraints.txt --build-constraint .github/ci-constraints.txt -e ".[dev]"
+      - name: Run CI checks (lint + C++ tests with and without the hooks + Python tests)
         if: runner.os != 'Windows'
         run: make check-ci
+      # Windows runs pytest without dev/run-checks.sh, so this step checks the hook setting that
+      # script would: the editable build carries the private hooks (no test then skips). A step of
+      # its own: PowerShell does not stop at a failing command inside one step.
+      - name: Check the editable build carries the private hooks (Windows)
+        if: runner.os == 'Windows'
+        run: python -c "import sys, _netgraph_core as m; sys.exit(0 if hasattr(m, '_max_flows_per_call') else 'the editable build lacks the private hooks')"
       - name: Run Python tests (Windows)
         if: runner.os == 'Windows'
         run: python -m pytest tests/py/ -v
+      # The timing tool of dev/perf compiles against the library (its adapter uses the public
+      # API and two private functions of the queue rule), and nothing else builds it: its own
+      # tests, which compile its driver with this checkout's library, run on one job, so a
+      # library change that breaks the tool fails here. macOS: the platform the tool is made
+      # and checked on (its build record and memory reading are macOS-first).
+      - name: Timing tool tests (macOS, py3.14)
+        if: runner.os == 'macOS' && matrix.python-version == '3.14'
+        run: make perf-tool-test
 
   test-centos-stream-9:
     name: CentOS Stream 9 (py${{ matrix.python-version }})
@@ -53,11 +77,70 @@ jobs:
 
       - name: Install Python deps
         run: |
-          python${{ matrix.python-version }} -m pip install -U pip wheel
-          python${{ matrix.python-version }} -m pip install -e .[dev]
+          python${{ matrix.python-version }} -m pip install -U -c .github/ci-constraints.txt pip
+          python${{ matrix.python-version }} -m pip install -c .github/ci-constraints.txt \
+            --build-constraint .github/ci-constraints.txt -e ".[dev]"
 
-      - name: Run CI checks (lint + C++/Python tests)
+      - name: Run CI checks (lint + C++ tests with and without the hooks + Python tests)
         run: PYTHON=python${{ matrix.python-version }} make check-ci
+
+  # The C++ tests with MSVC: a Release build with CMake's link-time optimisation (the wheel's
+  # configuration), with and without the private hooks.
+  cpp-windows-msvc:
+    name: C++ tests (windows, MSVC)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      CC: cl
+      CXX: cl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tools
+        run: |
+          python -m pip install -U -c .github/ci-constraints.txt pip
+          python -m pip install -c .github/ci-constraints.txt cmake ninja
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: C++ tests, private hooks on
+        run: bash dev/cpp-tests.sh release
+      - name: C++ tests, private hooks off
+        run: bash dev/cpp-tests.sh off
+
+  sanitizers:
+    name: C++ tests (ubuntu, ASan + UBSan)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tools
+        run: |
+          python -m pip install -U -c .github/ci-constraints.txt pip
+          python -m pip install -c .github/ci-constraints.txt cmake ninja
+      - name: C++ tests under AddressSanitizer and UndefinedBehaviorSanitizer
+        run: bash dev/cpp-tests.sh sanitize
+
+  # The generated type stub python/netgraph_core/__init__.pyi (make stubs-check): no drift from a
+  # fresh generation out of a wheel of this commit, the stub and py.typed in the wheel and the
+  # sdist, and the typed clients of tests/typing (valid: no diagnostic; invalid: exactly the
+  # expected ones) under pinned Pyright against the installed wheel and an installation built
+  # from the sdist. The script makes its own pinned venvs. Python 3.14: the version the
+  # committed stub is generated with.
+  stubs:
+    name: Type stub and typed clients (ubuntu, py3.14)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Stub drift, package contents, typed clients (wheel and sdist)
+        run: PYTHON=python bash dev/stubs/run.sh check
 
   coverage:
     name: Coverage (ubuntu, py3.11)
@@ -67,10 +150,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install deps
-        run: |
-          python -m pip install -U pip wheel
-          python -m pip install -e .[dev]
+      # make cov builds its own pinned venv (build/coverage-venv) and fails on any failure.
       - name: Generate coverage (Python + C++)
         run: make cov
       - name: Upload coverage artifacts

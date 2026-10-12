@@ -1,0 +1,48 @@
+{
+ "format": "frozen-queries/1",
+ "row": "spf.single.canonical16k",
+ "list": "canonical16k",
+ "input": {
+  "generator": "gen_random(16384, 8, 5)",
+  "num_nodes": 16384,
+  "num_edges": 131072,
+  "arrays_sha256": "5d045b157c560e00a0df2205a55d67965735773ed976a2c6e8d1ac0ff2c4f84e",
+  "input_digest": 11698079179288285235,
+  "residual_zero": 10050
+ },
+ "rule": "sources s_i = (i * 997 + 1) mod n, i = 0..7; target t_i = the reachable node with the largest shortest-path distance from s_i over the input edges whose residual is not zero (the row's residual gating; residual_zero lists the gated input edges), ties to the lowest node id",
+ "pairs": [
+  [
+   1,
+   1339
+  ],
+  [
+   998,
+   1339
+  ],
+  [
+   1995,
+   2641
+  ],
+  [
+   2992,
+   1339
+  ],
+  [
+   3989,
+   10530
+  ],
+  [
+   4986,
+   1339
+  ],
+  [
+   5983,
+   1339
+  ],
+  [
+   6980,
+   11931
+  ]
+ ]
+}

@@ -1,86 +1,120 @@
-"""Runtime package surface for :mod:`netgraph_core`.
+"""NetGraph-Core: graph, flow and placement models on exact integer units.
 
-All public symbols are re-exported from the compiled ``_netgraph_core`` module so
-downstream users import everything from a single place. Typing shims supplied in
-``_docs.py`` keep editors happy without affecting runtime behavior.
+Every public name is re-exported from the compiled ``_netgraph_core`` module, so users
+import everything from here. Type checkers read the generated stub ``__init__.pyi`` next
+to this file (``py.typed`` marks the package as typed).
+
+- The graph on integer units: ``Graph``, ``Eligibility``, ``to_units``, ``as_float``.
+- Route structures: ``PredDAG``, ``Path``.
+- Route selection and placement settings: ``PathSelection``, ``EdgeTieBreak``,
+  ``EdgePriority``, ``FlowPlacement``, ``Admission``.
+- The ledger of placed traffic: ``FlowLedger`` and its ``FlowRecord`` snapshots.
+- The policy engine: ``FlowPolicy``, ``FlowPolicyConfig``, the routings ``CostOnly``,
+  ``CapacityAware``, ``Global``, ``Pinned``, and ``PlacementResult``, ``OutputOptions``,
+  ``Termination``.
+- The shortest-path cache: ``DagCache`` (building and frozen modes), ``DagCacheMiss``.
+- The evaluators: ``capacity``, ``batch_capacity``, ``sensitivity``.
+- The searches: ``spf`` (``Direction``, ``SpfOptions``, ``SpfResult``, ``UNREACHABLE``),
+  ``ksp`` (``KspOptions``), ``resolve_to_paths``.
+
+``_netgraph_core`` also holds a private entry of the flow core, never re-exported here.
 """
 
-# pyright: reportMissingImports=false
-
-from importlib.metadata import version
-from typing import TYPE_CHECKING
+from importlib.metadata import version as _version
 
 from _netgraph_core import (
-    Algorithms,
-    Backend,
-    EdgeSelection,
+    MAX_FLOWS_PER_CALL,
+    UNREACHABLE,
+    Absolute,
+    Admission,
+    CapacityAware,
+    CapacityOptions,
+    CostOnly,
+    DagCache,
+    DagCacheMiss,
+    DagCacheStats,
+    DiminishingReturns,
+    Direction,
+    EdgePriority,
     EdgeTieBreak,
-    FlowGraph,
-    FlowIndex,
+    Eligibility,
+    FlowLedger,
     FlowPlacement,
     FlowPolicy,
     FlowPolicyConfig,
-    FlowState,
-    FlowSummary,
+    FlowRecord,
+    Global,
     Graph,
-    MinCut,
-    PathAlg,
+    KspOptions,
+    OutputOptions,
+    Path,
+    PathSelection,
+    Pinned,
+    PlacementResult,
     PredDAG,
-    StrictMultiDiGraph,
-    profiling_dump,
-    profiling_enabled,
-    profiling_reset,
+    SensitivityEntry,
+    SensitivityOptions,
+    SensitivityResult,
+    SpfOptions,
+    SpfResult,
+    Stretch,
+    Termination,
+    as_float,
+    batch_capacity,
+    capacity,
+    ksp,
+    resolve_to_paths,
+    sensitivity,
+    spf,
+    to_units,
 )
 
-__version__ = version("netgraph-core")
-
-# Provide richer type information for editors/type-checkers without affecting runtime.
-# Every name here must also appear in the runtime import above; the aliases only
-# change what a type checker sees. Keep this list in sync with _docs.py, and keep
-# _docs.py in sync with the bindings -- a wrong stub is worse than a missing one,
-# because it turns "unchecked" into "confidently wrong".
-if TYPE_CHECKING:  # pragma: no cover - typing-only
-    from ._docs import (  # noqa: I001
-        Algorithms as Algorithms,
-        Backend as Backend,
-        EdgeSelection as EdgeSelection,
-        EdgeTieBreak as EdgeTieBreak,
-        FlowGraph as FlowGraph,
-        FlowIndex as FlowIndex,
-        FlowPlacement as FlowPlacement,
-        FlowPolicy as FlowPolicy,
-        FlowPolicyConfig as FlowPolicyConfig,
-        FlowState as FlowState,
-        FlowSummary as FlowSummary,
-        Graph as Graph,
-        MinCut as MinCut,
-        PathAlg as PathAlg,
-        PredDAG as PredDAG,
-        StrictMultiDiGraph as StrictMultiDiGraph,
-        profiling_dump as profiling_dump,
-        profiling_enabled as profiling_enabled,
-        profiling_reset as profiling_reset,
-    )
+__version__ = _version("netgraph-core")
 
 __all__ = [
     "__version__",
-    "StrictMultiDiGraph",
-    "FlowGraph",
     "Graph",
-    "EdgeSelection",
-    "EdgeTieBreak",
-    "PathAlg",
-    "FlowPlacement",
-    "FlowPolicy",
-    "FlowPolicyConfig",
+    "Eligibility",
+    "to_units",
+    "as_float",
     "PredDAG",
-    "FlowIndex",
-    "FlowState",
-    "MinCut",
-    "FlowSummary",
-    "Backend",
-    "Algorithms",
-    "profiling_enabled",
-    "profiling_dump",
-    "profiling_reset",
+    "Path",
+    "EdgeTieBreak",
+    "EdgePriority",
+    "PathSelection",
+    "FlowPlacement",
+    "Admission",
+    "FlowLedger",
+    "FlowRecord",
+    "Absolute",
+    "Stretch",
+    "DiminishingReturns",
+    "CostOnly",
+    "CapacityAware",
+    "Global",
+    "Pinned",
+    "FlowPolicyConfig",
+    "OutputOptions",
+    "Termination",
+    "PlacementResult",
+    "FlowPolicy",
+    "MAX_FLOWS_PER_CALL",
+    "DagCache",
+    "DagCacheMiss",
+    "DagCacheStats",
+    "CapacityOptions",
+    "SensitivityOptions",
+    "SensitivityEntry",
+    "SensitivityResult",
+    "capacity",
+    "batch_capacity",
+    "sensitivity",
+    "Direction",
+    "SpfOptions",
+    "SpfResult",
+    "UNREACHABLE",
+    "spf",
+    "KspOptions",
+    "ksp",
+    "resolve_to_paths",
 ]

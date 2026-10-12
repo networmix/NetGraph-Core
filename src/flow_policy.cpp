@@ -1,840 +1,1691 @@
 /*
-  FlowPolicy — manages path selection and flow placement for a single demand.
+  The policy engine FlowPolicy: one placement transaction for every routing
+  mode, committed through the ledger as one atomic exchange per call.
 
-  Responsibilities:
-    - Select shortest-path predecessors (SPF) per policy via `shortest_paths`.
-    - Create and track flows with their current DAG and path cost.
-    - Place volumes using `FlowPlacement` (Proportional or EqualBalanced).
-    - Optionally re-optimize flows and enforce path-cost constraints.
+  * CostOnly, CapacityAware and Pinned visit the roster (eligible sources that statically
+    reach an allowed destination, fixed at construction) in ascending NodeId. Round robin gives each
+    source an equal integer share of the cumulative request, with leftover units going to
+    earlier sources. Offer each source the increase in its share, then run stages 1 creation,
+    2 reoptimisation, 3 amounts and 4 growth on shared unused capacity W (the working residual).
+    One `created` counter covers the call. Pinned has a single source.
+  * Global replaces its flow with a minimum-cost flow for the cumulative value on V = W + own,
+    over all eligible edges; own is its current allocation. Split the result by source in the
+    fixed order described by decompose().
 
-  Notes:
-    - "Residual-aware" SPF considers current remaining capacity (or a per-flow
-      threshold) when exploring edges.
-    - Edge selection (multipath vs single-path) is handled natively by the SPF algorithm.
+  Work on copies and commit all changes together; an exception leaves ledger and policy intact.
+  Update policy epoch state (accumulated since construction or remove()) after commit, without
+  throwing. Store only changes to ledger residual in per-thread slots. A Pinned call, or a
+  CostOnly call after creating a source's group of flows (cohort), costs O(its flows' members),
+  not O(E). CapacityAware and Global read a dense residual copy; CostOnly creation reads the
+  working residual edge by edge.
+
+  The transaction trace (the call's intermediate values, keyed as the tests' model of the policy
+  keys them) exists in a build with the private hooks only: every
+  trace block is guarded by kTraced and is compile-time dead without them.
 */
 #include "netgraph/core/flow_policy.hpp"
-#include "netgraph/core/constants.hpp"
-#include "netgraph/core/algorithms.hpp"
-#include "netgraph/core/options.hpp"
-#include "netgraph/core/profiling.hpp"
 
 #include <algorithm>
-#include <cstring>
-#include <deque>
+#include <functional>
 #include <limits>
-#include <optional>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+#include "netgraph/core/detail/cache_access.hpp"
+#include "netgraph/core/detail/endpoints.hpp"
+#include "netgraph/core/detail/enum_domain.hpp"
+#include "netgraph/core/detail/flow_core.hpp"
+#include "netgraph/core/detail/int128.hpp"
+#include "netgraph/core/detail/kernels.hpp"
+#include "netgraph/core/detail/ledger_access.hpp"
+#include "netgraph/core/detail/policy_engine.hpp"
+#include "netgraph/core/detail/pred_dag_builder.hpp"
+#include "netgraph/core/detail/private_hooks.hpp"
+#include "netgraph/core/detail/trace.hpp"
+#include "netgraph/core/detail/traversal.hpp"
 
 namespace netgraph::core {
 
+namespace detail {
+
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+std::atomic<std::int64_t>& max_flows_per_call() noexcept {
+  static std::atomic<std::int64_t> cap {kMaxFlowsPerCall};
+  return cap;
+}
+#endif
+
 namespace {
-// The equal-balanced placements share FlowPolicy's per-flow target and DAG
-// refresh logic (and, except for the lossy mode, the equalizing rebalance in
-// place_demand); they differ only inside FlowState::place_on_dag.
-constexpr bool is_equal_balanced(FlowPlacement p) noexcept {
-  return p == FlowPlacement::EqualBalanced || p == FlowPlacement::EqualBalancedLossy;
-}
-} // namespace
 
-/* Reject uses that would silently produce a wrong answer:
-   - a FlowGraph wrapping a different graph than the policy routes on (SPF would run
-     on one topology while flow is placed on another);
-   - a (src, dst) pair different from the demand this policy already manages (the
-     round-robin loop routes using src/dst from the existing flow records). */
-void FlowPolicy::check_demand_target(const FlowGraph& fg, NodeId src, NodeId dst,
-                                     const char* what) const {
-  const auto* policy_graph = ctx_.graph.graph.get();
-  if (policy_graph != nullptr && policy_graph != &fg.graph()) {
-    throw std::invalid_argument(
-        std::string("FlowPolicy::") + what +
-        ": the FlowGraph wraps a different StrictMultiDiGraph than this policy; "
-        "paths would be selected on one topology and placed on another");
-  }
-  if (!flows_.empty()) {
-    const auto& existing = flows_.begin()->second;
-    if (existing.src != src || existing.dst != dst) {
-      throw std::invalid_argument(
-          std::string("FlowPolicy::") + what +
-          ": this policy already manages a demand for a different (src, dst) pair; "
-          "use a separate FlowPolicy per demand or call remove_demand() first");
+// ================================================================ working residual
+
+// W = baseline - allocated + delta; delta holds this call's releases and new allocations.
+// Each call advances a scratch epoch (a numeric stamp, separate from the policy epoch).
+// Read a slot only when its stamp matches; later calls ignore stale slots even after a throw.
+// Clear all stamps only on wraparound (after 2^32 calls on one thread, which a long-running
+// process reaches). Slots share one per-thread array, so failed growth leaves the old array
+// intact.
+class Working {
+public:
+  explicit Working(const FlowLedger& fg)
+      : s_(storage()), base_(LedgerAccess::baseline(fg)), held_(LedgerAccess::allocated(fg)) {
+    if (s_.slot.size() < base_.size()) s_.slot.resize(base_.size());
+    if (++s_.epoch == 0) {
+      for (auto& x : s_.slot) x.stamp = 0;
+      s_.epoch = 1;
     }
   }
-}
+  Working(const Working&) = delete;
+  Working& operator=(const Working&) = delete;
 
-double FlowPolicy::placed_demand() const noexcept {
-  double s = 0.0;
-  for (auto const& kv : flows_) s += kv.second.placed_flow;
-  return s;
-}
-
-/* Compute an SPF predecessor DAG and its destination cost under the current
-   policy configuration. Honors static paths, residual capacity, and edge/node masks. */
-std::optional<std::pair<PredDAG, Cost>> FlowPolicy::get_path_bundle(const FlowGraph& fg,
-                                                                    NodeId src, NodeId dst,
-                                                                    std::optional<double> min_flow) {
-  // With static paths, flows are created directly from the pinned bundles in
-  // place_demand_body and never reoptimized, so no dynamic bundle exists to hand
-  // out. Callers reaching here with static paths configured get nothing.
-  if (has_static_paths()) return std::nullopt;
-  if (path_alg_ != PathAlg::SPF) return std::nullopt;
-
-  // Use configured selection for per-adjacency edge behavior (multi-edge, tie-breaking).
-  EdgeSelection sel = selection_;
-
-  // Enforce semantic consistency between multipath and multi_edge:
-  // - Tunnel mode (multipath=false): force single edge per hop for true single-path semantics
-  // - Hash-ECMP with EqualBalanced: use all equal-cost edges to maximize fanout
-  if (!multipath_) {
-    sel.multi_edge = false;
-  } else if (is_equal_balanced(flow_placement_)) {
-    sel.multi_edge = true;
+  [[nodiscard]] Amount at(EdgeId e) const noexcept {
+    const auto ei = static_cast<std::size_t>(e);
+    const auto& x = s_.slot[ei];
+    return base_[ei] - held_[ei] + (x.stamp == s_.epoch ? x.delta : 0);
+  }
+  void add(EdgeId e, Amount v) noexcept {
+    auto& x = s_.slot[static_cast<std::size_t>(e)];
+    if (x.stamp != s_.epoch) {
+      x.stamp = s_.epoch;
+      x.delta = 0;
+    }
+    x.delta += v;
+  }
+  // Unused capacity for each edge of `members`, in the same order (member-aligned).
+  void gather(std::span<const EdgeId> members, std::vector<Amount>& out) const {
+    out.resize(members.size());
+    for (std::size_t m = 0; m < members.size(); ++m) out[m] = at(members[m]);
+  }
+  // The dense working residual (searches, Global, traces).
+  void dense(std::vector<Amount>& out) const {
+    out.resize(base_.size());
+    for (std::size_t e = 0; e < out.size(); ++e) {
+      const auto& x = s_.slot[e];
+      out[e] = base_[e] - held_[e] + (x.stamp == s_.epoch ? x.delta : 0);
+    }
+  }
+  // W += a (release) or W -= a (consume) over member-aligned amounts.
+  void release(std::span<const EdgeId> members, std::span<const Amount> a) noexcept {
+    for (std::size_t m = 0; m < members.size(); ++m) {
+      if (a[m] != 0) add(members[m], a[m]);
+    }
+  }
+  void consume(std::span<const EdgeId> members, std::span<const Amount> a) noexcept {
+    for (std::size_t m = 0; m < members.size(); ++m) {
+      if (a[m] != 0) add(members[m], -a[m]);
+    }
   }
 
-  // Respect capacity requirements from both config sources
-  sel.require_capacity = (selection_.require_capacity || require_capacity_);
-  // Decide whether we need residual-aware SPF.
-  // Residual awareness is controlled by require_capacity_:
-  //   - require_capacity=true: Require edges to have capacity, routes adapt to residuals (SDN/TE behavior)
-  //   - require_capacity=false: Routes based on costs only (IP/IGP behavior)
-  // Passing a residual to SPF forces capacity-aware selection, so a cost-only
-  // policy must not pass one even when an equal-balanced per-flow target is
-  // set; the target only shapes how much is requested per flow, not the route.
-  const bool require_residual = require_capacity_;
-  const auto residual = fg.residual_view();
+private:
+  struct Slot {
+    Amount delta {0};
+    std::uint32_t stamp {0};
+  };
+  struct Storage {
+    std::vector<Slot> slot;
+    std::uint32_t epoch {0};
+  };
+  static Storage& storage() {
+    thread_local Storage st;
+    return st;
+  }
+  Storage& s_;
+  std::span<const Amount> base_;
+  std::span<const Amount> held_;
+};
 
-  // Edge mask: combine user-provided mask with minimum residual capacity threshold.
-  // For Proportional mode with min_flow threshold and max_flow_count limit, we filter edges
-  // by minimum capacity to ensure paths can accommodate the required flow. This prevents
-  // selecting low-capacity paths when limited to a single flow (max_flow_count=1).
-  // For EqualBalanced mode, we skip per-edge thresholds since group-based semantics mean
-  // per-edge thresholds can over-prune; capacity gating via residual + kMinCap is sufficient.
-  std::unique_ptr<bool[]> combined_edge_mask;
-  std::span<const bool> final_edge_mask;
+// ================================================================ small helpers
 
-  if (require_residual && min_flow.has_value() && !is_equal_balanced(flow_placement_)) {
-    // Need to filter by min_flow threshold for Proportional mode
-    combined_edge_mask.reset(new bool[residual.size()]);
-    double thr = *min_flow;
+[[noreturn]] void invalid(const std::string& what) { throw std::invalid_argument(what); }
 
-    if (!edge_mask_.empty()) {
-      // Combine user mask with min_flow mask: both must be true
-      for (std::size_t i=0; i<residual.size(); ++i) {
-        combined_edge_mask[i] = edge_mask_[i] && (static_cast<double>(residual[i]) >= thr);
-      }
+// The policy's routing mode (the tag of the Routing variant).
+template <class R>
+bool is(const PolicyEngine& pe) noexcept {
+  return std::holds_alternative<R>(pe.config.routing);
+}
+
+std::string str(std::int64_t v) { return std::to_string(v); }
+
+const char* outcome_name(Termination t) noexcept {
+  switch (t) {
+    case Termination::Complete: return "complete";
+    case Termination::LimitFlows: return "limit_flows";
+    case Termination::LimitDiminishing: return "limit_diminishing";
+    case Termination::NoRoute: return "no_route";
+    case Termination::Exhausted: return "exhausted";
+  }
+  return "?";
+}
+
+// The reduction rank of the call's termination (higher wins among unserved sources).
+int rank(Termination t) noexcept {
+  switch (t) {
+    case Termination::LimitFlows: return 4;
+    case Termination::LimitDiminishing: return 3;
+    case Termination::Exhausted: return 2;
+    case Termination::NoRoute: return 1;
+    case Termination::Complete: return 0;
+  }
+  return 0;
+}
+
+Trace amount_or_inf(std::optional<Amount> v) { return v.has_value() ? Trace::integer(*v) : Trace::str("inf"); }
+
+// The member-aligned amounts of a record's (EdgeId, amount) pairs (both ascending).
+template <class T>
+void align(std::span<const EdgeId> members, const std::vector<std::pair<EdgeId, T>>& pairs, std::vector<T>& out) {
+  out.assign(members.size(), T {});
+  std::size_t m = 0;
+  for (const auto& [e, x] : pairs) {
+    while (m < members.size() && members[m] < e) ++m;
+    if (m == members.size() || members[m] != e) {
+      throw std::logic_error("policy: a record's allocation lies outside its flow's split graph");
+    }
+    out[m] = x;
+  }
+}
+
+// Round robin of a cumulative 128-bit request: the per-source increment of the share when the
+// cumulative request goes from R to R + v over k sources, offer(i, increment) for
+// i in [0, k). It depends only on r = R mod k: floor((r + v) / k) + [i < (r + v) mod k] - [i < r].
+template <class Offer>
+void cumulative_offers(const Counter128& requested, Amount v, std::size_t k, Offer&& offer) {
+  const auto kk = static_cast<std::uint64_t>(k);
+  const std::uint64_t two64 = ((std::numeric_limits<std::uint64_t>::max() % kk) + 1) % kk;
+  const std::uint64_t r = ((requested.hi % kk) * two64 % kk + requested.lo % kk) % kk;
+  const auto total = static_cast<std::uint64_t>(v) + r;
+  const auto base = static_cast<Amount>(total / kk);
+  const std::uint64_t extra = total % kk;
+  for (std::size_t i = 0; i < k; ++i) offer(i, base + (i < extra ? 1 : 0) - (i < r ? 1 : 0));
+}
+
+// ================================================================ working flows
+
+struct WorkFlow {
+  std::int64_t id {-1};  // -1: created in this call
+  NodeId src {0};
+  std::shared_ptr<const KernelPlan> plan {};
+  std::shared_ptr<const PredDAG> bundle {};
+  Cost cost {kUnreachable};
+  std::int32_t bundle_index {-1};
+  Amount T {0};                 // Lossless: the cumulative amount (= delivered)
+  std::vector<Amount> alloc {}; // member-aligned with plan->members (cumulative carried for Lossy)
+  std::optional<Counter128> offered {};  // Lossy
+  Amount delivered {0};                  // Lossy (Lossless: T)
+  std::vector<Counter128> drops {};      // Lossy, member-aligned, cumulative
+  std::int64_t seq {0};                  // creation order within the call (new flows)
+  [[nodiscard]] bool is_new() const noexcept { return id < 0; }
+  [[nodiscard]] std::span<const EdgeId> members() const noexcept { return plan->members; }
+};
+
+struct SourceRun {
+  std::size_t ri {0};
+  NodeId src {0};
+  std::optional<Amount> offer {};  // nullopt: +inf
+  Amount P {0};
+  std::optional<Amount> B {};
+  Amount T_entry {0};
+  std::vector<WorkFlow> flows {};
+  bool capped {false};
+  std::optional<Termination> limit {};
+  std::vector<Amount> gains {};
+  Amount injected {0};
+  Trace* tr {nullptr};  // this source's trace map
+};
+
+struct Call {
+  PolicyEngine& pe;
+  const Graph& g;
+  Working& W;
+  std::int64_t cap {kMaxFlowsPerCall};
+  std::int64_t created {0};
+  bool routes_changed {false};
+  bool weights_changed {false};
+  std::int64_t seq {0};
+  std::vector<std::pair<EdgeId, Amount>> drops {};
+  Trace* trace {nullptr};
+};
+
+// ================================================================ routes and plans
+
+struct Route {
+  std::vector<EdgeId> edges {};  // ascending
+  Cost cost {kUnreachable};
+};
+
+// A flow's plan on its route (the record's bundle) with its membership captured on the creation
+// view (Weighted Residual: `dense_view` when the search read one, else the working residual W);
+// with `cost`, the route's minimum walk cost.
+std::shared_ptr<const KernelPlan> plan_on(const Call& c, NodeId src, const PredDAG& route,
+                                          const std::vector<Amount>* dense_view, Cost* cost) {
+  const auto& cfg = c.pe.config;
+  std::vector<Amount> creation;
+  if (cfg.placement == FlowPlacement::Weighted && cfg.selection.priority == EdgePriority::Residual) {
+    const auto edges = PredDAGBuilder::ascending(route);
+    creation.resize(edges.size());
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+      creation[i] = dense_view != nullptr ? (*dense_view)[static_cast<std::size_t>(edges[i])] : c.W.at(edges[i]);
+    }
+  }
+  return std::make_shared<const KernelPlan>(
+      make_plan(c.g, cfg.placement, cfg.admission, cfg.selection.priority, src, c.pe.dests_ok, route, creation, cost));
+}
+
+// The priority values of the creation view W, as the selection reads them (CostOnly). The
+// PriorityFn of `on_w` points at this view: it must outlive every call through that PriorityFn.
+struct WorkingPriority {
+  const Working* W;
+  std::span<const Amount> capacity;
+  EdgePriority priority;
+  [[nodiscard]] PriorityFn on_w() const noexcept {
+    return {this, [](const void* ctx, EdgeId e) noexcept {
+              const auto& v = *static_cast<const WorkingPriority*>(ctx);
+              return priority_value(v.priority, v.W->at(e), v.capacity[static_cast<std::size_t>(e)]);
+            }};
+  }
+};
+
+// The record bundle of a route: `share` itself when it is the whole route, else a new DAG.
+std::shared_ptr<const PredDAG> bundle_of(const Graph& g, std::span<const EdgeId> route,
+                                         const std::shared_ptr<const PredDAG>& share) {
+  if (share && PredDAGBuilder::ascending(*share).size() == route.size()) return share;
+  return std::make_shared<const PredDAG>(PredDAGBuilder::of_edges(g, route));
+}
+
+// CostOnly: keep static shortest-path support reachable from src, then apply selection on W.
+// For multi_edge = false (Collapse), choose one edge per (u, v) by (cost, higher priority under
+// PreferHigherPriority, lowest EdgeId). For multipath = false, choose the canonical single
+// path in stages. Both use W's priority values without excluding edges for low residual.
+Route cost_only_route(const Call& c, NodeId src) {
+  const auto& g = c.g;
+  const auto& pe = c.pe;
+  const auto& sel = pe.config.selection;
+  const WorkingPriority view {&c.W, g.capacity_units(), sel.priority};
+  auto r = support_route(g, PredDAGBuilder::ascending(*pe.support), src, pe.dests_ok, sel, view.on_w());
+  Route out;
+  out.edges = std::move(r.edges);
+  if (!sel.multipath && !out.edges.empty()) out.cost = r.cost;
+  return out;
+}
+
+// CostOnly's creation products in one pass (kernels' cost_only_creation, identical to
+// cost_only_route, bundle_of and plan_on where it applies); nullopt elsewhere.
+std::optional<CreationProducts> creation_products(const Call& c, NodeId src) {
+  const auto& pe = c.pe;
+  const auto& sel = pe.config.selection;
+  const WorkingPriority view {&c.W, c.g.capacity_units(), sel.priority};
+  return cost_only_creation(c.g, pe.support, src, pe.dests_ok, sel, view.on_w(), pe.config.placement,
+                            pe.config.admission);
+}
+
+// CapacityAware: the canonical route on the selection view `view` (dense): static
+// eligibility, residual >= max(1, min_flow_bandwidth), Collapse on the view, the tight DAG or the
+// staged single path toward the allowed destinations, then the max_path_cost ceiling.
+std::optional<Route> search(const Call& c, std::size_t ri, std::span<const Amount> view) {
+  const auto& pe = c.pe;
+  const auto& g = c.g;
+  const auto& ca = std::get<CapacityAware>(pe.config.routing);
+  const auto& sel = pe.config.selection;
+  const Gate gate {pe.elig, view, std::max<Amount>(1, ca.min_flow_bandwidth)};
+  auto found = route_search(g, gate, sel, pe.roster[ri], pe.dests_ok);
+  if (!found.has_value()) return std::nullopt;
+  Route out;
+  out.edges = std::move(found->edges);
+  out.cost = found->cost;
+  if (ca.max_path_cost.has_value()) {
+    if (const auto* a = std::get_if<Absolute>(&*ca.max_path_cost)) {
+      if (out.cost > a->cost) return std::nullopt;
     } else {
-      // Only min_flow mask
-      for (std::size_t i=0; i<residual.size(); ++i) {
-        combined_edge_mask[i] = static_cast<double>(residual[i]) >= thr;
-      }
-    }
-    final_edge_mask = std::span<const bool>(combined_edge_mask.get(), residual.size());
-  } else if (!edge_mask_.empty()) {
-    // Only user-provided mask
-    final_edge_mask = edge_mask_;
-  }
-
-  SpfOptions opts;
-  opts.multipath = multipath_;  // Use configured multipath value (enables/disables flow splitting across equal-cost paths)
-  opts.selection = sel;
-  opts.dst = dst;
-  opts.residual = require_residual ? residual : std::span<const Cap>();
-  opts.node_mask = node_mask_;  // Use user-provided node mask
-  opts.edge_mask = final_edge_mask;
-  // dist.size() == num_nodes() for every SPF result, so the range check does
-  // not depend on the SPF output; hoisting it lets the memo skip the call.
-  if (dst < 0 || dst >= ctx_.graph.graph->num_nodes()) return std::nullopt;
-
-  PredDAG dag;
-  Cost dst_cost;
-  const bool use_memo = (is_equal_balanced(flow_placement_));
-  const auto stamp = fg.state_stamp();
-  const bool with_residual = !opts.residual.empty();
-  std::size_t hit_idx = spf_memo_.size();
-  if (use_memo) {
-    for (std::size_t i = 0; i < spf_memo_.size(); ++i) {
-      const auto& e = spf_memo_[i];
-      // min_flow's VALUE never reaches SPF in EB mode (the value-derived edge
-      // mask is Proportional-only); only has_value() matters, via
-      // require_residual. Keying on the value caused misses whenever rebalance
-      // rounds adjusted the per-flow target against unchanged residuals.
-      if (e.src != src || e.dst != dst || e.with_residual != with_residual ||
-          e.has_min_flow != min_flow.has_value()) {
-        continue;
-      }
-      // Fast path: same FlowGraph, no mutation since the entry was stored.
-      // Content path: byte-identical residuals (rebalance remove+place
-      // round-trips restore content while the version keeps advancing).
-      const bool same = !with_residual || e.stamp == stamp ||
-          (e.residual.size() == opts.residual.size() &&
-           std::memcmp(e.residual.data(), opts.residual.data(),
-                       opts.residual.size() * sizeof(Cap)) == 0);
-      if (same) { hit_idx = i; break; }
+      // The roster holds the sources with a static route, so the baseline is a positive cost.
+      if (!stretch_le(out.cost, pe.baseline[ri], std::get<Stretch>(*ca.max_path_cost).factor)) return std::nullopt;
     }
   }
-  if (hit_idx < spf_memo_.size()) {
-    dag = spf_memo_[hit_idx].dag;
-    dst_cost = spf_memo_[hit_idx].dst_cost;
-    // MRU: move the hit to the front so hot entries stay cheap to find.
-    if (hit_idx != 0) {
-      std::rotate(spf_memo_.begin(), spf_memo_.begin() + hit_idx,
-                  spf_memo_.begin() + hit_idx + 1);
+  return out;
+}
+
+// ================================================================ amounts of one flow
+
+// T_max of a flow on a member-aligned view (the trace's bounds): MaxFlow's uncapped step from 0,
+// else the exact search.
+Amount flow_t_max(const Graph& g, const KernelPlan& plan, std::span<const Amount> view_m) {
+  if (plan.members.empty()) return 0;
+  if (plan.placement == FlowPlacement::MaxFlow) return lossless_step(g, plan, 0, view_m, {}, std::nullopt).total;
+  return t_max(plan, view_m).value;
+}
+
+// ================================================================ the cohort (EqualBalanced)
+
+// Split T by round robin over the source's EqualBalanced flows in their order. Allocate each
+// share using that flow's plan, then sum edge amounts across the union of their members.
+class CohortEval {
+public:
+  CohortEval(const std::vector<const KernelPlan*>& plans, const Working& W) : plans_(plans) {
+    for (const auto* p : plans_) uni_.insert(uni_.end(), p->members.begin(), p->members.end());
+    std::sort(uni_.begin(), uni_.end());
+    uni_.erase(std::unique(uni_.begin(), uni_.end()), uni_.end());
+    idx_.resize(plans_.size());
+    for (std::size_t i = 0; i < plans_.size(); ++i) {
+      idx_[i].resize(plans_[i]->members.size());
+      for (std::size_t m = 0; m < plans_[i]->members.size(); ++m) {
+        idx_[i][m] = static_cast<std::int32_t>(std::lower_bound(uni_.begin(), uni_.end(), plans_[i]->members[m]) -
+                                               uni_.begin());
+      }
     }
+    W.gather(uni_, view_);
+    acc_.assign(uni_.size(), 0);
+    // The search's upper bound: the view summed over the source members of every flow.
+    std::vector<std::uint8_t> src_member(uni_.size(), 0);
+    for (std::size_t i = 0; i < plans_.size(); ++i) {
+      for (auto k = plans_[i]->src_out_begin; k < plans_[i]->src_out_end; ++k) {
+        src_member[static_cast<std::size_t>(idx_[i][static_cast<std::size_t>(k)])] = 1;
+      }
+    }
+    for (std::size_t u = 0; u < uni_.size(); ++u) {
+      if (src_member[u] != 0) hi_ += view_[u];
+    }
+  }
+  [[nodiscard]] Amount upper() const noexcept { return hi_; }
+
+  // Whether the cohort allocation at total T fits the view.
+  bool fits(Amount T) {
+    std::fill(acc_.begin(), acc_.end(), 0);
+    const auto k = plans_.size();
+    std::vector<Amount> parts(k);
+    round_robin(T, parts);
+    for (std::size_t i = 0; i < k; ++i) {
+      if (parts[i] == 0) continue;
+      tmp_.resize(plans_[i]->members.size());
+      allocate(*plans_[i], parts[i], tmp_);
+      for (std::size_t m = 0; m < tmp_.size(); ++m) {
+        const auto u = static_cast<std::size_t>(idx_[i][m]);
+        acc_[u] += tmp_[m];
+        if (acc_[u] > view_[u]) return false;
+      }
+    }
+    return true;
+  }
+  // The largest T in [lo, hi] that fits, given fits(lo) (bisection, exact; at most 62 probes).
+  Amount largest(Amount lo, Amount hi) {
+    while (lo < hi) {
+      const Amount mid = lo + (hi - lo + 1) / 2;
+      if (fits(mid)) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return lo;
+  }
+  // The full T_max (the trace's `bound`).
+  Amount t_max() { return largest(0, hi_); }
+
+private:
+  const std::vector<const KernelPlan*>& plans_;
+  std::vector<EdgeId> uni_ {};
+  std::vector<std::vector<std::int32_t>> idx_ {};
+  std::vector<Amount> view_ {};
+  std::vector<Amount> acc_ {};
+  std::vector<Amount> tmp_ {};
+  Amount hi_ {0};
+};
+
+// Splits T over the cohort by round robin; a flow whose share changed (or is new) gets the
+// allocation of its new share (the amounts stage of EqualBalanced).
+void set_cohort(std::vector<WorkFlow>& flows, Amount T) {
+  std::vector<Amount> parts(flows.size());
+  round_robin(T, parts);
+  for (std::size_t i = 0; i < flows.size(); ++i) {
+    auto& f = flows[i];
+    if (parts[i] != f.T || f.is_new()) {
+      std::vector<Amount> a(f.plan->members.size());
+      allocate(*f.plan, parts[i], a);
+      f.alloc = std::move(a);
+    }
+    f.T = parts[i];
+  }
+}
+
+std::vector<const KernelPlan*> plans_of(const std::vector<WorkFlow>& flows) {
+  std::vector<const KernelPlan*> out;
+  out.reserve(flows.size() + 1);
+  for (const auto& f : flows) out.push_back(f.plan.get());
+  return out;
+}
+
+// ---------------------------------------------------------------- outputs
+
+// The optional outputs of a call whose policy allocation becomes `after` (the records' edge
+// lists), computed before the commit (so nothing allocates once the ledger changed):
+// edge_flows = the policy's own allocation after the call, residual = the ledger's after it
+// (now + own before - own after), bottleneck on that residual.
+void prepare_outputs(const PolicyEngine& pe, const OutputOptions& outputs,
+                     const std::vector<const std::vector<std::pair<EdgeId, Amount>>*>& after, PlacementResult& out) {
+  if (!outputs.edge_flows && !outputs.residual && !outputs.bottleneck) return;
+  const auto m = static_cast<std::size_t>(pe.graph->num_edges());
+  std::vector<Amount> own(m, 0);
+  for (const auto* edges : after) {
+    for (const auto& [e, x] : *edges) own[static_cast<std::size_t>(e)] += x;
+  }
+  if (outputs.residual || outputs.bottleneck) {
+    std::vector<Amount> res;
+    LedgerAccess::residual_into(pe.fg, res);
+    for (const auto& cohort : pe.cohorts) {
+      for (const auto& s : cohort) {
+        for (const auto& [e, x] : LedgerAccess::live(pe.fg, s.id).edges) res[static_cast<std::size_t>(e)] += x;
+      }
+    }
+    for (std::size_t e = 0; e < m; ++e) res[e] -= own[e];
+    if (outputs.bottleneck) out.bottleneck = bottleneck_of(*pe.graph, res, pe.sources, pe.elig);
+    if (outputs.residual) out.residual = std::move(res);
+  }
+  if (outputs.edge_flows) out.edge_flows = std::move(own);
+}
+
+// The current records' edge lists (a call that commits nothing).
+std::vector<const std::vector<std::pair<EdgeId, Amount>>*> current_edges(const PolicyEngine& pe) {
+  std::vector<const std::vector<std::pair<EdgeId, Amount>>*> out;
+  for (const auto& cohort : pe.cohorts) {
+    for (const auto& s : cohort) out.push_back(&LedgerAccess::live(pe.fg, s.id).edges);
+  }
+  return out;
+}
+
+bool any_output(const OutputOptions& outputs) noexcept {
+  return outputs.edge_flows || outputs.residual || outputs.bottleneck;
+}
+
+std::vector<const std::vector<std::pair<EdgeId, Amount>>*> draft_edges(const std::vector<Draft>& drafts) {
+  std::vector<const std::vector<std::pair<EdgeId, Amount>>*> out;
+  out.reserve(drafts.size());
+  for (const auto& d : drafts) out.push_back(&d.record.edges);
+  return out;
+}
+
+// ================================================================ the transaction
+
+Trace route_trace(std::span<const EdgeId> edges) { return Trace::ints(edges); }
+
+Trace alloc_trace(const WorkFlow& f) {
+  Trace t = Trace::list();
+  const auto members = f.members();
+  for (std::size_t m = 0; m < members.size(); ++m) {
+    if (f.alloc[m] == 0) continue;
+    Trace p = Trace::list();
+    p.push(Trace::integer(members[m]));
+    p.push(Trace::integer(f.alloc[m]));
+    t.push(std::move(p));
+  }
+  return t;
+}
+
+// A new working flow on `bundle` (its record's bundle) with the route's cost (kUnreachable:
+// computed with the plan) and its plan captured on the creation view, unless the route's static
+// plan is given.
+WorkFlow new_flow(Call& c, NodeId src, std::shared_ptr<const PredDAG> bundle, Cost cost,
+                  const std::vector<Amount>* dense_view, std::shared_ptr<const KernelPlan> plan = nullptr) {
+  WorkFlow f;
+  f.src = src;
+  f.bundle = std::move(bundle);
+  f.cost = cost;
+  f.plan = plan ? std::move(plan) : plan_on(c, src, *f.bundle, dense_view, cost == kUnreachable ? &f.cost : nullptr);
+  f.alloc.assign(f.plan->members.size(), 0);
+  if (c.pe.config.admission == Admission::Lossy) {
+    f.offered = Counter128 {};
+    f.drops.assign(f.plan->members.size(), Counter128 {});
+  }
+  return f;
+}
+
+// ---------------------------------------------------------------- stage 1: creation
+
+void stage1(Call& c, SourceRun& st) {
+  auto& pe = c.pe;
+  Trace tr = Trace::map();
+  if (is<CostOnly>(pe)) {
+    WorkFlow f;
+    if (auto made = creation_products(c, st.src)) {
+      // The route, its bundle and its plan in one pass (multipath, static membership).
+      if (kTraced && c.trace) tr.set("route", route_trace(made->plan.route));
+      f = new_flow(c, st.src, std::move(made->bundle), made->cost, nullptr,
+                   std::make_shared<const KernelPlan>(std::move(made->plan)));
+    } else {
+      const Route route = cost_only_route(c, st.src);
+      if (kTraced && c.trace) tr.set("route", route_trace(route.edges));
+      f = new_flow(c, st.src, bundle_of(c.g, route.edges, pe.support), route.cost, nullptr);
+    }
+    f.seq = ++c.seq;
+    st.flows.push_back(std::move(f));
+  } else if (is<Pinned>(pe)) {
+    const bool captured = pe.config.placement == FlowPlacement::Weighted &&
+                          pe.config.selection.priority == EdgePriority::Residual;
+    Trace usable = Trace::list();
+    for (std::int32_t i : pe.usable) {
+      const auto& b = pe.bundles[static_cast<std::size_t>(i)];
+      WorkFlow f = new_flow(c, st.src, b.route_dag, b.cost, nullptr, captured ? nullptr : b.route_plan);
+      f.bundle_index = i;
+      f.seq = ++c.seq;
+      st.flows.push_back(std::move(f));
+      if (kTraced && c.trace) usable.push(Trace::integer(i));
+    }
+    if (kTraced && c.trace) tr.set("usable", std::move(usable));
   } else {
-    auto res = ctx_.algorithms->spf(ctx_.graph, src, opts);
-    dag = std::move(res.second);
-    dst_cost = res.first[static_cast<std::size_t>(dst)];
-    if (use_memo) {
-      SpfMemoEntry entry;
-      entry.src = src;
-      entry.dst = dst;
-      entry.with_residual = with_residual;
-      entry.stamp = stamp;
-      entry.residual.assign(opts.residual.begin(), opts.residual.end());
-      entry.has_min_flow = min_flow.has_value();
-      entry.dag = dag;
-      entry.dst_cost = dst_cost;
-      const std::size_t entry_bytes =
-          entry.residual.size() * sizeof(Cap) +
-          entry.dag.parent_offsets.size() * sizeof(std::int32_t) +
-          entry.dag.parents.size() * (sizeof(NodeId) + sizeof(EdgeId)) +
-          sizeof(SpfMemoEntry);
-      const std::size_t cap = std::clamp<std::size_t>(
-          kSpfMemoMaxBytes / std::max<std::size_t>(entry_bytes, 1), 1,
-          kSpfMemoMaxEntries);
-      spf_memo_.insert(spf_memo_.begin(), std::move(entry));
-      if (spf_memo_.size() > cap) spf_memo_.resize(cap);
+    const auto& ca = std::get<CapacityAware>(pe.config.routing);
+    std::vector<Amount> S;
+    c.W.dense(S);
+    std::optional<Amount> rem = st.offer;
+    std::optional<Amount> target;
+    if (pe.config.placement == FlowPlacement::EqualBalanced && st.offer.has_value()) {
+      target = (st.P + *st.offer) / ca.flow_count;
     }
-  }
-  if (dst_cost < best_path_cost_) best_path_cost_ = dst_cost;
-
-  // Enforce path cost constraints:
-  // 1. In shortest_path mode, only allow paths with cost equal to best discovered cost.
-  //    This prevents the policy from stepping up to higher-cost tiers incrementally.
-  if (shortest_path_ && dst_cost > best_path_cost_) {
-    return std::nullopt;
-  }
-
-  // 2. Check absolute and relative path cost limits.
-  //    max_path_cost: absolute upper bound on path cost.
-  //    max_path_cost_factor: relative multiplier on best path cost (e.g. 1.5 = allow 50% longer).
-  if (max_path_cost_.has_value() || max_path_cost_factor_.has_value()) {
-    const Cost absmax = max_path_cost_.value_or(std::numeric_limits<Cost>::max());
-    // Apply the relative bound only when a best cost exists: multiplying the
-    // INT64_MAX "no best yet" sentinel by the factor and casting back is
-    // undefined behavior (the product exceeds the int64 range).
-    Cost factor_bound = std::numeric_limits<Cost>::max();
-    if (max_path_cost_factor_.has_value() &&
-        best_path_cost_ != std::numeric_limits<Cost>::max()) {
-      const double prod = static_cast<double>(best_path_cost_) * *max_path_cost_factor_;
-      if (prod < static_cast<double>(std::numeric_limits<Cost>::max())) {
-        factor_bound = static_cast<Cost>(prod);
+    Trace reservations = Trace::list();
+    const std::int64_t budget = std::min<std::int64_t>(ca.flow_count, std::max<std::int64_t>(0, c.cap - c.created));
+    bool stopped = false;
+    std::vector<Amount> view_m;
+    std::vector<Amount> zeros;
+    for (std::int64_t i = 0; i < budget; ++i) {
+      auto route = search(c, st.ri, S);
+      if (!route.has_value()) {
+        stopped = true;
+        break;
       }
+      WorkFlow f = new_flow(c, st.src, bundle_of(c.g, route->edges, nullptr), route->cost, &S);
+      const auto members = f.members();
+      view_m.resize(members.size());
+      for (std::size_t m = 0; m < members.size(); ++m) view_m[m] = S[static_cast<std::size_t>(members[m])];
+      zeros.assign(members.size(), 0);
+      std::optional<Amount> request = pe.config.placement == FlowPlacement::EqualBalanced ? target : rem;
+      auto step = lossless_step(c.g, *f.plan, 0, view_m, zeros, request);
+      const Amount t = step.total;
+      if (pe.config.placement != FlowPlacement::EqualBalanced && rem.has_value()) *rem -= t;
+      if (kTraced && c.trace) {
+        Trace row = Trace::map();
+        row.set("route", route_trace(route->edges));
+        row.set("S", Trace::ints(S));
+        row.set("T_bound", Trace::integer(flow_t_max(c.g, *f.plan, view_m)));
+        row.set("reserved", Trace::integer(t));
+        reservations.push(std::move(row));
+      }
+      for (std::size_t m = 0; m < members.size(); ++m) S[static_cast<std::size_t>(members[m])] -= step.alloc[m];
+      f.seq = ++c.seq;
+      st.flows.push_back(std::move(f));
+      ++c.created;
     }
-    if (dst_cost > std::min<Cost>(absmax, factor_bound)) return std::nullopt;
+    st.capped = budget < ca.flow_count && !stopped;
+    if (kTraced && c.trace) {
+      tr.set("eb_target", target.has_value() ? Trace::integer(*target) : Trace::null());
+      tr.set("reservations", std::move(reservations));
+      tr.set("created_cap_blocked", Trace::boolean(st.capped));
+    }
   }
-  // Ensure there is at least one predecessor for dst
-  if (static_cast<std::size_t>(dst) >= dag.parent_offsets.size()-1) return std::nullopt;
-  if (dag.parent_offsets[static_cast<std::size_t>(dst)] == dag.parent_offsets[static_cast<std::size_t>(dst)+1]) return std::nullopt;
-  // Return DAG and cost as-is; placement logic decides proportional vs equal-balanced behavior.
-  return std::make_optional(std::make_pair(std::move(dag), dst_cost));
+  if (!st.flows.empty()) c.routes_changed = true;
+  if (kTraced && st.tr) st.tr->set("stage1", std::move(tr));
 }
 
-/* Create a new flow using the current path bundle. Returns nullptr if no
-   admissible path is available given constraints. */
-FlowRecord* FlowPolicy::create_flow(FlowGraph& fg, NodeId src, NodeId dst, FlowClass flowClass,
-                              std::optional<double> min_flow) {
-  // Generate a unique flow index.
-  FlowIndex idx{src, dst, flowClass, next_flow_id_++};
+// ---------------------------------------------------------------- stage 2: reoptimisation
 
-  // Request a path DAG from shortest paths algorithm.
-  auto pb = get_path_bundle(fg, src, dst, min_flow);
-  if (!pb.has_value()) return nullptr;  // No admissible path found
-
-  // Destructure the returned pair (DAG, cost).
-  auto [dag, cost] = std::move(pb.value());
-
-  // Create flow record and insert into flows_ map.
-  FlowRecord f(idx, src, dst, std::move(dag), cost);
-  auto [it, ok] = flows_.emplace(idx, std::move(f));  // emplace returns (iterator, success_flag)
-  (void)ok;  // suppress unused variable warning
-  return &it->second;
-}
-
-/* Re-select a path for an existing flow, requesting at least (current+headroom)
-   residual. On failure, restores the flow on its original DAG.
-
-   Reoptimization is useful when a flow's current path becomes suboptimal due to
-   network changes or when seeking additional capacity. */
-FlowRecord* FlowPolicy::reoptimize_flow(FlowGraph& fg, const FlowIndex& idx, double headroom) {
-  // Pinned means pinned: a static-path flow is never rerouted. (Deliberate
-  // divergence from the original Python port, where reoptimization could
-  // silently move a pinned flow onto an SPF path.) Must precede any
-  // remove/re-place churn below.
-  if (has_static_paths()) return nullptr;
-  auto it = flows_.find(idx);
-  if (it == flows_.end()) return nullptr;
-  FlowRecord& cur = it->second;
-  const double current = cur.placed_flow;
-  const double new_min = current + headroom;
-
-  // Temporarily remove this flow's deltas from the graph to compute a path
-  // based on available capacity (excluding this flow's own usage).
-  fg.remove(idx);
-  auto pb = get_path_bundle(fg, cur.src, cur.dst, new_min);
-  if (!pb.has_value()) {
-    // Reoptimization failed: restore flow on original DAG.
-    Flow placed = fg.place(idx, cur.src, cur.dst, cur.dag, current, flow_placement_);
-    cur.placed_flow = placed; // may be slightly less if capacity changed; acceptable
-    return nullptr;
-  }
-
-  // Reoptimization succeeded: update flow to use new DAG.
-  auto [dag, cost] = std::move(pb.value());
-  cur.dag = std::move(dag);
-  cur.cost = cost;
-  Flow placed = fg.place(idx, cur.src, cur.dst, cur.dag, current, flow_placement_);
-  cur.placed_flow = placed;
-  return &cur;
-}
-
-/* Place `volume` of demand according to the policy. When `target_per_flow`
-   is provided (e.g., during rebalancing), each flow aims for that target.
-   Returns (total_placed, leftover). */
-std::pair<double,double> FlowPolicy::place_demand(FlowGraph& fg,
-                                                  NodeId src, NodeId dst,
-                                                  FlowClass flowClass,
-                                                  double volume,
-                                                  std::optional<double> target_per_flow,
-                                                  std::optional<double> min_flow) {
-  NGRAPH_PROFILE_SCOPE("place_demand");
-
-  check_demand_target(fg, src, dst, "place_demand");
-
-  auto [total_placed, remaining] = place_demand_body(fg, src, dst, flowClass, volume,
-                                                     target_per_flow, min_flow);
-
-  // For EQUAL_BALANCED placement, rebalance flows to maintain equal volumes.
-  //
-  // Iterative on purpose: the previous implementation recursed
-  // place_demand -> rebalance_demand -> place_demand until balanced, and with many
-  // pinned bundles of heterogeneous capacity the depth grows like
-  // U * ln(imbalance / kMinFlow) -- a stack-overflow risk on worker threads. Each
-  // round below performs exactly what one recursion level performed (re-place the
-  // currently placed volume at the equal-share target), and the recursion's return
-  // value telescoped to (placed_demand(), pre-rebalance leftover + volume lost in
-  // rebalancing), which is reproduced after the loop.
-  // Lossy placement is best-effort: each flow is offered its share and carries
-  // what fits, so equalizing what was *carried* would contradict the model
-  // (it would throttle the healthy flows down to the congested one).
-  if (is_equal_balanced(flow_placement_) &&
-      flow_placement_ != FlowPlacement::EqualBalancedLossy && !flows_.empty()) {
-    // Restore the reoptimize flag even if a round throws (bad_alloc is the only
-    // realistic thrower here); otherwise the policy would stay permanently
-    // non-reoptimizing.
-    struct ReoptRestore {
-      bool& flag;
-      bool prev;
-      ~ReoptRestore() { flag = prev; }
-    } reopt_restore{reoptimize_flows_on_each_placement_, reoptimize_flows_on_each_placement_};
-    reoptimize_flows_on_each_placement_ = false;
-    const double pre_rounds_placed = placed_demand();
-    bool rebalanced = false;
-    // Backstop only; each round strictly reduces the imbalance in practice.
-    constexpr int kMaxRebalanceRounds = 65536;
-    for (int round = 0; round < kMaxRebalanceRounds && !flows_.empty(); ++round) {
-      const double target_eq = placed_demand() / static_cast<double>(flows_.size());
-      bool unbalanced = false;
-      for (auto const& kv : flows_) {
-        if (std::abs(target_eq - kv.second.placed_flow) >= kMinFlow) { unbalanced = true; break; }
-      }
-      if (!unbalanced) break;
-      rebalanced = true;
-      const double vol = placed_demand();
-      remove_demand(fg);
-      (void)place_demand_body(fg, src, dst, flowClass, vol, target_eq, std::nullopt);
+void stage2(Call& c, SourceRun& st) {
+  Trace rows = Trace::list();
+  std::vector<Amount> Wi;
+  std::vector<Amount> view_m;
+  std::vector<Amount> zeros;
+  for (auto& f : st.flows) {
+    if (f.is_new()) continue;
+    c.W.dense(Wi);
+    const auto members = f.members();
+    for (std::size_t m = 0; m < members.size(); ++m) Wi[static_cast<std::size_t>(members[m])] += f.alloc[m];
+    auto cand = search(c, st.ri, Wi);
+    Trace row = Trace::map();
+    if (kTraced && c.trace) {
+      row.set("flow", Trace::ints(std::vector<std::int64_t> {static_cast<std::int64_t>(c.pe.fg.uid()), f.id}));
+      row.set("T", Trace::integer(f.T));
+      row.set("candidate", cand.has_value() ? route_trace(cand->edges) : Trace::null());
     }
-    if (rebalanced) {
-      const double final_placed = placed_demand();
-      remaining += pre_rounds_placed - final_placed;  // volume shed while rebalancing
-      total_placed = final_placed;
-    }
-  }
-  return { total_placed, remaining };
-}
-
-/* Placement core; see place_demand for the public contract. */
-std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
-                                                       NodeId src, NodeId dst,
-                                                       FlowClass flowClass,
-                                                       double volume,
-                                                       std::optional<double> target_per_flow,
-                                                       std::optional<double> min_flow) {
-  const bool is_static = has_static_paths();
-
-  // Compute target flow per flow-record.
-  // target: the volume to place per flow (or globally if target_per_flow is unset).
-  // per_target: refined target for EqualBalanced mode (considers source capacity).
-  double target = target_per_flow.value_or(volume);
-  double per_target = target;
-
-  // EqualBalanced divisor: the number of flows the volume is split across. For a
-  // pinned policy that is the number of USABLE bundles (a head-end hashes over up
-  // LSPs only); dynamically it is the configured max_flow_count.
-  int eb_divisor = 0;
-  if (is_equal_balanced(flow_placement_)) {
-    if (is_static) eb_divisor = static_cast<int>(static_bundles_.size());
-    else if (max_flow_count_.has_value()) eb_divisor = *max_flow_count_;
-  }
-
-  // For EqualBalanced, compute a per-flow target based on available source
-  // capacity and the requested volume, divided by the number of flows.
-  if (eb_divisor > 0) {
-    const auto& g = fg.graph();
-    auto row = g.row_offsets_view();
-    auto aei = g.adj_edge_index_view();
-    auto residual = fg.residual_view();
-
-    // Compute total residual capacity on edges leaving src.
-    double src_cap = 0.0;
-    if (src >= 0 && src < g.num_nodes()) {
-      auto s = static_cast<std::size_t>(row[static_cast<std::size_t>(src)]);
-      auto e = static_cast<std::size_t>(row[static_cast<std::size_t>(src)+1]);
-      for (std::size_t j = s; j < e; ++j) {
-        auto eid = static_cast<std::size_t>(aei[j]);
-        src_cap += static_cast<double>(residual[eid]);
+    if (!cand.has_value() || cand->edges == f.plan->route) {
+      if (kTraced && c.trace) {
+        row.set("decision", Trace::str("kept"));
+        rows.push(std::move(row));
       }
-    }
-    // Per-flow target: min of requested volume and source capacity, per flow.
-    double per_req = target / static_cast<double>(eb_divisor);
-    double per_src = src_cap / static_cast<double>(eb_divisor);
-    per_target = std::max(kMinFlow, std::min(per_req, per_src));
-  }
-
-  // Initialize flows if none exist yet.
-  if (flows_.empty()) {
-    if (is_static) {
-      // Pinned bundles: one flow per usable bundle, in supply order, each bound to
-      // its own (pruned) DAG and post-prune cost.
-      if (src != static_src_ || dst != static_dst_) {
-        throw std::invalid_argument(
-            "Source and destination nodes of static paths do not match demand.");
-      }
-      for (auto const& b : static_bundles_) {
-        FlowIndex idx{src, dst, flowClass, next_flow_id_++};
-        flows_.emplace(idx, FlowRecord(idx, src, dst, b.dag, b.cost));
-      }
-    } else {
-      // Dynamic paths: seed initial flows.
-      int initial = min_flow_count_;
-      if (max_flow_count_.has_value()) {
-        initial = std::min(initial, *max_flow_count_);
-      }
-      auto min_req = (is_equal_balanced(flow_placement_) && max_flow_count_.has_value())
-                       ? std::optional<double>(per_target)
-                       : min_flow;
-      // Seeding places no flow, so residuals do not change between iterations and
-      // every create_flow() here would recompute the identical SPF. Compute the
-      // bundle once and copy it into each seeded flow.
-      if (initial > 0) {
-        if (auto pb = get_path_bundle(fg, src, dst, min_req)) {
-          for (int i = 0; i < initial; ++i) {
-            FlowIndex idx{src, dst, flowClass, next_flow_id_++};
-            FlowRecord f(idx, src, dst, pb->first, pb->second);
-            flows_.emplace(idx, std::move(f));
-          }
-        }
-      }
-    }
-  }
-  // Round-robin placement: iterate over flows and try to place volume on each.
-  std::deque<FlowIndex> q;
-  for (auto const& kv : flows_) q.push_back(kv.first);
-  if (is_static) {
-    // Pinned bundles have a documented precedence: bundle-supply order. Flow ids
-    // are assigned in that order, so sorting makes the visit order deterministic
-    // across platforms (unordered_map iteration order is not).
-    std::sort(q.begin(), q.end(),
-              [](const FlowIndex& a, const FlowIndex& b) { return a.flowId < b.flowId; });
-  }
-  double total_placed = 0.0;
-  int no_progress = 0;  // counter for consecutive iterations with no progress
-  int iters = 0;
-
-  // Diminishing-returns tracking for early exit.
-  std::deque<double> recent;
-  const double initial_request = volume;
-
-  while (volume >= kMinFlow && !q.empty()) {
-    FlowIndex cur_idx = q.front(); q.pop_front();
-    auto it_cur = flows_.find(cur_idx);
-    if (it_cur == flows_.end()) continue;  // flow removed during iteration
-    FlowRecord* f = &it_cur->second;
-
-    // Must have a DAG to place; skip otherwise.
-    if (f->dag.parent_offsets.empty()) {
-      ++no_progress;
-      if (no_progress>=max_no_progress_iterations_) break;
       continue;
     }
-    // Refresh DAG based on current residuals for dynamic path selection.
-    // This prunes saturated next-hops and updates path selection.
-    // For multipath flows, this tracks saturated edges within the DAG.
-    // For tunnel flows, this allows different tunnels to discover different paths
-    // as residuals change, enabling natural fan-out across equal-cost paths.
-    if (is_equal_balanced(flow_placement_) && !is_static) {
-      if (auto pb = get_path_bundle(fg, f->src, f->dst, std::optional<double>(per_target))) {
-        f->dag = std::move(pb->first);
-        f->cost = pb->second;
+    WorkFlow trial = new_flow(c, st.src, bundle_of(c.g, cand->edges, nullptr), cand->cost, &Wi);
+    const auto tm = trial.members();
+    view_m.resize(tm.size());
+    for (std::size_t m = 0; m < tm.size(); ++m) view_m[m] = Wi[static_cast<std::size_t>(tm[m])];
+    zeros.assign(tm.size(), 0);
+    // The candidate's allocation at T_i (adopted iff it delivers T_i exactly).
+    auto step = lossless_step(c.g, *trial.plan, 0, view_m, zeros, f.T);
+    if (step.total < f.T) {
+      if (kTraced && c.trace) {
+        row.set("decision", Trace::str("rejected: delivers less than T_i"));
+        row.set("bound", Trace::integer(flow_t_max(c.g, *trial.plan, view_m)));
+        rows.push(std::move(row));
+      }
+      continue;
+    }
+    // Adopted: a replacement at T_i; W := W_i - alloc_c.
+    c.W.release(members, f.alloc);
+    trial.alloc = std::move(step.alloc);
+    c.W.consume(tm, trial.alloc);
+    f.plan = std::move(trial.plan);
+    f.bundle = std::move(trial.bundle);
+    f.cost = trial.cost;
+    f.alloc = std::move(trial.alloc);
+    c.routes_changed = true;
+    if (c.pe.config.placement == FlowPlacement::Weighted) c.weights_changed = true;
+    if (kTraced && c.trace) {
+      row.set("decision", Trace::str("adopted"));
+      row.set("alloc", alloc_trace(f));
+      rows.push(std::move(row));
+    }
+  }
+  if (kTraced && st.tr) st.tr->set("stage2", std::move(rows));
+}
+
+// ---------------------------------------------------------------- stage 3: amounts
+
+// The member-aligned view of stage 3, per thread: every use gathers it whole first, and no use
+// nests another, so its contents never outlive one flow's step.
+std::vector<Amount>& view_scratch() {
+  thread_local std::vector<Amount> v;
+  return v;
+}
+
+void stage3_seq(Call& c, SourceRun& st) {
+  Trace rows = Trace::list();
+  std::vector<Amount>& view_m = view_scratch();
+  for (auto& f : st.flows) {
+    const auto members = f.members();
+    c.W.release(members, f.alloc);  // V = W + own
+    c.W.gather(members, view_m);
+    const Amount T0 = f.T;
+    auto step = lossless_step(c.g, *f.plan, f.T, view_m, f.alloc, st.B);
+    f.T = step.total;
+    f.alloc = std::move(step.alloc);
+    c.W.consume(members, f.alloc);  // W = V - alloc
+    if (st.B.has_value()) *st.B -= f.T - T0;
+    if (kTraced && c.trace) {
+      Trace row = Trace::map();
+      row.set("T", Trace::ints(std::vector<Amount> {T0, f.T}));
+      row.set("curve", f.plan->placement == FlowPlacement::MaxFlow ? Trace::pairs(step.cost_distribution) : Trace::null());
+      row.set("alloc", alloc_trace(f));
+      rows.push(std::move(row));
+    }
+  }
+  if (kTraced && st.tr) st.tr->set("stage3", std::move(rows));
+}
+
+void stage3_eb(Call& c, SourceRun& st) {
+  auto& flows = st.flows;
+  Amount T = 0;
+  for (const auto& f : flows) T += f.T;
+  for (const auto& f : flows) c.W.release(f.members(), f.alloc);  // V = W + cohort allocation
+  Amount t_new = T;
+  std::optional<Amount> bound;
+  if (flows.size() == 1) {
+    auto& f = flows.front();
+    std::vector<Amount>& view_m = view_scratch();
+    c.W.gather(f.members(), view_m);
+    auto step = lossless_step(c.g, *f.plan, f.T, view_m, f.alloc, st.B);
+    t_new = step.total;
+    f.alloc = std::move(step.alloc);
+    f.T = t_new;
+    if (kTraced && c.trace) bound = flow_t_max(c.g, *f.plan, view_m);
+  } else {
+    const auto plans = plans_of(flows);
+    CohortEval cohort(plans, c.W);
+    const Amount target = st.B.has_value() ? T + *st.B : cohort.upper();
+    if (target > T) {
+      t_new = cohort.fits(target) ? target : cohort.largest(T, target - 1);
+    }
+    if (kTraced && c.trace) bound = cohort.t_max();
+    set_cohort(flows, t_new);
+  }
+  for (const auto& f : flows) c.W.consume(f.members(), f.alloc);
+  if (st.B.has_value()) *st.B -= t_new - T;
+  if (kTraced && st.tr) {
+    Trace row = Trace::map();
+    row.set("T", Trace::ints(std::vector<Amount> {T, t_new}));
+    row.set("bound", bound.has_value() ? Trace::integer(*bound) : Trace::null());
+    Trace shares = Trace::list();
+    for (const auto& f : flows) shares.push(Trace::integer(f.T));
+    row.set("shares", std::move(shares));
+    st.tr->set("stage3", std::move(row));
+  }
+}
+
+void stage3_lossy(Call& c, SourceRun& st) {
+  auto& flows = st.flows;
+  std::vector<Amount> offers(flows.size(), 0);
+  if (st.offer.has_value()) round_robin(*st.offer, offers);
+  Trace rows = Trace::list();
+  std::vector<Amount> w_m;
+  for (std::size_t i = 0; i < flows.size(); ++i) {
+    auto& f = flows[i];
+    const std::optional<Amount> offer = st.offer.has_value() ? std::optional<Amount>(offers[i]) : std::nullopt;
+    const auto members = f.members();
+    c.W.gather(members, w_m);
+    const auto step = lossy_step(*f.plan, offer, w_m);
+    // The 2^127 checks below can fail: finite offers bring an offered total up to the request
+    // total (below 2^127), and a +inf call then adds its injection. A drop counter (at most its
+    // flow's offered counter) can reach 2^127 only in such a call, and its check runs first.
+    c.W.consume(members, step.carried);
+    for (std::size_t m = 0; m < members.size(); ++m) {
+      f.alloc[m] += step.carried[m];
+      if (step.drops[m] != 0) {
+        if (!f.drops[m].add(step.drops[m])) throw std::invalid_argument("a cumulative drop counter would reach 2^127");
+        c.drops.emplace_back(members[m], step.drops[m]);
       }
     }
-    double need;
-    if (target_per_flow.has_value()) {
-      // When a per-flow target is specified (e.g., during rebalancing), cap by remaining per-flow target.
-      need = std::max(0.0, target - f->placed_flow);
-    } else if (eb_divisor > 0) {
-      // For EqualBalanced, request only the remaining deficit toward per-target for this flow.
-      need = std::max(0.0, per_target - f->placed_flow);
-    } else {
-      // Default behavior uses the global target amount.
-      need = target;
+    if (!f.offered->add(step.offered)) throw std::invalid_argument("the cumulative offered counter would reach 2^127");
+    f.delivered += step.delivered;
+    st.injected += step.injected;
+    if (kTraced && c.trace) {
+      Trace row = Trace::map();
+      row.set("offer", amount_or_inf(offer));
+      row.set("offered", Trace::integer(step.offered));
+      row.set("delivered", Trace::integer(step.delivered));
+      std::vector<std::pair<EdgeId, Amount>> carried, drops;
+      for (std::size_t m = 0; m < members.size(); ++m) {
+        if (step.carried[m] != 0) carried.emplace_back(members[m], step.carried[m]);
+        if (step.drops[m] != 0) drops.emplace_back(members[m], step.drops[m]);
+      }
+      row.set("carried", Trace::pairs(carried));
+      row.set("drops", Trace::pairs(drops));
+      rows.push(std::move(row));
     }
-    const double request = std::min(need, volume);
-    Flow placed = fg.place(f->index, f->src, f->dst, f->dag, request, flow_placement_);
-    f->placed_flow += placed;
-    volume -= placed;
-    total_placed += placed;
-    ++iters;
-    // IP-like mode: perform a single augmentation over the current SPF DAG
-    if (shortest_path_) {
+  }
+  if (kTraced && st.tr) {
+    st.tr->set("stage3", std::move(rows));
+    st.tr->set("injected", Trace::integer(st.injected));
+  }
+}
+
+// ---------------------------------------------------------------- stage 4: growth
+
+// fraction * v as the reduced rational "num/den" (or "num"): the exact text the transaction trace
+// records for the diminishing guard's threshold.
+std::string fraction_text(double fraction, Amount v) {
+  const auto [m, x] = dyadic(fraction);
+  U128 num = mul_u64(m, static_cast<std::uint64_t>(v));
+  int k = -x;  // den = 2^k
+  while (k > 0 && (num.lo & 1U) == 0 && !(num == U128 {0, 0})) {
+    num = U128 {num.hi >> 1, (num.lo >> 1) | (num.hi << 63)};
+    --k;
+  }
+  if (num == U128 {0, 0}) return "0";
+  auto dec = [](U128 n) {
+    std::string out;
+    while (!(n == U128 {0, 0})) {
+      const std::uint64_t hi_q = n.hi / 10;
+      const std::uint64_t hi_r = n.hi % 10;
+      const std::uint64_t lo_q = div_u128(U128 {hi_r, n.lo}, 10);
+      const std::uint64_t lo_r = n.lo - lo_q * 10;  // the remainder of (hi_r * 2^64 + lo) / 10
+      out.push_back(static_cast<char>('0' + lo_r));
+      n = U128 {hi_q, lo_q};
+    }
+    std::reverse(out.begin(), out.end());
+    return out;
+  };
+  if (k == 0) return dec(num);
+  if (k <= 126) return dec(num) + "/" + dec(k >= 64 ? U128 {std::uint64_t {1} << (k - 64), 0} : U128 {0, std::uint64_t {1} << k});
+  return dec(num) + "/2**" + std::to_string(k);
+}
+
+// Compare gains.sum < fraction * v exactly, reading fraction as its exact stored double value;
+// v < 2^62.
+bool below_fraction(Amount recent, double fraction, Amount v) {
+  const auto [m, x] = dyadic(fraction);  // x < 0 since fraction < 1
+  const U128 rhs = mul_u64(m, static_cast<std::uint64_t>(v));  // below 2^115
+  // recent < rhs * 2^x  <=>  recent * 2^-x < rhs; with -x large the left side exceeds 2^128
+  // unless recent is 0.
+  if (recent == 0) return !(rhs == U128 {0, 0});
+  const U128 r {0, static_cast<std::uint64_t>(recent)};
+  if (bits(r) - x > 127) return false;
+  return shl(r, -x) < rhs;
+}
+
+void stage4(Call& c, SourceRun& st) {
+  auto& pe = c.pe;
+  const auto& ca = std::get<CapacityAware>(pe.config.routing);
+  const auto v = st.offer;
+  Trace steps = Trace::list();
+  std::int32_t accepted = 0;
+  std::vector<Amount> Wd;
+  std::vector<Amount> view_m;
+  std::vector<Amount> zeros;
+  auto stop = [&](const char* why) {
+    if (kTraced && c.trace) {
+      Trace s = Trace::map();
+      s.set("stop", Trace::str(why));
+      steps.push(std::move(s));
+    }
+  };
+  while (!st.B.has_value() || *st.B > 0) {
+    if (c.created >= c.cap) {
+      st.limit = Termination::LimitFlows;
+      stop("kMaxFlowsPerCall");
       break;
     }
-    // Track recent placements. For a pinned policy, arm the window only once every
-    // flow has been visited: with more bundles than the window, the early rounds of
-    // small per-flow placements must not starve the bundles not yet visited.
-    if (diminishing_returns_enabled_ &&
-        (!is_static || iters >= static_cast<int>(flows_.size()))) {
-      recent.push_back(placed);
-      if (static_cast<int>(recent.size()) > diminishing_returns_window_) recent.pop_front();
-      if (static_cast<int>(recent.size()) == diminishing_returns_window_) {
-        double sum_recent = 0.0; for (double x : recent) sum_recent += x;
-        const double threshold = std::max(kMinFlow, diminishing_returns_epsilon_frac_ * initial_request);
-        if (sum_recent < threshold) {
-          break; // graceful cutoff
+    if (ca.max_flow_count.has_value() && static_cast<std::int64_t>(st.flows.size()) >= *ca.max_flow_count) {
+      if (*ca.max_flow_count > ca.flow_count) st.limit = Termination::LimitFlows;
+      if (kTraced && c.trace) {
+        Trace s = Trace::map();
+        s.set("stop", Trace::str("max_flow_count"));
+        s.set("k", Trace::integer(static_cast<std::int64_t>(st.flows.size())));
+        steps.push(std::move(s));
+      }
+      break;
+    }
+    c.W.dense(Wd);
+    auto cand = search(c, st.ri, Wd);
+    if (!cand.has_value()) {
+      stop("no candidate");
+      break;
+    }
+    if (pe.config.selection.multipath) {
+      // A multipath DAG already spans every equal-cost path, so a second
+      // flow on a structurally equal DAG gains only round-robin remainders: growth stops. A
+      // repeated single path is a legitimate tunnel.
+      bool equal = false;
+      for (const auto& f : st.flows) equal = equal || f.plan->route == cand->edges;
+      if (equal) {
+        if (kTraced && c.trace) {
+          Trace s = Trace::map();
+          s.set("stop", Trace::str("candidate equals a cohort route"));
+          s.set("route", route_trace(cand->edges));
+          steps.push(std::move(s));
         }
+        break;
       }
     }
-    if (placed < kMinFlow) {
-      ++no_progress; if (no_progress>=max_no_progress_iterations_) break;
+    WorkFlow f = new_flow(c, st.src, bundle_of(c.g, cand->edges, nullptr), cand->cost, &Wd);
+    Trace step = Trace::map();
+    if (kTraced && c.trace) {
+      step.set("route", route_trace(cand->edges));
+      step.set("W", Trace::ints(Wd));
+    }
+    Amount gain = 0;
+    if (pe.config.placement == FlowPlacement::EqualBalanced) {
+      Amount T = 0;
+      for (const auto& x : st.flows) T += x.T;
+      for (const auto& x : st.flows) c.W.release(x.members(), x.alloc);  // V = W + cohort allocation
+      auto plans = plans_of(st.flows);
+      plans.push_back(f.plan.get());
+      CohortEval trial(plans, c.W);
+      const Amount target = v.has_value() ? st.T_entry + *v : trial.upper();
+      Amount t_cand = T;  // rejected unless the trial cohort carries more than T
+      if (target > T && trial.fits(T + 1)) {
+        t_cand = trial.fits(target) ? target : trial.largest(T + 1, target - 1);
+      }
+      if (kTraced && c.trace) {
+        const Amount bound = trial.t_max();
+        step.set("T", Trace::integer(T));
+        step.set("T_candidate", Trace::integer(v.has_value() ? std::min(st.T_entry + *v, bound) : bound));
+        step.set("bound", Trace::integer(bound));
+      }
+      if (t_cand <= T) {
+        for (const auto& x : st.flows) c.W.consume(x.members(), x.alloc);  // W restored
+        if (kTraced && c.trace) {
+          step.set("decision", Trace::str("rejected: cohort total not larger"));
+          steps.push(std::move(step));
+        }
+        break;
+      }
+      f.seq = ++c.seq;
+      st.flows.push_back(std::move(f));
+      set_cohort(st.flows, t_cand);
+      for (const auto& x : st.flows) c.W.consume(x.members(), x.alloc);
+      gain = t_cand - T;
+      if (kTraced && c.trace) {
+        Trace shares = Trace::list();
+        for (const auto& x : st.flows) shares.push(Trace::integer(x.T));
+        step.set("shares", std::move(shares));
+      }
     } else {
-      no_progress = 0;
+      const auto members = f.members();
+      c.W.gather(members, view_m);
+      zeros.assign(members.size(), 0);
+      auto fill = lossless_step(c.g, *f.plan, 0, view_m, zeros, st.B);
+      if (kTraced && c.trace) {
+        step.set("bound", Trace::integer(flow_t_max(c.g, *f.plan, view_m)));
+        step.set("fill", Trace::integer(fill.total));
+      }
+      if (fill.total == 0) {
+        if (kTraced && c.trace) {
+          step.set("decision", Trace::str("rejected: zero fill"));
+          steps.push(std::move(step));
+        }
+        break;
+      }
+      f.T = fill.total;
+      f.alloc = std::move(fill.alloc);
+      c.W.consume(members, f.alloc);
+      f.seq = ++c.seq;
+      gain = f.T;
+      st.flows.push_back(std::move(f));
     }
-    // A pinned policy neither grows its flow set nor reoptimizes: the pinned-ness
-    // guard is explicit, never inferred from flow-count arithmetic.
-    if (!is_static) {
-      if (is_equal_balanced(flow_placement_)) {
-        if (max_flow_count_.has_value()) {
-          // Bounded EB: add flows up to configured maximum.
-          if (static_cast<int>(flows_.size()) < *max_flow_count_) {
-            if (auto* nf = create_flow(fg, src, dst, flowClass, std::optional<double>(per_target))) q.push_back(nf->index);
-          }
-        } else {
-          // Unbounded EB: rely on a single flow to equalize over the DAG.
-          // Do not create additional flows implicitly.
+    ++c.created;
+    c.routes_changed = true;
+    ++accepted;
+    st.gains.push_back(gain);
+    if (st.B.has_value()) *st.B -= gain;
+    if (kTraced && c.trace) {
+      step.set("decision", Trace::str("accepted"));
+      step.set("gain", Trace::integer(gain));
+      steps.push(std::move(step));
+    }
+    if (ca.diminishing.has_value() && v.has_value() && accepted >= ca.diminishing->window) {
+      Amount recent = 0;
+      const auto w = static_cast<std::size_t>(ca.diminishing->window);
+      for (std::size_t i = st.gains.size() - w; i < st.gains.size(); ++i) recent += st.gains[i];
+      if (below_fraction(recent, ca.diminishing->fraction, *v) && *st.B > 0) {
+        st.limit = Termination::LimitDiminishing;
+        if (kTraced && c.trace) {
+          Trace s = Trace::map();
+          s.set("stop", Trace::str("diminishing"));
+          s.set("recent", Trace::integer(recent));
+          s.set("threshold", Trace::str(fraction_text(ca.diminishing->fraction, *v)));
+          steps.push(std::move(s));
         }
-      } else {
-        if (target - f->placed_flow >= kMinFlow) {
-          if (!max_flow_count_ || static_cast<int>(flows_.size()) < *max_flow_count_) {
-            if (auto* nf = create_flow(fg, src, dst, flowClass, std::nullopt)) q.push_back(nf->index);
-          } else {
-            if (auto* rf = reoptimize_flow(fg, f->index, kMinFlow)) q.push_back(rf->index);
-          }
-        }
+        break;
       }
     }
-    if (iters >= max_total_iterations_) break;
   }
+  if (kTraced && st.tr) st.tr->set("stage4", std::move(steps));
+}
 
-  // Reoptimize all flows after placement if enabled (no-op for pinned policies:
-  // reoptimize_flow returns immediately when static paths are configured).
-  if (reoptimize_flows_on_each_placement_) {
-    for (auto& kv : flows_) {
-      (void)reoptimize_flow(fg, kv.first, kMinFlow);
+// ---------------------------------------------------------------- per source
+
+void run_source(Call& c, SourceRun& st) {
+  auto& pe = c.pe;
+  if (st.flows.empty()) stage1(c, st);
+  if (st.flows.empty()) return;
+  if (is<CapacityAware>(pe) && std::get<CapacityAware>(pe.config.routing).reoptimize) stage2(c, st);
+  if (pe.config.admission == Admission::Lossy) {
+    stage3_lossy(c, st);
+  } else if (pe.config.placement == FlowPlacement::EqualBalanced) {
+    stage3_eb(c, st);
+  } else {
+    stage3_seq(c, st);
+  }
+  if (is<CapacityAware>(pe)) stage4(c, st);
+}
+
+Termination local_outcome(const PolicyEngine& pe, const SourceRun& st) {
+  Amount after = 0;
+  for (const auto& f : st.flows) after += pe.config.admission == Admission::Lossy ? f.delivered : f.T;
+  const Amount delivered = after - st.P;
+  if (st.offer.has_value() && *st.offer == 0) return Termination::Complete;
+  if (pe.config.admission == Admission::Lossy) {
+    if (st.offer.has_value() && st.injected == *st.offer) return Termination::Complete;
+  } else if (st.offer.has_value() && delivered == *st.offer) {
+    return Termination::Complete;
+  }
+  if (st.limit == Termination::LimitFlows || st.capped) return Termination::LimitFlows;
+  if (st.limit == Termination::LimitDiminishing) return Termination::LimitDiminishing;
+  if (st.flows.empty()) return Termination::NoRoute;
+  return Termination::Exhausted;
+}
+
+// The working copy of a live flow: its state and its record's amounts, member-aligned.
+WorkFlow working_copy(const PolicyEngine& pe, const LiveFlow& s) {
+  const FlowRecord& rec = LedgerAccess::live(pe.fg, s.id);
+  WorkFlow f;
+  f.id = s.id;
+  f.src = s.src;
+  f.plan = s.plan;
+  f.bundle = s.bundle;
+  f.cost = s.cost;
+  f.bundle_index = s.bundle_index;
+  align(f.plan->members, rec.edges, f.alloc);
+  if (pe.config.admission == Admission::Lossy) {
+    f.offered = rec.offered.value_or(Counter128 {});
+    f.delivered = rec.delivered;
+    align(f.plan->members, rec.drops, f.drops);
+  } else {
+    f.T = rec.delivered;
+  }
+  return f;
+}
+
+Draft draft_of(const PolicyEngine& pe, const WorkFlow& f) {
+  Draft d;
+  if (!f.is_new()) d.id = f.id;
+  auto& r = d.record;
+  r.sources = {f.src};
+  r.destinations = pe.dests_ok;
+  r.placement = pe.config.placement;
+  r.admission = pe.config.admission;
+  r.bundle = f.bundle;
+  r.route_cost = f.cost;
+  const auto members = f.members();
+  // Exactly sized, written by index (the nonzero members in member order).
+  r.edges.resize(static_cast<std::size_t>(std::count_if(f.alloc.begin(), f.alloc.end(), [](Amount x) { return x != 0; })));
+  for (std::size_t m = 0, k = 0; m < members.size(); ++m) {
+    if (f.alloc[m] != 0) r.edges[k++] = {members[m], f.alloc[m]};
+  }
+  if (pe.config.admission == Admission::Lossy) {
+    r.offered = f.offered;
+    r.delivered = f.delivered;
+    r.drops.resize(static_cast<std::size_t>(
+        std::count_if(f.drops.begin(), f.drops.end(), [](const Counter128& x) { return !x.is_zero(); })));
+    for (std::size_t m = 0, k = 0; m < members.size(); ++m) {
+      if (!f.drops[m].is_zero()) r.drops[k++] = {members[m], f.drops[m]};
+    }
+  } else {
+    r.delivered = f.T;
+  }
+  return d;
+}
+
+// The epoch state after the commit is built before it (every allocation), then swapped in.
+std::vector<std::vector<LiveFlow>> next_cohorts(const std::vector<SourceRun>& runs, std::size_t num_roster) {
+  std::vector<std::vector<LiveFlow>> out(num_roster);
+  for (const auto& st : runs) {
+    auto& c = out[st.ri];
+    c.reserve(st.flows.size());
+    for (const auto& f : st.flows) c.push_back(LiveFlow {f.id, f.src, f.plan, f.bundle, f.cost, f.bundle_index});
+  }
+  return out;
+}
+
+std::vector<std::pair<EdgeId, Amount>> merge_drops(std::vector<std::pair<EdgeId, Amount>> drops) {
+  std::sort(drops.begin(), drops.end());
+  std::vector<std::pair<EdgeId, Amount>> out;
+  for (const auto& [e, x] : drops) {
+    if (!out.empty() && out.back().first == e) {
+      out.back().second += x;
+    } else {
+      out.emplace_back(e, x);
     }
   }
-  return { total_placed, volume };
+  return out;
 }
 
-/* Rebalance existing placed demand such that each flow carries approximately
-   `target_per_flow`. Internally removes and re-places the same total volume. */
-std::pair<double,double> FlowPolicy::rebalance_demand(FlowGraph& fg,
-                                                      NodeId src, NodeId dst,
-                                                      FlowClass flowClass,
-                                                      double target_per_flow) {
-  // Must run before remove_demand() empties flows_, or the check inside
-  // place_demand() would have nothing left to compare against and would
-  // silently retarget this policy's volume onto a different node pair.
-  check_demand_target(fg, src, dst, "rebalance_demand");
-  double vol = placed_demand();
-  remove_demand(fg);
-  return place_demand(fg, src, dst, flowClass, vol, target_per_flow, std::nullopt);
-}
+std::string key(NodeId v) { return std::to_string(v); }
 
-/* Remove all placed flows for this policy from the FlowGraph and reset
-   per-flow placed volumes. */
-void FlowPolicy::remove_demand(FlowGraph& fg) {
-  for (auto const& kv : flows_) {
-    fg.remove(kv.first);
+PlacementResult place_flows(PolicyEngine& pe, std::optional<Amount> v, const OutputOptions& outputs, Trace* trace,
+                            const std::function<void()>* staged) {
+  const auto& g = *pe.graph;
+  Working W(pe.fg);
+  Call c {pe, g, W};
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  c.cap = max_flows_per_call().load(std::memory_order_relaxed);
+#endif
+  c.trace = trace;
+  const std::size_t k = pe.roster.size();
+  std::vector<SourceRun> runs(k);
+  if (is<Pinned>(pe)) {
+    runs[0].offer = v;
+  } else if (v.has_value()) {
+    cumulative_offers(pe.requested, *v, k, [&](std::size_t i, Amount x) { runs[i].offer = x; });
   }
-  flows_.clear();
-  best_path_cost_ = std::numeric_limits<Cost>::max();
+  Trace sources_tr = Trace::map();
+  for (std::size_t i = 0; i < k; ++i) {
+    auto& st = runs[i];
+    st.ri = i;
+    st.src = pe.roster[i];
+    st.B = st.offer;
+    st.flows.reserve(pe.cohorts[i].size());
+    for (const auto& s : pe.cohorts[i]) st.flows.push_back(working_copy(pe, s));
+    for (const auto& f : st.flows) {
+      st.P += pe.config.admission == Admission::Lossy ? f.delivered : f.T;
+      st.T_entry += f.T;
+    }
+  }
+  for (auto& st : runs) {
+    Trace* tr = nullptr;
+    if (kTraced && trace) tr = &sources_tr.set(key(st.src), Trace::map());
+    st.tr = tr;
+    run_source(c, st);
+    st.tr = nullptr;
+  }
+  // The commit: retained flows (by source, FlowId order) then new flows in creation order.
+  std::vector<Draft> drafts;
+  // (run, flow) of the new flows, per thread: cleared here, read until the epoch state is set.
+  thread_local std::vector<std::pair<std::size_t, std::size_t>> fresh_scratch;
+  auto& fresh = fresh_scratch;
+  fresh.clear();
+  for (std::size_t i = 0; i < k; ++i) {
+    for (std::size_t j = 0; j < runs[i].flows.size(); ++j) {
+      const auto& f = runs[i].flows[j];
+      if (f.is_new()) {
+        fresh.emplace_back(i, j);
+      } else {
+        drafts.push_back(draft_of(pe, f));
+      }
+    }
+  }
+  std::sort(fresh.begin(), fresh.end(), [&](const auto& a, const auto& b) {
+    return runs[a.first].flows[a.second].seq < runs[b.first].flows[b.second].seq;
+  });
+  for (const auto& [i, j] : fresh) drafts.push_back(draft_of(pe, runs[i].flows[j]));
+  // Everything the publication of the epoch state needs is allocated before the commit.
+  Counter128 requested = pe.requested;
+  if (v.has_value()) (void)requested.add(*v);  // checked in place_impl
+  auto next = next_cohorts(runs, k);
+  Amount placed = 0;
+  std::vector<std::pair<NodeId, Termination>> outcomes;
+  outcomes.reserve(k);
+  Termination term = Termination::Complete;
+  for (const auto& st : runs) {
+    Amount after = 0;
+    for (const auto& f : st.flows) after += pe.config.admission == Admission::Lossy ? f.delivered : f.T;
+    placed += after - st.P;
+    const Termination o = local_outcome(pe, st);
+    outcomes.emplace_back(st.src, o);
+    if (rank(o) > rank(term)) term = o;
+  }
+  PlacementResult out;
+  out.placed = placed;
+  if (v.has_value()) out.remaining = *v - placed;
+  out.termination = term;
+  out.local_outcomes = std::move(outcomes);
+  out.routes_changed = c.routes_changed;
+  out.weights_changed = c.weights_changed;
+  out.drops = merge_drops(std::move(c.drops));
+  if (kTraced && trace) {
+    Trace offers_tr = Trace::map();
+    Trace outcomes_tr = Trace::map();
+    for (std::size_t i = 0; i < k; ++i) {
+      offers_tr.set(key(runs[i].src), amount_or_inf(runs[i].offer));
+      outcomes_tr.set(key(runs[i].src), Trace::str(outcome_name(out.local_outcomes[i].second)));
+    }
+    trace->set("offers", std::move(offers_tr));
+    trace->set("local_outcomes", std::move(outcomes_tr));
+    trace->set("created", Trace::integer(c.created));
+    trace->set("sources", std::move(sources_tr));
+    std::vector<Amount> wf;
+    W.dense(wf);
+    trace->set("W_final", Trace::ints(wf));
+  }
+  if (any_output(outputs)) prepare_outputs(pe, outputs, draft_edges(drafts), out);
+  if (staged != nullptr && *staged) (*staged)();
+  std::vector<FlowId> ids;
+  if (!drafts.empty()) ids = LedgerAccess::commit(pe.fg, pe.owner, drafts);
+  // Committed: the epoch state follows (nothing below throws).
+  for (std::size_t n = 0; n < fresh.size(); ++n) next[fresh[n].first][fresh[n].second].id = ids[n].second;
+  pe.cohorts.swap(next);
+  pe.requested = requested;
+  if (!v.has_value()) pe.infinite = true;
+  return out;
 }
+
+// ---------------------------------------------------------------- Global
+
+// Split flow by source in ascending NodeId. While a source has supply left, take the smallest
+// EdgeId sequence with positive remaining flow, stopping at the first destination. Assign
+// min(supply left, smallest remaining edge flow on that walk), then subtract it from the walk.
+// Each node's out-edge cursor only advances: remaining flow never increases.
+std::vector<std::vector<std::pair<EdgeId, Amount>>> decompose(const Graph& g, std::vector<Amount> rem,
+                                                              std::span<const NodeId> roster,
+                                                              std::span<const NodeId> dests) {
+  const auto row = g.row_offsets();
+  const auto edge_dst = g.edge_dst();
+  const auto in_row = g.in_row_offsets();
+  const auto in_adj = g.in_adj_edge_index();
+  std::vector<std::uint8_t> is_dst(static_cast<std::size_t>(g.num_nodes()), 0);
+  for (NodeId d : dests) is_dst[static_cast<std::size_t>(d)] = 1;
+  std::vector<std::int32_t> cur(row.begin(), row.end() - 1);
+  std::vector<std::vector<std::pair<EdgeId, Amount>>> out(roster.size());
+  std::vector<EdgeId> walk;
+  for (std::size_t i = 0; i < roster.size(); ++i) {
+    const NodeId s = roster[i];
+    const auto si = static_cast<std::size_t>(s);
+    // The supply of s: its net outflow (transit through s from another source is not supply).
+    Amount left = 0;
+    for (auto e = row[si]; e < row[si + 1]; ++e) left += rem[static_cast<std::size_t>(e)];
+    for (auto k = in_row[si]; k < in_row[si + 1]; ++k) left -= rem[static_cast<std::size_t>(in_adj[static_cast<std::size_t>(k)])];
+    std::vector<std::pair<EdgeId, Amount>> acc;
+    while (left > 0) {
+      walk.clear();
+      NodeId u = s;
+      while (walk.empty() || is_dst[static_cast<std::size_t>(u)] == 0) {
+        auto& p = cur[static_cast<std::size_t>(u)];
+        while (p < row[static_cast<std::size_t>(u) + 1] && rem[static_cast<std::size_t>(p)] == 0) ++p;
+        if (p == row[static_cast<std::size_t>(u) + 1]) {
+          throw std::logic_error("Global decomposition: flow conservation broken (no continuation)");
+        }
+        walk.push_back(p);
+        u = edge_dst[static_cast<std::size_t>(p)];
+        if (walk.size() > static_cast<std::size_t>(g.num_nodes())) {
+          throw std::logic_error("Global decomposition: a cycle with positive flow");
+        }
+      }
+      Amount amount = left;
+      for (EdgeId e : walk) amount = std::min(amount, rem[static_cast<std::size_t>(e)]);
+      for (EdgeId e : walk) {
+        rem[static_cast<std::size_t>(e)] -= amount;
+        acc.emplace_back(e, amount);
+      }
+      left -= amount;
+    }
+    std::sort(acc.begin(), acc.end());
+    auto& res = out[i];
+    for (const auto& [e, x] : acc) {
+      if (!res.empty() && res.back().first == e) {
+        res.back().second += x;
+      } else {
+        res.emplace_back(e, x);
+      }
+    }
+  }
+  for (Amount x : rem) {
+    if (x != 0) throw std::logic_error("Global decomposition: the walks do not cover the flow");
+  }
+  return out;
+}
+
+PlacementResult place_global(PolicyEngine& pe, std::optional<Amount> v, const OutputOptions& outputs, Trace* trace,
+                             const std::function<void()>* staged) {
+  const auto& g = *pe.graph;
+  std::vector<Amount> V;
+  LedgerAccess::residual_into(pe.fg, V);
+  Amount P = 0;
+  const bool created = std::all_of(pe.cohorts.begin(), pe.cohorts.end(), [](const auto& c) { return c.empty(); });
+  for (std::size_t i = 0; i < pe.roster.size(); ++i) {
+    for (const auto& s : pe.cohorts[i]) {
+      const FlowRecord& rec = LedgerAccess::live(pe.fg, s.id);
+      P += rec.delivered;
+      for (const auto& [e, x] : rec.edges) V[static_cast<std::size_t>(e)] += x;
+    }
+  }
+  const std::optional<Amount> cap = v.has_value() ? std::optional<Amount>(P + *v) : std::nullopt;
+  if (pe.capture != nullptr) pe.capture->graph = pe.graph;
+  auto sol = place_global_units(g, V, pe.roster, pe.dests_ok, pe.elig, cap, pe.capture);
+  if (sol.placed < P) throw std::logic_error("Global: a call reduced placed_demand()");
+  auto shares = decompose(g, sol.edge_flows, pe.roster, pe.dests_ok);
+  bool changed = created;
+  std::vector<Amount> supplies(pe.roster.size(), 0);
+  std::vector<Draft> drafts;
+  std::vector<std::size_t> fresh;
+  std::vector<std::vector<LiveFlow>> next(pe.roster.size());
+  for (std::size_t i = 0; i < pe.roster.size(); ++i) {
+    const NodeId s = pe.roster[i];
+    std::vector<EdgeId> route;
+    route.reserve(shares[i].size());
+    Amount supply = 0;
+    for (const auto& [e, x] : shares[i]) route.push_back(e);
+    {
+      // The supply of s: what its share delivers (its out-edges' share).
+      const auto row = g.row_offsets();
+      for (const auto& [e, x] : shares[i]) {
+        if (e >= row[static_cast<std::size_t>(s)] && e < row[static_cast<std::size_t>(s) + 1]) supply += x;
+      }
+    }
+    std::shared_ptr<const PredDAG> bundle;
+    Cost cost = kUnreachable;
+    const LiveFlow* old = pe.cohorts[i].empty() ? nullptr : &pe.cohorts[i].front();
+    if (old != nullptr && PredDAGBuilder::ascending(*old->bundle).size() == route.size() &&
+        std::equal(route.begin(), route.end(), PredDAGBuilder::ascending(*old->bundle).begin())) {
+      bundle = old->bundle;
+      cost = old->cost;
+    } else {
+      if (old != nullptr) changed = true;
+      bundle = std::make_shared<const PredDAG>(PredDAGBuilder::of_edges(g, route));
+      if (!route.empty()) cost = route_cost(g, *bundle, s, pe.dests_ok);
+    }
+    Draft d;
+    if (old != nullptr) d.id = old->id;
+    auto& r = d.record;
+    r.sources = {s};
+    r.destinations = pe.dests_ok;
+    r.placement = FlowPlacement::MaxFlow;
+    r.admission = Admission::Lossless;
+    r.bundle = bundle;
+    r.route_cost = cost;
+    r.delivered = supply;
+    supplies[i] = supply;
+    r.edges = shares[i];
+    if (old == nullptr) fresh.push_back(i);
+    next[i].push_back(LiveFlow {old != nullptr ? old->id : -1, s, nullptr, bundle, cost, -1});
+    drafts.push_back(std::move(d));
+  }
+  // New records in source order (ascending NodeId), after the retained ones.
+  std::stable_partition(drafts.begin(), drafts.end(), [](const Draft& d) { return d.id.has_value(); });
+  Counter128 requested = pe.requested;
+  if (v.has_value()) (void)requested.add(*v);  // checked in place_impl
+  PlacementResult out;
+  out.placed = sol.placed - P;
+  if (v.has_value()) out.remaining = *v - out.placed;
+  if (v.has_value() && out.placed == *v) {
+    out.termination = Termination::Complete;
+  } else if (sol.placed == 0) {
+    out.termination = Termination::NoRoute;
+  } else {
+    out.termination = Termination::Exhausted;
+  }
+  out.local_outcomes.reserve(pe.roster.size());
+  for (NodeId s : pe.roster) out.local_outcomes.emplace_back(s, out.termination);
+  out.routes_changed = changed;
+  out.cost_distribution = sol.cost_distribution;
+  if (kTraced && trace) {
+    trace->set("V", Trace::ints(V));
+    trace->set("cap", cap.has_value() ? Trace::integer(*cap) : Trace::null());
+    Trace fc = Trace::map();
+    fc.set("placed", Trace::integer(sol.placed));
+    fc.set("cost_distribution", Trace::pairs(sol.cost_distribution));
+    fc.set("edge_flows", Trace::ints(sol.edge_flows));
+    fc.set("min_cut", sol.min_cut.has_value() ? Trace::ints(*sol.min_cut) : Trace::null());
+    fc.set("potentials", Trace::ints(sol.potentials));
+    Trace counters = Trace::map();
+    counters.set("dijkstra_runs", Trace::integer(sol.counters.dijkstra_runs));
+    counters.set("dijkstra_pops", Trace::integer(sol.counters.dijkstra_pops));
+    counters.set("settled", Trace::integer(sol.counters.settled));
+    counters.set("arc_scans", Trace::integer(sol.counters.arc_scans));
+    counters.set("dinic_phases", Trace::integer(sol.counters.dinic_phases));
+    counters.set("augmentations", Trace::integer(sol.counters.augmentations));
+    fc.set("counters", std::move(counters));
+    Trace supply = Trace::map();
+    Trace shares_tr = Trace::map();
+    for (std::size_t i = 0; i < pe.roster.size(); ++i) {
+      supply.set(key(pe.roster[i]), Trace::integer(supplies[i]));
+      shares_tr.set(key(pe.roster[i]), Trace::pairs(shares[i]));
+    }
+    fc.set("supply", std::move(supply));
+    trace->set("flow_core", std::move(fc));
+    trace->set("shares", std::move(shares_tr));
+  }
+  if (outputs.bottleneck) out.min_cut = std::move(sol.min_cut);
+  if (any_output(outputs)) prepare_outputs(pe, outputs, draft_edges(drafts), out);
+  auto curve = *out.cost_distribution;  // the cumulative curve a later zero call reports
+  if (staged != nullptr && *staged) (*staged)();
+  const auto ids = LedgerAccess::commit(pe.fg, pe.owner, drafts);
+  // Committed: the epoch state follows (nothing below throws).
+  for (std::size_t n = 0; n < fresh.size(); ++n) next[fresh[n]].front().id = ids[n].second;
+  pe.cohorts.swap(next);
+  pe.curve.swap(curve);
+  pe.requested = requested;
+  if (!v.has_value()) pe.infinite = true;
+  return out;
+}
+
+// ---------------------------------------------------------------- construction
+
+} // namespace
+
+void validate_config(const FlowPolicyConfig& cfg, std::size_t num_sources, std::size_t num_destinations) {
+  const auto& r = cfg.routing;
+  if (r.valueless_by_exception()) invalid("routing: the variant holds no routing mode");
+  check_member(cfg.placement, "placement");
+  check_member(cfg.admission, "admission");
+  check_selection(cfg.selection);
+  check_kernel_combination(cfg.placement, cfg.admission, cfg.selection.priority);
+  if (cfg.admission == Admission::Lossy &&
+      (std::holds_alternative<Global>(r) || std::holds_alternative<CapacityAware>(r))) {
+    invalid("Lossy admission is rejected with Global and CapacityAware routing (hop-by-hop forwarding without "
+            "admission control neither grows nor reroutes)");
+  }
+  if (std::holds_alternative<Global>(r) && cfg.placement != FlowPlacement::MaxFlow) {
+    invalid("Global routing requires placement = MaxFlow");
+  }
+  if (const auto* ca = std::get_if<CapacityAware>(&r)) {
+    if (ca->flow_count < 1) invalid("CapacityAware flow_count must be >= 1 (got " + str(ca->flow_count) + ")");
+    if (ca->max_flow_count.has_value() && *ca->max_flow_count < ca->flow_count) {
+      invalid("CapacityAware max_flow_count (" + str(*ca->max_flow_count) + ") must be >= flow_count (" +
+              str(ca->flow_count) + ")");
+    }
+    if (ca->min_flow_bandwidth < 0 || ca->min_flow_bandwidth >= kDomainLimit) {
+      invalid("CapacityAware min_flow_bandwidth must be in [0, 2^62) units (got " + str(ca->min_flow_bandwidth) + ")");
+    }
+    check_ceiling(ca->max_path_cost);
+    if (ca->diminishing.has_value()) {
+      const auto& d = *ca->diminishing;
+      if (d.window < 1) invalid("diminishing window must be >= 1 (got " + str(d.window) + ")");
+      if (!(d.fraction > 0.0 && d.fraction < 1.0)) {
+        invalid("diminishing fraction must be in (0, 1) (got " + std::to_string(d.fraction) + ")");
+      }
+    }
+  }
+  if (std::holds_alternative<Pinned>(r) && (num_sources != 1 || num_destinations != 1)) {
+    invalid("Pinned routing requires single endpoints (bundles bind one source and one destination)");
+  }
+}
+
+} // namespace detail
+
+// ================================================================ FlowPolicyConfig
+
+// The enum-typed fields inside their enumerations, in validate_config's order.
+FlowPolicyConfig::FlowPolicyConfig(Routing routing_, FlowPlacement placement_, Admission admission_,
+                                   PathSelection selection_)
+    : routing(std::move(routing_)), placement(placement_), admission(admission_), selection(selection_) {
+  detail::check_member(placement, "placement");
+  detail::check_member(admission, "admission");
+  detail::check_selection(selection);
+}
+
+// ================================================================ FlowPolicy
+
+using detail::LedgerAccess;
+using detail::PolicyEngine;
 
 namespace {
 
-/* Validate one pinned bundle against the graph, prune it against the policy's
-   masks, and compute its post-prune min cost. Throws std::invalid_argument on a
-   malformed bundle; returns nullopt for a structurally valid bundle that has no
-   surviving src->dst walk under the masks (a DOWN LSP). */
-std::optional<std::pair<PredDAG, Cost>>
-prepare_static_bundle(const StrictMultiDiGraph& g, const PredDAG& dag,
-                      NodeId src, NodeId dst,
-                      std::span<const bool> node_mask,
-                      std::span<const bool> edge_mask) {
-  const auto N = static_cast<std::size_t>(g.num_nodes());
-  const auto E = static_cast<std::size_t>(g.num_edges());
-  const auto& off = dag.parent_offsets;
-  const auto& par = dag.parents;
-  const auto& via = dag.via_edges;
-
-  // Shape: CSR offsets over N nodes, entry arrays sized by the final offset.
-  if (off.size() != N + 1 || off.front() != 0) {
-    throw std::invalid_argument("static path bundle: parent_offsets must have length num_nodes + 1 and start at 0");
+// The engine of a new policy, bound to its ledger as the last step. A supplied frozen cache's hit
+// is recorded in `tally`: the public constructor publishes it once construction has
+// succeeded, an evaluator once its whole call has.
+std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const NodeId> sources,
+                                          std::span<const NodeId> destinations, FlowPolicyConfig config,
+                                          const Eligibility* elig, DagCache* cache, detail::FrozenTally& tally) {
+  auto pe = std::make_unique<PolicyEngine>(ledger, std::move(config));
+  pe->graph = ledger.graph();
+  const auto& g = *pe->graph;
+  if (elig != nullptr && elig->graph_uid() != g.uid()) {
+    throw std::invalid_argument("foreign Eligibility: built for another graph");
   }
-  for (std::size_t v = 0; v + 1 < off.size(); ++v) {
-    if (off[v] > off[v + 1]) {
-      throw std::invalid_argument("static path bundle: parent_offsets must be non-decreasing");
-    }
+  if (cache != nullptr && cache->graph_uid() != g.uid()) {
+    throw std::invalid_argument("foreign DagCache: bound to another graph");
   }
-  const auto entries = static_cast<std::size_t>(off.back());
-  if (par.size() != entries || via.size() != entries) {
-    throw std::invalid_argument("static path bundle: parents/via_edges size must equal parent_offsets.back()");
+  pe->elig = elig;
+  pe->sources = detail::node_set(sources, g.num_nodes(), "sources");
+  pe->destinations = detail::node_set(destinations, g.num_nodes(), "destinations");
+  detail::check_disjoint(pe->sources, pe->destinations, "sources", "destinations");
+  detail::validate_config(pe->config, pe->sources.size(), pe->destinations.size());
+  auto node_ok = [&](NodeId v) { return elig == nullptr || elig->node_ok(v); };
+  for (NodeId d : pe->destinations) {
+    if (node_ok(d)) pe->dests_ok.push_back(d);
   }
-
-  // Entries: ids in range, and each via edge must actually connect parent -> child
-  // in THIS graph. Without the endpoint check, a well-shaped DAG built for a
-  // different graph (or with shuffled edge ids) would silently place flow on
-  // arbitrary edges.
-  const auto esrc = g.edge_src_view();
-  const auto edst = g.edge_dst_view();
-  for (std::size_t v = 0; v < N; ++v) {
-    for (auto i = static_cast<std::size_t>(off[v]); i < static_cast<std::size_t>(off[v + 1]); ++i) {
-      const auto pnode = par[i];
-      const auto e = via[i];
-      if (pnode < 0 || static_cast<std::size_t>(pnode) >= N) {
-        throw std::invalid_argument("static path bundle: parent node id out of range");
-      }
-      if (e < 0 || static_cast<std::size_t>(e) >= E) {
-        throw std::invalid_argument("static path bundle: via edge id out of range");
-      }
-      if (esrc[static_cast<std::size_t>(e)] != pnode ||
-          edst[static_cast<std::size_t>(e)] != static_cast<NodeId>(v)) {
-        throw std::invalid_argument(
-            "static path bundle: via edge does not connect its parent to its node in "
-            "this graph (bundle built for a different graph?)");
-      }
-    }
-  }
-
-  // Acyclicity (Kahn over parent -> child entries).
-  {
-    std::vector<int> indeg(N, 0);
-    for (std::size_t v = 0; v < N; ++v) {
-      indeg[v] = static_cast<int>(off[v + 1] - off[v]);
-    }
-    std::vector<NodeId> stack;
-    stack.reserve(N);
-    for (std::size_t v = 0; v < N; ++v) {
-      if (indeg[v] == 0) stack.push_back(static_cast<NodeId>(v));
-    }
-    std::size_t seen = 0;
-    // Child adjacency: parent -> list of children, derived on the fly.
-    std::vector<std::vector<NodeId>> children(N);
-    for (std::size_t v = 0; v < N; ++v) {
-      for (auto i = static_cast<std::size_t>(off[v]); i < static_cast<std::size_t>(off[v + 1]); ++i) {
-        children[static_cast<std::size_t>(par[i])].push_back(static_cast<NodeId>(v));
-      }
-    }
-    while (!stack.empty()) {
-      auto u = stack.back(); stack.pop_back();
-      ++seen;
-      for (auto v : children[static_cast<std::size_t>(u)]) {
-        if (--indeg[static_cast<std::size_t>(v)] == 0) stack.push_back(v);
-      }
-    }
-    if (seen != N) {
-      throw std::invalid_argument("static path bundle: predecessor structure contains a cycle");
-    }
-  }
-
-  // Structural src->dst connectivity ignoring masks: a bundle that never had an
-  // src->dst walk is malformed for this demand, distinct from being down.
-  auto backward_reaches_src = [&](auto&& admit_entry) {
-    std::vector<char> reach(N, 0);
-    std::vector<NodeId> bfs;
-    bfs.push_back(dst);
-    reach[static_cast<std::size_t>(dst)] = 1;
-    for (std::size_t head = 0; head < bfs.size(); ++head) {
-      const auto v = static_cast<std::size_t>(bfs[head]);
-      for (auto i = static_cast<std::size_t>(off[v]); i < static_cast<std::size_t>(off[v + 1]); ++i) {
-        if (!admit_entry(i)) continue;
-        const auto pnode = par[i];
-        if (!reach[static_cast<std::size_t>(pnode)]) {
-          reach[static_cast<std::size_t>(pnode)] = 1;
-          bfs.push_back(pnode);
+  if (detail::is<Pinned>(*pe)) {
+    const auto& bundles = std::get<Pinned>(pe->config.routing).bundles;
+    if (bundles.empty()) throw std::invalid_argument("Pinned: an empty bundle list is rejected");
+    const NodeId src = pe->sources.front();
+    const NodeId dst[1] = {pe->destinations.front()};
+    for (std::size_t i = 0; i < bundles.size(); ++i) {
+      const auto& b = bundles[i];
+      if (!b) throw std::invalid_argument("Pinned: bundle " + std::to_string(i) + " is null");
+      if (b->graph_uid() != g.uid()) throw std::invalid_argument("foreign PredDAG: bundle built for another graph");
+      for (std::size_t j = 0; j < i; ++j) {
+        if (*bundles[j] == *b) {
+          throw std::invalid_argument("Pinned: duplicate bundle " + std::to_string(i) + " (equal to bundle " +
+                                      std::to_string(j) + " before pruning)");
         }
       }
-    }
-    return reach[static_cast<std::size_t>(src)] != 0;
-  };
-  if (!backward_reaches_src([](std::size_t) { return true; })) {
-    throw std::invalid_argument("static path bundle: no src->dst walk exists in the bundle");
-  }
-
-  // Prune against the policy's masks (failure exclusions), then re-check
-  // connectivity: no surviving walk means the LSP is DOWN.
-  const bool use_nm = !node_mask.empty();
-  const bool use_em = !edge_mask.empty();
-  auto entry_up = [&](std::size_t i) {
-    const auto pnode = static_cast<std::size_t>(par[i]);
-    const auto e = static_cast<std::size_t>(via[i]);
-    if (use_em && !edge_mask[e]) return false;
-    if (use_nm && !node_mask[pnode]) return false;
-    return true;
-  };
-  auto node_up = [&](NodeId v) { return !use_nm || node_mask[static_cast<std::size_t>(v)]; };
-  if (!node_up(src) || !node_up(dst)) return std::nullopt;
-
-  PredDAG pruned;
-  pruned.parent_offsets.assign(N + 1, 0);
-  for (std::size_t v = 0; v < N; ++v) {
-    std::int32_t c = 0;
-    if (node_up(static_cast<NodeId>(v))) {
-      for (auto i = static_cast<std::size_t>(off[v]); i < static_cast<std::size_t>(off[v + 1]); ++i) {
-        if (entry_up(i)) ++c;
+      Cost cost = kUnreachable;
+      auto plan = detail::make_route_plan(g, pe->config.placement, pe->config.admission,
+                                          pe->config.selection.priority, src, dst, *b, elig, &cost);
+      if (plan.route.empty() && detail::prune(g, *b, src, dst).empty()) {
+        throw std::invalid_argument("Pinned: malformed bundle " + std::to_string(i) + ", no src -> dst walk (src " +
+                                    std::to_string(src) + ", dst " + std::to_string(dst[0]) + ")");
       }
+      detail::PreparedPinnedBundle pb;
+      pb.cost = cost;
+      pb.route_dag = detail::bundle_of(g, plan.route, b);
+      pb.route_plan = std::make_shared<const detail::KernelPlan>(std::move(plan));
+      if (!pb.route_plan->route.empty()) pe->usable.push_back(static_cast<std::int32_t>(i));
+      pe->bundles.push_back(std::move(pb));
     }
-    pruned.parent_offsets[v + 1] = pruned.parent_offsets[v] + c;
+    if (!pe->usable.empty()) pe->roster.push_back(src);
+  } else if (detail::is<CostOnly>(*pe)) {
+    pe->support = cache != nullptr
+                      ? detail::DagCacheAccess::lookup(*cache, g, pe->destinations, Direction::Reverse, elig, tally)
+                      : std::make_shared<const PredDAG>(detail::static_support(g, pe->destinations, Direction::Reverse, elig));
+    const auto edges = detail::PredDAGBuilder::ascending(*pe->support);
+    const auto row = g.row_offsets();
+    for (NodeId s : pe->sources) {
+      if (!node_ok(s)) continue;
+      const auto it = std::lower_bound(edges.begin(), edges.end(), row[static_cast<std::size_t>(s)]);
+      if (it != edges.end() && *it < row[static_cast<std::size_t>(s) + 1]) pe->roster.push_back(s);
+    }
+  } else {
+    // The static costs fix the roster; only a Stretch ceiling reads them again, so only it keeps them.
+    const auto* ca = std::get_if<CapacityAware>(&pe->config.routing);
+    const bool keep_costs =
+        ca != nullptr && ca->max_path_cost.has_value() && std::holds_alternative<Stretch>(*ca->max_path_cost);
+    const auto dist = detail::static_costs(g, elig, pe->dests_ok, pe->sources);
+    for (std::size_t i = 0; i < pe->sources.size(); ++i) {
+      const NodeId s = pe->sources[i];
+      if (!node_ok(s) || dist[i] == kUnreachable) continue;
+      pe->roster.push_back(s);
+      if (keep_costs) pe->baseline.push_back(dist[i]);
+    }
   }
-  pruned.parents.resize(static_cast<std::size_t>(pruned.parent_offsets.back()));
-  pruned.via_edges.resize(static_cast<std::size_t>(pruned.parent_offsets.back()));
-  for (std::size_t v = 0; v < N; ++v) {
-    auto w = static_cast<std::size_t>(pruned.parent_offsets[v]);
-    if (!node_up(static_cast<NodeId>(v))) continue;
-    for (auto i = static_cast<std::size_t>(off[v]); i < static_cast<std::size_t>(off[v + 1]); ++i) {
-      if (!entry_up(i)) continue;
-      pruned.parents[w] = par[i];
-      pruned.via_edges[w] = via[i];
-      ++w;
-    }
-  }
-
-  const auto& poff = pruned.parent_offsets;
-  {
-    std::vector<char> reach(N, 0);
-    std::vector<NodeId> bfs;
-    bfs.push_back(dst);
-    reach[static_cast<std::size_t>(dst)] = 1;
-    for (std::size_t head = 0; head < bfs.size(); ++head) {
-      const auto v = static_cast<std::size_t>(bfs[head]);
-      for (auto i = static_cast<std::size_t>(poff[v]); i < static_cast<std::size_t>(poff[v + 1]); ++i) {
-        const auto pnode = pruned.parents[i];
-        if (!reach[static_cast<std::size_t>(pnode)]) {
-          reach[static_cast<std::size_t>(pnode)] = 1;
-          bfs.push_back(pnode);
-        }
-      }
-    }
-    if (!reach[static_cast<std::size_t>(src)]) return std::nullopt;  // DOWN
-  }
-
-  // Cost: min-cost src->dst walk within the PRUNED bundle, so the flow reports the
-  // metric of a walk it can actually use. DP in a topological order of the pruned
-  // DAG (acyclicity established above; pruning cannot introduce cycles).
-  Cost best = std::numeric_limits<Cost>::max();
-  {
-    const auto costs = g.cost_view();
-    std::vector<Cost> dist(N, std::numeric_limits<Cost>::max());
-    dist[static_cast<std::size_t>(src)] = 0;
-    std::vector<int> indeg(N, 0);
-    std::vector<std::vector<std::pair<NodeId, EdgeId>>> children(N);
-    for (std::size_t v = 0; v < N; ++v) {
-      indeg[v] = static_cast<int>(poff[v + 1] - poff[v]);
-      for (auto i = static_cast<std::size_t>(poff[v]); i < static_cast<std::size_t>(poff[v + 1]); ++i) {
-        children[static_cast<std::size_t>(pruned.parents[i])].emplace_back(
-            static_cast<NodeId>(v), pruned.via_edges[i]);
-      }
-    }
-    std::vector<NodeId> stack;
-    for (std::size_t v = 0; v < N; ++v) {
-      if (indeg[v] == 0) stack.push_back(static_cast<NodeId>(v));
-    }
-    while (!stack.empty()) {
-      auto u = stack.back(); stack.pop_back();
-      const auto du = dist[static_cast<std::size_t>(u)];
-      for (auto [v, e] : children[static_cast<std::size_t>(u)]) {
-        if (du != std::numeric_limits<Cost>::max()) {
-          const Cost cand = du + costs[static_cast<std::size_t>(e)];
-          if (cand < dist[static_cast<std::size_t>(v)]) dist[static_cast<std::size_t>(v)] = cand;
-        }
-        if (--indeg[static_cast<std::size_t>(v)] == 0) stack.push_back(v);
-      }
-    }
-    best = dist[static_cast<std::size_t>(dst)];
-  }
-  return std::make_optional(std::make_pair(std::move(pruned), best));
+  pe->cohorts.resize(pe->roster.size());
+  pe->owner = LedgerAccess::bind(ledger);  // last: nothing is bound when construction fails
+  return pe;
 }
 
 } // namespace
 
-/* See flow_policy.hpp for the contract. */
-void FlowPolicy::set_static_paths(NodeId src, NodeId dst, std::vector<PredDAG> bundles) {
-  const auto* g = ctx_.graph.graph.get();
-  if (g == nullptr) {
-    throw std::invalid_argument("FlowPolicy::set_static_paths: policy has no graph");
-  }
-  if (!flows_.empty()) {
-    throw std::invalid_argument(
-        "FlowPolicy::set_static_paths: policy already holds flows; call remove_demand() first");
-  }
-  if (bundles.empty()) {
-    throw std::invalid_argument("FlowPolicy::set_static_paths: bundles must be non-empty");
-  }
-  if (shortest_path_) {
-    throw std::invalid_argument(
-        "FlowPolicy::set_static_paths: incompatible with shortest_path=true (single-"
-        "augmentation IP semantics contradict pinned multi-LSP placement)");
-  }
-  const auto N = g->num_nodes();
-  if (src < 0 || src >= N || dst < 0 || dst >= N || src == dst) {
-    throw std::invalid_argument("FlowPolicy::set_static_paths: src/dst out of range or equal");
-  }
-  // Validate the USER's max_flow_count against the supplied bundle count. The
-  // configured value is never overwritten: the usable (up) count U drives the
-  // per-flow math at placement time, and N - flow_count() is the down-LSP count.
-  if (max_flow_count_.has_value() && *max_flow_count_ != static_cast<int>(bundles.size())) {
-    throw std::invalid_argument("If set, max_flow_count must be equal to the number of static paths.");
-  }
+// A public call of its own: a supplied frozen cache counts the hit once the policy exists.
+FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
+                       FlowPolicyConfig config, const Eligibility* elig, DagCache* cache)
+    : engine_(detail::frozen_call(cache, [&](detail::FrozenTally& tally) {
+        return make_engine(ledger, sources, destinations, std::move(config), elig, cache, tally);
+      })) {}
 
-  std::vector<StaticBundle> usable;
-  usable.reserve(bundles.size());
-  for (auto const& dag : bundles) {
-    if (auto prepared = prepare_static_bundle(*g, dag, src, dst, node_mask_, edge_mask_)) {
-      usable.push_back(StaticBundle{std::move(prepared->first), prepared->second});
-    }
+FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
+                       FlowPolicyConfig config, const Eligibility* elig, DagCache* cache, detail::FrozenTally& tally)
+    : engine_(make_engine(ledger, sources, destinations, std::move(config), elig, cache, tally)) {}
+
+// The destruction law: the records stay in the ledger as orphans.
+FlowPolicy::~FlowPolicy() { LedgerAccess::release(engine_->fg, engine_->owner); }
+
+namespace {
+
+// `staged` (optional) runs once the call's result and trace are final and before anything is
+// published (the ledger commit, the epoch state): an exception from it aborts the call with
+// nothing changed (the Python binding builds its result objects there).
+PlacementResult place_impl(PolicyEngine& pe, std::optional<Amount> volume, const OutputOptions& outputs,
+                           detail::Trace* trace, const std::function<void()>* staged) {
+  // Validation before any mutation, also before the zero shortcut.
+  if (volume.has_value() && (*volume < 0 || *volume >= kDomainLimit)) {
+    throw std::invalid_argument("request " + std::to_string(*volume) +
+                                " is outside [0, 2^62) units (requests are integer units or +inf)");
   }
-  static_src_ = src;
-  static_dst_ = dst;
-  static_supplied_count_ = static_cast<int>(bundles.size());
-  static_bundles_ = std::move(usable);
+  if (pe.infinite && volume.has_value()) {
+    throw std::invalid_argument(
+        "a finite request after +inf is rejected within an epoch (the cumulative finite request is undefined)");
+  }
+  // The only check of the cumulative request: nothing changes the requested total between here
+  // and the call's publication, so the later additions (below, in place_flows and in
+  // place_global) repeat this sum and cannot fail.
+  if (volume.has_value()) {
+    Counter128 probe = pe.requested;
+    if (!probe.add(*volume)) throw std::invalid_argument("the cumulative request counter would reach 2^127");
+  }
+  PlacementResult out;
+  if (volume.has_value() && *volume == 0) {
+    out.remaining = 0;
+    out.local_outcomes.reserve(pe.roster.size());
+    for (NodeId s : pe.roster) out.local_outcomes.emplace_back(s, Termination::Complete);
+    // Global: the cumulative curve (its amounts sum to placed_demand(); empty before the
+    // first placement); a zero call solves nothing, so it claims no cut (as the flow core's
+    // payload for a cap of 0).
+    if (detail::is<Global>(pe)) out.cost_distribution = pe.curve;
+    detail::prepare_outputs(pe, outputs, detail::current_edges(pe), out);
+    if (staged != nullptr && *staged) (*staged)();
+    return out;
+  }
+  if (pe.roster.empty()) {
+    out.remaining = volume;
+    out.termination = Termination::NoRoute;
+    if (detail::is<Global>(pe)) {
+      // No source reaches an allowed destination: the cumulative flow is 0 and maximal, so its
+      // marginal curve is empty and the full-residual cut is empty (the closure of the
+      // sources has no arc of positive view leaving it); None would claim a residual path.
+      out.cost_distribution.emplace();
+      if (outputs.bottleneck) out.min_cut.emplace();
+    }
+    if (detail::kTraced && trace) trace->set("roster", detail::Trace::list());
+    detail::prepare_outputs(pe, outputs, detail::current_edges(pe), out);
+    if (staged != nullptr && *staged) (*staged)();
+    // The epoch records every positive request, also one that finds no roster;
+    // nothing below throws (the counter was checked above).
+    if (volume.has_value()) {
+      (void)pe.requested.add(*volume);
+    } else {
+      pe.infinite = true;
+    }
+    return out;
+  }
+  if (detail::is<Global>(pe)) return detail::place_global(pe, volume, outputs, trace, staged);
+  return detail::place_flows(pe, volume, outputs, trace, staged);
 }
+
+} // namespace
+
+PlacementResult FlowPolicy::place(std::optional<Amount> volume, const OutputOptions& outputs) {
+  return place_impl(*engine_, volume, outputs, nullptr, nullptr);
+}
+
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+PlacementResult detail::place_traced(FlowPolicy& policy, std::optional<Amount> volume, const OutputOptions& outputs,
+                                     Trace& trace, const std::function<void()>* staged) {
+  trace = Trace::map();
+  return place_impl(PolicyAccess::engine(policy), volume, outputs, &trace, staged);
+}
+#endif
+
+void FlowPolicy::remove() {
+  auto& pe = *engine_;
+  (void)LedgerAccess::detach(pe.fg, pe.owner);
+  // A new epoch (nothing below throws).
+  for (auto& c : pe.cohorts) c.clear();
+  pe.curve.clear();
+  pe.requested = Counter128 {};
+  pe.infinite = false;
+}
+
+Amount FlowPolicy::placed_demand() const {
+  const auto& pe = *engine_;
+  Amount total = 0;
+  for (const auto& c : pe.cohorts) {
+    for (const auto& s : c) total += LedgerAccess::live(pe.fg, s.id).delivered;
+  }
+  return total;
+}
+
+std::vector<FlowRecord> FlowPolicy::records() const {
+  const auto& pe = *engine_;
+  std::vector<std::int64_t> ids;
+  for (const auto& c : pe.cohorts) {
+    for (const auto& s : c) ids.push_back(s.id);
+  }
+  std::sort(ids.begin(), ids.end());
+  std::vector<FlowRecord> out;
+  out.reserve(ids.size());
+  for (std::int64_t id : ids) out.push_back(LedgerAccess::live(pe.fg, id));
+  return out;
+}
+
+FlowRecord FlowPolicy::record(const FlowId& flow_id) const {
+  const auto& pe = *engine_;
+  const FlowLedger& fg = pe.fg;
+  // The ledger's checks first (another ledger, a retired or unknown id), then the owner.
+  FlowRecord rec = fg.record(flow_id);
+  if (rec.owner != pe.owner) {
+    throw std::invalid_argument("FlowId (" + std::to_string(flow_id.first) + ", " + std::to_string(flow_id.second) +
+                                ") is not a record of this policy");
+  }
+  return rec;
+}
+
+std::int32_t FlowPolicy::usable_bundles() const noexcept {
+  return detail::is<Pinned>(*engine_) ? static_cast<std::int32_t>(engine_->usable.size()) : 0;
+}
+
+const FlowPolicyConfig& FlowPolicy::config() const noexcept { return engine_->config; }
 
 } // namespace netgraph::core

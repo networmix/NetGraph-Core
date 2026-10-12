@@ -1,0 +1,109 @@
+# Policy fixture reference
+
+## In plain words
+
+`tests/data/policy_fixtures.json` holds 59 small scenarios (graphs, ledgers, policies and their
+calls) together with the result every call must produce. Both replay tests read it:
+`tests/cpp/flow_policy_fixture_tests.cpp` runs the scenarios on the C++ engine and
+`tests/py/test_flow_policy_fixtures.py` runs them through the Python binding; each compares
+every result, trace, ledger state and policy state exactly.
+
+The expected values were **not** computed by this library. They come from an independent
+reference: two plain-Python prototypes written from the design contract before the C++ engine
+existed (prototype 1, the amounts, search and kernels; prototype 2, the placement
+transaction and the policy engine), with every fixture's expected values derived by hand in
+the fixture text. This directory is a frozen copy of that reference and of the exporter that
+ran it to write the JSON file, so a clean checkout can reproduce the data byte for byte without
+the library and without the untracked design tree the code came from.
+
+The data is frozen: it is never regenerated from the build. The command below proves that it
+still equals what the reference computes; a change of the data is a deliberate data change,
+reviewed as such.
+
+## The historical `source` string inside the data
+
+The JSON's `source` field reads "prototype 2 of the design tree dev/design/2026-10-streamline
+(untracked by design): prototypes/p2_transaction in integer units (APPROACH 9), exported by
+gates/1c/export_fixture_data.py". It names the exporter that first wrote the file, under its
+earlier name `tests/data/p2_fixtures.json`, in the design tree's records of sub-PR 1c. The
+exporter copied here (`export_policy_fixtures.py`) replaced it with the same derivation and
+the same bytes when the file was renamed, and deliberately kept the string, because it is part
+of the content: changing it would change the bytes of the data. It is therefore kept
+unchanged, and this document is where it is explained. "APPROACH 9" is the section of the design
+contract on placement transactions; the contract is not part of the repository.
+
+## Reproduce and check
+
+From the repository root, with any Python 3.11 or later (only the standard library is used;
+`-I` keeps the environment and the user's site out, `-S` additionally proves the build is not
+needed, since without site-packages the library cannot be imported):
+
+    venv/bin/python -I -B tests/reference/policy/export_policy_fixtures.py --check
+    # prints "policy fixture data: identical" and exits 0; "DIFFERS" and exit 1 otherwise
+
+    venv/bin/python -I -B -S tests/reference/policy/export_policy_fixtures.py --out /tmp/policy_fixtures.json
+    cmp /tmp/policy_fixtures.json tests/data/policy_fixtures.json
+
+Without `--out` the exporter writes `tests/data/policy_fixtures.json` relative to this
+directory (three levels up). It runs in under a second. Before running the fixtures it checks
+that every module of the reference was imported from this directory (an installed package of
+the same name, such as `graph` or `units`, would otherwise shadow it) and that no module of the
+library (`netgraph_core`, `_netgraph_core`) was imported.
+
+The data file: 742,048 bytes, sha256
+`1b661708b10c6d49b9466d2de02b9fe3f2e050c957b67add34f7762255796673` (59 fixtures, 636
+operations).
+
+This directory is excluded from the source distribution (`sdist.exclude` in `pyproject.toml`);
+the wheel holds only the `netgraph_core` package. No test imports it.
+
+## Contents and origin
+
+The copies are the complete set of modules the exporter imports, found by running it and
+listing the imported modules (lazy imports inside functions included: every fixture runs).
+Their bodies are unchanged; they cite the design contract's sections and notes, which are not
+in the repository. `p2_transaction/_p1.py` appends the sibling `p1_amount/` to `sys.path`, so
+the two directory names are part of the layout. `run_fixtures.py` is used only for its
+`run_one`; its own `main` would write snapshots beside it and is not used.
+
+Original paths are relative to the design tree `dev/design/2026-10-streamline/` (untracked);
+the copies were taken on 2026-10-09.
+
+| Copy (this directory) | Original | sha256 of the original | sha256 of the copy |
+| --- | --- | --- | --- |
+| `export_policy_fixtures.py` | `equivalence/export_policy_fixtures.py` | `0aea76a050b2d83e7398559af6a7d484a5a82a48b35bac9a3686f5fdf73211d2` | `bdd6e63006d46408ae0779e8197f1ec149a93f252605353d8f5c5e3da8907e40` (relocated, below) |
+| `p2_transaction/_p1.py` | `prototypes/p2_transaction/_p1.py` | `3ec5468e1ee8357faa9d85e6d748c718de63baee22e064c204324e42de42ec98` | same |
+| `p2_transaction/fixtures.py` | `prototypes/p2_transaction/fixtures.py` | `ea05c85ce851fd7b7c6ff34b6a9eedbfd7b280187d0bf7e7965e626e4fe52071` | same |
+| `p2_transaction/policy.py` | `prototypes/p2_transaction/policy.py` | `b367b71c6052cb70c9b107ec7fdd15f491349cfd6fdfcb12a18f24ab69a4d27b` | same |
+| `p2_transaction/recorder.py` | `prototypes/p2_transaction/recorder.py` | `fb4a8f20ccc6ecef4bc6d934226df33d84ee4dbf70c59aad9f33a097b9d0eb8a` | same |
+| `p2_transaction/run_fixtures.py` | `prototypes/p2_transaction/run_fixtures.py` | `c20d655a2324c42201e9b743c51ef16bb47942dda56782e2d16b135a9c4db2fa` | same |
+| `p1_amount/apportion.py` | `prototypes/p1_amount/apportion.py` | `c1e2f5082a99db1d0e7de5cf4e713ad5790aca3d85060583d536f5bc7fdcd4b1` | same |
+| `p1_amount/certify.py` | `prototypes/p1_amount/certify.py` | `e4f0cce8a68fd512026e6e1c84c558b370d0741564b8191b8893de5cf173ad95` | same |
+| `p1_amount/flowcore.py` | `prototypes/p1_amount/flowcore.py` | `72b3d8c91a077017cf759d4c834576b1babd513024e9e227650d273d8b08da2c` | same |
+| `p1_amount/graph.py` | `prototypes/p1_amount/graph.py` | `44051d4a496a423c73ed473b6d4da045c32e30b40701bec0ecb19b8d9e5822a8` | same |
+| `p1_amount/kernels.py` | `prototypes/p1_amount/kernels.py` | `6e8db4d6de8c275d0335a9fddad28b7f84daa7af04d3ab872e4078cc4f709729` | same |
+| `p1_amount/ledger.py` | `prototypes/p1_amount/ledger.py` | `19a8ab41f7ae26ece8b8a0f151c55a287f0cdf22a779d8c6d2f9d8e5dc43fcf6` | same |
+| `p1_amount/search.py` | `prototypes/p1_amount/search.py` | `3ab124b99fa68e25d467cfbb22a4e9900ade86e10001269df84f3c99ad31e04a` | same |
+| `p1_amount/snap.py` | `prototypes/p1_amount/snap.py` | `0d62ff46d3c804bdbc80fae3c2c59a25aa0b34c013a086e7e81b7f722bdc0552` | same |
+| `p1_amount/units.py` | `prototypes/p1_amount/units.py` | `38b37a22ae56f592a63554683e860b44036cce678a7080f406a69c281a620cfe` | same |
+
+The rest of the two prototype directories (their notes, tests, snapshots, the MSD study
+`msd.py` and the historical grid prototypes) is not part of the reference and was not copied.
+
+## Relocation changes
+
+Only the exporter changed, and only where it named the design tree's layout:
+
+1. The usage line names the new path; a paragraph says the file is a relocated copy and points
+   here (the rest of the docstring describes the original layout and is kept).
+2. Paths: `DESIGN = HERE.parent` is gone; `REPO = HERE.parents[2]` (was `DESIGN.parents[2]`);
+   `P2 = HERE / "p2_transaction"` (was `DESIGN / "prototypes" / "p2_transaction"`). `OUT` is
+   unchanged in meaning (`tests/data/policy_fixtures.json` of the repository).
+3. The origin check: it compared five modules with the prototypes directory
+   (`origin.is_relative_to(DESIGN / "prototypes")`); it now compares every module of the
+   closure (`CLOSURE`, all fourteen) with its exact file in this directory, and also fails if
+   the library was imported.
+4. The comment on removing the script's directory from `sys.path` says the directory held
+   another `recorder.py` in the original layout; the removal is kept.
+
+The output, including the `source` string, is unchanged: the check above compares the bytes.

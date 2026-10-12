@@ -1,258 +1,195 @@
-/* FlowPolicy manages flows for a single demand. */
+/* The policy engine FlowPolicy. */
 #pragma once
 
 #include <cstdint>
-#include <limits>
+#include <memory>
 #include <optional>
-#include <unordered_map>
+#include <span>
 #include <utility>
+#include <variant>
 #include <vector>
-#include <stdexcept>
 
-#include "netgraph/core/flow.hpp"
-#include "netgraph/core/flow_graph.hpp"
-#include "netgraph/core/algorithms.hpp"
+#include "netgraph/core/dag_cache.hpp"
+#include "netgraph/core/flow_ledger.hpp"
+#include "netgraph/core/flow_record.hpp"
+#include "netgraph/core/graph.hpp"
 #include "netgraph/core/options.hpp"
+#include "netgraph/core/pred_dag.hpp"
 #include "netgraph/core/types.hpp"
 
 namespace netgraph::core {
 
-enum class PathAlg : std::int32_t { SPF = 1 };
+namespace detail {
+struct PolicyEngine;
+struct PolicyAccess;
+class FrozenTally;
+} // namespace detail
 
-// Execution context with algorithms and graph handle
-struct ExecutionContext {
-  std::shared_ptr<Algorithms> algorithms;
-  GraphHandle graph;
+// CapacityAware creations per call (stage 1 and accepted growth, across sources): reaching it
+// stops creation, and a source whose offer is not met then ends with LimitFlows. An engine
+// constant.
+inline constexpr std::int64_t kMaxFlowsPerCall = 10000;
 
-  ExecutionContext(std::shared_ptr<Algorithms> algs, const GraphHandle& gh) noexcept
-      : algorithms(std::move(algs)), graph(gh) {}
+// The diminishing-returns guard of CapacityAware growth: stop when at least `window` growth
+// steps were accepted in the call and the last `window` gains sum below `fraction` times the
+// source's offer (finite offers only). window >= 1, fraction in (0, 1).
+struct DiminishingReturns {
+  std::int32_t window {1};
+  double fraction {0.5};
 };
 
-// Configuration struct for FlowPolicy behavior
+// Each routing mode has only the fields it uses.
+// CostOnly: one flow per source on the static shortest-path DAG (all shortest paths, with no
+//   directed cycles), or its canonical single path; never refreshed, grown or reoptimised.
+// CapacityAware: flow_count flows found by shortest-path searches that require enough unused
+//   capacity on each edge. Grow up to max_flow_count (absent: no ceiling), subject to
+//   min_flow_bandwidth (units) and max_path_cost. Rerouting is optional; `diminishing`
+//   stops growth when recent gains are too small (absent: off).
+// Global: replace the policy's allocation with a minimum-cost flow of what it already delivers
+//   plus this call's request (placed_demand() + volume: what an earlier call could not place is
+//   not requested again) over the whole eligible graph (placement MaxFlow only).
+// Pinned: one flow per usable supplied route bundle, in supply order; single endpoints only.
+//   Convert a Path with to_dag().
+struct CostOnly {};
+struct CapacityAware {
+  std::int32_t flow_count {1};
+  std::optional<std::int32_t> max_flow_count {};
+  std::optional<CostCeiling> max_path_cost {};
+  Amount min_flow_bandwidth {0};
+  bool reoptimize {false};
+  std::optional<DiminishingReturns> diminishing {};
+};
+struct Global {};
+struct Pinned {
+  std::vector<std::shared_ptr<const PredDAG>> bundles {};
+};
+using Routing = std::variant<CostOnly, CapacityAware, Global, Pinned>;
+
+// routing, placement, admission and selection are required; none has a default.
+// Global and Pinned use selection.priority only for Weighted membership and weights, and
+// ignore the other selection fields. CostOnly and CapacityAware use all four selection fields.
+// Setting an ignored field is not an error. Invalid placement, admission or selection enum
+// values throw std::invalid_argument naming the field. Fields remain assignable, so policies
+// and evaluators check them again, then check the supported combinations.
 struct FlowPolicyConfig {
-  PathAlg path_alg { PathAlg::SPF };
-  FlowPlacement flow_placement { FlowPlacement::Proportional };
-  EdgeSelection selection { EdgeSelection{} };
-  bool require_capacity { true };  // Require edges to have capacity (software-defined/traffic engineering).
-                                   // Set false for cost-only routing (traditional IP/IGP shortest-paths).
-  bool multipath { true };         // Enable individual flows to split across multiple equal-cost paths.
-                                   // When true: each flow uses a DAG containing all equal-cost paths (hash-based ECMP).
-                                   // When false: each flow uses a single path (tunnel-based ECMP, MPLS LSP semantics).
-  int min_flow_count { 1 };
-  std::optional<int> max_flow_count { std::nullopt };
-  std::optional<Cost> max_path_cost { std::nullopt };
-  std::optional<double> max_path_cost_factor { std::nullopt };
-  bool shortest_path { false };
-  bool reoptimize_flows_on_each_placement { false };
-  int max_no_progress_iterations { 100 };
-  int max_total_iterations { 10000 };
-  bool diminishing_returns_enabled { true };
-  int diminishing_returns_window { 8 };
-  double diminishing_returns_epsilon_frac { 1e-3 };
-  std::span<const bool> node_mask {};  // Optional node mask for failure exclusions (True = include)
-  std::span<const bool> edge_mask {};  // Optional edge mask for failure exclusions (True = include)
+  FlowPolicyConfig(Routing routing_, FlowPlacement placement_, Admission admission_, PathSelection selection_);
+  Routing routing;
+  FlowPlacement placement;
+  Admission admission;
+  PathSelection selection;
 };
 
-// FlowPolicy manages flow creation, placement, reoptimization for a single demand
+// Optional outputs of a placement (absent unless requested): edge_flows (this policy's own
+// allocation per edge after the call), residual and bottleneck (the ledger's after the call),
+// and on Global the min_cut of the solve when bottleneck is requested.
+struct OutputOptions {
+  bool edge_flows {false};
+  bool residual {false};
+  bool bottleneck {false};
+};
+
+// A source is served if its offer is 0, Lossless delivers the offer, or Lossy forwards the
+// entire finite offer (including drops). Choose its first matching outcome:
+// Complete: served.
+// LimitFlows: creation/growth hit kMaxFlowsPerCall, or growth hit max_flow_count > flow_count.
+// LimitDiminishing: the diminishing-returns guard stopped growth.
+// NoRoute: no flows remain; for Global, maximum flow is 0 and nothing was ever placed.
+// Exhausted: any other unserved case, including full flows with no growth, a full fixed-size
+// group of flows, Global at maximum flow, or an infinite Lossy offer.
+// Global and Pinned act as one source: every local outcome equals the call's termination.
+// The call is Complete for request 0 or when all sources are served, and NoRoute for a positive
+// request with an empty roster: no eligible source statically reaches an allowed destination.
+// Otherwise, take the highest unserved outcome: LimitFlows > LimitDiminishing > Exhausted >
+// NoRoute.
+enum class Termination { Complete, LimitFlows, LimitDiminishing, NoRoute, Exhausted };
+
+// Per-call changes: placed, remaining = request - placed (nullopt for +inf), and transit drops.
+// Include the termination and one local outcome per roster source in ascending NodeId.
+// Global also returns its cumulative marginal cost curve: (cost, units) pairs in ascending cost,
+// where delivering `units` more units raises the minimum total cost of the flow by `cost` per
+// unit. Delivering more can reroute flow already placed, so the pairs are not the costs of the
+// paths in the final allocation. Optional outputs appear only if asked.
+// Both change flags start false and report committed changes only. routes_changed means a
+// source's group of flows was created (even at zero delivery), a retained flow was rerouted,
+// growth added a flow, or Global changed a source's used-edge set. weights_changed means a
+// rerouted Weighted flow captured its weights again; Global never sets it. A candidate equal
+// to the current route is not a change.
+struct PlacementResult {
+  Amount placed {0};
+  std::optional<Amount> remaining {};
+  Termination termination {Termination::Complete};
+  std::vector<std::pair<NodeId, Termination>> local_outcomes {};
+  bool routes_changed {false};
+  bool weights_changed {false};
+  std::vector<std::pair<EdgeId, Amount>> drops {};
+  std::optional<std::vector<std::pair<Cost, Amount>>> cost_distribution {};
+  std::optional<std::vector<Amount>> edge_flows {};
+  std::optional<std::vector<Amount>> residual {};
+  std::optional<std::vector<EdgeId>> bottleneck {};
+  // Global, when bottleneck is requested: positive-view edges leaving the set reachable from
+  // the real sources through residual arcs, including reverse arcs that cancel flow. A maximal
+  // solve returns this minimum cut; an empty roster returns an empty cut for its maximal flow
+  // of 0. nullopt if not requested, not Global, stopped by the cap, or a zero call (no solve).
+  std::optional<std::vector<EdgeId>> min_cut {};
+};
+
+// A policy binds to its ledger at construction. place() validates, then Global re-solves what
+// it already delivers plus the request; other modes create, reroute, fill and grow flows per roster source using
+// one working copy of unused capacity. All changes commit together, or none do.
+// remove() releases every policy flow, retires their ids and starts a new epoch: the period
+// since construction or the last remove() over which requests and flows accumulate. Destroying
+// a policy without remove() leaves its records in the ledger as orphans.
+//
+// Validation (std::invalid_argument, before anything binds): the endpoint sets (non-empty, ids
+// in range, disjoint), a foreign Eligibility or DagCache, the configuration (enumeration values;
+// Lossy with MaxFlow, Global or CapacityAware; Global without MaxFlow; Weighted with Headroom;
+// flow_count >= 1; max_flow_count >= flow_count; min_flow_bandwidth in [0, 2^62) units; the
+// ceiling; the diminishing guard; Pinned: single endpoints, a non-empty bundle list of this graph
+// without null or duplicate bundles, every bundle with a src -> dst walk before pruning). The order between
+// these three groups of checks is not specified: when defects of two groups meet, the one
+// reported may differ between this constructor and a language binding. place() validates the request ([0, 2^62) units or +inf; a
+// finite request after +inf in the epoch is rejected, also 0) before any change. A solve of the
+// flow core (Global, or a MaxFlow flow) whose network exceeds the core's int32 numbering throws
+// std::invalid_argument, and the call changes nothing: more than INT32_MAX - 2 nodes, or more than
+// 2^30 - 1 edges, sources and destinations together (Global counts the graph's nodes, the
+// eligible edges, the roster and the eligible destinations; a MaxFlow flow the nodes of its
+// member edges and endpoints, its member edges, its source and its destinations).
+//
+// Lifetime: the ledger, the Eligibility and the DagCache outlive the policy (the policy holds
+// pointers to them). The roster (the eligible sources that statically reach an allowed
+// destination) and, for Pinned, the usable bundles are fixed at construction.
 class FlowPolicy {
 public:
-  // Constructor accepting configuration struct
-  FlowPolicy(const ExecutionContext& ctx, const FlowPolicyConfig& cfg)
-    : ctx_(ctx),
-      path_alg_(cfg.path_alg), flow_placement_(cfg.flow_placement), selection_(cfg.selection),
-      require_capacity_(cfg.require_capacity), multipath_(cfg.multipath), shortest_path_(cfg.shortest_path),
-      min_flow_count_(cfg.min_flow_count), max_flow_count_(cfg.max_flow_count), max_path_cost_(cfg.max_path_cost),
-      max_path_cost_factor_(cfg.max_path_cost_factor), reoptimize_flows_on_each_placement_(cfg.reoptimize_flows_on_each_placement),
-      max_no_progress_iterations_(cfg.max_no_progress_iterations), max_total_iterations_(cfg.max_total_iterations),
-      diminishing_returns_enabled_(cfg.diminishing_returns_enabled), diminishing_returns_window_(cfg.diminishing_returns_window),
-      diminishing_returns_epsilon_frac_(cfg.diminishing_returns_epsilon_frac)
-  {
-    // Validate mask sizes early for clearer error messages
-    const auto* g = ctx_.graph.graph.get();
-    if (g) {
-      if (!cfg.node_mask.empty() && cfg.node_mask.size() != static_cast<std::size_t>(g->num_nodes())) {
-        throw std::invalid_argument("FlowPolicy: node_mask length mismatch");
-      }
-      if (!cfg.edge_mask.empty() && cfg.edge_mask.size() != static_cast<std::size_t>(g->num_edges())) {
-        throw std::invalid_argument("FlowPolicy: edge_mask length mismatch");
-      }
-    }
+  FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
+             FlowPolicyConfig config, const Eligibility* elig = nullptr, DagCache* cache = nullptr);
+  FlowPolicy(const FlowPolicy&) = delete;
+  FlowPolicy& operator=(const FlowPolicy&) = delete;
+  FlowPolicy(FlowPolicy&&) = delete;
+  FlowPolicy& operator=(FlowPolicy&&) = delete;
+  ~FlowPolicy();
 
-    // Copy mask data if provided
-    if (!cfg.node_mask.empty()) {
-      node_mask_storage_.reset(new bool[cfg.node_mask.size()]);
-      std::copy(cfg.node_mask.begin(), cfg.node_mask.end(), node_mask_storage_.get());
-      node_mask_ = std::span<const bool>(node_mask_storage_.get(), cfg.node_mask.size());
-    }
-    if (!cfg.edge_mask.empty()) {
-      edge_mask_storage_.reset(new bool[cfg.edge_mask.size()]);
-      std::copy(cfg.edge_mask.begin(), cfg.edge_mask.end(), edge_mask_storage_.get());
-      edge_mask_ = std::span<const bool>(edge_mask_storage_.get(), cfg.edge_mask.size());
-    }
-  }
-
-  ~FlowPolicy() noexcept = default;
-
-  [[nodiscard]] int flow_count() const noexcept { return static_cast<int>(flows_.size()); }
-  [[nodiscard]] double placed_demand() const noexcept;
-
-  // Core operations.
-  //
-  // A FlowPolicy manages the flows of a SINGLE demand. Once it holds flows, calling
-  // place_demand() with a different (src, dst) throws std::invalid_argument, because
-  // the round-robin loop routes using the src/dst stored on the existing flow records.
-  // Use one policy per demand, or call remove_demand() first to retarget it.
-  //
-  // `fg` must wrap the same StrictMultiDiGraph as the policy's own graph handle;
-  // placing onto a FlowGraph built from a different graph is rejected.
-  //
-  // Returns (placed, remaining). NOTE for EqualBalanced: when the equalizing
-  // rebalance runs, `placed` is the policy's TOTAL placed demand (cumulative
-  // across calls, since rebalancing re-places previously placed volume too) and
-  // `placed + remaining` can therefore exceed this call's `volume`. Use
-  // placed_demand() deltas for strict per-call accounting.
-  [[nodiscard]] std::pair<double,double> place_demand(FlowGraph& fg,
-                                        NodeId src, NodeId dst,
-                                        FlowClass flowClass,
-                                        double volume,
-                                        std::optional<double> target_per_flow = std::nullopt,
-                                        std::optional<double> min_flow = std::nullopt);
-
-  // Re-places the currently placed volume so each flow carries ~target_per_flow.
-  // (src, dst) must match the demand this policy already manages.
-  [[nodiscard]] std::pair<double,double> rebalance_demand(FlowGraph& fg,
-                                            NodeId src, NodeId dst,
-                                            FlowClass flowClass,
-                                            double target_per_flow);
-
-  void remove_demand(FlowGraph& fg);
-
-  [[nodiscard]] const std::unordered_map<FlowIndex, FlowRecord, FlowIndexHash>& flows() const noexcept { return flows_; }
-
-  // Pin this policy's demand to explicit path bundles (MPLS-style routing).
-  //
-  // One flow is created per USABLE bundle at the next placement, in supply order,
-  // each permanently bound to its own bundle. A single-path bundle (e.g. from
-  // make_path_dag / PredDAG.from_edges or ksp) models a strict-ERO LSP: any failed
-  // hop takes it down. A multi-walk bundle (e.g. an SPF DAG) models a pinned DAG /
-  // SR-TE-style policy that renormalizes over its surviving walks.
-  //
-  // Each bundle is validated against the policy's graph (shape, id ranges,
-  // edge-endpoint consistency, acyclicity, and an src->dst walk), then pruned
-  // against the policy's node/edge masks. A bundle with no surviving src->dst walk
-  // is DOWN: it creates no flow and carries nothing (a pinned path does not
-  // reroute around failures). Each flow's cost is the min-cost src->dst walk of
-  // its PRUNED bundle, computed from the graph's edge costs.
-  //
-  // With static paths configured the policy neither creates additional flows nor
-  // reoptimizes: max_path_cost, max_path_cost_factor, min_flow_count and
-  // reoptimize_flows_on_each_placement are inert. EqualBalanced spreads over the
-  // usable (up) bundles only and equalizes the carried volume per bundle;
-  // EqualBalancedLossy offers each up bundle an equal
-  // share and lets it carry what fits (no equalizing rebalance), so placed is the
-  // delivered total. flow_count() reports the usable count U; the supplied count
-  // N is the caller's, so down LSPs = N - flow_count().
-  //
-  // Throws std::invalid_argument if bundles is empty, the policy already holds
-  // flows (remove_demand() first), shortest_path=true is configured (single-
-  // augmentation IP semantics contradict pinned multi-LSP placement), src/dst is
-  // invalid or src == dst, a user-supplied max_flow_count differs from
-  // bundles.size(), or any bundle is malformed. Calling again before placement
-  // replaces the previous pinning.
-  void set_static_paths(NodeId src, NodeId dst, std::vector<PredDAG> bundles);
+  // volume: units, nullopt is +inf.
+  PlacementResult place(std::optional<Amount> volume, const OutputOptions& outputs = {});
+  void remove();
+  // The sum of delivered over this policy's live records.
+  [[nodiscard]] Amount placed_demand() const;
+  // This policy's live records as snapshots in FlowId order.
+  [[nodiscard]] std::vector<FlowRecord> records() const;
+  // One of this policy's live records; a FlowId of another ledger or policy, a retired or an
+  // unknown id throws std::invalid_argument.
+  [[nodiscard]] FlowRecord record(const FlowId& flow_id) const;
+  // Pinned: the number of bundles with a src -> dst walk after static pruning; 0 otherwise.
+  [[nodiscard]] std::int32_t usable_bundles() const noexcept;
+  // The configuration (a copy taken at construction).
+  [[nodiscard]] const FlowPolicyConfig& config() const noexcept;
 
 private:
-  // Helpers
-  // Throws std::invalid_argument if fg wraps a different graph than this policy, or if
-  // (src, dst) differs from the demand already managed here. `what` names the caller.
-  void check_demand_target(const FlowGraph& fg, NodeId src, NodeId dst, const char* what) const;
-  // Placement core: target computation, flow creation, round-robin placement, and
-  // the optional post-placement reoptimization. The public place_demand() wraps it
-  // with the iterative EqualBalanced rebalance rounds.
-  [[nodiscard]] std::pair<double,double> place_demand_body(FlowGraph& fg,
-                                             NodeId src, NodeId dst,
-                                             FlowClass flowClass,
-                                             double volume,
-                                             std::optional<double> target_per_flow,
-                                             std::optional<double> min_flow);
-  [[nodiscard]] std::optional<std::pair<PredDAG, Cost>> get_path_bundle(const FlowGraph& fg,
-                                                          NodeId src, NodeId dst,
-                                                          std::optional<double> min_flow);
-  [[nodiscard]] FlowRecord* create_flow(FlowGraph& fg, NodeId src, NodeId dst, FlowClass flowClass,
-                    std::optional<double> min_flow);
-  [[nodiscard]] FlowRecord* reoptimize_flow(FlowGraph& fg, const FlowIndex& idx, double headroom);
-
-  // Config
-  ExecutionContext ctx_;
-  PathAlg path_alg_ { PathAlg::SPF };
-  FlowPlacement flow_placement_ { FlowPlacement::Proportional };
-  EdgeSelection selection_ { EdgeSelection{} };
-  bool require_capacity_ { true };
-  bool multipath_ { true };
-  bool shortest_path_ { false };
-  int min_flow_count_ { 1 };
-  std::optional<int> max_flow_count_ {};
-  std::optional<Cost> max_path_cost_ {};
-  std::optional<double> max_path_cost_factor_ {};
-  bool reoptimize_flows_on_each_placement_ { false };
-  int max_no_progress_iterations_ { 100 };
-  int max_total_iterations_ { 10000 };
-  bool diminishing_returns_enabled_ { true };
-  int diminishing_returns_window_ { 8 };
-  double diminishing_returns_epsilon_frac_ { 1e-3 };
-
-  // Mask storage and views for failure exclusions
-  std::unique_ptr<bool[]> node_mask_storage_;
-  std::unique_ptr<bool[]> edge_mask_storage_;
-  std::span<const bool> node_mask_ {};
-  std::span<const bool> edge_mask_ {};
-
-  // State
-  std::unordered_map<FlowIndex, FlowRecord, FlowIndexHash> flows_;
-  Cost best_path_cost_ { std::numeric_limits<Cost>::max() };
-  FlowId next_flow_id_ { 0 };
-
-  // Memo of recent raw SPF results computed by get_path_bundle(), used only in
-  // EqualBalanced mode. SPF is a pure function of (graph, selection, multipath,
-  // node_mask, src, dst, residual, edge_mask); in EB mode everything except
-  // (src, dst, residual, min_flow) is fixed for the lifetime of the policy (the
-  // min_flow-derived edge mask is Proportional-only), so those four ARE the key.
-  // EB placement and rebalance rounds re-request bundles against residual
-  // content that repeats -- 94% of SPF calls in a measured place/rebalance
-  // cycle were exact input repeats, largely remove+place round-trips that
-  // restore identical bytes -- and the memo elides those calls without changing
-  // any output. Matching is exact: a (uid, version) StateStamp equality is the
-  // fast path (unchanged FlowGraph implies unchanged content), with a full
-  // residual memcmp as the content path (catches the round-trips). Proportional
-  // mode measured 0% repeats, so it skips the memo and pays nothing. Cost gates
-  // and best_path_cost_ updates still run on every call, hit or miss: they
-  // depend on mutable policy state.
-  struct SpfMemoEntry {
-    NodeId src = -1, dst = -1;
-    bool with_residual = false;
-    FlowGraph::StateStamp stamp {0, 0};
-    std::vector<Cap> residual;  // key copy; empty when SPF ran residual-blind
-    bool has_min_flow = false;  // toggles require_residual; the value is Proportional-only
-    PredDAG dag;
-    Cost dst_cost = 0;
-  };
-  // MRU order: front = most recent. Entry count adapts to graph size so the
-  // memo stays under ~512 KiB per policy regardless of edge count.
-  static constexpr std::size_t kSpfMemoMaxEntries = 24;
-  static constexpr std::size_t kSpfMemoMaxBytes = 512 * 1024;
-  std::vector<SpfMemoEntry> spf_memo_;
-
-  // Static paths (optional): usable (mask-pruned) bundles, one flow per bundle.
-  struct StaticBundle {
-    PredDAG dag;   // pruned to mask-surviving entries
-    Cost cost {0}; // min-cost src->dst walk within the pruned bundle
-  };
-  NodeId static_src_ {-1};
-  NodeId static_dst_ {-1};
-  int static_supplied_count_ {0};  // N as supplied; usable U = static_bundles_.size()
-  std::vector<StaticBundle> static_bundles_;
-
-  [[nodiscard]] bool has_static_paths() const noexcept { return !static_bundles_.empty() || static_supplied_count_ > 0; }
+  friend struct detail::PolicyAccess;
+  // Construction inside another public call (an evaluator): a supplied frozen cache's hits are
+  // recorded in that call's tally.
+  FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
+             FlowPolicyConfig config, const Eligibility* elig, DagCache* cache, detail::FrozenTally& tally);
+  std::unique_ptr<detail::PolicyEngine> engine_;
 };
 
 } // namespace netgraph::core

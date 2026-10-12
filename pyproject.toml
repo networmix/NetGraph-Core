@@ -1,14 +1,19 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "pybind11>=3", "numpy>=1.23.2"]
+# scikit-build-core 1.0 introduced the "explicit" sdist file selection used below. pybind11 is
+# pinned: the wheel ships its licence notice (third_party/pybind11/LICENSE, this version's) and
+# CMakeLists.txt requires the same version. NumPy is a run-time dependency only.
+requires = ["scikit-build-core>=1.0", "pybind11==3.1.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "netgraph-core"
-version = "0.11.0"
+version = "0.12.0"
 description = "C++ implementation of graph algorithms for network flow analysis and traffic engineering with Python bindings"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+# The wheel contains compiled pybind11 code, whose BSD-3-Clause licence asks for its notice.
+license-files = ["LICENSE", "third_party/pybind11/LICENSE"]
 authors = [{ name = "Project Contributors" }]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -31,11 +36,11 @@ dependencies = ["numpy>=1.23.2"]
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
-    "pytest-cov",
-    "pytest-benchmark",
-    "gcovr>=7",
     "ruff==0.11.13",
     "pyright==1.1.401",
+    # Generates python/netgraph_core/__init__.pyi (bash dev/stubs/run.sh generate); a new
+    # version can change the generated text, so it is pinned and updated deliberately.
+    "pybind11-stubgen==3.0.0",
     "pre-commit",
     "build",
     "twine",
@@ -50,17 +55,75 @@ Homepage = "https://github.com/networmix/NetGraph-Core"
 wheel.expand-macos-universal-tags = true
 build-dir = "build/{wheel_tag}"
 cmake.version = ">=3.23"
-# Developer tooling and research records are not part of the distribution.
-sdist.exclude = ["dev/"]
-# Include Python sources from the "python/" directory
+# The sdist holds exactly the files listed here ("explicit": nothing outside them is taken, so a
+# local file elsewhere in the checkout never ships): the build's sources, the package, the tests
+# with their data, the documents and the licence notices. Left out: the developer tooling (dev/),
+# the entrypoints that only run it (the Makefile, the CI workflows, the pre-commit
+# configuration), the agent/workspace configuration, and the frozen reference that regenerates
+# tests/data/policy_fixtures.json (tests/reference/, see its README; no test reads it). Release
+# CI runs the same commit's tests from its checkout against an installation built from the
+# sdist. This mode does not read .gitignore, so the local by-products it names that appear
+# inside the listed directories (Python caches, compiled modules, Finder files, the backup and
+# reject files of `patch`) are excluded here. The wheel takes its package files
+# (python/netgraph_core) by the same rule.
+# dev/stubs/check_contents.py repeats the list and refuses any other file, and any file git
+# ignores.
+sdist.inclusion-mode = "explicit"
+sdist.include = [
+    "/.coveragerc",
+    "/.gitignore",
+    "/CHANGELOG.md",
+    "/CMakeLists.txt",
+    "/CONTRIBUTING.md",
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+    "/bindings/",
+    "/docs/",
+    "/include/",
+    "/python/",
+    "/src/",
+    "/tests/",
+    "/third_party/",
+]
+sdist.exclude = [
+    "/tests/reference/",
+    "__pycache__/",
+    "*.py[codz]",
+    "*.so",
+    ".DS_Store",
+    "*.orig",
+    "*.rej",
+]
+# The package directory ships whole: __init__.py, the generated type stub __init__.pyi and the
+# py.typed marker (dev/stubs/run.sh check lists the wheel and the sdist and requires them).
 wheel.packages = ["python/netgraph_core"]
 
+# Every project option is stated for every build: the build directory above is shared, CMake keeps
+# an option's cached value when a later configure does not name it, and so a coverage, native or
+# hooks setting of one build would otherwise leak into the next. A variant overrides one value on
+# the command line (`pip install -C cmake.define.NETGRAPH_CORE_NATIVE=ON ...`, see the Makefile).
 [tool.scikit-build.cmake.define]
-# No optional backends yet; defaults are built-in CPU-only
+NETGRAPH_CORE_PRIVATE_HOOKS = "OFF"
+NETGRAPH_CORE_BUILD_TESTS = "OFF"
+NETGRAPH_CORE_COVERAGE = "OFF"
+NETGRAPH_CORE_SANITIZE = "OFF"
+NETGRAPH_CORE_TSAN = "OFF"
+NETGRAPH_CORE_NATIVE = "OFF"
+
+[[tool.scikit-build.overrides]]
+# The editable development build carries the private test hooks (CMake option
+# NETGRAPH_CORE_PRIVATE_HOOKS); a wheel or sdist build does not. "append": the override changes
+# this one value and keeps the other explicit defaults above (it would otherwise replace them).
+if.state = "^editable$"
+inherit.cmake.define = "append"
+cmake.define.NETGRAPH_CORE_PRIVATE_HOOKS = "ON"
 
 [tool.pytest.ini_options]
 addopts = "-q"
-markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+# pytest without arguments collects the repository tests only, not the timing tool's own tests
+# (dev/perf/test_tool.py, run by make perf-tool-test).
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 88
@@ -91,6 +154,3 @@ exclude = [
     "**/*.egg-info/**",
 ]
 reportMissingTypeStubs = "warning"
-reportUnknownMemberType = "none"
-reportUnknownVariableType = "none"
-reportUnknownArgumentType = "none"
