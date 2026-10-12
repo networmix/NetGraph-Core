@@ -1,14 +1,14 @@
 # NetGraph-Core Development Makefile
 
-.PHONY: help venv clean-venv dev install install-native install-pgo check check-ci lint format test qt build clean check-dist publish-test publish info hooks check-python cpp-test cov sanitize-test tsan-test rebuild
+.PHONY: help venv clean-venv dev install install-native check check-ci lint format test build clean check-dist publish-test publish info hooks check-python cpp-test cpp-test-off cov sanitize-test tsan-test stubs-check rebuild
 
 .DEFAULT_GOAL := help
 
 # --------------------------------------------------------------------------
 # Python interpreter detection
 # --------------------------------------------------------------------------
-# VENV_BIN: path to local virtualenv bin directory
-VENV_BIN := $(PWD)/venv/bin
+# VENV_BIN: the checkout's virtualenv bin directory (CURDIR is the directory make runs in, -C included)
+VENV_BIN := $(CURDIR)/venv/bin
 
 # PY_BEST: scan for newest supported Python (used when creating new venvs)
 # Supports 3.11-3.14 to match requires-python >=3.11
@@ -41,23 +41,26 @@ help:
 	@echo "Setup & Installation:"
 	@echo "  make venv          - Create a local virtualenv (./venv)"
 	@echo "  make dev           - Full development environment (package + dev deps + hooks)"
-	@echo "  make install       - Install package (default optimizations: LTO, loop unrolling)"
+	@echo "  make install       - Install package (editable, private hooks; LTO, loop unrolling)"
 	@echo "  make install-native - Install with CPU-specific optimizations (faster, not portable)"
-	@echo "  make install-pgo   - Profile-guided optimization (two-phase build, experimental)"
 	@echo "  make clean-venv    - Remove virtual environment"
 	@echo "  make rebuild       - Clean and rebuild (respects CMAKE_ARGS)"
 	@echo ""
 	@echo "Code Quality & Testing:"
-	@echo "  make check         - Run pre-commit (auto-fix) + C++/Python tests, then lint"
-	@echo "  make check-ci      - Run non-mutating lint + tests (CI entrypoint)"
+	@echo "  make check         - Rebuild the editable extension, then everything check-ci runs"
+	@echo "  make check-ci      - Lint, fixture data check, C++ tests (hooks on and off), Python tests"
+	@echo "                       (the CI entrypoint)"
+	@echo "                       (check and check-ci only verify: they never edit a file)"
 	@echo "  make lint          - Run only linting (non-mutating: ruff + pyright)"
-	@echo "  make format        - Auto-format code with ruff"
+	@echo "  make format        - Auto-format code with ruff (edits files)"
 	@echo "  make test          - Run Python tests (pytest)"
-	@echo "  make qt            - Run quick tests only (exclude slow/benchmark)"
-	@echo "  make cpp-test      - Build and run C++ tests"
-	@echo "  make cov           - Coverage summary + XML + single-page combined HTML"
+	@echo "  make cpp-test      - Build and run C++ tests (private hooks on)"
+	@echo "  make cpp-test-off  - Build and run C++ tests without the hooks (the shipped configuration)"
+	@echo "  make cov           - Coverage (own venv and builds) + XML + single-page combined HTML"
 	@echo "  make sanitize-test - Build and run C++ tests with sanitizers"
 	@echo "  make tsan-test     - Build and run C++ tests with ThreadSanitizer"
+	@echo "  make stubs-check   - Type stub: drift, wheel/sdist contents, typed clients (own venvs)"
+	@echo "                       (regenerate the stub: bash dev/stubs/run.sh generate)"
 	@echo ""
 	@echo "Build & Package:"
 	@echo "  make build         - Build distribution packages"
@@ -68,7 +71,7 @@ help:
 	@echo ""
 	@echo "Utilities:"
 	@echo "  make info          - Show project information"
-	@echo "  make hooks         - Run pre-commit on all files"
+	@echo "  make hooks         - Run pre-commit on all files (applies its fixes)"
 	@echo "  make check-python  - Check if venv Python matches best available"
 
 # Allow callers to pass CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET consistently
@@ -121,57 +124,39 @@ install:
 	@echo "📦 Installing package (editable, default optimizations)"
 	@$(DEV_ENV) $(PIP) install -e .
 
+# The project options are stated in pyproject.toml for every build; a variant overrides one of them
+# with -C (a config setting), so it cannot stay in the shared build directory's cache.
 install-native:
 	@echo "📦 Installing with native CPU optimizations (-march=native)"
 	@echo "   Note: Binary will only work on this CPU architecture"
-	@$(ENV_MACOS) $(ENV_CC) $(ENV_CXX) CMAKE_ARGS="$(strip $(CMAKE_ARGS) -DNETGRAPH_CORE_NATIVE=ON)" $(PIP) install -e .
+	@$(DEV_ENV) $(PIP) install -e . -C cmake.define.NETGRAPH_CORE_NATIVE=ON
 
-# PGO profile stored outside build/ so it survives rebuild
-PGO_DIR := $(PWD)/.pgo-profile
-
-install-pgo:
-	@echo "📦 PGO Build Phase 1/3: Instrumenting..."
-	@rm -rf build/ $(PGO_DIR)
-	@mkdir -p $(PGO_DIR)
-	@$(ENV_MACOS) $(ENV_CC) $(ENV_CXX) CMAKE_ARGS="$(strip $(CMAKE_ARGS) -DNETGRAPH_CORE_PGO_GENERATE=ON -DNETGRAPH_CORE_PGO_DIR=$(PGO_DIR) -DNETGRAPH_CORE_NATIVE=ON)" $(PIP) install -e .
-	@echo "📦 PGO Build Phase 2/3: Collecting profile (running the Python test suite)..."
-	@$(PYTEST) -q tests/py >/dev/null 2>&1
-	@# Clang: merge raw profiles into .profdata (profile may be in cwd or PGO_DIR)
-	@if ls $(PGO_DIR)/*.profraw >/dev/null 2>&1; then \
-		echo "   Merging Clang profile data..."; \
-		xcrun llvm-profdata merge -output=$(PGO_DIR)/default.profdata $(PGO_DIR)/*.profraw 2>/dev/null || \
-		llvm-profdata merge -output=$(PGO_DIR)/default.profdata $(PGO_DIR)/*.profraw; \
-	elif ls *.profraw >/dev/null 2>&1; then \
-		mv *.profraw $(PGO_DIR)/; \
-		xcrun llvm-profdata merge -output=$(PGO_DIR)/default.profdata $(PGO_DIR)/*.profraw 2>/dev/null || \
-		llvm-profdata merge -output=$(PGO_DIR)/default.profdata $(PGO_DIR)/*.profraw; \
-	fi
-	@echo "📦 PGO Build Phase 3/3: Rebuilding with profile data..."
-	@rm -rf build/
-	@$(ENV_MACOS) $(ENV_CC) $(ENV_CXX) CMAKE_ARGS="$(strip $(CMAKE_ARGS) -DNETGRAPH_CORE_PGO_USE=ON -DNETGRAPH_CORE_PGO_DIR=$(PGO_DIR) -DNETGRAPH_CORE_NATIVE=ON)" $(PIP) install -e .
-	@echo "✅ PGO build complete"
-
+# Verification only: neither target edits a file (make format and make hooks apply fixes).
 check:
-	@PYTHON=$(PYTHON) bash dev/run-checks.sh
+	@$(MAKE) install
+	@$(MAKE) check-ci
 
+# The fixture data check: tests/data/policy_fixtures.json still equals what its frozen reference
+# computes (tests/reference/policy/README.md; standard library only; -B writes no __pycache__).
 check-ci:
 	@$(MAKE) lint
+	@$(PYTHON) -I -B tests/reference/policy/export_policy_fixtures.py --check
 	@$(MAKE) cpp-test
-	@$(MAKE) test
+	@$(MAKE) cpp-test-off
+	@PYTHON=$(PYTHON) bash dev/run-checks.sh pytest on
 
+# Pyright resolves imports (NumPy in the type stub, the extension) through the interpreter it
+# is given; without --pythonpath it would take whichever python3 comes first on PATH.
 lint:
 	@$(RUFF) format --check .
 	@$(RUFF) check .
-	@$(PYTHON) -m pyright
+	@$(PYTHON) -m pyright --pythonpath "$$($(PYTHON) -c 'import sys; print(sys.executable)')"
 
 format:
 	@$(RUFF) format .
 
 test:
 	@$(PYTEST)
-
-qt:
-	@$(PYTEST) --no-cov -m "not slow and not benchmark"
 
 build:
 	@echo "🏗️  Building distribution packages..."
@@ -212,8 +197,7 @@ publish:
 clean:
 	@echo "🧹 Cleaning build artifacts and cache files..."
 	@rm -rf build/ dist/ *.egg-info/ || true
-	@rm -rf .pytest_cache .ruff_cache .mypy_cache htmlcov htmlcov-python .coverage coverage.xml coverage-*.xml .benchmarks .pytest-benchmark || true
-	@rm -rf Testing CTestTestfile.cmake || true
+	@rm -rf .pytest_cache .ruff_cache || true
 	@find . -path "./venv" -prune -o -type f -name "*.pyc" -delete 2>/dev/null || true
 	@find . -path "./venv" -prune -o -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	@find . -path "./venv" -prune -o -type f -name "*.pyo" -delete 2>/dev/null || true
@@ -247,40 +231,22 @@ hooks:
 cpp-test:
 	@PATH="$(VENV_BIN):$$PATH" bash dev/cpp-tests.sh release
 
+cpp-test-off:
+	@PATH="$(VENV_BIN):$$PATH" bash dev/cpp-tests.sh off
+
+# The summary script's own rules first (its refusals make a failed measurement fail; no build).
 cov:
-	@echo "📦 Reinstalling with C++ coverage instrumentation..."
-	@$(PIP) install -U scikit-build-core "pybind11>=2.11"
-	@PIP_NO_BUILD_ISOLATION=1 CMAKE_ARGS="-DNETGRAPH_CORE_COVERAGE=ON" $(PIP) install -e .'[dev]'
-	@echo "🧪 Running Python tests with coverage..."
-	@mkdir -p build/coverage
-	@$(PYTEST) --cov=netgraph_core --cov-report=term-missing --cov-report=xml:build/coverage/coverage-python.xml
-	@echo "🛠️  Building and running C++ tests with coverage..."
-	@BUILD_DIR="build/cpp-tests-cov"; \
-		mkdir -p "$$BUILD_DIR"; \
-		GEN_ARGS=""; \
-		if command -v ninja >/dev/null 2>&1; then GEN_ARGS="-G Ninja"; fi; \
-		cmake -S . -B "$$BUILD_DIR" -DNETGRAPH_CORE_BUILD_TESTS=ON -DNETGRAPH_CORE_PRIVATE_HOOKS=ON -DNETGRAPH_CORE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug $$GEN_ARGS; \
-		cmake --build "$$BUILD_DIR" --config Debug -j; \
-		ctest --test-dir "$$BUILD_DIR" --output-on-failure || echo "⚠️  Some C++ tests failed (continuing for coverage)"
-	@echo "📈 Generating C++ coverage XML (gcovr)..."
-	@$(PYTHON) -m gcovr --root . \
-		--object-directory build \
-		--object-directory build/cpp-tests-cov \
-		--filter 'include/netgraph' --filter 'src' --exclude 'tests' --exclude 'bindings/.*' --exclude '.*pybind11.*' --exclude '_deps/pybind11-src/.*' \
-		--gcov-ignore-errors=all \
-		--gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
-		--xml-pretty -o build/coverage/coverage-cpp.xml
-	@echo ""
-	@echo "================ Python + C++ coverage (summary) ================"
-	@$(PYTHON) dev/coverage_summary.py build/coverage/coverage-python.xml build/coverage/coverage-cpp.xml --html=build/coverage/coverage-combined.html
-	@echo ""
-	@echo "✅ Coverage ready in build/coverage/: coverage-python.xml, coverage-cpp.xml, coverage-combined.html"
+	@$(PYTHON) -I -B dev/test_coverage_summary.py
+	@PYTHON=$(PYTHON) bash dev/run-checks.sh cov
 
 sanitize-test:
 	@PATH="$(VENV_BIN):$$PATH" bash dev/cpp-tests.sh sanitize
 
 tsan-test:
 	@PATH="$(VENV_BIN):$$PATH" bash dev/cpp-tests.sh tsan
+
+stubs-check:
+	@PYTHON=$(PYTHON) bash dev/stubs/run.sh check
 
 # Clean + reinstall in dev mode (respects CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET)
 # Uses active PYTHON (venv or PATH) to avoid environment mismatches

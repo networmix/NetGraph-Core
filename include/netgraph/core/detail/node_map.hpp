@@ -20,12 +20,8 @@ namespace netgraph::core::detail {
 // use. One instance per thread (`local()`); not reentrant: a caller holding it must not call
 // another routine that uses it.
 //
-// reset() sizes both arrays for the graph, so add() never allocates: it is a few instructions,
-// noexcept and inlined into the callers' per-edge loops. An out-of-line add() (it grew its list
-// with push_back) saved and restored callee-saved registers on every call, and in some process
-// layouts those stack reloads stalled: the flow core's subset solve then ran about 1.45 times
-// slower for a whole process (the bimodal `kernel.proportional.grid` blocks; NOTES
-// "Bimodality").
+// reset() sizes both arrays for the graph, so add() never allocates and is noexcept.
+// Keep add() inline: it runs in the callers' per-edge loops, where call overhead matters.
 class NodeMap {
 public:
   void reset(std::size_t num_nodes) {

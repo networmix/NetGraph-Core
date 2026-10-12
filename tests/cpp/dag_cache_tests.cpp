@@ -1,16 +1,21 @@
-// The DagCache's modes (APPROACH 10): the transition table (building and frozen lookups, freeze,
-// clear, thaw, destruction), the statistics (a frozen miss counts one miss), DagCacheMiss as a
-// dedicated exception, frozen hits from several threads, and the evaluators' sharing rules
-// (section 11): a frozen cache shared by every worker, a building one rejected with two or more,
-// DagCacheMiss propagated unchanged through batch_capacity and sensitivity, the reuse of a
-// prepopulated Eligibility through an unchanged intersection, and the deletion-mode sensitivity
-// with a supplied frozen cache. The thread cases are named DagCacheFrozen* (the TSan filter).
+// The DagCache's modes: the transition table (building and frozen lookups, freeze, clear, thaw,
+// destruction), the statistics (a frozen miss counts one miss), roots in any order sharing one
+// entry and one validation, the key (a policy's selection is not part of it, the Eligibility uid
+// is) and clear() releasing the values nobody holds, DagCacheMiss as a dedicated exception, frozen
+// hits from several threads, and the evaluators' sharing rules: a frozen cache shared by every
+// worker, a building one rejected with two or more, DagCacheMiss propagated unchanged through
+// batch_capacity and sensitivity, the reuse of a prepopulated Eligibility through an unchanged
+// intersection, the deletion-mode sensitivity (Global: each deletion repaired from the baseline's
+// state) with a supplied frozen cache; a failed call's statistics, and concurrent calls and
+// publications that lose no hit. The thread cases form the suite DagCacheFrozen; make tsan-test
+// runs them under ThreadSanitizer with every other test.
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <latch>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -27,6 +32,8 @@
 using namespace netgraph::core;
 using namespace netgraph::core::test;
 
+// DagCacheMiss is its own exception, neither a std::runtime_error nor a std::logic_error (a frozen
+// miss is thrown as one: miss_of in the tests below).
 static_assert(!std::is_base_of_v<std::runtime_error, DagCacheMiss>);
 static_assert(!std::is_base_of_v<std::logic_error, DagCacheMiss>);
 static_assert(std::is_base_of_v<std::exception, DagCacheMiss>);
@@ -46,18 +53,6 @@ std::shared_ptr<const Graph> fabric() {
   return std::make_shared<const Graph>(make_graph(9, e));
 }
 
-std::vector<NodeId> v(std::initializer_list<NodeId> x) { return x; }
-
-FlowPolicyConfig costonly() {
-  return FlowPolicyConfig {CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossless,
-                           PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Capacity)};
-}
-
-FlowPolicyConfig global() {
-  return FlowPolicyConfig {Global {}, FlowPlacement::MaxFlow, Admission::Lossless,
-                           PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Capacity)};
-}
-
 std::string miss_of(const std::function<void()>& fn) {
   try {
     fn();
@@ -65,6 +60,17 @@ std::string miss_of(const std::function<void()>& fn) {
     return e.what();
   }
   return "";
+}
+
+// The bytes a DAG's stored arrays hold, from its public arrays: k nodes with entries and e
+// entries store the k nodes, k + 1 offsets, e parents, e via edges and their ascending copy, all
+// 32-bit values.
+std::int64_t stored_bytes(const PredDAG& d) {
+  const auto off = d.parent_offsets();
+  std::int64_t k = 0;
+  for (std::size_t i = 0; i + 1 < off.size(); ++i) k += off[i + 1] > off[i] ? 1 : 0;
+  const auto e = static_cast<std::int64_t>(d.via_edges().size());
+  return 4 * (k + (k + 1) + e + e + e);
 }
 
 } // namespace
@@ -80,6 +86,28 @@ TEST(DagCacheModes, TransitionTableAndStatistics) {
   EXPECT_EQ(st.misses, 1);
   EXPECT_EQ(st.hits, 1);
   EXPECT_EQ(st.entries, 1);
+  EXPECT_EQ(st.bytes, stored_bytes(*a));
+  // Invalid queries throw std::invalid_argument, each with its own message, and change no
+  // statistic, while building here and while frozen below: a foreign graph, an Eligibility built
+  // for another graph (the same roots and direction as a stored entry), empty roots, a root out of
+  // range, a direction outside its enumeration (with the roots of a stored entry).
+  const auto other = fabric();
+  const auto foreign = other->eligibility(v({}), std::vector<EdgeId> {0});
+  auto invalid_queries_count_nothing = [&](const char* mode) {
+    const auto before = cache.stats();
+    EXPECT_EQ(error_of([&] { (void)cache.lookup(*other, v({0}), Direction::Reverse, nullptr); }),
+              "DagCache: the graph is not the cache's graph (foreign graph)") << mode;
+    EXPECT_EQ(error_of([&] { (void)cache.lookup(*g, v({0, 1}), Direction::Reverse, &foreign); }),
+              "foreign Eligibility: built for another graph") << mode;
+    EXPECT_EQ(error_of([&] { (void)cache.lookup(*g, v({}), Direction::Reverse, nullptr); }), "roots: the node set is empty")
+        << mode;
+    EXPECT_EQ(error_of([&] { (void)cache.lookup(*g, v({9}), Direction::Reverse, nullptr); }),
+              "roots: node 9 out of node range [0, 9)") << mode;
+    EXPECT_EQ(error_of([&] { (void)cache.lookup(*g, v({0, 1}), static_cast<Direction>(9), nullptr); }),
+              "direction: 9 is not a value of Direction") << mode;
+    EXPECT_EQ(stats_of(cache.stats()), stats_of(before)) << mode;
+  };
+  invalid_queries_count_nothing("building");
   // Frozen: hits return the value; a miss counts one miss, inserts nothing, throws DagCacheMiss.
   cache.freeze();
   cache.freeze();  // idempotent
@@ -91,27 +119,17 @@ TEST(DagCacheModes, TransitionTableAndStatistics) {
   EXPECT_EQ(st.misses, 2);
   EXPECT_EQ(st.hits, 2);
   EXPECT_EQ(st.entries, 1);
-  // Invalid queries throw std::invalid_argument and count nothing, in frozen mode too.
-  const auto other = fabric();
-  EXPECT_THROW((void)cache.lookup(*other, v({0}), Direction::Reverse, nullptr), std::invalid_argument);
-  EXPECT_THROW((void)cache.lookup(*g, v({}), Direction::Reverse, nullptr), std::invalid_argument);
-  EXPECT_THROW((void)cache.lookup(*g, v({9}), Direction::Reverse, nullptr), std::invalid_argument);
-  EXPECT_EQ(cache.stats().misses, 2);
-  EXPECT_EQ(cache.stats().hits, 2);
+  invalid_queries_count_nothing("frozen");
   // clear() throws when frozen and keeps the entries.
-  try {
-    cache.clear();
-    FAIL() << "clear() on a frozen cache";
-  } catch (const std::invalid_argument& e) {
-    EXPECT_EQ(std::string(e.what()),
-              "DagCache.clear is rejected while the cache is frozen (join every reader, then thaw() and clear())");
-  }
+  EXPECT_EQ(error_of([&] { cache.clear(); }),
+            "DagCache.clear is rejected while the cache is frozen (join every reader, then thaw() and clear())");
   EXPECT_EQ(cache.stats().entries, 1);
   // thaw(): building again; a miss searches and inserts, clear() empties (counters persist).
   cache.thaw();
   cache.thaw();  // no effect when building
   const auto b = cache.lookup(*g, v({2}), Direction::Forward, nullptr);
   EXPECT_EQ(cache.stats().entries, 2);
+  EXPECT_EQ(cache.stats().bytes, stored_bytes(*a) + stored_bytes(*b));
   cache.clear();
   st = cache.stats();
   EXPECT_EQ(st.entries, 0);
@@ -135,7 +153,7 @@ TEST(DagCacheModes, TransitionTableAndStatistics) {
 }
 
 TEST(DagCacheModes, RootsInAnyOrderShareOneEntryAndOneValidation) {
-  // Task 1d-msd: a lookup borrows roots that are already a sorted set (no copy on a hit) and
+  // A lookup borrows roots that are already a sorted set (no copy on a hit) and
   // normalises any other; either way the key is the sorted set, ordered by roots, then direction,
   // then Eligibility uid, and the checks and their messages are node_set's.
   const auto g = fabric();
@@ -171,22 +189,17 @@ TEST(DagCacheModes, RootsInAnyOrderShareOneEntryAndOneValidation) {
   EXPECT_EQ(cache.stats().hits, 4 + static_cast<std::int64_t>(keys.size()));
   // The checks in node_set's order, sorted or not: empty, then the first id out of range in input
   // order; nothing counted.
-  auto error_of = [&](std::vector<NodeId> roots) {
-    try {
-      (void)cache.lookup(*g, roots, Direction::Reverse, nullptr);
-    } catch (const std::invalid_argument& e) {
-      return std::string(e.what());
-    }
-    return std::string();
+  auto lookup_error = [&](const std::vector<NodeId>& roots) {
+    return error_of([&] { (void)cache.lookup(*g, roots, Direction::Reverse, nullptr); });
   };
   const auto before = cache.stats();
-  EXPECT_EQ(error_of(v({9})), "roots: node 9 out of node range [0, 9)");
-  EXPECT_EQ(error_of(v({3, 9})), "roots: node 9 out of node range [0, 9)");
-  EXPECT_EQ(error_of(v({9, 3})), "roots: node 9 out of node range [0, 9)");
-  EXPECT_EQ(error_of(v({-1, 9})), "roots: node -1 out of node range [0, 9)");
-  EXPECT_EQ(error_of(v({9, -1})), "roots: node 9 out of node range [0, 9)");
-  EXPECT_EQ(error_of(v({3, 3, 12})), "roots: node 12 out of node range [0, 9)");
-  EXPECT_FALSE(error_of(v({})).empty());
+  EXPECT_EQ(lookup_error(v({9})), "roots: node 9 out of node range [0, 9)");
+  EXPECT_EQ(lookup_error(v({3, 9})), "roots: node 9 out of node range [0, 9)");
+  EXPECT_EQ(lookup_error(v({9, 3})), "roots: node 9 out of node range [0, 9)");
+  EXPECT_EQ(lookup_error(v({-1, 9})), "roots: node -1 out of node range [0, 9)");
+  EXPECT_EQ(lookup_error(v({9, -1})), "roots: node 9 out of node range [0, 9)");
+  EXPECT_EQ(lookup_error(v({3, 3, 12})), "roots: node 12 out of node range [0, 9)");
+  EXPECT_EQ(lookup_error(v({})), "roots: the node set is empty");
   const auto after = cache.stats();
   EXPECT_EQ(after.misses, before.misses);
   EXPECT_EQ(after.hits, before.hits);
@@ -200,27 +213,49 @@ TEST(DagCacheModes, RootsInAnyOrderShareOneEntryAndOneValidation) {
   EXPECT_EQ(cache.stats().misses, 11);
 }
 
-TEST(DagCacheModes, MissIsADedicatedException) {
-  const auto g = fabric();
+TEST(DagCacheModes, SelectionIsNoPartOfTheKeyAndClearReleasesUnheldValues) {
+  // Two disjoint routes 0 -> 1 -> 3 and 0 -> 2 -> 3. EdgeIds: 0 = 0->1, 1 = 0->2, 2 = 1->3, 3 = 2->3.
+  const auto g = std::make_shared<const Graph>(make_graph(4, {{0, 1, 5, 1}, {1, 3, 5, 1}, {0, 2, 5, 1}, {2, 3, 5, 1}}));
   DagCache cache(*g);
-  cache.freeze();
-  bool as_miss = false;
-  try {
-    (void)cache.lookup(*g, v({0}), Direction::Reverse, nullptr);
-  } catch (const std::runtime_error&) {
-    FAIL() << "DagCacheMiss caught as std::runtime_error";
-  } catch (const std::logic_error&) {
-    FAIL() << "DagCacheMiss caught as std::logic_error";
-  } catch (const DagCacheMiss&) {
-    as_miss = true;
-  }
-  EXPECT_TRUE(as_miss);
+  // Two CostOnly policies differing only in selection share one entry (selection is a
+  // projection at creation, never part of the key).
+  FlowLedger fg(g);
+  FlowPolicy a(fg, v({0}), v({3}), cost_only_config(), nullptr, &cache);
+  auto other_selection = cost_only_config();
+  other_selection.selection = PathSelection(EdgeTieBreak::PreferHigherPriority, EdgePriority::Residual, false, false);
+  FlowPolicy b(fg, v({0}), v({3}), other_selection, nullptr, &cache);
+  auto s = cache.stats();
+  EXPECT_EQ(s.misses, 1);
+  EXPECT_EQ(s.hits, 1);
+  EXPECT_EQ(s.entries, 1);
+  EXPECT_GT(s.bytes, 0);
+  // The Eligibility uid is part of the key: the value under el is the static support without 0 -> 1.
+  const auto x = cache.lookup(*g, v({3}), Direction::Reverse, nullptr);
+  EXPECT_EQ(cache.stats().hits, 2);
+  (void)cache.lookup(*g, v({3}), Direction::Forward, nullptr);  // held by the cache only
+  const auto el = g->eligibility({}, std::vector<EdgeId> {0});
+  const auto y = cache.lookup(*g, v({3}), Direction::Reverse, &el);
+  s = cache.stats();
+  EXPECT_EQ(s.misses, 3);
+  EXPECT_EQ(s.entries, 3);
+  EXPECT_EQ(ascending_edges(*y), (std::vector<EdgeId> {1, 2, 3}));
+  EXPECT_EQ(ascending_edges(*x), (std::vector<EdgeId> {0, 1, 2, 3}));
+  // clear() releases the values nobody else holds: the Forward one dies, x and y stay alive.
+  EXPECT_EQ(cache.stats().live_values, 3);
+  cache.clear();
+  EXPECT_EQ(cache.stats().live_values, 2);
+  EXPECT_EQ(ascending_edges(*x), (std::vector<EdgeId> {0, 1, 2, 3}));
+  // After clear() a lookup misses and inserts again.
+  (void)cache.lookup(*g, v({3}), Direction::Reverse, nullptr);
+  EXPECT_EQ(cache.stats().misses, 4);
+  EXPECT_EQ(cache.stats().entries, 1);
 }
 
 namespace {
 
 // Frozen hits from `threads` threads at once over prepopulated keys; every value is the
-// prepopulated one and every hit is counted.
+// prepopulated one and every hit is counted. The threads start their lookups together, once all
+// of them are running.
 void frozen_readers(int threads) {
   const auto g = fabric();
   DagCache cache(*g);
@@ -231,8 +266,10 @@ void frozen_readers(int threads) {
   std::atomic<int> wrong {0};
   std::vector<std::thread> pool;
   constexpr int kRounds = 200;
+  std::latch start(threads);
   for (int t = 0; t < threads; ++t) {
     pool.emplace_back([&, t] {
+      start.arrive_and_wait();
       for (int round = 0; round < kRounds; ++round) {
         const NodeId r = static_cast<NodeId>((round + t) % 9);
         const NodeId roots[1] = {r};
@@ -258,32 +295,45 @@ TEST(DagCacheFrozen, HitsFromOneThread) { frozen_readers(1); }
 TEST(DagCacheFrozen, HitsFromTwoThreads) { frozen_readers(2); }
 TEST(DagCacheFrozen, HitsFromFourThreads) { frozen_readers(4); }
 
+// A frozen cache shared by every worker of a batch gives the batch without a cache: per pair the
+// placed amount and every output (on this symmetric fabric the amounts alone would not tell the
+// pairs apart: the first three each place the same amount, on different edges).
 TEST(DagCacheFrozen, SharedByEveryWorkerOfABatch) {
   const auto g = fabric();
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {
       {v({0}), v({3})}, {v({1}), v({4})}, {v({2}), v({5})}, {v({0, 1}), v({3, 4})}};
-  const auto want = batch_capacity(*g, pairs, CapacityOptions {costonly()}, {}, 1);
+  const OutputOptions all {true, true, true};
+  const auto want = batch_capacity(*g, pairs, CapacityOptions {cost_only_config(), nullptr, nullptr, all}, {}, 1);
+  for (const auto& r : want) EXPECT_GT(r.placed, 0);  // every pair places: the comparison is not of zeros
   for (int workers : {1, 2, 4}) {
     DagCache cache(*g);
     for (const auto& [s, t] : pairs) (void)cache.lookup(*g, t, Direction::Reverse, nullptr);
     // A building cache with two or more workers is rejected; frozen, it is shared.
     if (workers > 1) {
-      EXPECT_THROW((void)batch_capacity(*g, pairs, CapacityOptions {costonly(), nullptr, &cache}, {}, workers),
-                   std::invalid_argument);
+      EXPECT_THROW(
+          (void)batch_capacity(*g, pairs, CapacityOptions {cost_only_config(), nullptr, &cache, all}, {}, workers),
+          std::invalid_argument);
     }
     cache.freeze();
     const auto before = cache.stats();
-    const auto got = batch_capacity(*g, pairs, CapacityOptions {costonly(), nullptr, &cache}, {}, workers);
+    const auto got = batch_capacity(*g, pairs, CapacityOptions {cost_only_config(), nullptr, &cache, all}, {}, workers);
     ASSERT_EQ(got.size(), want.size());
-    for (std::size_t i = 0; i < got.size(); ++i) EXPECT_EQ(got[i].placed, want[i].placed) << workers;
+    for (std::size_t i = 0; i < got.size(); ++i) {
+      ASSERT_TRUE(got[i].edge_flows.has_value() && want[i].edge_flows.has_value()) << workers << " " << i;
+      ASSERT_TRUE(got[i].residual.has_value() && want[i].residual.has_value()) << workers << " " << i;
+      EXPECT_EQ(got[i].placed, want[i].placed) << workers << " " << i;
+      EXPECT_EQ(got[i].edge_flows, want[i].edge_flows) << workers << " " << i;
+      EXPECT_EQ(got[i].residual, want[i].residual) << workers << " " << i;
+      EXPECT_EQ(got[i].bottleneck, want[i].bottleneck) << workers << " " << i;
+    }
     EXPECT_EQ(cache.stats().hits - before.hits, static_cast<std::int64_t>(pairs.size()));
     EXPECT_EQ(cache.stats().misses, before.misses);
   }
 }
 
 TEST(DagCacheFrozen, MissPropagatesThroughBatchCapacity) {
-  // An empty frozen cache: every pair misses; the lowest index's DagCacheMiss reaches the caller
-  // unchanged, with one worker and with several.
+  // A frozen cache holding only pair 1's key: pairs 0 and 2 miss; the lowest index's DagCacheMiss
+  // (pair 0's) reaches the caller unchanged, with one worker and with several.
   const auto g = fabric();
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {{v({0}), v({3})}, {v({1}), v({4})},
                                                                                    {v({2}), v({5})}};
@@ -291,13 +341,13 @@ TEST(DagCacheFrozen, MissPropagatesThroughBatchCapacity) {
     DagCache cache(*g);
     (void)cache.lookup(*g, v({4}), Direction::Reverse, nullptr);  // only pair 1's key
     cache.freeze();
-    const auto msg = miss_of([&] { (void)batch_capacity(*g, pairs, CapacityOptions {costonly(), nullptr, &cache}, {}, workers); });
+    const auto msg = miss_of([&] { (void)batch_capacity(*g, pairs, CapacityOptions {cost_only_config(), nullptr, &cache}, {}, workers); });
     EXPECT_NE(msg.find("roots {3}"), std::string::npos) << workers << ": " << msg;  // pair 0, the lowest index
   }
 }
 
 TEST(DagCacheFrozen, PerPairIntersectionsAndPrepopulatedUids) {
-  // APPROACH 10: an intersection equal to an operand returns that operand (its uid), so the
+  // An intersection equal to an operand returns that operand (its uid), so the
   // prepopulated key hits; one that differs from both operands gets a fresh uid and misses.
   const auto g = fabric();
   const EdgeId e0[1] = {0};
@@ -316,20 +366,20 @@ TEST(DagCacheFrozen, PerPairIntersectionsAndPrepopulatedUids) {
   // A common value containing the per-pair one: intersect returns the per-pair operand.
   auto before = hits();
   const std::vector<const Eligibility*> contained = {&narrow, nullptr};
-  EXPECT_EQ(batch_capacity(*g, pairs, CapacityOptions {costonly(), &common, &cache}, contained, 2).size(), 2U);
+  EXPECT_EQ(batch_capacity(*g, pairs, CapacityOptions {cost_only_config(), &common, &cache}, contained, 2).size(), 2U);
   EXPECT_EQ(hits() - before, 2);
   // An unchanged intersection (the operand itself) and already-effective values with a null
   // common value.
   before = hits();
   const std::vector<const Eligibility*> same = {&common, &common};
-  EXPECT_EQ(batch_capacity(*g, pairs, CapacityOptions {costonly(), &common, &cache}, same, 2).size(), 2U);
+  EXPECT_EQ(batch_capacity(*g, pairs, CapacityOptions {cost_only_config(), &common, &cache}, same, 2).size(), 2U);
   const std::vector<const Eligibility*> own = {&narrow, &common};
-  EXPECT_EQ(batch_capacity(*g, pairs, CapacityOptions {costonly(), nullptr, &cache}, own, 2).size(), 2U);
+  EXPECT_EQ(batch_capacity(*g, pairs, CapacityOptions {cost_only_config(), nullptr, &cache}, own, 2).size(), 2U);
   EXPECT_EQ(hits() - before, 4);
   // An intersection that differs from both operands: a fresh uid, absent from the cache.
   const auto misses = cache.stats().misses;
   const std::vector<const Eligibility*> changed = {&other, nullptr};
-  const auto msg = miss_of([&] { (void)batch_capacity(*g, pairs, CapacityOptions {costonly(), &common, &cache}, changed, 2); });
+  const auto msg = miss_of([&] { (void)batch_capacity(*g, pairs, CapacityOptions {cost_only_config(), &common, &cache}, changed, 2); });
   EXPECT_NE(msg.find("roots {4}"), std::string::npos) << msg;
   EXPECT_EQ(msg.find("uid " + std::to_string(common.uid()) + " "), std::string::npos) << msg;
   EXPECT_EQ(msg.find("uid " + std::to_string(other.uid()) + " "), std::string::npos) << msg;
@@ -337,16 +387,16 @@ TEST(DagCacheFrozen, PerPairIntersectionsAndPrepopulatedUids) {
   EXPECT_EQ(cache.stats().entries, 3);
 }
 
-TEST(DagCacheFrozen, MissPropagatesThroughSensitivityNeverAsUnevaluable) {
+TEST(DagCacheFrozen, MissPropagatesThroughSensitivity) {
   // CostOnly sensitivity evaluates each candidate under a new Eligibility (a new uid): with a
   // frozen cache holding only the baseline's key, the first re-evaluated deletion misses and the
-  // miss reaches the caller (it is not a std::runtime_error, so never `unevaluable`).
+  // miss reaches the caller.
   const auto g = fabric();
   for (int workers : {1, 2, 4}) {
     DagCache cache(*g);
     (void)cache.lookup(*g, v({4}), Direction::Reverse, nullptr);
     cache.freeze();
-    const auto msg = miss_of([&] { (void)sensitivity(*g, v({1}), v({4}), SensitivityOptions {costonly(), nullptr, &cache}, workers); });
+    const auto msg = miss_of([&] { (void)sensitivity(*g, v({1}), v({4}), SensitivityOptions {cost_only_config(), nullptr, &cache}, workers); });
     EXPECT_NE(msg.find("no entry for roots {4}"), std::string::npos) << workers << ": " << msg;
     EXPECT_EQ(cache.stats().entries, 1);  // nothing inserted
   }
@@ -356,11 +406,13 @@ TEST(DagCacheFrozen, DeletionModeSensitivityWithASuppliedFrozenCache) {
   // Global sensitivity repairs the baseline's state per deletion and reads no cache: a supplied
   // frozen cache, shared by two or four workers, gives the result without a cache.
   const auto g = fabric();
-  const auto want = sensitivity(*g, v({0, 1}), v({4, 5}), SensitivityOptions {global()}, 1);
+  const auto want = sensitivity(*g, v({0, 1}), v({4, 5}), SensitivityOptions {global_config()}, 1);
+  ASSERT_GT(want.baseline.placed, 0);
+  EXPECT_TRUE(std::any_of(want.entries.begin(), want.entries.end(), [](const auto& x) { return x.loss > 0; }));
   for (int workers : {1, 2, 4}) {
     DagCache cache(*g);
     cache.freeze();
-    const auto got = sensitivity(*g, v({0, 1}), v({4, 5}), SensitivityOptions {global(), nullptr, &cache}, workers);
+    const auto got = sensitivity(*g, v({0, 1}), v({4, 5}), SensitivityOptions {global_config(), nullptr, &cache}, workers);
     EXPECT_EQ(got.baseline.placed, want.baseline.placed);
     ASSERT_EQ(got.entries.size(), want.entries.size());
     for (std::size_t i = 0; i < got.entries.size(); ++i) {
@@ -371,19 +423,11 @@ TEST(DagCacheFrozen, DeletionModeSensitivityWithASuppliedFrozenCache) {
   }
 }
 
-namespace {
-
-std::tuple<std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t> all_of(const DagCache::Stats& s) {
-  return {s.hits, s.misses, s.entries, s.bytes, s.live_values};
-}
-
-} // namespace
-
 TEST(DagCacheFrozen, AFailedCallChangesNoStatisticButItsMiss) {
-  // review-1d F1, NOTES R27: a public call reading a frozen cache publishes its hits only when it
-  // succeeds. A batch whose pair 0 hits and pair 1 misses raises the miss and keeps no hit; the
-  // miss counts once, with one worker and with several (the boundary counts it, not the workers);
-  // the policy constructor and CostOnly sensitivity do the same.
+  // A frozen cache's statistics are observable state: a public call reading a frozen cache
+  // publishes its hits only when it succeeds. A batch whose pair 0 hits and pair 1 misses raises
+  // the miss and keeps no hit; the miss counts once, with one worker and with several (the boundary
+  // counts it, not the workers); the policy constructor and CostOnly sensitivity do the same.
   const auto g = fabric();
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {
       {v({0}), v({3})}, {v({1}), v({4})}, {v({2}), v({5})}, {v({0}), v({3})}};
@@ -391,28 +435,28 @@ TEST(DagCacheFrozen, AFailedCallChangesNoStatisticButItsMiss) {
     DagCache cache(*g);
     (void)cache.lookup(*g, v({3}), Direction::Reverse, nullptr);
     cache.freeze();
-    auto before = all_of(cache.stats());
+    auto before = stats_of(cache.stats());
     // Pairs 1 and 2 miss; pairs 0 and 3 hit.
-    EXPECT_NE(miss_of([&] { (void)batch_capacity(*g, pairs, CapacityOptions {costonly(), nullptr, &cache}, {}, workers); })
+    EXPECT_NE(miss_of([&] { (void)batch_capacity(*g, pairs, CapacityOptions {cost_only_config(), nullptr, &cache}, {}, workers); })
                   .find("roots {4}"),
               std::string::npos);
     auto want = before;
     std::get<1>(want) += 1;
-    EXPECT_EQ(all_of(cache.stats()), want) << workers;
-    before = all_of(cache.stats());
+    EXPECT_EQ(stats_of(cache.stats()), want) << workers;
+    before = stats_of(cache.stats());
     EXPECT_NE(miss_of([&] {
-                (void)sensitivity(*g, v({0}), v({3}), SensitivityOptions {costonly(), nullptr, &cache}, workers);
+                (void)sensitivity(*g, v({0}), v({3}), SensitivityOptions {cost_only_config(), nullptr, &cache}, workers);
               }).find("roots {3}"),
               std::string::npos);
     want = before;
     std::get<1>(want) += 1;
-    EXPECT_EQ(all_of(cache.stats()), want) << workers;  // the baseline's hit is dropped
+    EXPECT_EQ(stats_of(cache.stats()), want) << workers;  // the baseline's hit is dropped
   }
   DagCache cache(*g);
   cache.freeze();
   FlowLedger fg(g);
-  EXPECT_FALSE(miss_of([&] { FlowPolicy p(fg, v({0}), v({3}), costonly(), nullptr, &cache); }).empty());
-  EXPECT_EQ(all_of(cache.stats()), std::make_tuple(0, 1, 0, 0, 0));
+  EXPECT_FALSE(miss_of([&] { FlowPolicy p(fg, v({0}), v({3}), cost_only_config(), nullptr, &cache); }).empty());
+  EXPECT_EQ(stats_of(cache.stats()), std::make_tuple(0, 1, 0, 0, 0));
 }
 
 TEST(DagCacheFrozen, ConcurrentCallsKeepEverySuccessfulHit) {
@@ -424,15 +468,17 @@ TEST(DagCacheFrozen, ConcurrentCallsKeepEverySuccessfulHit) {
   for (NodeId d : {3, 4}) (void)cache.lookup(*g, v({d}), Direction::Reverse, nullptr);
   cache.freeze();
   const auto before = cache.stats();
-  const CapacityOptions opts {costonly(), nullptr, &cache};
+  const CapacityOptions opts {cost_only_config(), nullptr, &cache};
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> good = {{v({0}), v({3})}, {v({1}), v({4})}};
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> bad = {{v({0}), v({3})}, {v({1}), v({5})}};
   constexpr int kThreads = 4;
   constexpr int kRounds = 25;
   std::atomic<int> wrong {0};
   std::vector<std::thread> pool;
+  std::latch start(kThreads);  // the threads start together, once all of them are running
   for (int t = 0; t < kThreads; ++t) {
     pool.emplace_back([&] {
+      start.arrive_and_wait();
       for (int round = 0; round < kRounds; ++round) {
         if (batch_capacity(*g, good, opts, {}, 2).size() != 2) ++wrong;
         try {
@@ -466,10 +512,12 @@ TEST(DagCacheFrozen, ConcurrentPublicationsLoseNoIncrement) {
   constexpr int kThreads = 8;
   constexpr int kRounds = 1500;
   std::vector<std::thread> pool;
+  std::latch start(kThreads);  // the threads start together, once all of them are running
   for (int t = 0; t < kThreads; ++t) {
     pool.emplace_back([&] {
       FlowLedger fg(g);
-      for (int round = 0; round < kRounds; ++round) FlowPolicy p(fg, v({0}), v({3}), costonly(), nullptr, &cache);
+      start.arrive_and_wait();
+      for (int round = 0; round < kRounds; ++round) FlowPolicy p(fg, v({0}), v({3}), cost_only_config(), nullptr, &cache);
     });
   }
   for (auto& th : pool) th.join();

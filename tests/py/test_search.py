@@ -1,37 +1,33 @@
-"""The public search through the binding (``spf``, APPROACH 6): results, the DAG's canonical
-form, the validation order on unnarrowed values, the enumerations, and the all-or-nothing
-construction of the result objects."""
+"""The public search through the binding (``spf``, docs/semantics.md#4-search): results, the
+DAG's canonical form, the validation order on unnarrowed values, the enumerations, and the
+all-or-nothing construction of the result objects."""
 
 from __future__ import annotations
 
-import _netgraph_core as ext
+import itertools
+import traceback
+
 import numpy as np
 import pytest
+from helpers import (
+    DET,
+    L62,
+    PREFER,
+    RES,
+    build,
+    exact,
+    ids,
+    plain,
+    sel,
+    sweep_python_allocation,
+    to_ids,
+)
 from private_hooks import needs_hooks
 
 import netgraph_core as ngc
 
-DET = ngc.EdgeTieBreak.DETERMINISTIC
-PREFER = ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY
-CAP = ngc.EdgePriority.CAPACITY
-RES = ngc.EdgePriority.RESIDUAL
 FWD = ngc.Direction.FORWARD
 REV = ngc.Direction.REVERSE
-
-
-def build(n, edges, q=1.0):
-    return ngc.Graph(
-        n,
-        [e[0] for e in edges],
-        [e[1] for e in edges],
-        [e[2] for e in edges],
-        [e[3] for e in edges],
-        q,
-    )
-
-
-def ids(g, positions):
-    return sorted(int(e) for e, p in enumerate(g.input_index()) if p in positions)
 
 
 def via(dag):
@@ -39,7 +35,7 @@ def via(dag):
 
 
 def opts(direction=FWD, selection=None, **kw):
-    return ngc.SpfOptions(direction, selection or ngc.PathSelection(DET, CAP), **kw)
+    return ngc.SpfOptions(direction, selection or sel(), **kw)
 
 
 ANYCAST = [(0, 1, 1, 1), (1, 2, 1, 1), (0, 3, 1, 2), (3, 2, 1, 5), (1, 4, 1, 5)]
@@ -84,12 +80,12 @@ def test_reverse_full_search_is_forward_oriented():
     assert off[0] == 0 and off[-1] == len(r.dag.via_edges())
 
 
-def test_staged_single_path_review13_d3_both_directions():
+def test_staged_single_path_with_a_shared_bottleneck_takes_the_fewest_hops():
     # s -> v (1, prio 1), v -> t (3, prio 1), v -> a -> b -> t (1 + 1 + 1, prio 2): the
     # bottleneck of every walk is 1, so the two-hop walk wins under both tie modes.
     g = build(5, [(0, 1, 1, 1), (1, 4, 1, 3), (1, 2, 2, 1), (2, 3, 2, 1), (3, 4, 2, 1)])
     for tie in (DET, PREFER):
-        s = ngc.PathSelection(tie, CAP, multipath=False)
+        s = sel(tie, mp=False)
         f = ngc.spf(g, 0, opts(selection=s, targets=4))
         assert via(f.dag) == ids(g, {0, 1})
         assert f.target_cost == 4
@@ -100,9 +96,8 @@ def test_staged_single_path_review13_d3_both_directions():
 def test_residual_gating_and_priority():
     # Capacities 5; residuals by input [5, 4, 1, 3, 2]: 0->1->3 has bottleneck 4.
     g = build(4, [(0, 1, 5, 1), (1, 3, 5, 1), (0, 2, 5, 1), (2, 3, 5, 1), (0, 3, 5, 2)])
-    by_input = [5, 4, 1, 3, 2]
-    residual = np.array([by_input[int(p)] for p in g.input_index()], dtype=np.int64)
-    s = ngc.PathSelection(PREFER, RES, multipath=False)
+    residual = np.array(to_ids(g, [5, 4, 1, 3, 2]), dtype=np.int64)
+    s = sel(PREFER, RES, mp=False)
     r = ngc.spf(g, 0, opts(selection=s, targets=3, residual=residual))
     assert via(r.dag) == ids(g, {0, 1})
     # Gated at 4 units: only 0->1 (5) and 1->3 (4) are routable on that walk; the direct edge
@@ -115,16 +110,19 @@ def test_residual_gating_and_priority():
 
 
 def test_validation_order_on_unnarrowed_values():
+    # The residual's own checks are the shared ones of test_edge_amounts.py.
     g = build(3, [(0, 1, 2, 1), (1, 2, 2, 1)])
     other = build(3, [(0, 1, 2, 1)])
-    with pytest.raises(ValueError, match=r"^roots: the node set is empty$"):
+    with pytest.raises(ValueError, match=exact("roots: the node set is empty")):
         ngc.spf(g, [], opts())
-    with pytest.raises(ValueError, match=r"^roots: node 3 out of node range \[0, 3\)$"):
+    with pytest.raises(
+        ValueError, match=exact("roots: node 3 out of node range [0, 3)")
+    ):
         ngc.spf(g, 3, opts())
     big = 2**70
     with pytest.raises(ValueError, match=rf"^roots: node {big} out of node range"):
         ngc.spf(g, [0, big], opts())
-    with pytest.raises(ValueError, match=r"^targets: the node set is empty$"):
+    with pytest.raises(ValueError, match=exact("targets: the node set is empty")):
         ngc.spf(g, 0, opts(targets=[]))
     with pytest.raises(ValueError, match=r"^targets: node -1 out of node range"):
         ngc.spf(g, 0, opts(targets=[-1]))
@@ -132,43 +130,55 @@ def test_validation_order_on_unnarrowed_values():
         ValueError, match=r"^node 1 is in both endpoint sets: roots and targets"
     ):
         ngc.spf(g, [0, 1], opts(targets=[1]))
-    with pytest.raises(ValueError, match="^multipath = false requires targets"):
-        ngc.spf(g, 0, opts(selection=ngc.PathSelection(DET, CAP, multipath=False)))
-    with pytest.raises(ValueError, match="^residual has length 1, expected 2"):
-        ngc.spf(g, 0, opts(residual=[1]))
-    with pytest.raises(ValueError, match=r"^residual\[1\] = 3 is outside"):
-        ngc.spf(g, 0, opts(residual=[1, 3]))
-    with pytest.raises(ValueError, match=r"^residual\[0\] = -" + str(big)):
-        ngc.spf(g, 0, opts(residual=[-big, 1]))
+    single = (
+        "multipath = false requires targets (the single path joins a root to a target)"
+    )
+    with pytest.raises(ValueError, match=exact(single)):
+        ngc.spf(g, 0, opts(selection=sel(mp=False)))
     with pytest.raises(
-        ValueError, match=r"^min_residual must be at least 1 unit \(got 0\)$"
+        ValueError, match=exact("min_residual must be at least 1 unit (got 0)")
     ):
         ngc.spf(g, 0, opts(min_residual=0))
-    with pytest.raises(ValueError, match=r"min_residual must be an integer"):
+    with pytest.raises(
+        ValueError, match=exact(f"min_residual must be at least 1 unit (got {-big})")
+    ):
+        ngc.spf(g, 0, opts(min_residual=-big))
+    with pytest.raises(
+        ValueError, match=exact("min_residual must be an integer (got float)")
+    ):
         ngc.spf(g, 0, opts(min_residual=1.5))
     with pytest.raises(ValueError, match="^foreign Eligibility"):
         ngc.spf(g, 0, opts(elig=other.eligibility([], [0])))
-    # Several defects: the contract's order (roots, targets, overlap, single path, residual,
-    # min_residual, Eligibility).
-    with pytest.raises(ValueError, match="^roots: the node set is empty$"):
+    # Several defects: the first in the documented order (roots, targets, overlap, single
+    # path, residual, min_residual, Eligibility).
+    with pytest.raises(ValueError, match=exact("roots: the node set is empty")):
         ngc.spf(g, [], opts(targets=[], residual=[1], min_residual=0))
+    with pytest.raises(ValueError, match=rf"^targets: node {big} out of node range"):
+        ngc.spf(g, 0, opts(targets=[0, big], residual=[]))
     with pytest.raises(ValueError, match="both endpoint sets"):
         ngc.spf(g, 0, opts(targets=0, residual=[]))
-    with pytest.raises(ValueError, match="requires targets"):
+    with pytest.raises(ValueError, match=exact(single)):
         ngc.spf(
             g,
             0,
-            opts(selection=ngc.PathSelection(DET, CAP, multipath=False), residual=[]),
+            opts(selection=sel(mp=False), residual=[]),
         )
     with pytest.raises(ValueError, match="^residual"):
         ngc.spf(g, 0, opts(residual=[1, 9], min_residual=0))
     with pytest.raises(ValueError, match="^min_residual"):
         ngc.spf(g, 0, opts(min_residual=0, elig=other.eligibility([], [0])))
-    # A huge min_residual gates every residual edge (no error).
-    assert list(ngc.spf(g, 0, opts(residual=[2, 2], min_residual=big)).costs)[1:] == [
-        ngc.UNREACHABLE,
-        ngc.UNREACHABLE,
-    ]
+    # A min_residual above INT64_MAX is no error and acts as INT64_MAX does: it gates every
+    # residual edge, even one whose residual is the largest unit value 2^62 - 1, which
+    # min_residual = 2^62 - 1 itself admits.
+    top = build(2, [(0, 1, L62 - 1, 1)])
+    for m in (L62 - 1, 2**63 - 1, big):
+        r = ngc.spf(top, 0, opts(residual=[L62 - 1], min_residual=m))
+        assert list(r.costs) == [0, 1 if m == L62 - 1 else ngc.UNREACHABLE], m
+    huge = ngc.spf(g, 0, opts(residual=[2, 2], min_residual=big))
+    assert list(huge.costs)[1:] == [ngc.UNREACHABLE, ngc.UNREACHABLE]
+    assert plain(huge) == plain(
+        ngc.spf(g, 0, opts(residual=[2, 2], min_residual=2**63 - 1))
+    )
 
 
 def test_options_types_and_enumerations():
@@ -176,49 +186,143 @@ def test_options_types_and_enumerations():
     o = opts(targets=[1], min_residual=3)
     assert o.direction == FWD and o.targets == [1] and o.min_residual == 3
     assert o.residual is None and o.elig is None
-    with pytest.raises(ValueError, match="^direction: 7 is not a value of Direction$"):
-        ngc.SpfOptions(ngc.Direction(7), ngc.PathSelection(DET, CAP))
+    with pytest.raises(
+        ValueError, match=exact("direction: 7 is not a value of Direction")
+    ):
+        ngc.SpfOptions(ngc.Direction(7), sel())
     with pytest.raises(TypeError):
-        ngc.SpfOptions(FWD, ngc.PathSelection(DET, CAP), fanout_edges=[0])
+        ngc.SpfOptions(FWD, sel(), fanout_edges=[0])
     with pytest.raises(TypeError, match=r"^spf\(\): incompatible function arguments"):
         ngc.spf(g, 0, opts(), fanout_edges=[0])
-    with pytest.raises(TypeError, match="SpfOptions expected"):
-        ngc.spf(g, 0, ngc.PathSelection(DET, CAP))
+    with pytest.raises(
+        TypeError, match=exact("SpfOptions expected (got PathSelection)")
+    ):
+        ngc.spf(g, 0, sel())
     with pytest.raises(TypeError):
         ngc.SpfOptions(FWD)
     # Roots as a NumPy array, with duplicates.
     r = ngc.spf(g, np.array([0, 0], dtype=np.int32), opts())
     assert list(r.costs) == [0, 1]
+    # SpfOptions keeps targets, residual and min_residual as given (the same objects) and
+    # validates only the direction: spf validates the rest at the call, in its order.
+    assert opts().min_residual == 1
+    targets, residual, low = [1, 1], [9], -(2**70)
+    o = opts(targets=targets, residual=residual, min_residual=low)
+    assert o.targets is targets and o.residual is residual and o.min_residual is low
+    assert o.selection == sel()
+    with pytest.raises(ValueError, match=r"^residual\[0\] = 9 is outside"):
+        ngc.spf(g, 0, o)
 
 
 @needs_hooks
 def test_python_result_construction_is_all_or_nothing():
     # Every Python object allocation of the call fails once: the call raises (never crashes)
-    # and a clean retry gives the same result.
+    # and a clean retry gives the same result, for a search with targets and a full search.
     g = build(5, ANYCAST)
-    o = opts(targets=[2, 4])
-    want = ngc.spf(g, 0, o)
-    seen = None
-    k = 0
-    failures = 0
-    while True:
-        hit, seen, result, error = ext._fail_python_allocation(ngc.spf, (g, 0, o), k)
-        if not hit:
-            assert result is not None and result.dag == want.dag
-            break
-        failures += 1
-        assert result is None and isinstance(error, (MemoryError, RuntimeError)), error
-        again = ngc.spf(g, 0, o)
-        assert again.dag == want.dag and again.target_cost == want.target_cost
-        k += 1
-    assert failures >= 3 and seen > 0
-    full = opts()
-    want_full = ngc.spf(g, 0, full)
-    for k in range(40):
-        hit, _seen, result, error = ext._fail_python_allocation(
-            ngc.spf, (g, 0, full), k
-        )
-        if not hit:
-            assert list(result.costs) == list(want_full.costs)
-            break
-        assert result is None and error is not None
+    for o in (opts(targets=[2, 4]), opts()):
+        failures = sweep_python_allocation(lambda o=o: (ngc.spf, (g, 0, o), list), 200)
+        assert failures >= 3, o.targets
+
+
+@needs_hooks
+def test_the_python_allocation_sweep_rejects_a_wrong_call():
+    # sweep_python_allocation rejects a wrong call, each on its own clause: one that absorbs the
+    # injected failure and returns a value, one that raises another exception in its place, one
+    # that changes the observable state before the failure reaches it; one whose completing call
+    # raises after its result, returns another value or makes fewer allocations than failed
+    # before it (a prebuilt result), one whose retry after a failure returns another value; and
+    # one that has not completed within the attempt limit.
+    g = build(5, ANYCAST)
+
+    def absorbs(o):
+        try:
+            return ngc.spf(g, 0, o)
+        except MemoryError:
+            return "absorbed"
+
+    def replaces(o):
+        try:
+            return ngc.spf(g, 0, o)
+        except MemoryError:
+            raise LookupError("replaced") from None
+
+    def changing():
+        log = []
+
+        def changes(o):
+            log.append(o)
+            return ngc.spf(g, 0, o)
+
+        return changes, (opts(),), lambda: len(log)
+
+    def root(r):
+        def search(o):
+            return ngc.spf(g, r, o)
+
+        return search
+
+    root0, root1 = root(0), root(1)
+    full = ngc.spf(g, 0, opts())
+
+    def prebuilt(o):
+        return full
+
+    def raising():
+        # The completing call raises after its result. It raises in the frame the sweep calls:
+        # CPython keeps an exception whose traceback entry for an outer frame failed to allocate.
+        made = itertools.count()
+
+        def make():
+            m = next(made)
+            calls = itertools.count()
+
+            def raises(o):
+                first = not next(calls)
+                result = ngc.spf(g, 0, o)
+                if m and first:
+                    raise LookupError("after its result")
+                return result
+
+            return raises, (opts(),), list
+
+        return make
+
+    def by_turn(turns):
+        # The c-th call within the m-th make() runs turns(m, c); m = 0 is the sweep's reference.
+        made = itertools.count()
+
+        def make():
+            m = next(made)
+            calls = itertools.count()
+            return (lambda o: turns(m, next(calls))(o)), (opts(),), list
+
+        return make
+
+    for make, clause in (
+        (lambda: (absorbs, (opts(),), list), "assert value is None, (where, value)"),
+        (
+            lambda: (replaces, (opts(),), list),
+            "assert isinstance(error, (MemoryError, RuntimeError)), (where, repr(error))",
+        ),
+        (changing, "assert snapshot() == before, where"),
+        (raising(), "assert error is None, (where, repr(error))"),
+        (
+            by_turn(lambda m, c: root1 if m and not c else root0),
+            "assert plain(value) == want, where",
+        ),
+        (
+            by_turn(lambda m, c: prebuilt if m >= 3 and not c else root0),
+            "assert seen == failures, (where, seen)  # every allocation failed once",
+        ),
+        (
+            by_turn(lambda m, c: root1 if m and c == 1 else root0),
+            "assert plain(fn(*args)) == want, where",
+        ),
+    ):
+        with pytest.raises(AssertionError) as info:
+            sweep_python_allocation(make, 200)
+        assert traceback.extract_tb(info.tb)[-1].line == clause
+    # A call that needs more attempts than the limit: the sweep fails, never passes.
+    with pytest.raises(pytest.fail.Exception) as info:
+        sweep_python_allocation(lambda: (ngc.spf, (g, 0, opts()), list), 2)
+    assert str(info.value) == "spf never completed"

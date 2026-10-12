@@ -1,52 +1,66 @@
 /*
-  The one integer minimum-cost flow core (APPROACH 2.2).
+  The one integer minimum-cost flow core.
 
-  One objective on every view: minimum cost for the maximum value attainable under the value
-  cap. Successive shortest paths with potentials and blocking flows. Each tier runs Dijkstra on
-  reduced costs cost(e) + pi(u) - pi(v) to completion over the residual network reachable from
-  the virtual source s* (through the virtual sink t* and onward), adds the distances to the
-  potentials of the vertices it settled, then drains the zero-reduced-cost admissible subgraph
-  by Dinic phases (BFS levels, DFS with current-arc pointers) until no admissible augmenting
-  path remains or the cap is reached; then the next tier. Positive original costs do not
-  exclude zero-reduced-cost residual cycles, hence the repeated phases. The solve ends when a
-  Dijkstra does not reach t* or the cap is reached; there is no completion phase.
+  Find the maximum flow allowed by the cap at minimum cost. The residual network records how
+  much flow a forward arc can add and how much its reverse arc can cancel. A potential pi is
+  a vertex cost offset; the reduced cost of u -> v is cost(e) + pi(u) - pi(v). These offsets
+  make searchable arc costs non-negative without changing which path between two endpoints
+  is cheapest. Each tier runs Dijkstra, which finalises the nearest pending vertex first,
+  over all residual vertices reachable from virtual source s*, through sink t* and onward.
+  Add the final distances to settled vertices' potentials. Arcs on shortest paths now have
+  zero reduced cost; those with positive residual capacity form the admissible subgraph.
+  Dinic phases push flow through it: breadth-first search (BFS) assigns minimum-hop levels;
+  depth-first search (DFS) follows level-increasing paths, keeping each node's next arc to try.
+  A blocking flow fills these paths until none can take more. Repeat phases until no admissible
+  augmenting path (a residual source-to-sink path) remains, or the cap is reached. Repetition is
+  needed because a phase's level graph keeps only the admissible paths with the fewest arcs.
+  Start the next tier; stop when Dijkstra cannot reach t* or the cap is reached. No completion
+  phase follows.
 
-  Arc identity: every eligible edge is its own arc pair (forward with the view capacity,
-  reverse with the flow). At a node the forward arcs of its out-edges and the reverse arcs of
-  its in-edges are visited in one sequence by ascending EdgeId (a self-loop's forward arc before
-  its reverse arc); at a real endpoint its virtual arc comes first; s* visits its arcs by
-  ascending source NodeId and t* by ascending destination NodeId. Virtual arcs cost 0 and carry
-  2^63 - 2 units, above every attainable value. Every solve starts from zero flow, so the zero
-  potentials are valid (all costs are positive).
+  Arc identity: each eligible edge has a forward arc with the view capacity and a reverse arc
+  with its flow. At each node, visit forward out-arcs and reverse in-arcs together by ascending
+  EdgeId; for a self-loop visit forward before reverse. Virtual vertices s* and t* connect the
+  real source and destination sets. A real endpoint's virtual arc comes first; s* visits
+  sources and t* visits destinations by ascending NodeId. Virtual arcs cost 0 and carry
+  2^63 - 2 units, above every attainable value. Starting from zero flow makes zero potentials
+  valid: usable real arcs have positive costs and virtual arcs cost 0.
 
-  The deletion re-solve (the exact sensitivity model, APPROACH 11) continues from a solve's
-  final state instead. A solve asked to capture its state also records, as a shadow that
-  changes none of its searches, the working potentials: the running sum of the tier maxima D_k
-  and, per settled vertex, that sum at its last settlement; the working potential is the
-  published one plus the difference (a never-settled vertex: the whole sum, from numeric zero).
-  They equal the update of every vertex after every Dijkstra, the reached ones by their distance
-  and the others by D_k, so the reduced cost is non-negative on every positive residual arc,
-  real or virtual. The re-solve deletes a real arc e = (u, v) with flow f_e > 0 from a copy of
-  the state and runs three fixed-origin repairs, each a sequence of tiers as above from its
-  origin to its target, with that all-vertex update before the Dinic phases: u -> v for f_e,
-  moving m; when r = f_e - m > 0, u -> s* for r, whose first tier reuses repair 1's failed
-  search (nothing changed since), then t* -> v for r. The result is the minimum-cost flow of the
-  maximum value placed - r on the view without e, certified by the working potentials and the
-  real sources' residual closure; at most m + 2 r Dijkstra runs.
+  Deletion re-solves start from a captured final state. During capture, track working
+  potentials without changing the original searches. Keep the sum of tier maxima D_k and
+  each settled vertex's last such sum; D_k is that search's largest finite distance.
+  Working potential = published potential + tier maxima accumulated since its last settlement.
+  For a never-settled vertex, start at zero and add the whole sum. This equals updating every
+  vertex after every Dijkstra: reached vertices by their distance, the others by D_k.
+  Thus every positive residual arc, real or virtual, has non-negative reduced cost.
+  Delete e = (u, v), with flow f_e > 0, from a copy and run three repairs, each with a fixed
+  origin and target and that all-vertex update before Dinic phases. First move up to f_e from
+  u to v; call the amount moved m. If r = f_e - m > 0, move r from u to s*, then from t* to v.
+  The u -> s* repair reuses the first repair's failed search because nothing has changed.
+  The result has maximum value placed - r and minimum cost on the view without e. Working
+  potentials certify its cost; the real sources' full residual closure certifies its value.
+  There are at most m + 2 r Dijkstra runs.
 
   Dijkstra's queue is a radix heap: keys pop in increasing order and entries with equal keys pop
   in a fixed order (last pushed first within the lowest bucket), so the settle order, and with it
   every counter, is a function of the input alone. Equal-key order affects only the counters,
   never a distance, a potential or an augmenting path. The solve runs to the cap or to
-  disconnection; there is no clamp of the cap (APPROACH 2.2, revision 25).
+  disconnection; there is no clamp of the cap.
 
-  Arithmetic. A solve from zero stays in int64: every true residual distance is the cost of a
-  simple residual path, below the cost sum bound 2^62; potentials are such distances; a path's
-  bottleneck contains a real arc (sources and destinations are disjoint), so every amount is
-  below 2^62. The deletion mode's working potentials, distance keys, tentative distances and
-  sums of tier maxima are signed 128-bit (I128; reachability kept apart from the value by a
-  stamp): they stay within (n + 1) C at capture and (22 n + 15) C across the repairs for n
-  vertices and the cost sum C < 2^62, and its heap takes 128-bit keys. Amounts stay int64.
+  Arithmetic. A solve from zero stays in int64: each true residual distance is the cost of a
+  simple path (no repeated vertex), below the cost sum bound 2^62; potentials are such distances.
+  A path's bottleneck is its smallest residual capacity. It includes a real arc because sources
+  and destinations are disjoint, so every amount is below 2^62. The deletion mode's working
+  potentials, distance keys, tentative distances and sums of tier maxima are signed 128-bit
+  (I128; reachability kept apart from the value by a stamp): they stay within (n + 1) C at
+  capture and (22 n + 15) C across the repairs for n vertices and the cost sum C < 2^62, and its
+  heap takes 128-bit keys. Amounts stay int64.
+
+  Size. Vertex ids, arc slots and slot offsets are int32. A network of N real vertices has
+  N + 2 vertices, and every edge and every virtual arc has two slots (forward and reverse), so
+  N <= INT32_MAX - 2 and edges + sources + destinations <= 2^30 - 1 (twice that is the largest
+  even int32). network_vertices() refuses a larger network; both ways of sizing the solver (a
+  solve from zero, a captured state's re-solves) take their vertex count from it before anything
+  else, so every vertex id, slot and offset fits.
 */
 #include "netgraph/core/detail/flow_core.hpp"
 
@@ -58,6 +72,7 @@
 #include <string>
 #include <type_traits>
 
+#include "netgraph/core/detail/edge_amounts.hpp"
 #include "netgraph/core/detail/endpoints.hpp"
 #include "netgraph/core/detail/node_map.hpp"
 
@@ -69,7 +84,8 @@ constexpr Cost kInfDist = std::numeric_limits<Cost>::max();
 constexpr Amount kUncapped = std::numeric_limits<Amount>::max();
 
 // The bucket of a key: the number of the highest bit in which it differs from the last popped
-// key (keys are non-negative).
+// key (keys are non-negative). A 128-bit key differs in its high word from 2^64 on, which the
+// deletion mode's bound (22 n + 15) C allows (see Arithmetic above).
 std::size_t bucket_of(Cost key, Cost last) noexcept {
   return static_cast<std::size_t>(std::bit_width(static_cast<std::uint64_t>(key) ^ static_cast<std::uint64_t>(last)));
 }
@@ -123,27 +139,51 @@ inline constexpr bool kWide = std::is_same_v<P, I128>;
 
 } // namespace
 
+std::int32_t network_vertices(std::int32_t num_nodes, std::size_t num_edges, std::size_t num_sources,
+                              std::size_t num_destinations) {
+  constexpr std::int32_t kMax = std::numeric_limits<std::int32_t>::max();
+  if (num_nodes > kMax - 2) {
+    throw std::invalid_argument(
+        "flow core: the number of nodes exceeds INT32_MAX - 2 (a solve adds a virtual source and sink)");
+  }
+  // Each term is compared with what the earlier ones leave, so no sum of counts can wrap.
+  constexpr auto kPairs = static_cast<std::size_t>(kMax / 2);  // 2^30 - 1
+  if (num_edges > kPairs || num_sources > kPairs - num_edges || num_destinations > kPairs - num_edges - num_sources) {
+    throw std::invalid_argument(
+        "flow core: the edges, sources and destinations of a solve number more than 2^30 - 1 together (each "
+        "takes two int32 arc slots)");
+  }
+  return num_nodes + 2;
+}
+
 // The residual network of one solve (Network: real vertices 0..N-1, s* = N, t* = N + 1) with
 // its flow, potentials and scratch; also the working storage of a deletion re-solve.
 class FlowSolver {
 public:
   // One reusable instance per thread (`local()`) for the solves from zero: build() resizes every
-  // buffer for the input, keeping capacity across calls, so repeated solves do not allocate
-  // once warm. Not reentrant (a solve never starts another). A deletion resolver owns its own.
+  // buffer for the input, keeping capacity across calls, so the solver's own buffers are not
+  // reallocated once warm (each solve still allocates its outputs). Not reentrant (a solve never
+  // starts another). A deletion resolver owns its own.
   static FlowSolver& local() {
     thread_local FlowSolver solver;
     return solver;
   }
 
+  FlowSolver() = default;
+  // Never copied or moved: net_ may point at own_.
+  FlowSolver(const FlowSolver&) = delete;
+  FlowSolver& operator=(const FlowSolver&) = delete;
+
   // The input part of the network (num_nodes, the edges, the endpoint sets) is the caller's to
   // fill; build() adds the arcs.
-  Network& network() noexcept { return net_; }
+  Network& network() noexcept { return own_; }
 
   // The arcs of the input, zero flow and zero potentials. `shadow`: record the working
   // potentials for a capture.
   void build(bool shadow) {
-    auto& in = net_;
-    size(in.num_nodes);
+    auto& in = own_;
+    size(in);
+    net_ = &own_;
     const auto n = static_cast<std::size_t>(n_);
     in.off.assign(n + 1, 0);
     auto deg = [&](std::int32_t v) { ++in.off[static_cast<std::size_t>(v) + 1]; };
@@ -204,11 +244,13 @@ public:
     }
   }
 
-  // A captured state's network, as the working storage of its deletion re-solves.
+  // A captured state's network, read in place by its deletion re-solves (never written; the
+  // caller keeps it alive while this solver uses it). The residual, the potentials and the
+  // scratch stay this solver's own.
   void load(const Network& net) {
-    net_ = net;
-    size(net_.num_nodes);
-    res_.resize(net_.arc_head.size());
+    size(net);
+    net_ = &net;
+    res_.resize(net_->arc_head.size());
     wpi_.resize(static_cast<std::size_t>(n_));
     wdist_.resize(static_cast<std::size_t>(n_));
     wseen_.assign(static_cast<std::size_t>(n_), 0);
@@ -252,11 +294,11 @@ public:
     }
     out.placed = total;
 
-    out.flows.resize(net_.edges.size());
-    for (std::size_t k = 0; k < net_.edges.size(); ++k) out.flows[k] = flow_of(k);
+    out.flows.resize(net_->edges.size());
+    for (std::size_t k = 0; k < net_->edges.size(); ++k) out.flows[k] = flow_of(k);
     if (closure && close_sources()) out.cut = cut_edges(-1);
     if (potentials) {
-      out.potentials.resize(static_cast<std::size_t>(net_.num_nodes));
+      out.potentials.resize(static_cast<std::size_t>(net_->num_nodes));
       for (std::size_t v = 0; v < out.potentials.size(); ++v) {
         out.potentials[v] = ever_[v] != 0 ? pi_[v] : kNeverReached;
       }
@@ -268,7 +310,7 @@ public:
   void capture(DeletionCapture& req, Amount placed, const FlowCoreCounters& counters) {
     DeletionState state;
     state.graph_ = req.graph;
-    state.net_ = std::make_shared<const Network>(net_);
+    state.net_ = std::make_shared<const Network>(*net_);
     state.res_ = res_;
     state.pi_.resize(static_cast<std::size_t>(n_));
     for (std::size_t v = 0; v < state.pi_.size(); ++v) state.pi_[v] = I128 {pi_[v]} + (tier_sum_ - checkpoint_[v]);
@@ -291,13 +333,13 @@ public:
     std::copy(state.potentials().begin(), state.potentials().end(), wpi_.begin());
     DeletionResult out;
     auto& c = out.counters;
-    const auto fwd = static_cast<std::size_t>(net_.edge_slot[k]);
-    const auto bwd = static_cast<std::size_t>(net_.rev[fwd]);
+    const auto fwd = static_cast<std::size_t>(net_->edge_slot[k]);
+    const auto bwd = static_cast<std::size_t>(net_->rev[fwd]);
     const Amount f = res_[bwd];
-    const std::int32_t u = net_.tail[k];
-    const std::int32_t v = net_.head[k];
-    // The deletion: a pseudo-flow with an excess of f at u and a deficit of f at v, its residual
-    // the state's without e's two arcs.
+    const std::int32_t u = net_->tail[k];
+    const std::int32_t v = net_->head[k];
+    // Removing e leaves f extra units at u and f missing units at v; conservation is broken
+    // until repairs reconnect or cancel them. Remove both residual arcs of e.
     res_[fwd] = 0;
     res_[bwd] = 0;
     emit(0, false, 0, c);
@@ -321,19 +363,21 @@ public:
     }
     out.value = state.value() - r;
     out.potentials = wpi_;
-    for (std::int32_t j : cut_edges(static_cast<std::int64_t>(k))) out.cut.push_back(net_.edges[static_cast<std::size_t>(j)]);
+    for (std::int32_t j : cut_edges(static_cast<std::int64_t>(k))) out.cut.push_back(net_->edges[static_cast<std::size_t>(j)]);
     out.edge_flows.assign(static_cast<std::size_t>(state.graph().num_edges()), 0);
-    for (std::size_t j = 0; j < net_.edges.size(); ++j) {
-      out.edge_flows[static_cast<std::size_t>(net_.edges[j])] = j == k ? 0 : flow_of(j);
+    for (std::size_t j = 0; j < net_->edges.size(); ++j) {
+      out.edge_flows[static_cast<std::size_t>(net_->edges[j])] = j == k ? 0 : flow_of(j);
     }
     return out;
   }
 
 private:
-  void size(std::int32_t num_nodes) {
-    n_ = num_nodes + 2;
-    s_ = num_nodes;
-    t_ = num_nodes + 1;
+  // The vertex count and the virtual vertices of `net` (refused beyond the limits of
+  // network_vertices(), before any change), then the scratch of that many vertices.
+  void size(const Network& net) {
+    n_ = network_vertices(net.num_nodes, net.edges.size(), net.sources.size(), net.destinations.size());
+    s_ = n_ - 2;
+    t_ = n_ - 1;
     const auto n = static_cast<std::size_t>(n_);
     level_.resize(n);
     reach_.assign(n, 0);
@@ -343,7 +387,7 @@ private:
 
   // The flow of input edge k: the residual of its reverse slot.
   [[nodiscard]] Amount flow_of(std::size_t k) const {
-    return res_[static_cast<std::size_t>(net_.rev[static_cast<std::size_t>(net_.edge_slot[k])])];
+    return res_[static_cast<std::size_t>(net_->rev[static_cast<std::size_t>(net_->edge_slot[k])])];
   }
 
   template <class P>
@@ -388,8 +432,15 @@ private:
     auto& pi = potentials<P>();
     auto& dist = distances<P>();
     auto& queue = heap<P>();
+    // The network is never resized during a search: raw pointers keep the compiler from
+    // reloading net_ and the vector bases around every store into the solver's own buffers.
+    const std::int32_t* const off = net_->off.data();
+    const std::int32_t* const arc_head = net_->arc_head.data();
+    const Cost* const arc_cost = net_->arc_cost.data();
     ++c.dijkstra_runs;
     if constexpr (kWide<P>) {
+      // Wraparound after 2^32 wide searches since load(): one resolver's searches over all its
+      // deletions, which no stated limit keeps below 2^32.
       if (++wepoch_ == 0) {
         std::fill(wseen_.begin(), wseen_.end(), 0);
         wepoch_ = 1;
@@ -411,13 +462,13 @@ private:
       settled_.push_back(ui);
       ++c.settled;
       const P base = du + pi[u];
-      const auto end = net_.off[u + 1];
-      c.arc_scans += end - net_.off[u];
-      for (auto p = net_.off[u]; p < end; ++p) {
+      const auto end = off[u + 1];
+      c.arc_scans += end - off[u];
+      for (auto p = off[u]; p < end; ++p) {
         const auto a = static_cast<std::size_t>(p);
         if (res_[a] <= 0) continue;
-        const auto v = static_cast<std::size_t>(net_.arc_head[a]);
-        const P nd = base + net_.arc_cost[a] - pi[v];
+        const auto v = static_cast<std::size_t>(arc_head[a]);
+        const P nd = base + arc_cost[a] - pi[v];
         if constexpr (kWide<P>) {
           if (wseen_[v] != wepoch_ || nd < dist[v]) {
             wseen_[v] = wepoch_;
@@ -465,16 +516,17 @@ private:
   // after every push.
   template <class P, class OnPush>
   Amount drain(FlowCoreCounters& c, Amount limit, Amount total, OnPush on_push) {
+    const std::int32_t* const rev = net_->rev.data();
     while (total < limit) {
       if (!build_levels<P>(c)) break;
-      std::copy(net_.off.begin(), net_.off.end() - 1, cur_.begin());
+      std::copy(net_->off.begin(), net_->off.end() - 1, cur_.begin());
       while (total < limit) {
         if (!find_path<P>(c)) break;
         Amount amount = limit - total;
         for (std::int32_t a : path_) amount = std::min(amount, res_[static_cast<std::size_t>(a)]);
         for (std::int32_t a : path_) {
           res_[static_cast<std::size_t>(a)] -= amount;
-          res_[static_cast<std::size_t>(net_.rev[static_cast<std::size_t>(a)])] += amount;
+          res_[static_cast<std::size_t>(rev[static_cast<std::size_t>(a)])] += amount;
         }
         total += amount;
         ++c.augmentations;
@@ -493,23 +545,32 @@ private:
   template <class P>
   bool build_levels(FlowCoreCounters& c) {
     const auto& pi = potentials<P>();
+    const std::int32_t* const off = net_->off.data();
+    const std::int32_t* const arc_head = net_->arc_head.data();
+    const std::int32_t* const rev = net_->rev.data();
+    const Cost* const arc_cost = net_->arc_cost.data();
     const auto t = static_cast<std::size_t>(target_);
+    // Wraparound after 2^32 phases since size(): one solve from zero, or one resolver's phases
+    // over all its deletions, which no stated limit keeps below 2^32.
+    if (++mark_epoch_ == 0) {
+      std::fill(reach_.begin(), reach_.end(), 0);
+      mark_epoch_ = 1;
+    }
     // Reverse search from the target: the arc into v from arc_head[p] is the partner of v's slot p.
-    ++mark_epoch_;
     queue_.clear();
     reach_[t] = mark_epoch_;
     queue_.push_back(target_);
     for (std::size_t qi = 0; qi < queue_.size(); ++qi) {
       const auto v = static_cast<std::size_t>(queue_[qi]);
       const P pv = pi[v];
-      const auto end = net_.off[v + 1];
-      c.arc_scans += end - net_.off[v];
-      for (auto p = net_.off[v]; p < end; ++p) {
+      const auto end = off[v + 1];
+      c.arc_scans += end - off[v];
+      for (auto p = off[v]; p < end; ++p) {
         const auto a = static_cast<std::size_t>(p);
-        const auto u = static_cast<std::size_t>(net_.arc_head[a]);
+        const auto u = static_cast<std::size_t>(arc_head[a]);
         if (reach_[u] == mark_epoch_) continue;
-        const auto in = static_cast<std::size_t>(net_.rev[a]);
-        if (res_[in] > 0 && net_.arc_cost[in] + pi[u] == pv) {
+        const auto in = static_cast<std::size_t>(rev[a]);
+        if (res_[in] > 0 && arc_cost[in] + pi[u] == pv) {
           reach_[u] = mark_epoch_;
           queue_.push_back(static_cast<std::int32_t>(u));
         }
@@ -527,12 +588,12 @@ private:
       if (level_[t] >= 0 && level_[u] >= level_[t]) break;
       const P pu = pi[u];
       const auto next = level_[u] + 1;
-      const auto end = net_.off[u + 1];
-      c.arc_scans += end - net_.off[u];
-      for (auto p = net_.off[u]; p < end; ++p) {
+      const auto end = off[u + 1];
+      c.arc_scans += end - off[u];
+      for (auto p = off[u]; p < end; ++p) {
         const auto a = static_cast<std::size_t>(p);
-        const auto v = static_cast<std::size_t>(net_.arc_head[a]);
-        if (level_[v] < 0 && reach_[v] == mark_epoch_ && res_[a] > 0 && net_.arc_cost[a] + pu == pi[v]) {
+        const auto v = static_cast<std::size_t>(arc_head[a]);
+        if (level_[v] < 0 && reach_[v] == mark_epoch_ && res_[a] > 0 && arc_cost[a] + pu == pi[v]) {
           level_[v] = next;
           queue_.push_back(static_cast<std::int32_t>(v));
         }
@@ -546,6 +607,9 @@ private:
   template <class P>
   bool find_path(FlowCoreCounters& c) {
     const auto& pi = potentials<P>();
+    const std::int32_t* const off = net_->off.data();
+    const std::int32_t* const arc_head = net_->arc_head.data();
+    const Cost* const arc_cost = net_->arc_cost.data();
     stack_.clear();
     path_.clear();
     stack_.push_back(origin_);
@@ -553,14 +617,14 @@ private:
       const auto u = static_cast<std::size_t>(stack_.back());
       if (static_cast<std::int32_t>(u) == target_) return true;
       bool advanced = false;
-      const auto end = net_.off[u + 1];
+      const auto end = off[u + 1];
       const auto next = level_[u] + 1;
       const P pu = pi[u];
       while (cur_[u] < end) {
         ++c.arc_scans;
         const auto a = static_cast<std::size_t>(cur_[u]);
-        const auto v = static_cast<std::size_t>(net_.arc_head[a]);
-        if (res_[a] > 0 && level_[v] == next && net_.arc_cost[a] + pu == pi[v]) {
+        const auto v = static_cast<std::size_t>(arc_head[a]);
+        if (res_[a] > 0 && level_[v] == next && arc_cost[a] + pu == pi[v]) {
           stack_.push_back(static_cast<std::int32_t>(v));
           path_.push_back(static_cast<std::int32_t>(a));
           advanced = true;
@@ -607,17 +671,19 @@ private:
   // The full residual closure of the real sources (reverse and virtual arcs included) into
   // seen_. Returns whether t* is outside it.
   bool close_sources() {
+    const std::int32_t* const off = net_->off.data();
+    const std::int32_t* const arc_head = net_->arc_head.data();
     seen_.assign(static_cast<std::size_t>(n_), 0);
     queue_.clear();
-    for (std::int32_t s : net_.sources) {
+    for (std::int32_t s : net_->sources) {
       seen_[static_cast<std::size_t>(s)] = 1;
       queue_.push_back(s);
     }
     for (std::size_t qi = 0; qi < queue_.size(); ++qi) {
       const auto u = static_cast<std::size_t>(queue_[qi]);
-      for (auto p = net_.off[u]; p < net_.off[u + 1]; ++p) {
+      for (auto p = off[u]; p < off[u + 1]; ++p) {
         const auto a = static_cast<std::size_t>(p);
-        const auto v = static_cast<std::size_t>(net_.arc_head[a]);
+        const auto v = static_cast<std::size_t>(arc_head[a]);
         if (res_[a] > 0 && seen_[v] == 0) {
           seen_[v] = 1;
           queue_.push_back(static_cast<std::int32_t>(v));
@@ -630,10 +696,13 @@ private:
   // The input edges of positive view capacity from the closure to its complement (ascending),
   // the input edge `skip` (a deleted edge) left out.
   [[nodiscard]] std::vector<std::int32_t> cut_edges(std::int64_t skip) const {
+    const std::int32_t* const tail = net_->tail.data();
+    const std::int32_t* const head = net_->head.data();
+    const Amount* const cap = net_->cap.data();
     std::vector<std::int32_t> cut;
-    for (std::size_t k = 0; k < net_.edges.size(); ++k) {
-      if (static_cast<std::int64_t>(k) != skip && seen_[static_cast<std::size_t>(net_.tail[k])] != 0 &&
-          seen_[static_cast<std::size_t>(net_.head[k])] == 0 && net_.cap[k] > 0) {
+    for (std::size_t k = 0; k < net_->edges.size(); ++k) {
+      if (static_cast<std::int64_t>(k) != skip && seen_[static_cast<std::size_t>(tail[k])] != 0 &&
+          seen_[static_cast<std::size_t>(head[k])] == 0 && cap[k] > 0) {
         cut.push_back(static_cast<std::int32_t>(k));
       }
     }
@@ -648,7 +717,8 @@ private:
   void emit(int /*repair*/, bool /*push*/, Amount /*moved*/, const FlowCoreCounters& /*c*/) const noexcept {}
 #endif
 
-  Network net_ {};
+  Network own_ {};              // a solve from zero's network (build())
+  const Network* net_ {&own_};  // the network the searches read: own_, or a captured one (load())
   std::int32_t n_ {0};
   std::int32_t s_ {0};
   std::int32_t t_ {0};
@@ -700,6 +770,8 @@ DeletionState& DeletionState::operator=(const DeletionState& other) {
   return *this = std::move(copy);
 }
 
+// The solver reads the network that state_ shares: it lives as long as state_, a move included
+// (a move transfers the owner, the network stays where it is).
 DeletionResolver::DeletionResolver(const DeletionState& state) : state_(state), solver_(std::make_unique<FlowSolver>()) {
   if (state_.net_ == nullptr) throw std::invalid_argument("deletion re-solve: an empty state (no solve captured it)");
   solver_->load(state_.network());
@@ -750,18 +822,7 @@ FlowCoreResult place_global_units(const Graph& g,
                                   std::optional<Amount> cap,
                                   DeletionCapture* capture) {
   const auto num_edges = static_cast<std::size_t>(g.num_edges());
-  if (view.size() != num_edges) {
-    throw std::invalid_argument("view has length " + std::to_string(view.size()) + ", expected " +
-                                std::to_string(num_edges) + " (one entry per edge)");
-  }
-  const auto capacity = g.capacity_units();
-  for (std::size_t e = 0; e < num_edges; ++e) {
-    if (view[e] < 0 || view[e] > capacity[e]) {
-      throw std::invalid_argument("view[" + std::to_string(e) + "] = " + std::to_string(view[e]) +
-                                  " is outside [0, capacity_units[" + std::to_string(e) + "] = " +
-                                  std::to_string(capacity[e]) + "]");
-    }
-  }
+  check_edge_amounts(g, view, "view");
   const auto srcs = node_set(sources, g.num_nodes(), "sources");
   const auto dsts = node_set(destinations, g.num_nodes(), "destinations");
   check_disjoint(srcs, dsts, "sources", "destinations");

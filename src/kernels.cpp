@@ -1,10 +1,11 @@
 /*
-  Apportionment and the placement kernels in units (APPROACH 2.1, 7 and 16).
+  Apportionment and the placement kernels in units. T is a flow's total.
 
-  Every amount is an int64 number of units below 2^62: a flow's T is bounded by its source
-  members' view, every inflow by T, every share by its node's inflow. Highest averages compares
-  quotients by exact 128-bit cross products (weights and divisors below 2^63, products below
-  2^126); lower quotas floor(I * w / W) are 128-bit products divided by W < 2^62.
+  Every amount is an int64 number of units below 2^62: T is bounded by the view on source
+  members, each node's inflow by T, and each share by that inflow. Highest averages compares
+  w_i/d_i and w_j/d_j through w_i*d_j and w_j*d_i (operands < 2^63, products < 2^126). The
+  lower quota floor(I*w/W) uses a 128-bit product, with inflow I, weight w and weight sum
+  W < 2^62.
 */
 #include "netgraph/core/detail/kernels.hpp"
 
@@ -81,10 +82,7 @@ void highest_averages(Amount total, std::span<const Amount> weights, std::span<A
 
 // ---------------------------------------------------------------- plans
 
-void check_kernel(FlowPlacement placement, Admission admission, EdgePriority priority) {
-  check_member(placement, "placement");
-  check_member(admission, "admission");
-  check_member(priority, "priority");
+void check_kernel_combination(FlowPlacement placement, Admission admission, EdgePriority priority) {
   if (admission == Admission::Lossy && placement == FlowPlacement::MaxFlow) {
     throw std::invalid_argument(
         "Lossy admission is rejected with the MaxFlow kernel: a controller never drops (EqualBalanced or "
@@ -93,6 +91,13 @@ void check_kernel(FlowPlacement placement, Admission admission, EdgePriority pri
   if (placement == FlowPlacement::Weighted && priority == EdgePriority::Headroom) {
     throw std::invalid_argument("the Weighted kernel is rejected with priority Headroom (weights are units)");
   }
+}
+
+void check_kernel(FlowPlacement placement, Admission admission, EdgePriority priority) {
+  check_member(placement, "placement");
+  check_member(admission, "admission");
+  check_member(priority, "priority");
+  check_kernel_combination(placement, admission, priority);
 }
 
 KernelPlan::Layout KernelPlan::point(std::size_t num_dsts, std::size_t positions, std::size_t num_members) noexcept {
@@ -172,11 +177,12 @@ KernelPlan& KernelPlan::operator=(KernelPlan&& other) noexcept {
 
 namespace {
 
-// Per-thread per-node state of build_split, indexed by NodeId and valid for a node only
-// when its stamp is the current epoch (no clearing between calls; a call that throws leaves stale
-// entries behind an old epoch). One array of slots, so growing it either succeeds whole or leaves
-// the previous array in place (review-1b-fixes N1: separately grown arrays could be left at
-// different sizes by a failed allocation).
+// Per-thread build_split state, by NodeId, for its backward depth-first search (DFS) and
+// forward pass. A call advances an epoch (a numeric stamp); a slot is valid only if its stamp
+// matches. Later calls ignore stale entries, including after exceptions; only stamp wraparound
+// (after 2^32 calls on one thread, which a long-running process reaches) clears all stamps. One
+// array holds every node's fields, so a failed growth leaves the old array intact (the strong
+// guarantee); separate arrays could end at mismatched sizes.
 struct DagScratch {
   struct Node {
     std::uint32_t stamp {0};
@@ -218,19 +224,16 @@ DagScratch& dag_scratch() {
   return s;
 }
 
-// The split structure of a flow from src to the destination set over a DAG, on the DAG's own
-// predecessor lists (no local renumbering, no arc arrays, no CSR to build), restricted to the
-// edges `keep(e)` accepts: the kept edges on some walk from src to a destination (destinations
-// terminal) become plan.members, with the plan's topological fields. One pass: a backward DFS
-// from the destinations over the predecessor entries lists the nodes that reach a destination in
-// postorder (every node after its parents, a topological order); a forward pass over that order
-// marks the nodes the source reaches. Members ascend by EdgeId and B' ids rank edges by source
-// first, so the members of one tail are consecutive. Any topological order gives the same
-// allocation (a node splits once its inflow is complete).
-//
-// With `cost`, the forward pass also computes the minimum walk cost from the source to a
-// destination over the members (kUnreachable without members): the DP runs in the same
-// topological order. Without `out` (route_cost) the pass ends with the DP: no plan is built.
+// Build plan.members from the DAG's incoming-edge lists: keep edges accepted by keep(e) that
+// lie on a src-to-destination walk; exclude edges leaving destinations. No node renumbering,
+// extra arc arrays or adjacency offsets are needed. A backward DFS from destinations lists
+// each node after its parents (postorder, also a topological order here).
+// A forward pass then marks nodes reachable from src. Members ascend by EdgeId, so one tail's
+// members are consecutive. Any topological order gives the same allocation because each node
+// splits only after receiving all its inflow.
+// With `cost`, the forward pass computes minimum cost to each node from its parents' costs
+// (dynamic programming, DP), giving the minimum source-to-destination cost over members, or
+// kUnreachable if none exist. Without `out` (route_cost), stop there and build no plan.
 template <class Keep>
 void build_split(const Graph& g, const PredDAG& dag, NodeId src, std::span<const NodeId> dsts, Keep keep,
                  KernelPlan* out, Cost* cost) {
@@ -239,8 +242,8 @@ void build_split(const Graph& g, const PredDAG& dag, NodeId src, std::span<const
   const auto via = dag.via_edges();
   DagScratch& s = dag_scratch();
   s.begin(static_cast<std::size_t>(g.num_nodes()));
-  // The DAG's sparse storage scattered into the per-node slots (O(member nodes)); every other
-  // node is touched with no entries.
+  // The DAG's sparse storage scattered into the per-node slots (O(member nodes)); a node outside
+  // it has no entries when first touched (a destination, src or a parent the search meets).
   {
     const auto nodes = PredDAGBuilder::member_nodes(dag);
     const auto offs = PredDAGBuilder::member_offsets(dag);
@@ -324,9 +327,8 @@ void build_split(const Graph& g, const PredDAG& dag, NodeId src, std::span<const
   // that reaches a destination.
   const auto edge_src = g.edge_src();
   const auto edge_dst = g.edge_dst();
-  // The member and node loops write by index into vectors sized to a known bound (the DAG's edges
-  // here, the reached nodes below): libc++ 22's emplace_back (a fast-path and a slow-path lambda)
-  // made the push_back form about ten percent slower on the kernel rows under Xcode 27.
+  // Size vectors to known bounds (DAG edges here, reached nodes below), then write by index
+  // to avoid push_back overhead in these loops.
   const auto asc = PredDAGBuilder::ascending(dag);
   const std::size_t bound = asc.size();
   plan.members.resize(bound);
@@ -364,7 +366,7 @@ void build_split(const Graph& g, const PredDAG& dag, NodeId src, std::span<const
     if (nt.count == 0) {
       nt.first = static_cast<std::int32_t>(m);
     } else if (static_cast<std::size_t>(nt.first + nt.count) != m) {
-      throw std::logic_error("kernel plan: the members of a node are not consecutive (EdgeIds not in B' order)");
+      throw std::logic_error("kernel plan: the members of a node are not consecutive (member EdgeIds not grouped by source node)");
     }
     ++nt.count;
   }
@@ -463,10 +465,11 @@ KernelPlan make_route_plan(const Graph& g, FlowPlacement placement, Admission ad
 namespace {
 
 // Per-thread state of cost_only_creation. Per node (by NodeId) a slot valid only under the
-// current epoch (DagScratch's pattern: nothing is cleared between calls, a call that throws leaves
-// stale slots behind an old epoch, and the one array of slots grows whole or not at all); every
-// other buffer is indexed by the reached nodes' local indices (their rank in ascending NodeId) or
-// by route position, and is rewritten before it is read.
+// current epoch (DagScratch's pattern: nothing is cleared between calls except on stamp
+// wraparound, a call that throws leaves stale slots behind an old epoch, and the one array of
+// slots grows whole or not at all); every other buffer is indexed by the reached nodes' local
+// indices (their rank in ascending NodeId) or by route position, and is rewritten before it is
+// read.
 struct CreationScratch {
   struct Node {
     std::uint32_t stamp {0};
@@ -534,7 +537,8 @@ std::size_t lower_bound_from(std::span<const EdgeId> a, std::size_t hint, EdgeId
     }
     hi = std::min(hi, n);
   } else {
-    // The answer lies in [0, hint] (hint == n, or a[hint] >= x): a[hi] >= x or hi == n throughout.
+    // The answer lies in [0, min(hint, n)] (hint >= n, or a[hint] >= x): a[hi] >= x or hi == n
+    // throughout.
     hi = std::min(hint, n);
     for (std::size_t step = 1;; step <<= 1) {
       if (hi < step) {
@@ -572,7 +576,7 @@ std::optional<CreationProducts> cost_only_creation(const Graph& g, const std::sh
   s.begin(static_cast<std::size_t>(g.num_nodes()));
   for (NodeId d : dsts) s.touch(d).target = 1;
   // support_route's walk over the support from src: every reached node keeps its support
-  // out-edges as one range (B' ids rank edges by source first: one tail's edges are consecutive).
+  // out-edges as one range (EdgeIds rank edges by source first: one tail's edges are consecutive).
   s.reached.clear();
   s.touch(src).reached = 1;
   s.reached.push_back(src);
@@ -812,7 +816,7 @@ namespace {
 // A floating-point estimate of T_max: the fraction f of the source's inflow that each member
 // carries under the plan's split (1/k per round-robin member, w/W per Weighted member), then
 // min over members of view / f. It only chooses the first probe of the exact search below
-// (APPROACH 7, revision 26: approximate arithmetic may choose probes, nothing else).
+// (approximate arithmetic may choose probes, nothing else).
 double estimate_t_max(const KernelPlan& plan, std::span<const Amount> view_m) {
   thread_local std::vector<double> f;
   f.assign(plan.topo.size(), 0.0);
@@ -840,17 +844,15 @@ double estimate_t_max(const KernelPlan& plan, std::span<const Amount> view_m) {
 
 constexpr std::int32_t kProbeBudget = 62;  // a plain bisection over units below 2^62
 
-// The largest T in [lo, hi) whose allocation fits view_m, given that alloc(lo) fits and alloc(hi)
-// does not (APPROACH 7 and 16.3, revision 26). fits(T) is exact (integer allocation compared
-// member by member with the view) and monotone in T (the allocation is non-decreasing member by
-// member: house monotonicity), so the result is exact whatever probes are taken. The probes: one
-// at the floating-point estimate (the only approximate arithmetic, which chooses that probe and
-// nothing else), then a galloping bracket, then bisection; both bracket ends are always exact
-// probe results (or the given ends). The number of probes stays within kProbeBudget = 62, the
-// bound of a plain bisection: a seed or galloping probe is taken only while the probes made so
-// far, that probe and a worst-case bisection of the current bracket fit in the budget; the bound
-// is checked on return. With `best`, every fitting probe's allocation is kept there (swapped in),
-// so on return it holds alloc(result) whenever result > the given lo.
+// Find the largest fitting T in [lo, hi): alloc(lo) fits view_m; alloc(hi) does not.
+// Fit checks compare integer amounts per member exactly. Increasing T never reduces a
+// member's allocation, so these bounds remain valid regardless of probe choices.
+// First try a floating-point estimate, then double step sizes to narrow the bounds, then
+// bisect. Only probe choice is approximate; bounds always come from exact checks or the given
+// ends. Allow an estimate or doubling probe only if it and the worst-case remaining bisection
+// fit within kProbeBudget = 62, counting probes already made. Check the budget on return.
+// Swap each fitting allocation into `best` when supplied; on return it holds alloc(result)
+// whenever result is greater than the original lo.
 Amount largest_fit(const KernelPlan& plan, std::span<const Amount> view_m, Amount lo, Amount hi,
                    std::vector<Amount>& probe, std::vector<Amount>* best, std::int32_t& probes) {
   auto fits = [&](Amount t) {

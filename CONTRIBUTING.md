@@ -9,7 +9,7 @@ NetGraph-Core is a hybrid C++/Python project. You will need:
 - Python 3.11+
 - C++20 compatible compiler (GCC 10+, Clang 12+, MSVC 2019+)
 - CMake 3.23+
-- Ninja (recommended)
+- Ninja (the C++ test runner uses it; `make dev` installs CMake and Ninja into the venv)
 
 ### 1. Clone the repository
 
@@ -37,7 +37,11 @@ This will:
 
 ### Running Tests
 
-Run all checks (linting + C++ tests + Python tests):
+Run all checks: rebuild the editable extension, then lint (ruff, pyright), the check that the
+policy fixture data still equals its frozen reference (`tests/reference/policy/README.md`), the
+C++ tests with and without the private test hooks, and the Python tests. It only verifies and
+never edits a file; `make check-ci` is the same without the rebuild (CI installs the package
+itself):
 
 ```bash
 make check
@@ -46,8 +50,12 @@ make check
 Run specific test suites:
 
 ```bash
-make cpp-test   # C++ tests (GoogleTest)
-make test       # Python tests (pytest)
+make cpp-test       # C++ tests (GoogleTest), private hooks on
+make cpp-test-off   # C++ tests without the hooks (the shipped configuration)
+make test           # Python tests (pytest)
+make sanitize-test  # C++ tests under ASan/UBSan (required for C++ changes)
+make tsan-test      # C++ tests under ThreadSanitizer (required for C++ changes)
+make cov            # Coverage of the C++ and Python suites (its own venv and builds)
 ```
 
 ### Code Style
@@ -55,11 +63,28 @@ make test       # Python tests (pytest)
 - **Python**: We use `ruff` for linting and formatting, and `pyright` for static type checking.
 - **C++**: We follow standard C++20 practices.
 
-Auto-fix Python formatting:
+Apply fixes (these edit files):
 
 ```bash
-make format
+make format   # ruff formatting
+make hooks    # every pre-commit hook, including ruff --fix and whitespace fixers
 ```
+
+The commit hook and `make hooks` run Pyright as `make lint` does, from the `make dev` venv: it
+needs the built extension to resolve the package's imports.
+
+### Type Stub
+
+`python/netgraph_core/__init__.pyi` is generated from the compiled module. After changing a
+binding's signature or docstring, run `bash dev/stubs/run.sh generate` and commit the stub;
+`make stubs-check` (also in CI) fails when the stub drifts or the typed client checks fail.
+
+### Behaviour Documentation
+
+[docs/semantics.md](docs/semantics.md) is the maintained statement of what the library computes.
+A change to observable behaviour (a result, an order, an outcome, an error, a default) updates it
+in the same change, and its examples must still print what the document shows:
+`tests/py/test_docs_examples.py` runs them, and README's quick start, in the Python tests.
 
 ## Release Process
 
@@ -67,14 +92,14 @@ Releases are automated via GitHub Actions when a new tag is pushed.
 
 1. Move the pending notes into a new `## [X.Y.Z] - YYYY-MM-DD` section in `CHANGELOG.md`,
    dated the day you tag. Mark anything that breaks consumers as **BREAKING**.
-2. Bump `version` in `pyproject.toml` to the same `X.Y.Z`. CI does not cross-check the
-   tag against this value, so a mismatch publishes the wrong version silently.
+2. Bump `version` in `pyproject.toml` to the same `X.Y.Z`. Release CI compares the tag
+   with this value and refuses to publish on a mismatch.
 3. Commit and push.
 4. Create and push a matching tag:
 
    ```bash
-   git tag v0.8.0
-   git push origin v0.8.0
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
    ```
 
 5. The CI pipeline builds wheels and the sdist, tests them, and publishes to PyPI via

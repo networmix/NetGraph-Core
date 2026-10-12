@@ -1,13 +1,12 @@
 /*
-  Graph: the one graph type on integer units (APPROACH 2.1, 3).
+  Graph: the one graph type on integer units.
 
-  Construction validates the inputs in the documented order, then builds layout B' by stable
-  counting passes (each distributes items into buckets numbered by a small integer key and keeps
-  the earlier order inside a bucket). The cost rank of an edge is the position of its cost among
-  the K distinct costs, sorted. The id order is (src, cost, dst, input), whose rank is the public
-  EdgeId, so the out-edges of u are the id range [row_offsets[u], row_offsets[u + 1]); the
-  in-edges of v are listed in (cost, src, input) order. An edgeless graph is its validation and
-  two zero-filled offset arrays.
+  Validate inputs in the documented order, then build edge ids and CSR arrays. N is the node
+  count, E the edge count, and K the number of distinct costs. Stable counting passes group by
+  a small integer key while preserving order within each group. A cost's rank is its position
+  among sorted distinct costs. EdgeIds sort by (src, cost, dst, input); u's out-edges occupy
+  [row_offsets[u], row_offsets[u + 1]); v's in-edges sort by (cost, src, input).
+  An edgeless graph is its validation and two zero-filled offset arrays.
   * N K >= E: three passes (dst, cost rank, src; least significant first) give the id order, and
     two over the ids (cost rank, then dst) the reverse lists: within one (dst, cost) group the
     id order is (src, input).
@@ -17,23 +16,23 @@
   The offset arrays serve as their own cursors; a pass that advances them is followed by one
   that walks back, so no pass over the nodes restores them.
 
-  The ranks: each edge first gets its cost's first-appearance ordinal from an open-addressing
-  table (fixed mixing, linear probing, load at most 1/4, doubled from 64 up to 2^18 slots, each
-  growth rebuilt from the distinct costs in their order); an
-  edge whose cost equals the previous edge's reuses that ordinal without a lookup. The K
-  distinct costs are then radix-sorted. Hashing stops on the 65,537th distinct cost, or before
-  a probe (one table slot examined, the terminating one included, counted across the lookups
-  and the growths) would exceed 8E + 8 x 65,536; the ranks then come from a radix sort of all
-  costs (16-bit digits). Both paths give the same ranks.
+  Assign each cost its first-appearance index (ordinal) with a hash table. Resolve collisions
+  by trying successive slots (linear probing). Use fixed mixing, at most 1/4 occupancy, and
+  double from 64 to 2^18 slots, rebuilding in distinct-cost order. Consecutive equal costs reuse
+  the previous ordinal without lookup. Radix-sort the K distinct costs, processing digits from
+  least to most significant. Stop hashing at the 65,537th distinct cost, or before examining
+  more than 8E + 8 x 65,536 slots. Count every examined slot, including the final slot, across
+  lookups and growths. On either limit, radix-sort all costs in 16-bit digits.
+  Both methods produce identical ranks.
 
-  Memory: every retained array is allocated first, at its final size; until it is filled, each
-  serves as scratch. The ranks go into in_col_indices_; the hash table borrows capacity_ (keys) and
-  src_ (ordinals) while it has at most E slots, the distinct costs cost_, their sort dst_,
-  input_index_ and in_adj_edge_index_; the passes use in_adj_edge_index_ (the middle forward
-  pass), capacity_ and cost_ (the K rank cursors or the combined histograms), and the fallback
-  input_index_ and in_adj_edge_index_. The only other buffers are a table larger than E slots (its
-  own vectors, the old and new ones briefly together at a growth) and the fallback's 2^16 digit
-  counts. A table of at most E slots frees no separate buffer that the allocator could keep cached.
+  Allocate all retained arrays at final size, then use them as scratch before filling them.
+  Store ranks in in_col_indices_. While the hash table has <= E slots, capacity_ holds its keys
+  and src_ its ordinals. cost_ holds distinct costs; dst_, input_index_ and in_adj_edge_index_
+  serve their sort. Counting passes use in_adj_edge_index_ for the middle forward pass, and
+  capacity_/cost_ for K rank cursors or combined histograms. The fallback uses input_index_ and
+  in_adj_edge_index_. Extra buffers are limited to tables > E slots (old and new coexist during
+  growth) and the fallback's 2^16 digit counts. Smaller tables free no separate buffer that the
+  allocator could retain.
 */
 #include "netgraph/core/graph.hpp"
 
@@ -48,7 +47,7 @@
 #include <utility>
 
 #include "netgraph/core/detail/graph_access.hpp"
-#include "netgraph/core/detail/private_hooks.hpp"
+#include "netgraph/core/detail/hooks_flag.hpp"
 #include "netgraph/core/detail/uid.hpp"
 
 namespace netgraph::core {
@@ -164,16 +163,19 @@ struct RankOutcome {
   std::int64_t budget {0};
 };
 
-// Ranks from a sort of all E costs: a stable LSD radix sort of the input positions by cost,
-// 16 bits per pass, then one scan of the sorted positions. Digits above the largest cost's bit
-// length are not visited, and a pass whose digit is the same for every cost is skipped.
-// `a` and `b` (E slots each) hold the positions; `count` has 2^16 entries.
+// Ranks from a stable LSD radix sort of the positions of `cost` by cost, kBits bits per pass (all
+// E costs and 16 bits on the fallback path, the K distinct costs and 8 bits on the hashed path),
+// then one scan of the sorted positions. Digits above the largest cost's bit length are not
+// visited, and a pass whose digit is the same for every cost is skipped. `a` and `b`
+// (cost.size() slots each) hold the positions; `count` has 2^kBits entries. `cost` is never
+// empty: ranks_by_hash returns Hashed for an edgeless graph before calling this, a successful
+// collection of positive costs keeps at least one, and the fallback sort of all costs runs only
+// after hashing failed, which needs an edge.
 template <int kBits>
 std::int64_t ranks_by_sort(std::span<const Cost> cost, Cost max_cost, std::span<std::int32_t> rank,
                            std::span<std::int32_t> a, std::span<std::int32_t> b,
                            std::span<std::int32_t> count) {
   const std::size_t m = cost.size();
-  if (m == 0) return 0;
   constexpr std::uint64_t kMask = (std::uint64_t {1} << kBits) - 1;
   std::iota(a.begin(), a.end(), 0);
   const auto top = static_cast<std::uint64_t>(max_cost);
@@ -269,11 +271,11 @@ RankOutcome ranks_by_hash(std::span<const Cost> cost, std::span<std::int32_t> ra
   return out;
 }
 
-// Offsets from cursors that a scatter advanced to the ends: off[k] = start(k + 1) becomes
-// off[k] = start(k), off[0] = 0 (the last entry of an (N + 1)-array keeps its value).
-// Counts in off[0, n) become inclusive sums (each node's end), off[n] the total: a scatter that
-// decrements these cursors, walking its input backwards, leaves the starts (stable, no shift).
-// The sum stays in a register (a sum through memory chains every node on the previous store).
+// Convert counts in off[0, n) to cumulative ends; off[n] becomes the total. Scattering input
+// backwards while decrementing these cursors leaves group starts and preserves order within
+// each group. Forward scattering leaves ends; ends_to_starts below shifts those back to starts
+// (off[k] = off[k - 1] for every k >= 1, then off[0] = 0). Keep the running sum in a register so
+// each iteration does not wait for the previous store.
 void counts_to_ends(std::span<std::int32_t> off) noexcept {
   std::int32_t sum = 0;
   for (std::size_t k = 0; k + 1 < off.size(); ++k) {
@@ -311,7 +313,8 @@ Amount to_units(double x, double resolution) {
   if (x < 0.0) {
     throw std::invalid_argument("to_units: a negative amount has no unit value");
   }
-  // x / q is exact (q is a power of two) unless it overflows to infinity.
+  // x / q is exact (q is a power of two) unless it overflows to infinity or falls below the
+  // normal range (below 2^-1022 it may lose low bits; it then rounds to 0 units either way).
   const double y = std::ldexp(x, -k);
   constexpr double kTwo52 = 4503599627370496.0;  // 2^52: doubles at or above it are integers
   constexpr double kLimit = 4611686018427387904.0;  // 2^62
@@ -363,7 +366,7 @@ Graph::Graph(std::int32_t num_nodes,
   if (m > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
     throw std::invalid_argument("the number of edges exceeds INT32_MAX (array length)");
   }
-  // Zero or negative costs (rule 28).
+  // Zero or negative costs (costs are positive).
   Cost max_cost = 0;
   Cost cost_gcd = 0;
   for (std::size_t i = 0; i < m; ++i) {
@@ -445,17 +448,17 @@ Graph::Graph(std::int32_t num_nodes,
     c.last_budget = ro.budget;
   }
 #endif
-  // An edgeless graph is its validation and its two zero-filled offset arrays (APPROACH 3).
+  // An edgeless graph is its validation and its two zero-filled offset arrays.
   if (m == 0) return;
 
   // The passes. With few nodes times few costs (N K < E), the cost rank rides with an endpoint as
-  // one key: forward by dst, then by (src, rank); reverse by (dst, rank) over the ids (proposal P4).
+  // one key: forward by dst, then by (src, rank); reverse by (dst, rank) over the ids.
   // Otherwise the five single-key passes: forward by dst, rank, src; reverse by rank, then dst.
-  // Both give the same orders. P4's two (N K + 1)-entry histograms live in the not-yet-filled
-  // capacity and cost arrays (N K + 1 <= E), so its work is O(E).
+  // Both give the same orders. The combined-key passes keep their two (N K + 1)-entry histograms
+  // in the not-yet-filled capacity and cost arrays (N K + 1 <= E), so their work is O(E).
   const bool fused = n * kk < m;
-  const std::span<Amount> by_dst_rank(capacity_);  // P4: (dst, rank) histogram, then cursors
-  const std::span<Cost> by_src_rank(cost_);        // P4: (src, rank) histogram, then cursors
+  const std::span<Amount> by_dst_rank(capacity_);  // fused: (dst, rank) histogram, then cursors
+  const std::span<Cost> by_src_rank(cost_);        // fused: (src, rank) histogram, then cursors
   if (fused) {
 #if NETGRAPH_CORE_PRIVATE_HOOKS
     ++detail::thread_construction_counts().fused;
@@ -463,7 +466,7 @@ Graph::Graph(std::int32_t num_nodes,
     const std::size_t nk = n * kk;
     std::fill(by_dst_rank.begin(), by_dst_rank.begin() + static_cast<std::ptrdiff_t>(nk + 1), 0);
     std::fill(by_src_rank.begin(), by_src_rank.begin() + static_cast<std::ptrdiff_t>(nk + 1), 0);
-    // One counter update per loop: two in one loop ran several times slower (NOTES section 1).
+    // Keep the counter updates in separate loops for speed.
     for (std::size_t i = 0; i < m; ++i) ++by_dst_rank[static_cast<std::size_t>(dst[i]) * kk + static_cast<std::size_t>(rank[i]) + 1];
     for (std::size_t i = 0; i < m; ++i) ++by_src_rank[static_cast<std::size_t>(src[i]) * kk + static_cast<std::size_t>(rank[i]) + 1];
     for (std::size_t x = 0, sum = 0; x <= nk; ++x) sum = static_cast<std::size_t>(by_dst_rank[x] += static_cast<Amount>(sum));
@@ -479,8 +482,9 @@ Graph::Graph(std::int32_t num_nodes,
   }
 
   // Forward pass 1, by dst, from input order. The reverse offsets serve as cursors, so no pass
-  // over the nodes restores them: P4 walks the input backwards from the ends to the starts; the
-  // single-key passes walk it forwards from the starts to the ends, and reverse pass 2 walks back.
+  // over the nodes restores them: the combined-key passes walk the input backwards from the ends
+  // to the starts; the single-key passes walk it forwards from the starts to the ends, and
+  // reverse pass 2 walks back.
   if (fused) {
     for (std::size_t i = m; i-- > 0;) {
       order[static_cast<std::size_t>(--in_row_offsets_[static_cast<std::size_t>(dst[i])])] = static_cast<std::int32_t>(i);

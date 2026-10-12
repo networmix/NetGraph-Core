@@ -1,9 +1,12 @@
-// KSP (APPROACH 6, rule 10) and resolve_to_paths (APPROACH 5): prototype 6's witnesses (the
-// review-12 C2 and three-hop graphs, the review-13 priority-suffix trap, the prefix-capped spur,
-// the parallel root under Expand and Collapse, the four-edge graph, the zero-capacity tie order,
-// the static ceiling on chain-plus-bypasses), k = 1 against the forward and reverse single path,
-// and agreement with exhaustive enumeration (search_reference.hpp) on random graphs; the
-// resolver's order, splitting and truncation against an enumeration of every walk of a DAG.
+// KSP and resolve_to_paths (docs/semantics.md#k-shortest-paths): the witness graphs (hand-built
+// examples: the diamond and the three-hop graph, whose first path is the canonical single path
+// of the forward and the reverse search; a shared bottleneck that leaves the fewest hops first; the prefix-capped spur; a
+// candidate's bottleneck including its prefix; parallel members under Expand and Collapse;
+// accepted paths that never return after a shared prefix; zero-capacity edges; the ceilings on
+// chain-plus-bypasses and the exact Stretch ceiling at large costs and factors), the defects in the contract order, and agreement with exhaustive
+// enumeration (search_reference.hpp) on random graphs; the resolver's order, splitting and
+// truncation against an enumeration of every walk of a DAG, from either search direction and on
+// long chains.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -14,7 +17,6 @@
 #include <map>
 #include <optional>
 #include <random>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -33,17 +35,8 @@ PathSelection sel(bool multi_edge = true, EdgeTieBreak tie = EdgeTieBreak::Deter
   return PathSelection(tie, prio, true, multi_edge);
 }
 
-std::string error_of(const std::function<void()>& fn) {
-  try {
-    fn();
-  } catch (const std::invalid_argument& e) {
-    return e.what();
-  }
-  return "";
-}
-
-// Rows (u, v, capacity, cost) given in B' order (sorted by (src, cost, dst)), so ids are the
-// input positions, as prototype 6's b() arranges.
+// A graph from rows (u, v, capacity, cost), stable-sorted by (src, cost, dst) first: that is the
+// EdgeId order, so each EdgeId is the row's position in the sorted list.
 Graph bgraph(std::int32_t n, std::vector<InEdge> rows) {
   std::stable_sort(rows.begin(), rows.end(), [](const InEdge& a, const InEdge& b) {
     return std::tie(a.u, a.cost, a.v) < std::tie(b.u, b.cost, b.v);
@@ -87,20 +80,20 @@ std::vector<Cost> costs_of(const std::vector<std::pair<Cost, Path>>& r) {
 
 } // namespace
 
-TEST(Ksp, Review12AndTheSinglePathFromBothDirections) {
-  auto c2 = bgraph(4, {{0, 1, 1, 9}, {0, 2, 1, 1}, {1, 3, 1, 1}, {2, 3, 1, 9}});
+TEST(Ksp, FirstPathIsTheCanonicalSinglePathOfBothDirections) {
+  auto diamond = bgraph(4, {{0, 1, 1, 9}, {0, 2, 1, 1}, {1, 3, 1, 1}, {2, 3, 1, 9}});
   auto three = bgraph(6, {{0, 2, 1, 1}, {2, 3, 1, 1}, {3, 5, 1, 1}, {0, 1, 1, 1}, {1, 4, 1, 1}, {4, 5, 1, 1}});
   struct Case {
     const Graph* g;
     NodeId t;
     std::vector<NodeId> want;
   };
-  for (const auto& c : {Case {&c2, 3, {0, 2, 3}}, Case {&three, 5, {0, 1, 4, 5}}}) {
+  for (const auto& c : {Case {&diamond, 3, {0, 2, 3}}, Case {&three, 5, {0, 1, 4, 5}}}) {
     for (auto tie : {EdgeTieBreak::Deterministic, EdgeTieBreak::PreferHigherPriority}) {
       auto got = run(*c.g, 0, c.t, 2, sel(true, tie));
       ASSERT_EQ(got.size(), 2U);
       EXPECT_EQ(nodes_of(*c.g, got[0].second), c.want);
-      // k = 1 is the canonical single path of the forward and the reverse search.
+      // The first path is the canonical single path of the forward and the reverse search.
       SpfOptions f(Direction::Forward, PathSelection(tie, EdgePriority::Residual, false));
       f.targets = std::vector<NodeId> {c.t};
       SpfOptions r(Direction::Reverse, PathSelection(tie, EdgePriority::Residual, false));
@@ -109,7 +102,6 @@ TEST(Ksp, Review12AndTheSinglePathFromBothDirections) {
       auto rv = spf(*c.g, std::vector<NodeId> {c.t}, r);
       auto w = walk_of(got[0].second);
       std::sort(w.begin(), w.end());
-      EXPECT_EQ(std::vector<EdgeId>(fw.dag.via_edges().begin(), fw.dag.via_edges().end()).size(), w.size());
       auto fe = std::vector<EdgeId>(fw.dag.via_edges().begin(), fw.dag.via_edges().end());
       auto re = std::vector<EdgeId>(rv.dag.via_edges().begin(), rv.dag.via_edges().end());
       std::sort(fe.begin(), fe.end());
@@ -120,7 +112,7 @@ TEST(Ksp, Review12AndTheSinglePathFromBothDirections) {
   }
 }
 
-TEST(Ksp, Review13PrioritySuffixTrap) {
+TEST(Ksp, WithASharedBottleneckTheFewestHopsComeFirst) {
   auto g = bgraph(5, {{0, 1, 1, 1}, {1, 4, 1, 3}, {1, 2, 2, 1}, {2, 3, 2, 1}, {3, 4, 2, 1}});
   auto got = run(g, 0, 4, 1, sel(true, EdgeTieBreak::PreferHigherPriority, EdgePriority::Capacity));
   ASSERT_EQ(got.size(), 1U);
@@ -143,7 +135,7 @@ TEST(Ksp, CandidateBottleneckIncludesThePrefix) {
   // 0-2-3 (bottleneck 5); at 1, the prefix 0-1 then the second 1-3 edge (the spur alone has
   // bottleneck 10, the candidate min(1, 10) = 1). PreferHigherPriority orders 0-2-3 first; a
   // candidate keyed by its spur's bottleneck alone would put the prefix's deviation first.
-  // Deterministic orders the two by B' ids: 0-1-3 (ids 0, 3) before 0-2-3 (ids 1, 4).
+  // Deterministic orders the two by EdgeIds: 0-1-3 (ids 0, 3) before 0-2-3 (ids 1, 4).
   auto g = bgraph(4, {{0, 1, 1, 1}, {1, 3, 10, 1}, {0, 2, 5, 1}, {2, 3, 5, 2}, {1, 3, 10, 2}});
   auto prefer = run(g, 0, 3, 8, sel(true, EdgeTieBreak::PreferHigherPriority, EdgePriority::Capacity));
   ASSERT_EQ(costs_of(prefer), (std::vector<Cost> {2, 3, 3}));
@@ -173,6 +165,77 @@ TEST(Ksp, ParallelMembersUnderExpandAndCollapse) {
   EXPECT_EQ(costs_of(run(fe, 0, 2, 8, sel(false))), (std::vector<Cost>{3}));
 }
 
+TEST(Ksp, AcceptedPathsNeverReturnAfterASharedPrefix) {
+  // A candidate goes into the pending set without a search of the accepted
+  // paths, because each accepted path with the spur's prefix has its next edge (Expand) or its
+  // next transition (Collapse) banned at the spur. Spurs here share their prefix with one or two
+  // accepted paths at once, over parallel members; every path comes once, in the derived order.
+  // EdgeIds: 0, 1: 0->1 (1); 2: 0->2 (3); 3: 1->2 (1); 4, 5: 1->3 (1); 6: 2->3 (1).
+  auto g = bgraph(4, {{0, 1, 1, 1}, {0, 1, 1, 1}, {0, 2, 1, 3}, {1, 2, 1, 1}, {1, 3, 1, 1}, {1, 3, 1, 1}, {2, 3, 1, 1}});
+  auto walks = [](const std::vector<std::pair<Cost, Path>>& r) {
+    std::vector<std::vector<EdgeId>> out;
+    for (const auto& [c, p] : r) out.push_back(walk_of(p));
+    return out;
+  };
+  // Expand, derived by hand from the deviations: [0, 4] first; its spurs give [1, 4] and [0, 5].
+  // After [0, 5] the spur at node 1 bans 4 and 5 (both accepted paths share the prefix [0]) and
+  // finds [0, 3, 6]; the spur at node 0 bans 0 (twice) and finds [1, 4] again (pending: kept
+  // once). [1, 4] adds [2, 6] and [1, 5]; [1, 5] adds [1, 3, 6]; the rest add nothing new.
+  const auto expand = run(g, 0, 3, 16, sel());
+  EXPECT_EQ(walks(expand), (std::vector<std::vector<EdgeId>> {{0, 4}, {0, 5}, {1, 4}, {1, 5}, {0, 3, 6}, {1, 3, 6}, {2, 6}}));
+  EXPECT_EQ(costs_of(expand), (std::vector<Cost> {2, 2, 2, 2, 3, 3, 4}));
+  // Collapse: [0, 4] first; at node 1 the transition to 3 is banned, so 5 never follows [0]; at
+  // node 0 the transition to 1 is banned. Then [0, 3, 6] (node 1 bans the heads 3 and 2) and
+  // [2, 6].
+  const auto collapse = run(g, 0, 3, 16, sel(false));
+  EXPECT_EQ(walks(collapse), (std::vector<std::vector<EdgeId>> {{0, 4}, {0, 3, 6}, {2, 6}}));
+  EXPECT_EQ(costs_of(collapse), (std::vector<Cost> {2, 3, 4}));
+  // Every k gives the prefix of the full answer.
+  const auto all_e = walks(expand);
+  const auto all_c = walks(collapse);
+  for (std::int64_t k = 1; k <= 8; ++k) {
+    EXPECT_EQ(walks(run(g, 0, 3, k, sel())), decltype(all_e)(all_e.begin(), all_e.begin() + std::min<std::int64_t>(k, 7)));
+    EXPECT_EQ(walks(run(g, 0, 3, k, sel(false))), decltype(all_c)(all_c.begin(), all_c.begin() + std::min<std::int64_t>(k, 3)));
+  }
+}
+
+TEST(Ksp, EndpointDefectsReportTheFirstInOrder) {
+  // The scalar endpoints are checked as one-element sets (range, then the
+  // overlap), with every other argument also wrong where the order allows it; the first defect
+  // in the validation order is reported, for ksp and resolve_to_paths.
+  auto g = bgraph(3, {{0, 1, 1, 1}, {1, 2, 1, 1}});
+  auto other = bgraph(3, {{0, 1, 1, 1}});
+  auto foreign = other.eligibility({}, std::vector<EdgeId> {0});
+  const std::vector<Amount> bad = {1, 2};
+  const auto all_wrong = [&](NodeId s, NodeId t) {
+    return error_of([&] { (void)run(g, s, t, 0, sel(), Absolute {-1}, &bad, &foreign); });
+  };
+  EXPECT_EQ(all_wrong(5, -1), "src: node 5 out of node range [0, 3)");
+  EXPECT_EQ(all_wrong(-1, -1), "src: node -1 out of node range [0, 3)");
+  EXPECT_EQ(all_wrong(3, 3), "src: node 3 out of node range [0, 3)");  // range before the overlap
+  EXPECT_EQ(all_wrong(0, 3), "dst: node 3 out of node range [0, 3)");
+  EXPECT_EQ(all_wrong(2, -4), "dst: node -4 out of node range [0, 3)");
+  EXPECT_EQ(all_wrong(1, 1), "node 1 is in both endpoint sets: src and dst must not overlap");
+  EXPECT_EQ(all_wrong(0, 2), "k must be >= 1 (got 0)");
+  PathSelection selection = sel();
+  selection.priority = static_cast<EdgePriority>(9);
+  EXPECT_EQ(error_of([&] { (void)ksp(g, 7, 7, KspOptions(0, selection)); }),
+            "selection.priority: 9 is not a value of EdgePriority");
+  const auto dag = detail::PredDAGBuilder::of_edges(g, std::vector<EdgeId> {0, 1});
+  const auto dag_other = detail::PredDAGBuilder::of_edges(other, std::vector<EdgeId> {0});
+  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, dag_other, 9, 9, false, 0); }), "foreign PredDAG: built for another graph");
+  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, dag, 9, -9, false, 0); }), "src: node 9 out of node range [0, 3)");
+  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, dag, 3, 3, false, 0); }), "src: node 3 out of node range [0, 3)");
+  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, dag, 0, 3, false, 0); }), "dst: node 3 out of node range [0, 3)");
+  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, dag, 2, 2, false, 0); }),
+            "node 2 is in both endpoint sets: src and dst must not overlap");
+  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, dag, 0, 2, false, 0); }), "max_paths must be >= 1 (got 0)");
+  // Valid endpoints at both ends of the range.
+  EXPECT_EQ(run(g, 0, 2, 1, sel()).size(), 1U);
+  EXPECT_EQ(resolve_to_paths(g, dag, 0, 2).size(), 1U);
+  EXPECT_TRUE(run(g, 2, 0, 1, sel()).empty());
+}
+
 TEST(Ksp, ZeroCapacityEdgesAreNeverMembers) {
   auto g = bgraph(4, {{0, 1, 1, 1}, {1, 3, 1, 1}, {0, 2, 1, 1}, {2, 3, 1, 1}, {0, 3, 0, 2}, {0, 3, 1, 2}});
   std::vector<EdgeId> zero;
@@ -183,6 +246,9 @@ TEST(Ksp, ZeroCapacityEdgesAreNeverMembers) {
   auto with_zero = run(g, 0, 3, 8, sel());
   auto el = g.eligibility({}, zero);
   auto excluded = run(g, 0, 3, 8, sel(), std::nullopt, nullptr, &el);
+  // The three walks of cost 2 that avoid the zero-capacity edge: 0-1-3, 0-2-3 and the direct edge
+  // of capacity 1.
+  ASSERT_EQ(costs_of(with_zero), (std::vector<Cost> {2, 2, 2}));
   ASSERT_EQ(with_zero.size(), excluded.size());
   for (std::size_t i = 0; i < with_zero.size(); ++i) {
     EXPECT_TRUE(with_zero[i].second == excluded[i].second);
@@ -214,15 +280,35 @@ TEST(Ksp, CeilingsOnChainPlusBypasses) {
   EXPECT_TRUE(run(g, 0, 3, 8, sel(), Stretch {2.0}, nullptr, &el).empty());
 }
 
+// The Stretch ceiling is exact for costs and factors far past double precision: f = m * 2^x is
+// compared as that dyadic rational, the bit lengths before any shift. Paths 0->1 of cost b and
+// 0->2->1 of cost b + 1 (b + 2 on the second graph). b = 2^60: b + 1 rounds to b in a double, so
+// Stretch(1) admitting both paths would be a double comparison; (1 + 2^-52) * 2^60 = 2^60 + 2^8
+// admits b + 1; m * 2^60 for m = 2^52 + 1 does not fit 64 bits; 2^68 * 2^60 leaves 128 bits, and
+// so do the rest, which admit everything. b = 2^52: (1 + 2^-52) * b = b + 1 exactly, admitted,
+// while b + 2 is not.
+TEST(Ksp, StretchCeilingIsExactForLargeCostsAndFactors) {
+  const Cost big = Cost {1} << 60;
+  auto g = bgraph(3, {{0, 1, 1, big}, {0, 2, 1, 1}, {2, 1, 1, big}});
+  const double just_above_one = std::nextafter(1.0, 2.0);  // 1 + 2^-52
+  EXPECT_EQ(costs_of(run(g, 0, 1, 8, sel(), Stretch {1.0})), (std::vector<Cost> {big}));
+  for (const double f : {just_above_one, std::ldexp(1.0, 68), std::ldexp(1.0, 70), std::ldexp(1.0, 1000), 1e308,
+                         std::numeric_limits<double>::max()}) {
+    EXPECT_EQ(costs_of(run(g, 0, 1, 8, sel(), Stretch {f})), (std::vector<Cost> {big, big + 1})) << f;
+  }
+  const Cost b52 = Cost {1} << 52;
+  auto h = bgraph(4, {{0, 1, 1, b52}, {0, 2, 1, 1}, {2, 1, 1, b52}, {0, 3, 1, 2}, {3, 1, 1, b52}});
+  EXPECT_EQ(costs_of(run(h, 0, 1, 8, sel(), Stretch {1.0})), (std::vector<Cost> {b52}));
+  EXPECT_EQ(costs_of(run(h, 0, 1, 8, sel(), Stretch {just_above_one})), (std::vector<Cost> {b52, b52 + 1}));
+  EXPECT_EQ(costs_of(run(h, 0, 1, 8, sel(), Stretch {2.0})), (std::vector<Cost> {b52, b52 + 1, b52 + 2}));
+}
+
 TEST(Ksp, ValidationInTheContractOrder) {
   auto g = bgraph(3, {{0, 1, 1, 1}, {1, 2, 1, 1}});
   auto other = bgraph(3, {{0, 1, 1, 1}});
   auto foreign = other.eligibility({}, std::vector<EdgeId> {0});
   const std::vector<Amount> bad = {1, 2};
-  EXPECT_EQ(error_of([&] { (void)run(g, 3, 1, 1, sel()); }), "src: node 3 out of node range [0, 3)");
-  EXPECT_EQ(error_of([&] { (void)run(g, 0, -1, 1, sel()); }), "dst: node -1 out of node range [0, 3)");
-  EXPECT_EQ(error_of([&] { (void)run(g, 1, 1, 1, sel()); }), "node 1 is in both endpoint sets: src and dst must not overlap");
-  EXPECT_EQ(error_of([&] { (void)run(g, 0, 2, 0, sel()); }), "k must be >= 1 (got 0)");
+  // The endpoints and k, alone and with every later argument wrong: the test above.
   EXPECT_EQ(error_of([&] { (void)run(g, 0, 2, 1, sel(), Absolute {-1}); }), "max_path_cost Absolute cost must be >= 0 (got -1)");
   EXPECT_EQ(error_of([&] { (void)run(g, 0, 2, 1, sel(), Stretch {0.5}); }),
             "max_path_cost Stretch factor must be finite and in [1, inf) (got 0.500000)");
@@ -231,18 +317,33 @@ TEST(Ksp, ValidationInTheContractOrder) {
   EXPECT_EQ(error_of([&] { (void)run(g, 0, 2, 1, sel(), std::nullopt, &bad); }), "residual[1] = 2 is outside [0, capacity_units[1] = 1]");
   EXPECT_EQ(error_of([&] { (void)run(g, 0, 2, 1, sel(), std::nullopt, nullptr, &foreign); }),
             "foreign Eligibility: built for another graph");
-  // Order: the endpoints before k before the ceiling before the residual.
-  EXPECT_EQ(error_of([&] { (void)run(g, 2, 2, 0, sel(), Absolute {-1}, &bad); }),
-            "node 2 is in both endpoint sets: src and dst must not overlap");
-  EXPECT_EQ(error_of([&] { (void)run(g, 0, 2, 0, sel(), Absolute {-1}, &bad); }), "k must be >= 1 (got 0)");
+  // Order: the ceiling before the residual (the endpoints before k before the ceiling: the test
+  // above).
   EXPECT_EQ(error_of([&] { (void)run(g, 0, 2, 1, sel(), Absolute {-1}, &bad); }), "max_path_cost Absolute cost must be >= 0 (got -1)");
   KspOptions o(1, sel());
   o.selection.tie_break = static_cast<EdgeTieBreak>(4);
   EXPECT_EQ(error_of([&] { (void)ksp(g, 0, 2, o); }), "selection.tie_break: 4 is not a value of EdgeTieBreak");
-  // An excluded endpoint gives [], never an error.
-  const std::vector<NodeId> x0 = {0};
-  auto el = g.eligibility(x0, {});
-  EXPECT_TRUE(run(g, 0, 2, 3, sel(), std::nullopt, nullptr, &el).empty());
+  // An excluded endpoint, the source or the destination, gives [], never an error.
+  for (const NodeId x : {0, 2}) {
+    const std::vector<NodeId> xn = {x};
+    auto el = g.eligibility(xn, {});
+    EXPECT_TRUE(run(g, 0, 2, 3, sel(), std::nullopt, nullptr, &el).empty()) << x;
+    EXPECT_TRUE(run(g, 0, 2, 3, sel(), Stretch {2.0}, nullptr, &el).empty()) << x;
+  }
+}
+
+// A residual array with several defects at once (one error, from the shared edge-amount check): its
+// length before any entry, then its first entry outside [0, capacity] in EdgeId order, before
+// the Eligibility.
+TEST(Ksp, ResidualDefectsReportTheFirstInOrder) {
+  const auto g = edge_amount_graph();
+  const auto other = make_graph(4, {{0, 1, 2, 1}});
+  const auto foreign = other.eligibility({}, std::vector<EdgeId> {0});
+  for (const auto& c : edge_amount_defects()) {
+    EXPECT_EQ(error_of([&] { (void)run(g, 0, 3, 2, sel(), std::nullopt, &c.amounts, &foreign); }), "residual" + c.error);
+  }
+  const auto bounds = edge_amounts_at_the_bounds();
+  EXPECT_EQ(error_of([&] { (void)run(g, 0, 3, 2, sel(), std::nullopt, &bounds); }), "");
 }
 
 namespace {
@@ -277,8 +378,8 @@ std::vector<std::vector<EdgeId>> reference_ksp(const Graph& g, const ref::Query&
         const Cost base = d[static_cast<std::size_t>(t)];
         if (base == ref::kNone) return {};
         // f in {1, 1.25, 1.5, 2}: c <= f * base exactly in quarters.
-        const auto quarters = static_cast<__int128>(std::get<Stretch>(*ceiling).factor * 4);
-        if (static_cast<__int128>(c) * 4 > quarters * base) break;
+        const auto quarters = static_cast<std::int64_t>(std::get<Stretch>(*ceiling).factor * 4);
+        if (static_cast<Int128>(c) * 4 > static_cast<Int128>(quarters) * base) break;
       }
     }
     out.push_back(p);
@@ -289,10 +390,10 @@ std::vector<std::vector<EdgeId>> reference_ksp(const Graph& g, const ref::Query&
 } // namespace
 
 TEST(Ksp, RandomGraphsAgreeWithExhaustiveEnumeration) {
-  // The prototype-6 corpus shape (seed 6006): parallel members, residuals, masks, both tie modes,
-  // every priority, Expand and Collapse, k in {1, 3, 8}, Absolute and Stretch ceilings.
+  // Random graphs (seed 6006) checked against exhaustive enumeration: parallel members, residuals,
+  // masks, both tie modes, every priority, Expand and Collapse, k in {1, 3, 8}, Absolute and
+  // Stretch ceilings; each query again with multipath = false, which ksp ignores.
   std::mt19937 rng(6006);
-  int checked = 0;
   int nonempty = 0;
   int deep = 0;
   for (int gi = 0; gi < 300; ++gi) {
@@ -353,12 +454,20 @@ TEST(Ksp, RandomGraphsAgreeWithExhaustiveEnumeration) {
         EXPECT_EQ(cost, p.cost());
       }
       ASSERT_EQ(walks, want) << "graph " << gi << " case " << c;
-      ++checked;
+      // multipath is ignored: the same selection with multipath = false lists the same paths.
+      PathSelection single = s1;
+      single.multipath = false;
+      const auto same = run(g, 0, static_cast<NodeId>(n - 1), k, single, ceiling, use_res ? &residual : nullptr,
+                            masks ? &el : nullptr);
+      ASSERT_EQ(same.size(), got.size()) << "graph " << gi << " case " << c;
+      for (std::size_t i = 0; i < same.size(); ++i) {
+        EXPECT_EQ(same[i].first, got[i].first) << "graph " << gi << " case " << c;
+        EXPECT_TRUE(same[i].second == got[i].second) << "graph " << gi << " case " << c;
+      }
       if (!want.empty()) ++nonempty;
       if (want.size() >= 3) ++deep;
     }
   }
-  EXPECT_EQ(checked, 7200);
   EXPECT_GT(nonempty, 3000);
   EXPECT_GT(deep, 300);
 }
@@ -422,7 +531,7 @@ std::vector<std::vector<std::vector<EdgeId>>> reference_walks(const Graph& g, co
 
 TEST(ResolveToPaths, OrderSplitAndTruncation) {
   // A DAG with a parallel pair, two routes of equal cost and a dearer one:
-  // ids (B' order): 0: 0->1 (1), 1: 0->1 (1), 2: 0->2 (1), 3: 0->3 (5), 4: 1->3 (1), 5: 2->3 (1).
+  // EdgeIds: 0: 0->1 (1), 1: 0->1 (1), 2: 0->2 (1), 3: 0->3 (5), 4: 1->3 (1), 5: 2->3 (1).
   auto g = bgraph(4, {{0, 1, 1, 1}, {0, 1, 1, 1}, {0, 2, 1, 1}, {0, 3, 1, 5}, {1, 3, 1, 1}, {2, 3, 1, 1}});
   const auto dag = detail::PredDAGBuilder::of_edges(g, std::vector<EdgeId> {0, 1, 2, 3, 4, 5});
   auto hops_of = [](const std::vector<Path>& ps) {
@@ -435,7 +544,7 @@ TEST(ResolveToPaths, OrderSplitAndTruncation) {
   EXPECT_EQ(hops_of(grouped), (std::vector<std::vector<std::vector<EdgeId>>> {{{0, 1}, {4}}, {{2}, {5}}, {{3}}}));
   EXPECT_EQ(grouped[0].cost(), 2);
   EXPECT_EQ(grouped[2].cost(), 5);
-  // Split: one path per member combination, in the same order.
+  // Split: one path per member combination, sorted by its own (cost, hops, edge-id sequence).
   auto split = resolve_to_paths(g, dag, 0, 3, true);
   EXPECT_EQ(hops_of(split), (std::vector<std::vector<std::vector<EdgeId>>> {{{0}, {4}}, {{1}, {4}}, {{2}, {5}}, {{3}}}));
   EXPECT_EQ(resolve_to_paths(g, dag, 0, 3, true, 2).size(), 2U);
@@ -443,20 +552,28 @@ TEST(ResolveToPaths, OrderSplitAndTruncation) {
   // An endpoint the DAG does not join: [].
   EXPECT_TRUE(resolve_to_paths(g, dag, 3, 0).empty());
   EXPECT_TRUE(resolve_to_paths(g, detail::PredDAGBuilder::of_edges(g, std::vector<EdgeId> {4}), 0, 3).empty());
-  // Validation.
-  auto other = bgraph(4, {{0, 1, 1, 1}});
-  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(other, dag, 0, 3); }), "foreign PredDAG: built for another graph");
-  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, dag, 4, 3); }), "src: node 4 out of node range [0, 4)");
-  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, dag, 0, -2); }), "dst: node -2 out of node range [0, 4)");
-  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, dag, 2, 2); }), "node 2 is in both endpoint sets: src and dst must not overlap");
-  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, dag, 0, 3, false, 0); }), "max_paths must be >= 1 (got 0)");
+  // Unequal parallel costs: expanding the first grouped walk in place would put cost 4 before
+  // the direct cost-3 path, and truncating there would discard the wrong path.
+  const auto mixed = bgraph(3, {{0, 1, 1, 1}, {0, 1, 1, 3}, {1, 2, 1, 1}, {0, 2, 1, 3}});
+  const auto all = detail::PredDAGBuilder::of_edges(mixed, all_ids(mixed));
+  const auto grouped_mixed = resolve_to_paths(mixed, all, 0, 2);
+  EXPECT_EQ(hops_of(grouped_mixed), (std::vector<std::vector<std::vector<EdgeId>>> {{{0, 1}, {3}}, {{2}}}));
+  const auto split_mixed = resolve_to_paths(mixed, all, 0, 2, true);
+  EXPECT_EQ(hops_of(split_mixed), (std::vector<std::vector<std::vector<EdgeId>>> {{{0}, {3}}, {{2}}, {{1}, {3}}}));
+  ASSERT_EQ(split_mixed.size(), 3U);
+  EXPECT_EQ((std::vector<Cost> {split_mixed[0].cost(), split_mixed[1].cost(), split_mixed[2].cost()}),
+            (std::vector<Cost> {2, 3, 4}));
+  EXPECT_EQ(hops_of(resolve_to_paths(mixed, all, 0, 2, true, 2)),
+            (std::vector<std::vector<std::vector<EdgeId>>> {{{0}, {3}}, {{2}}}));
+  // Validation: Ksp.EndpointDefectsReportTheFirstInOrder.
 }
 
 TEST(ResolveToPaths, RandomDagsAgreeWithEnumeration) {
   // Random DAGs (edges u -> v with u < v, parallel members, mixed costs, not necessarily tight):
   // the order, both forms and the truncation against the enumeration of every walk.
   std::mt19937 rng(55);
-  int checked = 0;
+  int nonempty = 0;   // checks with at least one walk
+  int truncated = 0;  // checks whose max_paths cut the walks short
   for (int trial = 0; trial < 600; ++trial) {
     const int n = 2 + static_cast<int>(rng() % 7);
     std::vector<InEdge> rows;
@@ -482,11 +599,15 @@ TEST(ResolveToPaths, RandomDagsAgreeWithEnumeration) {
         const std::size_t expect_n = mp.has_value() ? std::min<std::size_t>(want.size(), static_cast<std::size_t>(*mp)) : want.size();
         ASSERT_EQ(got.size(), expect_n) << trial;
         for (std::size_t i = 0; i < got.size(); ++i) EXPECT_EQ(got[i].hops(), want[i]) << trial << " path " << i;
-        ++checked;
+        nonempty += want.empty() ? 0 : 1;
+        truncated += expect_n < want.size() ? 1 : 0;
       }
     }
   }
-  EXPECT_EQ(checked, 3600);
+  RecordProperty("nonempty", nonempty);
+  RecordProperty("truncated", truncated);
+  EXPECT_GT(nonempty, 1800);  // not vacuous: most DAGs hold a walk
+  EXPECT_GT(truncated, 400);
 }
 
 TEST(ResolveToPaths, ResolvesASearchDagFromEitherDirection) {
@@ -512,9 +633,7 @@ TEST(ResolveToPaths, LongChainsNeedNoRecursion) {
   for (int v = 0; v + 1 < n; ++v) rows.push_back({v, v + 1, 1, 1});
   rows.push_back({n / 2, n / 2 + 1, 1, 1});
   auto g = make_graph(n, rows);
-  std::vector<EdgeId> all(static_cast<std::size_t>(g.num_edges()));
-  for (std::size_t e = 0; e < all.size(); ++e) all[e] = static_cast<EdgeId>(e);
-  const auto dag = detail::PredDAGBuilder::of_edges(g, all);
+  const auto dag = detail::PredDAGBuilder::of_edges(g, all_ids(g));
   EXPECT_EQ(resolve_to_paths(g, dag, 0, n - 1, true).size(), 2U);
   EXPECT_EQ(resolve_to_paths(g, dag, 0, n - 1).size(), 1U);
 }

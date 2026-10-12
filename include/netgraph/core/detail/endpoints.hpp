@@ -1,4 +1,4 @@
-/* Endpoint and root sets (internal; APPROACH 4, 6 and 9.3; rule 13): one normalisation, one
+/* Endpoint and root sets (internal): one normalisation, one
    overlap check and one message for each defect, shared by the flow core, the searches, the
    ledger's bottleneck, the policies, the evaluators and the bindings (which check unnarrowed
    Python integers and report the same texts). */
@@ -45,7 +45,7 @@ inline void check_range(std::span<const NodeId> nodes, std::int32_t num_nodes, c
   return out;
 }
 
-// std::invalid_argument when the two sorted sets share a vertex (the first shared one; rule 13).
+// std::invalid_argument when the two sorted sets share a vertex (the first shared one).
 inline void check_disjoint(std::span<const NodeId> a, std::span<const NodeId> b, const char* a_name,
                            const char* b_name) {
   for (std::size_t i = 0, k = 0; i < a.size() && k < b.size();) {

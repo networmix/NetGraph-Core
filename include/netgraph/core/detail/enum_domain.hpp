@@ -1,4 +1,4 @@
-/* Membership of enumeration values (internal; rule 13). An enum-typed field can hold a value
+/* Membership of enumeration values (internal). An enum-typed field can hold a value
    outside its enumeration (a C++ cast, a Python enum built from an integer); such a value is
    outside the domain and is rejected (std::invalid_argument naming the field) before it
    reaches any rule or record. */

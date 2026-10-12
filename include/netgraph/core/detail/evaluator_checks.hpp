@@ -1,6 +1,6 @@
 /* The evaluators' argument checks, worker default and in-call forms (internal), shared with the
-   Python binding so that both report the same first error (APPROACH 4 and 11) and publish a frozen
-   cache's statistics at the same boundary (NOTES R27). */
+   Python binding so that both report the same first error and publish a frozen cache's
+   statistics at the same boundary. */
 #pragma once
 
 #include <cstddef>
@@ -25,8 +25,7 @@ void check_batch_pair(const Graph& g, std::span<const NodeId> sources,
 
 // The evaluators' default worker count from the environment (NGRAPH_CORE_BATCH_THREADS for
 // batch_capacity, NGRAPH_CORE_SENSITIVITY_THREADS for sensitivity): an integer in [1, 4096],
-// else 1. An explicit workers >= 1 is always honoured; the environment supplies defaults only
-// (APPROACH 11).
+// else 1. An explicit workers >= 1 is always honoured; the environment supplies defaults only.
 std::int32_t default_workers(bool sensitivity) noexcept;
 
 // The evaluators inside a public call: as capacity, batch_capacity and sensitivity, with a

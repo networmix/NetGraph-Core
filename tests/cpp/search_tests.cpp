@@ -1,23 +1,25 @@
-// The search of APPROACH 6 through the public spf and the traversal core's internal entries: the
-// member graph and select_adjacency, the unique DAG in both directions, anycast pruning, the staged
-// canonical single path on the review witnesses, the canonical predecessor order, both queues and
+// The search through the public spf and the traversal core's internal entries: the
+// member graph and select_adjacency, the unique DAG in both directions and the values that reach
+// it only through the member graph, anycast pruning, the staged
+// canonical single path on its witness graphs (hand-built examples), the canonical predecessor order, both queues and
 // their dispatch, and agreement with an independent reference (search_reference.hpp) on random
-// graphs.
+// graphs, one population of them built so that every rule of the single path's key decides
+// some trials.
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <functional>
-#include <limits>
 #include <numeric>
 #include <optional>
 #include <queue>
 #include <random>
 #include <set>
-#include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
+#include "netgraph/core/dag_cache.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
 #include "netgraph/core/detail/traversal.hpp"
 #include "netgraph/core/options.hpp"
@@ -33,15 +35,6 @@ namespace {
 PathSelection sel(bool multipath = true, bool multi_edge = true, EdgeTieBreak tie = EdgeTieBreak::Deterministic,
                   EdgePriority prio = EdgePriority::Residual) {
   return PathSelection(tie, prio, multipath, multi_edge);
-}
-
-std::string error_of(const std::function<void()>& fn) {
-  try {
-    fn();
-  } catch (const std::invalid_argument& e) {
-    return e.what();
-  }
-  return "";
 }
 
 SpfResult run(const Graph& g, std::vector<NodeId> roots, Direction dir, std::optional<std::vector<NodeId>> targets,
@@ -113,6 +106,8 @@ TEST(Search, CollapseBySelectAdjacency) {
   };
   // Expand keeps every tight member; Deterministic Collapse the lowest EdgeId among the cheapest.
   EXPECT_EQ(member(sel()), (std::vector<EdgeId>{0, 1, 2}));
+  // multipath and multi_edge default to true: a full search keeping every tight member.
+  EXPECT_EQ(member(PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Residual)), (std::vector<EdgeId>{0, 1, 2}));
   EXPECT_EQ(member(sel(true, false)), (std::vector<EdgeId>{0}));
   // PreferHigherPriority on Capacity: the highest capacity among the cheapest.
   EXPECT_EQ(member(sel(true, false, EdgeTieBreak::PreferHigherPriority, EdgePriority::Capacity)), (std::vector<EdgeId>{1}));
@@ -134,7 +129,7 @@ TEST(Search, CollapseBySelectAdjacency) {
 }
 
 TEST(Search, HeadroomRationalsBeyondDoubles) {
-  // review-1d-refine's witness: (a - 1) / a < a / (a + 1) for a = 2^54, while both round to the
+  // Headroom ratios a double cannot separate: (a - 1) / a < a / (a + 1) for a = 2^54, while both round to the
   // same double. Parallel 0->1 members: id 0 residual a - 1 of capacity a, id 1 residual a of
   // capacity a + 1; Headroom Collapse must keep id 1.
   const Amount a = Amount {1} << 54;
@@ -157,16 +152,20 @@ TEST(Search, FullDagForwardAndReverse) {
   expect_canonical(g, f.dag);
   auto r = run(g, {3}, Direction::Reverse, std::nullopt, sel());
   EXPECT_EQ(*r.costs, (std::vector<Cost>{2, 1, 1, 0}));
-  // The reverse DAG toward 3 is the forward-oriented set of tight edges toward 3.
+  // The reverse DAG toward 3 is the forward-oriented set of tight edges toward 3. It differs from
+  // the forward DAG from 0 although 3 is a node that search reaches: each search keeps the edges
+  // tight in its own direction (0->2 forward only, 2->3 reverse only).
   EXPECT_EQ(edges_of(r.dag), (std::vector<EdgeId>{0, 1, 3, 4}));
   expect_canonical(g, r.dag);
+  // On the same root the directions differ too: no edge enters 0, so the reverse DAG is empty.
+  EXPECT_TRUE(run(g, {0}, Direction::Reverse, std::nullopt, sel()).dag.via_edges().empty());
   // Unreached nodes keep kUnreachable.
   auto u = run(g, {2}, Direction::Forward, std::nullopt, sel());
   EXPECT_EQ(*u.costs, (std::vector<Cost>{kUnreachable, kUnreachable, 0, 1}));
 }
 
 TEST(Search, PredecessorOrderIsAscendingViaIndependentlyOfDiscovery) {
-  // review-1d-refine's four-node witness: ids 0: 0->1 (1), 1: 0->2 (2), 2: 1->3 (2), 3: 2->3 (1).
+  // A four-node witness: ids 0: 0->1 (1), 1: 0->2 (2), 2: 1->3 (2), 3: 2->3 (1).
   // Node 3's tight parents are discovered via 2 (from node 1, settled first) and then via 3; the
   // list holds them newest first, [3, 2]; the DAG must list [2, 3] whatever the queue.
   auto g = make_graph(4, {{0, 1, 1, 1}, {0, 2, 1, 2}, {1, 3, 1, 2}, {2, 3, 1, 1}});
@@ -186,6 +185,25 @@ TEST(Search, PredecessorOrderIsAscendingViaIndependentlyOfDiscovery) {
   auto rev = run(g, {3}, Direction::Reverse, std::nullopt, sel());
   expect_canonical(g, rev.dag);
   EXPECT_EQ(edges_of(rev.dag), (std::vector<EdgeId>{0, 1, 2, 3}));
+}
+
+// The canonical-form check reports each defect of a hand-built DAG: a descending via within a
+// child, a wrong parent, an entry under a child its edge does not enter, an ascending list that
+// is not the sorted via; the correct DAG passes.
+TEST(Search, CanonicalFormCheckReportsEachDefect) {
+  // ids: 0: 0->1, 1: 0->1, 2: 0->2 (cost 2), 3: 1->2.
+  auto g = make_graph(3, {{0, 1, 1, 1}, {0, 1, 1, 1}, {0, 2, 1, 2}, {1, 2, 1, 1}});
+  const auto failures = [&](std::vector<NodeId> nodes, std::vector<std::int32_t> offsets, std::vector<NodeId> parents,
+                            std::vector<EdgeId> via, std::vector<EdgeId> ascending) {
+    const auto dag = detail::PredDAGBuilder::of_parts(g, std::move(nodes), std::move(offsets), std::move(parents),
+                                                      std::move(via), std::move(ascending));
+    return failures_of([&] { expect_canonical(g, dag); });
+  };
+  EXPECT_EQ(failures({1, 2}, {0, 2, 3}, {0, 0, 1}, {0, 1, 3}, {0, 1, 3}), 0);
+  EXPECT_GT(failures({1, 2}, {0, 2, 3}, {0, 0, 1}, {1, 0, 3}, {0, 1, 3}), 0) << "descending via";
+  EXPECT_GT(failures({1, 2}, {0, 2, 3}, {0, 0, 0}, {0, 1, 3}, {0, 1, 3}), 0) << "wrong parent";
+  EXPECT_GT(failures({1}, {0, 3}, {0, 0, 1}, {0, 1, 3}, {0, 1, 3}), 0) << "wrong child";
+  EXPECT_GT(failures({1, 2}, {0, 2, 3}, {0, 0, 1}, {0, 1, 3}, {0, 1, 2}), 0) << "ascending list";
 }
 
 TEST(Search, AnycastPruningAndDirectionIndependence) {
@@ -298,9 +316,49 @@ TEST(Search, ValidationBeforeAnyWorkInTheContractOrder) {
   SpfOptions good(Direction::Forward, sel());
   EXPECT_EQ(error_of([&] { (void)spf(g, std::vector<NodeId> {0}, good, static_cast<SpfQueue>(3)); }),
             "queue: 3 is not a value of SpfQueue");
+  // The enumerations come before every other check, in the order direction, the selection (its
+  // tie break, then its priority), the queue. Each call has every later defect too (empty roots,
+  // multipath = false without targets, a short residual, min_residual 0, a foreign Eligibility);
+  // repairing the reported defect moves the error to the next one.
+  SpfOptions every(Direction::Forward, sel(false));
+  every.residual = std::span<const Amount>(short_res);
+  every.min_residual = 0;
+  every.elig = &foreign;
+  every.direction = static_cast<Direction>(7);
+  every.selection.tie_break = static_cast<EdgeTieBreak>(6);
+  every.selection.priority = static_cast<EdgePriority>(5);
+  const auto bad_queue = static_cast<SpfQueue>(3);
+  const auto staircase_error = [&] { return error_of([&] { (void)spf(g, std::vector<NodeId> {}, every, bad_queue); }); };
+  EXPECT_EQ(staircase_error(), "direction: 7 is not a value of Direction");
+  every.direction = Direction::Forward;
+  EXPECT_EQ(staircase_error(), "selection.tie_break: 6 is not a value of EdgeTieBreak");
+  every.selection.tie_break = EdgeTieBreak::Deterministic;
+  EXPECT_EQ(staircase_error(), "selection.priority: 5 is not a value of EdgePriority");
+  every.selection.priority = EdgePriority::Capacity;
+  EXPECT_EQ(staircase_error(), "queue: 3 is not a value of SpfQueue");
+  EXPECT_EQ(error_of([&] { (void)spf(g, std::vector<NodeId> {}, every, SpfQueue::Auto); }), "roots: the node set is empty");
 }
 
-TEST(Search, StagedPathReview13D3Witness) {
+// A residual array with several defects at once (one error, from the shared edge-amount check): its
+// length before any entry, then its first entry outside [0, capacity] in EdgeId order, before
+// min_residual and the Eligibility; in both directions, with and without targets.
+TEST(Search, ResidualDefectsReportTheFirstInOrder) {
+  const auto g = edge_amount_graph();
+  const auto other = make_graph(4, {{0, 1, 2, 1}});
+  const auto foreign = other.eligibility({}, std::vector<EdgeId> {0});
+  for (const auto& c : edge_amount_defects()) {
+    for (auto dir : {Direction::Forward, Direction::Reverse}) {
+      EXPECT_EQ(error_of([&] { (void)run(g, {0}, dir, std::nullopt, sel(), &c.amounts, 0, &foreign); }),
+                "residual" + c.error);
+      EXPECT_EQ(error_of([&] { (void)run(g, {0}, dir, std::vector<NodeId> {3}, sel(false), &c.amounts, 0, &foreign); }),
+                "residual" + c.error);
+    }
+  }
+  const auto bounds = edge_amounts_at_the_bounds();
+  EXPECT_EQ(error_of([&] { (void)run(g, {0}, Direction::Forward, std::nullopt, sel(), &bounds); }), "");
+}
+
+TEST(Search, StagedPathWithASharedBottleneckTakesTheFewestHops) {
   // s=0 -> v=1 cost 1 prio 1; v -> t=4 cost 3 prio 1; v -> a=2 -> b=3 -> t costs 1+1+1 prio 2.
   // Capacities carry the priority. Under PreferHigherPriority the bottleneck of every walk is 1
   // (the shared s->v), so B* = 1 and the canonical walk is the two-hop s, v, t.
@@ -345,7 +403,7 @@ TEST(Search, StagedPathBottleneckThenHopsThenIds) {
 }
 
 TEST(Search, StagedPathPrefixTrapNeedsTheFullKey) {
-  // review-1d-refine section 1: a cost-2 direct prefix 0->2 with bottleneck 5 against a two-edge
+  // A cost-2 direct prefix 0->2 with bottleneck 5 against a two-edge
   // cost-2 prefix 0->1->2 with bottleneck 10, then a cost-1 edge of priority 1 to the target 3.
   // Both complete walks cost 3 with bottleneck 1, so hops decide: [0->2, 2->3]. A search that kept
   // only the wider prefix would return the three-hop walk.
@@ -368,11 +426,11 @@ TEST(Search, MultiRootSinglePathStartsAtTheNearestRootByHops) {
   EXPECT_EQ(edges_of(r.dag), (std::vector<EdgeId>{inv[0]}));
 }
 
-TEST(Search, StagedPathReview13CanonicalWitnesses) {
-  // review-13 contract_probes.py: the C2 diamond (0-1-3 and 0-2-3 both cost 10) takes 0-2-3,
+TEST(Search, StagedPathTiesGoToTheSmallerEdgeIdSequence) {
+  // The diamond (0-1-3 and 0-2-3 both cost 10) takes 0-2-3,
   // whose edge-id sequence is smaller; the equal three-hop graph takes 0-1-4-5. Both tie modes
   // (all capacities 1: priority ties), both directions.
-  auto c2 = make_graph(4, {{0, 1, 1, 9}, {0, 2, 1, 1}, {1, 3, 1, 1}, {2, 3, 1, 9}});
+  auto diamond = make_graph(4, {{0, 1, 1, 9}, {0, 2, 1, 1}, {1, 3, 1, 1}, {2, 3, 1, 9}});
   auto three = make_graph(6, {{0, 2, 1, 1}, {2, 3, 1, 1}, {3, 5, 1, 1}, {0, 1, 1, 1}, {1, 4, 1, 1}, {4, 5, 1, 1}});
   auto nodes_of = [](const Graph& g, const PredDAG& dag) {
     std::set<NodeId> out;
@@ -385,9 +443,9 @@ TEST(Search, StagedPathReview13CanonicalWitnesses) {
   for (auto tie : {EdgeTieBreak::Deterministic, EdgeTieBreak::PreferHigherPriority}) {
     for (auto prio : {EdgePriority::Residual, EdgePriority::Capacity, EdgePriority::Headroom}) {
       const auto s = sel(false, true, tie, prio);
-      auto a = run(c2, {0}, Direction::Forward, std::vector<NodeId> {3}, s);
-      EXPECT_EQ(nodes_of(c2, a.dag), (std::set<NodeId>{0, 2, 3}));
-      auto ar = run(c2, {3}, Direction::Reverse, std::vector<NodeId> {0}, s);
+      auto a = run(diamond, {0}, Direction::Forward, std::vector<NodeId> {3}, s);
+      EXPECT_EQ(nodes_of(diamond, a.dag), (std::set<NodeId>{0, 2, 3}));
+      auto ar = run(diamond, {3}, Direction::Reverse, std::vector<NodeId> {0}, s);
       EXPECT_EQ(edges_of(ar.dag), edges_of(a.dag));
       auto b = run(three, {0}, Direction::Forward, std::vector<NodeId> {5}, s);
       EXPECT_EQ(nodes_of(three, b.dag), (std::set<NodeId>{0, 1, 4, 5}));
@@ -412,15 +470,6 @@ struct RandomCase {
   std::optional<std::vector<NodeId>> targets;
 };
 
-Graph random_graph(std::mt19937& rng, int n, int m, Cost max_cost, Cost scale = 1) {
-  std::vector<InEdge> edges;
-  for (int i = 0; i < m; ++i) {
-    edges.push_back({static_cast<NodeId>(rng() % static_cast<unsigned>(n)), static_cast<NodeId>(rng() % static_cast<unsigned>(n)),
-                     static_cast<Amount>(rng() % 5), scale * static_cast<Cost>(1 + rng() % static_cast<unsigned>(max_cost))});
-  }
-  return make_graph(n, edges);
-}
-
 // The expected result of a query by the reference: costs, the DAG's edges, target_cost.
 struct Expected {
   std::optional<std::vector<Cost>> costs;
@@ -428,28 +477,23 @@ struct Expected {
   std::optional<Cost> target_cost;
 };
 
-Expected expect_of(const RandomCase& c) {
-  const Graph& g = c.g;
+ref::Query query_of(const RandomCase& c) {
   ref::Query q;
-  q.g = &g;
+  q.g = &c.g;
   q.elig = c.elig ? &*c.elig : nullptr;
   q.residual = c.use_res ? &c.residual : nullptr;
   q.min_residual = c.min_residual;
   q.multi_edge = c.selection.multi_edge;
   q.prefer = c.selection.tie_break == EdgeTieBreak::PreferHigherPriority;
   q.priority = c.selection.priority;
+  return q;
+}
+
+Expected expect_of(const RandomCase& c) {
+  const Graph& g = c.g;
+  const ref::Query q = query_of(c);
   const auto mem = ref::members(q);
-  auto live = [&](const std::vector<NodeId>& set) {
-    std::vector<NodeId> s(set.begin(), set.end());
-    std::sort(s.begin(), s.end());
-    s.erase(std::unique(s.begin(), s.end()), s.end());
-    std::vector<NodeId> out;
-    for (NodeId v : s) {
-      if (q.elig == nullptr || q.elig->node_ok(v)) out.push_back(v);
-    }
-    return out;
-  };
-  const auto roots = live(c.roots);
+  const auto roots = allowed_nodes(c.roots, q.elig);
   const bool reverse = c.direction == Direction::Reverse;
   Expected out;
   if (!c.targets.has_value()) {
@@ -459,7 +503,7 @@ Expected expect_of(const RandomCase& c) {
     out.edges.assign(dag.begin(), dag.end());
     return out;
   }
-  const auto targets = live(*c.targets);
+  const auto targets = allowed_nodes(*c.targets, q.elig);
   out.target_cost = kUnreachable;
   if (roots.empty() || targets.empty()) return out;
   const auto& starts = reverse ? targets : roots;
@@ -480,8 +524,9 @@ Expected expect_of(const RandomCase& c) {
 
 TEST(Search, RandomQueriesAgreeWithTheReferenceOnBothQueues) {
   std::mt19937 rng(20261006);
-  int checked = 0;
-  int single = 0;
+  int full = 0;       // full searches that keep an edge
+  int multipath = 0;  // multipath target searches that reach a target
+  int single = 0;     // single-path target searches that reach a target
   for (int trial = 0; trial < 3000; ++trial) {
     const int n = 2 + static_cast<int>(rng() % 7);
     const int m = static_cast<int>(rng() % 16);
@@ -513,14 +558,10 @@ TEST(Search, RandomQueriesAgreeWithTheReferenceOnBothQueues) {
     const std::size_t nr = 1 + rng() % static_cast<unsigned>(std::max(1, n / 2));
     c.roots.assign(perm.begin(), perm.begin() + static_cast<std::ptrdiff_t>(nr));
     if (rng() % 4 == 0) c.roots.push_back(c.roots.front());
-    if (with_targets) {
+    if (with_targets) {  // never empty: nr <= n / 2 < n
       const std::size_t nt = 1 + rng() % static_cast<unsigned>(std::max<std::size_t>(1, perm.size() - nr));
       c.targets = std::vector<NodeId>(perm.begin() + static_cast<std::ptrdiff_t>(nr),
                                       perm.begin() + static_cast<std::ptrdiff_t>(std::min(perm.size(), nr + nt)));
-      if (c.targets->empty()) c.targets = std::nullopt;
-    }
-    if (!c.targets.has_value() && !c.selection.multipath) {
-      c.selection = PathSelection(c.selection.tie_break, c.selection.priority, true, c.selection.multi_edge);
     }
     const auto want = expect_of(c);
     for (auto queue : {SpfQueue::Auto, SpfQueue::Heap}) {
@@ -531,17 +572,108 @@ TEST(Search, RandomQueriesAgreeWithTheReferenceOnBothQueues) {
       ASSERT_EQ(got.target_cost, want.target_cost) << "trial " << trial;
       expect_canonical(c.g, got.dag);
     }
-    ++checked;
-    if (c.targets.has_value() && !c.selection.multipath && want.target_cost != kUnreachable) ++single;
+    full += !c.targets.has_value() && !want.edges.empty() ? 1 : 0;
+    const bool reached = c.targets.has_value() && want.target_cost != kUnreachable;
+    multipath += reached && c.selection.multipath ? 1 : 0;
+    single += reached && !c.selection.multipath ? 1 : 0;
   }
-  EXPECT_EQ(checked, 3000);
+  EXPECT_GT(full, 300);
+  EXPECT_GT(multipath, 300);
   EXPECT_GT(single, 300);
+}
+
+namespace {
+
+// Whether the hop count decides a single-path query's canonical walk: another walk ties it on
+// cost (and bottleneck under PreferHigherPriority) with more hops but a smaller edge-id sequence.
+bool hops_decide(const RandomCase& c) {
+  const ref::Query q = query_of(c);
+  const auto mem = ref::members(q);
+  const bool reverse = c.direction == Direction::Reverse;
+  const auto roots = allowed_nodes(c.roots, q.elig);
+  const auto targets = allowed_nodes(*c.targets, q.elig);
+  const auto& starts = reverse ? targets : roots;
+  const auto& ends = reverse ? roots : targets;
+  const auto canonical = ref::canonical(q, mem, starts, ends);
+  if (!canonical) return false;
+  const std::vector<EdgeId>& walk = *canonical;
+  for (const auto& w : ref::all_walks(c.g, mem, starts, ends)) {
+    if (ref::walk_cost(c.g, w) == ref::walk_cost(c.g, walk) &&
+        (!q.prefer || ref::cmp(ref::bottleneck(q, w), ref::bottleneck(q, walk)) == 0) && w.size() > walk.size() &&
+        w < walk) {
+      return true;
+    }
+  }
+  return false;
+}
+
+} // namespace
+
+// The single-path rules that the random comparison above reaches only now and then, on a
+// population built for them: a few nodes joined by many parallel edges of cost 1 or 2, a residual
+// on every query, one root and one target. Each rule is guarded by the trials in which it decides
+// the reference's answer, against a twin query without it: the Headroom ratio (the twin reads the
+// residual alone), the capacity priority (the twin reads the residual), the bottleneck key under
+// PreferHigherPriority (the twin breaks ties deterministically, on Expand member graphs, where the
+// tie mode decides nothing else), and the hop count (hops_decide). Both queues agree with the
+// reference on every trial.
+TEST(Search, RandomSinglePathsExerciseEveryKeyRule) {
+  std::mt19937 rng(20261010);
+  int headroom = 0, capacity = 0, bottleneck = 0, hops = 0;
+  for (int trial = 0; trial < 8000; ++trial) {
+    const int n = 3 + static_cast<int>(rng() % 4);
+    const int m = 6 + static_cast<int>(rng() % 14);
+    const EdgePriority prios[3] = {EdgePriority::Residual, EdgePriority::Capacity, EdgePriority::Headroom};
+    const EdgePriority prio = prios[rng() % 3];
+    const bool prefer = rng() % 4 != 0;
+    const bool expand = rng() % 2 == 0;
+    RandomCase c {random_graph(rng, n, m, 2), {}, true, 1, std::nullopt,
+                  PathSelection(prefer ? EdgeTieBreak::PreferHigherPriority : EdgeTieBreak::Deterministic, prio, false,
+                                expand),
+                  (rng() % 2) == 0 ? Direction::Forward : Direction::Reverse, {}, std::nullopt};
+    c.residual.resize(static_cast<std::size_t>(c.g.num_edges()));
+    for (std::size_t e = 0; e < c.residual.size(); ++e) {
+      const Amount cap = c.g.capacity_units()[e];
+      c.residual[e] = cap == 0 ? 0 : static_cast<Amount>(rng() % static_cast<std::uint32_t>(cap + 1));
+    }
+    const auto root = static_cast<NodeId>(rng() % static_cast<unsigned>(n));
+    c.roots = {root};
+    c.targets = std::vector<NodeId> {static_cast<NodeId>((root + 1 + rng() % static_cast<unsigned>(n - 1)) % n)};
+    const auto want = expect_of(c);
+    for (auto queue : {SpfQueue::Auto, SpfQueue::Heap}) {
+      auto got = run(c.g, c.roots, c.direction, c.targets, c.selection, &c.residual, c.min_residual, nullptr, queue);
+      ASSERT_EQ(edges_of(got.dag), want.edges) << "trial " << trial << " queue " << static_cast<int>(queue);
+      ASSERT_EQ(got.target_cost, want.target_cost) << "trial " << trial;
+    }
+    if (want.target_cost == kUnreachable) continue;
+    auto differs = [&](const std::function<void(RandomCase&)>& change) {
+      RandomCase twin = c;
+      change(twin);
+      return expect_of(twin).edges != want.edges ? 1 : 0;
+    };
+    const auto residual_only = [](RandomCase& t) { t.selection.priority = EdgePriority::Residual; };
+    if (prio == EdgePriority::Headroom) headroom += differs(residual_only);
+    if (prio == EdgePriority::Capacity) capacity += differs(residual_only);
+    if (prefer && expand) {
+      bottleneck += differs([](RandomCase& t) { t.selection.tie_break = EdgeTieBreak::Deterministic; });
+    }
+    hops += hops_decide(c) ? 1 : 0;
+  }
+  // Each rule decides 42 to 66 of the 8,000 trials with this seed: the floors leave room for a
+  // generator change while staying far above the one or two trials of the comparison above.
+  EXPECT_GT(headroom, 20);
+  EXPECT_GT(capacity, 20);
+  EXPECT_GT(bottleneck, 20);
+  EXPECT_GT(hops, 20);
 }
 
 TEST(Search, DirectionsWithExchangedEndpointsDescribeTheSameWalks) {
   // A forward search from S with targets T and a reverse search rooted at T with targets S give
-  // the same pruned DAG, target cost and single path, for every selection.
+  // the same pruned DAG, target cost and single path, for both tie modes with and without
+  // multipath and multi-edge, under the capacity priority (the other priorities are compared with
+  // the reference in RandomQueriesAgreeWithTheReferenceOnBothQueues).
   std::mt19937 rng(7);
+  int reached = 0;  // comparisons where a target is reached (a non-empty DAG)
   for (int trial = 0; trial < 500; ++trial) {
     const int n = 4 + static_cast<int>(rng() % 8);
     auto g = random_graph(rng, n, 4 + static_cast<int>(rng() % 20), 3);
@@ -558,30 +690,141 @@ TEST(Search, DirectionsWithExchangedEndpointsDescribeTheSameWalks) {
           auto r = run(g, t, Direction::Reverse, s, s1);
           ASSERT_EQ(f.target_cost, r.target_cost) << trial;
           ASSERT_EQ(edges_of(f.dag), edges_of(r.dag)) << trial;
+          reached += f.target_cost != kUnreachable ? 1 : 0;
         }
       }
     }
   }
+  RecordProperty("reached", reached);
+  EXPECT_GT(reached, 1500);  // not vacuous: of 4000 comparisons
 }
 
 TEST(Search, TieModesShareTheDagOfAFixedMemberGraph) {
   // Under Expand the member graph does not depend on the tie mode or the priority, so neither
-  // does the DAG; under Collapse the member may differ (and with it the DAG).
+  // does the DAG; under Collapse the member may differ (and with it the DAG). Half of the graphs,
+  // with and without targets, have a random residual (0 to the capacity), so the residual and
+  // headroom priorities read values that differ from the capacities.
   std::mt19937 rng(11);
+  int nonempty = 0;
+  int with_residual = 0;  // nonempty DAGs under a residual
   for (int trial = 0; trial < 300; ++trial) {
     auto g = random_graph(rng, 6, 14, 2);
     std::optional<std::vector<NodeId>> t;
     if (trial % 2 == 0) t = std::vector<NodeId> {5};
-    const auto base = edges_of(run(g, {0}, Direction::Forward, t, sel()).dag);
+    std::vector<Amount> res;
+    if (trial % 4 < 2) {
+      res.resize(static_cast<std::size_t>(g.num_edges()));
+      for (std::size_t e = 0; e < res.size(); ++e) {
+        const Amount cap = g.capacity_units()[e];
+        res[e] = cap == 0 ? 0 : static_cast<Amount>(rng() % static_cast<std::uint32_t>(cap + 1));
+      }
+    }
+    const std::vector<Amount>* r = res.empty() ? nullptr : &res;
+    const auto base = edges_of(run(g, {0}, Direction::Forward, t, sel(), r).dag);
+    nonempty += base.empty() ? 0 : 1;
+    with_residual += !base.empty() && r != nullptr ? 1 : 0;
     for (auto tie : {EdgeTieBreak::Deterministic, EdgeTieBreak::PreferHigherPriority}) {
       for (auto prio : {EdgePriority::Residual, EdgePriority::Capacity, EdgePriority::Headroom}) {
-        EXPECT_EQ(edges_of(run(g, {0}, Direction::Forward, t, sel(true, true, tie, prio)).dag), base);
+        EXPECT_EQ(edges_of(run(g, {0}, Direction::Forward, t, sel(true, true, tie, prio), r).dag), base) << trial;
       }
     }
   }
+  RecordProperty("nonempty", nonempty);
+  RecordProperty("with_residual", with_residual);
+  EXPECT_GT(nonempty, 150);  // not vacuous: of 300 graphs
+  EXPECT_GT(with_residual, 50);  // of the 150 graphs with a residual (this seed: 76)
+}
+
+TEST(Search, CapacityAndResidualValuesActOnlyThroughTheMemberGraph) {
+  // Two graphs with the same edges, in EdgeId order so the ids agree, where the second raises
+  // every positive capacity by 1 to 5 units (a zero capacity stays zero). On half of the trials
+  // each gets a residual that gates the same edges at min_residual (1 or 2 units) with other
+  // values. The member graph is then the same, so the DAG must be: in both directions, with and
+  // without targets, under every tie mode and priority keeping every member, and under the
+  // Deterministic member rule (which reads no capacity or residual value).
+  std::mt19937 rng(23);
+  int nonempty = 0;
+  int gated = 0;  // nonempty DAGs where the residual excluded an edge of at least 1 unit
+  for (int trial = 0; trial < 300; ++trial) {
+    auto g = random_graph(rng, 6, 14, 2);
+    const auto m = static_cast<std::size_t>(g.num_edges());
+    std::vector<InEdge> rows;
+    for (std::size_t e = 0; e < m; ++e) {
+      const Amount cap = g.capacity_units()[e];
+      rows.push_back({g.edge_src()[e], g.edge_dst()[e], cap == 0 ? 0 : cap + 1 + static_cast<Amount>(rng() % 5),
+                      g.cost()[e]});
+    }
+    auto h = make_graph(6, rows);
+    for (std::size_t e = 0; e < m; ++e) {
+      ASSERT_EQ(h.edge_src()[e], g.edge_src()[e]);
+      ASSERT_EQ(h.edge_dst()[e], g.edge_dst()[e]);
+      ASSERT_EQ(h.cost()[e], g.cost()[e]);
+      const Amount cg = g.capacity_units()[e];
+      ASSERT_TRUE(cg == 0 ? h.capacity_units()[e] == 0 : h.capacity_units()[e] > cg);
+    }
+    std::vector<Amount> rg;
+    std::vector<Amount> rh;
+    const Amount minr = 1 + static_cast<Amount>(rng() % 2);
+    bool excluded = false;
+    if (trial % 2 == 0) {
+      for (std::size_t e = 0; e < m; ++e) {
+        const Amount cg = g.capacity_units()[e];
+        const Amount ch = h.capacity_units()[e];
+        rg.push_back(cg == 0 ? 0 : static_cast<Amount>(rng() % static_cast<std::uint32_t>(cg + 1)));
+        if (rg.back() >= minr) {
+          rh.push_back(minr + static_cast<Amount>(rng() % static_cast<std::uint32_t>(ch - minr + 1)));
+        } else {
+          rh.push_back(static_cast<Amount>(rng() % static_cast<std::uint32_t>(std::min(minr - 1, ch) + 1)));
+          excluded = excluded || cg >= 1;
+        }
+      }
+    }
+    const std::vector<Amount>* res_g = rg.empty() ? nullptr : &rg;
+    const std::vector<Amount>* res_h = rh.empty() ? nullptr : &rh;
+    std::optional<std::vector<NodeId>> t;
+    if (trial % 4 < 2) t = std::vector<NodeId> {5};
+    std::vector<PathSelection> sels;
+    for (auto tie : {EdgeTieBreak::Deterministic, EdgeTieBreak::PreferHigherPriority}) {
+      for (auto prio : {EdgePriority::Residual, EdgePriority::Capacity, EdgePriority::Headroom}) {
+        sels.push_back(sel(true, true, tie, prio));
+      }
+    }
+    sels.push_back(sel(true, false, EdgeTieBreak::Deterministic, EdgePriority::Capacity));
+    for (const Direction dir : {Direction::Forward, Direction::Reverse}) {
+      for (const auto& s : sels) {
+        const auto want = edges_of(run(g, {0}, dir, t, s, res_g, minr).dag);
+        EXPECT_EQ(edges_of(run(h, {0}, dir, t, s, res_h, minr).dag), want) << trial;
+        nonempty += want.empty() ? 0 : 1;
+        gated += !want.empty() && excluded ? 1 : 0;
+      }
+    }
+  }
+  RecordProperty("nonempty", nonempty);
+  RecordProperty("gated", gated);
+  EXPECT_GT(nonempty, 1500);  // not vacuous: of 300 x 2 x 7 = 4200 comparisons (this seed: 2205)
+  EXPECT_GT(gated, 500);      // of the 2100 comparisons under a residual (this seed: 840)
 }
 
 TEST(Search, QueueDispatchAtTheWidthLimit) {
+  // W = max_cost / gcd + 1: 65,535 / 1 + 1 = 65,536 buckets (the limit) and 65,536 + 1 above it;
+  // a large common gcd makes the width 2 big / big + 1 = 3; a graph without edges has width 1.
+  // The widths and the dispatch rule (Auto takes the bucket queue up to the limit, Heap never)
+  // hold in every build; the queue each search takes is counted by a private hook.
+  auto at = make_graph(3, {{0, 1, 1, 65535}, {1, 0, 1, 1}});
+  auto above = make_graph(3, {{0, 1, 1, 65536}, {1, 0, 1, 1}});
+  const Cost big = Cost {1} << 40;
+  auto gcd = make_graph(3, {{0, 1, 1, big}, {1, 0, 1, 2 * big}});
+  auto bare = make_graph(2, {});
+  EXPECT_EQ(detail::bucket_width(at), 65536);
+  EXPECT_EQ(detail::bucket_width(above), 65537);
+  EXPECT_EQ(detail::bucket_width(gcd), 3);
+  EXPECT_EQ(detail::bucket_width(bare), 1);
+  EXPECT_TRUE(detail::uses_buckets(at, SpfQueue::Auto));
+  EXPECT_FALSE(detail::uses_buckets(above, SpfQueue::Auto));
+  EXPECT_TRUE(detail::uses_buckets(gcd, SpfQueue::Auto));
+  EXPECT_TRUE(detail::uses_buckets(bare, SpfQueue::Auto));
+  EXPECT_FALSE(detail::uses_buckets(at, SpfQueue::Heap));
+  EXPECT_FALSE(detail::uses_buckets(gcd, SpfQueue::Heap));
 #if NETGRAPH_CORE_PRIVATE_HOOKS
   auto& counts = detail::thread_queue_counts();
   auto queue_of = [&](const Graph& g, SpfQueue q) {
@@ -590,23 +833,11 @@ TEST(Search, QueueDispatchAtTheWidthLimit) {
     EXPECT_EQ(*r.costs, (std::vector<Cost>{0, g.cost()[0], kUnreachable}));
     return counts.buckets > before.buckets ? std::string("buckets") : std::string("heap");
   };
-  // W = max_cost / gcd + 1: 65,535 / 1 + 1 = 65,536 buckets (the limit) and 65,536 + 1 above it;
-  // a large common gcd makes the width 2.
-  auto at = make_graph(3, {{0, 1, 1, 65535}, {1, 0, 1, 1}});
-  auto above = make_graph(3, {{0, 1, 1, 65536}, {1, 0, 1, 1}});
-  const Cost big = Cost {1} << 40;
-  auto gcd = make_graph(3, {{0, 1, 1, big}, {1, 0, 1, 2 * big}});
-  EXPECT_EQ(detail::bucket_width(at), 65536);
-  EXPECT_EQ(detail::bucket_width(above), 65537);
-  EXPECT_EQ(detail::bucket_width(gcd), 3);
   EXPECT_EQ(queue_of(at, SpfQueue::Auto), "buckets");
   EXPECT_EQ(queue_of(above, SpfQueue::Auto), "heap");
   EXPECT_EQ(queue_of(gcd, SpfQueue::Auto), "buckets");
   EXPECT_EQ(queue_of(at, SpfQueue::Heap), "heap");
   EXPECT_EQ(queue_of(gcd, SpfQueue::Heap), "heap");
-  // A graph without edges has width 1: buckets.
-  auto bare = make_graph(2, {});
-  EXPECT_EQ(detail::bucket_width(bare), 1);
 #else
   GTEST_SKIP() << "the queue counters are a private hook";
 #endif
@@ -652,9 +883,10 @@ std::pair<std::vector<Cost>, std::vector<EdgeId>> dijkstra(const Graph& g, const
 
 } // namespace
 
-TEST(Search, BucketWraparoundRingsAndChains) {
-  // Small widths with distances many times the width: the cyclic buckets wrap around repeatedly;
-  // rings and chains keep a frontier of one item (the inline item and its promotion), and chords
+TEST(Search, BucketWraparoundOnRings) {
+  // Small widths with distances many times the width: the cyclic buckets wrap around repeatedly.
+  // A plain ring, searched from node 0, runs like a chain with a frontier of one item (the inline
+  // item and its promotion); chords, shortcuts and parallel edges on the other three rings
   // promote it. Every result equals the heap's and the textbook Dijkstra's.
   std::mt19937 rng(5);
   for (int shape = 0; shape < 4; ++shape) {
@@ -687,49 +919,72 @@ TEST(Search, EarlyStopsLeaveNothingForTheNextQuery) {
   auto huge = random_graph(rng, 20000, 40000, 5);
   const auto [d_big, t_big] = dijkstra(big, {0});
   const auto [d_small, t_small] = dijkstra(small, {1});
+  // The huge reverse search, first on a fresh thread (an empty workspace): each repetition below
+  // must give the same.
+  std::optional<SpfResult> h_want;
+  std::thread([&] { h_want.emplace(run(huge, {5}, Direction::Reverse, std::vector<NodeId> {7}, sel(false))); }).join();
+  ASSERT_NE(h_want->target_cost, kUnreachable);
+  int stopped = 0;  // target searches that reached their target (and stopped there)
   for (int round = 0; round < 6; ++round) {
     for (auto q : {SpfQueue::Auto, SpfQueue::Heap}) {
       auto stop = run(big, {0}, Direction::Forward, std::vector<NodeId> {static_cast<NodeId>(1 + round)}, sel(), nullptr, 1,
                       nullptr, q);
       EXPECT_EQ(stop.target_cost, d_big[static_cast<std::size_t>(1 + round)]);
+      stopped += stop.target_cost != kUnreachable ? 1 : 0;
       auto s = run(small, {1}, Direction::Forward, std::nullopt, sel(), nullptr, 1, nullptr, q);
       EXPECT_EQ(*s.costs, d_small);
       EXPECT_EQ(edges_of(s.dag), t_small);
-      if (round % 2 == 0) (void)run(huge, {5}, Direction::Reverse, std::vector<NodeId> {7}, sel(false), nullptr, 1, nullptr, q);
+      if (round % 2 == 0) {
+        const auto h = run(huge, {5}, Direction::Reverse, std::vector<NodeId> {7}, sel(false), nullptr, 1, nullptr, q);
+        EXPECT_EQ(h.target_cost, h_want->target_cost);
+        EXPECT_EQ(edges_of(h.dag), edges_of(h_want->dag));
+      }
       auto b = run(big, {0}, Direction::Forward, std::nullopt, sel(), nullptr, 1, nullptr, q);
       EXPECT_EQ(*b.costs, d_big);
       EXPECT_EQ(edges_of(b.dag), t_big);
     }
   }
+  EXPECT_EQ(stopped, 12);
 }
 
 TEST(Search, LargeGraphsBothQueuesIdentical) {
-  // Every SpfResult field identical on both queues, for full and target searches in both
-  // directions, on graphs where Auto takes the buckets.
+  // Every SpfResult field identical on both queues, on graphs where Auto takes the buckets: in
+  // both directions, the full multipath search and the target searches (multipath, and single
+  // path under each tie mode; a single-path search needs targets), with and without multi_edge
+  // across the shapes.
   std::mt19937 rng(17);
+  int reached = 0;
   for (int shape = 0; shape < 3; ++shape) {
     auto g = random_graph(rng, 2000, 16000, shape == 2 ? 1 : 31);
     ASSERT_TRUE(detail::uses_buckets(g, SpfQueue::Auto));
-    for (int k = 0; k < 6; ++k) {
-      const auto s = sel(k % 2 == 0, k % 3 != 0, k % 2 == 0 ? EdgeTieBreak::Deterministic : EdgeTieBreak::PreferHigherPriority,
-                         EdgePriority::Capacity);
-      const Direction dir = k % 2 == 0 ? Direction::Forward : Direction::Reverse;
-      std::optional<std::vector<NodeId>> t;
-      if (k >= 2) t = std::vector<NodeId> {static_cast<NodeId>(100 + k), static_cast<NodeId>(900 + k)};
-      if (!t.has_value() && !s.multipath) continue;
-      auto a = run(g, {static_cast<NodeId>(k)}, dir, t, s, nullptr, 1, nullptr, SpfQueue::Auto);
-      auto h = run(g, {static_cast<NodeId>(k)}, dir, t, s, nullptr, 1, nullptr, SpfQueue::Heap);
-      EXPECT_EQ(a.costs, h.costs);
-      EXPECT_EQ(a.target_cost, h.target_cost);
-      EXPECT_TRUE(a.dag == h.dag);
+    int k = 0;
+    for (const Direction dir : {Direction::Forward, Direction::Reverse}) {
+      for (int kind = 0; kind < 4; ++kind, ++k) {
+        const auto tie = kind == 3 ? EdgeTieBreak::PreferHigherPriority : EdgeTieBreak::Deterministic;
+        const auto s = sel(kind < 2, (kind + shape) % 2 == 0, tie, EdgePriority::Capacity);
+        std::optional<std::vector<NodeId>> t;
+        if (kind > 0) t = std::vector<NodeId> {static_cast<NodeId>(100 + k), static_cast<NodeId>(900 + k)};
+        auto a = run(g, {static_cast<NodeId>(k)}, dir, t, s, nullptr, 1, nullptr, SpfQueue::Auto);
+        auto h = run(g, {static_cast<NodeId>(k)}, dir, t, s, nullptr, 1, nullptr, SpfQueue::Heap);
+        EXPECT_EQ(a.costs, h.costs);
+        EXPECT_EQ(a.target_cost, h.target_cost);
+        EXPECT_TRUE(a.dag == h.dag);
+        reached += t.has_value() && a.target_cost.value_or(kUnreachable) != kUnreachable;
+      }
     }
   }
+  EXPECT_GT(reached, 12);  // of the 18 target searches: not comparisons of unreached targets
 }
 
 TEST(Search, InternalEntriesMatchThePublicSearch) {
   // route_search (CapacityAware), support_route (CostOnly on the cached support) and
-  // static_costs (rosters) against spf on the same questions.
+  // static_costs (rosters) against spf on the same questions; support_route under residual
+  // priority views against the independent reference (search_reference.hpp).
   std::mt19937 rng(23);
+  int routed = 0;        // gated route searches that reach a destination
+  int projected = 0;     // static projections that reach a destination
+  int residual_views = 0;
+  int view_changes = 0;  // the residual view selected another route than the static one
   for (int trial = 0; trial < 400; ++trial) {
     const int n = 3 + static_cast<int>(rng() % 8);
     auto g = random_graph(rng, n, 3 + static_cast<int>(rng() % 22), 3);
@@ -754,6 +1009,7 @@ TEST(Search, InternalEntriesMatchThePublicSearch) {
             ASSERT_TRUE(got.has_value());
             EXPECT_EQ(got->cost, *want.target_cost);
             EXPECT_EQ(got->edges, edges_of(want.dag));
+            ++routed;
           }
           // CostOnly: the static support toward dests projected with static priorities equals the
           // static search from src (no residual: every priority reads capacities).
@@ -767,6 +1023,36 @@ TEST(Search, InternalEntriesMatchThePublicSearch) {
           } else {
             EXPECT_EQ(proj.edges, edges_of(stat.dag)) << trial;
             EXPECT_EQ(proj.cost, *stat.target_cost);
+            ++projected;
+          }
+          // CostOnly creation reads its priorities on a residual view without gating on it:
+          // the projection of the static support under each priority read on `residual` equals
+          // the independent reference's walks (or canonical path) over the static member graph
+          // with that priority, gated at no residual (min_residual 0).
+          for (auto prio : {EdgePriority::Residual, EdgePriority::Headroom, EdgePriority::Capacity}) {
+            const auto sp = sel(mp, me, tie, prio);
+            const detail::PriorityValues on_residual {&g, prio, residual};
+            auto rproj = detail::support_route(g, detail::PredDAGBuilder::ascending(support), src, dests, sp,
+                                               detail::PriorityFn::of(on_residual));
+            ref::Query q;
+            q.g = &g;
+            q.residual = &residual;
+            q.min_residual = 0;
+            q.multi_edge = me;
+            q.prefer = tie == EdgeTieBreak::PreferHigherPriority;
+            q.priority = prio;
+            const auto mem = ref::members(q);
+            const auto [dstar, walks] = ref::pruned(g, mem, {src}, dests);
+            if (dstar == ref::kNone) {
+              EXPECT_TRUE(rproj.edges.empty()) << trial;
+              continue;
+            }
+            std::vector<EdgeId> want(walks.begin(), walks.end());
+            if (!mp) want = sorted(*ref::canonical(q, mem, {src}, dests));
+            EXPECT_EQ(rproj.edges, want) << "trial " << trial << " priority " << static_cast<int>(prio);
+            EXPECT_EQ(rproj.cost, dstar) << trial;
+            ++residual_views;
+            if (rproj.edges != proj.edges) ++view_changes;
           }
         }
       }
@@ -775,13 +1061,18 @@ TEST(Search, InternalEntriesMatchThePublicSearch) {
     auto rev = run(g, dests, Direction::Reverse, std::nullopt, sel());
     EXPECT_EQ(costs, (std::vector<Cost>{(*rev.costs)[0], (*rev.costs)[1]}));
   }
+  EXPECT_GT(routed, 300);           // not vacuous: many queries reach a destination
+  EXPECT_GT(projected, 1000);
+  EXPECT_GT(residual_views, 3000);
+  EXPECT_GT(view_changes, 30);      // and the residual view decides some of them
 }
 
 TEST(Search, ReverseSupportsOrderEveryTailsEdgesAtAnyDegree) {
-  // Task 1d-msd: a reverse full search emits each tail's tight out-edges in ascending EdgeId, by one
-  // bit per out-edge id up to 64 out-edges and by sorting above: hubs with 63, 64, 65 and 129
-  // out-edges, tight (cost 1, parallel copies, ties) and not (cost 2 or no capacity), against the
-  // reference's full DAG, with and without an Eligibility.
+  // A reverse full search emits each tail's tight out-edges in ascending EdgeId, by one
+  // bit per out-edge id up to 64 out-edges and by sorting above: hubs with 1, 63, 64, 65 and 129
+  // out-edges, tight (cost 1, parallel copies, ties) and not (cost 2 or no capacity), and hubs of
+  // 64, 65 and 66 out-edges that are all tight, against the reference's full DAG, with and
+  // without an Eligibility.
   // Ids rank a node's costlier edges last, so the all-tight variant makes the last ids tight too.
   std::mt19937 rng(64);
   for (const auto& [degree, all_tight] : std::vector<std::pair<int, bool>> {
@@ -813,6 +1104,72 @@ TEST(Search, ReverseSupportsOrderEveryTailsEdgesAtAnyDegree) {
           << "degree " << degree << " all tight " << all_tight << " elig " << with_elig;
       if (all_tight && !with_elig) EXPECT_EQ(asc.size(), static_cast<std::size_t>(degree + spokes));
       EXPECT_TRUE(std::is_sorted(asc.begin(), asc.end()));
+      // The hub's own entries, whose order is the subject here: at least half its edges (none when
+      // the Eligibility masks the degree-1 hub's only edge).
+      const auto hub_entries = std::count_if(asc.begin(), asc.end(), [&](EdgeId e) { return g.edge_src()[e] == hub; });
+      EXPECT_GE(hub_entries, with_elig && degree == 1 ? 0 : (degree + 1) / 2)
+          << "degree " << degree << " all tight " << all_tight << " elig " << with_elig;
     }
   }
+}
+
+TEST(Search, StaticSupportTakesNormalisedRootsAndAllowsNone) {
+  // static_support and static_costs take root sets their callers normalised
+  // (ascending, no duplicates, in range) and filter the Eligibility themselves. On random graphs
+  // with masks they equal the public search on the same roots: the full support in both
+  // directions, the reverse costs at every node. With no allowed root the support is the empty
+  // DAG and every cost kUnreachable, as the public search gives (and static_costs of no
+  // destination at all). The public entries keep normalising: spf and a cache lookup on the
+  // roots unsorted and repeated give the same support.
+  std::mt19937 rng(813);
+  int masked_roots = 0;  // supports with an edge although the Eligibility removes a root
+  for (int trial = 0; trial < 300; ++trial) {
+    const int n = 3 + static_cast<int>(rng() % 9);
+    const auto g = random_graph(rng, n, 2 + static_cast<int>(rng() % 30), 4);
+    std::vector<NodeId> roots;
+    for (NodeId v = 0; v < n; ++v) {
+      if (rng() % 3 == 0) roots.push_back(v);
+    }
+    if (roots.empty()) roots.push_back(static_cast<NodeId>(rng() % static_cast<unsigned>(n)));
+    std::vector<NodeId> xn;
+    for (NodeId v = 0; v < n; ++v) {
+      if (rng() % 4 == 0) xn.push_back(v);
+    }
+    if (trial % 10 == 0) xn = roots;  // no root allowed
+    std::vector<EdgeId> xe;
+    for (EdgeId e = 0; e < g.num_edges(); ++e) {
+      if (rng() % 6 == 0) xe.push_back(e);
+    }
+    const auto el = g.eligibility(xn, xe);
+    const Eligibility* elig = trial % 2 == 0 ? &el : nullptr;
+    const bool any_allowed =
+        std::any_of(roots.begin(), roots.end(), [&](NodeId r) { return elig == nullptr || elig->node_ok(r); });
+    const bool masked =
+        elig != nullptr && std::any_of(roots.begin(), roots.end(), [&](NodeId r) { return !elig->node_ok(r); });
+    std::vector<NodeId> all(static_cast<std::size_t>(n));
+    std::iota(all.begin(), all.end(), 0);
+    for (Direction dir : {Direction::Forward, Direction::Reverse}) {
+      const auto got = detail::static_support(g, roots, dir, elig);
+      const auto [want_costs, want_dag, want_cost] = run(g, roots, dir, std::nullopt, sel(), nullptr, 1, elig);
+      EXPECT_TRUE(got == want_dag) << "trial " << trial << " direction " << static_cast<int>(dir);
+      if (!any_allowed) EXPECT_TRUE(got == detail::PredDAGBuilder::empty(g)) << trial;
+      if (dir == Direction::Forward && masked && !detail::PredDAGBuilder::ascending(got).empty()) ++masked_roots;
+    }
+    const auto costs = detail::static_costs(g, elig, roots, all);
+    const auto [rev_costs, rev_dag, rev_cost] = run(g, roots, Direction::Reverse, std::nullopt, sel(), nullptr, 1, elig);
+    EXPECT_EQ(costs, *rev_costs) << trial;
+    if (!any_allowed) EXPECT_EQ(costs, std::vector<Cost>(all.size(), kUnreachable)) << trial;  // every tenth trial, and an even one whose exclusions remove every root
+    EXPECT_EQ(detail::static_costs(g, elig, std::vector<NodeId> {}, all), std::vector<Cost>(all.size(), kUnreachable));
+    // The public entries on the same roots reversed and repeated.
+    std::vector<NodeId> messy(roots.rbegin(), roots.rend());
+    messy.push_back(roots.front());
+    DagCache cache(g);
+    const auto cached = cache.lookup(g, messy, Direction::Reverse, elig);
+    EXPECT_TRUE(*cached == detail::static_support(g, roots, Direction::Reverse, elig)) << trial;
+    EXPECT_TRUE(cache.lookup(g, roots, Direction::Reverse, elig) == cached) << trial;  // the same entry
+    EXPECT_TRUE(rev_dag == *cached) << trial;
+    const auto [messy_costs, messy_dag, messy_cost] = run(g, messy, Direction::Reverse, std::nullopt, sel(), nullptr, 1, elig);
+    EXPECT_TRUE(messy_dag == *cached) << trial;
+  }
+  EXPECT_GT(masked_roots, 10);  // not vacuous: the Eligibility removes some roots of real supports
 }

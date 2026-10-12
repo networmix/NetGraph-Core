@@ -1,4 +1,4 @@
-"""to_units (round half up, the only entry of physical numbers) and as_float (APPROACH 2.1)."""
+"""to_units (round half up, the only entry of physical numbers) and as_float."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from fractions import Fraction
 
 import numpy as np
 import pytest
+from helpers import exact
 
 import netgraph_core as ngc
 
@@ -34,9 +35,16 @@ def test_arrays():
     assert ngc.to_units(np.array([], dtype=float), 1).tolist() == []
     assert ngc.as_float([1, 2, 3], 0.5).tolist() == [0.5, 1.0, 1.5]
     assert ngc.as_float(np.array([4096], dtype=np.int64), q).tolist() == [1.0]
+    # An int gives a float, an integer array a float64 array, also for whole results.
+    assert type(ngc.as_float(4096, q)) is float
+    assert type(ngc.as_float(2**70, 1.0)) is float
+    assert ngc.as_float([1, 2, 3], 1.0).dtype == np.float64
+    assert ngc.as_float(np.array([4096], dtype=np.int64), q).dtype == np.float64
 
 
-def test_admission_is_not_additive():
+def test_rounding_is_per_value_not_additive():
+    # Each value is converted to whole units on its own: two values of 0.6 units give 1 + 1,
+    # their sum 1.2 gives 1.
     q = 2.0**-12
     assert ngc.to_units(0.6 * q, q) + ngc.to_units(0.6 * q, q) == 2
     assert ngc.to_units(1.2 * q, q) == 1
@@ -48,39 +56,55 @@ def test_exactness_limits():
     assert ngc.as_float(1 << 70, 2.0**-12) == 2.0**58
 
 
+NAN = "to_units: NaN has no unit value"
+INFINITE = "to_units: an infinite amount is not finite and has no unit value"
+BOUND = "to_units: the amount is at or above the bound of the units domain (2^62 units)"
+NOT_PHYSICAL = "to_units takes physical numbers (a float or an array of floats)"
+RESOLUTION = "resolution must be a power of two in [2^-32, 2^32]"
+
+
 @pytest.mark.parametrize(
-    "x, pattern",
+    "x, message",
     [
-        (float("nan"), "NaN"),
-        (float("inf"), "finite"),
-        (-float("inf"), "finite"),
-        (-1e-300, "negative"),
-        (2.0**62, "bound"),
-        ([1.0, float("nan")], "NaN"),
-        ("1.0", "physical numbers"),
-        (True, "physical numbers"),
-        (["a"], "physical numbers"),
+        (float("nan"), NAN),
+        (float("inf"), INFINITE),
+        (-float("inf"), INFINITE),
+        (-1e-300, "to_units: a negative amount has no unit value"),
+        (2.0**62, BOUND),
+        ([1.0, float("nan")], NAN),
+        ("1.0", NOT_PHYSICAL),
+        (b"1.0", NOT_PHYSICAL),
+        (True, NOT_PHYSICAL),
+        (["a"], "to_units takes physical numbers (got dtype <U1)"),
+        (np.array([True]), "to_units takes physical numbers (got dtype bool)"),
+        (np.zeros((1, 1)), "to_units takes a float or a 1-D array of floats"),
+        ([[1.0]], "to_units takes a float or a 1-D array of floats"),
     ],
 )
-def test_rejected(x, pattern):
-    with pytest.raises(ValueError, match=pattern):
+def test_rejected(x, message):
+    with pytest.raises(ValueError, match=exact(message)):
         ngc.to_units(x, 1)
 
 
 def test_resolution_validated():
     for q in (3.0, 2.0**-33, 2.0**33, 0.0, -1.0, math.nan, math.inf):
-        with pytest.raises(ValueError, match="resolution"):
+        with pytest.raises(ValueError, match=exact(RESOLUTION)):
             ngc.to_units(1.0, q)
-        with pytest.raises(ValueError, match="resolution"):
+        with pytest.raises(ValueError, match=exact(RESOLUTION)):
             ngc.as_float(1, q)
-    with pytest.raises(ValueError, match="bound"):
+    with pytest.raises(ValueError, match=exact(BOUND)):
         ngc.to_units(1.7976931348623157e308, 2.0**32)
 
 
 def test_as_float_rejects_non_integers():
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError, match=exact("as_float: x must be an integer (got float)")
+    ):
         ngc.as_float(1.5, 1)
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match=exact("as_float: x entries must be integers (got dtype float64)"),
+    ):
         ngc.as_float(np.array([1.5]), 1)
 
 
@@ -89,14 +113,17 @@ def test_as_float_rejects_non_integers():
     "empty", [[], (), np.array([], dtype=np.float64), np.array([], dtype=np.int64)]
 )
 def test_empty_arrays_validate_the_resolution(q, empty):
-    # review-1a D3: the resolution is validated before the shape, also for empty input.
-    with pytest.raises(ValueError, match="resolution"):
+    # The resolution is validated before the shape, also for empty input.
+    with pytest.raises(ValueError, match=exact(RESOLUTION)):
         ngc.to_units(empty, q)
-    with pytest.raises(ValueError, match="resolution"):
+    with pytest.raises(ValueError, match=exact(RESOLUTION)):
         ngc.as_float(empty, q)
     assert ngc.to_units(empty, 1.0).tolist() == []
     if isinstance(empty, np.ndarray) and empty.dtype.kind == "f":
-        with pytest.raises(ValueError, match="integers"):  # not units, even when empty
+        with pytest.raises(  # not units, even when empty
+            ValueError,
+            match=exact("as_float: x entries must be integers (got dtype float64)"),
+        ):
             ngc.as_float(empty, 1.0)
     else:
         assert ngc.as_float(empty, 1.0).tolist() == []
@@ -116,7 +143,7 @@ def test_empty_arrays_validate_the_resolution(q, empty):
     ],
 )
 def test_as_float_unbounded_ints_are_correctly_rounded(x, q):
-    # review-1a D4: Python Amounts are unbounded; the scaled value is the correctly rounded
+    # Python Amounts are unbounded; the scaled value is the correctly rounded
     # double of the exact product, and no Python error leaks.
     expect = float(Fraction(x) * Fraction(q))
     assert ngc.as_float(x, q) == expect
@@ -125,9 +152,14 @@ def test_as_float_unbounded_ints_are_correctly_rounded(x, q):
 
 
 def test_as_float_beyond_the_finite_doubles():
-    with pytest.raises(ValueError, match="largest finite double"):
+    def beyond(x):
+        return exact(
+            f"as_float: {x} units times the resolution exceed the largest finite double"
+        )
+
+    with pytest.raises(ValueError, match=beyond(2**1100)):
         ngc.as_float(2**1100, 2.0**32)
-    with pytest.raises(ValueError, match="largest finite double"):
+    with pytest.raises(ValueError, match=beyond(-(2**1100))):
         ngc.as_float([1, -(2**1100)], 1.0)
     assert ngc.as_float(np.array([2**64 - 1], dtype=np.uint64), 1.0).tolist() == [
         2.0**64

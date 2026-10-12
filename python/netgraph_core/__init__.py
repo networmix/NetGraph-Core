@@ -1,26 +1,26 @@
-"""Runtime package surface for :mod:`netgraph_core`.
+"""NetGraph-Core: graph, flow and placement models on exact integer units.
 
-All public symbols are re-exported from the compiled ``_netgraph_core`` module so
-downstream users import everything from a single place. Typing shims supplied in
-``_docs.py`` keep editors happy without affecting runtime behavior.
+Every public name is re-exported from the compiled ``_netgraph_core`` module, so users
+import everything from here. Type checkers read the generated stub ``__init__.pyi`` next
+to this file (``py.typed`` marks the package as typed).
 
-The package carries the graph on integer units (``Graph``, ``Eligibility``
-with ``intersect``, ``to_units``, ``as_float``), the route structures (``PredDAG``,
-``Path``), the selection and placement axes (``PathSelection``, ``EdgeTieBreak``,
-``EdgePriority``, ``FlowPlacement``, ``Admission``), the integer ledger (``FlowLedger``
-with its ``FlowRecord`` snapshots), the policy engine (``FlowPolicy`` with
-``FlowPolicyConfig`` over the routing variants ``CostOnly``, ``CapacityAware``,
-``Global``, ``Pinned``; ``PlacementResult``, ``OutputOptions``, ``Termination``), the
-``DagCache`` (building and frozen modes, ``DagCacheMiss``) and the evaluators (``capacity``, ``batch_capacity``,
-``sensitivity``) and the public search (``spf`` with ``Direction``, ``SpfOptions``,
-``SpfResult`` and the ``UNREACHABLE`` sentinel; ``ksp`` with ``KspOptions``; ``resolve_to_paths``). ``_netgraph_core`` also holds the private
-entry of the flow core, which is never re-exported here.
+- The graph on integer units: ``Graph``, ``Eligibility``, ``to_units``, ``as_float``.
+- Route structures: ``PredDAG``, ``Path``.
+- Route selection and placement settings: ``PathSelection``, ``EdgeTieBreak``,
+  ``EdgePriority``, ``FlowPlacement``, ``Admission``.
+- The ledger of placed traffic: ``FlowLedger`` and its ``FlowRecord`` snapshots.
+- The policy engine: ``FlowPolicy``, ``FlowPolicyConfig``, the routings ``CostOnly``,
+  ``CapacityAware``, ``Global``, ``Pinned``, and ``PlacementResult``, ``OutputOptions``,
+  ``Termination``.
+- The shortest-path cache: ``DagCache`` (building and frozen modes), ``DagCacheMiss``.
+- The evaluators: ``capacity``, ``batch_capacity``, ``sensitivity``.
+- The searches: ``spf`` (``Direction``, ``SpfOptions``, ``SpfResult``, ``UNREACHABLE``),
+  ``ksp`` (``KspOptions``), ``resolve_to_paths``.
+
+``_netgraph_core`` also holds a private entry of the flow core, never re-exported here.
 """
 
-# pyright: reportMissingImports=false
-
-from importlib.metadata import version
-from typing import TYPE_CHECKING
+from importlib.metadata import version as _version
 
 from _netgraph_core import (
     MAX_FLOWS_PER_CALL,
@@ -55,7 +55,6 @@ from _netgraph_core import (
     SensitivityEntry,
     SensitivityOptions,
     SensitivityResult,
-    SensitivityStatus,
     SpfOptions,
     SpfResult,
     Stretch,
@@ -70,61 +69,7 @@ from _netgraph_core import (
     to_units,
 )
 
-__version__ = version("netgraph-core")
-
-# Provide richer type information for editors/type-checkers without affecting runtime.
-# Every name here must also appear in the runtime import above; the aliases only
-# change what a type checker sees. Keep this list in sync with _docs.py, and keep
-# _docs.py in sync with the bindings -- a wrong stub is worse than a missing one,
-# because it turns "unchecked" into "confidently wrong".
-if TYPE_CHECKING:  # pragma: no cover - typing-only
-    from ._docs import (  # noqa: I001
-        MAX_FLOWS_PER_CALL as MAX_FLOWS_PER_CALL,
-        UNREACHABLE as UNREACHABLE,
-        Absolute as Absolute,
-        Admission as Admission,
-        CapacityAware as CapacityAware,
-        CapacityOptions as CapacityOptions,
-        CostOnly as CostOnly,
-        DagCache as DagCache,
-        DagCacheMiss as DagCacheMiss,
-        DagCacheStats as DagCacheStats,
-        DiminishingReturns as DiminishingReturns,
-        Direction as Direction,
-        EdgePriority as EdgePriority,
-        EdgeTieBreak as EdgeTieBreak,
-        Eligibility as Eligibility,
-        FlowLedger as FlowLedger,
-        FlowPlacement as FlowPlacement,
-        FlowPolicy as FlowPolicy,
-        FlowPolicyConfig as FlowPolicyConfig,
-        FlowRecord as FlowRecord,
-        Global as Global,
-        Graph as Graph,
-        KspOptions as KspOptions,
-        OutputOptions as OutputOptions,
-        Path as Path,
-        PathSelection as PathSelection,
-        Pinned as Pinned,
-        PlacementResult as PlacementResult,
-        PredDAG as PredDAG,
-        SensitivityEntry as SensitivityEntry,
-        SensitivityOptions as SensitivityOptions,
-        SensitivityResult as SensitivityResult,
-        SensitivityStatus as SensitivityStatus,
-        SpfOptions as SpfOptions,
-        SpfResult as SpfResult,
-        Stretch as Stretch,
-        Termination as Termination,
-        as_float as as_float,
-        batch_capacity as batch_capacity,
-        capacity as capacity,
-        ksp as ksp,
-        resolve_to_paths as resolve_to_paths,
-        sensitivity as sensitivity,
-        spf as spf,
-        to_units as to_units,
-    )
+__version__ = _version("netgraph-core")
 
 __all__ = [
     "__version__",
@@ -159,7 +104,6 @@ __all__ = [
     "DagCacheStats",
     "CapacityOptions",
     "SensitivityOptions",
-    "SensitivityStatus",
     "SensitivityEntry",
     "SensitivityResult",
     "capacity",

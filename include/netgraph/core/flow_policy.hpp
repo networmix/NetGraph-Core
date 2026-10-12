@@ -1,4 +1,4 @@
-/* The policy engine FlowPolicy (APPROACH 8 and 9). */
+/* The policy engine FlowPolicy. */
 #pragma once
 
 #include <cstdint>
@@ -25,8 +25,9 @@ struct PolicyAccess;
 class FrozenTally;
 } // namespace detail
 
-// CapacityAware creations per call (stage 1 and accepted growth, across sources) before the
-// call stops with limit_flows (APPROACH 9.2): an engine constant.
+// CapacityAware creations per call (stage 1 and accepted growth, across sources): reaching it
+// stops creation, and a source whose offer is not met then ends with LimitFlows. An engine
+// constant.
 inline constexpr std::int64_t kMaxFlowsPerCall = 10000;
 
 // The diminishing-returns guard of CapacityAware growth: stop when at least `window` growth
@@ -37,17 +38,18 @@ struct DiminishingReturns {
   double fraction {0.5};
 };
 
-// The routing modes (APPROACH 9.1): a field exists only in the variant it applies to.
-// CostOnly: IGP forwarding, one flow per source on the static shortest-path DAG (or its
-//   canonical single path), never refreshed, grown or reoptimised.
-// CapacityAware: distributed CSPF tunnels: flow_count flows created by the canonical search on
-//   the selection view, grown up to max_flow_count (absent: no ceiling), gated by
-//   min_flow_bandwidth (units) and the max_path_cost ceiling, optionally reoptimised and guarded
-//   by `diminishing` (absent: off).
-// Global: the omniscient controller, the minimum-cost flow of the cumulative value over the
-//   whole eligible graph (a replacement kernel; placement MaxFlow only).
-// Pinned: explicit route structures, one flow per usable bundle in supply order (single
-//   endpoints; a Path converts with to_dag()).
+// Each routing mode has only the fields it uses.
+// CostOnly: one flow per source on the static shortest-path DAG (all shortest paths, with no
+//   directed cycles), or its canonical single path; never refreshed, grown or reoptimised.
+// CapacityAware: flow_count flows found by shortest-path searches that require enough unused
+//   capacity on each edge. Grow up to max_flow_count (absent: no ceiling), subject to
+//   min_flow_bandwidth (units) and max_path_cost. Rerouting is optional; `diminishing`
+//   stops growth when recent gains are too small (absent: off).
+// Global: replace the policy's allocation with a minimum-cost flow of what it already delivers
+//   plus this call's request (placed_demand() + volume: what an earlier call could not place is
+//   not requested again) over the whole eligible graph (placement MaxFlow only).
+// Pinned: one flow per usable supplied route bundle, in supply order; single endpoints only.
+//   Convert a Path with to_dag().
 struct CostOnly {};
 struct CapacityAware {
   std::int32_t flow_count {1};
@@ -63,12 +65,12 @@ struct Pinned {
 };
 using Routing = std::variant<CostOnly, CapacityAware, Global, Pinned>;
 
-// The four outer axes are explicit (no defaults). Global and Pinned read selection.priority only
-// for the Weighted kernel (membership and weights) and ignore the rest; CostOnly and
-// CapacityAware read all four fields (APPROACH 9). The constructor rejects a placement,
-// admission or selection field outside its enumeration (std::invalid_argument naming the field;
-// rule 13); the fields stay assignable, so the policy and the evaluators check them again with
-// the combination rules.
+// routing, placement, admission and selection are required; none has a default.
+// Global and Pinned use selection.priority only for Weighted membership and weights, and
+// ignore the other selection fields. CostOnly and CapacityAware use all four selection fields.
+// Setting an ignored field is not an error. Invalid placement, admission or selection enum
+// values throw std::invalid_argument naming the field. Fields remain assignable, so policies
+// and evaluators check them again, then check the supported combinations.
 struct FlowPolicyConfig {
   FlowPolicyConfig(Routing routing_, FlowPlacement placement_, Admission admission_, PathSelection selection_);
   Routing routing;
@@ -86,13 +88,32 @@ struct OutputOptions {
   bool bottleneck {false};
 };
 
-// The local outcome of a source and the call's termination (APPROACH 9.4).
+// A source is served if its offer is 0, Lossless delivers the offer, or Lossy forwards the
+// entire finite offer (including drops). Choose its first matching outcome:
+// Complete: served.
+// LimitFlows: creation/growth hit kMaxFlowsPerCall, or growth hit max_flow_count > flow_count.
+// LimitDiminishing: the diminishing-returns guard stopped growth.
+// NoRoute: no flows remain; for Global, maximum flow is 0 and nothing was ever placed.
+// Exhausted: any other unserved case, including full flows with no growth, a full fixed-size
+// group of flows, Global at maximum flow, or an infinite Lossy offer.
+// Global and Pinned act as one source: every local outcome equals the call's termination.
+// The call is Complete for request 0 or when all sources are served, and NoRoute for a positive
+// request with an empty roster: no eligible source statically reaches an allowed destination.
+// Otherwise, take the highest unserved outcome: LimitFlows > LimitDiminishing > Exhausted >
+// NoRoute.
 enum class Termination { Complete, LimitFlows, LimitDiminishing, NoRoute, Exhausted };
 
-// The result of one placement call: the deltas of this call (placed, remaining = request -
-// placed, nullopt for +inf; drops = this call's transit drops), the termination and one local
-// outcome per roster source (ascending NodeId), the two flags of the 9.4 table; Global adds the
-// marginal cost curve of its cumulative solve. The optional outputs are present when requested.
+// Per-call changes: placed, remaining = request - placed (nullopt for +inf), and transit drops.
+// Include the termination and one local outcome per roster source in ascending NodeId.
+// Global also returns its cumulative marginal cost curve: (cost, units) pairs in ascending cost,
+// where delivering `units` more units raises the minimum total cost of the flow by `cost` per
+// unit. Delivering more can reroute flow already placed, so the pairs are not the costs of the
+// paths in the final allocation. Optional outputs appear only if asked.
+// Both change flags start false and report committed changes only. routes_changed means a
+// source's group of flows was created (even at zero delivery), a retained flow was rerouted,
+// growth added a flow, or Global changed a source's used-edge set. weights_changed means a
+// rerouted Weighted flow captured its weights again; Global never sets it. A candidate equal
+// to the current route is not a change.
 struct PlacementResult {
   Amount placed {0};
   std::optional<Amount> remaining {};
@@ -105,25 +126,34 @@ struct PlacementResult {
   std::optional<std::vector<Amount>> edge_flows {};
   std::optional<std::vector<Amount>> residual {};
   std::optional<std::vector<EdgeId>> bottleneck {};
-  // Global with bottleneck requested: the full-residual cut when the solve was maximal on its
-  // view (an empty roster's maximal flow 0 has the empty cut); nullopt otherwise: not requested,
-  // not Global, a solve stopped by its cap, or a zero call (nothing is solved).
+  // Global, when bottleneck is requested: positive-view edges leaving the set reachable from
+  // the real sources through residual arcs, including reverse arcs that cancel flow. A maximal
+  // solve returns this minimum cut; an empty roster returns an empty cut for its maximal flow
+  // of 0. nullopt if not requested, not Global, stopped by the cap, or a zero call (no solve).
   std::optional<std::vector<EdgeId>> min_cut {};
 };
 
-// The one placement engine (APPROACH 9). A policy binds to its ledger at construction and is the
-// only way flows enter it: place() runs the transaction of 9.2 and commits one atomic exchange;
-// remove() reverts every flow of the policy, retires the ids and opens a new epoch; destroying a
-// policy without remove() leaves its records in the ledger as orphans.
+// A policy binds to its ledger at construction. place() validates, then Global re-solves what
+// it already delivers plus the request; other modes create, reroute, fill and grow flows per roster source using
+// one working copy of unused capacity. All changes commit together, or none do.
+// remove() releases every policy flow, retires their ids and starts a new epoch: the period
+// since construction or the last remove() over which requests and flows accumulate. Destroying
+// a policy without remove() leaves its records in the ledger as orphans.
 //
 // Validation (std::invalid_argument, before anything binds): the endpoint sets (non-empty, ids
 // in range, disjoint), a foreign Eligibility or DagCache, the configuration (enumeration values;
 // Lossy with MaxFlow, Global or CapacityAware; Global without MaxFlow; Weighted with Headroom;
-// flow_count >= 1; max_flow_count >= flow_count; min_flow_bandwidth >= 0; the ceiling; the
-// diminishing guard; Pinned: single endpoints, a non-empty bundle list of this graph without
-// duplicates, every bundle with a src -> dst walk before pruning). place() validates the
-// request ([0, 2^62) units or +inf; a finite request after +inf in the epoch is rejected, also
-// 0) before any change.
+// flow_count >= 1; max_flow_count >= flow_count; min_flow_bandwidth in [0, 2^62) units; the
+// ceiling; the diminishing guard; Pinned: single endpoints, a non-empty bundle list of this graph
+// without null or duplicate bundles, every bundle with a src -> dst walk before pruning). The order between
+// these three groups of checks is not specified: when defects of two groups meet, the one
+// reported may differ between this constructor and a language binding. place() validates the request ([0, 2^62) units or +inf; a
+// finite request after +inf in the epoch is rejected, also 0) before any change. A solve of the
+// flow core (Global, or a MaxFlow flow) whose network exceeds the core's int32 numbering throws
+// std::invalid_argument, and the call changes nothing: more than INT32_MAX - 2 nodes, or more than
+// 2^30 - 1 edges, sources and destinations together (Global counts the graph's nodes, the
+// eligible edges, the roster and the eligible destinations; a MaxFlow flow the nodes of its
+// member edges and endpoints, its member edges, its source and its destinations).
 //
 // Lifetime: the ledger, the Eligibility and the DagCache outlive the policy (the policy holds
 // pointers to them). The roster (the eligible sources that statically reach an allowed
@@ -156,7 +186,7 @@ public:
 private:
   friend struct detail::PolicyAccess;
   // Construction inside another public call (an evaluator): a supplied frozen cache's hits are
-  // recorded in that call's tally (NOTES R27).
+  // recorded in that call's tally.
   FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
              FlowPolicyConfig config, const Eligibility* elig, DagCache* cache, detail::FrozenTally& tally);
   std::unique_ptr<detail::PolicyEngine> engine_;

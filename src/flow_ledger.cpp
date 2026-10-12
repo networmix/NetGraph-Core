@@ -1,9 +1,10 @@
 /*
-  The integer ledger FlowLedger (APPROACH 8).
+  The integer ledger FlowLedger.
 
-  The aggregate allocation is kept exactly (integers) and changed only by an atomic commit or a
-  detach; residual() is derived from it (baseline - allocated). Records are kept by id (FlowId
-  order); ids come from a per-ledger counter and are never reused, also across reset().
+  The aggregate allocation is kept exactly (integers) and changed only by an atomic commit, a
+  detach or a reset (which zeroes it); residual() is derived from it (baseline - allocated).
+  Records are kept by id (FlowId order); ids come from a per-ledger counter and are never
+  reused, also across reset().
 */
 #include "netgraph/core/flow_ledger.hpp"
 
@@ -12,6 +13,7 @@
 #include <string>
 #include <type_traits>
 
+#include "netgraph/core/detail/edge_amounts.hpp"
 #include "netgraph/core/detail/endpoints.hpp"
 #include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/uid.hpp"
@@ -78,18 +80,7 @@ void FlowLedger::check_usable() const {
 }
 
 std::vector<Amount> FlowLedger::checked_baseline(std::span<const Amount> residual) const {
-  const auto capacity = graph_->capacity_units();
-  if (residual.size() != capacity.size()) {
-    throw std::invalid_argument("residual has length " + std::to_string(residual.size()) + ", expected " +
-                                std::to_string(capacity.size()) + " (one entry per edge)");
-  }
-  for (std::size_t e = 0; e < residual.size(); ++e) {
-    if (residual[e] < 0 || residual[e] > capacity[e]) {
-      throw std::invalid_argument("residual[" + std::to_string(e) + "] = " + std::to_string(residual[e]) +
-                                  " is outside [0, capacity_units[" + std::to_string(e) + "] = " +
-                                  std::to_string(capacity[e]) + "]");
-    }
-  }
+  detail::check_edge_amounts(*graph_, residual, "residual");
   return std::vector<Amount>(residual.begin(), residual.end());
 }
 
@@ -224,13 +215,13 @@ bool is_bound(const std::map<std::int64_t, bool>& owners, std::int64_t owner) {
   return it != owners.end() && it->second;
 }
 
-// The dense per-edge delta of one commit, in a per-thread array of slots. An edge is touched in
-// this commit when its slot carries the commit's epoch stamp: that test does not depend on the
-// delta's value, so a delta that returns to zero during accumulation (-1, then +1) keeps its one
-// entry in the touched list and is published once (review-1b-fixes N2). A slot is reset on its
-// first touch in a commit, so nothing needs clearing between commits: a commit that throws
-// leaves stale slots behind an old epoch. Delta and stamp share one array, so growing it either
-// succeeds whole or leaves the previous array (review-1b-fixes N1).
+// Per-thread deltas indexed by EdgeId. Each commit advances an epoch (a numeric stamp).
+// A matching slot stamp means the edge is already in the touched list, even if its delta
+// returned to zero (-1, then +1), so each edge is published once. Reset a slot on first touch;
+// later commits ignore old stamps, including after an exception. Only stamp wraparound (after
+// 2^32 commits on one thread, which a long-running process reaches) needs a full stamp clear.
+// Delta and stamp share one array: failed growth leaves the old array intact (the strong
+// guarantee).
 class DeltaScratch {
 public:
   explicit DeltaScratch(std::size_t num_edges) : s_(storage()) {

@@ -1,4 +1,4 @@
-/* Flow identities, the 128-bit counter and the ledger records (APPROACH 8). */
+/* Flow identities, the 128-bit counter and the ledger records. */
 #pragma once
 
 #include <cstdint>
@@ -17,7 +17,8 @@ namespace netgraph::core {
 using FlowId = std::pair<std::uint64_t, std::int64_t>;
 
 // A cumulative counter (offered, per-edge drops): a sum over calls, the 128-bit value
-// hi * 2^64 + lo, always below 2^127 (APPROACH 2.1, 2.3).
+// hi * 2^64 + lo, always below 2^127. Such sums over many calls may exceed 64 bits; the
+// Python binding returns them as exact int.
 struct Counter128 {
   std::uint64_t hi {0};
   std::uint64_t lo {0};
@@ -35,11 +36,11 @@ struct Counter128 {
   }
 };
 
-// One flow of the ledger, as a snapshot (records(), record(id)). `bundle` is the flow's route
-// structure (its structural identity); `route_cost` the cached minimum walk cost from the
-// sources to the destinations over that bundle (kUnreachable when it has no such walk);
-// `offered` exists on Lossy records only (the injection basis); `edges` and `drops` list
-// positive values in ascending EdgeId; per-call and cumulative drop totals are derived.
+// A snapshot of one ledger flow, returned by records() or record(id). `bundle` is its route
+// structure; `route_cost` is the minimum walk cost from its sources to its destinations over
+// that bundle, or kUnreachable if none exists. Lossy records alone have `offered`: the cumulative
+// amount submitted to this flow before any drops. `edges` and `drops` contain positive values
+// in ascending EdgeId; per-call and cumulative drop totals are derived.
 struct FlowRecord {
   FlowId flow_id {};
   std::int64_t owner {0};

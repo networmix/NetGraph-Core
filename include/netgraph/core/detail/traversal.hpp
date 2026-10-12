@@ -1,21 +1,24 @@
-/* The one traversal core of every search (internal; APPROACH 6 and 14): public spf, the
-   policies' route searches, the DagCache's supports and KSP's spur searches.
+/* Shared traversal for spf, policy routes, cached shortest-path supports and KSP alternatives.
+   A support contains every edge on the eligible shortest paths. A KSP spur search finds an
+   alternative suffix from a node on an earlier path.
 
-   One Dijkstra loop, parametrised by the direction (Forward scans a node's out-edge id range,
-   Reverse its in-edge slots) and the queue (a binary heap, or monotone cyclic buckets when the
-   graph's costs fit 65,536 buckets), both popping in (distance, node) order. Positive costs make
-   the set of tight edges d(u) + cost(e) = d(v) of a fixed member graph unique (2.4), whatever the
-   pop order among equal distances; the loop records them in per-node lists while it runs. An edge
-   is a candidate when it passes static eligibility, capacity >= 1 unit and the residual gate;
-   Collapse (multi_edge = false) keeps one member per (u, v) pair by select_adjacency when the
-   tight edges are emitted (it never changes a distance). With targets the loop stops at the first
-   target popped: every node nearer than that distance d* is settled by then, so every target at
-   d* has its final distance, and the walks back from the targets at d* are the anycast-pruned DAG.
-   The canonical single path is extracted from that DAG in stages (section 6) with the search's
-   own distances as the topological order: no second traversal.
-
-   Every call leases the thread's workspace (node arrays reset through touched lists); the lease
-   restores it on every exit, exceptions included, and overlapping leases are refused.
+   Dijkstra finalises the nearest pending node, scanning out-edges for Forward and in-edges
+   for Reverse. Both heap and cyclic distance-bucket queues pop in (distance, node) order;
+   buckets are used when the graph's costs fit 65,536 buckets. A candidate must pass static
+   eligibility, have capacity >= 1 unit, and pass any residual-capacity threshold.
+   A tight edge extends a shortest path exactly: d(u) + cost(e) = d(v) in traversal direction.
+   Positive costs make these edges unique for a fixed member graph regardless of equal-distance
+   pop order. Record them in per-node lists; on output, multi_edge = false (Collapse) selects
+   one member per (u, v) by select_adjacency, without changing distances.
+   With targets, stop when the first target at distance d* is popped. Every nearer node is
+   already final, so positive costs ensure every target at d* has its final distance too.
+   Keep only tight edges on walks to these nearest targets (anycast pruning).
+   Extract the single path from that DAG by bottleneck under PreferHigherPriority (largest
+   minimum edge priority), then fewest hops, then smallest EdgeId sequence. Increasing search
+   distance orders every predecessor before its child, so no second traversal is needed.
+   Each call exclusively borrows the thread's workspace (a lease). Reset it on every exit,
+   including exceptions: the touched nodes only, or the whole arrays when a quarter or more of
+   the nodes were touched; refuse overlapping leases.
 */
 #pragma once
 
@@ -24,6 +27,7 @@
 #include <span>
 #include <vector>
 
+#include "netgraph/core/detail/hooks_flag.hpp"
 #include "netgraph/core/graph.hpp"
 #include "netgraph/core/options.hpp"
 #include "netgraph/core/pred_dag.hpp"
@@ -46,7 +50,7 @@ struct Priority {
 [[nodiscard]] Priority priority_value(EdgePriority priority, Amount residual, Amount capacity) noexcept;
 
 // The per-edge priority values a search reads: `residual` empty (no residual) reads the static
-// capacity for every priority (APPROACH 10); else priority_value on the residual.
+// capacity for every priority; else priority_value on the residual.
 struct PriorityValues {
   const Graph* g {nullptr};
   EdgePriority priority {EdgePriority::Capacity};
@@ -63,7 +67,7 @@ struct PriorityFn {
   [[nodiscard]] static PriorityFn of(const PriorityValues& values) noexcept;
 };
 
-// select_adjacency (APPROACH 6): whether member `e` replaces `cur`, the choice so far among the
+// select_adjacency: whether member `e` replaces `cur`, the choice so far among the
 // eligible members of one (u, v) pair seen in ascending EdgeId (cur < e): the lower cost, then
 // under PreferHigherPriority (`prefer`) the higher priority value; on a tie the lower EdgeId
 // (cur) stays. `value(e)` reads the priority value of an edge on the view of the selection.
@@ -103,13 +107,13 @@ struct SearchRoute {
   Cost cost {kUnreachable};
 };
 
-// CapacityAware's search (APPROACH 9.1): forward from `src` toward the destination set (allowed
+// CapacityAware's search: forward from `src` toward the destination set (allowed
 // ones; disjoint from src) over the candidates of `gate`, Collapse and the staged single path by
 // `selection` with the priority values on `gate.residual`; nullopt when no destination is reached.
 [[nodiscard]] std::optional<SearchRoute> route_search(const Graph& g, const Gate& gate, const PathSelection& selection,
                                                       NodeId src, std::span<const NodeId> dests);
 
-// CostOnly's projection of a cached full static support (APPROACH 9.1, 10): the support edges
+// CostOnly's projection of a cached full static support: the support edges
 // reachable from `src` (ascending `support`: a reverse multipath DAG rooted at the destination
 // set), Collapse by `selection` on the priority values `view` (no residual gating), and for
 // multipath = false the staged canonical single path on that part, its distances derived from the
@@ -117,27 +121,29 @@ struct SearchRoute {
 [[nodiscard]] SearchRoute support_route(const Graph& g, std::span<const EdgeId> support, NodeId src,
                                         std::span<const NodeId> dests, const PathSelection& selection, PriorityFn view);
 
-// The full static support of a search from (Forward) or toward (Reverse) the root set (every root
-// in range; excluded roots skipped): every tight edge of the statically eligible member graph
-// (multipath, multi_edge, no residual) over the nodes it reaches, forward-oriented (the DagCache's
-// value, and a CostOnly policy's DAG when it has no cache).
+// The full static support of a search from (Forward) or toward (Reverse) the root set (a
+// normalised set: nonempty, in range, ascending, no duplicates; excluded roots skipped): every
+// tight edge of the statically eligible member graph (multipath, multi_edge, no residual) over the
+// nodes it reaches, forward-oriented (the DagCache's value, and a CostOnly policy's DAG when it has
+// no cache). The empty DAG when no root is allowed.
 [[nodiscard]] PredDAG static_support(const Graph& g, std::span<const NodeId> roots, Direction direction,
                                      const Eligibility* elig);
 
-// The static cost from each of `sources` to the nearest of `dests` (allowed ones) over the
-// statically eligible edges of at least 1 unit, kUnreachable where there is no walk (the
+// The static cost from each of `sources` to the nearest of `dests` (in range, ascending, no
+// duplicates, possibly empty; allowed ones) over the statically eligible edges of at least 1 unit,
+// kUnreachable where there is no walk, and everywhere when no destination is allowed (the
 // CapacityAware and Global rosters and the Stretch baselines).
 [[nodiscard]] std::vector<Cost> static_costs(const Graph& g, const Eligibility* elig, std::span<const NodeId> dests,
                                              std::span<const NodeId> sources);
 
-// The rule-13 check of a cost ceiling (APPROACH 6; KSP and CapacityAware): Absolute's cost >= 0,
+// The validation of a cost ceiling (KSP and CapacityAware): Absolute's cost >= 0,
 // Stretch's factor finite and in [1, inf); std::invalid_argument naming max_path_cost.
 void check_ceiling(const std::optional<CostCeiling>& ceiling);
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
-// Test evidence (C++ tests, hooks builds only): the queue of every search this thread ran.
+// Test evidence (C++ tests, hooks builds only): how many of this thread's searches ran on the
+// bucket queue; a search that leaves the count unchanged ran on the heap.
 struct QueueCounts {
-  std::int64_t heap {0};
   std::int64_t buckets {0};
 };
 QueueCounts& thread_queue_counts() noexcept;

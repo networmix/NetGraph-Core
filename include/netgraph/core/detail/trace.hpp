@@ -1,6 +1,10 @@
-/* The transaction trace of a placement call (internal diagnostics for the tests and the
-   prototype parity check): a small JSON-like value whose keys follow prototype 2's trace. Built
-   only in a build with the private hooks, when a call asks for it (detail::place_traced). */
+/* The transaction trace of a placement call (internal diagnostics for the tests, which compare
+   it key by key with the same trace of their independent model of the policy): a small
+   JSON-like value of the call's intermediate values, per source the offer, the rows of the
+   stages (creation, reoptimisation, filling, growth) and the local outcome, then the flows
+   created and the final working residual; for Global the solve's input, result and counters.
+   Filled only in a build with the private hooks, when a call asks for it (detail::place_traced);
+   other calls build only empty values. */
 #pragma once
 
 #include <cstdint>

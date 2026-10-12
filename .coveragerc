@@ -3,8 +3,6 @@ branch = True
 data_file = build/coverage/.coverage
 source =
     netgraph_core
-omit =
-    python/netgraph_core/_docs.py
 
 [report]
 show_missing = True

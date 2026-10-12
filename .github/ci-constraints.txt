@@ -1,0 +1,78 @@
+# Exact versions for CI's Python environments and for the coverage venv of `make cov`, so a new
+# release of a tool cannot change a CI result without a change in this repository: the accepted
+# development environment's versions, and for what only Linux, Windows or Python 3.11 installs,
+# the version a resolver chose for those platforms (its marker says where it applies). pip itself
+# is one of them: a job installs this pip (`pip install -U -c` this file, which also downgrades a
+# newer one) before anything else. They reach a build environment only through the mechanism of
+# the tool that fills it: pip's own isolated build takes --build-constraint or
+# PIP_BUILD_CONSTRAINT (since pip 26.2 never -c or PIP_CONSTRAINT), `python -m build` takes
+# PIP_CONSTRAINT, and its uv installer (the release wheels) UV_CONSTRAINT. NumPy 2.5 needs Python
+# 3.12; Python 3.11 gets the last NumPy that supports it. Update deliberately.
+build==1.5.0
+certifi==2026.7.22
+cfgv==3.5.0
+charset-normalizer==3.5.1
+cmake==4.4.2
+colorlog==6.12.0
+coverage==7.15.4
+distlib==0.4.3
+docutils==0.23
+filelock==3.32.3
+gcovr==8.6
+id==1.6.1
+identify==2.6.19
+idna==3.19
+iniconfig==2.3.0
+jaraco.classes==3.4.0
+jaraco.context==6.1.2
+jaraco.functools==4.6.0
+Jinja2==3.1.6
+keyring==25.7.0
+lxml==6.1.2
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+more-itertools==11.1.0
+nh3==0.3.6
+ninja==1.13.0
+nodeenv==1.10.0
+packaging==26.3
+pathspec==1.1.1
+pip==26.2.1
+platformdirs==4.11.3
+pluggy==1.6.0
+pre_commit==4.6.2
+pybind11==3.1.0
+pybind11-stubgen==3.0.0
+Pygments==2.21.0
+pyproject_hooks==1.2.0
+pyright==1.1.401
+pytest==9.1.1
+pytest-cov==7.1.0
+python-discovery==1.5.2
+PyYAML==6.0.3
+readme_renderer==45.0
+requests==2.34.2
+requests-toolbelt==1.0.0
+rfc3986==2.0.0
+rich==15.0.0
+ruff==0.11.13
+scikit_build_core==1.0.3
+setuptools==84.0.0
+twine==7.0.0
+typing_extensions==4.16.0
+urllib3==2.7.0
+virtualenv==21.7.4
+wheel==0.48.0
+numpy==2.5.2; python_version >= "3.12"
+numpy==2.4.4; python_version < "3.12"
+backports.tarfile==1.2.0; python_version < "3.12"
+importlib_metadata==9.0.1; python_version < "3.12"
+zipp==4.1.1; python_version < "3.12"
+cffi==2.1.1; sys_platform == "linux"
+cryptography==50.0.2; sys_platform == "linux"
+jeepney==0.9.0; sys_platform == "linux"
+pycparser==3.11; sys_platform == "linux"
+SecretStorage==3.5.0; sys_platform == "linux"
+colorama==0.4.6; sys_platform == "win32"
+pywin32-ctypes==0.2.3; sys_platform == "win32"

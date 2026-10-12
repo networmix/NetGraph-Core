@@ -1,15 +1,13 @@
 /* The private hooks of the development build (internal). CMake option NETGRAPH_CORE_PRIVATE_HOOKS:
    ON for the editable development build and the test suites, OFF for an installed wheel. The
-   hooks are test controls and prototype-parity diagnostics that the contract does not name:
-   a lowered creation cap, an injected sensitivity model failure and the transaction trace.
-   Without the option none of them exists: the engine reads the constant kMaxFlowsPerCall,
-   sensitivity has no injection branch, and every trace block is a compile-time-dead branch
-   (kTraced), so no trace code is emitted. */
+   hooks declared here are test controls and diagnostics the tests compare with their
+   independent model of the policy; none of them is public API:
+   a lowered creation cap and the transaction trace.
+   Without the option neither is built: the engine reads the constant kMaxFlowsPerCall, and every
+   trace write is a compile-time-dead branch (kTraced), so only empty trace values are built. */
 #pragma once
 
-#ifndef NETGRAPH_CORE_PRIVATE_HOOKS
-#define NETGRAPH_CORE_PRIVATE_HOOKS 0
-#endif
+#include "netgraph/core/detail/hooks_flag.hpp"
 
 namespace netgraph::core::detail {
 
@@ -34,12 +32,8 @@ namespace netgraph::core::detail {
 // lowers it to reach the cap on small graphs).
 std::atomic<std::int64_t>& max_flows_per_call() noexcept;
 
-// The sensitivity candidate whose deletion raises a model exception (-1: none). No valid
-// configuration raises under an edge deletion (every construction check is
-// deletion-independent), so this is how the tests reach `unevaluable` (APPROACH 11).
-std::atomic<std::int64_t>& sensitivity_fail_edge() noexcept;
-
-// FlowPolicy::place with the transaction's trace (prototype 2's keys). `staged`, when given, runs
+// FlowPolicy::place with the transaction's trace (a Trace: the call's intermediate values,
+// keyed as the tests' model of the policy keys them). `staged`, when given, runs
 // once the result and the trace are final and before anything is published (the commit, the
 // epoch state): an exception from it aborts the call with nothing changed (the binding builds
 // its Python objects there).

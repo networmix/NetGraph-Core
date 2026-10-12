@@ -1,6 +1,0 @@
-date: 2026-10-02T18:14:27Z
-old: d5717cc (0.11.0) via build.sh old d5717cc; new: working tree with shortest_paths_dag
-phases: a1-old, b-new-full (shortest_paths), b-new-dag (SPFX_DAG=1: shortest_paths_dag for destination rows), a2-old; short mode, 7 samples
-b1760ef54d46011673e5f517d1b6242fcda0f9cd500898ec4748b2df4bb054ff  src/shortest_paths.cpp
-494b95a4a3b7fd9105a37c5f53acf4e88642167549b7eb56f4e01f64e013cd5e  build/perf/cpu-queue
-7de733ce4ec111c3414e2b262b6063a253b5cd790e4beceab893d802f0c5bf6a  build/perf/cpu-queue-old

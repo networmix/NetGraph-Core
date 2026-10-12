@@ -2,47 +2,58 @@
 
 C++ graph engine for network flow analysis, traffic engineering simulation, and capacity planning.
 
-> **Streamline in progress.** The `streamline` branch rebuilds Core. This build carries the
-> graph on integer units, the minimum-cost flow core, the route structures (`PredDAG`, `Path`),
-> the integer ledger `FlowLedger` with the placement kernels, the policy engine `FlowPolicy`, the
-> `DagCache` (building mode) and the evaluators `capacity`, `batch_capacity` and `sensitivity`.
-> The public search API (shortest paths, k shortest paths, path resolution) and the frozen cache
-> are not part of it yet. The previous API (0.11 and earlier) is in git history and on PyPI.
+> **Unreleased, breaking.** This version replaces the 0.11 API (see the Unreleased section of
+> [CHANGELOG.md](CHANGELOG.md)): the graph on integer units, the minimum-cost flow core, the route
+> structures (`PredDAG`, `Path`), the integer ledger `FlowLedger` with the placement kernels, the
+> policy engine `FlowPolicy`, the searches (`spf`, `ksp`, `resolve_to_paths`), the `DagCache` in
+> building and frozen modes, and the evaluators `capacity`, `batch_capacity` and `sensitivity`.
+> The previous API (0.11 and earlier) is in git history and on PyPI.
 
 ## Overview
 
 - **Exact integer amounts**: a graph carries an explicit resolution `q` (a power of two in
   `[2^-32, 2^32]`); capacities and flows are `int64` units of `q`. Physical values enter only
   through `to_units` (round half up) and leave through `as_float`.
-- **Positive costs**: edge costs are integers `>= 1`, so the shortest-path DAG is unique.
-- **Stable edge ids**: the public `EdgeId` is the rank of an edge in the order
-  `(src, cost, dst, input)`; `input_index()` maps ids back to input positions.
-- **One flow core**: an integer minimum-cost flow (successive shortest paths with potentials,
-  Dinic phases per cost tier) returning the flow value, the marginal cost curve, per-edge
-  flows, the residual minimum cut and the dual potentials.
+- **Positive costs**: edge costs are integers `>= 1`, so the shortest-path DAG (every edge on
+  some shortest path) has no cycle and does not depend on search order or tie rules.
+- **Stable edge ids**: edges are numbered by sorting on `(src, cost, dst)`, ties kept in input
+  order; that number is the public `EdgeId`, and `input_index()` maps it back to the input position.
+- **One flow core**: an exact integer minimum-cost flow solver (the most traffic, sent as cheaply
+  as possible). It returns the flow value, the marginal cost curve (the extra minimum total cost
+  per additional delivered unit, as `(cost, units)` segments), the flow on every edge, a minimum
+  cut (the full edges that separate the sources from the destinations) and the node potentials
+  (per-node prices that prove the flow is cheapest). It works one cost level at a time: shortest
+  paths with potentials find the next cheapest cost, then Dinic phases fill every path of that
+  cost.
 
 ## Core Features
+
+The exact behaviour of every call (units and rounding, edge ids, which route a search returns,
+how the kernels split traffic, outcomes and flags, failures, the cache and the evaluators) is
+specified in [docs/semantics.md](docs/semantics.md).
 
 ### Graph
 
 - **`Graph(num_nodes, src, dst, capacity_units, cost, resolution)`**: immutable
-  directed multigraph with forward and reverse CSR adjacency; parallel edges and self-loops are
-  allowed. Validation reports the first defect in a fixed order (the resolution, the unit
+  directed multigraph that stores each node's out-edges and in-edges as arrays; parallel edges and
+  self-loops are allowed. Validation reports the first defect in a fixed order (the resolution, the unit
   values, the shapes, zero or negative costs, the remaining bounds). Accessors (`capacity_units()`, `cost()`, `edge_src()`, `edge_dst()`,
   `input_index()`, `row_offsets()`, `in_row_offsets()`, `in_adj_edge_index()`) return read-only
   NumPy views that keep the graph alive.
-- **`Eligibility`**: immutable, graph-bound static eligibility built by
+- **`Eligibility`**: which nodes and edges of one graph may be used (immutable), built by
   `graph.eligibility(excluded_nodes, excluded_edges)`; `Eligibility.intersect(a, b)` returns an
   operand when the result equals it, otherwise a new value.
 
 ### Route structures
 
-- **`PredDAG`**: immutable, graph-bound predecessor DAG, stored over its member nodes and
-  presented in CSR form (`parent_offsets()` built on demand, `parents()`, `via_edges()`),
-  entries in ascending via EdgeId within a node.
+- **`PredDAG`**: the route structure a search returns, a predecessor DAG (directed, no cycle):
+  for each node, the edges that reach it on the route and the node each comes from. `parents()`
+  and `via_edges()` list these entries, in ascending EdgeId within a node; `parent_offsets()`
+  (built on each call) says where each node's entries start.
   `PredDAG.from_csr(graph, offsets, parents, via)` validates the shape, the ranges and endpoints,
   duplicates, acyclicity and the canonical order before accepting a DAG.
-- **`Path(graph, hops)`**: an explicit walk whose hops may hold several parallel members;
+- **`Path(graph, hops)`**: a route given hop by hop, where a hop may hold several parallel edges
+  between the same two nodes;
   `cost()` is the sum over hops of the minimum member cost and `to_dag()` gives the equivalent
   `PredDAG`.
 - **`PathSelection(tie_break, priority, multipath=True, multi_edge=True)`** with
@@ -50,92 +61,110 @@ C++ graph engine for network flow analysis, traffic engineering simulation, and 
 
 ### Ledger and kernels
 
-- **`FlowLedger(graph, residual=None)`**: the integer ledger of one graph: an immutable baseline
-  in units and the records (`FlowRecord`: flow id, owner, endpoints, placement, admission,
-  bundle, route cost, offered, delivered, per-edge allocation and drops) of the flows placed on
-  it. `allocated()` is the exact sum of the records and `residual()` the baseline minus it;
-  `bottleneck(sources)` lists the saturated frontier; `reset()` and `copy()` follow the lifetime
-  rules (rejected while a policy is bound). The ledger is mutated only through policies.
-- **Kernels** (`FlowPlacement`: `MAX_FLOW`, `WEIGHTED`, `EQUAL_BALANCED`; `Admission`:
-  `LOSSLESS`, `LOSSY`): MaxFlow is the flow core on the flow's DAG (a replacement on its own
-  allocation plus the residual), Weighted splits by highest averages over weights frozen at
-  creation, EqualBalanced by round robin; Lossy forwards hop by hop and records drops.
+- **`FlowLedger(graph, residual=None)`**: the integer ledger of one graph: a baseline
+  in units (replaced by `reset()`) and the records (`FlowRecord`: flow id, owner, endpoints,
+  placement, admission, bundle, route cost, offered, delivered, per-edge allocation and drops)
+  of the flows placed on it. `allocated()` is the exact sum of the records and `residual()`
+  the baseline minus it; `bottleneck(sources)` lists the full edges leaving the set of nodes
+  the sources can still reach. `reset()` and `copy()` are rejected while a policy is bound
+  to the ledger. Policies place and remove flows; `reset()` replaces an unbound ledger's
+  baseline and clears its records.
+- **Kernels**, the rules that spread one flow over its route (`FlowPlacement`: `MAX_FLOW`,
+  `WEIGHTED`, `EQUAL_BALANCED`; `Admission`: `LOSSLESS`, `LOSSY`): `MAX_FLOW` re-solves the flow
+  with the flow core on its DAG, over the free capacity plus its own allocation; `WEIGHTED` splits
+  at every node in proportion to weights fixed when the flow is created (highest averages:
+  whole-unit shares as close to proportional as possible); `EQUAL_BALANCED` splits equally (round
+  robin); `LOSSY` forwards hop by hop and records what it drops.
 
 ### Policies
 
-- **`FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)`**: the one
-  placement engine, bound to its ledger. `FlowPolicyConfig(routing=..., placement=...,
-  admission=..., selection=...)` has four explicit axes; the routing is `CostOnly()` (static
-  shortest paths), `CapacityAware(flow_count=1, max_flow_count=None, max_path_cost=None,
-  min_flow_bandwidth=0, reoptimize=False, diminishing=None)` (residual-aware searches with an
-  `Absolute` or `Stretch` cost ceiling, a `DiminishingReturns(window, fraction)` guard, and at
-  most `MAX_FLOWS_PER_CALL` (10,000) creations per call), `Global()` (the minimum-cost flow of the policy's
-  sources to its destinations on the residual plus its own allocation) or `Pinned(bundles)`
-  (fixed `PredDAG`s).
-- **`place(volume, outputs=None)`** runs one transaction per call (per source for CostOnly and
-  CapacityAware, cumulative on Global) and returns a `PlacementResult` (`placed`, `remaining`,
-  `termination`, `local_outcomes`, `routes_changed`, `weights_changed`, `drops` and the
-  optional `cost_distribution` (Global) and, when requested through `OutputOptions`, `edge_flows`,
-  `residual`, `bottleneck` and, on Global with `OutputOptions(bottleneck=True)`, `min_cut`).
+- **`FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)`**: the placement
+  engine for one demand, bound to its ledger. `FlowPolicyConfig(routing=..., placement=...,
+  admission=..., selection=...)` sets four independent choices, all explicit. The routing is one of:
+  - `CostOnly()`: static shortest paths, as routers forward with an IGP such as OSPF;
+  - `CapacityAware(flow_count=1, max_flow_count=None, max_path_cost=None, min_flow_bandwidth=0,
+    reoptimize=False, diminishing=None)`: tunnels that each search the free capacity (CSPF), with
+    an `Absolute` or `Stretch` cost ceiling, a `DiminishingReturns(window, fraction)` guard, and at
+    most `MAX_FLOWS_PER_CALL` (10,000) new flows per call;
+  - `Global()`: an ideal controller: the minimum-cost flow from all the policy's sources to its
+    destinations, on the free capacity plus its own allocation;
+  - `Pinned(bundles)`: fixed routes given as `PredDAG`s.
+- **`place(volume, outputs=None)`** adds `volume` to the policy's request as one all-or-nothing
+  step (CostOnly and CapacityAware place source by source; Global re-solves what it already
+  delivers plus this request) and returns a `PlacementResult`: `placed`, `remaining`, `termination`, `local_outcomes`,
+  `routes_changed`, `weights_changed`, `drops`, `cost_distribution` (Global only), and, when
+  requested through `OutputOptions`, `edge_flows`, `residual`, `bottleneck` and (Global only)
+  `min_cut`.
   `remove()` reverts the policy's flows; `records()`, `record(flow_id)`, `placed_demand()` and
   `usable_bundles()` read its state.
-- **Failure guarantee**: every public call is all-or-nothing up to its caller: a failure
-  anywhere (validation, allocation, a worker thread, the construction of the Python result)
-  leaves every ledger, policy, cache and scratch buffer as it was and raises one exception.
-  Two limits: the pybind11 object machinery is outside the guarantee (constructing a bound
-  object from Python, or a conversion into a new bound object or container outside the staged
-  calls, allocates through pybind11's `make_new_instance`, which does not check `tp_alloc`, so a
-  Python allocation failure there crashes the process, with Core state unchanged); and a
-  supplied building `DagCache` is a memo that keeps the complete entries and statistics of the
-  lookups that succeeded before a later failure of the call.
+- **Failure guarantee**: every public call either completes or raises one exception and leaves
+  every ledger, policy, cache and scratch buffer as it was, whatever fails (validation, memory, a
+  worker thread, building the Python result). Two limits: pybind11 does not check every
+  allocation when it constructs a bound object from Python or converts a returned value into a
+  new Python object outside the library's checked result construction, so running out of memory
+  exactly there may crash the process (Core state stays unchanged); and a `DagCache` passed to the
+  call: a building cache keeps the complete entries and statistics of the lookups that succeeded
+  before the failure, and a frozen cache keeps its entries and statistics unchanged, except that a
+  call raising `DagCacheMiss` counts one miss
+  ([docs/semantics.md](docs/semantics.md#8-failures-threads-and-lifetimes)).
 
 ### Search
 
 `spf(graph, roots, SpfOptions(direction, selection, targets=None, residual=None,
 min_residual=1, elig=None))` searches from a root set, forward or reverse.
 - **Without targets:** it returns `costs` (`UNREACHABLE` for nodes not reached) and the full
-  DAG of tight edges, the edges that lie on some shortest path.
+  DAG of tight edges, the edges that lie on some shortest path (one per node pair with
+  `multi_edge=False`).
 - **With targets:** it stops at the nearest targets and returns `target_cost` and the DAG of
   the walks between the roots and the nearest targets (for a reverse search, from a target to
   a root).
-- **With `multipath=False`:** it returns the canonical single path, the one walk that minimises
-  cost, then bottleneck, then hops, then edge ids.
+- **With `multipath=False`:** it returns the canonical single path: the walk of lowest cost;
+  among those, under `PREFER_HIGHER_PRIORITY` only, the one of highest bottleneck (the smallest
+  priority value along the walk); then the fewest hops; then the lexicographically smallest
+  sequence of EdgeIds ([docs/semantics.md](docs/semantics.md#the-canonical-single-path)).
+- **With `multi_edge=False`** (any search): each node pair is first reduced to one parallel
+  member (lowest cost, then under `PREFER_HIGHER_PRIORITY` the highest priority, then the lowest
+  EdgeId).
 
 `ksp(graph, src, dst, KspOptions(k, selection, max_path_cost=None, residual=None, elig=None))`
-returns the K shortest simple paths as `(cost, Path)` pairs, in the contract's order and up to
+returns the K shortest simple paths as `(cost, Path)` pairs, in the order of
+[docs/semantics.md](docs/semantics.md#k-shortest-paths) and up to
 an inclusive cost ceiling. `resolve_to_paths(graph, dag, src, dst, split_parallel_edges=False,
 max_paths=None)` lists a DAG's walks as `Path` values.
 
 ### DagCache
 
-`DagCache(graph)` keeps the static shortest-path supports that policies build, keyed by the
-root set, the direction and the Eligibility. Values are immutable and shared, and `stats()`
-reports hits, misses, entries, retained bytes and live values.
-- **Building mode (new caches):** one writer; a miss searches and inserts.
-- **Frozen mode (`freeze()`):** read-only and shared by every worker of an evaluator; a miss
-  raises `DagCacheMiss`. `thaw()` returns to building mode once every reader has finished.
+`DagCache(graph)` keeps the static shortest-path DAGs (from costs and the Eligibility, not
+traffic) that policies build, keyed by the root set, the direction and the Eligibility. Values
+are immutable and shared, and `stats()` reports hits, misses, entries, retained bytes and live
+values.
+- **Building mode (new caches):** one writer; a miss searches and inserts. An evaluator given a
+  building cache runs on one worker (an explicit `workers` above 1 is rejected).
+- **Frozen mode (`freeze()`):** read-only and shared by every worker of an evaluator (pass
+  `workers` explicitly; with a cache the default is 1); a miss raises `DagCacheMiss`. `thaw()`
+  returns to building mode once every reader has finished.
 
 ### Evaluators
 
 `capacity(graph, sources, destinations, CapacityOptions(config, elig=None, cache=None,
-outputs=None))` is `place(+inf)` of a policy on a fresh ledger; Global with MaxFlow gives the
+outputs=None))` is `place(+inf)` of a policy on a fresh ledger; Global with MAX_FLOW gives the
 exact maximum flow with its marginal cost curve, and its minimum cut with
 `outputs=OutputOptions(bottleneck=True)`. `batch_capacity(graph, pairs,
 opts, per_pair_elig=None, workers=None)` evaluates pairs in pair order (the lowest failing
 index raises). `sensitivity(graph, sources, destinations, SensitivityOptions(...),
 workers=None)` reports, for every candidate edge, the signed loss in placed units when the
-edge is removed. The default worker counts come from `NGRAPH_CORE_BATCH_THREADS` and
-`NGRAPH_CORE_SENSITIVITY_THREADS`.
+edge is removed. With `workers=None` the worker count is 1 when a cache is supplied, otherwise
+it comes from `NGRAPH_CORE_BATCH_THREADS` and `NGRAPH_CORE_SENSITIVITY_THREADS`.
 
 ### Flow core
 
-One native integer minimum-cost flow core serves Global routing, the MaxFlow kernel and the
-evaluators: the minimum-cost flow of the maximum value attainable under a cap from a source set
-to a destination set over the eligible edges, starting from zero flow; the exact sensitivity
-model re-solves each deletion from the baseline solve's final state. Its private Python entry
+One native integer minimum-cost flow core serves Global routing, the MAX_FLOW kernel and the
+evaluators: the largest flow up to a cap from a source set to a destination set over the eligible
+edges, sent at the lowest total cost, starting from zero flow. For sensitivity it repairs the
+baseline's solution for each removed edge instead of solving again. Its private Python entry
 `_netgraph_core._place_global_units(graph, view, sources, destinations, elig, cap)` returns the
 payload `{placed, cost_distribution, edge_flows, min_cut, potentials, counters}` for the
-equivalence recorder and the oracle checks.
+flow checks of the test suites.
 
 ## Quick Start
 
@@ -164,11 +193,14 @@ print(result.cost_distribution)         # [(2, 40960), (4, 20480)]
 pip install netgraph-core
 ```
 
-Or from source:
+Or from source (the shipped configuration; `pip install -e .` is the editable development build,
+which carries the private test hooks):
 
 ```bash
-pip install -e .
+pip install .
 ```
+
+The package is typed: it ships `py.typed` and a type stub generated from the compiled module.
 
 ### Build Optimizations
 
@@ -187,24 +219,26 @@ bindings/python/        # pybind11 bindings
 python/netgraph_core/   # Python package
 tests/cpp/              # C++ tests (googletest)
 tests/py/               # Python tests (pytest)
-dev/                    # Developer scripts (not shipped): checks, coverage,
-dev/perf/               #   performance tooling and recorded A/B/A results,
-dev/research/           #   research prototypes and their evidence
+dev/                    # Developer scripts (not shipped): checks and coverage
 ```
 
 ## Development
 
 ```bash
-make dev        # Setup: venv, dependencies, pre-commit hooks
-make check      # Run all tests and linting (auto-fix formatting)
-make check-ci   # Strict checks without auto-fix (for CI)
-make test       # Python tests
-make cpp-test   # C++ tests only
-make cov        # Combined coverage report (C++ + Python)
+make dev           # Setup: venv, dependencies, pre-commit hooks
+make check         # Rebuild the editable extension, then everything check-ci runs
+make check-ci      # Lint, types, C++ tests (hooks on and off), Python tests (CI entrypoint)
+make test          # Python tests
+make cpp-test      # C++ tests (private hooks on)
+make cpp-test-off  # C++ tests without the hooks (the shipped configuration)
+make sanitize-test # C++ tests under ASan/UBSan
+make tsan-test     # C++ tests under ThreadSanitizer
+make cov           # Combined coverage report (C++ + Python; its own venv and builds)
+make stubs-check   # The generated type stub: drift, package contents, typed clients
+make format        # Apply ruff formatting (make hooks runs every pre-commit fixer)
 ```
 
-Performance work (harnesses, old/new/old protocol, recorded measurements) is
-described in [dev/perf/README.md](dev/perf/README.md).
+`make check` and `make check-ci` only verify; they never edit a file.
 
 The editable development build (`make install`, `make dev`) carries the private test hooks
 (CMake option `NETGRAPH_CORE_PRIVATE_HOOKS`; a wheel build does not); the test suites skip the
@@ -214,7 +248,7 @@ tests that need them when they are absent.
 
 | Variable | Effect |
 | --- | --- |
-| `NGRAPH_CORE_BATCH_THREADS` | Default worker count of `batch_capacity` (an integer in [1, 4096]; 1 when unset or invalid; an explicit `workers` wins). |
+| `NGRAPH_CORE_BATCH_THREADS` | Default worker count of `batch_capacity` (an integer in [1, 4096]; 1 when unset or invalid; not read when a cache is supplied, which defaults to 1; an explicit `workers` wins). |
 | `NGRAPH_CORE_SENSITIVITY_THREADS` | Default worker count of `sensitivity` (as above). |
 
 ## Requirements

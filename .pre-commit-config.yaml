@@ -4,14 +4,12 @@ repos:
     hooks:
       - id: check-merge-conflict
       - id: check-yaml
-      # Recorded measurement artefacts and review patches must stay byte-exact.
       - id: end-of-file-fixer
-        exclude: ^dev/(research/|perf/.*/(results|review-[^/]+)/|reviews/|design/.*/experiments/)
       - id: trailing-whitespace
-        exclude: ^dev/(research/|perf/.*/(results|review-[^/]+)/|reviews/|design/.*/experiments/)
       - id: mixed-line-ending
       - id: debug-statements
 
+  # The revision matches the dev pin of Ruff (pyproject.toml).
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.11.13
     hooks:
@@ -19,9 +17,15 @@ repos:
         args: ["--fix"]
       - id: ruff-format
 
-  - repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.401
+  # Pyright needs the compiled extension _netgraph_core to resolve the package's imports, so it
+  # runs as make lint runs it: the pinned Pyright of the project's venv (make dev), whose
+  # interpreter has the extension built, over the whole project (pyproject.toml's settings).
+  # An isolated hook environment cannot hold the extension.
+  - repo: local
     hooks:
       - id: pyright
-        additional_dependencies: ["numpy>=1.22"]
-        # Pyright reads configuration from pyproject.toml
+        name: pyright
+        entry: venv/bin/python -m pyright --pythonpath venv/bin/python
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false

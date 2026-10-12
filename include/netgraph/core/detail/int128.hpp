@@ -1,16 +1,17 @@
-/* Portable 128-bit values (internal).
+/* Portable 128-bit arithmetic (internal).
 
-   U128, unsigned, for exact rational arithmetic: the highest-averages apportionment (quotients
-   w / d compared by cross products, lower quotas floor(I * w / W)), the Headroom priority
-   (residual / capacity compared by cross products), the comparisons with a double factor read
-   as the exact dyadic rational it is (the Stretch ceiling, the diminishing guard) and the
-   cumulative counters (Counter128). Every product operand is below 2^63, so every product is
-   below 2^126 and every quotient that is formed fits 64 bits. Compilers with __int128 use it;
-   others use 32-bit limbs.
+   U128 holds unsigned values for exact allocation shares, priorities and factor comparisons
+   (Counter128 keeps its own two words). Compare fractions a/b and c/d by comparing a*d and
+   c*b; compute a lower quota as floor(I*w/W), where I is the total, w one weight and W the sum
+   of weights.
+   A double factor is used exactly as stored: an integer divided by a power of two.
+   Product operands stay below 2^63, products below 2^126, and quotients fit 64 bits.
+   Use __int128 when available; otherwise split products into 32-bit parts (limbs).
 
-   I128, signed, for the deletion re-solve of the flow core (APPROACH 2.2): working potentials,
-   distance keys and sums of tier maxima, which stay within (22 n + 15) C for n vertices and the
-   cost sum C < 2^62. Only addition, subtraction and comparison, on two limbs everywhere.
+   I128 holds signed costs for deletion repairs: vertex cost offsets (potentials), distance
+   keys and sums of each shortest-path search's largest distance (tier maxima). These stay
+   within (22 n + 15) C for n vertices and cost sum C < 2^62. Only addition, subtraction and
+   comparison are needed, always using two 64-bit parts.
 */
 #pragma once
 
@@ -59,8 +60,8 @@ inline U128 mul_u64(std::uint64_t a, std::uint64_t b) noexcept {
   return r;
 }
 
-// floor(n / d) for d > 0 and a quotient below 2^64 (n.hi < d): restoring division, one
-// quotient bit per step.
+// floor(n / d), with d > 0 and quotient < 2^64 (n.hi < d). Build one quotient bit per step:
+// shift in the next dividend bit, then subtract d if the current remainder is large enough.
 inline std::uint64_t div_u128(U128 n, std::uint64_t d) noexcept {
   std::uint64_t rem = n.hi;
   std::uint64_t q = 0;
@@ -133,7 +134,7 @@ inline Dyadic dyadic(double f) noexcept {
   return d;
 }
 
-// cost <= f * base, exactly (the Stretch ceiling of APPROACH 6 and 9.1): f is the dyadic rational
+// cost <= f * base, exactly (the Stretch cost ceiling): f is the dyadic rational
 // it is (finite, f >= 1), cost >= 0 and base >= 1 below 2^63. f = m * 2^x with m odd below 2^53;
 // bit lengths are compared before any shift, so no product exceeds 128 bits.
 inline bool stretch_le(std::int64_t cost, std::int64_t base, double f) noexcept {

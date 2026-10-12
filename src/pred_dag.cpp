@@ -1,5 +1,5 @@
 /*
-  PredDAG and Path (APPROACH 5): immutable, graph-bound route structures validated once at
+  PredDAG and Path: immutable, graph-bound route structures validated once at
   construction, in the documented order, before any traversal.
 */
 #include "netgraph/core/pred_dag.hpp"
@@ -77,7 +77,8 @@ PredDAG PredDAG::from_csr(const Graph& g, std::span<const std::int32_t> offsets,
       seen[e] = 1;
     }
   }
-  // Acyclic: Kahn over the entries (a self-loop is a cycle).
+  // Repeatedly remove nodes with no remaining predecessors, with their outgoing entries
+  // (Kahn's algorithm). Entries left over mean a cycle; a self-loop is one.
   {
     std::vector<std::int32_t> out_count(n + 1, 0);
     std::vector<std::int32_t> indeg(n, 0);

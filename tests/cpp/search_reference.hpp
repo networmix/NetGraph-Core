@@ -1,4 +1,4 @@
-// An independent reference of the search semantics (APPROACH 6) for the tests: the member graph
+// An independent reference of the search semantics (docs/semantics.md#4-search) for the tests: the member graph
 // by an explicit per-pair selection, Bellman-Ford distances, the tight-edge DAG and the pruned
 // DAG by two-sided distances, and the canonical single path by enumerating every simple walk.
 // It shares no code with the traversal core (no queue, no lists, no extractor).
@@ -15,19 +15,20 @@
 #include "netgraph/core/graph.hpp"
 #include "netgraph/core/options.hpp"
 #include "netgraph/core/types.hpp"
+#include "test_int128.hpp"
 
 namespace netgraph::core::test::ref {
 
 // An exact priority: residual / capacity as a rational, or an integer (den 1); `inf` above all.
 struct Prio {
-  __int128 num {0};
-  __int128 den {1};
+  Int128 num {0};
+  Int128 den {1};
   bool inf {false};
 };
 inline int cmp(const Prio& a, const Prio& b) {
   if (a.inf || b.inf) return a.inf == b.inf ? 0 : (a.inf ? 1 : -1);
-  const __int128 l = a.num * b.den;
-  const __int128 r = b.num * a.den;
+  const Int128 l = a.num * b.den;
+  const Int128 r = b.num * a.den;
   return l == r ? 0 : (l < r ? -1 : 1);
 }
 
@@ -164,32 +165,9 @@ inline void walks(const Graph& g, const std::vector<char>& mem, NodeId u, const 
   }
 }
 
-// The canonical key (cost, -bottleneck under prefer, hops, edge-id sequence) as a strict order.
-inline bool key_less(const Query& q, const std::vector<EdgeId>& a, const std::vector<EdgeId>& b) {
-  const Graph& g = *q.g;
-  Cost ca = 0, cb = 0;
-  for (EdgeId e : a) ca += g.cost()[static_cast<std::size_t>(e)];
-  for (EdgeId e : b) cb += g.cost()[static_cast<std::size_t>(e)];
-  if (ca != cb) return ca < cb;
-  if (q.prefer) {
-    Prio ba {0, 1, true}, bb {0, 1, true};
-    for (EdgeId e : a) {
-      if (cmp(prio_of(q, e), ba) < 0) ba = prio_of(q, e);
-    }
-    for (EdgeId e : b) {
-      if (cmp(prio_of(q, e), bb) < 0) bb = prio_of(q, e);
-    }
-    const int c = cmp(ba, bb);
-    if (c != 0) return c > 0;
-  }
-  if (a.size() != b.size()) return a.size() < b.size();
-  return a < b;
-}
-
-// The canonical single path from the start set to the end set, or nullopt.
-inline std::optional<std::vector<EdgeId>> canonical(const Query& q, const std::vector<char>& mem,
-                                                    const std::vector<NodeId>& starts, const std::vector<NodeId>& ends) {
-  const Graph& g = *q.g;
+// Every simple walk from any start to an end over the members (walks above, from each start).
+inline std::vector<std::vector<EdgeId>> all_walks(const Graph& g, const std::vector<char>& mem,
+                                                  const std::vector<NodeId>& starts, const std::vector<NodeId>& ends) {
   std::vector<char> is_end(static_cast<std::size_t>(g.num_nodes()), 0);
   for (NodeId t : ends) is_end[static_cast<std::size_t>(t)] = 1;
   std::vector<std::vector<EdgeId>> all;
@@ -199,6 +177,41 @@ inline std::optional<std::vector<EdgeId>> canonical(const Query& q, const std::v
     on[static_cast<std::size_t>(s)] = 1;
     walks(g, mem, s, is_end, walk, on, all);
   }
+  return all;
+}
+
+inline Cost walk_cost(const Graph& g, const std::vector<EdgeId>& walk) {
+  Cost x = 0;
+  for (EdgeId e : walk) x += g.cost()[static_cast<std::size_t>(e)];
+  return x;
+}
+
+// A walk's bottleneck: its lowest priority value (cmp order).
+inline Prio bottleneck(const Query& q, const std::vector<EdgeId>& walk) {
+  Prio b {0, 1, true};
+  for (EdgeId e : walk) {
+    if (cmp(prio_of(q, e), b) < 0) b = prio_of(q, e);
+  }
+  return b;
+}
+
+// The canonical key (cost, -bottleneck under prefer, hops, edge-id sequence) as a strict order.
+inline bool key_less(const Query& q, const std::vector<EdgeId>& a, const std::vector<EdgeId>& b) {
+  const Cost ca = walk_cost(*q.g, a);
+  const Cost cb = walk_cost(*q.g, b);
+  if (ca != cb) return ca < cb;
+  if (q.prefer) {
+    const int c = cmp(bottleneck(q, a), bottleneck(q, b));
+    if (c != 0) return c > 0;
+  }
+  if (a.size() != b.size()) return a.size() < b.size();
+  return a < b;
+}
+
+// The canonical single path from the start set to the end set, or nullopt.
+inline std::optional<std::vector<EdgeId>> canonical(const Query& q, const std::vector<char>& mem,
+                                                    const std::vector<NodeId>& starts, const std::vector<NodeId>& ends) {
+  const auto all = all_walks(*q.g, mem, starts, ends);
   if (all.empty()) return std::nullopt;
   return *std::min_element(all.begin(), all.end(), [&](const auto& a, const auto& b) { return key_less(q, a, b); });
 }

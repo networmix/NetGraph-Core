@@ -1,6 +1,6 @@
-/* The shared small option types: the selection axes of the searches and the policies (APPROACH 6)
-   and the placement kinds of the kernels (APPROACH 7). Component configurations and result
-   statuses stay with their component. */
+/* The shared small option types: the selection axes of the searches and the policies and the
+   placement kinds of the kernels. Component configurations and result statuses stay with their
+   component. */
 #pragma once
 
 #include <variant>
@@ -9,13 +9,13 @@
 
 namespace netgraph::core {
 
-// The orientation of a search: Forward from the roots, or Reverse (rooted at the roots over
-// reversed arcs; the DAG it returns is forward-oriented, toward the roots).
+// Forward follows edges from the roots; Reverse follows them backwards toward the roots.
+// The returned DAG (a directed graph with no cycles) keeps the edges' original orientation.
 enum class Direction { Forward, Reverse };
 
-// One cost ceiling knob (APPROACH 6): an Absolute cost budget (inclusive, >= 0), or a Stretch
-// factor (in [1, inf)) of the static shortest cost under the given Eligibility, read as the exact
-// dyadic rational it is and compared without rounding.
+// Inclusive cost ceiling: Absolute gives a budget >= 0; Stretch multiplies the static shortest
+// cost under the given Eligibility by a factor in [1, inf). Use the double's exact stored
+// value, a dyadic rational (an integer divided by a power of two), with no comparison rounding.
 struct Absolute {
   Cost cost {0};
   friend bool operator==(const Absolute&, const Absolute&) = default;
@@ -26,26 +26,27 @@ struct Stretch {
 };
 using CostCeiling = std::variant<Absolute, Stretch>;
 
-// How ties between equal-cost candidates are broken, at both tie levels: the member chosen
-// among parallel edges of one (u, v) pair and the single path chosen among equal-cost walks.
-// Deterministic ignores capacities entirely (the lowest EdgeId wins); PreferHigherPriority
-// prefers the higher `priority` value first (then the lowest EdgeId).
+// Break equal-cost ties first between parallel edges, then between walks.
+// For one (u, v) pair, Deterministic picks the lowest EdgeId; PreferHigherPriority picks the
+// higher priority, then lowest EdgeId. For a single path (multipath = false),
+// PreferHigherPriority first maximises the smallest edge priority along the walk (bottleneck);
+// Deterministic ignores capacities. Both then prefer fewer hops, then the lexicographically
+// smallest EdgeId sequence: compare at the first differing edge. Choose parallel members
+// first (multi_edge = false), then choose the walk among the remaining members.
 enum class EdgeTieBreak { Deterministic, PreferHigherPriority };
 
-// The per-edge value read by PreferHigherPriority and, for the Weighted kernel, its membership
-// and weights: the residual units on the view of the search (Residual), the static capacity
-// units (Capacity), or the exact rational residual / capacity (Headroom; rejected with
-// Weighted). A search given no residual reads static capacities for every priority.
+// Per-edge priority for PreferHigherPriority and for Weighted membership and weights:
+// Residual is unused capacity in units on the search's view; Capacity is static capacity in
+// units; Headroom is the exact ratio residual / capacity (rejected with Weighted).
+// Without a supplied residual, a search uses static capacity as the value for every priority.
 enum class EdgePriority { Residual, Capacity, Headroom };
 
-// The selection of a search: `multipath` keeps every equal-cost walk (the shortest-path DAG)
-// instead of the one canonical single path; `multi_edge` keeps every eligible parallel member
-// of a (u, v) pair instead of the one chosen by (minimum cost, priority under
-// PreferHigherPriority, lowest EdgeId). tie_break and priority have no default (APPROACH 9: an
-// outer axis is explicit); the two flags default to the plain form of their mechanism. The
-// constructor rejects a tie_break or priority outside its enumeration (std::invalid_argument
-// naming the field; rule 13); the fields stay assignable, so every entry that reads a selection
-// checks it again.
+// `multipath` keeps all equal-cost walks as a shortest-path DAG; false selects the canonical
+// single path. `multi_edge` keeps all eligible parallel edges between each (u, v) pair; false
+// keeps one by (minimum cost, higher priority under PreferHigherPriority, lowest EdgeId).
+// Both flags default to true. tie_break and priority are required. Invalid enum values throw
+// std::invalid_argument naming the field. Fields remain assignable, so every entry point that
+// uses a selection validates it again.
 struct PathSelection {
   PathSelection(EdgeTieBreak tie_break_, EdgePriority priority_, bool multipath_ = true, bool multi_edge_ = true);
   EdgeTieBreak tie_break;
@@ -55,10 +56,13 @@ struct PathSelection {
   friend bool operator==(const PathSelection&, const PathSelection&) = default;
 };
 
-// The kernel that computes one flow's pushes on its DAG: MaxFlow (the flow core of the
-// minimum-cost flow restricted to the flow's split graph, a replacement on V = W + own),
-// Weighted (hop-by-hop WCMP: highest-averages apportionment over frozen weights at every node)
-// and EqualBalanced (ECMP: round robin at every node).
+// A placement kernel assigns one flow's amounts to its usable route edges (its split graph).
+// MaxFlow replaces its allocation with a minimum-cost flow on the split graph over
+// V = W + own, where W is unused capacity and own is this flow's current allocation. Weighted
+// splits at each node using weights fixed at creation: give each next unit to the edge with
+// largest w / (a + 1), where w is its weight and a its share so far; ties use lower EdgeId.
+// EqualBalanced splits equally at each node, giving leftover units to edges in ascending
+// EdgeId order.
 enum class FlowPlacement { MaxFlow, Weighted, EqualBalanced };
 
 // Lossless admits only what fits; Lossy forwards hop by hop without admission control and

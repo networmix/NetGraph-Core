@@ -1,10 +1,17 @@
-"""Independent checks of the flow-core payload (APPROACH 2.2) for the Python tests.
+"""Independent checks of the flow-core payload (``_place_global_units``) for the Python tests.
 
 Nothing here calls the extension's solver: an exhaustive minimum cost of every integer
-value on small graphs, and the certificate in its two ordered branches (feasibility,
+value on small graphs, an independent successive-shortest-path solver (Bellman-Ford) for the
+others, and the certificate in its two ordered branches (the payload shape, feasibility,
 conservation, attained value, the full residual closure of the real sources and its cut,
-potentials with the NEVER_REACHED sentinel tested first, the virtual-terminal convention,
-the curve shape, total and moment, and the complete curve against the exhaustive optimum).
+potentials with the NEVER_REACHED sentinel tested first (never below it, never on a closure
+vertex, and exactly on the vertices that no allowed source reaches over eligible edges of
+positive view at zero flow), the virtual-terminal convention,
+pi(t*) equal to the last curve cost, the curve shape, total and moment, and the complete
+curve: against the exhaustive optimum of every value when the graph has at most 7 edges and
+every view is at most 3, else against the independent solver at every breakpoint of either
+curve; the C++ certificate checks the same clauses and makes the same two comparisons, its
+branch chosen by each test).
 """
 
 from __future__ import annotations
@@ -43,6 +50,60 @@ def exhaustive(num_nodes, src, dst, cost, view, sources, dests, allowed=None):
     return best
 
 
+def independent_curve(num_nodes, src, dst, cost, view, sources, dests, allowed=None):
+    """The minimum-cost curve as breakpoints [(value, cost)], from (0, 0): one shortest
+    augmenting path at a time, each found by Bellman-Ford over the residual arcs (a virtual
+    source feeds every source, every destination drains into a virtual sink)."""
+    big = sum(view) + 1  # more than any flow, so the virtual arcs never bind
+    arcs = [
+        [src[e], dst[e], view[e], cost[e], 0]
+        for e in range(len(src))
+        if allowed is None or allowed[e]
+    ]
+    s_v, t_v = num_nodes, num_nodes + 1
+    arcs += [[s_v, s, big, 0, 0] for s in sources]
+    arcs += [[d, t_v, big, 0, 0] for d in dests]
+    points = [(0, 0)]
+    while True:
+        dist: list[int | None] = [None] * (num_nodes + 2)
+        parent: list[tuple[int, int] | None] = [None] * (num_nodes + 2)
+        dist[s_v] = 0
+        for _ in range(num_nodes + 2):
+            changed = False
+            for i, (u, v, cap, w, flow) in enumerate(arcs):
+                du, dv = dist[u], dist[v]
+                if flow < cap and du is not None and (dv is None or du + w < dv):
+                    dist[v], parent[v], changed = du + w, (i, 1), True
+                du, dv = dist[u], dist[v]
+                if flow > 0 and dv is not None and (du is None or dv - w < du):
+                    dist[u], parent[u], changed = dv - w, (i, -1), True
+            if not changed:
+                break
+        if dist[t_v] is None:
+            return points
+        path, v = [], t_v
+        while v != s_v:
+            i, sign = parent[v]
+            path.append((i, sign))
+            v = arcs[i][0] if sign == 1 else arcs[i][1]
+        amount = min(
+            arcs[i][2] - arcs[i][4] if sign == 1 else arcs[i][4] for i, sign in path
+        )
+        for i, sign in path:
+            arcs[i][4] += sign * amount
+        value, total = points[-1]
+        points.append((value + amount, total + dist[t_v] * amount))
+
+
+def points_value(points, x):
+    """Cost of the piecewise-linear curve through the breakpoints at a value in its domain
+    (an empty or backward segment, which the curve-shape clause rejects, is skipped)."""
+    for (a, ca), (b, cb) in zip(points, points[1:], strict=False):
+        if a <= x <= b and a < b:
+            return ca + Fraction(cb - ca, b - a) * (x - a)
+    return Fraction(points[-1][1])
+
+
 def curve_value(curve, x):
     """Cost of the convex function given by its marginal curve at the integer value x."""
     total = Fraction(0)
@@ -72,6 +133,9 @@ def certify(
     placed = payload["placed"]
     curve = [tuple(t) for t in payload["cost_distribution"]]
     fails: list[str] = []
+    if len(f) != m or len(pi) != n:
+        fails.append("shape")
+        return fails
     if cap == 0:
         zero = {
             "placed": 0,
@@ -106,7 +170,7 @@ def certify(
             fails.append(f"conservation at {v}")
     if sum(supply.values()) != placed or sum(inflow.values()) != placed:
         fails.append("value differs from supply or inflow")
-    if cap is not None and not 0 <= placed <= cap:
+    if placed < 0 or (cap is not None and placed > cap):
         fails.append("placed outside [0, cap]")
     s_star, t_star = n, n + 1
     out: list[list[tuple[int, int]]] = [[] for _ in range(n + 2)]
@@ -153,11 +217,26 @@ def certify(
             fails.append(f"min_cut {payload['min_cut']} != closure cut {expect}")
         if sum(view[e] for e in expect) != placed:
             fails.append("cut value differs from placed")
+    # The vertices some search settled: the first search runs on the zero flow and settles
+    # every vertex an allowed source reaches over eligible edges of positive view; a later
+    # search adds only the reverses of carrying edges, whose ends that one already settled.
+    settled = set(roots)
+    queue = deque(roots)
+    while queue:
+        u = queue.popleft()
+        for e in range(m):
+            if src[e] == u and edge_ok[e] and view[e] > 0 and dst[e] not in settled:
+                settled.add(dst[e])
+                queue.append(dst[e])
     for v in range(n):
         if pi[v] < NEVER_REACHED:
             fails.append("potential below the sentinel")
         if v in seen and pi[v] == NEVER_REACHED:
             fails.append(f"closure vertex {v} holds NEVER_REACHED")
+        if (pi[v] == NEVER_REACHED) == (v in settled):
+            fails.append(
+                f"NEVER_REACHED differs from reachability at zero flow at node {v}"
+            )
     for s in roots:
         if pi[s] != 0:
             fails.append(f"root {s} potential {pi[s]}")
@@ -173,6 +252,8 @@ def certify(
         for d in reached:
             if inflow[d] > 0 and pi[d] != pt:
                 fails.append(f"inflow destination {d} potential differs from pi(t*)")
+        if curve and curve[-1][0] != pt:
+            fails.append("pi(t*) differs from the last curve cost")
     elif placed:
         fails.append("flow delivered but no destination reached")
     if any(u <= 0 for _c, u in curve):
@@ -183,16 +264,28 @@ def certify(
         fails.append("curve total differs from placed")
     if sum(c * u for c, u in curve) != sum(cost[e] * f[e] for e in range(m)):
         fails.append("curve moment differs from the flow cost")
+    allowed_dests = [d for d in d_all if node_ok[d]]
     if m <= 7 and max(view, default=0) <= 3:
-        best = exhaustive(
-            n, src, dst, cost, view, roots, [d for d in d_all if node_ok[d]], edge_ok
-        )
+        best = exhaustive(n, src, dst, cost, view, roots, allowed_dests, edge_ok)
         fmax = max(best)
         top = fmax if cap is None else min(cap, fmax)
         if placed != top:
-            fails.append(f"placed {placed} != min(cap, F_max) {top}")
+            fails.append(f"placed {placed} != min(cap, F_max) {top} (exhaustive)")
         for x in range(min(top, placed) + 1):
             if curve_value(curve, x) != best[x]:
                 fails.append(f"curve differs from the exhaustive optimum at {x}")
+                break
+    else:
+        ref = independent_curve(n, src, dst, cost, view, roots, allowed_dests, edge_ok)
+        fmax = ref[-1][0]
+        top = fmax if cap is None else min(cap, fmax)
+        if placed != top:
+            fails.append(f"placed {placed} != min(cap, F_max) {top} (independent)")
+        mine = [(0, 0)]
+        for c, u in curve:
+            mine.append((mine[-1][0] + u, mine[-1][1] + c * u))
+        for x in sorted({x for x, _c in mine + ref}):
+            if x <= min(top, placed) and points_value(mine, x) != points_value(ref, x):
+                fails.append(f"curve differs from the independent solver at {x}")
                 break
     return fails

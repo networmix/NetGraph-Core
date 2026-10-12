@@ -12,12 +12,11 @@
 namespace netgraph::core::detail {
 
 struct PredDAGBuilder {
-  // The DAG of an edge set known to be acyclic and duplicate-free: per node its predecessor
-  // entries (edge_src, e) in ascending EdgeId. Not validated beyond what the callers guarantee.
-  // A small set (8 |edges| < N) is grouped by sorting, O(|edges| log |edges|), with nothing
-  // proportional to the graph's size; a larger one by a stable counting sort over a temporary
-  // N + 1 array, O(|edges| + N) (a sort first when the input is not ascending). Nothing retained
-  // is proportional to the graph's size.
+  // Build a DAG from acyclic, duplicate-free edges; callers guarantee these preconditions.
+  // Group predecessor entries (edge_src, e) by node, with ascending EdgeId within each node.
+  // For graph node count N and 8 |edges| < N, sort in O(|edges| log |edges|) without graph-sized
+  // scratch. Otherwise use stable counting sort with an N + 1 temporary in O(|edges| + N),
+  // sorting first if edges are not ascending. Retained storage never scales with graph size.
   [[nodiscard]] static PredDAG of_edges(const Graph& g, std::span<const EdgeId> edges);
   // The DAG without entries.
   [[nodiscard]] static PredDAG empty(const Graph& g);

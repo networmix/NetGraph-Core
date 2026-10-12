@@ -1,4 +1,4 @@
-/* The state of a FlowPolicy (internal; APPROACH 8 and 9). The transaction lives in
+/* The state of a FlowPolicy (internal). The transaction lives in
    src/flow_policy.cpp; the evaluators, the private bindings and the tests read this state
    through PolicyAccess. */
 #pragma once
@@ -52,28 +52,29 @@ struct PolicyEngine {
   std::vector<NodeId> destinations {};
   std::vector<NodeId> dests_ok {};      // the allowed destinations (the records' destination set)
   std::vector<NodeId> roster {};        // fixed at construction, ascending
-  std::vector<Cost> baseline {};        // CapacityAware: the static shortest cost per roster source
+  std::vector<Cost> baseline {};        // CapacityAware with a Stretch ceiling only: the static shortest
+                                        // cost per roster source (empty otherwise)
   std::shared_ptr<const PredDAG> support {};       // CostOnly: the full static support
   std::vector<PreparedPinnedBundle> bundles {};    // Pinned
   std::vector<std::int32_t> usable {};             // Pinned: indices of usable bundles
   std::int64_t owner {0};
-  // Epoch state.
+  // State accumulated since construction or the last remove() (the policy epoch).
   std::vector<std::vector<LiveFlow>> cohorts {};  // per roster index, in FlowId order
-  std::vector<std::pair<Cost, Amount>> curve {};  // Global: the cumulative marginal curve (9.1)
+  std::vector<std::pair<Cost, Amount>> curve {};  // Global: the cumulative marginal curve
   Counter128 requested {};
   bool infinite {false};
   // Global: a capture request for the next solve's final state (the exact sensitivity model's
-  // baseline, APPROACH 11); set and cleared by the evaluator.
+  // baseline); set and cleared by the evaluator.
   DeletionCapture* capture {nullptr};
 };
 
 // The internal access to a policy's engine (the pattern of LedgerAccess): FlowPolicy's public
-// interface is the contract's; everything else reaches the state here.
+// interface is the documented API; everything else reaches the state here.
 struct PolicyAccess {
   [[nodiscard]] static const PolicyEngine& engine(const FlowPolicy& policy) noexcept { return *policy.engine_; }
   [[nodiscard]] static PolicyEngine& engine(FlowPolicy& policy) noexcept { return *policy.engine_; }
   // A policy constructed inside another public call, whose tally records a supplied frozen
-  // cache's hits (NOTES R27); returned as a prvalue (FlowPolicy does not move).
+  // cache's hits; returned as a prvalue (FlowPolicy does not move).
   [[nodiscard]] static FlowPolicy make(FlowLedger& ledger, std::span<const NodeId> sources,
                                        std::span<const NodeId> destinations, FlowPolicyConfig config,
                                        const Eligibility* elig, DagCache* cache, FrozenTally& tally) {
@@ -81,7 +82,7 @@ struct PolicyAccess {
   }
 };
 
-// The configuration checks of FlowPolicy (APPROACH 9; enumeration values first, rule 13),
+// The configuration checks of FlowPolicy (enumeration values first, then the combinations),
 // shared with the evaluators' argument checks.
 void validate_config(const FlowPolicyConfig& cfg, std::size_t num_sources, std::size_t num_destinations);
 

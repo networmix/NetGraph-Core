@@ -1,29 +1,31 @@
 /*
-  The policy engine FlowPolicy (APPROACH 8 and 9): one placement transaction for every routing
+  The policy engine FlowPolicy: one placement transaction for every routing
   mode, committed through the ledger as one atomic exchange per call.
 
-  * CostOnly, CapacityAware and Pinned run the per-source transaction of 9.2 and 9.3: the
-    roster (fixed at construction) in ascending NodeId, each source offered the increment of its
-    round-robin share of the cumulative request, stages 1 (creation), 2 (reoptimisation), 3
-    (amounts) and 4 (growth) on the shared working residual W; one `created` counter per call.
-    Pinned has one actor, the policy, with its one source.
-  * Global re-solves the minimum-cost flow of the cumulative value on V = W + own (the flow core
-    of 2.2 over the whole eligible graph) and decomposes it per source canonically (9.1).
+  * CostOnly, CapacityAware and Pinned visit the roster (eligible sources that statically
+    reach an allowed destination, fixed at construction) in ascending NodeId. Round robin gives each
+    source an equal integer share of the cumulative request, with leftover units going to
+    earlier sources. Offer each source the increase in its share, then run stages 1 creation,
+    2 reoptimisation, 3 amounts and 4 growth on shared unused capacity W (the working residual).
+    One `created` counter covers the call. Pinned has a single source.
+  * Global replaces its flow with a minimum-cost flow for the cumulative value on V = W + own,
+    over all eligible edges; own is its current allocation. Split the result by source in the
+    fixed order described by decompose().
 
-  Every stage works on copies; nothing is published before the commit, which either succeeds or
-  throws leaving the ledger and the policy unchanged; the epoch state follows the commit with
-  operations that cannot throw. The working residual is a per-thread overlay over the ledger's
-  residual (only the edges a call touches cost anything), so a Pinned call, and a CostOnly call
-  after its cohort's creation, costs O(its flows' members), never O(E); CostOnly creation of a
-  single path, CapacityAware searches and Global solves read a dense copy.
+  Work on copies and commit all changes together; an exception leaves ledger and policy intact.
+  Update policy epoch state (accumulated since construction or remove()) after commit, without
+  throwing. Store only changes to ledger residual in per-thread slots. A Pinned call, or a
+  CostOnly call after creating a source's group of flows (cohort), costs O(its flows' members),
+  not O(E). CapacityAware and Global read a dense residual copy; CostOnly creation reads the
+  working residual edge by edge.
 
-  The transaction trace (prototype 2's keys) exists in a build with the private hooks only: every
+  The transaction trace (the call's intermediate values, keyed as the tests' model of the policy
+  keys them) exists in a build with the private hooks only: every
   trace block is guarded by kTraced and is compile-time dead without them.
 */
 #include "netgraph/core/flow_policy.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <functional>
 #include <limits>
 #include <stdexcept>
@@ -37,7 +39,6 @@
 #include "netgraph/core/detail/int128.hpp"
 #include "netgraph/core/detail/kernels.hpp"
 #include "netgraph/core/detail/ledger_access.hpp"
-#include "netgraph/core/detail/node_map.hpp"
 #include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
 #include "netgraph/core/detail/private_hooks.hpp"
@@ -53,22 +54,18 @@ std::atomic<std::int64_t>& max_flows_per_call() noexcept {
   static std::atomic<std::int64_t> cap {kMaxFlowsPerCall};
   return cap;
 }
-
-std::atomic<std::int64_t>& sensitivity_fail_edge() noexcept {
-  static std::atomic<std::int64_t> edge {-1};
-  return edge;
-}
 #endif
 
 namespace {
 
 // ================================================================ working residual
 
-// W = baseline - allocated + delta, the delta being this call's working changes (releases of the
-// policy's own allocations and new working allocations). Per-thread slots stamped with the
-// call's epoch: a slot is valid only under the current epoch, so nothing is cleared between calls
-// and a call that throws leaves stale slots behind an old epoch. One array of slots: growing it
-// either succeeds whole or leaves the previous array (strong guarantee).
+// W = baseline - allocated + delta; delta holds this call's releases and new allocations.
+// Each call advances a scratch epoch (a numeric stamp, separate from the policy epoch).
+// Read a slot only when its stamp matches; later calls ignore stale slots even after a throw.
+// Clear all stamps only on wraparound (after 2^32 calls on one thread, which a long-running
+// process reaches). Slots share one per-thread array, so failed growth leaves the old array
+// intact.
 class Working {
 public:
   explicit Working(const FlowLedger& fg)
@@ -95,7 +92,7 @@ public:
     }
     x.delta += v;
   }
-  // The member-aligned working residual of `members`.
+  // Unused capacity for each edge of `members`, in the same order (member-aligned).
   void gather(std::span<const EdgeId> members, std::vector<Amount>& out) const {
     out.resize(members.size());
     for (std::size_t m = 0; m < members.size(); ++m) out[m] = at(members[m]);
@@ -161,7 +158,7 @@ const char* outcome_name(Termination t) noexcept {
   return "?";
 }
 
-// The reduction rank of 9.4 (higher wins among unserved sources).
+// The reduction rank of the call's termination (higher wins among unserved sources).
 int rank(Termination t) noexcept {
   switch (t) {
     case Termination::LimitFlows: return 4;
@@ -190,7 +187,7 @@ void align(std::span<const EdgeId> members, const std::vector<std::pair<EdgeId, 
 }
 
 // Round robin of a cumulative 128-bit request: the per-source increment of the share when the
-// cumulative request goes from R to R + v over k sources (APPROACH 9.3), offer(i, increment) for
+// cumulative request goes from R to R + v over k sources, offer(i, increment) for
 // i in [0, k). It depends only on r = R mod k: floor((r + v) / k) + [i < (r + v) mod k] - [i < r].
 template <class Offer>
 void cumulative_offers(const Counter128& requested, Amount v, std::size_t k, Offer&& offer) {
@@ -275,6 +272,20 @@ std::shared_ptr<const KernelPlan> plan_on(const Call& c, NodeId src, const PredD
       make_plan(c.g, cfg.placement, cfg.admission, cfg.selection.priority, src, c.pe.dests_ok, route, creation, cost));
 }
 
+// The priority values of the creation view W, as the selection reads them (CostOnly). The
+// PriorityFn of `on_w` points at this view: it must outlive every call through that PriorityFn.
+struct WorkingPriority {
+  const Working* W;
+  std::span<const Amount> capacity;
+  EdgePriority priority;
+  [[nodiscard]] PriorityFn on_w() const noexcept {
+    return {this, [](const void* ctx, EdgeId e) noexcept {
+              const auto& v = *static_cast<const WorkingPriority*>(ctx);
+              return priority_value(v.priority, v.W->at(e), v.capacity[static_cast<std::size_t>(e)]);
+            }};
+  }
+};
+
 // The record bundle of a route: `share` itself when it is the whole route, else a new DAG.
 std::shared_ptr<const PredDAG> bundle_of(const Graph& g, std::span<const EdgeId> route,
                                          const std::shared_ptr<const PredDAG>& share) {
@@ -282,26 +293,16 @@ std::shared_ptr<const PredDAG> bundle_of(const Graph& g, std::span<const EdgeId>
   return std::make_shared<const PredDAG>(PredDAGBuilder::of_edges(g, route));
 }
 
-// CostOnly: the static support restricted to the walks from src, then the selection projected on
-// the creation view W (APPROACH 9.1, 10): Collapse by (cost, priority under PreferHigherPriority,
-// lowest EdgeId), and the staged canonical single path for multipath = false, both reading W's
-// priority values and never gating on them (the traversal core's support projection).
+// CostOnly: keep static shortest-path support reachable from src, then apply selection on W.
+// For multi_edge = false (Collapse), choose one edge per (u, v) by (cost, higher priority under
+// PreferHigherPriority, lowest EdgeId). For multipath = false, choose the canonical single
+// path in stages. Both use W's priority values without excluding edges for low residual.
 Route cost_only_route(const Call& c, NodeId src) {
   const auto& g = c.g;
   const auto& pe = c.pe;
   const auto& sel = pe.config.selection;
-  const auto capacity = g.capacity_units();
-  struct View {
-    const Working* W;
-    std::span<const Amount> capacity;
-    EdgePriority priority;
-  };
-  const View view {&c.W, capacity, sel.priority};
-  const PriorityFn on_w {&view, [](const void* ctx, EdgeId e) noexcept {
-                           const auto& v = *static_cast<const View*>(ctx);
-                           return priority_value(v.priority, v.W->at(e), v.capacity[static_cast<std::size_t>(e)]);
-                         }};
-  auto r = support_route(g, PredDAGBuilder::ascending(*pe.support), src, pe.dests_ok, sel, on_w);
+  const WorkingPriority view {&c.W, g.capacity_units(), sel.priority};
+  auto r = support_route(g, PredDAGBuilder::ascending(*pe.support), src, pe.dests_ok, sel, view.on_w());
   Route out;
   out.edges = std::move(r.edges);
   if (!sel.multipath && !out.edges.empty()) out.cost = r.cost;
@@ -313,21 +314,12 @@ Route cost_only_route(const Call& c, NodeId src) {
 std::optional<CreationProducts> creation_products(const Call& c, NodeId src) {
   const auto& pe = c.pe;
   const auto& sel = pe.config.selection;
-  struct View {
-    const Working* W;
-    std::span<const Amount> capacity;
-    EdgePriority priority;
-  };
-  const View view {&c.W, c.g.capacity_units(), sel.priority};
-  const PriorityFn on_w {&view, [](const void* ctx, EdgeId e) noexcept {
-                           const auto& v = *static_cast<const View*>(ctx);
-                           return priority_value(v.priority, v.W->at(e), v.capacity[static_cast<std::size_t>(e)]);
-                         }};
-  return cost_only_creation(c.g, pe.support, src, pe.dests_ok, sel, on_w, pe.config.placement,
-                                    pe.config.admission);
+  const WorkingPriority view {&c.W, c.g.capacity_units(), sel.priority};
+  return cost_only_creation(c.g, pe.support, src, pe.dests_ok, sel, view.on_w(), pe.config.placement,
+                            pe.config.admission);
 }
 
-// CapacityAware: the canonical route of section 6 on the selection view `view` (dense): static
+// CapacityAware: the canonical route on the selection view `view` (dense): static
 // eligibility, residual >= max(1, min_flow_bandwidth), Collapse on the view, the tight DAG or the
 // staged single path toward the allowed destinations, then the max_path_cost ceiling.
 std::optional<Route> search(const Call& c, std::size_t ri, std::span<const Amount> view) {
@@ -364,8 +356,8 @@ Amount flow_t_max(const Graph& g, const KernelPlan& plan, std::span<const Amount
 
 // ================================================================ the cohort (EqualBalanced)
 
-// The cohort allocation of an EqualBalanced cohort (APPROACH 16.5): T split by round robin over
-// the flows in order, each flow's own plan, summed per edge over the union of members.
+// Split T by round robin over the source's EqualBalanced flows in their order. Allocate each
+// share using that flow's plan, then sum edge amounts across the union of their members.
 class CohortEval {
 public:
   CohortEval(const std::vector<const KernelPlan*>& plans, const Working& W) : plans_(plans) {
@@ -439,7 +431,7 @@ private:
 };
 
 // Splits T over the cohort by round robin; a flow whose share changed (or is new) gets the
-// allocation of its new share (APPROACH 9.2 stage 3 EB).
+// allocation of its new share (the amounts stage of EqualBalanced).
 void set_cohort(std::vector<WorkFlow>& flows, Amount T) {
   std::vector<Amount> parts(flows.size());
   round_robin(T, parts);
@@ -774,6 +766,9 @@ void stage3_lossy(Call& c, SourceRun& st) {
     const auto members = f.members();
     c.W.gather(members, w_m);
     const auto step = lossy_step(*f.plan, offer, w_m);
+    // The 2^127 checks below can fail: finite offers bring an offered total up to the request
+    // total (below 2^127), and a +inf call then adds its injection. A drop counter (at most its
+    // flow's offered counter) can reach 2^127 only in such a call, and its check runs first.
     c.W.consume(members, step.carried);
     for (std::size_t m = 0; m < members.size(); ++m) {
       f.alloc[m] += step.carried[m];
@@ -808,7 +803,8 @@ void stage3_lossy(Call& c, SourceRun& st) {
 
 // ---------------------------------------------------------------- stage 4: growth
 
-// fraction * v as the reduced rational "num/den" (or "num"), prototype 2's trace text.
+// fraction * v as the reduced rational "num/den" (or "num"): the exact text the transaction trace
+// records for the diminishing guard's threshold.
 std::string fraction_text(double fraction, Amount v) {
   const auto [m, x] = dyadic(fraction);
   U128 num = mul_u64(m, static_cast<std::uint64_t>(v));
@@ -836,7 +832,8 @@ std::string fraction_text(double fraction, Amount v) {
   return dec(num) + "/2**" + std::to_string(k);
 }
 
-// gains.sum < fraction * v, exactly (fraction the dyadic rational it is, v < 2^62).
+// Compare gains.sum < fraction * v exactly, reading fraction as its exact stored double value;
+// v < 2^62.
 bool below_fraction(Amount recent, double fraction, Amount v) {
   const auto [m, x] = dyadic(fraction);  // x < 0 since fraction < 1
   const U128 rhs = mul_u64(m, static_cast<std::uint64_t>(v));  // below 2^115
@@ -887,7 +884,7 @@ void stage4(Call& c, SourceRun& st) {
       break;
     }
     if (pe.config.selection.multipath) {
-      // Revision 24 (owner): a multipath DAG already spans every equal-cost path, so a second
+      // A multipath DAG already spans every equal-cost path, so a second
       // flow on a structurally equal DAG gains only round-robin remainders: growth stops. A
       // repeated single path is a legitimate tunnel.
       bool equal = false;
@@ -1166,7 +1163,7 @@ PlacementResult place_flows(PolicyEngine& pe, std::optional<Amount> v, const Out
   for (const auto& [i, j] : fresh) drafts.push_back(draft_of(pe, runs[i].flows[j]));
   // Everything the publication of the epoch state needs is allocated before the commit.
   Counter128 requested = pe.requested;
-  if (v.has_value() && !requested.add(*v)) throw std::invalid_argument("the cumulative request counter would reach 2^127");
+  if (v.has_value()) (void)requested.add(*v);  // checked in place_impl
   auto next = next_cohorts(runs, k);
   Amount placed = 0;
   std::vector<std::pair<NodeId, Termination>> outcomes;
@@ -1217,10 +1214,10 @@ PlacementResult place_flows(PolicyEngine& pe, std::optional<Amount> v, const Out
 
 // ---------------------------------------------------------------- Global
 
-// The canonical per-source decomposition (9.1): sources ascending; for each, while it has
-// supply, the lexicographically smallest EdgeId walk with positive remaining flow from it to the
-// first destination it reaches, saturated by min(the walk's bottleneck, the remaining supply).
-// Per node the first out-edge with remaining flow only moves forward (remaining flow never grows).
+// Split flow by source in ascending NodeId. While a source has supply left, take the smallest
+// EdgeId sequence with positive remaining flow, stopping at the first destination. Assign
+// min(supply left, smallest remaining edge flow on that walk), then subtract it from the walk.
+// Each node's out-edge cursor only advances: remaining flow never increases.
 std::vector<std::vector<std::pair<EdgeId, Amount>>> decompose(const Graph& g, std::vector<Amount> rem,
                                                               std::span<const NodeId> roster,
                                                               std::span<const NodeId> dests) {
@@ -1233,7 +1230,6 @@ std::vector<std::vector<std::pair<EdgeId, Amount>>> decompose(const Graph& g, st
   std::vector<std::int32_t> cur(row.begin(), row.end() - 1);
   std::vector<std::vector<std::pair<EdgeId, Amount>>> out(roster.size());
   std::vector<EdgeId> walk;
-  std::vector<Amount> mine;
   for (std::size_t i = 0; i < roster.size(); ++i) {
     const NodeId s = roster[i];
     const auto si = static_cast<std::size_t>(s);
@@ -1349,7 +1345,7 @@ PlacementResult place_global(PolicyEngine& pe, std::optional<Amount> v, const Ou
   // New records in source order (ascending NodeId), after the retained ones.
   std::stable_partition(drafts.begin(), drafts.end(), [](const Draft& d) { return d.id.has_value(); });
   Counter128 requested = pe.requested;
-  if (v.has_value() && !requested.add(*v)) throw std::invalid_argument("the cumulative request counter would reach 2^127");
+  if (v.has_value()) (void)requested.add(*v);  // checked in place_impl
   PlacementResult out;
   out.placed = sol.placed - P;
   if (v.has_value()) out.remaining = *v - out.placed;
@@ -1393,7 +1389,7 @@ PlacementResult place_global(PolicyEngine& pe, std::optional<Amount> v, const Ou
   }
   if (outputs.bottleneck) out.min_cut = std::move(sol.min_cut);
   if (any_output(outputs)) prepare_outputs(pe, outputs, draft_edges(drafts), out);
-  auto curve = *out.cost_distribution;  // the cumulative curve a later zero call reports (9.1)
+  auto curve = *out.cost_distribution;  // the cumulative curve a later zero call reports
   if (staged != nullptr && *staged) (*staged)();
   const auto ids = LedgerAccess::commit(pe.fg, pe.owner, drafts);
   // Committed: the epoch state follows (nothing below throws).
@@ -1415,7 +1411,7 @@ void validate_config(const FlowPolicyConfig& cfg, std::size_t num_sources, std::
   check_member(cfg.placement, "placement");
   check_member(cfg.admission, "admission");
   check_selection(cfg.selection);
-  check_kernel(cfg.placement, cfg.admission, cfg.selection.priority);
+  check_kernel_combination(cfg.placement, cfg.admission, cfg.selection.priority);
   if (cfg.admission == Admission::Lossy &&
       (std::holds_alternative<Global>(r) || std::holds_alternative<CapacityAware>(r))) {
     invalid("Lossy admission is rejected with Global and CapacityAware routing (hop-by-hop forwarding without "
@@ -1468,7 +1464,7 @@ using detail::PolicyEngine;
 namespace {
 
 // The engine of a new policy, bound to its ledger as the last step. A supplied frozen cache's hit
-// is recorded in `tally` (NOTES R27): the public constructor publishes it once construction has
+// is recorded in `tally`: the public constructor publishes it once construction has
 // succeeded, an evaluator once its whole call has.
 std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const NodeId> sources,
                                           std::span<const NodeId> destinations, FlowPolicyConfig config,
@@ -1533,12 +1529,16 @@ std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const No
       if (it != edges.end() && *it < row[static_cast<std::size_t>(s) + 1]) pe->roster.push_back(s);
     }
   } else {
+    // The static costs fix the roster; only a Stretch ceiling reads them again, so only it keeps them.
+    const auto* ca = std::get_if<CapacityAware>(&pe->config.routing);
+    const bool keep_costs =
+        ca != nullptr && ca->max_path_cost.has_value() && std::holds_alternative<Stretch>(*ca->max_path_cost);
     const auto dist = detail::static_costs(g, elig, pe->dests_ok, pe->sources);
     for (std::size_t i = 0; i < pe->sources.size(); ++i) {
       const NodeId s = pe->sources[i];
       if (!node_ok(s) || dist[i] == kUnreachable) continue;
       pe->roster.push_back(s);
-      pe->baseline.push_back(dist[i]);
+      if (keep_costs) pe->baseline.push_back(dist[i]);
     }
   }
   pe->cohorts.resize(pe->roster.size());
@@ -1559,7 +1559,7 @@ FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std:
                        FlowPolicyConfig config, const Eligibility* elig, DagCache* cache, detail::FrozenTally& tally)
     : engine_(make_engine(ledger, sources, destinations, std::move(config), elig, cache, tally)) {}
 
-// The destruction law (section 8): the records stay in the ledger as orphans.
+// The destruction law: the records stay in the ledger as orphans.
 FlowPolicy::~FlowPolicy() { LedgerAccess::release(engine_->fg, engine_->owner); }
 
 namespace {
@@ -1569,16 +1569,18 @@ namespace {
 // nothing changed (the Python binding builds its result objects there).
 PlacementResult place_impl(PolicyEngine& pe, std::optional<Amount> volume, const OutputOptions& outputs,
                            detail::Trace* trace, const std::function<void()>* staged) {
-  // Validation before any mutation, also before the zero shortcut (section 8).
+  // Validation before any mutation, also before the zero shortcut.
   if (volume.has_value() && (*volume < 0 || *volume >= kDomainLimit)) {
     throw std::invalid_argument("request " + std::to_string(*volume) +
                                 " is outside [0, 2^62) units (requests are integer units or +inf)");
   }
   if (pe.infinite && volume.has_value()) {
     throw std::invalid_argument(
-        "a finite request after +inf is rejected within an epoch (the cumulative finite request is undefined; "
-        "rule 13)");
+        "a finite request after +inf is rejected within an epoch (the cumulative finite request is undefined)");
   }
+  // The only check of the cumulative request: nothing changes the requested total between here
+  // and the call's publication, so the later additions (below, in place_flows and in
+  // place_global) repeat this sum and cannot fail.
   if (volume.has_value()) {
     Counter128 probe = pe.requested;
     if (!probe.add(*volume)) throw std::invalid_argument("the cumulative request counter would reach 2^127");
@@ -1588,8 +1590,9 @@ PlacementResult place_impl(PolicyEngine& pe, std::optional<Amount> volume, const
     out.remaining = 0;
     out.local_outcomes.reserve(pe.roster.size());
     for (NodeId s : pe.roster) out.local_outcomes.emplace_back(s, Termination::Complete);
-    // Global: the cumulative curve (9.1: its amounts sum to placed_demand(); empty before the
-    // first placement); a zero call solves nothing, so it claims no cut (2.2's cap-zero payload).
+    // Global: the cumulative curve (its amounts sum to placed_demand(); empty before the
+    // first placement); a zero call solves nothing, so it claims no cut (as the flow core's
+    // payload for a cap of 0).
     if (detail::is<Global>(pe)) out.cost_distribution = pe.curve;
     detail::prepare_outputs(pe, outputs, detail::current_edges(pe), out);
     if (staged != nullptr && *staged) (*staged)();
@@ -1600,7 +1603,7 @@ PlacementResult place_impl(PolicyEngine& pe, std::optional<Amount> volume, const
     out.termination = Termination::NoRoute;
     if (detail::is<Global>(pe)) {
       // No source reaches an allowed destination: the cumulative flow is 0 and maximal, so its
-      // marginal curve is empty and the full-residual cut of 2.2 is empty (the closure of the
+      // marginal curve is empty and the full-residual cut is empty (the closure of the
       // sources has no arc of positive view leaving it); None would claim a residual path.
       out.cost_distribution.emplace();
       if (outputs.bottleneck) out.min_cut.emplace();
@@ -1608,7 +1611,7 @@ PlacementResult place_impl(PolicyEngine& pe, std::optional<Amount> volume, const
     if (detail::kTraced && trace) trace->set("roster", detail::Trace::list());
     detail::prepare_outputs(pe, outputs, detail::current_edges(pe), out);
     if (staged != nullptr && *staged) (*staged)();
-    // The epoch records every positive request, also one that finds no roster (section 8);
+    // The epoch records every positive request, also one that finds no roster;
     // nothing below throws (the counter was checked above).
     if (volume.has_value()) {
       (void)pe.requested.add(*volume);

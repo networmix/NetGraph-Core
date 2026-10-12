@@ -1,5 +1,5 @@
 /*
-  The DagCache of APPROACH 10: a map from (roots, direction, Eligibility uid) to the full static
+  The DagCache: a map from (roots, direction, Eligibility uid) to the full static
   support of that search, with atomic statistics; building mode (a miss searches and inserts) and
   frozen mode (read-only: concurrent hits read the map and bump atomic counters, a miss throws).
 */
@@ -44,7 +44,7 @@ std::shared_ptr<const PredDAG> DagCache::lookup(const Graph& g, std::span<const 
 std::shared_ptr<const PredDAG> DagCache::lookup_in_call(const Graph& g, std::span<const NodeId> roots,
                                                         Direction direction, const Eligibility* elig,
                                                         detail::FrozenTally* tally) {
-  // Inside a public call a frozen cache's statistics wait for the call's boundary (NOTES R27).
+  // Inside a public call a frozen cache's statistics wait for the call's boundary.
   const bool staged = frozen_ && tally != nullptr && tally->cache() == this;
   // Invalid queries throw before anything is counted.
   if (g.uid() != graph_uid_) throw std::invalid_argument("DagCache: the graph is not the cache's graph (foreign graph)");

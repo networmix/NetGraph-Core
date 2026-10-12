@@ -1,8 +1,8 @@
 /*
-  Eligibility: the static node and edge flags of one graph (APPROACH 4), and its one public
-  construction Graph::eligibility(excluded_nodes, excluded_edges). An excluded node excludes its
-  incident edges (its out-edge id range and its reverse-CSR in-edges); intersect keeps an
-  operand, and its uid, when the result equals it.
+  Eligibility: the static node and edge flags of one graph, its one public construction from
+  excluded ids, Graph::eligibility(excluded_nodes, excluded_edges), and intersect. An excluded
+  node excludes its incident edges (its out-edge id range and its reverse-CSR in-edges);
+  intersect keeps an operand, and its uid, when the result equals it.
 */
 #include "netgraph/core/eligibility.hpp"
 

@@ -1,5 +1,0 @@
-19:15  up 52 days, 23:51, 3 users, load averages: 4.90 9.98 17.60
-19:16  up 52 days, 23:52, 3 users, load averages: 5.13 9.03 16.68
-19:17  up 52 days, 23:53, 3 users, load averages: 4.07 8.05 15.79
-19:18  up 52 days, 23:54, 3 users, load averages: 5.16 7.58 15.05
-19:19  up 52 days, 23:55, 3 users, load averages: 4.97 7.09 14.35

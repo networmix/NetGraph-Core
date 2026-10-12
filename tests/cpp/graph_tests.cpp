@@ -1,13 +1,15 @@
-// The graph on integer units (APPROACH 2.1, 3): construction, validation order, layout B'
-// ids, the reverse CSR, input_index, to_units and as_float.
+// The graph on integer units: construction, validation order, the EdgeId order
+// (src, cost, dst, input), the reverse CSR, input_index, to_units and as_float.
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <vector>
 
 #include "netgraph/core/graph.hpp"
@@ -18,30 +20,17 @@ using namespace netgraph::core::test;
 
 namespace {
 
-constexpr Amount L62 = Amount{1} << 62;
-
-// The message of the std::invalid_argument thrown by `fn`, or "" when nothing is thrown.
-template <typename F>
-std::string error_of(F&& fn) {
-  try {
-    fn();
-  } catch (const std::invalid_argument& e) {
-    return e.what();
-  }
-  return "";
-}
-
+// A Graph of these arrays (resolution 1 unless given).
 Graph build(std::int32_t n, std::vector<NodeId> src, std::vector<NodeId> dst, std::vector<Amount> cap,
             std::vector<Cost> cost, double q = 1.0) {
   return Graph(n, src, dst, cap, cost, q);
 }
 
-bool contains(const std::string& s, const std::string& part) { return s.find(part) != std::string::npos; }
-
 } // namespace
 
-TEST(Graph, BPrimeOrderInputIndexAndReverseCsr) {
-  // (u, v, cap, cost) in input order; prototype fixture graph_bprime_order.
+TEST(Graph, EdgeIdOrderInputIndexAndReverseCsr) {
+  // (u, v, cap, cost) in input order. EdgeIds rank edges by source, then cost, then destination,
+  // then input position.
   const std::vector<InEdge> edges = {{2, 0, 5, 3}, {0, 2, 4, 2}, {0, 1, 3, 2}, {1, 2, 2, 1},
                                      {0, 1, 1, 2}, {0, 2, 6, 1}, {2, 1, 7, 1}};
   auto g = make_graph(3, edges);
@@ -64,17 +53,15 @@ TEST(Graph, BPrimeOrderInputIndexAndReverseCsr) {
     EXPECT_EQ(g.capacity_units()[e], in.cap);
     EXPECT_EQ(g.cost()[e], in.cost);
   }
-  // The out-edges of u are the id range of its row, in (cost, dst, input) order.
+  // Row u's id range holds u's out-edges (their (cost, dst, input) order within the row is the
+  // input_index checked above).
   for (NodeId u = 0; u < 3; ++u) {
     for (auto e = g.row_offsets()[u]; e < g.row_offsets()[u + 1]; ++e) {
       EXPECT_EQ(g.edge_src()[static_cast<std::size_t>(e)], u);
     }
   }
-  // input_index round trip through the caller's inverse.
-  const auto inv = id_of_input(g);
-  for (std::size_t i = 0; i < edges.size(); ++i) {
-    EXPECT_EQ(g.input_index()[static_cast<std::size_t>(inv[i])], static_cast<std::int32_t>(i));
-  }
+  // The inverse map from input positions to EdgeIds, derived by hand from the order above.
+  EXPECT_EQ(id_of_input(g), (std::vector<EdgeId> {6, 3, 1, 4, 2, 0, 5}));
   std::vector<Amount> caps_in;
   for (const auto& e : edges) caps_in.push_back(e.cap);
   EXPECT_EQ(to_input(g, g.capacity_units()), caps_in);
@@ -105,7 +92,7 @@ TEST(Graph, EqualKeysKeepInputOrder) {
 }
 
 TEST(Graph, ReverseOrderIsCostThenSource) {
-  // A scan in id order would give (src, cost, input); the contract is (cost, src, input).
+  // A scan in id order would give (src, cost, input); the reverse order is (cost, src, input).
   auto g = make_graph(3, {{0, 2, 1, 5}, {1, 2, 1, 1}});
   ASSERT_EQ(g.in_row_offsets()[2], 0);
   const EdgeId first = g.in_adj_edge_index()[0];
@@ -145,9 +132,9 @@ TEST(Graph, CostChecksAndMaximumAfterTheGcdReachesOne) {
   auto late = build(2, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, {4, 6, 9});
   EXPECT_EQ(late.cost_gcd(), 1);  // 1 only at the last edge
   EXPECT_EQ(late.max_cost(), 9);
-  auto ones = build(2, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, {1, 1, L62 / 4});
+  auto ones = build(2, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, {1, 1, kL62 / 4});
   EXPECT_EQ(ones.cost_gcd(), 1);
-  EXPECT_EQ(ones.max_cost(), L62 / 4);
+  EXPECT_EQ(ones.max_cost(), kL62 / 4);
   EXPECT_EQ(build(2, {0}, {1}, {1}, {6}).cost_gcd(), 6);
   EXPECT_EQ(build(2, {0, 0}, {1, 1}, {1, 1}, {6, 4}).cost_gcd(), 2);
   EXPECT_EQ(build(0, {}, {}, {}, {}).cost_gcd(), 0);
@@ -157,31 +144,14 @@ TEST(Graph, CostChecksAndMaximumAfterTheGcdReachesOne) {
   const auto negative = error_of([] { (void)build(2, {0, 0, 0, 0}, {1, 1, 1, 1}, {1, 1, 1, 1}, {1, 5, -7, 0}); });
   EXPECT_TRUE(contains(negative, "cost[2] = -7")) << negative;
   // The cost sum after the GCD reached 1.
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, {1, L62 / 2, L62 / 2}); }),
+  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, {1, kL62 / 2, kL62 / 2}); }),
                        "sum of all edge costs"));
 }
 
-TEST(Graph, ExactUnitsAboveTwo53) {
-  const Amount big = (Amount{1} << 53) + 1;
-  auto g = make_graph(2, {{0, 1, big, 1}});
-  EXPECT_EQ(g.capacity_units()[0], big);
-  EXPECT_EQ(as_float(big, 1.0), 9007199254740992.0);  // the documented export limit
-}
-
-TEST(Graph, CopyIsANewGraph) {
-  auto g = make_graph(3, {{0, 2, 4, 2}, {0, 1, 3, 1}});
-  Graph c(g);
-  EXPECT_NE(c.uid(), g.uid());
-  EXPECT_EQ(std::vector<std::int32_t>(c.input_index().begin(), c.input_index().end()),
-            std::vector<std::int32_t>(g.input_index().begin(), g.input_index().end()));
-  EXPECT_EQ(std::vector<Amount>(c.capacity_units().begin(), c.capacity_units().end()),
-            std::vector<Amount>(g.capacity_units().begin(), g.capacity_units().end()));
-  auto h = make_graph(3, {{0, 2, 4, 2}, {0, 1, 3, 1}});
-  EXPECT_NE(h.uid(), g.uid());
-  EXPECT_GT(g.uid(), 0u);
-}
-
 TEST(Graph, Resolution) {
+  // The resolution has no default: no constructor takes the arrays without it.
+  static_assert(!std::is_constructible_v<Graph, std::int32_t, std::span<const NodeId>, std::span<const NodeId>,
+                                         std::span<const Amount>, std::span<const Cost>>);
   for (double q : {std::ldexp(1.0, -32), std::ldexp(1.0, -12), 1.0, std::ldexp(1.0, 32)}) {
     auto g = build(2, {0}, {1}, {1}, {1}, q);
     EXPECT_EQ(g.resolution(), q);
@@ -194,49 +164,75 @@ TEST(Graph, Resolution) {
 
 TEST(Graph, EveryValidationError) {
   // The unit values.
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0}, {1}, {-1}, {1}); }), "capacity_units"));
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0}, {1}, {L62}, {1}); }), "units domain"));
+  EXPECT_EQ(error_of([] { (void)build(2, {0}, {1}, {-1}, {1}); }),
+            "capacity_units[0] = -1 is outside the units domain [0, 2^62)");
+  EXPECT_EQ(error_of([] { (void)build(2, {0}, {1}, {kL62}, {1}); }),
+            "capacity_units[0] = 4611686018427387904 is outside the units domain [0, 2^62)");
   // The shapes.
-  EXPECT_TRUE(contains(error_of([] { (void)build(-1, {}, {}, {}, {}); }), "num_nodes"));
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0, 1}, {1}, {1}, {1}); }), "same length"));
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0}, {1}, {1, 2}, {1}); }), "same length"));
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0}, {1}, {1}, {}); }), "same length"));
-  // Zero and negative costs (rule 28).
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0}, {1}, {1}, {0}); }), "cost"));
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0}, {1}, {1}, {-5}); }), "costs must be positive"));
+  EXPECT_EQ(error_of([] { (void)build(-1, {}, {}, {}, {}); }), "num_nodes must be >= 0 (got -1)");
+  EXPECT_EQ(error_of([] { (void)build(2, {0, 1}, {1}, {1}, {1}); }),
+            "src, dst, capacity_units and cost must have the same length (got 2, 1, 1, 1)");
+  EXPECT_EQ(error_of([] { (void)build(2, {0}, {1}, {1, 2}, {1}); }),
+            "src, dst, capacity_units and cost must have the same length (got 1, 1, 2, 1)");
+  EXPECT_EQ(error_of([] { (void)build(2, {0}, {1}, {1}, {}); }),
+            "src, dst, capacity_units and cost must have the same length (got 1, 1, 1, 0)");
+  // Zero and negative costs.
+  EXPECT_EQ(error_of([] { (void)build(2, {0}, {1}, {1}, {0}); }), "cost[0] = 0: costs must be positive (cost >= 1)");
+  EXPECT_EQ(error_of([] { (void)build(2, {0}, {1}, {1}, {-5}); }), "cost[0] = -5: costs must be positive (cost >= 1)");
   // The remaining bounds.
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {2}, {1}, {1}, {1}); }), "out of node range"));
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0}, {-1}, {1}, {1}); }), "out of node range"));
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0, 0}, {1, 1}, {L62 / 2, L62 / 2}, {1, 1}); }),
-                       "sum of all capacities"));
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0, 0}, {1, 1}, {1, 1}, {L62 / 2, L62 / 2}); }),
-                       "sum of all edge costs"));
+  EXPECT_EQ(error_of([] { (void)build(2, {2}, {1}, {1}, {1}); }), "edge 0: endpoint (2, 1) out of node range [0, 2)");
+  EXPECT_EQ(error_of([] { (void)build(2, {0}, {-1}, {1}, {1}); }), "edge 0: endpoint (0, -1) out of node range [0, 2)");
+  EXPECT_EQ(error_of([] { (void)build(2, {0, 0}, {1, 1}, {kL62 / 2, kL62 / 2}, {1, 1}); }),
+            "the sum of all capacities reaches the bound of the units domain (2^62 units)");
+  EXPECT_EQ(error_of([] { (void)build(2, {0, 0}, {1, 1}, {1, 1}, {kL62 / 2, kL62 / 2}); }),
+            "the sum of all edge costs reaches the bound 2^62: path costs would overflow int64");
   // Just below the bounds is accepted.
-  auto caps = build(2, {0, 0}, {1, 1}, {L62 / 2, L62 / 2 - 1}, {1, 1});
-  EXPECT_EQ(caps.capacity_units()[0] + caps.capacity_units()[1], L62 - 1);
-  auto costs = build(2, {0, 0}, {1, 1}, {1, 1}, {L62 / 2, L62 / 2 - 1});
-  EXPECT_EQ(costs.max_cost(), L62 / 2);
-  auto huge_cost = build(2, {0}, {1}, {1}, {L62 - 1});
-  EXPECT_EQ(huge_cost.max_cost(), L62 - 1);
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0}, {1}, {1}, {std::numeric_limits<Cost>::max()}); }),
-                       "sum of all edge costs"));
+  auto caps = build(2, {0, 0}, {1, 1}, {kL62 / 2, kL62 / 2 - 1}, {1, 1});
+  EXPECT_EQ(caps.capacity_units()[0] + caps.capacity_units()[1], kL62 - 1);
+  auto costs = build(2, {0, 0}, {1, 1}, {1, 1}, {kL62 / 2, kL62 / 2 - 1});
+  EXPECT_EQ(costs.max_cost(), kL62 / 2);
+  auto huge_cost = build(2, {0}, {1}, {1}, {kL62 - 1});
+  EXPECT_EQ(huge_cost.max_cost(), kL62 - 1);
+  EXPECT_EQ(error_of([] { (void)build(2, {0}, {1}, {1}, {std::numeric_limits<Cost>::max()}); }),
+            "the sum of all edge costs reaches the bound 2^62: path costs would overflow int64");
 }
 
 TEST(Graph, ValidationOrder) {
   // Resolution before the unit values.
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0}, {1}, {-1}, {1}, 3.0); }), "resolution"));
-  // The unit values before the shapes.
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0, 1}, {1}, {-1}, {1}); }), "capacity_units"));
+  EXPECT_EQ(error_of([] { (void)build(2, {0}, {1}, {-1}, {1}, 3.0); }),
+            "resolution must be a power of two in [2^-32, 2^32]");
+  // The unit values before the shapes (the length message names capacity_units too).
+  EXPECT_EQ(error_of([] { (void)build(2, {0, 1}, {1}, {-1}, {1}); }),
+            "capacity_units[0] = -1 is outside the units domain [0, 2^62)");
   // The shapes before the costs.
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0, 1}, {1}, {1}, {0}); }), "same length"));
-  EXPECT_TRUE(contains(error_of([] { (void)build(-1, {0}, {1}, {1}, {0}); }), "num_nodes"));
+  EXPECT_EQ(error_of([] { (void)build(2, {0, 1}, {1}, {1}, {0}); }),
+            "src, dst, capacity_units and cost must have the same length (got 2, 1, 1, 1)");
+  EXPECT_EQ(error_of([] { (void)build(-1, {0}, {1}, {1}, {0}); }), "num_nodes must be >= 0 (got -1)");
   // The costs before the remaining bounds (endpoints, sums).
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0}, {5}, {1}, {0}); }), "costs must be positive"));
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0, 0}, {1, 1}, {L62 / 2, L62 / 2}, {1, 0}); }),
-                       "costs must be positive"));
+  EXPECT_EQ(error_of([] { (void)build(2, {0}, {5}, {1}, {0}); }), "cost[0] = 0: costs must be positive (cost >= 1)");
+  EXPECT_EQ(error_of([] { (void)build(2, {0, 0}, {1, 1}, {kL62 / 2, kL62 / 2}, {1, 0}); }),
+            "cost[1] = 0: costs must be positive (cost >= 1)");
   // Endpoints before the sums.
-  EXPECT_TRUE(contains(error_of([] { (void)build(2, {0, 7}, {1, 1}, {L62 / 2, L62 / 2}, {1, 1}); }),
-                       "out of node range"));
+  EXPECT_EQ(error_of([] { (void)build(2, {0, 7}, {1, 1}, {kL62 / 2, kL62 / 2}, {1, 1}); }),
+            "edge 1: endpoint (7, 1) out of node range [0, 2)");
+  // Both running sums reach 2^62 at the same edge: the capacity sum is reported.
+  EXPECT_EQ(error_of([] { (void)build(2, {0, 0}, {1, 1}, {kL62 / 2, kL62 / 2}, {kL62 / 2, kL62 / 2}); }),
+            "the sum of all capacities reaches the bound of the units domain (2^62 units)");
+}
+
+// Uids come from one process-wide counter and are never reused: a graph built after another was
+// destroyed (in the same storage) gets a larger uid, and so does a copy.
+TEST(Graph, UidsAreNeverReused) {
+  std::uint64_t last = 0;
+  for (int i = 0; i < 3; ++i) {
+    const auto g = build(2, {0}, {1}, {1}, {1});
+    EXPECT_GT(g.uid(), last) << i;
+    last = g.uid();
+  }
+  const auto g = build(2, {0}, {1}, {1}, {1});
+  const Graph copy(g);
+  EXPECT_GT(copy.uid(), g.uid());
+  EXPECT_GT(g.uid(), last);
 }
 
 TEST(Units, HalfUpBoundaries) {
@@ -259,24 +255,35 @@ TEST(Units, HalfUpBoundaries) {
   EXPECT_EQ(to_units(4503599627370497.5, 1.0), Amount{4503599627370498});  // 2^52 + 1.5 is not a double
   EXPECT_EQ(to_units(4503599627370495.5, 1.0), Amount{4503599627370496});  // 2^52 - 0.5 rounds up
   EXPECT_EQ(to_units(4611686018427387392.0, 1.0), Amount{4611686018427387392});  // 2^62 - 512
+  // The export above 2^53 is the nearest double (the documented export limit).
+  EXPECT_EQ(as_float((Amount{1} << 53) + 1, 1.0), 9007199254740992.0);
 }
 
 TEST(Units, RejectedValues) {
   const double q = std::ldexp(1.0, -12);
-  EXPECT_TRUE(contains(error_of([&] { (void)to_units(std::numeric_limits<double>::quiet_NaN(), q); }), "NaN"));
-  EXPECT_TRUE(contains(error_of([&] { (void)to_units(std::numeric_limits<double>::infinity(), q); }), "finite"));
-  EXPECT_TRUE(contains(error_of([&] { (void)to_units(-std::numeric_limits<double>::infinity(), q); }), "finite"));
-  EXPECT_TRUE(contains(error_of([&] { (void)to_units(-1e-300, q); }), "negative"));
-  EXPECT_TRUE(contains(error_of([&] { (void)to_units(4611686018427387904.0, 1.0); }), "bound"));  // 2^62
-  EXPECT_TRUE(contains(error_of([&] { (void)to_units(std::numeric_limits<double>::max(), std::ldexp(1.0, 32)); }),
-                       "bound"));
-  EXPECT_TRUE(contains(error_of([&] { (void)to_units(1e300, std::ldexp(1.0, -32)); }), "bound"));
-  EXPECT_TRUE(contains(error_of([&] { (void)to_units(1.0, 3.0); }), "resolution"));
-  EXPECT_TRUE(contains(error_of([&] { (void)as_float(1, 0.0); }), "resolution"));
-  // Admission at q = 2^-12: [1e15, 1.25e14] fits, [1e15, 1.26e14] exceeds the unit sum.
+  const std::string nan = "to_units: NaN has no unit value";
+  const std::string infinite = "to_units: an infinite amount is not finite and has no unit value";
+  const std::string bound = "to_units: the amount is at or above the bound of the units domain (2^62 units)";
+  const std::string resolution = "resolution must be a power of two in [2^-32, 2^32]";
+  EXPECT_EQ(error_of([&] { (void)to_units(std::numeric_limits<double>::quiet_NaN(), q); }), nan);
+  EXPECT_EQ(error_of([&] { (void)to_units(std::numeric_limits<double>::infinity(), q); }), infinite);
+  EXPECT_EQ(error_of([&] { (void)to_units(-std::numeric_limits<double>::infinity(), q); }), infinite);
+  EXPECT_EQ(error_of([&] { (void)to_units(-1e-300, q); }), "to_units: a negative amount has no unit value");
+  EXPECT_EQ(error_of([&] { (void)to_units(4611686018427387904.0, 1.0); }), bound);  // 2^62
+  EXPECT_EQ(error_of([&] { (void)to_units(std::numeric_limits<double>::max(), std::ldexp(1.0, 32)); }), bound);
+  EXPECT_EQ(error_of([&] { (void)to_units(1e300, std::ldexp(1.0, -32)); }), bound);
+  // Both resolution checks: a value that is not a power of two, and a power of two out of range
+  // (and the values that are not positive and finite).
+  for (const double bad : {3.0, std::ldexp(1.0, -33), std::ldexp(1.0, 33), 0.0, -1.0,
+                           std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+    EXPECT_EQ(error_of([&] { (void)to_units(1.0, bad); }), resolution) << bad;
+    EXPECT_EQ(error_of([&] { (void)as_float(1, bad); }), resolution) << bad;
+  }
+  // The capacity-sum bound at q = 2^-12: [1e15, 1.25e14] fits, [1e15, 1.26e14] exceeds the unit sum.
   const std::vector<Amount> ok = {to_units(1e15, q), to_units(1.25e14, q)};
   auto g = build(2, {0, 0}, {1, 1}, ok, {1, 1}, q);
   EXPECT_EQ(g.capacity_units()[0] + g.capacity_units()[1], ok[0] + ok[1]);
   const std::vector<Amount> over = {to_units(1e15, q), to_units(1.26e14, q)};
-  EXPECT_TRUE(contains(error_of([&] { (void)build(2, {0, 0}, {1, 1}, over, {1, 1}, q); }), "sum of all capacities"));
+  EXPECT_EQ(error_of([&] { (void)build(2, {0, 0}, {1, 1}, over, {1, 1}, q); }),
+            "the sum of all capacities reaches the bound of the units domain (2^62 units)");
 }

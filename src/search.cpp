@@ -1,16 +1,16 @@
 /*
-  The one traversal core of every search (detail/traversal.hpp; APPROACH 6 and 14), the public
+  The one traversal core of every search (detail/traversal.hpp), the public
   spf, and the constructors of the search options.
 
   Distances are int64 path costs: every cost is positive and the sum of all costs is below 2^62,
   so no simple path cost overflows and kUnreachable (INT64_MAX) never collides.
 
-  The queues pop in (distance, node) order: the heap by its key, the buckets because each bucket
-  holds one distance at a time (pending distances lie in (d, d + max_cost] for the distance d
-  popped last, all multiples of the cost gcd) and the active bucket is sorted by node. A node is
-  pushed only when its distance strictly improves, so a bucket holds a node at most once. Pop
-  order among equal distances never changes a result: positive costs make every tight
-  predecessor of a node strictly nearer, hence settled before it.
+  Both queues pop in (distance, node) order: the heap by its key, the cyclic buckets because
+  each holds one distance at a time and the active bucket is sorted by node. After popping
+  distance d, pending distances lie in [d, d + max_cost], all multiples of cost_gcd. A node is
+  pushed only on a strict improvement, so it appears at most once per bucket. Equal-distance pop
+  order cannot change the result: positive costs make every tight predecessor of a node
+  strictly nearer, so it is finalised first.
 */
 #include "netgraph/core/search.hpp"
 
@@ -23,9 +23,11 @@
 #include <string>
 #include <utility>
 
+#include "netgraph/core/detail/edge_amounts.hpp"
 #include "netgraph/core/detail/endpoints.hpp"
 #include "netgraph/core/detail/enum_domain.hpp"
 #include "netgraph/core/detail/graph_access.hpp"
+#include "netgraph/core/detail/hooks_flag.hpp"
 #include "netgraph/core/detail/int128.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
 #include "netgraph/core/detail/traversal.hpp"
@@ -386,9 +388,10 @@ void mark(Workspace& ws, NodeId v, std::uint8_t bit) noexcept {
   f = static_cast<std::uint8_t>(f | bit);
 }
 
-// A KSP spur's rules (forward searches only): the spur node, its banned out-edges (Expand) or
-// the banned heads of its transitions (Collapse: the heads carry kBannedHead), and the excluded
-// prefix nodes (kExcluded).
+// A KSP spur is the node where an alternative path leaves an earlier path's prefix. Spur rules
+// apply to forward searches only: excluded prefix nodes (kExcluded) prevent cycles. At the spur,
+// multi_edge = true (Expand) bans the listed edges; false (Collapse) bans every edge to a head
+// marked kBannedHead.
 struct Spur {
   NodeId node {-1};
   std::span<const EdgeId> banned_edges {};
@@ -499,9 +502,6 @@ Cost run(Workspace& ws, const SearchIn& in) {
     ws.buckets.begin(bucket_width(g), std::max<Cost>(1, g.cost_gcd()), ws.dist.size(), in.roots);
     return forward ? loop<Direction::Forward>(ws, ws.buckets, in) : loop<Direction::Reverse>(ws, ws.buckets, in);
   }
-#if NETGRAPH_CORE_PRIVATE_HOOKS
-  ++thread_queue_counts().heap;
-#endif
   ws.heap.begin(in.roots);
   return forward ? loop<Direction::Forward>(ws, ws.heap, in) : loop<Direction::Reverse>(ws, ws.heap, in);
 }
@@ -578,7 +578,7 @@ PredDAG emit_full(Workspace& ws, const Emit& em) {
     via = list;
     parents.resize(via.size());
     for (std::size_t k = 0; k < via.size(); ++k) parents[k] = esrc[static_cast<std::size_t>(via[k])];
-    // Ascending EdgeId = grouped by source (B' ids rank by source first), ascending within one.
+    // Ascending EdgeId = grouped by source (EdgeIds rank by source first), ascending within one.
     std::vector<std::int32_t> slot(n + 1, 0);
     for (NodeId p : parents) ++slot[static_cast<std::size_t>(p) + 1];
     for (std::size_t v = 1; v <= n; ++v) slot[v] += slot[v - 1];
@@ -659,14 +659,14 @@ void prune(Workspace& ws, const Emit& em, std::span<const NodeId> targets, Cost 
   }
 }
 
-// The staged canonical single path (APPROACH 6) on a tight DAG: `edges` (ws.pruned, any order) and
-// its nodes `nodes` (ws.kept, each with kKeep), `pot(v)` the potential of a node (its forward
-// distance from the walks' starts: 0 at the starts, `total` at the ends; a topological order).
-// Stage 2 under PreferHigherPriority (`prio`): B*, the max-min priority over the DAG's walks,
-// capped by `cap` (a KSP root prefix's bottleneck), and the DAG restricted to priority >= B*.
-// Stage 3: the reverse hop count h from the ends and the greedy walk from the starts of minimum
-// h, each step the smallest edge whose head has h(v) = h(u) - 1 (prefix-monotone, so the walk is
-// the lexicographic minimum and simple).
+// Choose one path from tight DAG `edges` (ws.pruned, any order) and `nodes` (ws.kept, kKeep).
+// pot(v) is distance from the starts: 0 there, `total` at the ends. Increasing pot orders
+// every predecessor before its child (topological order).
+// Under PreferHigherPriority (`prio`), first maximise the smallest edge priority on a walk
+// (its bottleneck), capped by `cap` for a KSP prefix; call this B*. Keep edges with priority >= B*.
+// Then compute minimum remaining hops h from the ends. Start where h is smallest and repeatedly
+// take the lowest EdgeId with h(v) = h(u) - 1. Decreasing h prevents cycles; choosing the smallest
+// eligible id at each position gives the smallest EdgeId sequence among minimum-hop paths.
 struct Walk {
   std::vector<EdgeId> edges {};  // in walk order
   Cost cost {0};
@@ -822,23 +822,7 @@ Emit emit_of(const Graph& g, Direction direction, const PathSelection& selection
   return em;
 }
 
-void check_residual(const Graph& g, std::span<const Amount> residual) {
-  const auto m = static_cast<std::size_t>(g.num_edges());
-  if (residual.size() != m) {
-    throw std::invalid_argument("residual has length " + std::to_string(residual.size()) + ", expected " +
-                                std::to_string(m) + " (one entry per edge)");
-  }
-  const auto capacity = g.capacity_units();
-  for (std::size_t e = 0; e < m; ++e) {
-    if (residual[e] < 0 || residual[e] > capacity[e]) {
-      throw std::invalid_argument("residual[" + std::to_string(e) + "] = " + std::to_string(residual[e]) +
-                                  " is outside [0, capacity_units[" + std::to_string(e) + "] = " +
-                                  std::to_string(capacity[e]) + "]");
-    }
-  }
-}
-
-// One KSP spur search (APPROACH 6, rule 10): the canonical walk from `spur` to `dst` over the
+// One KSP spur search: the canonical walk from `spur` to `dst` over the
 // candidates of `gate`, without the excluded prefix nodes, with the spur node's banned
 // transitions (Expand: the banned edges; Collapse: every edge to a banned head, no re-selection),
 // B* capped by `cap` (the root prefix's bottleneck). nullopt when dst is unreachable.
@@ -916,7 +900,7 @@ std::vector<Path> enumerate_paths(const Graph& g, const PredDAG& dag, NodeId src
   if ((ws.flags[static_cast<std::size_t>(src)] & kKeep) == 0) return out;  // src is not on a walk to dst
   for (std::size_t i = 0; i < kept.size(); ++i) ws.loc[static_cast<std::size_t>(kept[i])] = static_cast<std::int32_t>(i);
   auto local = [&](NodeId v) { return static_cast<std::size_t>(ws.loc[static_cast<std::size_t>(v)]); };
-  // The hops: per child, its entries come in ascending via, so grouped by parent (B' ids rank by
+  // The hops: per child, its entries come in ascending via, so grouped by parent (EdgeIds rank by
   // source first); a hop is one parent's run (its members ascending, its cost the cheapest, its
   // key the lowest id), or one member when split.
   struct Hop {
@@ -960,7 +944,8 @@ std::vector<Path> enumerate_paths(const Graph& g, const PredDAG& dag, NodeId src
       out_hop[static_cast<std::size_t>(fill[static_cast<std::size_t>(hops[h].tail)]++)] = static_cast<std::int32_t>(h);
     }
   }
-  // Per node: its completions found so far (sorted) and the heap of the next completion per hop.
+  // A completion is a walk suffix from a node to dst. Per node: the completions found so far
+  // (sorted) and a heap holding the next completion through each hop.
   struct Elem {
     Cost cost;
     std::int64_t hops;
@@ -1158,7 +1143,7 @@ SearchRoute support_route(const Graph& g, std::span<const EdgeId> support, NodeI
   if (!selection.multi_edge) {
     // One member per (u, v) by select_adjacency on the view (no gating: the support's members are
     // all statically eligible). The members of a pair in the support have one cost, so they are
-    // consecutive in id order (B' ranks by (src, cost, dst, input)).
+    // consecutive in id order (EdgeIds rank by (src, cost, dst, input)).
     std::size_t w = 0;
     for (std::size_t i = 0; i < route.size();) {
       const auto ei = static_cast<std::size_t>(route[i]);
@@ -1187,8 +1172,7 @@ SearchRoute support_route(const Graph& g, std::span<const EdgeId> support, NodeI
 }
 
 PredDAG static_support(const Graph& g, std::span<const NodeId> roots, Direction direction, const Eligibility* elig) {
-  const auto root_set = node_set(roots, g.num_nodes(), "roots");
-  const auto live_roots = live(root_set, elig);
+  const auto live_roots = live(roots, elig);
   if (live_roots.empty()) return PredDAGBuilder::empty(g);
   Lease lease(static_cast<std::size_t>(g.num_nodes()));
   Workspace& ws = lease.ws();
@@ -1207,10 +1191,7 @@ PredDAG static_support(const Graph& g, std::span<const NodeId> roots, Direction 
 std::vector<Cost> static_costs(const Graph& g, const Eligibility* elig, std::span<const NodeId> dests,
                                std::span<const NodeId> sources) {
   std::vector<Cost> out(sources.size(), kInf);
-  std::vector<NodeId> roots(dests.begin(), dests.end());
-  std::sort(roots.begin(), roots.end());
-  roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
-  roots = live(roots, elig);
+  const auto roots = live(dests, elig);
   if (roots.empty()) return out;
   Lease lease(static_cast<std::size_t>(g.num_nodes()));
   Workspace& ws = lease.ws();
@@ -1266,7 +1247,7 @@ SpfResult spf(const Graph& g, std::span<const NodeId> roots, const SpfOptions& o
     throw std::invalid_argument("multipath = false requires targets (the single path joins a root to a target)");
   }
   const std::span<const Amount> residual = opts.residual.value_or(std::span<const Amount> {});
-  if (opts.residual.has_value()) check_residual(g, residual);
+  if (opts.residual.has_value()) check_edge_amounts(g, residual, "residual");
   if (opts.min_residual < 1) {
     throw std::invalid_argument("min_residual must be at least 1 unit (got " + std::to_string(opts.min_residual) + ")");
   }
@@ -1327,20 +1308,20 @@ std::vector<std::pair<Cost, Path>> ksp(const Graph& g, NodeId src, NodeId dst, c
   check_selection(opts.selection);
   const NodeId s1[1] = {src};
   const NodeId t1[1] = {dst};
-  (void)node_set(s1, g.num_nodes(), "src");
-  (void)node_set(t1, g.num_nodes(), "dst");
+  check_range(s1, g.num_nodes(), "src");
+  check_range(t1, g.num_nodes(), "dst");
   check_disjoint(s1, t1, "src", "dst");
   if (opts.k < 1) throw std::invalid_argument("k must be >= 1 (got " + std::to_string(opts.k) + ")");
   check_ceiling(opts.max_path_cost);
   const std::span<const Amount> residual = opts.residual.value_or(std::span<const Amount> {});
-  if (opts.residual.has_value()) check_residual(g, residual);
+  if (opts.residual.has_value()) check_edge_amounts(g, residual, "residual");
   if (opts.elig != nullptr && opts.elig->graph_uid() != g.uid()) {
     throw std::invalid_argument("foreign Eligibility: built for another graph");
   }
   std::vector<std::pair<Cost, Path>> out;
   if (opts.elig != nullptr && (!opts.elig->node_ok(src) || !opts.elig->node_ok(dst))) return out;
   // The ceiling: Absolute(c), or Stretch(f) times the static shortest cost of the member graph
-  // under the Eligibility (residual ignored: the policy ceiling's baseline of 9.1); no static route
+  // under the Eligibility (residual ignored, as for the CapacityAware ceiling); no static route
   // gives [].
   const auto* absolute = opts.max_path_cost.has_value() ? std::get_if<Absolute>(&*opts.max_path_cost) : nullptr;
   const auto* stretch = opts.max_path_cost.has_value() ? std::get_if<Stretch>(&*opts.max_path_cost) : nullptr;
@@ -1358,11 +1339,12 @@ std::vector<std::pair<Cost, Path>> ksp(const Graph& g, NodeId src, NodeId dst, c
   const PriorityValues values {&g, opts.selection.priority, residual};
   const PriorityFn prio = PriorityFn::of(values);
   const bool prefer = opts.selection.tie_break == EdgeTieBreak::PreferHigherPriority;
-  // Yen deviations (APPROACH 6): the first path and every spur path are the canonical walk from
-  // the spur node under the spur's exclusions; roots are matched by edge prefix; a deviation bans
-  // the next edge of every accepted path with that prefix (Expand) or that transition (Collapse);
-  // the prefix's vertices are excluded; candidates live in an ordered set keyed by the tuple
-  // (structural deduplication).
+  // Yen's method finds alternatives by keeping a prefix and replacing its suffix at a spur.
+  // The first path and each spur suffix use the canonical search with that spur's exclusions.
+  // Match prefixes by EdgeId sequence. Ban the next edge of every accepted matching path
+  // (Expand), or its entire (u, v) transition (Collapse); exclude earlier prefix vertices to
+  // prevent cycles. Store candidates once in a set ordered by (cost, decreasing bottleneck
+  // under PreferHigherPriority, hops, EdgeId sequence).
   struct Cand {
     Cost cost {0};
     Priority bottleneck {0, 1, true};
@@ -1411,10 +1393,10 @@ std::vector<std::pair<Cost, Path>> ksp(const Graph& g, NodeId src, NodeId dst, c
         c.bottleneck = compare(sp->bottleneck, prefix_bottleneck) < 0 ? sp->bottleneck : prefix_bottleneck;
         c.edges.assign(last.begin(), last.begin() + static_cast<std::ptrdiff_t>(j));
         c.edges.insert(c.edges.end(), sp->edges.begin(), sp->edges.end());
-        // An accepted path never returns (its next edge after this prefix is banned); checked
-        // anyway, as the prototype does.
-        const bool known = std::any_of(accepted.begin(), accepted.end(), [&](const Cand& a) { return a.edges == c.edges; });
-        if (!known) candidates.insert(std::move(c));
+        // Never an accepted path: every accepted path with this prefix has its next edge (Expand)
+        // or its next transition (Collapse) banned at the spur, and the candidate's next edge is
+        // the spur walk's first. Only a pending candidate can be equal; the set keeps one.
+        candidates.insert(std::move(c));
       }
       prefix_cost += cost[static_cast<std::size_t>(last[j])];
       if (prefer) {
@@ -1439,8 +1421,8 @@ std::vector<Path> resolve_to_paths(const Graph& g, const PredDAG& dag, NodeId sr
   if (dag.graph_uid() != g.uid()) throw std::invalid_argument("foreign PredDAG: built for another graph");
   const NodeId s1[1] = {src};
   const NodeId t1[1] = {dst};
-  (void)node_set(s1, g.num_nodes(), "src");
-  (void)node_set(t1, g.num_nodes(), "dst");
+  check_range(s1, g.num_nodes(), "src");
+  check_range(t1, g.num_nodes(), "dst");
   check_disjoint(s1, t1, "src", "dst");
   if (max_paths.has_value() && *max_paths < 1) {
     throw std::invalid_argument("max_paths must be >= 1 (got " + std::to_string(*max_paths) + ")");

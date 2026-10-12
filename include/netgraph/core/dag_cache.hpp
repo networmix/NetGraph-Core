@@ -1,4 +1,4 @@
-/* The DagCache of APPROACH 10: building and frozen modes, the dedicated frozen-miss exception. */
+/* The DagCache: building and frozen modes, the dedicated frozen-miss exception. */
 #pragma once
 
 #include <algorithm>
@@ -25,13 +25,9 @@ struct DagCacheAccess;
 class FrozenTally;
 } // namespace detail
 
-// A lookup in a frozen DagCache whose key is absent (APPROACH 10): a dedicated exception, not a
-// std::runtime_error, so no evaluator converts it into a status (a sensitivity entry's
-// `unevaluable` comes from a std::runtime_error); every evaluator propagates it unchanged. Its
-// message is shared, so copying it never allocates. what() is defined in dag_cache.cpp: as the
-// key function it gives the type one vtable and one type_info. An all-inline class gets a weak
-// copy per translation unit, and the LTO build of the extension kept two, so the binding's catch
-// of DagCacheMiss missed the thrown one (NOTES R26).
+// A frozen-cache lookup with no matching key throws DagCacheMiss. The shared message can be
+// copied without allocation. Keep what() out of line: this gives the exception one vtable and
+// type_info, so the binding can reliably catch it.
 class DagCacheMiss : public std::exception {
 public:
   explicit DagCacheMiss(const std::string& what) : what_(std::make_shared<const std::string>(what)) {}
@@ -41,12 +37,13 @@ private:
   std::shared_ptr<const std::string> what_;
 };
 
-// A cache of shortest-path supports bound to one graph (by uid). The key is (the roots as a
-// sorted set, the direction, the Eligibility uid; no Eligibility is uid 0); the value is the full
-// static support of that search (multipath = true, multi_edge = true, no residual: every tight
-// edge of the statically eligible member graph over the nodes it reaches, forward-oriented for a
-// reverse search) as an immutable shared PredDAG, valid after clear() and after the cache is
-// destroyed. Selection is never cached: a policy projects it at creation (APPROACH 9.1, 10).
+// A cache of static shortest-path supports bound to one graph uid. A support contains every
+// statically eligible edge with capacity >= 1 unit on a shortest path from the roots (Forward)
+// or to them (Reverse), ignoring residual capacity. It keeps every equal-cost path and every
+// parallel edge. The key is (sorted root set, direction, Eligibility uid; 0 for no Eligibility).
+// Values are immutable shared PredDAGs; reverse searches keep the original edge orientation.
+// Values remain valid after clear() or cache destruction. Selection is applied when a policy
+// creates a flow and is never cached.
 //
 // Building mode (a new cache): one writer, no concurrent readers. A hit returns the value; a miss
 // runs the search, inserts and returns (a failed search counts one miss and inserts nothing); an
@@ -60,14 +57,14 @@ private:
 // building mode once the caller has joined every reader (no lookup may run concurrently with
 // freeze(), thaw() or destruction).
 //
-// Statistics are atomic per field, not a consistent snapshot: `bytes` is the retained payload of
-// the entries (the DAGs' stored arrays), `live_values` the values alive anywhere, entries
-// included. A supplied building cache whose public call fails later keeps the complete entries and
-// statistics of its successful lookups (APPROACH 13, limit 2). A frozen cache's statistics follow
-// the public call that reads it (a policy constructor, an evaluator; NOTES R27): its hits are
-// counted when the call succeeds, its Python result included, and a failed call changes no
-// statistic, except that a call raising DagCacheMiss counts one miss. A direct lookup() is such a
-// call: a hit counts one hit, a miss one miss.
+// Each statistic is atomic, but reading several fields need not give one consistent snapshot.
+// `bytes` counts the entries' stored DAG arrays; `live_values` counts values alive anywhere,
+// including in the cache. A building cache keeps completed entries and lookup statistics even
+// if the enclosing public call fails. Entries are always complete; keeping them changes no
+// later result. This is the exception to public calls' all-or-nothing state guarantee.
+// For a frozen cache, hits count only after the whole public call succeeds, including its
+// Python result. A failed call counts nothing, except one miss if it raises DagCacheMiss.
+// Direct lookup() follows the same rule: one hit on success, one miss on DagCacheMiss.
 class DagCache {
 public:
   struct Stats {

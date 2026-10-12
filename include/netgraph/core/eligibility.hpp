@@ -1,5 +1,6 @@
-/* Eligibility: which nodes and edges of one graph may be used (APPROACH 4). Constructed only by
-   Graph::eligibility(excluded_nodes, excluded_edges) (graph.hpp, which includes this header). */
+/* Eligibility: which nodes and edges of one graph may be used.
+   Built only by Graph::eligibility(excluded_nodes, excluded_edges) (graph.hpp, which includes
+   this header) and by intersect, which combines two values of one graph. */
 #pragma once
 
 #include <cstddef>

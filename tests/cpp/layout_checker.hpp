@@ -1,10 +1,11 @@
-// An independent checker of the graph's stored layout (APPROACH 3, layout B'; task 1e).
+// An independent checker of the graph's stored layout (the EdgeId order and the CSR arrays that
+// graph.hpp describes).
 //
 // It reads the arrays as spans and the caller's input separately, and derives every expectation
-// from the contract's text, never from the constructor's helpers:
+// from the layout's definition, never from the constructor's helpers:
 //   1. sizes first, before any element is read: N >= 0, E >= 0, the input arrays of length E,
 //      every per-edge array and the input map of length E, both offset arrays of length N + 1,
-//      the reverse slots of length E, the internal reverse-source copy of length E when present;
+//      the reverse slots of length E, the internal reverse-source copy of length E;
 //   2. then ranges, before any value is used as an index: offsets in [0, E], [0] = 0, [N] = E,
 //      non-decreasing; endpoints in [0, N); the map and the slots in [0, E) and permutations;
 //      the copied sources in [0, N);
@@ -18,7 +19,6 @@
 
 #include <cstdint>
 #include <numeric>
-#include <optional>
 #include <span>
 #include <string>
 #include <tuple>
@@ -49,7 +49,7 @@ struct LayoutSpans {
   std::span<const std::int32_t> row_offsets {};
   std::span<const std::int32_t> in_row_offsets {};
   std::span<const EdgeId> in_adj_edge_index {};
-  std::optional<std::span<const NodeId>> in_col_indices {};  // the internal copy, when stored
+  std::span<const NodeId> in_col_indices {};  // the internal copy of the in-edges' sources
   Cost max_cost {0};
   Cost cost_gcd {0};
 };
@@ -108,7 +108,7 @@ inline std::vector<std::string> check_layout(const LayoutSpans& g, const LayoutI
   size_is(g.row_offsets.size(), np1, "row_offsets");
   size_is(g.in_row_offsets.size(), np1, "in_row_offsets");
   size_is(g.in_adj_edge_index.size(), me, "in_adj_edge_index");
-  if (g.in_col_indices.has_value()) size_is(g.in_col_indices->size(), me, "in_col_indices");
+  size_is(g.in_col_indices.size(), me, "in_col_indices");
   if (!bad.empty()) return bad;
 
   // 2. Ranges and permutations (values are read, none is used as an index yet).
@@ -128,12 +128,10 @@ inline std::vector<std::string> check_layout(const LayoutSpans& g, const LayoutI
   }
   if (!permutation_of_range(g.input_index, m)) bad.emplace_back("map:permutation");
   if (!permutation_of_range(g.in_adj_edge_index, m)) bad.emplace_back("slot:permutation");
-  if (g.in_col_indices.has_value()) {
-    for (const NodeId x : *g.in_col_indices) {
-      if (x < 0 || x >= n) {
-        bad.emplace_back("range:in_col_indices");
-        break;
-      }
+  for (const NodeId x : g.in_col_indices) {
+    if (x < 0 || x >= n) {
+      bad.emplace_back("range:in_col_indices");
+      break;
     }
   }
   if (!bad.empty()) return bad;
@@ -198,12 +196,10 @@ inline std::vector<std::string> check_layout(const LayoutSpans& g, const LayoutI
   }
   if (!rev_member) bad.emplace_back("reverse:membership");
   if (!rev_order) bad.emplace_back("reverse:order");
-  if (g.in_col_indices.has_value()) {
-    for (std::size_t s = 0; s < me; ++s) {
-      if ((*g.in_col_indices)[s] != g.src[static_cast<std::size_t>(g.in_adj_edge_index[s])]) {
-        bad.emplace_back("copy:source");
-        break;
-      }
+  for (std::size_t s = 0; s < me; ++s) {
+    if (g.in_col_indices[s] != g.src[static_cast<std::size_t>(g.in_adj_edge_index[s])]) {
+      bad.emplace_back("copy:source");
+      break;
     }
   }
   // The scans, from the input (0 on an empty graph).

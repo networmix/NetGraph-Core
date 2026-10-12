@@ -1,10 +1,8 @@
-/* The graph's internal entry points (internal, APPROACH 3).
-
-   The internal reverse-source copy (APPROACH 3: "the stored copy is internal, for locality") is
-   read by the reverse search through this struct; the tests read it, and the retained array
-   bytes, the same way. Header-only and inline: nothing here is a library symbol, and no Python
-   name exists for it. The construction counters exist in hooks builds only (the C++ tests'
-   branch observations); the hooks-off symbol check lists their names. */
+/* Internal graph access for reverse searches and tests. The stored reverse-source array
+   avoids fetching each source through a second array; tests also read retained array bytes.
+   Everything is inline, with no Python name. Construction counters exist only in private-hooks
+   builds (their accessor, the one library symbol, is defined in graph.cpp) and let C++ tests
+   observe which construction branches ran. */
 #pragma once
 
 #include <cstddef>
@@ -12,6 +10,7 @@
 #include <span>
 #include <type_traits>
 
+#include "netgraph/core/detail/hooks_flag.hpp"
 #include "netgraph/core/graph.hpp"
 
 namespace netgraph::core::detail {
@@ -61,7 +60,8 @@ struct GraphAccess {
 };
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
-// Test evidence (C++ tests, hooks builds only): what the last construction on this thread did.
+// Test evidence (C++ tests, hooks builds only): this thread's construction counts so far, and
+// what its last construction did (the last_* fields).
 struct ConstructionCounts {
   std::int64_t hashed {0};                // constructions whose ranks came from the hash table
   std::int64_t fallback {0};              // constructions whose ranks came from the sort of all costs

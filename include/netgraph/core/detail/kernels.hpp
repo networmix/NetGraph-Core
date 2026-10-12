@@ -1,10 +1,11 @@
-/* Apportionment and the placement kernels in units (internal; APPROACH 2.1, 7 and 16).
+/* Placement kernels assign one flow's amounts to route edges. Apportionment splits an integer
+   total among recipients.
 
-   A kernel computes the pushes of one flow on its route. The plan of a flow is frozen at its
-   creation: the route, its split graph (the route's edges that pass the kernel's membership
-   rule, pruned to the walks from the source to the destination set, destinations terminal)
-   and, for Weighted, the weights. These are the per-flow routines of the placement transaction
-   (APPROACH 9.2 stage 3); the policy engine composes them and the ledger commits their output.
+   A plan freezes the route, its split graph and any Weighted weights at creation. The split
+   graph keeps edges allowed by the kernel that lie on a source-to-destination walk; it removes
+   edges leaving destinations. Its edges are the plan's members. A member-aligned array has one
+   entry per member, in the same order as plan.members. Policies combine these allocations; the
+   ledger commits them.
 */
 #pragma once
 
@@ -24,16 +25,16 @@
 
 namespace netgraph::core::detail {
 
-// ---------------------------------------------------------------- apportionment (2.1)
+// ---------------------------------------------------------------- apportionment
 
-// Round robin (EqualBalanced and Lossy EqualBalanced at every node; the cohort's split over its
-// flows and a source's offer over its flows): floor(total / k) to each of the k members, one
-// more unit to the first total mod k members (ascending EdgeId). Only the n leading members with
-// a positive share (n = total when total < k, else k) are visited: the members from n on carry
-// 0, which a caller with a zeroed output need not write or visit. The callback form computes the
-// split once and calls share(i, x) for i in [0, n), in index order; share returns false to stop
-// early. It returns the number of shares accepted: n, or the index i whose call returned false.
-// The span form writes out[0 .. n) of the k = out.size() members and returns n.
+// Round robin: give floor(total / k) to each of k recipients, plus one to the first
+// total mod k in caller order. Edge shares use ascending EdgeId; shares among a source's
+// flows use flow order. Used by EqualBalanced (Lossless and Lossy) at every node and to split a
+// source's amount over its flows.
+// Visit only the n positive shares (n = min(total, k)); later entries stay 0 in a zeroed output.
+// The callback form computes the split once and calls share(i, x) in index order for i in
+// [0, n). Stop if it returns false; return the accepted count: n, or that rejected index i.
+// The span form writes out[0 .. n), where k = out.size(), and returns n.
 template <class Share>
 inline std::size_t round_robin(Amount total, std::size_t k, Share&& share) {
   const auto kk = static_cast<Amount>(k);
@@ -53,18 +54,23 @@ inline std::size_t round_robin(Amount total, std::span<Amount> out) noexcept {
   });
 }
 
-// Highest averages (Jefferson, D'Hondt; Weighted and Lossy Weighted): the units go one at a
-// time to the member maximising w / (a + 1), ties by the lower member index (ascending
-// EdgeId). Closed form: every member starts at its lower quota floor(total * w / W), then the
-// fewer than k remaining units go by the exact next quotients, compared by 128-bit cross
-// products. Weights positive with a sum below 2^62; total below 2^63. House-monotone.
+// Highest averages (Jefferson/D'Hondt; Weighted and Lossy Weighted): give each next unit to
+// the member with largest w / (a + 1), where w is its weight and a its allocation so far.
+// Break ties by lower member index (ascending EdgeId). Start each member at its lower quota
+// floor(total * w / W), where W is the weight sum; then assign the fewer than k remaining units
+// by those quotients, comparing with exact 128-bit cross products. Weights are positive,
+// W < 2^62, total < 2^63. Increasing total never reduces any member's allocation (house
+// monotonicity).
 void highest_averages(Amount total, std::span<const Amount> weights, std::span<Amount> out);
 
 // ---------------------------------------------------------------- plans
 
-// Throws std::invalid_argument for a value outside its enumeration and for the combinations the
-// contract rejects (Lossy with MaxFlow, Weighted with priority Headroom).
+// Throws std::invalid_argument for a value outside its enumeration and for the unsupported
+// combinations (Lossy with MaxFlow, Weighted with priority Headroom).
 void check_kernel(FlowPlacement placement, Admission admission, EdgePriority priority);
+// The combination rule of check_kernel alone, for a caller that has already checked the three
+// enumerations (validate_config).
+void check_kernel_combination(FlowPlacement placement, Admission admission, EdgePriority priority);
 
 struct KernelPlan {
   FlowPlacement placement {FlowPlacement::MaxFlow};
@@ -73,11 +79,11 @@ struct KernelPlan {
   std::vector<EdgeId> route {};      // ascending: the flow's route (its record's bundle)
   std::vector<EdgeId> members {};    // ascending: the split graph
   std::vector<Amount> weights {};    // Weighted: per member (positive), frozen; else empty
-  // The destinations (ascending) and the split graph's nodes in a topological order (the source
-  // first), with per position its out-members members[out_begin[p] .. out_end[p]) (consecutive in
-  // ascending EdgeId: B' ids rank edges by source first) and per member the position of its head;
-  // the structure is empty when the split graph is empty. Views of one block the plan owns
-  // (layout()), so a plan costs one allocation for all of them.
+  // Destinations ascend. Nodes have a topological order: every edge's tail precedes its head,
+  // with the source first. Position p's out-members are members[out_begin[p] .. out_end[p]);
+  // they are consecutive in ascending EdgeId because EdgeIds sort by source first. Each member
+  // also stores its head's position. Empty split graph means empty structure. All views share
+  // one block owned by the plan (layout()), so the structure takes one allocation.
   std::span<const NodeId> dsts {};
   std::span<const NodeId> topo {};
   std::span<const std::int32_t> out_begin {};
@@ -118,8 +124,8 @@ private:
 [[nodiscard]] std::vector<EdgeId> prune(const Graph& g, const PredDAG& dag, NodeId src,
                                         std::span<const NodeId> dsts);
 
-// The minimum walk cost from `src` to the destination set over `route` (a record's bundle;
-// APPROACH 8, rule 12); kUnreachable when the route has no such walk. The split-graph builder's
+// The minimum walk cost from `src` to the destination set over `route` (a record's bundle:
+// its route cost); kUnreachable when the route has no such walk. The split-graph builder's
 // cost pass alone: no plan is built.
 [[nodiscard]] Cost route_cost(const Graph& g, const PredDAG& route, NodeId src,
                               std::span<const NodeId> dsts);
@@ -149,11 +155,11 @@ private:
                                          EdgePriority priority, NodeId src, std::span<const NodeId> dsts,
                                          const PredDAG& bundle, const Eligibility* elig, Cost* cost = nullptr);
 
-// ---------------------------------------------------------------- CostOnly creation (9.1, 10)
+// ---------------------------------------------------------------- CostOnly creation
 
 // std::lower_bound(a, x) on an ascending `a`, found from position `hint` (the creation walk's
-// previous range): a galloping probe toward x (1, 2, 4, ... away from the hint), then a binary
-// search inside the last step. The answer is std::lower_bound's whatever the hint (the first
+// previous range): a galloping probe toward x (steps of 1, 2, 4, ... between probes), then a
+// binary search inside the last step. The answer is std::lower_bound's whatever the hint (the first
 // position holding a value >= x, a.size() when none); only the probes differ.
 [[nodiscard]] std::size_t lower_bound_from(std::span<const EdgeId> a, std::size_t hint, EdgeId x) noexcept;
 
@@ -164,24 +170,23 @@ struct CreationProducts {
   Cost cost {kUnreachable};
 };
 
-// The products of a CostOnly flow of `src` created on its policy's static support (`support`: a
-// reverse multipath support rooted at the destination set `dsts`) in one pass over its route:
-// support_route's route for `selection` (Collapse on `view`), its record bundle (`support` itself
-// when the route is the whole support, else PredDAGBuilder::of_edges of the route), and make_plan's
-// plan and cost on that bundle, identical to those functions' for every input it accepts. It
-// accepts a multipath selection with a kernel of static membership (every kernel but Weighted with
-// Residual priority) and checks, while it builds, that the plan's members are the whole route:
-// every route edge a member candidate, none leaving a destination, every route node reaching a
-// destination, the source first in the topological order, no cycle, the members of a tail
-// consecutive. Otherwise, and when src reaches no destination, it returns nullopt, and the caller
-// takes those functions' path. Nothing proportional to the graph's size is allocated per call.
+// Build a CostOnly flow's route, record bundle, plan and cost in one pass. `support` contains
+// all static shortest paths to sorted destinations `dsts`; start at `src` and apply selection
+// on `view`. The result matches support_route, bundle construction and make_plan: reuse
+// `support` if it is the whole route, otherwise build its bundle with PredDAGBuilder::of_edges.
+// Requires multipath and static membership (all kernels except Weighted with Residual).
+// While building, check: every route edge can be a member; none leaves a destination; every
+// route node reaches a destination; the source is first in topological order; no cycle exists;
+// and each tail's members are consecutive. These checks ensure members == route.
+// Return nullopt on a failed condition or if src reaches no destination; the caller then uses
+// the separate routines. No per-call allocation is proportional to the whole graph's size.
 [[nodiscard]] std::optional<CreationProducts> cost_only_creation(const Graph& g,
                                                                  const std::shared_ptr<const PredDAG>& support,
                                                                  NodeId src, std::span<const NodeId> dsts,
                                                                  const PathSelection& selection, PriorityFn view,
                                                                  FlowPlacement placement, Admission admission);
 
-// ---------------------------------------------------------------- allocation (16.2, 16.3)
+// ---------------------------------------------------------------- allocation
 
 // The cumulative allocation alloc(T) of a Weighted or EqualBalanced plan, member-aligned:
 // node by node in topological order, the source's inflow T, every other node's inflow the sum
@@ -189,21 +194,21 @@ struct CreationProducts {
 // (member-aligned) it stops at the first member above its limit and returns false.
 bool allocate(const KernelPlan& plan, Amount total, std::span<Amount> out, std::span<const Amount> limit = {});
 
-// The largest T whose allocation fits `view_m` (member-aligned) member by member, by search on
-// alloc(T) (exact: alloc is non-decreasing member by member, so fits(T) is monotone); upper
-// bound the source members' view. APPROACH 7 (revision 26): approximate arithmetic only
-// chooses probes. The first probe is at a floating-point estimate, then a galloping bracket,
-// then bisection; every predicate, both bracket ends, the value and the allocation are exact,
-// and `iterations` counts the probes, which stay within 62 (the bound of a plain bisection over
-// units below 2^62; checked, std::logic_error otherwise). A first evaluation at the upper bound
-// (or a Lossless step's target) is another allocation evaluation, not a search probe.
+// Find the largest T whose allocation fits each entry of member-aligned view_m. The upper
+// bound is the sum of the view on source members. Each member's allocation never decreases as
+// T grows, so a fitting and a failing T bound the answer. A floating-point estimate chooses
+// the first probe only; then double the step size to narrow the bounds and bisect them.
+// All fit checks, bounds, the returned value and allocation are exact. `iterations` counts
+// at most 62 search probes (enough to bisect the units domain below 2^62); throw std::logic_error
+// if that bound is exceeded. Evaluating the upper bound first, or a Lossless step's target,
+// is an allocation evaluation and is not counted as a search probe.
 struct TMax {
   Amount value {0};
   std::int32_t iterations {0};
 };
 [[nodiscard]] TMax t_max(const KernelPlan& plan, std::span<const Amount> view_m);
 
-// One Lossless step of one flow (APPROACH 9.2 stage 3, 16.3): T_new = max(T, min(T + request,
+// One Lossless step of one flow (the amounts stage): T_new = max(T, min(T + request,
 // T_max(V))) on the replacement view V = W + own (member-aligned `view_m`), with `own_m` the
 // flow's committed allocation alloc(T) (member-aligned). MaxFlow solves the flow core on the
 // split graph with cap T + request (uncapped for +inf) and reports the solve's marginal curve;

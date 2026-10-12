@@ -1,4 +1,5 @@
-/* The one graph type: an immutable directed multigraph on integer units (APPROACH 3). */
+/* An immutable directed graph that allows several edges between the same ordered node pair.
+   Capacities use integer units. */
 #pragma once
 
 #include <cstdint>
@@ -14,37 +15,40 @@ namespace detail {
 struct GraphAccess;
 } // namespace detail
 
-// Converts a physical value to units of the resolution q, rounding half up. The only way a
-// physical number enters Core. Throws std::invalid_argument for NaN, infinity, a negative value,
-// a result at or above the domain bound 2^62, or a resolution that is not a power of two in
-// [2^-32, 2^32].
+// Convert a physical value to units of resolution q (the physical size of one unit).
+// Round to the nearest integer, with exact halves rounded up. This is the only way a physical
+// value enters Core. Throw std::invalid_argument for NaN, infinity, a negative value, a result
+// >= 2^62, or a resolution that is not a power of two in [2^-32, 2^32].
 [[nodiscard]] Amount to_units(double x, double resolution);
 // Units to a physical double (x * q): exact below 2^53 units.
 [[nodiscard]] double as_float(Amount x, double resolution);
 
-// Edges are given in input order. The public EdgeId of an edge is its rank in the stable order
-// (src, cost, dst, input): the out-edges of u are exactly the ids [row_offsets()[u],
-// row_offsets()[u + 1]) in traversal order (cost, dst, input), and input_index()[e] is the input
-// position of e. Every other per-edge array is in id order. The reverse CSR lists the in-edges
-// of v in (cost, src, input) order.
+// Edges arrive in input order. Their public EdgeIds are their positions after sorting by
+// (src, cost, dst, input). Node u's out-edges are [row_offsets()[u], row_offsets()[u + 1]),
+// ordered by (cost, dst, input); input_index()[e] gives e's input position. All other per-edge
+// arrays use EdgeId order, except in_adj_edge_index() (reverse-CSR slot order). CSR (compressed
+// sparse row) stores each node's edges in a flat array and uses offsets to mark its range.
+// Reverse CSR lists v's in-edges in (cost, src, input) order.
 //
 // The constructor validates in this order and reports the first defect (std::invalid_argument):
 // the resolution (a power of two in [2^-32, 2^32]); the unit values (every capacity in
 // [0, 2^62)); the array shapes (num_nodes >= 0, equal lengths, at most INT32_MAX edges); zero
-// or negative costs (costs are positive, rule 28); the remaining bounds (endpoints in
-// [0, num_nodes), then the sum of all capacities and the sum of all costs below 2^62, so no path
-// cost overflows int64). This is APPROACH 3's order (revision 25); a language binding validates
-// in the same order before narrowing any value, so the reported defect does not depend on the
-// representation of the input.
+// or negative costs (costs are positive); the remaining bounds (endpoints in
+// [0, num_nodes), then the capacity and cost sums below 2^62, so no path cost overflows int64:
+// both are added up edge by edge in input order, and the first edge at which a running sum
+// reaches 2^62 reports that sum, the capacity sum before the cost sum at the same edge). The
+// order is part of the interface: a language binding validates in the same order before
+// narrowing any value, so the reported defect does not depend on the representation of the
+// input.
 //
-// Construction (APPROACH 3): stable counting passes by dst, cost rank and src give the id order,
-// two more by cost rank and dst the reverse CSR; when N K < E, combined keys do it in two forward
-// passes (dst, then (src, rank)) and one reverse pass ((dst, rank)). An edgeless graph is its
-// validation and two zero-filled offset arrays. The cost ranks come from the distinct costs
-// collected in a hash table while there are at most 65,536 of them and a cumulative probe budget
-// of 8E + 8 x 65,536 table slots lasts, else from a sort of all costs; both give the same ranks.
-// Expected linear in E + N for a bounded number of distinct costs, O(N + E log(E + 1)) at worst.
-// Retained: 36 bytes per edge plus 8 (N + 1) bytes of offsets.
+// Construction uses N nodes, E edges and K distinct costs. A cost's rank is its position among
+// the sorted distinct costs. Stable counting passes group by each key without changing ties:
+// dst, cost rank, src give EdgeId order; cost rank, dst give reverse CSR. When N K < E, use
+// dst then (src, rank) forward, and (dst, rank) reverse. With no edges, only validation and two
+// zero-filled offset arrays are needed. Rank costs through a hash table up to 65,536 distinct
+// costs and 8E + 8 x 65,536 examined slots; otherwise sort all costs. Both give the same ranks.
+// Expected O(E + N) for bounded K; O(N + E log(E + 1)) worst case.
+// Retained arrays: 36 bytes per edge plus 8 (N + 1) bytes of offsets.
 //
 // A copy is a new graph: same ids and input map, a new uid. Uids come from one process-wide
 // 64-bit counter and are never reused. A move transfers every array and the uid without
@@ -75,7 +79,8 @@ public:
   [[nodiscard]] std::span<const Cost> cost() const noexcept { return cost_; }
   [[nodiscard]] std::span<const NodeId> edge_src() const noexcept { return src_; }
   [[nodiscard]] std::span<const NodeId> edge_dst() const noexcept { return dst_; }
-  // Full scans at construction; 0 on a graph without edges.
+  // Maximum edge cost and greatest common divisor of all edge costs, computed by full scans
+  // at construction; both are 0 on a graph without edges.
   [[nodiscard]] Cost max_cost() const noexcept { return max_cost_; }
   [[nodiscard]] Cost cost_gcd() const noexcept { return cost_gcd_; }
   // id -> input position. The inverse permutation is the caller's (one O(E) scatter).
@@ -90,7 +95,7 @@ public:
 
   // Static eligibility from excluded ids (duplicates and unsorted lists accepted, out-of-range
   // ids rejected). Empty lists mean all allowed (uid 0). The one public construction of an
-  // Eligibility (eligibility.hpp).
+  // Eligibility from excluded ids (Eligibility::intersect combines two values).
   [[nodiscard]] Eligibility eligibility(std::span<const NodeId> excluded_nodes = {},
                                         std::span<const EdgeId> excluded_edges = {}) const;
 

@@ -1,4 +1,4 @@
-/* Route structures: the immutable predecessor DAG and the explicit Path (APPROACH 5). */
+/* Route structures: the immutable predecessor DAG and the explicit Path. */
 #pragma once
 
 #include <cstdint>
@@ -15,14 +15,14 @@ struct PredDAGBuilder;
 struct PathBuilder;
 } // namespace detail
 
-// An immutable, graph-bound DAG in predecessor CSR form: the predecessor entries of node v are
-// parents()[k] and via_edges()[k] for k in [parent_offsets()[v], parent_offsets()[v + 1]); the
-// entry (u, e) means the edge e = u -> v belongs to the DAG. Within a node the entries are in
-// strictly ascending via EdgeId, so a DAG value has one canonical form. Equality is structural
-// (same graph, same CSR). Every API that takes a route structure takes a PredDAG; a DAG of
-// another graph is rejected wherever it is used.
+// An immutable predecessor DAG: a directed graph with no cycles, recording each node's
+// incoming edges. It belongs to one graph. CSR (compressed sparse row) groups entries in flat
+// arrays: node v uses parents()[k] and via_edges()[k] for
+// k in [parent_offsets()[v], parent_offsets()[v + 1]); (u, e) means edge e = u -> v is included.
+// Entries per node have strictly ascending via EdgeId, giving one canonical form. Equality
+// means the same graph and CSR. Route APIs take PredDAG and reject one from another graph.
 //
-// Storage is sparse (APPROACH 8, revision 27): the entries are kept per member node (the nodes
+// Storage is sparse: the entries are kept per member node (the nodes
 // with at least one entry, ascending, and their offsets), never as an N + 1 offsets array, so a
 // flow's bundle costs O(its entries) whatever the graph's size. parent_offsets() presents the
 // from_csr shape on demand (a fresh N + 1 array); parents() and via_edges() are the stored

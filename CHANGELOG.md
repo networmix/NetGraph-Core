@@ -7,8 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The streamlined Core (breaking; integration branch `streamline`): one numeric domain (integer
-units), one flow core, one placement engine. It replaces the 0.11 API.
+A rebuilt Core (breaking): one numeric domain (integer units), one flow core, one placement
+engine. It replaces the 0.11 API.
 
 ### Changed
 
@@ -20,10 +20,9 @@ units), one flow core, one placement engine. It replaces the 0.11 API.
   unit values, the shapes, zero or negative costs, the remaining bounds including the cost-sum
   guard), on the exact integers also beyond int64. Accessors return read-only NumPy views that
   keep their graph alive, also when empty.
-  Construction uses stable counting passes: expected linear in edges plus nodes for bounded,
-  well-distributed distinct costs. It sorts all costs above 65,536 distinct costs or when the
-  cumulative hash-probe budget is exhausted. An edgeless graph needs validation and two
-  zero-filled offset arrays. Moving a graph no longer allocates.
+  Construction numbers the edges by counting sort, in expected time linear in edges plus nodes
+  for typical costs; above 65,536 distinct costs, or when the hash table that ranks the costs
+  examines too many slots, it sorts all costs instead. Moving a graph no longer allocates.
   `Eligibility` is built from excluded node ids and EdgeIds, with `Eligibility.intersect(a, b)`.
   `to_units` (round half up) and `as_float` are the only conversions between physical values and
   units.
@@ -36,16 +35,16 @@ units), one flow core, one placement engine. It replaces the 0.11 API.
   ledger: a baseline in units (validated within `[0, capacity_units]`), records as snapshots in
   FlowId order (`records()`, `record(flow_id)` with `FlowId = (ledger uid, id)`, ids never
   reused), `capacity_units()`, `residual()`, `allocated()`, `bottleneck(sources, elig)`,
-  `reset()` and `copy()` with the lifetime table (bound and orphaned records; reset and copy
-  rejected while a policy is bound). `FlowRecord` carries the flow's endpoints as sets,
+  `reset()` and `copy()` (both rejected while a policy is bound; `reset()` clears the records a
+  destroyed policy left behind). `FlowRecord` carries the flow's endpoints as sets,
   placement, admission, bundle (`PredDAG`), route cost, `offered` (Lossy only), delivery and
-  per-edge allocations and drops; counters are 128-bit (exact Python ints). The ledger is
-  mutated only through policies.
+  per-edge allocations and drops; counters are 128-bit (exact Python ints). Policies place and
+  remove flows; `reset()` replaces an unbound ledger's baseline and clears its records.
 - **Kernels**: `FlowPlacement` (`MAX_FLOW`, `WEIGHTED`, `EQUAL_BALANCED`) and `Admission`
-  (`LOSSLESS`, `LOSSY`). MaxFlow solves the flow core on the flow's split graph over the residual
-  plus its own allocation; Weighted apportions by highest averages (D'Hondt, EdgeId ties) over
-  weights frozen at creation from `priority`; EqualBalanced by round robin from the lowest
-  EdgeId; Lossy splits each offer per call and records transit drops.
+  (`LOSSLESS`, `LOSSY`). `MAX_FLOW` re-solves the flow with the flow core on its route over the free
+  capacity plus its own allocation; `WEIGHTED` splits in proportion to weights fixed at creation
+  from `priority` (highest averages, D'Hondt, EdgeId ties); `EQUAL_BALANCED` splits equally by
+  round robin from the lowest EdgeId; Lossy splits each offer per call and records transit drops.
 - **Policies**: `FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)`
   is the one placement engine. `FlowPolicyConfig(routing=..., placement=..., admission=...,
   selection=...)` has four explicit axes; the routing is `CostOnly()`, `CapacityAware(...)`
@@ -57,27 +56,31 @@ units), one flow core, one placement engine. It replaces the 0.11 API.
   the residual plus the policy's own allocation, and returns `PlacementResult` (`placed`,
   `remaining`, `termination`, `local_outcomes`, `routes_changed`, `weights_changed`, `drops`,
   Global's `cost_distribution`, and `edge_flows`, `residual`, `bottleneck` and Global's
-  `min_cut` when requested through `OutputOptions`). Validation precedes the zero-volume shortcut.
+  `min_cut` when requested through `OutputOptions`). A request of 0 is validated like any other.
   `remove()`, `records()`, `record(flow_id)` (the policy's own records), `placed_demand()` and
   `usable_bundles()` complete the policy.
-- **Failure guarantee**: every public call is all-or-nothing up to its caller, an allocation
-  failure included, across worker threads and the Python result. Two limits: the pybind11 object
-  machinery (a construction or conversion outside the staged calls allocates through
-  `make_new_instance`, which does not check `tp_alloc`: a Python allocation failure there
-  crashes the process, Core state unchanged), and a supplied building `DagCache`, a memo that
-  keeps the complete entries and statistics of the lookups that succeeded before a failure.
+- **Failure guarantee**: every public call either completes or raises and changes nothing, also
+  when memory runs out, a worker thread fails or the Python result cannot be built. Two limits:
+  running out of memory inside pybind11's own object construction (outside the library's checked
+  result construction) may crash the process; a `DagCache` passed to the call: a building cache
+  keeps the complete entries and statistics of the lookups that succeeded before the failure, and
+  a frozen cache keeps its entries and changes none of its statistics, except one miss when the
+  call raised `DagCacheMiss`.
 - **Search**: `spf(graph, roots, SpfOptions(direction, selection, targets=None, residual=None,
   min_residual=1, elig=None))` returns `SpfResult`. It searches from a root set (every root at
-  distance 0), `Direction.FORWARD` or `REVERSE`. Without targets it settles every reachable node
-  and returns `costs` (`UNREACHABLE` for the nodes not reached) and the full DAG of tight edges,
+  distance 0), `Direction.FORWARD` or `REVERSE`. Without targets it finds the distance of every reachable
+  node and returns `costs` (`UNREACHABLE` for the nodes not reached) and the full DAG of tight edges,
   the edges on some shortest path. With targets it stops at the nearest targets' cost and
   returns `target_cost` and the DAG of the walks between the roots and a nearest target (for a
   reverse search, from the target to a root). With
-  `multipath=False` it returns the canonical single path: the one walk that minimises cost,
-  then the bottleneck under `PREFER_HIGHER_PRIORITY`, then hops, then the edge-id sequence. A
+  `multipath=False` it returns the canonical single path: the walk of lowest cost, then (under
+  `PREFER_HIGHER_PRIORITY` only) of highest bottleneck, the smallest priority value along it,
+  then of fewest hops, then of lexicographically smallest edge-id sequence; with
+  `multi_edge=False` each node pair is first reduced to one parallel member. A
   residual adds residual gating, which keeps only the edges with at least `min_residual`
-  residual units. Every search runs on one traversal core, with a bucket queue when the cost
-  width allows and a heap otherwise.
+  residual units. Every search runs on one traversal core, with a bucket queue (nodes grouped by
+  distance) when the largest edge cost is at most 65,535 times the costs' greatest common
+  divisor, and a binary heap otherwise.
 - **KSP and paths**: `ksp(graph, src, dst, KspOptions(k, selection, max_path_cost=None,
   residual=None, elig=None))` returns the K shortest simple paths as `(cost, Path)` pairs. They
   come in increasing (cost, -bottleneck under `PREFER_HIGHER_PRIORITY`, hops, edge ids) order,
@@ -86,26 +89,31 @@ units), one flow core, one placement engine. It replaces the 0.11 API.
   `resolve_to_paths(graph, dag, src, dst, split_parallel_edges=False, max_paths=None)` lists a
   DAG's walks in (cost, hops, edge ids) order.
 - **DagCache**: `DagCache(graph)` is keyed by the root set, the direction and the Eligibility.
-  Its values are the full static supports (immutable, shared, valid after `clear()`), and
+  Its values are the full static shortest-path DAGs (immutable, shared, valid after `clear()`), and
   `stats()` reports `hits`, `misses`, `entries`, `bytes` and `live_values`.
   - **Building mode:** one writer; a miss searches and inserts.
   - **Frozen mode:** `freeze()` makes the cache read-only and shareable by every worker of an
     evaluator. A frozen lookup miss raises `DagCacheMiss`, an exception the evaluators pass on
-    unchanged, never as a status. `clear()` raises when frozen, and `thaw()` returns to
-    building mode after the caller has joined every reader.
+    unchanged. `clear()` raises when frozen, and `thaw()` returns to building mode after the
+    caller has joined every reader.
 - **Evaluators**: `capacity(graph, sources, destinations, CapacityOptions(...))` (with Global
-  and MaxFlow the exact maximum flow, its marginal cost curve and its minimum cut),
+  and `MAX_FLOW` the exact maximum flow, its marginal cost curve and its minimum cut),
   `batch_capacity(graph, pairs, opts, per_pair_elig=None, workers=None)` (pair order; the lowest
-  failing index raises; a supplied cache needs `workers == 1`) and `sensitivity(graph, sources,
-  destinations, SensitivityOptions(...), workers=None)` (every candidate edge, the signed
-  unthresholded loss in units, unevaluable edges with their reason). The default worker counts
-  read `NGRAPH_CORE_BATCH_THREADS` and `NGRAPH_CORE_SENSITIVITY_THREADS` (1 when unset).
-- **Flow core**: one integer minimum-cost flow (successive shortest paths with potentials,
-  Dinic phases per cost tier, every edge its own arc, arcs at a node in ascending EdgeId) serves
-  Global routing, the MaxFlow kernel and the evaluators (the exact sensitivity model re-solves
-  each deletion from the baseline solve's final state); the private entry
-  `_netgraph_core._place_global_units` returns the value, the marginal cost curve, edge flows,
-  the residual minimum cut, the potentials and six operation counters.
+  failing index raises) and `sensitivity(graph, sources, destinations, SensitivityOptions(...),
+  workers=None)` (every candidate edge and its signed unthresholded loss in units; a failed
+  deletion fails the call). A supplied building cache needs `workers == 1`; a frozen cache is
+  shared by every worker. With `workers=None` the count is 1 when a cache is supplied, otherwise
+  `NGRAPH_CORE_BATCH_THREADS` and `NGRAPH_CORE_SENSITIVITY_THREADS` (an integer in [1, 4096];
+  1 when unset or invalid).
+- **Flow core**: one exact integer minimum-cost flow solver (successive shortest paths with
+  potentials, then Dinic phases for each cost level; each edge is its own arc, visited in
+  ascending EdgeId) serves Global routing, the `MAX_FLOW` kernel and the evaluators (sensitivity
+  repairs the baseline's solution for each removed edge instead of solving again); the private
+  entry `_netgraph_core._place_global_units` returns the value, the marginal cost curve, the edge
+  flows, the minimum cut, the potentials and six operation counters. The solver numbers its
+  network in `int32`, so a solve raises `ValueError`, before it sizes anything, on a network of
+  more than `INT32_MAX - 2` nodes or with more than `2^30 - 1` edges, sources and destinations
+  together; graphs of every accepted size still build and can be searched.
 - **C++ headers** (under `netgraph/core/`): `types.hpp`, `graph.hpp` (`Graph`, `to_units`,
   `as_float`; it includes `eligibility.hpp`), `eligibility.hpp`, `options.hpp` (the selection
   axes, `FlowPlacement`, `Admission`), `pred_dag.hpp`, `flow_record.hpp` (`FlowId`,
@@ -114,6 +122,14 @@ units), one flow core, one placement engine. It replaces the 0.11 API.
   queue choice `SpfQueue { Auto, Heap }` is a C++-only trailing parameter of `spf`); each
   compiles alone and includes no `detail/` header. Python spells the
   creation cap `MAX_FLOWS_PER_CALL` (C++ `kMaxFlowsPerCall`).
+- **Typing**: the package ships `__init__.pyi`, a type stub generated from the compiled module
+  (pybind11-stubgen with reviewed overrides: exact integer and array types, NumPy result
+  dtypes, optional values, and no constructor for the result classes the module refuses to
+  construct), next to `py.typed`. The stub carries the binding docstrings. `bash dev/stubs/run.sh
+  generate` regenerates it; `make stubs-check` checks it against a fresh generation, the wheel
+  and sdist contents, and typed client programs.
+- **Error messages**: the error for a finite request after `float('inf')` within an epoch no
+  longer cites a rule number.
 
 ### Removed
 
@@ -124,6 +140,15 @@ units), one flow core, one placement engine. It replaces the 0.11 API.
   batch max-flow and the previous sensitivity, the SPF memo and `StateStamp`, `kMinFlow`,
   `kEpsilon`, `constants.hpp`, and the profiling facility (the Python accessors, the C++ scopes
   and `NGRAPH_CORE_PROFILE`).
+- The hand-written typing module `netgraph_core/_docs.py`, replaced by the generated stub.
+- The sensitivity entry status (`SensitivityStatus`, `SensitivityEntry.status` and `.reason`):
+  Successful entries were always `EVALUATED`;
+  `SensitivityEntry.loss` is now always an int, and a failed deletion fails the call.
+
+### Fixed
+
+- Fixed double frees and leaks when native allocation fails while constructing Python result
+  wrappers for `spf`, `ksp` and `resolve_to_paths`; these failures now raise `MemoryError`.
 
 ## [0.11.0] - 2026-10-02
 

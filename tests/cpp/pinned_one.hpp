@@ -1,6 +1,6 @@
-// A manual placement as the contract defines it (APPROACH 8): a FlowPolicy with Pinned routing and
-// one bundle. The ledger and kernel tests drive the ledger through it and compare the real
-// PlacementResult.
+// A manual placement: a FlowPolicy with Pinned routing and one bundle. The ledger tests
+// (flow_ledger_tests.cpp, flow_ledger_fault_tests.cpp) drive the ledger through it and compare the
+// real PlacementResult.
 #pragma once
 
 #include <memory>
@@ -35,7 +35,6 @@ public:
     if (pe.cohorts.empty() || pe.cohorts.front().empty()) return std::nullopt;
     return FlowId {pe.fg.uid(), pe.cohorts.front().front().id};
   }
-  [[nodiscard]] Amount placed_demand() const { return policy_->placed_demand(); }
   [[nodiscard]] int usable_bundles() const { return policy_->usable_bundles(); }
   [[nodiscard]] const detail::KernelPlan* plan() const {
     const auto& pe = engine();
@@ -44,6 +43,8 @@ public:
   }
   [[nodiscard]] const Counter128& requested() const { return engine().requested; }
   [[nodiscard]] bool infinite() const { return engine().infinite; }
+  // The wrapped policy (for the shared comparators of state_comparators.hpp, such as epoch()).
+  [[nodiscard]] FlowPolicy& policy() { return *policy_; }
 
 private:
   [[nodiscard]] const detail::PolicyEngine& engine() const { return detail::PolicyAccess::engine(*policy_); }

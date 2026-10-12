@@ -1,4 +1,4 @@
-/* The integer ledger FlowLedger (APPROACH 8). */
+/* The integer ledger FlowLedger. */
 #pragma once
 
 #include <cstddef>
@@ -19,11 +19,11 @@ namespace detail {
 struct LedgerAccess;
 } // namespace detail
 
-// The ledger of one graph: an immutable baseline residual in units and the records of the
-// flows placed on it. The ledger is mutated only through policies (bound to it by the
-// internal entry points of detail::LedgerAccess); there is no public placement, removal or
-// reservation. Aggregates are exact: allocated() is the sum of every record's edges and
-// residual() = baseline - allocated(), both int64[E] snapshots in EdgeId order.
+// A ledger tracks the flows placed on one graph. Its baseline is the available capacity in
+// units before these flows; its residual is the capacity still unused. Policies alone place
+// or remove flows through detail::LedgerAccess; there is no public placement, removal or
+// reservation. allocated() is the exact sum of all records' edge amounts, and
+// residual() = baseline - allocated(); both return int64[E] snapshots in EdgeId order.
 //
 // Lifetime: the graph outlives the ledger (shared pointer), the ledger outlives its policies.
 // A ledger with bound policies cannot be copied, moved or reset. A copy of an unbound ledger
@@ -54,9 +54,10 @@ public:
   // One record; a FlowId of another ledger, a retired id or an unknown id throws
   // std::invalid_argument.
   [[nodiscard]] FlowRecord record(const FlowId& flow_id) const;
-  // Saturation diagnostic: the edges (statically eligible, capacity >= 1 unit) leaving the set
-  // reachable from the allowed sources over eligible forward arcs with residual >= 1 unit, in
-  // ascending EdgeId. Not a cut; empty when the sources reach everything they can.
+  // Saturation diagnostic: follow eligible forward edges with residual >= 1 unit from the
+  // allowed sources. Return statically eligible edges with capacity >= 1 unit leaving that
+  // reachable set, in ascending EdgeId; empty if no such edge remains. This is not a minimum-cut
+  // certificate: it does not follow reverse arcs that could cancel existing flow.
   [[nodiscard]] std::vector<EdgeId> bottleneck(std::span<const NodeId> sources, const Eligibility* elig = nullptr) const;
   // A new baseline (the capacities when absent); orphaned records and their allocations are
   // cleared and their ids retired. Rejected (std::invalid_argument) while a policy is bound.

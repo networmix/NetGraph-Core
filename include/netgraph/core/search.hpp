@@ -1,6 +1,6 @@
-/* The public search (APPROACH 5 and 6): spf from a set of roots, forward or reverse, with an
-   optional set of targets (anycast); ksp, the K shortest paths in the canonical order; and
-   resolve_to_paths, a DAG unfolded into explicit paths. */
+/* The public search: spf from a set of roots, forward or reverse,
+   with an optional set of targets (anycast); ksp, the K shortest paths in the canonical order;
+   and resolve_to_paths, a DAG unfolded into explicit paths. */
 #pragma once
 
 #include <cstdint>
@@ -16,20 +16,21 @@
 
 namespace netgraph::core {
 
-// The frontier queue of a search (C++ only; the results never depend on it). Auto takes the
-// monotone bucket queue when the graph's costs fit max_cost / max(1, cost_gcd) + 1 <= 65,536
-// buckets, else the binary heap; Heap always takes the heap. Both pop in (distance, node) order
-// and give identical results.
+// The queue holds nodes waiting for their shortest distance to be finalised (C++ only).
+// Auto groups them into cyclic distance buckets if max_cost / max(1, cost_gcd) + 1 <= 65,536;
+// cost_gcd is the greatest common divisor of edge costs. Otherwise use a binary heap, which
+// keeps the smallest key first; Heap always uses it. Both pop in (distance, node) order and
+// give identical results. The bucket limit bounds bucket storage.
 enum class SpfQueue { Auto, Heap };
 
-// The options of spf (APPROACH 6). direction and selection are explicit; targets absent is a
-// full search (every reachable node settled), present a search that stops at the nearest
-// targets (anycast). A supplied residual (int64[E] in EdgeId order, each entry in
-// [0, capacity_units]) is borrowed for the call; it adds residual gating at min_residual units
-// and supplies the residual values of the selected priority. min_residual (an integer >= 1) gates
-// a supplied residual only: static eligibility (the Eligibility, capacity >= 1 unit) is
-// unconditional. The constructor rejects a direction outside its enumeration
-// (std::invalid_argument naming the field); the fields stay assignable, so spf checks them again.
+// spf requires direction and selection. Without targets, finalise every reachable node's
+// shortest distance; with targets, stop at the nearest targets (anycast).
+// A supplied residual gives unused capacity: int64[E] in EdgeId order, each in
+// [0, capacity_units], borrowed for this call. Only edges with residual >= min_residual are
+// usable, and these values also supply residual-based priorities. min_residual must be >= 1
+// and applies only when residual is supplied. Eligibility and capacity >= 1 unit always apply.
+// Invalid direction enum values throw std::invalid_argument naming the field. Fields remain
+// assignable, so spf validates them again.
 struct SpfOptions {
   SpfOptions(Direction direction_, PathSelection selection_);
   Direction direction;
@@ -63,13 +64,13 @@ struct SpfResult {
 [[nodiscard]] SpfResult spf(const Graph& g, std::span<const NodeId> roots, const SpfOptions& opts,
                             SpfQueue queue = SpfQueue::Auto);
 
-// The options of ksp (APPROACH 6, rule 10). k (>= 1) and selection are explicit; the selection's
-// multi_edge is the member rule (Expand keeps every eligible parallel member, Collapse one per
-// (u, v) pair by select_adjacency) and multipath is ignored. max_path_cost: an inclusive ceiling,
-// Absolute(c) (c >= 0) or Stretch(f) (f finite in [1, inf), read as the exact dyadic rational it
-// is) times the static shortest cost of the member graph under the Eligibility, residual ignored.
-// A supplied residual (validated as for spf, borrowed for the call) gates at 1 unit and supplies
-// the priority values. The fields stay assignable; ksp checks them.
+// ksp requires k >= 1 and a selection. multi_edge = true keeps all eligible parallel edges;
+// false keeps one per (u, v) pair by select_adjacency. multipath is ignored.
+// max_path_cost is inclusive: Absolute(c), c >= 0, or Stretch(f), finite f in [1, inf), times
+// the static shortest cost under the Eligibility, ignoring residual capacity. f is compared
+// exactly, as for CostCeiling.
+// A residual is validated as for spf and borrowed for the call; edges need at least 1 unused
+// unit, and it supplies priority values. Fields remain assignable, so ksp validates them.
 struct KspOptions {
   KspOptions(std::int64_t k_, PathSelection selection_);
   std::int64_t k;
@@ -79,7 +80,7 @@ struct KspOptions {
   const Eligibility* elig {nullptr};
 };
 
-// The K shortest simple src -> dst paths of the member graph in increasing (cost, -bottleneck
+// The K shortest src -> dst paths with no repeated node, ordered by (cost, -bottleneck
 // under PreferHigherPriority, hops, edge-id sequence), the bottleneck being the minimum priority
 // value along a path: the minimal prefix of that order, truncated at k and at the ceiling. Each
 // path is a Path of single-member hops with its cost. Validates in this order before any work
@@ -88,10 +89,11 @@ struct KspOptions {
 // Stretch ceiling, or no path gives an empty list.
 [[nodiscard]] std::vector<std::pair<Cost, Path>> ksp(const Graph& g, NodeId src, NodeId dst, const KspOptions& opts);
 
-// The src -> dst walks of a DAG (APPROACH 5) in increasing (cost, hops, edge-id sequence): a hop's
+// The src -> dst walks of a DAG in increasing (cost, hops, edge-id sequence): a hop's
 // cost is its cheapest member's, and a grouped hop is represented in the key by its lowest member
 // id. split_parallel_edges = false keeps every parallel member of the DAG's (u, v) pair in one hop
-// (members ascending); true gives one path per member combination, in the same order. max_paths
+// (members ascending); true gives one path per member combination, sorted by that path's own
+// (cost, hops, edge-id sequence). max_paths
 // (>= 1) truncates the sorted list; absent, every walk. Validates (std::invalid_argument): a DAG of
 // another graph, src and dst in range, src == dst, max_paths >= 1. An endpoint outside the DAG, or
 // no walk, gives an empty list.

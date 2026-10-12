@@ -1,5 +1,5 @@
 /* Internal access to a DagCache: its mode (the evaluators' rule for a supplied cache) and the
-   frozen statistics of one public call (APPROACH 13; NOTES R27). */
+   frozen statistics of one public call. */
 #pragma once
 
 #include <atomic>
@@ -16,7 +16,7 @@ namespace netgraph::core::detail {
 class FrozenTally;
 
 struct DagCacheAccess {
-  // Whether the cache is frozen (APPROACH 10: a frozen cache may be shared by every worker).
+  // Whether the cache is frozen (a frozen cache may be shared by every worker).
   [[nodiscard]] static bool frozen(const DagCache& cache) noexcept { return cache.frozen_; }
   // A lookup inside a public call (FrozenTally): a frozen hit is recorded in `tally` instead of
   // the cache, a frozen miss is counted by the call's boundary (frozen_call); a building cache
@@ -32,14 +32,11 @@ struct DagCacheAccess {
   static void add_miss(DagCache& cache) noexcept { cache.misses_.fetch_add(1, std::memory_order_relaxed); }
 };
 
-// The frozen-cache statistics of one public call that reads a supplied cache (NOTES R27). A
-// frozen cache's counters are observable state under the all-or-nothing rule (APPROACH 13; only
-// a supplied building cache, a memo, keeps the statistics of a failed call: limit 2). So inside
-// the call a frozen hit is recorded here, and the call's boundary (frozen_call) publishes the
-// hits after the call's last failing step, its Python result included; a failed call drops
-// them. A call that raises DagCacheMiss counts that one miss (R20), whatever its workers did. All
-// workers of the call record into the one atomic count; every call has its own tally, so the
-// increments of concurrent successful calls are all kept.
+// Collect one public call's frozen-cache hits here; publish them only after all fallible work,
+// including the Python result, succeeds. Failure discards the hits, except that DagCacheMiss
+// records one miss regardless of its workers' lookups. A building cache keeps its statistics
+// even on failure. Workers share this call's atomic tally; separate calls have separate
+// tallies, so concurrent successful calls keep all their increments.
 class FrozenTally {
 public:
   explicit FrozenTally(DagCache* cache) noexcept : cache_(cache) {}

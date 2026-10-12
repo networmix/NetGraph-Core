@@ -1,10 +1,10 @@
 /*
-  The evaluators of APPROACH 11: capacity() is place(+inf) of a FlowPolicy on a fresh ledger;
-  batch_capacity() runs it per pair and sensitivity() per deleted candidate edge, on `workers`
-  threads (results in input order; the lowest index's exception wins). Sensitivity evaluates a
-  Global deletion by the flow core's deletion re-solve from the baseline solve's final state
-  (APPROACH 2.2) and gives a CostOnly edge outside the baseline's routes loss 0 without a
-  placement (a result-equivalent predicate); every other deletion is placed on a fresh ledger.
+  capacity() is place(+inf) on a fresh ledger. batch_capacity() runs it per pair and
+  sensitivity() per candidate deletion on `workers` threads; results follow input order and
+  the lowest failing index supplies the exception. Global repairs the baseline flow after
+  each deletion. CostOnly skips an edge that no roster source's reachable part of the static
+  shortest-path support contains: removing it changes no route or amount. Other deletions use
+  fresh ledgers.
 */
 #include "netgraph/core/evaluators.hpp"
 
@@ -26,7 +26,6 @@
 #include "netgraph/core/detail/flow_core.hpp"
 #include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
-#include "netgraph/core/detail/private_hooks.hpp"
 
 namespace netgraph::core {
 
@@ -119,13 +118,16 @@ void run_indexed(std::size_t n, std::int32_t workers, const Graph& g, DagCache* 
   }
 }
 
-// CostOnly sensitivity: the edges of the baseline's routes. A source's route is read from the
-// part of the full static support reachable from it (projected by the selection on the values
-// of those edges; on a fresh ledger the creation view is the capacity). Deleting an edge
-// outside every such part leaves every roster source's distance and reachable support as they
-// were (distances only grow, and no shortest path of a reachable node used the edge), so every
-// route, and the placement over the same capacities, is unchanged: the loss is exactly 0 and
-// the deletion is not re-evaluated.
+// CostOnly sensitivity: the edges of the full static support (every edge on a static shortest
+// path to the destination set) reachable from the roster sources through support edges. This is
+// not only the baseline's selected routes. A source's route is read from the part of this set
+// reachable from it, then selected on the priority values of the working residual when that
+// source's flow is created; earlier creations may already have used capacity, even on a fresh
+// ledger. Deleting an edge outside the set leaves every reachable node's distance and support
+// edges as they were (distances only grow, and no shortest path of a reachable node used the
+// edge). So, creation by creation in their order, each sees the same reachable support and the
+// same residual, and every route and placement is unchanged: the loss is exactly 0 and the
+// deletion is not re-evaluated.
 std::vector<std::uint8_t> reachable_support(const Graph& g, const detail::PolicyEngine& pe) {
   const auto num_edges = static_cast<std::size_t>(g.num_edges());
   std::vector<std::uint8_t> in_support(num_edges, 0);
@@ -271,33 +273,19 @@ SensitivityResult sensitivity_in_call(const Graph& g, std::span<const NodeId> so
     const EdgeId e = candidates[i];
     auto& entry = out.entries[i];
     entry.edge = e;
+    // A failed deletion fails the call: run_indexed raises the lowest failing candidate's exception.
     if (global) {
-      // An exact deletion on valid inputs always has a feasible optimum: a failure propagates.
       entry.loss = base - resolvers[t].resolve(e).value;
-      entry.status = SensitivityStatus::Evaluated;
       return;
     }
-    try {
-#if NETGRAPH_CORE_PRIVATE_HOOKS
-      if (detail::sensitivity_fail_edge().load(std::memory_order_relaxed) == e) {
-        throw std::runtime_error("injected model exception for the deletion of edge " + std::to_string(e) +
-                                 " (test hook)");
-      }
-#endif
-      if (cost_only && on_route[static_cast<std::size_t>(e)] == 0) {
-        entry.loss = 0;
-      } else {
-        const EdgeId one[1] = {e};
-        Eligibility deleted = g.eligibility({}, one);
-        if (opts.elig != nullptr) deleted = Eligibility::intersect(*opts.elig, deleted);
-        const auto r = evaluate(g, sources, destinations, opts.cfg, &deleted, &cache, OutputOptions {}, tally);
-        entry.loss = base - r.placed;
-      }
-      entry.status = SensitivityStatus::Evaluated;
-    } catch (const std::runtime_error& ex) {
-      entry.loss = std::nullopt;
-      entry.status = SensitivityStatus::Unevaluable;
-      entry.reason = ex.what();
+    if (cost_only && on_route[static_cast<std::size_t>(e)] == 0) {
+      entry.loss = 0;
+    } else {
+      const EdgeId one[1] = {e};
+      Eligibility deleted = g.eligibility({}, one);
+      if (opts.elig != nullptr) deleted = Eligibility::intersect(*opts.elig, deleted);
+      const auto r = evaluate(g, sources, destinations, opts.cfg, &deleted, &cache, OutputOptions {}, tally);
+      entry.loss = base - r.placed;
     }
     if (&cache != opts.cache) cache.clear();
   });
@@ -315,7 +303,7 @@ std::int32_t default_workers(bool sensitivity) noexcept {
 
 } // namespace detail
 
-// Each evaluator is one public call on a supplied frozen cache's statistics (NOTES R27).
+// Each evaluator is one public call on a supplied frozen cache's statistics.
 PlacementResult capacity(const Graph& g, std::span<const NodeId> sources,
                          std::span<const NodeId> destinations, const CapacityOptions& opts) {
   return detail::frozen_call(opts.cache, [&](detail::FrozenTally& tally) {

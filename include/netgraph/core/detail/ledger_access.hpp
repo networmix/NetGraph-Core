@@ -1,9 +1,10 @@
 /* The ledger's internal entry points: what a policy uses to place on and remove from it.
 
-   APPROACH 8: the ledger is mutated only through policies. A policy binds (an owner id), then
-   every call ends with one atomic exchange of all of its records (`commit`); remove() reverts
-   its allocations and retires its ids (`detach`); a policy destroyed without remove() leaves
-   its records as orphans (`release`). None of this is public API.
+   Policies place and remove flows through these entry points; an unbound ledger can also be
+   reset, through its public reset(), which is not one of them. A policy binds (an owner id),
+   then every call ends with one atomic exchange of all of its records (`commit`); remove()
+   reverts its allocations and retires its ids (`detach`); a policy destroyed without remove()
+   leaves its records as orphans (`release`). None of this is public API.
 */
 #pragma once
 

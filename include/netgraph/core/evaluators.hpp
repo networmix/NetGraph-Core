@@ -1,12 +1,11 @@
-/* The evaluators of APPROACH 11: capacity (a FlowPolicy placement of +inf on a fresh ledger; the
-   exact maximum flow is capacity() with routing Global and placement MaxFlow), batch_capacity
-   (capacity per pair) and sensitivity (the loss of deleting each candidate edge). */
+/* The evaluators: capacity (a FlowPolicy placement of +inf on
+   a fresh ledger; the exact maximum flow is capacity() with routing Global and placement
+   MaxFlow), batch_capacity (capacity per pair) and sensitivity (the loss of deleting each
+   candidate edge). */
 #pragma once
 
 #include <cstdint>
-#include <optional>
 #include <span>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -33,15 +32,11 @@ struct SensitivityOptions {
   OutputOptions outputs {};
 };
 
-enum class SensitivityStatus { Evaluated, Unevaluable };
-
 // One candidate edge: loss = baseline placed - placed without the edge (signed, in units, never
-// thresholded); an unevaluable deletion has no loss and the model exception's message in reason.
+// thresholded).
 struct SensitivityEntry {
   EdgeId edge {0};
-  std::optional<Amount> loss {};
-  SensitivityStatus status {SensitivityStatus::Evaluated};
-  std::string reason {};
+  Amount loss {0};
 };
 
 struct SensitivityResult {
@@ -57,41 +52,38 @@ struct SensitivityResult {
 [[nodiscard]] PlacementResult capacity(const Graph& g, std::span<const NodeId> sources,
                                        std::span<const NodeId> destinations, const CapacityOptions& opts);
 
-// capacity() per pair, in pair order, with opts.elig intersected with per_pair_elig[i] (null
-// entries allowed; an empty span means none: the Python binding checks the length of every
-// sequence it is given). Validated before any worker starts, the arguments first (workers >= 1,
-// opts.elig's and the cache's graph, a supplied building cache only with workers == 1: it has
-// one writer, while a frozen cache is shared by every worker; Pinned rejected: bundles bind
-// endpoints; the per_pair_elig length; the
-// configuration), then each pair completely in pair order (its endpoint sets, their overlap,
-// its Eligibility's graph), so the lowest failing pair index is reported. Without a supplied
-// cache each worker owns a private building cache, allocated before any thread starts. A worker
-// exception aborts the batch and the exception of the lowest pair index is raised; an empty
-// batch returns an empty list. A frozen cache's DagCacheMiss propagates unchanged; a per-pair
-// intersection that differs from both operands has a fresh uid, absent from a frozen cache
-// (APPROACH 10: already effective per-pair values with a null common value, or a common value
-// containing them, reuse the prepopulated operand).
+// Run capacity() per pair, returning results in pair order. Intersect opts.elig with
+// per_pair_elig[i]; null entries are allowed, and an empty span supplies no per-pair values.
+// The Python binding checks the length of every supplied sequence.
+// Before starting workers, validate in order: workers >= 1; opts.elig's and the cache's graph;
+// a supplied building cache with workers > 1; Pinned (rejected because bundles bind endpoints);
+// the configuration; and per_pair_elig's length. Then validate each pair completely in index
+// order: endpoint sets, overlap, Eligibility's graph. This reports the lowest failing pair index.
+// A supplied building cache requires workers == 1 because it allows one writer. Workers share
+// a supplied frozen cache, and the one worker uses a supplied building cache; without a supplied
+// cache each worker gets a private building cache before threads start.
+// A worker exception aborts the batch; rethrow the exception from the lowest pair index.
+// An empty batch returns an empty list. DagCacheMiss always propagates unchanged.
+// An intersection equal to an operand reuses its uid and any prepopulated cache entry.
+// Otherwise it gets a fresh uid, absent from a frozen cache. To reuse entries, supply already
+// effective per-pair values with no common Eligibility, or one that contains them.
 [[nodiscard]] std::vector<PlacementResult> batch_capacity(
     const Graph& g, const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>>& pairs,
     const CapacityOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers);
 
-// The baseline capacity() and one entry per candidate edge: under Global the edges with
-// positive flow in the baseline; under every other model every edge opts.elig allows with at
-// least 1 unit of static capacity. A loss is the baseline's placed minus the placed amount of
-// capacity() with the edge deleted (opts.elig without it; the same configuration and cache).
-// Global evaluates a deletion by the flow core's deletion re-solve from the baseline solve's
-// final state (APPROACH 2.2: the minimum-cost flow of the maximum value without the edge, that
-// value exactly), on one copy of the state per worker; an exact deletion on valid inputs always
-// has an optimum, so any failure there propagates. CostOnly gives an edge outside every roster
-// source's reachable part of the static support loss 0 without a placement, a result-equivalent
-// predicate (no route uses the edge, so the deletion changes no route and no amount); every
-// other deletion is placed on a fresh ledger, where a model exception (std::runtime_error) makes
-// the entry unevaluable with its message as the reason. Every other exception propagates (the
-// lowest candidate's). Workers and the cache
-// rule as batch_capacity; a worker's private cache is cleared per candidate (fresh Eligibility
-// uids never hit). CostOnly is the one model reading the cache: with a frozen cache a
-// placed deletion raises DagCacheMiss (a fresh uid), which propagates unchanged (it is not a
-// std::runtime_error, so never `unevaluable`); the other models read no cache.
+// Return baseline capacity() and one entry per candidate edge. Global candidates carry
+// positive baseline flow; other models use every edge opts.elig allows with capacity >= 1 unit.
+// Loss is baseline placed minus placed with that edge deleted, using the same config and cache.
+// Global starts from the baseline solve's final state and repairs it after deleting the edge,
+// using one state copy per worker. The result is the exact maximum flow at minimum cost.
+// CostOnly skips a deletion when no roster source's reachable part of the static shortest-path
+// support contains the edge: no route uses it, so loss is 0. All other deletions use a fresh
+// ledger. A failed deletion fails the call (no partial result), raising the exception of the
+// lowest failing candidate index.
+// Worker and cache rules are as in batch_capacity. Clear each worker's private cache per
+// candidate because deletion Eligibility uids are fresh and cannot reuse entries.
+// Only CostOnly reads the cache. A deletion that needs placement with a frozen cache raises
+// DagCacheMiss for its fresh uid.
 [[nodiscard]] SensitivityResult sensitivity(const Graph& g, std::span<const NodeId> sources,
                                             std::span<const NodeId> destinations, const SensitivityOptions& opts,
                                             std::int32_t workers);

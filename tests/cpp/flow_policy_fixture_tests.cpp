@@ -1,17 +1,21 @@
-// Prototype 2's 59 fixtures replayed through FlowPolicy (APPROACH 8, 9).
+// The 59 fixtures of the independent reference replayed through FlowPolicy.
 //
-// tests/data/policy_fixtures.json was exported from the reference, prototype 2 of the design tree
-// (its "source" names it; the design tree is untracked by design; its maintained exporter is
-// equivalence/export_policy_fixtures.py there): every ledger, policy and call
-// of every fixture in order, with the prototype's values after each operation. The replay checks
+// tests/data/policy_fixtures.json was exported from the independent reference (its
+// frozen copy, the exporter, the regeneration check and the meaning of the data's historical
+// "source" string: tests/reference/policy/README.md): every ledger, policy and call of every
+// fixture in order, with the reference's values after each operation. The replay checks
 // every one of them on the engine: each call's result (placed, remaining, termination, local
-// outcomes, flags, drops, the cost curve, the requested outputs), its trace (prototype 2's keys),
+// outcomes, flags, drops, the cost curve, the requested outputs), its trace (the reference's keys),
 // the ledger after it (allocations, residuals, every record field, next FlowId, owners) and the
 // policy state (roster, requested, +inf, placed demand, usable bundles, per source the flows'
-// ids, routes, T, deliveries, allocations, members and weights). An operation the prototype
-// rejects must throw here too (the messages differ). Normalised on both sides: the T_max probe
-// counts, the flow core's operation counters and ledger uids. The replay needs the private hooks
-// (the trace and the creation cap; NETGRAPH_CORE_PRIVATE_HOOKS) and is skipped without them.
+// ids, routes, T, deliveries, allocations, members and weights). An operation the reference
+// rejects must throw std::invalid_argument here too (the messages differ); any other exception
+// is a failure. Normalised on both sides: the T_max probe
+// counts, the flow core's operation counters and ledger uids. The trace and the creation cap need
+// the private hooks (NETGRAPH_CORE_PRIVATE_HOOKS): without them, in the shipped configuration, the
+// replay compares everything but the trace on the 58 fixtures that keep the default cap, and the
+// corruption test corrupts what that replay compares: every section but the trace, in those 58
+// fixtures.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -21,8 +25,11 @@
 #include <deque>
 #include <fstream>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
+#include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -44,10 +51,10 @@
 #error "NETGRAPH_CORE_TEST_DATA (the tests/data directory) must be defined by the build"
 #endif
 
-#if NETGRAPH_CORE_PRIVATE_HOOKS
-
 using namespace netgraph::core;
 using detail::LedgerAccess;
+using test::Int128;
+using test::UInt128;
 
 namespace {
 
@@ -57,7 +64,7 @@ struct J {
   enum class K { Null, Bool, Int, Dbl, Str, Arr, Obj };
   K k {K::Null};
   bool b {false};
-  __int128 i {0};
+  Int128 i {0};
   double d {0.0};
   std::string s {};
   std::vector<J> a {};
@@ -70,7 +77,7 @@ struct J {
     j.b = v;
     return j;
   }
-  static J integer(__int128 v) {
+  static J integer(Int128 v) {
     J j;
     j.k = K::Int;
     j.i = v;
@@ -92,6 +99,7 @@ struct J {
     j.k = K::Obj;
     return j;
   }
+  // Builders for the replay.
   J& set(const std::string& key, J v) {
     k = K::Obj;
     o.emplace_back(key, std::move(v));
@@ -113,50 +121,13 @@ struct J {
     if (p == nullptr) throw std::runtime_error("missing key " + key);
     return *p;
   }
+  // Readers for the replay.
   [[nodiscard]] bool is_null() const { return k == K::Null; }
   [[nodiscard]] std::int64_t int64() const {
     if (k != K::Int) throw std::runtime_error("not an integer");
     return static_cast<std::int64_t>(i);
   }
 };
-
-std::string int128_text(__int128 v) {
-  if (v == 0) return "0";
-  const bool neg = v < 0;
-  unsigned __int128 u = neg ? static_cast<unsigned __int128>(-(v + 1)) + 1 : static_cast<unsigned __int128>(v);
-  std::string out;
-  while (u != 0) {
-    out.push_back(static_cast<char>('0' + static_cast<int>(u % 10)));
-    u /= 10;
-  }
-  if (neg) out.push_back('-');
-  return {out.rbegin(), out.rend()};
-}
-
-std::string dump(const J& j) {
-  switch (j.k) {
-    case J::K::Null: return "null";
-    case J::K::Bool: return j.b ? "true" : "false";
-    case J::K::Int: return int128_text(j.i);
-    case J::K::Dbl: {
-      std::ostringstream os;
-      os << j.d;
-      return os.str();
-    }
-    case J::K::Str: return "\"" + j.s + "\"";
-    case J::K::Arr: {
-      std::string out = "[";
-      for (std::size_t n = 0; n < j.a.size(); ++n) out += (n ? "," : "") + dump(j.a[n]);
-      return out + "]";
-    }
-    case J::K::Obj: {
-      std::string out = "{";
-      for (std::size_t n = 0; n < j.o.size(); ++n) out += (n ? "," : "") + ("\"" + j.o[n].first + "\":") + dump(j.o[n].second);
-      return out + "}";
-    }
-  }
-  return "?";
-}
 
 class Parser {
 public:
@@ -285,7 +256,7 @@ private:
       j.d = std::strtod(num.c_str(), nullptr);
       return j;
     }
-    __int128 v = 0;
+    Int128 v = 0;
     const bool neg = num[0] == '-';
     for (std::size_t n = neg ? 1 : 0; n < num.size(); ++n) v = v * 10 + (num[n] - '0');
     return J::integer(neg ? -v : v);
@@ -306,6 +277,54 @@ const J& data() {
     return Parser(text).parse();
   }();
   return d;
+}
+
+} // namespace
+
+TEST(PolicyFixtures, TheDataHoldsEveryReferenceFixture) {
+  const J& d = data();
+  EXPECT_EQ(d.at("format").s, "p2-fixtures/1");
+  EXPECT_EQ(d.at("fixtures").a.size(), 59U);
+}
+
+namespace {
+
+std::string int128_text(Int128 v) {
+  if (v == 0) return "0";
+  const bool neg = v < 0;
+  UInt128 u = neg ? static_cast<UInt128>(-(v + 1)) + 1 : static_cast<UInt128>(v);
+  std::string out;
+  while (u != 0) {
+    out.push_back(static_cast<char>('0' + static_cast<int>(u % 10)));
+    u /= 10;
+  }
+  if (neg) out.push_back('-');
+  return {out.rbegin(), out.rend()};
+}
+
+std::string dump(const J& j) {
+  switch (j.k) {
+    case J::K::Null: return "null";
+    case J::K::Bool: return j.b ? "true" : "false";
+    case J::K::Int: return int128_text(j.i);
+    case J::K::Dbl: {
+      std::ostringstream os;
+      os << j.d;
+      return os.str();
+    }
+    case J::K::Str: return "\"" + j.s + "\"";
+    case J::K::Arr: {
+      std::string out = "[";
+      for (std::size_t n = 0; n < j.a.size(); ++n) out += (n ? "," : "") + dump(j.a[n]);
+      return out + "]";
+    }
+    case J::K::Obj: {
+      std::string out = "{";
+      for (std::size_t n = 0; n < j.o.size(); ++n) out += (n ? "," : "") + ("\"" + j.o[n].first + "\":") + dump(j.o[n].second);
+      return out + "}";
+    }
+  }
+  return "?";
 }
 
 // Structural equality; objects by key set, arrays in order. `why` names the first difference.
@@ -364,7 +383,7 @@ bool same(const J& a, const J& b, const std::string& path, std::string& why) {
 template <class T>
 J ints(const T& v) {
   J j = J::arr();
-  for (const auto& x : v) j.push(J::integer(static_cast<__int128>(x)));
+  for (const auto& x : v) j.push(J::integer(static_cast<Int128>(x)));
   return j;
 }
 
@@ -373,15 +392,15 @@ J pairs(const std::vector<std::pair<A, B>>& v) {
   J j = J::arr();
   for (const auto& [x, y] : v) {
     J p = J::arr();
-    p.push(J::integer(static_cast<__int128>(x)));
-    p.push(J::integer(static_cast<__int128>(y)));
+    p.push(J::integer(static_cast<Int128>(x)));
+    p.push(J::integer(static_cast<Int128>(y)));
     j.push(std::move(p));
   }
   return j;
 }
 
-__int128 wide(const Counter128& c) {
-  return (static_cast<__int128>(c.hi) << 64) | static_cast<__int128>(c.lo);
+Int128 wide(const Counter128& c) {
+  return test::int128_of(static_cast<std::int64_t>(c.hi), c.lo);
 }
 
 const char* placement_name(FlowPlacement p) {
@@ -567,21 +586,19 @@ std::vector<NodeId> endpoints(const J& j) {
   return int32s(j);
 }
 
-std::shared_ptr<const PredDAG> dag_of(const Graph& g, std::vector<EdgeId> edges) {
-  std::sort(edges.begin(), edges.end());
-  std::vector<std::vector<EdgeId>> per(static_cast<std::size_t>(g.num_nodes()));
-  for (EdgeId e : edges) per[static_cast<std::size_t>(g.edge_dst()[static_cast<std::size_t>(e)])].push_back(e);
-  std::vector<std::int32_t> offsets {0};
-  std::vector<NodeId> parents;
-  std::vector<EdgeId> via;
-  for (const auto& entries : per) {
-    for (EdgeId e : entries) {
-      parents.push_back(g.edge_src()[static_cast<std::size_t>(e)]);
-      via.push_back(e);
-    }
-    offsets.push_back(static_cast<std::int32_t>(via.size()));
+// A name in the data that the replay does not know: the data and the replay disagree, which is a
+// failure of the replay, never a rejection by the engine.
+struct UnknownName : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
+// The value the data names `name` among `values`; any other name throws UnknownName.
+template <typename T>
+T named(const std::string& what, const std::string& name, std::initializer_list<std::pair<std::string, T>> values) {
+  for (const auto& [n, v] : values) {
+    if (n == name) return v;
   }
-  return std::make_shared<const PredDAG>(PredDAG::from_csr(g, offsets, parents, via));
+  throw UnknownName("the data names an unknown " + what + " (" + name + ")");
 }
 
 FlowPolicyConfig config_of(const Graph& g, const J& c) {
@@ -592,7 +609,7 @@ FlowPolicyConfig config_of(const Graph& g, const J& c) {
     routing = Global {};
   } else if (kind == "Pinned") {
     Pinned p;
-    for (const auto& b : r.at("bundles").a) p.bundles.push_back(dag_of(g, int32s(b)));
+    for (const auto& b : r.at("bundles").a) p.bundles.push_back(test::dag_of(g, int32s(b)));
     routing = std::move(p);
   } else if (kind == "CapacityAware") {
     CapacityAware ca;
@@ -602,8 +619,10 @@ FlowPolicyConfig config_of(const Graph& g, const J& c) {
       const J& mc = r.at("max_path_cost");
       if (mc.a[0].s == "Absolute") {
         ca.max_path_cost = Absolute {mc.a[1].int64()};
-      } else {
+      } else if (mc.a[0].s == "Stretch") {
         ca.max_path_cost = Stretch {mc.a[1].k == J::K::Dbl ? mc.a[1].d : static_cast<double>(mc.a[1].int64())};
+      } else {
+        throw UnknownName("the data names an unknown cost ceiling (" + mc.a[0].s + ")");
       }
     }
     ca.min_flow_bandwidth = r.at("min_flow_bandwidth").int64();
@@ -614,34 +633,61 @@ FlowPolicyConfig config_of(const Graph& g, const J& c) {
                                     d.a[1].k == J::K::Dbl ? d.a[1].d : static_cast<double>(d.a[1].int64())};
     }
     routing = ca;
+  } else if (kind != "CostOnly") {
+    throw UnknownName("the data names an unknown routing (" + kind + ")");
   }
-  const std::string placement = c.at("placement").s;
-  const FlowPlacement fp = placement == "MaxFlow"    ? FlowPlacement::MaxFlow
-                           : placement == "Weighted" ? FlowPlacement::Weighted
-                                                     : FlowPlacement::EqualBalanced;
-  const Admission adm = c.at("admission").s == "Lossy" ? Admission::Lossy : Admission::Lossless;
+  const FlowPlacement fp = named<FlowPlacement>("placement", c.at("placement").s,
+                                                {{"MaxFlow", FlowPlacement::MaxFlow},
+                                                 {"Weighted", FlowPlacement::Weighted},
+                                                 {"EqualBalanced", FlowPlacement::EqualBalanced}});
+  const Admission adm = named<Admission>("admission", c.at("admission").s,
+                                         {{"Lossless", Admission::Lossless}, {"Lossy", Admission::Lossy}});
   const J& sel = c.at("selection");
-  const EdgeTieBreak tie =
-      sel.at("tie_break").s == "Deterministic" ? EdgeTieBreak::Deterministic : EdgeTieBreak::PreferHigherPriority;
-  const std::string pr = sel.at("priority").s;
-  const EdgePriority prio = pr == "Residual"   ? EdgePriority::Residual
-                            : pr == "Capacity" ? EdgePriority::Capacity
-                                               : EdgePriority::Headroom;
+  const EdgeTieBreak tie = named<EdgeTieBreak>(
+      "tie break", sel.at("tie_break").s,
+      {{"Deterministic", EdgeTieBreak::Deterministic}, {"PreferHigherPriority", EdgeTieBreak::PreferHigherPriority}});
+  const EdgePriority prio = named<EdgePriority>("priority", sel.at("priority").s,
+                                                {{"Residual", EdgePriority::Residual},
+                                                 {"Capacity", EdgePriority::Capacity},
+                                                 {"Headroom", EdgePriority::Headroom}});
   return FlowPolicyConfig {std::move(routing), fp, adm,
                            PathSelection(tie, prio, sel.at("multipath").b, sel.at("multi_edge").b)};
 }
 
+#if NETGRAPH_CORE_PRIVATE_HOOKS
 // Restores the creation cap whatever happens.
 struct CapGuard {
   std::int64_t old {detail::max_flows_per_call().load()};
   ~CapGuard() { detail::max_flows_per_call().store(old); }
 };
+#endif
 
-// Replays one fixture; returns the failures (empty when every value matches).
-std::vector<std::string> replay(const J& fx) {
+// Whether every call of the fixture keeps the default creation cap (without the hooks the cap
+// cannot be lowered, so a fixture that lowers it replays only with them).
+bool default_cap(const J& fx) {
+  return std::all_of(fx.at("ops").a.begin(), fx.at("ops").a.end(), [](const J& op) {
+    const J* cap = op.get("cap");
+    return cap == nullptr || cap->int64() == kMaxFlowsPerCall;
+  });
+}
+
+// Replays one fixture; returns the failures (empty when every value matches). `compared`, when
+// given, counts the expectations compared. `after_rejected_call`, when given, runs with the
+// operation's index and its policy right after each call the reference rejects, before the policy
+// is compared with its state before the call (the negative control of that comparison changes the
+// policy there). `inside_call`, when given, runs with the operation's index inside the guarded
+// part of every ledger, copy, reset, policy and placement operation, before the engine's call (the
+// negative control of the rejection rule throws there). The engine rejects an operation with
+// std::invalid_argument only; any other exception (an internal invariant's std::logic_error,
+// std::bad_alloc, a reader of the data) is a failure, also where the reference rejects.
+std::vector<std::string> replay(const J& fx, std::size_t* compared = nullptr,
+                                const std::function<void(std::size_t, FlowPolicy&)>& after_rejected_call = {},
+                                const std::function<void(std::size_t)>& inside_call = {}) {
   std::vector<std::string> fails;
   const std::string name = fx.at("name").s;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
   CapGuard guard;
+#endif
   std::vector<std::shared_ptr<const Graph>> graphs;
   for (const auto& spec : fx.at("graphs").a) {
     std::vector<test::InEdge> edges;
@@ -665,10 +711,18 @@ std::vector<std::string> replay(const J& fx) {
   std::deque<Eligibility> eligs;
   std::vector<std::unique_ptr<FlowPolicy>> policies;
   std::vector<FlowLedger*> policy_ledger;
-  std::vector<J> curves;  // per policy: the cumulative Global curve of the epoch (F5 normalisation)
+  std::vector<J> curves;  // per policy: the cumulative Global curve of the epoch (zero-call check below)
   auto check = [&](const std::string& where, const char* what, const J& expected, const J& actual) {
+    if (compared != nullptr) ++*compared;
     std::string why;
     if (!same(expected, actual, what, why)) fails.push_back(name + " " + where + ": " + why);
+  };
+  auto not_a_rejection = [&](const std::string& where, const std::exception& e) {
+    fails.push_back(name + " " + where + ": throws an exception other than a rejection: " + e.what());
+    return fails;
+  };
+  auto planted = [&](std::size_t n) {
+    if (inside_call) inside_call(n);
   };
   const auto& ops = fx.at("ops").a;
   for (std::size_t n = 0; n < ops.size(); ++n) {
@@ -680,15 +734,21 @@ std::vector<std::string> replay(const J& fx) {
     if (kind == "ledger") {
       const auto& g = graphs[static_cast<std::size_t>(op.at("graph").int64())];
       try {
+        planted(n);
         if (op.at("baseline").is_null()) {
           ledgers.emplace_back(g);
         } else {
           ledgers.emplace_back(g, amounts(op.at("baseline")));
         }
-        if (error) fails.push_back(name + " " + where + ": accepted, the prototype rejects it");
+        if (error) fails.push_back(name + " " + where + ": accepted, the reference rejects it");
         ledger_of_id.push_back(&ledgers.back());
+      } catch (const std::invalid_argument& e) {
+        if (!error) {
+          fails.push_back(name + " " + where + ": throws " + e.what());
+          return fails;  // the later operations name a ledger that does not exist
+        }
       } catch (const std::exception& e) {
-        if (!error) fails.push_back(name + " " + where + ": throws " + e.what());
+        return not_a_rejection(where, e);
       }
       continue;
     }
@@ -696,6 +756,7 @@ std::vector<std::string> replay(const J& fx) {
       FlowLedger& fg = *ledger_of_id[static_cast<std::size_t>(op.at("ledger").int64())];
       bool threw = false;
       try {
+        planted(n);
         if (kind == "copy") {
           ledgers.emplace_back(fg);
           ledger_of_id.push_back(&ledgers.back());
@@ -704,11 +765,13 @@ std::vector<std::string> replay(const J& fx) {
         } else {
           fg.reset(amounts(op.at("baseline")));
         }
-      } catch (const std::exception&) {
+      } catch (const std::invalid_argument&) {
         threw = true;
+      } catch (const std::exception& e) {
+        return not_a_rejection(where, e);
       }
       if (threw != error) {
-        fails.push_back(name + " " + where + (error ? ": accepted, the prototype rejects it" : ": throws"));
+        fails.push_back(name + " " + where + (error ? ": accepted, the reference rejects it" : ": throws"));
         return fails;
       }
       const FlowLedger& shown = (kind == "copy" && !error) ? ledgers.back() : fg;
@@ -720,6 +783,7 @@ std::vector<std::string> replay(const J& fx) {
       const auto& g = *fg.graph();
       std::unique_ptr<FlowPolicy> pol;
       try {
+        planted(n);
         const Eligibility* elig = nullptr;
         if (!op.at("elig").is_null()) {
           eligs.push_back(g.eligibility(int32s(op.at("elig").at("nodes")), int32s(op.at("elig").at("edges"))));
@@ -728,12 +792,20 @@ std::vector<std::string> replay(const J& fx) {
         auto cfg = config_of(g, op.at("config"));
         pol = std::make_unique<FlowPolicy>(fg, endpoints(op.at("sources")), endpoints(op.at("destinations")),
                                            std::move(cfg), elig);
-      } catch (const std::exception& e) {
-        if (!error) fails.push_back(name + " " + where + ": throws " + e.what());
+      } catch (const UnknownName& e) {
+        fails.push_back(name + " " + where + ": " + e.what());
+        return fails;
+      } catch (const std::invalid_argument& e) {
+        if (!error) {
+          fails.push_back(name + " " + where + ": throws " + e.what());
+          return fails;  // the later operations name a policy that does not exist
+        }
         continue;
+      } catch (const std::exception& e) {
+        return not_a_rejection(where, e);
       }
       if (error) {
-        fails.push_back(name + " " + where + ": accepted, the prototype rejects it");
+        fails.push_back(name + " " + where + ": accepted, the reference rejects it");
         return fails;
       }
       policies.push_back(std::move(pol));
@@ -744,6 +816,11 @@ std::vector<std::string> replay(const J& fx) {
     }
     const auto pi = static_cast<std::size_t>(op.at("policy").int64());
     const FlowLedger& fg = *policy_ledger[pi];
+    if ((kind == "destroy" || kind == "remove") && error) {
+      // Neither can fail here, so a reference that rejects one is a difference.
+      fails.push_back(name + " " + where + ": accepted, the reference rejects it");
+      return fails;
+    }
     if (kind == "destroy") {
       policies[pi] = nullptr;  // the destruction law: the records stay as orphans
       check(where, "ledger", expect->at("ledger"), ledger_json(fg));
@@ -757,7 +834,10 @@ std::vector<std::string> replay(const J& fx) {
       check(where, "policy", expect->at("policy"), policy_json(pol));
       continue;
     }
-    // place
+    if (kind != "place") {
+      fails.push_back(name + " " + where + ": an unknown operation");
+      return fails;
+    }
     std::optional<Amount> volume;
     if (op.at("volume").k == J::K::Int) volume = op.at("volume").int64();
     if (op.at("volume").k == J::K::Str && op.at("volume").s != "inf") {
@@ -765,8 +845,8 @@ std::vector<std::string> replay(const J& fx) {
       continue;
     }
     if (op.at("volume").k == J::K::Dbl) {
-      // A non-integer request: the prototype rejects it, as the bindings do; C++ has no such value.
-      if (!error) fails.push_back(name + " " + where + ": a non-integer request accepted by the prototype");
+      // A non-integer request: the reference rejects it, as the bindings do; C++ has no such value.
+      if (!error) fails.push_back(name + " " + where + ": a non-integer request accepted by the reference");
       continue;
     }
     OutputOptions outputs;
@@ -774,28 +854,45 @@ std::vector<std::string> replay(const J& fx) {
       const auto& o = op.at("outputs").a;
       outputs = OutputOptions {o[0].b, o[1].b, o[2].b};
     }
+#if NETGRAPH_CORE_PRIVATE_HOOKS
     detail::max_flows_per_call().store(op.at("cap").int64());
+#endif
+    const J policy_before = error ? policy_json(pol) : J::null();
     detail::Trace trace;
     PlacementResult r;
     bool threw = false;
     try {
+      planted(n);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
       r = detail::place_traced(pol, volume, outputs, trace);
-    } catch (const std::exception&) {
+#else
+      r = pol.place(volume, outputs);
+#endif
+    } catch (const std::invalid_argument&) {
       threw = true;
+    } catch (const std::exception& e) {
+      return not_a_rejection(where, e);
     }
     if (threw != error) {
-      fails.push_back(name + " " + where + (error ? ": accepted, the prototype rejects it" : ": throws"));
+      fails.push_back(name + " " + where + (error ? ": accepted, the reference rejects it" : ": throws"));
       return fails;
     }
     if (error) {
+      if (after_rejected_call) after_rejected_call(n, pol);
+      // A rejected call leaves the ledger as the reference has it and the policy as it was (the
+      // data holds no policy section for it, so this comparison is not an expectation).
       check(where, "ledger", expect->at("ledger"), ledger_json(fg));
+      std::string why;
+      if (!same(policy_before, policy_json(pol), "policy", why)) {
+        fails.push_back(name + " " + where + ": the rejected call changed the policy: " + why);
+      }
       continue;
     }
     J actual = result_json(r);
     const J& expected_result = expect->at("result");
     if (std::holds_alternative<Global>(pol.config().routing)) {
-      // Contract over prototype (1c NOTES P3, review-1c F5): a Global zero call reports the
-      // policy's cumulative curve (9.1), which prototype 2 omits; it must equal the curve of the
+      // Where the engine reports more than the reference: a Global zero call reports the
+      // policy's cumulative curve, which the reference omits; it must equal the curve of the
       // epoch's last positive call ([] before any), and only then is it set aside.
       const J* got = actual.get("cost_distribution");
       if (volume.has_value() && *volume == 0 && expected_result.get("cost_distribution") == nullptr && got != nullptr) {
@@ -808,7 +905,7 @@ std::vector<std::string> replay(const J& fx) {
       if (const J* c = expected_result.get("cost_distribution"); c != nullptr) curves[pi] = *c;
     }
     check(where, "result", expected_result, actual);
-    check(where, "trace", expect->at("trace"), trace_json(trace));
+    if (detail::kTraced) check(where, "trace", expect->at("trace"), trace_json(trace));
     check(where, "ledger", expect->at("ledger"), ledger_json(fg));
     check(where, "policy", expect->at("policy"), policy_json(pol));
   }
@@ -817,75 +914,358 @@ std::vector<std::string> replay(const J& fx) {
 
 } // namespace
 
-TEST(PolicyFixtures, TheDataHoldsEveryPrototypeFixture) {
-  const J& d = data();
-  EXPECT_EQ(d.at("format").s, "p2-fixtures/1");
-  EXPECT_EQ(d.at("fixtures").a.size(), 59U);
-}
-
 TEST(PolicyFixtures, EveryFixtureReplaysIdentically) {
   const J& d = data();
-  std::size_t ops = 0;
+  std::size_t sections = 0;  // the expectations the data holds (without the hooks: no trace)
+  std::size_t compared = 0;  // the expectations the replay compared
+  std::size_t replayed = 0;
   for (const auto& fx : d.at("fixtures").a) {
-    ops += fx.at("ops").a.size();
-    const auto fails = replay(fx);
+    if (!detail::kTraced && !default_cap(fx)) continue;
+    ++replayed;
+    for (const auto& op : fx.at("ops").a) {
+      if (const J* expect = op.get("expect"); expect != nullptr) {
+        sections += expect->o.size() - (!detail::kTraced && expect->get("trace") != nullptr ? 1 : 0);
+      }
+    }
+    const auto fails = replay(fx, &compared);
     for (const auto& f : fails) ADD_FAILURE() << f;
   }
-  EXPECT_GT(ops, 600U);
+  // With the hooks every fixture; without them all but the one that lowers the creation cap.
+  EXPECT_EQ(replayed, detail::kTraced ? 59U : 58U);
+  EXPECT_GT(sections, 1000U);
+  EXPECT_EQ(compared, sections);  // every expectation was compared, none skipped
 }
 
-// The comparison is not vacuous: a corrupted expectation is reported.
+namespace {
+
+// One leaf changed: a null becomes 0, a boolean flips, a number grows by one, a string gains a
+// character. Returns its kind: 0 integer, 1 boolean, 2 string, 3 other.
+int corrupt(J& leaf) {
+  switch (leaf.k) {
+    case J::K::Null: leaf = J::integer(0); return 3;
+    case J::K::Bool: leaf.b = !leaf.b; return 1;
+    case J::K::Int: leaf.i += 1; return 0;
+    case J::K::Dbl: leaf.d += 1.0; return 3;
+    case J::K::Str: leaf.s += "#"; return 2;
+    default: return 3;
+  }
+}
+
+// The member `key` of an object, for writing.
+J& member(J& x, const std::string& key) {
+  for (auto& [k, v] : x.o) {
+    if (k == key) return v;
+  }
+  throw std::out_of_range("no member " + key);
+}
+
+// The first leaf of x in document order (an empty container has none); nullptr when x has none.
+J* first_leaf(J& x) {
+  if (x.k == J::K::Arr) {
+    for (auto& y : x.a) {
+      if (J* l = first_leaf(y); l != nullptr) return l;
+    }
+    return nullptr;
+  }
+  if (x.k == J::K::Obj) {
+    for (auto& [k, y] : x.o) {
+      if (J* l = first_leaf(y); l != nullptr) return l;
+    }
+    return nullptr;
+  }
+  return &x;
+}
+
+// Whether the replay of fx reports a failure that starts with `prefix`.
+bool reported(const J& fx, const std::string& prefix) {
+  return test::has_failure(replay(fx), prefix);
+}
+
+// The replay's other failure clauses, each reported at the operation it concerns: the first leaf
+// of every section of every other operation's expectations (failed placements, policies, copies,
+// resets, removals, destructions); the error flag of the first operation of every kind and
+// outcome in each fixture; the input order of the first graph; an unknown operation; a ledger the
+// data accepts and the engine rejects; an unknown and a non-integer volume; the curve a Global
+// zero call reports, against the remembered one; a policy changed by a call the data rejects;
+// an exception other than a rejection; and a configuration name the replay does not know.
+// Without the hooks the fixture that lowers the creation cap is left out, as in the replay test;
+// it holds no operation kind or outcome the others lack, so the expected sets are the same.
+void expect_every_other_clause_reported() {
+  const J& d = data();
+  std::set<std::string> sections;  // "kind error key" combinations corrupted
+  std::set<std::string> flags;     // "kind error" combinations flipped
+  std::size_t exercised = 0;       // fixtures whose clauses were exercised
+  for (const auto& fx : d.at("fixtures").a) {
+    if (!detail::kTraced && !default_cap(fx)) continue;
+    ++exercised;
+    const std::string name = fx.at("name").s;
+    ASSERT_TRUE(replay(fx).empty()) << name;
+    std::set<std::string> flipped;
+    for (std::size_t n = 0; n < fx.at("ops").a.size(); ++n) {
+      const J& op = fx.at("ops").a[n];
+      const std::string kind = op.at("op").s;
+      const bool error = op.at("error").b;
+      const std::string combination = kind + (error ? " failed" : " ok");
+      const std::string at = name + " op " + std::to_string(n) + " (" + kind + ")";
+      if (const J* expect = op.get("expect"); expect != nullptr && (kind != "place" || error)) {
+        for (const auto& [key, section] : expect->o) {
+          J copy = fx;
+          J* leaf = first_leaf(member(member(member(copy, "ops").a[n], "expect"), key));
+          ASSERT_NE(leaf, nullptr) << at << " " << key;
+          corrupt(*leaf);
+          EXPECT_TRUE(reported(copy, at + ": " + key)) << "undetected: " << at << " " << key;
+          sections.insert(combination + " " + key);
+        }
+      }
+      if (flipped.insert(combination).second) {
+        J copy = fx;
+        auto& flag = member(member(copy, "ops").a[n], "error");
+        flag.b = !flag.b;
+        EXPECT_TRUE(reported(copy, at + ": ")) << "undetected error flag: " << at;
+        flags.insert(combination);
+      }
+    }
+    J reordered = fx;
+    J* first = first_leaf(member(member(reordered, "graphs").a[0], "input_index"));
+    ASSERT_NE(first, nullptr) << name;
+    corrupt(*first);
+    EXPECT_TRUE(reported(reordered, name + ": the engine ranks the edges differently")) << name;
+  }
+  EXPECT_EQ(exercised, detail::kTraced ? 59U : 58U);
+  // Every section of every other operation kind and outcome in the data, and every flag.
+  EXPECT_EQ(sections, (std::set<std::string> {"copy failed ledger", "destroy ok ledger", "place failed ledger",
+                                              "policy ok policy", "remove ok ledger", "remove ok policy",
+                                              "reset failed ledger", "reset ok ledger"}));
+  EXPECT_EQ(flags, (std::set<std::string> {"copy failed", "destroy ok", "ledger ok", "place failed", "place ok",
+                                           "policy failed", "policy ok", "remove ok", "reset failed", "reset ok"}));
+  // Op 3 of global_epochs renamed: an unknown operation.
+  const auto& fixtures = d.at("fixtures").a;
+  const auto& epochs = *std::find_if(fixtures.begin(), fixtures.end(),
+                                     [](const J& fx) { return fx.at("name").s == "global_epochs"; });
+  ASSERT_EQ(epochs.at("ops").a[3].at("op").s, "place");
+  J renamed = epochs;
+  member(member(renamed, "ops").a[3], "op") = J::str("move");
+  EXPECT_TRUE(reported(renamed, "global_epochs op 3 (move): an unknown operation"));
+  // A ledger the data accepts and the engine rejects: op 0's baseline, one entry for two edges.
+  ASSERT_EQ(epochs.at("ops").a[0].at("op").s, "ledger");
+  J rejected = epochs;
+  auto& baseline = member(member(rejected, "ops").a[0], "baseline");
+  baseline = J::arr();
+  baseline.a.push_back(J::integer(-1));
+  EXPECT_TRUE(reported(rejected, "global_epochs op 0 (ledger): throws "));
+  // The volume of op 3 of global_epochs: neither "inf" nor an integer, then a non-integer number
+  // the data says is accepted.
+  J unknown = epochs;
+  member(member(unknown, "ops").a[3], "volume") = J::str("many");
+  EXPECT_TRUE(reported(unknown, "global_epochs op 3 (place): unexpected volume"));
+  J fractional = epochs;
+  auto& volume = member(member(fractional, "ops").a[3], "volume");
+  volume.k = J::K::Dbl;
+  volume.d = 0.5;
+  EXPECT_TRUE(reported(fractional, "global_epochs op 3 (place): a non-integer request accepted"));
+  // Op 2 of global_epochs is a Global zero call on a fresh policy, op 3 a positive call with the
+  // curve [[1, 1]]. With op 3 moved before op 2, the zero call reports [[1, 1]], the remembered
+  // curve (the zero call's other sections, recorded before the positive call, differ); with op
+  // 3's curve changed as well, the two curves differ too.
+  const std::string zero_call = "global_epochs op 3 (place): the zero call's curve is not the cumulative one";
+  ASSERT_EQ(dump(epochs.at("ops").a[2].at("volume")), "0");
+  J swapped = epochs;
+  auto& ops = member(swapped, "ops").a;
+  std::swap(ops[2], ops[3]);
+  ASSERT_FALSE(reported(swapped, zero_call));
+  J* cost = first_leaf(member(member(member(ops[2], "expect"), "result"), "cost_distribution"));
+  ASSERT_NE(cost, nullptr);
+  corrupt(*cost);
+  EXPECT_TRUE(reported(swapped, "global_epochs op 2 (place): result"));
+  EXPECT_TRUE(reported(swapped, zero_call));
+  // Every call the data rejects, with the policy changed after it (its +inf flag flipped; after
+  // that call only): the comparison with the policy before the call reports it.
+  std::size_t rejected_calls = 0;
+  for (const auto& fx : fixtures) {
+    for (std::size_t n = 0; n < fx.at("ops").a.size(); ++n) {
+      const J& op = fx.at("ops").a[n];
+      if (op.at("op").s != "place" || !op.at("error").b) continue;
+      ++rejected_calls;
+      const auto fails = replay(fx, nullptr, [n](std::size_t at, FlowPolicy& p) {
+        if (at != n) return;
+        auto& engine = detail::PolicyAccess::engine(p);
+        engine.infinite = !engine.infinite;
+      });
+      const std::string at = fx.at("name").s + " op " + std::to_string(n) + " (place)";
+      EXPECT_TRUE(test::has_failure(fails, at + ": the rejected call changed the policy")) << at;
+    }
+  }
+  EXPECT_EQ(rejected_calls, 4U);
+  // An exception other than std::invalid_argument (an internal invariant's std::logic_error)
+  // thrown inside the first operation of each kind, the first one the data rejects where there
+  // is one: a failure at that operation, never taken for the expected rejection.
+  std::set<std::string> planted;
+  for (const std::string kind : {"ledger", "copy", "reset", "policy", "place"}) {
+    const J* chosen = nullptr;
+    std::size_t at = 0;
+    for (const auto& fx : fixtures) {
+      for (std::size_t n = 0; n < fx.at("ops").a.size(); ++n) {
+        const J& op = fx.at("ops").a[n];
+        if (op.at("op").s != kind) continue;
+        if (chosen == nullptr || (op.at("error").b && !chosen->at("ops").a[at].at("error").b)) {
+          chosen = &fx;
+          at = n;
+        }
+      }
+    }
+    ASSERT_NE(chosen, nullptr) << kind;
+    const bool error = chosen->at("ops").a[at].at("error").b;
+    planted.insert(kind + (error ? " failed" : " ok"));
+    const auto fails = replay(*chosen, nullptr, {}, [at](std::size_t n) {
+      if (n == at) throw std::logic_error("planted");
+    });
+    const std::string where = chosen->at("name").s + " op " + std::to_string(at) + " (" + kind + ")";
+    EXPECT_TRUE(test::has_failure(fails, where + ": throws an exception other than a rejection: planted")) << where;
+  }
+  EXPECT_EQ(planted,
+            (std::set<std::string> {"copy failed", "ledger ok", "place failed", "policy failed", "reset failed"}));
+  // A name the replay does not know, in the configuration of global_epochs' policy (op 1) and,
+  // for the cost ceiling, of creation_fewer_routes' CapacityAware policy (op 1): a failure of the
+  // replay, never taken for the engine rejecting the policy.
+  ASSERT_EQ(epochs.at("ops").a[1].at("op").s, "policy");
+  for (const std::string path :
+       {"routing kind", "placement", "admission", "selection tie_break", "selection priority"}) {
+    J copy = epochs;
+    J* config = &member(member(copy, "ops").a[1], "config");
+    std::string key = path;
+    if (const auto space = path.find(' '); space != std::string::npos) {
+      config = &member(*config, path.substr(0, space));
+      key = path.substr(space + 1);
+    }
+    member(*config, key) = J::str("Unknown");
+    EXPECT_TRUE(reported(copy, "global_epochs op 1 (policy): the data names an unknown ")) << path;
+  }
+  const auto& fewer = *std::find_if(fixtures.begin(), fixtures.end(),
+                                    [](const J& fx) { return fx.at("name").s == "creation_fewer_routes"; });
+  J ceiling = fewer;
+  auto& routing = member(member(member(ceiling, "ops").a[1], "config"), "routing");
+  ASSERT_EQ(routing.at("kind").s, "CapacityAware");
+  J bound = J::arr();
+  bound.push(J::str("Unknown"));
+  bound.push(J::integer(5));
+  member(routing, "max_path_cost") = std::move(bound);
+  EXPECT_TRUE(
+      reported(ceiling, "creation_fewer_routes op 1 (policy): the data names an unknown cost ceiling (Unknown)"));
+}
+
+// The comparison's structural clauses, which the leaf corruptions above never reach: equal
+// values pass, and an array of another length, a key the engine lacks, a key only the engine has
+// and a value of another kind each fail with their own message.
+void expect_the_comparison_reports_shape_differences() {
+  auto diff = [](const std::string& expected, const std::string& engine) {
+    std::string why;
+    return same(Parser(expected).parse(), Parser(engine).parse(), "x", why) ? std::string("same") : why;
+  };
+  EXPECT_EQ(diff(R"({"a": [1, 2], "b": null})", R"({"b": null, "a": [1, 2]})"), "same");
+  EXPECT_EQ(diff("[1, 2]", "[1]"), "x: length 2 (expected) != 1 (engine): [1,2] vs [1]");
+  EXPECT_EQ(diff("[1]", "[1, 2]"), "x: length 1 (expected) != 2 (engine): [1] vs [1,2]");
+  EXPECT_EQ(diff(R"({"a": 1, "b": 2})", R"({"a": 1})"), "x.b: missing in the engine's value");
+  EXPECT_EQ(diff(R"({"a": 1})", R"({"a": 1, "c": 3})"), "x.c: only in the engine's value (3)");
+  EXPECT_EQ(diff(R"({"a": [1]})", R"({"a": 1})"), "x.a: [1] (expected) != 1 (engine)");
+  EXPECT_EQ(diff("[[1, 2]]", "[[1, 3]]"), "x[0][1]: 2 (expected) != 3 (engine)");
+}
+
+} // namespace
+
+// The comparison is not vacuous: a corrupted expectation is reported at the operation and by the
+// section it changes. In the first successful placement of every fixture, each section (result,
+// trace, ledger, policy) gets several single corruptions: its first and last integer, boolean
+// and string leaves, and one leaf drawn at random. Then the replay's other clauses and the
+// comparison's structural clauses (above). Without the hooks the replay compares no trace and
+// leaves out the fixture that lowers the creation cap, so neither is corrupted; the counts below
+// are those of each configuration (the random draws come from std::mt19937_64, whose sequence the
+// standard fixes, so they are the same with every standard library).
 TEST(PolicyFixtures, ACorruptedExpectationFails) {
   const J& d = data();
+  std::mt19937_64 rng(837);
   std::size_t corrupted = 0;
   std::size_t detected = 0;
+  std::size_t fixtures = 0;  // fixtures whose first successful placement was corrupted
+  std::size_t kinds[4] = {0, 0, 0, 0};  // integers, booleans, strings, others
   for (const auto& fx : d.at("fixtures").a) {
-    for (std::size_t n = 0; n < fx.at("ops").a.size() && corrupted < 200; ++n) {
+    if (!detail::kTraced && !default_cap(fx)) continue;
+    for (std::size_t n = 0; n < fx.at("ops").a.size(); ++n) {
       const J& op = fx.at("ops").a[n];
       if (op.at("op").s != "place" || op.at("error").b) continue;
-      for (const char* key : {"result", "trace", "ledger", "policy"}) {
-        J copy = fx;
-        J* ops = nullptr;
-        for (auto& [k, v] : copy.o) {
-          if (k == "ops") ops = &v;
+      ++fixtures;
+      for (const std::string key : {"result", "trace", "ledger", "policy"}) {
+        if (!detail::kTraced && key == "trace") continue;
+        // The leaves of the section in document order, as paths of child indices.
+        std::vector<std::vector<std::size_t>> leaves;
+        std::vector<std::size_t> path;
+        std::function<void(const J&)> walk = [&](const J& x) {
+          if (x.k == J::K::Arr || x.k == J::K::Obj) {
+            const std::size_t count = x.k == J::K::Arr ? x.a.size() : x.o.size();
+            for (std::size_t i = 0; i < count; ++i) {
+              path.push_back(i);
+              walk(x.k == J::K::Arr ? x.a[i] : x.o[i].second);
+              path.pop_back();
+            }
+            return;
+          }
+          leaves.push_back(path);
+        };
+        const J& section = op.at("expect").at(key);
+        walk(section);
+        auto leaf = [](auto& root, const std::vector<std::size_t>& at) -> auto& {
+          auto* x = &root;
+          for (std::size_t i : at) x = x->k == J::K::Arr ? &x->a[i] : &x->o[i].second;
+          return *x;
+        };
+        std::set<std::vector<std::size_t>> picks;
+        for (const J::K kind : {J::K::Int, J::K::Bool, J::K::Str}) {
+          std::vector<std::vector<std::size_t>> of_kind;
+          for (const auto& at : leaves) {
+            if (leaf(section, at).k == kind) of_kind.push_back(at);
+          }
+          if (!of_kind.empty()) {
+            picks.insert(of_kind.front());
+            picks.insert(of_kind.back());
+          }
         }
-        J* exp = nullptr;
-        for (auto& [k, v] : ops->a[n].o) {
-          if (k == "expect") exp = &v;
-        }
-        for (auto& [k, v] : exp->o) {
-          if (k != key) continue;
-          // Corrupt the first integer field of this value.
-          std::function<bool(J&)> corrupt = [&](J& x) {
-            if (x.k == J::K::Int) {
-              x.i += 1;
-              return true;
-            }
-            for (auto& y : x.a) {
-              if (corrupt(y)) return true;
-            }
-            for (auto& [kk, y] : x.o) {
-              if (corrupt(y)) return true;
-            }
-            return false;
-          };
-          if (!corrupt(v)) continue;
+        if (!leaves.empty()) picks.insert(leaves[rng() % leaves.size()]);
+        for (const auto& at : picks) {
+          J copy = fx;
+          J* ops = nullptr;
+          for (auto& [k, v] : copy.o) {
+            if (k == "ops") ops = &v;
+          }
+          J* exp = nullptr;
+          for (auto& [k, v] : ops->a[n].o) {
+            if (k == "expect") exp = &v;
+          }
+          J* target = nullptr;
+          for (auto& [k, v] : exp->o) {
+            if (k == key) target = &leaf(v, at);
+          }
+          ASSERT_NE(target->k, J::K::Arr) << "a container is not a leaf";
+          ASSERT_NE(target->k, J::K::Obj) << "a container is not a leaf";
+          ++kinds[corrupt(*target)];
           ++corrupted;
-          if (!replay(copy).empty()) ++detected;
+          // Reported at this op, by the comparison of this section.
+          const std::string where = fx.at("name").s + " op " + std::to_string(n) + " (place): " + key;
+          if (reported(copy, where)) {
+            ++detected;
+          } else {
+            ADD_FAILURE() << "undetected: " << where;
+          }
         }
       }
       break;  // one placement per fixture
     }
   }
-  EXPECT_GT(corrupted, 100U);
+  RecordProperty("corruptions", static_cast<int>(corrupted));
+  EXPECT_EQ(fixtures, detail::kTraced ? 59U : 58U);
+  EXPECT_EQ(corrupted, detail::kTraced ? 1132U : 858U);
+  EXPECT_GT(kinds[0], 200U);
+  EXPECT_GT(kinds[1], 50U);
+  EXPECT_GT(kinds[2], 50U);
   EXPECT_EQ(detected, corrupted);
+  expect_every_other_clause_reported();
+  expect_the_comparison_reports_shape_differences();
 }
-
-#else
-
-// The replay reads the trace and sets the creation cap: without the private hooks it is skipped.
-TEST(PolicyFixtures, TheDataHoldsEveryPrototypeFixture) { GTEST_SKIP() << "needs the private hooks"; }
-TEST(PolicyFixtures, EveryFixtureReplaysIdentically) { GTEST_SKIP() << "needs the private hooks"; }
-TEST(PolicyFixtures, ACorruptedExpectationFails) { GTEST_SKIP() << "needs the private hooks"; }
-
-#endif
