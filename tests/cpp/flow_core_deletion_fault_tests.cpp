@@ -528,7 +528,7 @@ TEST(DeletionFaults, CaptureFailsAtEveryAllocationOnAColdOrGrowingThread) {
 TEST(DeletionFaults, GlobalSensitivityFailsAtEveryAllocation) {
   const auto g = std::make_shared<const Graph>(
       make_graph(5, {{0, 1, 2, 1}, {1, 2, 2, 1}, {1, 3, 1, 2}, {3, 2, 1, 2}, {2, 4, 2, 1}, {0, 3, 1, 5}}));
-  const SensitivityOptions opts {global_config(), nullptr, nullptr, OutputOptions {true, true, true}};
+  const QueryOptions opts {global_config(), nullptr, nullptr, OutputOptions {true, true, true}};
   const std::vector<NodeId> sources {0};
   const std::vector<NodeId> destinations {4};
   const auto want = sensitivity(*g, sources, destinations, opts, 1);

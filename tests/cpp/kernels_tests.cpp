@@ -205,7 +205,19 @@ KernelPlan plan_of(const Graph& g, FlowPlacement p, NodeId src, std::vector<Node
 
 // The route cost of a plan's route (its record's bundle).
 Cost cost_of(const Graph& g, const KernelPlan& plan) {
-  return route_cost(g, PredDAGBuilder::of_edges(g, plan.route), plan.src, plan.dsts);
+  return route_cost(g, PredDAGBuilder::of_edges(g, plan.route), plan.roots.front(), plan.dsts);
+}
+
+// One Lossy offer of a single-root plan on the member-aligned view `w` (nullopt: the first-hop
+// experiment of +inf).
+Forwarding lossy_step(const KernelPlan& plan, std::optional<Amount> offer, std::span<const Amount> w) {
+  Injection in;
+  if (offer.has_value()) {
+    in.per_root = std::span<const Amount>(&*offer, 1);
+  } else {
+    in.first_hop = true;
+  }
+  return forward(plan, in, w);
 }
 
 std::vector<Amount> caps(const Graph& g) {
@@ -280,6 +292,52 @@ TEST(Apportion, RoundRobinAndHighestAveragesValues) {
   EXPECT_EQ(ha(11, {3, 9, 9}), (std::vector<Amount>{1, 5, 5}));
   EXPECT_EQ(ha(4, {1, 3, 3}), (std::vector<Amount>{0, 2, 2}));
   EXPECT_EQ(ha(7, {1, 3, 3}), (std::vector<Amount>{1, 3, 3}));
+}
+
+// Highest averages with zero weights (pooled attribution divides by what each source holds, and a
+// source can hold nothing): a zero weight gets nothing and all-zero weights give nothing. The
+// contract's examples H-not-one-unit (not "within one unit of proportional"), H-local-bound and
+// RR-local-bound, and H-bound-sweep: every total up to 24 over 1 to 4 members with weights 0 to 4,
+// not all zero (19,400 cases), equals the sequential definition, and each member's rounding error
+// against its proportional share is below k units (k members), below 1 for equal weights.
+TEST(Apportion, HighestAveragesExamplesAndZeroWeights) {
+  EXPECT_EQ(ha(50, {100, 1, 1, 1}), (std::vector<Amount>{50, 0, 0, 0}));
+  std::vector<Amount> local(11, 1);
+  local[0] = 1000000;
+  std::vector<Amount> want(11, 0);
+  want[0] = 1000000;
+  EXPECT_EQ(ha(1000000, local), want);
+  EXPECT_EQ(rr(10, 3), (std::vector<Amount>{4, 3, 3}));
+  EXPECT_EQ(ha(3, {0, 2, 0, 1}), (std::vector<Amount>{0, 2, 0, 1}));
+  EXPECT_EQ(ha(5, {0, 0}), (std::vector<Amount>{0, 0}));
+  EXPECT_EQ(ha(0, {0, 0, 0}), (std::vector<Amount>{0, 0, 0}));
+  int cases = 0;
+  for (std::size_t k = 1; k <= 4; ++k) {
+    std::vector<Amount> w(k, 0);
+    for (;;) {
+      // The next weight vector (base 5 counter), all-zero skipped.
+      std::size_t i = 0;
+      while (i < k && w[i] == 4) w[i++] = 0;
+      if (i == k) break;
+      ++w[i];
+      Amount sum = 0;
+      for (Amount x : w) sum += x;
+      const bool equal = std::all_of(w.begin(), w.end(), [&](Amount x) { return x == w[0]; });
+      for (Amount total = 0; total <= 24; ++total) {
+        ++cases;
+        const auto got = ha(total, w);
+        ASSERT_EQ(got, ha_slow(total, w)) << total;
+        for (std::size_t j = 0; j < k; ++j) {
+          if (w[j] == 0) EXPECT_EQ(got[j], 0) << total;
+          // |got - total * w / sum| < bound, in integers: |got * sum - total * w| < bound * sum.
+          const Amount err = got[j] * sum - total * w[j];
+          const Amount bound = (equal ? 1 : static_cast<Amount>(k)) * sum;
+          EXPECT_LT(err < 0 ? -err : err, bound) << total << " member " << j;
+        }
+      }
+    }
+  }
+  EXPECT_EQ(cases, 19400);
 }
 
 // The callback form hands out the span form's shares (positive ones only, in index order) and
@@ -913,7 +971,8 @@ TEST(Allocation, TMaxSearchIsExactAndWithinTheProbeBudgetOnLargeRanges) {
     // Reference: each node splits by exact quotient rank, then plain bisection over feasible
     // totals. No production allocation or search is used to compute an expected amount.
     Amount hi = 0;
-    for (auto k = plan.src_out_begin; k < plan.src_out_end; ++k) hi += vm[static_cast<std::size_t>(k)];
+    const auto root = static_cast<std::size_t>(plan.root_pos.front());
+    for (auto k = plan.out_begin[root]; k < plan.out_end[root]; ++k) hi += vm[static_cast<std::size_t>(k)];
     const Amount source_side = hi;
     ASSERT_EQ(plan.members, walk_members(g, all_ids(g), 0, {n - 1}));
     std::vector<std::pair<NodeId, NodeId>> arcs;
@@ -1078,18 +1137,18 @@ std::vector<std::string> certify_step(const Graph& g, const KernelPlan& plan, co
     bal[static_cast<std::size_t>(g.edge_dst()[e])] += flow[e];
   }
   const Int128 moment = flow_cost(g, flow);
-  const std::vector<NodeId> src = {plan.src};
+  const std::vector<NodeId> src(plan.roots.begin(), plan.roots.end());
   const std::vector<NodeId> dsts(plan.dsts.begin(), plan.dsts.end());
   Int128 inflow = 0;
   for (std::size_t v = 0; v < n; ++v) {
-    if (static_cast<NodeId>(v) == plan.src) continue;
+    if (static_cast<NodeId>(v) == plan.roots.front()) continue;
     if (std::find(dsts.begin(), dsts.end(), static_cast<NodeId>(v)) != dsts.end()) {
       inflow += bal[v];
     } else if (bal[v] != 0) {
       fails.push_back("conservation at node " + std::to_string(v));
     }
   }
-  if (-bal[static_cast<std::size_t>(plan.src)] != step.total || inflow != step.total) {
+  if (-bal[static_cast<std::size_t>(plan.roots.front())] != step.total || inflow != step.total) {
     fails.push_back("value differs from supply or inflow");
   }
   // The optimum's cost at every value up to F_max, as breakpoints.

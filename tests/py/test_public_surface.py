@@ -27,6 +27,7 @@ PUBLIC = {
     "PathSelection",
     "FlowPlacement",
     "Admission",
+    "Origin",
     "FlowLedger",
     "FlowRecord",
     "Absolute",
@@ -40,13 +41,13 @@ PUBLIC = {
     "OutputOptions",
     "Termination",
     "PlacementResult",
+    "SourceFlow",
     "FlowPolicy",
     "MAX_FLOWS_PER_CALL",
     "DagCache",
     "DagCacheMiss",
     "DagCacheStats",
-    "CapacityOptions",
-    "SensitivityOptions",
+    "QueryOptions",
     "SensitivityEntry",
     "SensitivityResult",
     "capacity",
@@ -140,6 +141,8 @@ RETIRED = {
     "Outputs",
     "Diminishing",
     "kMaxFlowsPerCall",
+    "CapacityOptions",
+    "SensitivityOptions",
 }
 
 # The retired search entry points, their option types and the private name _spf: never bound.
@@ -156,10 +159,21 @@ RETIRED_SEARCH = {
 }
 
 
+# Retired members: PlacementResult's per-source termination list (the result reports one
+# termination and per-source rows in by_source) and FlowRecord's kernel (only ever written).
+RETIRED_MEMBERS = {"PlacementResult": {"local_outcomes"}, "FlowRecord": {"placement"}}
+
+
 def test_retired_spellings_are_absent():
     for name in RETIRED | RETIRED_SEARCH:
         assert not hasattr(_netgraph_core, name), name
         assert not hasattr(ngc, name), name
+    for cls, members in RETIRED_MEMBERS.items():
+        for member in members:
+            assert not hasattr(getattr(ngc, cls), member), (cls, member)
+    # FlowPolicyConfig takes keywords only: no positional spelling.
+    with pytest.raises(TypeError):
+        ngc.FlowPolicyConfig(ngc.CostOnly(), ngc.FlowPlacement.MAX_FLOW)
     assert ngc.Graph.__name__ == "Graph"
     assert ngc.FlowLedger.__name__ == "FlowLedger"
     assert ngc.OutputOptions.__name__ == "OutputOptions"
@@ -198,8 +212,7 @@ def _refusal_inputs():
         g=g,
         ledger=ngc.FlowLedger(g),
         cfg=cfg,
-        capacity=ngc.CapacityOptions(cfg),
-        sensitivity=ngc.SensitivityOptions(cfg),
+        query=ngc.QueryOptions(cfg),
         spf=ngc.SpfOptions(ngc.Direction.FORWARD, sel()),
         ksp=ngc.KspOptions(1, sel()),
         dag=ngc.Path(g, [[0], [1]]).to_dag(),
@@ -245,17 +258,17 @@ REFUSALS = {
         GRAPH,
     ),
     "capacity-graph-None": (
-        lambda s: ngc.capacity(None, 0, 2, s.capacity),
+        lambda s: ngc.capacity(None, 0, 2, s.query),
         ValueError,
         GRAPH,
     ),
     "batch_capacity-graph-None": (
-        lambda s: ngc.batch_capacity(None, [(0, 2)], s.capacity),
+        lambda s: ngc.batch_capacity(None, [(0, 2)], s.query),
         ValueError,
         GRAPH,
     ),
     "sensitivity-graph-None": (
-        lambda s: ngc.sensitivity(None, 0, 2, s.sensitivity),
+        lambda s: ngc.sensitivity(None, 0, 2, s.query),
         ValueError,
         GRAPH,
     ),
@@ -271,22 +284,22 @@ REFUSALS = {
     ),
     # Shapes and types of sequence and field arguments.
     "batch_capacity-pairs-not-a-sequence": (
-        lambda s: ngc.batch_capacity(s.g, 5, s.capacity),
+        lambda s: ngc.batch_capacity(s.g, 5, s.query),
         ValueError,
         "pairs must be a sequence of (sources, destinations)",
     ),
     "batch_capacity-pair-of-one": (
-        lambda s: ngc.batch_capacity(s.g, [(0,)], s.capacity),
+        lambda s: ngc.batch_capacity(s.g, [(0,)], s.query),
         ValueError,
         PAIR,
     ),
     "batch_capacity-pair-not-a-sequence": (
-        lambda s: ngc.batch_capacity(s.g, [5], s.capacity),
+        lambda s: ngc.batch_capacity(s.g, [5], s.query),
         ValueError,
         PAIR,
     ),
     "batch_capacity-per_pair_elig-not-a-sequence": (
-        lambda s: ngc.batch_capacity(s.g, [(0, 2)], s.capacity, 5),
+        lambda s: ngc.batch_capacity(s.g, [(0, 2)], s.query, 5),
         ValueError,
         "per_pair_elig must be a sequence of Eligibility or None",
     ),

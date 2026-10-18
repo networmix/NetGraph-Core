@@ -36,15 +36,22 @@ namespace netgraph::core::bindings {
 namespace {
 
 // A request: an integer number of units in [0, 2^62) or +inf (float('inf')); nullopt is +inf.
+// Any other value (a bool, another float, a non-integer, an integer out of range) raises the one
+// ValueError; an exception of the object's own __index__ propagates as raised.
 std::optional<Amount> request_units(const py::object& volume) {
+  const char* const text = "offer must be an integer in [0, 2^62) or permitted +inf";
   if (py::isinstance<py::float_>(volume) || py::isinstance(volume, py::module_::import("numpy").attr("floating"))) {
     const double x = PyFloat_AsDouble(volume.ptr());
     if (x == -1.0 && PyErr_Occurred() != nullptr) throw py::error_already_set();
     if (std::isinf(x) && x > 0) return std::nullopt;
-    throw py::value_error("requests are integer units or +inf (a physical request goes through to_units first; got " +
-                          std::string(py::str(volume)) + ")");
+    throw py::value_error(text);
   }
-  const auto v = integer_value(volume, 0, kDomainLimit - 1, "request (units)");
+  if (is_bool(volume) || !PyIndex_Check(volume.ptr())) throw py::value_error(text);
+  const py::object idx = py::reinterpret_steal<py::object>(PyNumber_Index(volume.ptr()));
+  if (!idx) throw py::error_already_set();
+  int overflow = 0;
+  const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
+  if (overflow != 0 || v < 0 || v >= kDomainLimit) throw py::value_error(text);
   return static_cast<Amount>(v);
 }
 
@@ -122,10 +129,11 @@ void register_flow_policy(py::module_& m) {
            py::arg("sources"), py::arg("destinations"), py::arg("config"), py::arg("elig") = nullptr,
            py::arg("cache") = nullptr,
            "Bind a policy to ledger. elig (None: everything allowed) and cache (None: none; only CostOnly\n"
-           "routing reads it) belong to the ledger's graph; the policy keeps the ledger, elig and cache\n"
-           "alive. The roster (the sources that statically reach an allowed destination, over allowed edges\n"
-           "whatever their capacity) and, for Pinned, the usable bundles are fixed here. Everything is\n"
-           "validated before the policy binds.")
+           "routing reads it, another model rejects it) belong to the ledger's graph; the policy keeps the\n"
+           "ledger, elig and cache alive. The roster (the sources that statically reach an allowed\n"
+           "destination, over allowed edges whatever their capacity) and, for Pinned, the usable bundles\n"
+           "are fixed here. Everything is validated before the policy binds, in this order: the endpoints,\n"
+           "elig's and cache's graph, the configuration (FlowPolicyConfig's order), Pinned's bundles.")
       .def(
           "place",
           [](FlowPolicy& p, const py::object& volume, const py::object& outputs) {
@@ -141,11 +149,15 @@ void register_flow_policy(py::module_& m) {
           py::arg("volume"), py::arg("outputs") = py::none(),
           "Place volume (int units in [0, 2^62), or float('inf')) all or nothing -> PlacementResult.\n"
           "Requests add up within an epoch (from construction or the last remove()); after float('inf') any\n"
-          "finite request is rejected, 0 included. A request of 0 places nothing. outputs (OutputOptions;\n"
-          "None: none) requests edge_flows, residual and bottleneck. Everything is validated before any\n"
-          "change; a failed call raises with the ledger and the policy unchanged. A solve of the flow core\n"
-          "(Global, or a MAX_FLOW flow) on a network beyond its int32 numbering raises ValueError: more than\n"
-          "INT32_MAX - 2 nodes, or more than 2^30 - 1 edges, sources and destinations together.")
+          "finite request is rejected, 0 included. A request of 0 places nothing and reports the current\n"
+          "state. CostOnly prepares its routes at the epoch's first positive request; LOSSLESS admits the\n"
+          "largest total in [admitted, admitted + volume] that the routes carry with no loss (a refused unit\n"
+          "is not offered again); LOSSY forwards the new round-robin injections (earlier drops are not\n"
+          "offered again). outputs (OutputOptions; None: none) requests edge_flows, residual, bottleneck and\n"
+          "min_cut. Everything is validated before any change; a failed call raises with the ledger and the\n"
+          "policy unchanged. A solve of the flow core (Global, CostOnly MAX_FLOW, or a MAX_FLOW flow) on a\n"
+          "network beyond its int32 numbering raises ValueError: more than INT32_MAX - 2 nodes, or more than\n"
+          "2^30 - 1 edges, sources and destinations together.")
       .def("remove", &FlowPolicy::remove, "revert every flow of the policy, retire the ids, open a new epoch")
       .def("placed_demand", &FlowPolicy::placed_demand, "the sum of delivered over the policy's live records")
       .def("records", &FlowPolicy::records, "the policy's live records as snapshots in FlowId order")
@@ -157,7 +169,9 @@ void register_flow_policy(py::module_& m) {
       .def("usable_bundles", &FlowPolicy::usable_bundles,
            "Pinned: the bundles with a src -> dst walk over eligible edges, whatever their capacity (0 for\n"
            "the other modes)")
-      .def_property_readonly("config", &FlowPolicy::config, "the FlowPolicyConfig the policy was built with");
+      .def_property_readonly("config", &FlowPolicy::config,
+                             "the configuration as validated at construction, its absent origin and selection\n"
+                             "resolved to the model's defaults");
 #if NETGRAPH_CORE_PRIVATE_HOOKS
   flow_policy
       .def(

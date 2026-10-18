@@ -51,7 +51,7 @@ inline LedgerState ledger_state(const FlowLedger& fg) {
 
 inline bool same_record(const FlowRecord& a, const FlowRecord& b) {
   return a.flow_id == b.flow_id && a.owner == b.owner && a.sources == b.sources && a.destinations == b.destinations &&
-         a.placement == b.placement && a.admission == b.admission && a.bundle && b.bundle && *a.bundle == *b.bundle &&
+         a.admission == b.admission && a.bundle && b.bundle && *a.bundle == *b.bundle &&
          a.route_cost == b.route_cost && a.offered == b.offered && a.delivered == b.delivered && a.edges == b.edges &&
          a.drops == b.drops;
 }
@@ -89,11 +89,21 @@ inline void expect_balanced(const FlowLedger& fg, const std::string& where) {
 inline void expect_same(const PlacementResult& a, const PlacementResult& b, const std::string& where) {
   EXPECT_EQ(a.placed, b.placed) << where;
   EXPECT_EQ(a.remaining, b.remaining) << where;
+  EXPECT_EQ(a.delivery_delta, b.delivery_delta) << where;
+  EXPECT_EQ(a.call_drops, b.call_drops) << where;
+  EXPECT_EQ(a.call_source_loss, b.call_source_loss) << where;
   EXPECT_EQ(a.termination, b.termination) << where;
-  EXPECT_EQ(a.local_outcomes, b.local_outcomes) << where;
   EXPECT_EQ(a.routes_changed, b.routes_changed) << where;
   EXPECT_EQ(a.weights_changed, b.weights_changed) << where;
+  EXPECT_EQ(a.requested, b.requested) << where;
+  EXPECT_EQ(a.offered, b.offered) << where;
+  EXPECT_EQ(a.admitted, b.admitted) << where;
+  EXPECT_EQ(a.delivered, b.delivered) << where;
+  EXPECT_EQ(a.unadmitted, b.unadmitted) << where;
+  EXPECT_EQ(a.source_loss, b.source_loss) << where;
   EXPECT_EQ(a.drops, b.drops) << where;
+  EXPECT_TRUE(a.by_source == b.by_source) << where;
+  EXPECT_EQ(a.total_cost, b.total_cost) << where;
   EXPECT_EQ(a.cost_distribution, b.cost_distribution) << where;
   EXPECT_EQ(a.edge_flows, b.edge_flows) << where;
   EXPECT_EQ(a.residual, b.residual) << where;
@@ -113,19 +123,24 @@ struct FlowSnapshot {
   bool operator==(const FlowSnapshot&) const = default;
 };
 
-// A policy's epoch state: the call state (requested, +inf, the placed demand), Global's
-// cumulative curve and per roster source its flows.
+// A policy's epoch state: the call state (requested, offered, +inf, prepared, the placed
+// demand), Global's cumulative curve, CostOnly's program (its members, or the MaxFlow support)
+// and per roster source its flows.
 struct Epoch {
   Counter128 requested;
+  Counter128 offered;
   bool infinite {false};
+  bool prepared {false};
   Amount placed {0};
   std::vector<std::pair<Cost, Amount>> curve;
+  std::vector<EdgeId> program;
   std::vector<std::vector<FlowSnapshot>> cohorts;
 };
 
 inline Epoch epoch(const FlowPolicy& p) {
   const auto& pe = detail::PolicyAccess::engine(p);
-  Epoch e {pe.requested, pe.infinite, p.placed_demand(), pe.curve, {}};
+  Epoch e {pe.requested, pe.offered, pe.infinite, pe.prepared, p.placed_demand(), pe.curve,
+           pe.program ? pe.program->members : pe.program_edges, {}};
   for (const auto& c : pe.cohorts) {
     auto& out = e.cohorts.emplace_back();
     for (const auto& f : c) {
@@ -142,9 +157,12 @@ inline Epoch epoch(const FlowPolicy& p) {
 
 inline void expect_same(const Epoch& a, const Epoch& b, const std::string& where) {
   EXPECT_EQ(a.requested, b.requested) << where;
+  EXPECT_EQ(a.offered, b.offered) << where;
   EXPECT_EQ(a.infinite, b.infinite) << where;
+  EXPECT_EQ(a.prepared, b.prepared) << where;
   EXPECT_EQ(a.placed, b.placed) << where;
   EXPECT_EQ(a.curve, b.curve) << where;
+  EXPECT_EQ(a.program, b.program) << where;
   EXPECT_TRUE(a.cohorts == b.cohorts) << where;
 }
 

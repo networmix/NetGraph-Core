@@ -222,7 +222,7 @@ TEST(GraphConcurrency, BatchWorkersBuildTheirOwnReverseSupport) {
   for (NodeId s = 0; s < 32; ++s) pairs.push_back({{s}, {static_cast<NodeId>(399 - s)}});
   // CostOnly routing: each policy's DAG is the reverse static support toward its destination.
   // Every output is requested, so the per-edge flows and the residuals are compared too.
-  const CapacityOptions opts {cost_only_config(), nullptr, nullptr, OutputOptions {true, true, true}};
+  const QueryOptions opts {cost_only_config(), nullptr, nullptr, OutputOptions {true, true, true}};
   const auto serial = batch_capacity(g, pairs, opts, {}, 1);
   const auto parallel = batch_capacity(g, pairs, opts, {}, 4);
   ASSERT_EQ(serial.size(), pairs.size());

@@ -503,7 +503,8 @@ TEST(KernelPlanBlock, CopiesAndMovesKeepTheirOwnViews) {
   // A copy's views point into its own block (none into the source's), and stay valid once the
   // source is gone.
   auto own_block = [](const KernelPlan& a, const KernelPlan& b) {
-    return a.dsts.data() != b.dsts.data() && a.topo.data() != b.topo.data() &&
+    return a.roots.data() != b.roots.data() && a.root_pos.data() != b.root_pos.data() &&
+           a.dsts.data() != b.dsts.data() && a.topo.data() != b.topo.data() &&
            a.out_begin.data() != b.out_begin.data() && a.out_end.data() != b.out_end.data() &&
            a.head_pos.data() != b.head_pos.data() && a.terminal.data() != b.terminal.data();
   };
@@ -515,7 +516,8 @@ TEST(KernelPlanBlock, CopiesAndMovesKeepTheirOwnViews) {
   KernelPlan donor(copy);
   KernelPlan moved(std::move(donor));
   expect_same_plan(moved, original, "move");
-  EXPECT_TRUE(donor.topo.empty() && donor.dsts.empty() && donor.head_pos.empty() && donor.terminal.empty());
+  EXPECT_TRUE(donor.topo.empty() && donor.dsts.empty() && donor.head_pos.empty() && donor.terminal.empty() &&
+              donor.roots.empty() && donor.root_pos.empty());
   KernelPlan assigned;
   assigned = copy;
   expect_same_plan(assigned, original, "copy assignment");
@@ -524,13 +526,51 @@ TEST(KernelPlanBlock, CopiesAndMovesKeepTheirOwnViews) {
                                 dag, {});
   target = std::move(moved);
   expect_same_plan(target, original, "move assignment");
-  EXPECT_TRUE(moved.topo.empty() && moved.dsts.empty() && moved.head_pos.empty() && moved.terminal.empty());
+  EXPECT_TRUE(moved.topo.empty() && moved.dsts.empty() && moved.head_pos.empty() && moved.terminal.empty() &&
+              moved.roots.empty() && moved.root_pos.empty());
   const KernelPlan& self = target;
   target = self;
   expect_same_plan(target, original, "self assignment");
   const KernelPlan empty;
   const KernelPlan empty_copy(empty);
-  EXPECT_TRUE(empty_copy.dsts.empty() && empty_copy.topo.empty() && empty_copy.members.empty());
+  EXPECT_TRUE(empty_copy.dsts.empty() && empty_copy.topo.empty() && empty_copy.members.empty() &&
+              empty_copy.roots.empty() && empty_copy.root_pos.empty());
+}
+
+// A lifetime witness: two identical chains, 0 -> 1 -> 2 and 3 -> 4 -> 5, give plans of one shape
+// (one root, one destination, three positions, two members) and other values. A copy (and a copy
+// assignment) of the first chain's plan keeps its roots, root positions and destinations after the
+// plan it was copied from is destroyed and plans of the same shape for the second chain have been
+// built (they reuse freed blocks of that size): a copy whose views still pointed into the
+// destroyed block would read the second chain's root 3 and destination 5.
+TEST(KernelPlanBlock, ACopyOutlivesItsSource) {
+  const Graph g = make_graph(6, {{0, 1, 2, 1}, {1, 2, 2, 1}, {3, 4, 2, 1}, {4, 5, 2, 1}});
+  auto chain = [&](NodeId src, NodeId dst) {
+    const std::vector<EdgeId> edges = src == 0 ? std::vector<EdgeId> {0, 1} : std::vector<EdgeId> {2, 3};
+    const auto dag = PredDAGBuilder::of_edges(g, edges);
+    return make_plan(g, FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Capacity, src,
+                     std::vector<NodeId> {dst}, dag, {});
+  };
+  for (const bool assign : {false, true}) {
+    std::optional<KernelPlan> owner(chain(0, 2));
+    ASSERT_EQ(vec(owner->roots), (std::vector<NodeId> {0}));
+    ASSERT_EQ(vec(owner->root_pos), (std::vector<std::int32_t> {0}));
+    std::optional<KernelPlan> copy;
+    if (assign) {
+      copy.emplace(chain(3, 5));
+      *copy = *owner;
+    } else {
+      copy.emplace(*owner);
+    }
+    owner.reset();
+    std::vector<KernelPlan> later;
+    for (int i = 0; i < 64; ++i) later.push_back(chain(3, 5));
+    const std::string where = assign ? "copy assignment" : "copy construction";
+    EXPECT_EQ(vec(copy->roots), (std::vector<NodeId> {0})) << where;
+    EXPECT_EQ(vec(copy->root_pos), (std::vector<std::int32_t> {0})) << where;
+    EXPECT_EQ(vec(copy->dsts), (std::vector<NodeId> {2})) << where;
+    EXPECT_EQ(vec(copy->topo), (std::vector<NodeId> {0, 1, 2})) << where;
+  }
 }
 
 // The plan comparison names every field that differs: a copy of a real plan with one field changed
@@ -564,7 +604,10 @@ TEST(TestHelpers, PlanDifferencesNameEveryField) {
   const std::vector<std::pair<std::string, Change>> changes = {
       {"placement", [](auto& x) { x.placement = FlowPlacement::EqualBalanced; }},
       {"admission", [](auto& x) { x.admission = Admission::Lossy; }},
-      {"src", [](auto& x) { ++x.src; }},
+      {"roots", [&](auto& x) { x.roots = nodes_of(x.roots, false); }},
+      {"roots", [&](auto& x) { x.roots = nodes_of(x.roots, true); }},
+      {"root_pos", [&](auto& x) { x.root_pos = positions_of(x.root_pos, false); }},
+      {"root_pos", [&](auto& x) { x.root_pos = positions_of(x.root_pos, true); }},
       {"dsts", [&](auto& x) { x.dsts = nodes_of(x.dsts, false); }},
       {"dsts", [&](auto& x) { x.dsts = nodes_of(x.dsts, true); }},
       {"route", [](auto& x) { x.route.push_back(0); }},
@@ -591,8 +634,6 @@ TEST(TestHelpers, PlanDifferencesNameEveryField) {
          flags.push_back(0);
          x.terminal = flags;
        }},
-      {"src_out_begin", [](auto& x) { ++x.src_out_begin; }},
-      {"src_out_end", [](auto& x) { ++x.src_out_end; }},
   };
   for (std::size_t k = 0; k < changes.size(); ++k) {
     KernelPlan x = plan;

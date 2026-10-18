@@ -18,9 +18,10 @@ namespace netgraph::core::detail {
 
 // batch_capacity's validation in its two parts: the arguments (workers, foreign objects, the
 // cache rule, Pinned, the configuration), then one pair (its endpoint sets, their overlap, its
-// Eligibility's graph), the pairs in index order.
-void check_batch_arguments(const Graph& g, const CapacityOptions& opts, std::int32_t workers);
-void check_batch_pair(const Graph& g, std::span<const NodeId> sources,
+// Eligibility's graph, the pooled single-path rule for its source count), the pairs in index
+// order.
+void check_batch_arguments(const Graph& g, const QueryOptions& opts, std::int32_t workers);
+void check_batch_pair(const Graph& g, const FlowPolicyConfig& cfg, std::span<const NodeId> sources,
                       std::span<const NodeId> destinations, const Eligibility* elig, std::size_t index);
 
 // The evaluators' default worker count from the environment (NGRAPH_CORE_BATCH_THREADS for
@@ -33,13 +34,13 @@ std::int32_t default_workers(bool sensitivity) noexcept;
 // are frozen_call over these; the Python binding runs frozen_call over these and the construction
 // of its result object, so the hits count only once that object exists.
 PlacementResult capacity_in_call(const Graph& g, std::span<const NodeId> sources,
-                                 std::span<const NodeId> destinations, const CapacityOptions& opts, FrozenTally& tally);
+                                 std::span<const NodeId> destinations, const QueryOptions& opts, FrozenTally& tally);
 std::vector<PlacementResult> batch_capacity_in_call(
     const Graph& g, const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>>& pairs,
-    const CapacityOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers,
+    const QueryOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers,
     FrozenTally& tally);
 SensitivityResult sensitivity_in_call(const Graph& g, std::span<const NodeId> sources,
-                                      std::span<const NodeId> destinations, const SensitivityOptions& opts,
+                                      std::span<const NodeId> destinations, const QueryOptions& opts,
                                       std::int32_t workers, FrozenTally& tally);
 
 } // namespace netgraph::core::detail

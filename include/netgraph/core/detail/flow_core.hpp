@@ -77,6 +77,7 @@ struct Network {
   std::vector<Cost> cost {};
   std::vector<Amount> cap {};
   std::vector<std::int32_t> sources {};
+  std::vector<Amount> src_cap {};  // per source: its virtual arc's capacity; empty: kMaxFlowCap
   std::vector<std::int32_t> destinations {};
   std::vector<std::int32_t> off {};
   std::vector<std::int32_t> arc_head {};
@@ -92,7 +93,8 @@ struct Network {
 // num_nodes <= INT32_MAX - 2, and the two slots (forward and reverse) of every edge and of every
 // virtual arc, one per source and one per destination, need
 // num_edges + num_sources + num_destinations <= 2^30 - 1 (twice that, 2^31 - 2, is the largest
-// even int32). Throws std::invalid_argument for a larger network, the node limit first. Every
+// even int32). Throws std::invalid_argument for a larger network, the node limit first ("flow
+// solver node limit exceeded", then "flow solver arc limit exceeded"). Every
 // solver takes its vertex count from here before it sizes or allocates anything of its own.
 [[nodiscard]] std::int32_t network_vertices(std::int32_t num_nodes, std::size_t num_edges,
                                             std::size_t num_sources, std::size_t num_destinations);
@@ -235,11 +237,13 @@ private:
 // stored there as well. A solve (a cap other than 0, or a capture) then throws
 // std::invalid_argument, before the solver sizes anything, for a network beyond the limits of
 // network_vertices(): the graph's nodes, the eligible edges, the eligible sources and
-// destinations.
+// destinations. `source_caps` (aligned with `sources`; empty: unlimited) gives each source's
+// virtual arc its capacity, the equal origin's round-robin shares; it is not captured.
 [[nodiscard]] FlowCoreResult place_global_units(const Graph& g, std::span<const Amount> view,
                                                 std::span<const NodeId> sources,
                                                 std::span<const NodeId> destinations, const Eligibility* elig,
-                                                std::optional<Amount> cap, DeletionCapture* capture = nullptr);
+                                                std::optional<Amount> cap, DeletionCapture* capture = nullptr,
+                                                std::span<const Amount> source_caps = {});
 
 // The solve on an edge subset (the MaxFlow kernel's replacement on V_i = W + own_i over a
 // flow's split graph): flows aligned with the input edges, the value and the marginal curve.
@@ -258,8 +262,10 @@ struct SubsetFlow {
 // ascending, distinct and disjoint; the caller validated every input. A solve (a cap other than
 // 0) throws std::invalid_argument, before the solver sizes anything, for a network beyond the
 // limits of network_vertices(): the touched vertices, the edges and the endpoints.
+// `source_caps` as in place_global_units.
 [[nodiscard]] SubsetFlow solve_subset(const Graph& g, std::span<const EdgeId> edges,
                                       std::span<const Amount> caps, std::span<const NodeId> sources,
-                                      std::span<const NodeId> destinations, std::optional<Amount> cap);
+                                      std::span<const NodeId> destinations, std::optional<Amount> cap,
+                                      std::span<const Amount> source_caps = {});
 
 } // namespace netgraph::core::detail

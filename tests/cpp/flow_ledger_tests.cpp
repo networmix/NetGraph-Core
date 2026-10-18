@@ -193,8 +193,8 @@ TEST(FlowLedger, BoundWithFlowsRowAndEpochs) {
   // allocations are unchanged.
   const Counter128 requested = p.requested();
   const auto id = p.flow_id();
-  EXPECT_NE(error_of([&] { (void)p.place(1); }).find("after +inf"), std::string::npos);
-  EXPECT_NE(error_of([&] { (void)p.place(0); }).find("after +inf"), std::string::npos);
+  EXPECT_NE(error_of([&] { (void)p.place(1); }).find("after infinite placement"), std::string::npos);
+  EXPECT_NE(error_of([&] { (void)p.place(0); }).find("after infinite placement"), std::string::npos);
   EXPECT_EQ(p.requested(), requested);
   EXPECT_TRUE(p.infinite());
   EXPECT_EQ(p.flow_id(), id);
@@ -390,20 +390,19 @@ TEST(FlowLedger, RecordsCarryTheContractFields) {
   auto r = p.place(10);
   EXPECT_EQ(r.placed, 6);
   EXPECT_EQ(r.termination, Termination::Complete);
-  EXPECT_EQ(r.drops, (std::vector<std::pair<EdgeId, Amount>>{{inv[2], 4}}));
+  EXPECT_EQ(r.call_drops, (std::vector<std::pair<EdgeId, Amount>>{{inv[2], 4}}));
   r = p.place(1);
   EXPECT_EQ(r.placed, 0);
   EXPECT_EQ(r.termination, Termination::Complete);
   EXPECT_EQ(*r.remaining, 1);
   // The call's own drops; the record keeps the cumulative 4 + 1 below.
-  EXPECT_EQ(r.drops, (std::vector<std::pair<EdgeId, Amount>>{{inv[2], 1}}));
+  EXPECT_EQ(r.call_drops, (std::vector<std::pair<EdgeId, Amount>>{{inv[2], 1}}));
   EXPECT_EQ(alloc_in(fg), (std::vector<Amount>{6, 5, 1, 5}));
   const auto rec = fg.records().at(0);
   EXPECT_EQ(rec.flow_id, (FlowId {fg.uid(), 0}));
   EXPECT_EQ(rec.owner, 0);
   EXPECT_EQ(rec.sources, (std::vector<NodeId>{0}));
   EXPECT_EQ(rec.destinations, (std::vector<NodeId>{3}));
-  EXPECT_EQ(rec.placement, FlowPlacement::EqualBalanced);
   EXPECT_EQ(rec.admission, Admission::Lossy);
   ASSERT_TRUE(rec.bundle);
   EXPECT_EQ(rec.bundle->via_edges().size(), 4u);
@@ -489,9 +488,9 @@ TEST(FlowLedger, RequestDomainAndFailedCallsLeaveState) {
   const LedgerState before = ledger_state(fg);
   const auto id = p.flow_id();
   EXPECT_EQ(error_of([&] { (void)p.place(kDomainLimit); }),
-            "request 4611686018427387904 is outside [0, 2^62) units (requests are integer units or +inf)");
+            "offer must be an integer in [0, 2^62) or permitted +inf");
   EXPECT_EQ(error_of([&] { (void)p.place(-1); }),
-            "request -1 is outside [0, 2^62) units (requests are integer units or +inf)");
+            "offer must be an integer in [0, 2^62) or permitted +inf");
   // The failed calls changed nothing: the requested total, the +inf flag, the flow and the
   // ledger (every record field, the aggregate, the residual, the next FlowId and the owners).
   EXPECT_EQ(p.requested(), (Counter128 {0, 2}));
@@ -788,8 +787,8 @@ TEST(FlowLedger, NoRouteCallsRecordTheEpochState) {
   EXPECT_EQ(r.termination, Termination::NoRoute);
   EXPECT_FALSE(r.remaining.has_value());
   EXPECT_TRUE(p.infinite());
-  EXPECT_NE(error_of([&] { (void)p.place(1); }).find("after +inf"), std::string::npos);
-  EXPECT_NE(error_of([&] { (void)p.place(0); }).find("after +inf"), std::string::npos);
+  EXPECT_NE(error_of([&] { (void)p.place(1); }).find("after infinite placement"), std::string::npos);
+  EXPECT_NE(error_of([&] { (void)p.place(0); }).find("after infinite placement"), std::string::npos);
   EXPECT_EQ(p.requested(), (Counter128 {0, 3}));  // the rejected calls added nothing
   EXPECT_TRUE(p.infinite());
   p.remove();
@@ -802,7 +801,8 @@ TEST(FlowLedger, NoRouteCallsRecordTheEpochState) {
 
 TEST(FlowLedger, RouteCostIsTheBundlesMinimumWalk) {
   // Weighted Residual on a route whose only edge another owner fills: the split graph is
-  // empty (record at zero delivery), route_cost is still the bundle's walk cost 3.
+  // empty (record at zero delivery; no positive weight: NoActiveWeight), route_cost is still the
+  // bundle's walk cost 3.
   auto g = shared(make_graph(2, {{0, 1, 2, 3}}));
   FlowLedger fg(g);
   PinnedOne holder(fg, 0, 1, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
@@ -810,7 +810,7 @@ TEST(FlowLedger, RouteCostIsTheBundlesMinimumWalk) {
   PinnedOne w(fg, 0, 1, all_edges(*g), FlowPlacement::Weighted, Admission::Lossless, EdgePriority::Residual);
   auto r = w.place(1);
   EXPECT_EQ(r.placed, 0);
-  EXPECT_EQ(r.termination, Termination::Exhausted);
+  EXPECT_EQ(r.termination, Termination::NoActiveWeight);
   EXPECT_TRUE(r.routes_changed);
   ASSERT_NE(w.plan(), nullptr);
   EXPECT_TRUE(w.plan()->members.empty());

@@ -119,7 +119,6 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { ++x.owner; },
       [](auto& x) { x.sources.push_back(1); },
       [](auto& x) { x.destinations.push_back(1); },
-      [](auto& x) { x.placement = FlowPlacement::MaxFlow; },
       [](auto& x) { x.admission = Admission::Lossy; },
       [&](auto& x) { x.bundle = other_bundle; },
       [](auto& x) { ++x.route_cost; },
@@ -128,7 +127,6 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { x.edges.emplace_back(2, 1); },
       [](auto& x) { x.drops.emplace_back(2, Counter128 {}); },
   };
-  ASSERT_EQ(rec.placement, FlowPlacement::EqualBalanced);
   ASSERT_EQ(rec.admission, Admission::Lossless);
   ASSERT_FALSE(rec.offered.has_value());
   for (std::size_t k = 0; k < records.size(); ++k) {
@@ -164,11 +162,22 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   const std::vector<std::function<void(PlacementResult&)>> results = {
       [](auto& x) { ++x.placed; },
       [](auto& x) { x.remaining = Amount {1}; },
+      [](auto& x) { ++x.delivery_delta; },
+      [](auto& x) { x.call_drops.emplace_back(2, 1); },
+      [](auto& x) { ++x.call_source_loss; },
       [](auto& x) { x.termination = Termination::NoRoute; },
-      [](auto& x) { x.local_outcomes.emplace_back(1, Termination::NoRoute); },
       [](auto& x) { x.routes_changed = !x.routes_changed; },
       [](auto& x) { x.weights_changed = !x.weights_changed; },
-      [](auto& x) { x.drops.emplace_back(2, 1); },
+      [](auto& x) { x.requested.reset(); },
+      [](auto& x) { x.offered = Counter128 {0, 1}; },
+      [](auto& x) { ++x.admitted.lo; },
+      [](auto& x) { ++x.delivered; },
+      [](auto& x) { x.unadmitted.reset(); },
+      [](auto& x) { ++x.source_loss.lo; },
+      [](auto& x) { x.drops.emplace_back(2, Counter128 {0, 1}); },
+      [](auto& x) { x.by_source.emplace_back(); },
+      [](auto& x) { ++x.by_source[0].delivered; },
+      [](auto& x) { x.total_cost = Counter128 {0, 1}; },
       [](auto& x) { x.cost_distribution = std::vector<std::pair<Cost, Amount>> {{9, 1}}; },
       [](auto& x) { x.edge_flows->push_back(0); },
       [](auto& x) { x.residual->push_back(0); },
@@ -179,6 +188,8 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   ASSERT_NE(r.termination, Termination::NoRoute);
   ASSERT_FALSE(r.cost_distribution.has_value());  // CostOnly: Global's curve only
   ASSERT_FALSE(r.min_cut.has_value());
+  ASSERT_FALSE(r.offered.has_value() || r.total_cost.has_value());  // Lossless CostOnly EqualBalanced
+  ASSERT_TRUE(r.requested.has_value() && r.unadmitted.has_value() && !r.by_source.empty());
   for (std::size_t k = 0; k < results.size(); ++k) {
     PlacementResult x = r;
     results[k](x);
@@ -191,9 +202,12 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   const std::vector<std::function<void(Epoch&)>> epochs = {
       [](auto& x) { ++x.requested.hi; },
       [](auto& x) { ++x.requested.lo; },
+      [](auto& x) { ++x.offered.lo; },
       [](auto& x) { x.infinite = !x.infinite; },
+      [](auto& x) { x.prepared = !x.prepared; },
       [](auto& x) { ++x.placed; },
       [](auto& x) { x.curve.emplace_back(9, 1); },
+      [](auto& x) { x.program.push_back(0); },
       [](auto& x) { x.cohorts.emplace_back(); },
       [](auto& x) { ++x.cohorts[0][0].id; },
       [](auto& x) { ++x.cohorts[0][0].cost; },

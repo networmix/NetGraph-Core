@@ -39,16 +39,19 @@ struct DiminishingReturns {
 };
 
 // Each routing mode has only the fields it uses.
-// CostOnly: one flow per source on the static shortest-path DAG (all shortest paths, with no
-//   directed cycles, edges of capacity 0 included), or its canonical single path; never
-//   refreshed, grown or reoptimised.
-// CapacityAware: flow_count flows found by shortest-path searches that require enough unused
-//   capacity on each edge. Grow up to max_flow_count (absent: no ceiling), subject to
-//   min_flow_bandwidth (units) and max_path_cost. Rerouting is optional; `diminishing`
-//   stops growth when recent gains are too small (absent: off).
-// Global: replace the policy's allocation with a minimum-cost flow of what it already delivers
-//   plus this call's request (placed_demand() + volume: what an earlier call could not place is
-//   not requested again) over the whole eligible graph (placement MaxFlow only).
+// CostOnly: hop-by-hop routing on each roster source's static shortest routes (all shortest
+//   paths, with no directed cycles, edges of capacity 0 included, or the canonical single
+//   path), prepared once per epoch and never refreshed, grown or reoptimised. The sources of
+//   the demand are pooled: a router shared by several sources adds their traffic and splits it
+//   once. EqualBalanced and Weighted forward the equal origin; MaxFlow is a controller
+//   restricted to the union of those routes.
+// CapacityAware: flow_count flows per source found by shortest-path searches that require
+//   enough unused capacity on each edge. Grow up to max_flow_count (absent: no ceiling), subject
+//   to min_flow_bandwidth (units) and max_path_cost. Rerouting is optional; `diminishing`
+//   stops growth when recent gains are too small (absent: off). Its sources are not pooled.
+// Global: the ideal controller, a minimum-cost maximum flow over the whole eligible graph of
+//   what the policy already delivers plus this call's request (placed_demand() + volume: what an
+//   earlier call could not place is not requested again).
 // Pinned: one flow per usable supplied route bundle (a walk survives the Eligibility, whatever
 //   the capacities), in supply order; single endpoints only. Convert a Path with to_dag().
 struct CostOnly {};
@@ -66,96 +69,151 @@ struct Pinned {
 };
 using Routing = std::variant<CostOnly, CapacityAware, Global, Pinned>;
 
-// routing, placement, admission and selection are required; none has a default.
-// Global and Pinned use selection.priority only for Weighted membership and weights, and
-// ignore the other selection fields. CostOnly and CapacityAware use all four selection fields.
-// Setting an ignored field is not an error. Invalid placement, admission or selection enum
-// values throw std::invalid_argument naming the field. Fields remain assignable, so policies
-// and evaluators check them again, then check the supported combinations.
+// One demand's settings. A field that does not apply to the routing mode stays absent; a policy
+// or an evaluator checks the combination when it uses the configuration (the fields remain
+// assignable), in this order: the enumeration values, then the model's row of the matrix below,
+// its columns left to right (placement, origin, admission, selection), then the DagCache, then
+// CapacityAware's own parameters, then the pooled single-path rule.
+//
+// | routing       | placement               | origin (default / allowed) | admission         | selection |
+// | CostOnly      | EqualBalanced, Weighted | Equal / Equal              | Lossless, Lossy   | all four fields |
+// | CostOnly      | MaxFlow                 | Optimized / both           | Lossless          | all four fields |
+// | Global        | none                    | Optimized / both           | Lossless          | none |
+// | CapacityAware | required (all three)    | Equal / Equal              | Lossless          | all four fields |
+// | Pinned        | required (all three)    | none                       | Lossless; Lossy   | priority (Weighted) |
+//
+// An absent origin resolves to the default and an absent selection to PathSelection() in the
+// policy's snapshot (config()). Only CostOnly reads a DagCache; another model rejects one. Weighted takes its weights from
+// selection.priority (Capacity or Residual; Headroom is rejected). Pooled single-path rule:
+// CostOnly with more than one input source (normalized, before any Eligibility) rejects
+// multipath = false together with PreferHigherPriority, whose bottleneck choice would differ per
+// source at a shared router.
 struct FlowPolicyConfig {
-  FlowPolicyConfig(Routing routing_, FlowPlacement placement_, Admission admission_, PathSelection selection_);
-  Routing routing;
-  FlowPlacement placement;
-  Admission admission;
-  PathSelection selection;
+  Routing routing {CostOnly {}};
+  std::optional<FlowPlacement> placement {};
+  Admission admission {Admission::Lossless};
+  std::optional<PathSelection> selection {};
+  std::optional<Origin> origin {};
 };
 
 // Optional outputs of a placement (absent unless requested): edge_flows (this policy's own
 // allocation per edge after the call), residual and bottleneck (the ledger's after the call),
-// and on Global the min_cut of the solve when bottleneck is requested.
+// and min_cut (Global with the optimized origin; see PlacementResult::min_cut).
 struct OutputOptions {
   bool edge_flows {false};
   bool residual {false};
   bool bottleneck {false};
+  bool min_cut {false};
 };
 
-// A source is served if its offer is 0, Lossless delivers the offer, or Lossy forwards the
-// entire finite offer (including drops). Choose its first matching outcome:
-// Complete: served.
-// LimitFlows: creation/growth hit kMaxFlowsPerCall, or growth hit max_flow_count > flow_count.
-// LimitDiminishing: the diminishing-returns guard stopped growth.
-// NoRoute: no flows remain; for Global, maximum flow is 0 and nothing was ever placed.
-// Exhausted: any other unserved case, including full flows with no growth, a full fixed-size
-// group of flows, Global at maximum flow, or an infinite Lossy offer.
-// Global and Pinned act as one source: every local outcome equals the call's termination.
-// The call is Complete for request 0 or when all sources are served, and NoRoute for a positive
-// request with an empty roster: no eligible source statically reaches an allowed destination.
-// Otherwise, take the highest unserved outcome: LimitFlows > LimitDiminishing > Exhausted >
-// NoRoute.
-enum class Termination { Complete, LimitFlows, LimitDiminishing, NoRoute, Exhausted };
+// The call's outcome, the first that applies: Complete for a zero request; NoRoute for a
+// positive request with an empty roster (no eligible source statically reaches an allowed
+// destination); NoActiveWeight when routes exist but none has a positive weight (Weighted over
+// edges of capacity 0 only); a Lossy finite request: Complete (delivery and losses account for
+// the whole offer, which does not mean nothing was lost); otherwise Complete when the whole
+// request was delivered, else Exhausted (an infinite request is Exhausted). A controller whose
+// maximum is 0 over existing routes is Exhausted, not NoRoute.
+// CapacityAware alone reduces per-source outcomes instead: a source is served when its offer is
+// 0 or delivered; an unserved source's outcome is LimitFlows (creation or growth hit
+// kMaxFlowsPerCall, or growth hit max_flow_count > flow_count), else LimitDiminishing (the
+// diminishing guard), else NoRoute (no flows), else Exhausted; the call takes the highest
+// unserved outcome in that order, Complete when every source is served.
+enum class Termination { Complete, LimitFlows, LimitDiminishing, NoRoute, Exhausted, NoActiveWeight };
 
-// Per-call changes: placed, remaining = request - placed (nullopt for +inf), and transit drops.
-// Include the termination and one local outcome per roster source in ascending NodeId.
-// Global also returns its cumulative marginal cost curve: (cost, units) pairs in ascending cost,
-// where delivering `units` more units raises the minimum total cost of the flow by `cost` per
-// unit. Delivering more can reroute flow already placed, so the pairs are not the costs of the
-// paths in the final allocation. Optional outputs appear only if asked.
-// Both change flags start false and report committed changes only. routes_changed means a
-// source's group of flows was created (even at zero delivery), a retained flow was rerouted,
-// growth added a flow, or Global changed a source's used-edge set. weights_changed means a
-// rerouted Weighted flow captured its weights again; Global never sets it. A candidate equal
-// to the current route is not a change.
+// One normalized input source's forwarding in the epoch (zero rows included: a masked or
+// unreachable source): offered (Lossy only: its injections), admitted (Lossless: what it
+// delivers; Lossy: offered), delivered, source_loss (offered shares lost at the source for lack of
+// a usable route) and dropped (its losses on links). Lossy: offered = delivered + source_loss +
+// dropped.
+struct SourceFlow {
+  NodeId source {0};
+  std::optional<Counter128> offered {};
+  Counter128 admitted {};
+  Amount delivered {0};
+  Counter128 source_loss {};
+  Counter128 dropped {};
+  friend bool operator==(const SourceFlow&, const SourceFlow&) = default;
+};
+
+// The result of one call: this call's values, then the demand's state after it (totals of the
+// epoch), then the optional outputs.
+// This call: placed (units delivered by the call), remaining = request - placed (nullopt for
+// +inf), delivery_delta (new minus old delivery: placed for a placement), call_drops (this call's
+// drops per edge, ascending EdgeId), call_source_loss, termination and the change flags.
+// routes_changed means a group of flows was created (even at zero delivery: CostOnly prepares
+// every roster source's route at the epoch's first positive call), a retained flow was rerouted,
+// growth added a flow, or Global changed a source's used-edge set; weights_changed means a
+// rerouted Weighted flow captured its weights again. A candidate equal to the current route is not
+// a change.
+// State: requested (the sum of the requests; nullopt after +inf), offered (Lossy only: the
+// traffic actually sent; the first-hop injection of a Lossy +inf), admitted (Lossless: the total
+// carried; Lossy: offered), delivered, unadmitted (Lossless: requested - delivered, nullopt after
+// +inf; Lossy: 0), source_loss and drops (per edge). Lossy: offered = source_loss + sum(drops) +
+// delivered. by_source has one row per normalized input source in ascending NodeId; the rows sum
+// to the totals except for Lossy with an empty roster, where the whole offer is source loss of
+// the demand and every row is zero. total_cost (controllers: Global and CostOnly MaxFlow) is the
+// exact sum of cost * flow over the policy's allocation (below 2^124).
+// cost_distribution: Global with the optimized origin only, the cumulative marginal cost curve:
+// (cost, units) pairs in ascending cost, where delivering `units` more units raised the minimum
+// total cost of the flow by `cost` per unit (more delivery can reroute flow already placed, so the
+// pairs are not the costs of the paths in the final allocation); empty for an empty roster, and
+// absent before the epoch's first positive call.
 struct PlacementResult {
   Amount placed {0};
   std::optional<Amount> remaining {};
+  Amount delivery_delta {0};
+  std::vector<std::pair<EdgeId, Amount>> call_drops {};
+  Amount call_source_loss {0};
   Termination termination {Termination::Complete};
-  std::vector<std::pair<NodeId, Termination>> local_outcomes {};
   bool routes_changed {false};
   bool weights_changed {false};
-  std::vector<std::pair<EdgeId, Amount>> drops {};
+  std::optional<Counter128> requested {};
+  std::optional<Counter128> offered {};
+  Counter128 admitted {};
+  Amount delivered {0};
+  std::optional<Counter128> unadmitted {};
+  Counter128 source_loss {};
+  std::vector<std::pair<EdgeId, Counter128>> drops {};
+  std::vector<SourceFlow> by_source {};
+  std::optional<Counter128> total_cost {};
   std::optional<std::vector<std::pair<Cost, Amount>>> cost_distribution {};
   std::optional<std::vector<Amount>> edge_flows {};
   std::optional<std::vector<Amount>> residual {};
   std::optional<std::vector<EdgeId>> bottleneck {};
-  // Global, when bottleneck is requested: the edges leaving the set reachable from the real
-  // sources through residual arcs, including reverse arcs that cancel flow, whatever their view
-  // (an allowed edge of capacity 0 is listed; an excluded edge is not an edge here). A maximal
-  // solve returns this minimum cut; an empty roster returns an empty cut for its maximal flow
-  // of 0. nullopt if not requested, not Global, stopped by the cap, or a zero call (no solve).
+  // Requested by OutputOptions::min_cut; Global with the optimized origin only, when the solve
+  // reached the maximum flow: the edges leaving the set of nodes the roster sources reach through
+  // residual arcs (free capacity plus this policy's own load, reverse arcs that cancel flow
+  // included), whatever their free capacity (an allowed edge of capacity 0 is listed; an excluded
+  // edge is not an edge here), ascending EdgeId. That is the minimum cut closest to the sources; an
+  // empty roster returns an empty cut. nullopt otherwise (another model, the equal origin, a call
+  // below the maximum, a zero call).
   std::optional<std::vector<EdgeId>> min_cut {};
 };
 
-// A policy binds to its ledger at construction. place() validates, then Global re-solves what
-// it already delivers plus the request; other modes create, reroute, fill and grow flows per roster source using
-// one working copy of unused capacity. All changes commit together, or none do.
-// remove() releases every policy flow, retires their ids and starts a new epoch: the period
-// since construction or the last remove() over which requests and flows accumulate. Destroying
-// a policy without remove() leaves its records in the ledger as orphans.
+// A policy binds to its ledger at construction. place() validates, then computes on working
+// copies and commits all changes together, or none. CostOnly prepares its routes at the epoch's
+// first positive call (every roster source's shortest routes on the ledger's residual at that
+// call's entry) and keeps them for the epoch; EqualBalanced and Weighted forward the equal origin
+// over the pooled routes: Lossless admits the largest total a in [admitted, admitted + volume]
+// whose no-drop forwarding fits (a refused unit is not offered again), Lossy forwards the new
+// round-robin injections on the residual at call entry (earlier drops are not offered again).
+// The controllers (Global, CostOnly MaxFlow) re-solve admitted + volume from zero on the
+// residual plus their own allocation; the equal origin admits the largest total whose round-robin
+// supplies are all carried. CapacityAware and Pinned run per source (stages of creation,
+// reoptimisation, amounts and growth). remove() releases every policy flow, retires their ids and
+// starts a new epoch: the period since construction or the last remove() over which requests and
+// flows accumulate. Destroying a policy without remove() leaves its records in the ledger as
+// orphans.
 //
-// Validation (std::invalid_argument, before anything binds): the endpoint sets (non-empty, ids
-// in range, disjoint), a foreign Eligibility or DagCache, the configuration (enumeration values;
-// Lossy with MaxFlow, Global or CapacityAware; Global without MaxFlow; Weighted with Headroom;
-// flow_count >= 1; max_flow_count >= flow_count; min_flow_bandwidth in [0, 2^62) units; the
-// ceiling; the diminishing guard; Pinned: single endpoints, a non-empty bundle list of this graph
-// without null or duplicate bundles, every bundle with a src -> dst walk before pruning). The order between
-// these three groups of checks is not specified: when defects of two groups meet, the one
-// reported may differ between this constructor and a language binding. place() validates the request ([0, 2^62) units or +inf; a
-// finite request after +inf in the epoch is rejected, also 0) before any change. A solve of the
-// flow core (Global, or a MaxFlow flow) whose network exceeds the core's int32 numbering throws
-// std::invalid_argument, and the call changes nothing: more than INT32_MAX - 2 nodes, or more than
-// 2^30 - 1 edges, sources and destinations together (Global counts the graph's nodes, the
-// eligible edges, the roster and the eligible destinations; a MaxFlow flow the nodes of its
-// member edges and endpoints, its member edges, its source and its destinations).
+// Validation (std::invalid_argument, before anything binds), in this order: the endpoint sets
+// (non-empty, ids in range, disjoint), a foreign Eligibility or DagCache, the configuration
+// (FlowPolicyConfig's order), then Pinned's bundles (a non-empty list of this graph without null
+// or duplicate bundles, every bundle with a src -> dst walk before pruning). place() validates
+// the request ([0, 2^62) units or +inf; a finite request after +inf in the epoch is rejected,
+// also 0) before any change. A solve of the flow core (Global, CostOnly MaxFlow, a MaxFlow flow)
+// whose network exceeds the core's int32 numbering throws std::invalid_argument, and the call
+// changes nothing: more than INT32_MAX - 2 nodes, or more than 2^30 - 1 edges, sources and
+// destinations together.
 //
 // Lifetime: the ledger, the Eligibility and the DagCache outlive the policy (the policy holds
 // pointers to them). The roster (the eligible sources that statically reach an allowed
@@ -183,7 +241,8 @@ public:
   [[nodiscard]] FlowRecord record(const FlowId& flow_id) const;
   // Pinned: the number of bundles with a src -> dst walk after static pruning; 0 otherwise.
   [[nodiscard]] std::int32_t usable_bundles() const noexcept;
-  // The configuration (a copy taken at construction).
+  // The configuration as validated at construction: a copy whose absent origin and selection are
+  // resolved to the model's defaults (FlowPolicyConfig).
   [[nodiscard]] const FlowPolicyConfig& config() const noexcept;
 
 private:

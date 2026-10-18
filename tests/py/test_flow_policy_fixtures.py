@@ -24,7 +24,6 @@ import copy
 import gc
 import json
 import math
-import sys
 import traceback
 from pathlib import Path
 
@@ -43,7 +42,6 @@ PLACEMENT = {
     "Weighted": ngc.FlowPlacement.WEIGHTED,
     "EqualBalanced": ngc.FlowPlacement.EQUAL_BALANCED,
 }
-PLACEMENT_NAME = {v: k for k, v in PLACEMENT.items()}
 ADMISSION = {"Lossless": ngc.Admission.LOSSLESS, "Lossy": ngc.Admission.LOSSY}
 ADMISSION_NAME = {v: k for k, v in ADMISSION.items()}
 TIE = {
@@ -129,9 +127,11 @@ def config_of(g, c):
     sel = c["selection"]
     return ngc.FlowPolicyConfig(
         routing=routing,
-        placement=PLACEMENT[c["placement"]],
+        placement=None if c["placement"] is None else PLACEMENT[c["placement"]],
         admission=ADMISSION[c["admission"]],
-        selection=ngc.PathSelection(
+        selection=None
+        if sel is None
+        else ngc.PathSelection(
             TIE[sel["tie_break"]],
             PRIORITY[sel["priority"]],
             sel["multipath"],
@@ -144,12 +144,26 @@ def result_json(r):
     out = {
         "placed": r.placed,
         "remaining": "inf" if r.remaining == math.inf else r.remaining,
+        "delivery_delta": r.delivery_delta,
+        "call_drops": [[e, x] for e, x in r.call_drops],
+        "call_source_loss": r.call_source_loss,
         "termination": r.termination.name.lower(),
         "routes_changed": r.routes_changed,
         "weights_changed": r.weights_changed,
+        "requested": "inf" if r.requested == math.inf else r.requested,
+        "admitted": r.admitted,
+        "delivered": r.delivered,
+        "source_loss": r.source_loss,
         "drops": [[e, x] for e, x in r.drops],
-        "local_outcomes": [[s, o.name.lower()] for s, o in r.local_outcomes],
+        "by_source": [
+            [x.source, x.offered, x.admitted, x.delivered, x.source_loss, x.dropped]
+            for x in r.by_source
+        ],
     }
+    for name in ("offered", "unadmitted", "total_cost"):
+        value = getattr(r, name)
+        if value is not None:
+            out[name] = value
     if r.cost_distribution is not None:
         out["cost_distribution"] = [[c, u] for c, u in r.cost_distribution]
     for name in ("edge_flows", "residual", "bottleneck", "min_cut"):
@@ -170,7 +184,6 @@ def ledger_json(fg):
                 "owner": r.owner,
                 "sources": list(r.sources),
                 "destinations": list(r.destinations),
-                "placement": PLACEMENT_NAME[r.placement],
                 "admission": ADMISSION_NAME[r.admission],
                 "bundle": sorted(int(e) for e in r.bundle.via_edges()),
                 "route_cost": r.route_cost,
@@ -229,7 +242,6 @@ def replay(fx, at=None):
     ledgers: dict[int, object] = {}
     policies: dict[int, object] = {}
     alive = []
-    curves: dict[int, list] = {}  # per policy: the cumulative Global curve of the epoch
     for i, op in enumerate(fx["ops"]):
         if at is not None:
             at.append(i)
@@ -282,7 +294,6 @@ def replay(fx, at=None):
             pol = construct()
             alive.append(pol)
             policies[op["id"]] = (pol, fg)
-            curves[op["id"]] = []
             assert exactly(policy_json(pol), expect["policy"]), where
             continue
         pol, fg = policies[op["policy"]]
@@ -290,7 +301,6 @@ def replay(fx, at=None):
         assert kind not in ("remove", "destroy") or not op["error"], where
         if kind == "remove":
             pol.remove()
-            curves[op["policy"]] = []
             assert exactly(ledger_json(fg), expect["ledger"]), where
             assert exactly(policy_json(pol), expect["policy"]), where
             continue
@@ -306,8 +316,10 @@ def replay(fx, at=None):
         volume = math.inf if op["volume"] == "inf" else op["volume"]
         outputs = None
         if op["outputs"] is not None:
-            e, r, b = op["outputs"]
-            outputs = ngc.OutputOptions(edge_flows=e, residual=r, bottleneck=b)
+            e, r, b, m = op["outputs"]
+            outputs = ngc.OutputOptions(
+                edge_flows=e, residual=r, bottleneck=b, min_cut=m
+            )
         old = ext._max_flows_per_call(op["cap"])
         try:
             if op["error"]:
@@ -322,17 +334,7 @@ def replay(fx, at=None):
             r, trace = pol._place_traced(volume, outputs)
         finally:
             ext._max_flows_per_call(old)
-        got = result_json(r)
-        if isinstance(pol.config.routing, ngc.Global):
-            # Where the reference differs from the library: a Global zero call reports
-            # the cumulative curve, which the reference omits; it must equal the curve of the
-            # epoch's last positive call ([] before any), and only then is it set aside.
-            if volume == 0 and "cost_distribution" not in expect["result"]:
-                curve = curves[op["policy"]]
-                assert exactly(got.pop("cost_distribution"), curve), where
-            if "cost_distribution" in expect["result"]:
-                curves[op["policy"]] = expect["result"]["cost_distribution"]
-        assert exactly(got, expect["result"]), where
+        assert exactly(result_json(r), expect["result"]), where
         assert exactly(norm(trace), expect["trace"]), where
         assert exactly(ledger_json(fg), expect["ledger"]), where
         assert exactly(policy_json(pol), expect["policy"]), where
@@ -599,29 +601,18 @@ def test_every_other_replay_clause_reports_its_operation(monkeypatch):
             ), (fx["name"], n)
     assert rejected_calls == 4
     monkeypatch.undo()
-    # Op 2 of global_epochs is a Global zero call on a fresh policy, op 3 a positive call with
-    # the curve [[1, 1]]. With op 3 moved before op 2, the zero call reports [[1, 1]], the
-    # remembered curve; a result that reports another cumulative curve must fail there.
+    # Op 2 of global_epochs is a Global zero call on a fresh policy (nothing prepared: no curve),
+    # op 3 a positive call with the curve [[1, 1]]. With op 3 moved before op 2, the zero call
+    # reports the remembered curve [[1, 1]] where the data, recorded before any placement, has
+    # none: the result line of that operation fails.
     assert epochs["ops"][2]["volume"] == 0
+    assert "cost_distribution" not in epochs["ops"][2]["expect"]["result"]
     swapped = copy.deepcopy(epochs)
     swapped["ops"][2], swapped["ops"][3] = swapped["ops"][3], swapped["ops"][2]
-    zero_call = 'assert exactly(got.pop("cost_distribution"), curve), where'
-    # Unchanged, the replay passes the zero call's curve and fails only after it, at the ledger
-    # line of the same operation: its expected ledger is the one from before the positive call.
     assert _failure(swapped) == (
         3,
-        'assert exactly(ledger_json(fg), expect["ledger"]), where',
+        'assert exactly(result_json(r), expect["result"]), where',
     )
-    unshifted = result_json
-
-    def shifted(r):
-        got = unshifted(r)
-        if got["placed"] == 0 and got.get("cost_distribution"):
-            got["cost_distribution"] = [[c + 1, u] for c, u in got["cost_distribution"]]
-        return got
-
-    monkeypatch.setattr(sys.modules[__name__], "result_json", shifted)
-    assert _failure(swapped) == (3, zero_call)
 
 
 def _corrupt_first_int(x):

@@ -57,6 +57,14 @@ def graph():
     return build(5, EDGES)
 
 
+POOLED_LOSSY = ngc.FlowPolicyConfig(
+    routing=ngc.CostOnly(),
+    placement=ngc.FlowPlacement.EQUAL_BALANCED,
+    admission=ngc.Admission.LOSSY,
+)
+GLOBAL_EQUAL = ngc.FlowPolicyConfig(routing=ngc.Global(), origin=ngc.Origin.EQUAL)
+
+
 def caps(g):
     return [int(c) for c in g.capacity_units()]
 
@@ -82,11 +90,11 @@ def stateless(call):
     return make
 
 
-def placement(cfg, traced):
+def placement(cfg, traced, sources=0):
     def make():
         g = graph()
         ledger = ngc.FlowLedger(g)
-        policy = ngc.FlowPolicy(ledger, 0, 4, cfg)
+        policy = ngc.FlowPolicy(ledger, sources, 4, cfg)
         policy.place(
             2
         )  # an earlier call's flows in the same epoch: a failed call keeps them
@@ -108,9 +116,9 @@ def placement(cfg, traced):
 def frozen_cache_capacity():
     g = graph()
     cache = ngc.DagCache(g)
-    ngc.capacity(g, 0, 4, ngc.CapacityOptions(COSTONLY, cache=cache))
+    ngc.capacity(g, 0, 4, ngc.QueryOptions(COSTONLY, cache=cache))
     cache.freeze()
-    opts = ngc.CapacityOptions(COSTONLY, cache=cache, outputs=ALL_OUT)
+    opts = ngc.QueryOptions(COSTONLY, cache=cache, outputs=ALL_OUT)
     return ngc.capacity, (g, 0, 4, opts), lambda: stats_of(cache)
 
 
@@ -160,21 +168,33 @@ SCENARIOS = {
     "place.costonly": placement(COSTONLY, traced=False),
     "place.global": placement(GLOBAL, traced=False),
     "place_traced.global": placement(GLOBAL, traced=True),
+    # Two sources: the pooled program's attribution and per-source rows, Lossy accounting, and
+    # the equal origin's bisection.
+    "place.costonly_pooled_lossy": placement(
+        POOLED_LOSSY, traced=False, sources=[0, 1]
+    ),
+    "place.global_equal": placement(GLOBAL_EQUAL, traced=False, sources=[0, 1]),
+    "batch_capacity.global_equal": stateless(
+        lambda g: (
+            ngc.batch_capacity,
+            (g, [([0, 1], 4), (1, 3)], ngc.QueryOptions(GLOBAL_EQUAL), None, 1),
+        )
+    ),
     "capacity.global": stateless(
         lambda g: (
             ngc.capacity,
-            (g, 0, 4, ngc.CapacityOptions(GLOBAL, outputs=ALL_OUT)),
+            (g, 0, 4, ngc.QueryOptions(GLOBAL, outputs=ALL_OUT)),
         )
     ),
     "capacity.frozen_cache": frozen_cache_capacity,
     "batch_capacity.global": stateless(
         lambda g: (
             ngc.batch_capacity,
-            (g, [(0, 4), (1, 3)], ngc.CapacityOptions(GLOBAL), None, 1),
+            (g, [(0, 4), (1, 3)], ngc.QueryOptions(GLOBAL), None, 1),
         )
     ),
     "sensitivity.global": stateless(
-        lambda g: (ngc.sensitivity, (g, 0, 4, ngc.SensitivityOptions(GLOBAL), 1))
+        lambda g: (ngc.sensitivity, (g, 0, 4, ngc.QueryOptions(GLOBAL), 1))
     ),
 }
 

@@ -12,7 +12,7 @@ import traceback
 
 import _netgraph_core as ext
 import pytest
-from helpers import ALL_OUT, COSTONLY, GLOBAL, build, stats_of
+from helpers import ALL_OUT, COSTONLY, GLOBAL, build, exact, stats_of
 from private_hooks import needs_hooks
 
 import netgraph_core as ngc
@@ -31,7 +31,7 @@ def prepopulate(g, keys):
     looks up the destinations' reverse support; the source is spine 6), frozen afterwards."""
     cache = ngc.DagCache(g)
     for dst in keys:
-        ngc.capacity(g, 6, dst, ngc.CapacityOptions(COSTONLY, cache=cache))
+        ngc.capacity(g, 6, dst, ngc.QueryOptions(COSTONLY, cache=cache))
     cache.freeze()
     return cache
 
@@ -44,8 +44,8 @@ def stats(cache):
 def test_transition_table():
     g = fabric()
     cache = ngc.DagCache(g)
-    opts = ngc.CapacityOptions(COSTONLY, cache=cache)
-    want = ngc.capacity(g, 0, 3, ngc.CapacityOptions(COSTONLY)).placed
+    opts = ngc.QueryOptions(COSTONLY, cache=cache)
+    want = ngc.capacity(g, 0, 3, ngc.QueryOptions(COSTONLY)).placed
     assert want == 12  # three spines of 4: the comparisons below are not of zeros
     assert ngc.capacity(g, 0, 3, opts).placed == want
     assert stats(cache) == (0, 1, 1)
@@ -80,20 +80,18 @@ def test_miss_is_a_dedicated_exception():
 def test_frozen_cache_shared_by_every_worker():
     g = fabric()
     pairs = [(0, 3), (1, 4), (2, 5), ([0, 1], [3, 4])]
-    want = [
-        r.placed for r in ngc.batch_capacity(g, pairs, ngc.CapacityOptions(COSTONLY))
-    ]
+    want = [r.placed for r in ngc.batch_capacity(g, pairs, ngc.QueryOptions(COSTONLY))]
     building = ngc.DagCache(g)
     with pytest.raises(ValueError, match="workers == 1"):
         ngc.batch_capacity(
-            g, pairs, ngc.CapacityOptions(COSTONLY, cache=building), workers=2
+            g, pairs, ngc.QueryOptions(COSTONLY, cache=building), workers=2
         )
     assert all(w > 0 for w in want)  # every pair places: the comparison is not of zeros
     cache = prepopulate(g, [[3], [4], [5], [3, 4]])
     for workers in (1, 2, 4):
         before = stats(cache)
         got = ngc.batch_capacity(
-            g, pairs, ngc.CapacityOptions(COSTONLY, cache=cache), workers=workers
+            g, pairs, ngc.QueryOptions(COSTONLY, cache=cache), workers=workers
         )
         assert [r.placed for r in got] == want
         assert stats(cache) == (before[0] + 4, before[1], 4), workers  # a hit per pair
@@ -106,7 +104,7 @@ def test_frozen_cache_shared_by_every_worker():
             ngc.batch_capacity(
                 g,
                 pairs[:3],
-                ngc.CapacityOptions(COSTONLY, cache=partial),
+                ngc.QueryOptions(COSTONLY, cache=partial),
                 workers=workers,
             )
         assert stats(partial) == (before[0], before[1] + 1, 1), workers
@@ -119,15 +117,15 @@ def test_prepopulated_uids_and_intersections():
     other = g.eligibility(excluded_edges=[1])  # the intersection with common is new
     pairs = [(1, 4), (2, 5)]
     cache = ngc.DagCache(g)
-    ngc.capacity(g, 1, 4, ngc.CapacityOptions(COSTONLY, elig=narrow, cache=cache))
-    ngc.capacity(g, 2, 5, ngc.CapacityOptions(COSTONLY, elig=common, cache=cache))
+    ngc.capacity(g, 1, 4, ngc.QueryOptions(COSTONLY, elig=narrow, cache=cache))
+    ngc.capacity(g, 2, 5, ngc.QueryOptions(COSTONLY, elig=common, cache=cache))
     cache.freeze()
-    opts = ngc.CapacityOptions(COSTONLY, elig=common, cache=cache)
+    opts = ngc.QueryOptions(COSTONLY, elig=common, cache=cache)
     ngc.batch_capacity(g, pairs, opts, [narrow, None], workers=2)  # returns the operand
     ngc.batch_capacity(
         g,
         pairs,
-        ngc.CapacityOptions(COSTONLY, cache=cache),
+        ngc.QueryOptions(COSTONLY, cache=cache),
         [narrow, common],
         workers=2,
     )
@@ -136,28 +134,24 @@ def test_prepopulated_uids_and_intersections():
         ngc.batch_capacity(g, pairs, opts, [other, None], workers=2)
 
 
-def test_sensitivity_propagates_the_miss_and_global_reads_no_cache():
+def test_sensitivity_propagates_the_miss_and_global_rejects_a_cache():
     g = fabric()
     cache = prepopulate(g, [[4]])
-    opts = ngc.SensitivityOptions(COSTONLY, cache=cache)
+    opts = ngc.QueryOptions(COSTONLY, cache=cache)
     for workers in (1, 2, 4):
         before = stats(cache)
         with pytest.raises(ngc.DagCacheMiss, match=r"roots \{4\}"):
             ngc.sensitivity(g, 1, 4, opts, workers)
         assert stats(cache) == (before[0], before[1] + 1, 1), workers  # the miss, once
-    want = ngc.sensitivity(g, [0, 1], [4, 5], ngc.SensitivityOptions(GLOBAL))
-    assert want.baseline.placed > 0
-    assert any(e.loss > 0 for e in want.entries)  # the comparison below is not of zeros
+    # Only CostOnly reads a DagCache: Global given one is a configuration error at every worker
+    # count, and the cache is not read.
     empty = ngc.DagCache(g)
     empty.freeze()
     for workers in (1, 2, 4):
-        got = ngc.sensitivity(
-            g, [0, 1], [4, 5], ngc.SensitivityOptions(GLOBAL, cache=empty), workers
-        )
-        assert got.baseline.placed == want.baseline.placed
-        assert [(e.edge, e.loss) for e in got.entries] == [
-            (e.edge, e.loss) for e in want.entries
-        ]
+        with pytest.raises(ValueError, match=exact("Global does not use DagCache")):
+            ngc.sensitivity(
+                g, [0, 1], [4, 5], ngc.QueryOptions(GLOBAL, cache=empty), workers
+            )
     assert stats(empty) == (0, 0, 0)
 
 
@@ -165,7 +159,7 @@ def test_frozen_lookups_from_python_threads():
     g = fabric()
     cache = prepopulate(g, [[d] for d in range(6)])
     want = {
-        d: ngc.capacity(g, 6, d, ngc.CapacityOptions(COSTONLY)).placed for d in range(6)
+        d: ngc.capacity(g, 6, d, ngc.QueryOptions(COSTONLY)).placed for d in range(6)
     }
     # The spine's one edge of 4 into each leaf: the comparisons below are not of zeros.
     assert want == dict.fromkeys(range(6), 4)
@@ -175,7 +169,7 @@ def test_frozen_lookups_from_python_threads():
         try:
             for i in range(60):
                 d = (i + t) % 6
-                r = ngc.capacity(g, 6, d, ngc.CapacityOptions(COSTONLY, cache=cache))
+                r = ngc.capacity(g, 6, d, ngc.QueryOptions(COSTONLY, cache=cache))
                 assert r.placed == want[d]
         except BaseException as exc:  # reported below; pytest's own failures included
             errors.append(exc)
@@ -200,7 +194,7 @@ def test_a_failed_call_changes_no_statistic_but_its_miss():
     # worker and with several; CostOnly sensitivity drops its baseline's hit the same way.
     g = fabric()
     cache = prepopulate(g, [[3]])
-    opts = ngc.CapacityOptions(COSTONLY, cache=cache)
+    opts = ngc.QueryOptions(COSTONLY, cache=cache)
     for workers in (1, 2, 4):
         before = stats_of(cache)
         with pytest.raises(ngc.DagCacheMiss, match=r"roots \{4\}"):
@@ -210,9 +204,7 @@ def test_a_failed_call_changes_no_statistic_but_its_miss():
         assert stats_of(cache) == plus(before, misses=1)
         before = stats_of(cache)
         with pytest.raises(ngc.DagCacheMiss, match=r"roots \{3\}"):
-            ngc.sensitivity(
-                g, 0, 3, ngc.SensitivityOptions(COSTONLY, cache=cache), workers
-            )
+            ngc.sensitivity(g, 0, 3, ngc.QueryOptions(COSTONLY, cache=cache), workers)
         assert stats_of(cache) == plus(before, misses=1)
     before = stats_of(cache)
     assert ngc.batch_capacity(g, [(0, 3), (1, 3)], opts, workers=2)
@@ -224,7 +216,7 @@ def test_concurrent_calls_keep_every_successful_hit():
     # successful capacity (one hit) and a failing batch (its hit dropped, one miss).
     g = fabric()
     cache = prepopulate(g, [[3], [4]])
-    opts = ngc.CapacityOptions(COSTONLY, cache=cache)
+    opts = ngc.QueryOptions(COSTONLY, cache=cache)
     errors = []
 
     def caller():
@@ -290,7 +282,7 @@ def sweep_frozen(cache, fn, args, hits=0, miss=False):
 def test_frozen_statistics_survive_python_allocation_failures():
     g = fabric()
     cache = prepopulate(g, [[3], [4], [3, 4]])
-    opts = ngc.CapacityOptions(
+    opts = ngc.QueryOptions(
         COSTONLY,
         cache=cache,
         outputs=ALL_OUT,
@@ -314,13 +306,13 @@ def test_frozen_statistics_survive_python_allocation_failures():
             )
             >= 3
         )
-    sens = ngc.SensitivityOptions(COSTONLY, cache=cache)
+    sens = ngc.QueryOptions(COSTONLY, cache=cache)
     assert sweep_frozen(cache, ngc.sensitivity, (g, 0, 3, sens, 1), miss=True) >= 3
     # CostOnly sensitivity from a source that reaches no destination: one hit (the baseline's)
     # and no placed deletion.
     island = build(3, [(0, 1, 4, 1), (1, 0, 4, 1)])
     small = ngc.DagCache(island)
-    ngc.capacity(island, 0, 1, ngc.CapacityOptions(COSTONLY, cache=small))
+    ngc.capacity(island, 0, 1, ngc.QueryOptions(COSTONLY, cache=small))
     small.freeze()
     for workers in (1, 2):
         assert (
@@ -331,7 +323,7 @@ def test_frozen_statistics_survive_python_allocation_failures():
                     island,
                     2,
                     1,
-                    ngc.SensitivityOptions(COSTONLY, cache=small),
+                    ngc.QueryOptions(COSTONLY, cache=small),
                     workers,
                 ),
                 hits=1,
@@ -350,8 +342,8 @@ def test_the_frozen_sweep_rejects_a_wrong_call():
     g = fabric()
     cache = prepopulate(g, [[3]])
     other = prepopulate(g, [[3]])
-    opts = ngc.CapacityOptions(COSTONLY, cache=cache, outputs=ALL_OUT)
-    elsewhere = ngc.CapacityOptions(COSTONLY, cache=other, outputs=ALL_OUT)
+    opts = ngc.QueryOptions(COSTONLY, cache=cache, outputs=ALL_OUT)
+    elsewhere = ngc.QueryOptions(COSTONLY, cache=other, outputs=ALL_OUT)
     hit = (g, 0, 3, opts)
     miss = (g, 0, 5, opts)
 
@@ -428,7 +420,7 @@ def test_the_frozen_sweep_rejects_a_wrong_call():
         assert traceback.extract_tb(info.tb)[-1].line == clause, clause
 
     # Made outside the sweep, as every bound object.
-    uncached = ngc.CapacityOptions(COSTONLY)
+    uncached = ngc.QueryOptions(COSTONLY)
 
     def endless(*args):
         while True:

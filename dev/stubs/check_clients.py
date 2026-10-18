@@ -43,6 +43,7 @@ REQUIRED = [
     "ng.PredDAG()",
     "ng.FlowRecord()",
     "ng.PlacementResult()",
+    "ng.SourceFlow()",
     "ng.DagCacheStats()",
     "ng.SensitivityEntry()",
     "ng.SensitivityResult()",
@@ -53,14 +54,16 @@ REQUIRED = [
     "ng.Graph(2, [0], [1], [1.5]",
     "ng.FlowLedger(g, residual=np.zeros(1, dtype=np.float64))",
     "ng.spf(g, 0, ng.KspOptions(1, sel))",
-    "ng.capacity(g, 0, 1, ng.SensitivityOptions(cfg))",
+    "ng.capacity(g, 0, 1, cfg)",
     "ng.CapacityAware(max_path_cost=guard)",
     'ng.to_units("1.5", 1.0)',
+    "ng.FlowPolicyConfig(ng.Global())",
     "ng.Path(g, np.zeros((1, 1), dtype=np.float64))",
     "ng.batch_capacity(g, float_pairs,",
     "cost: int = result.target_cost",
     "first = result.costs[0]",
     "total = flows.sum()",
+    "cost_total: int = best.total_cost",
 ]
 
 

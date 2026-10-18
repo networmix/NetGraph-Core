@@ -117,16 +117,18 @@ def test_equal_and_weighted_splits_over_a_zero_member():
 
 @pytest.mark.parametrize(
     ("caps", "lossless", "drops"),
-    [((0, 10), 5, [(0, 5)]), ((10, 0), 5, [(1, 5)])],
+    [((0, 10), 0, [(0, 5)]), ((10, 0), 1, [(1, 5)])],
     ids=["B3-zero-first", "B3-positive-first"],
 )
 def test_two_sources_one_behind_a_zero_link(caps, lossless, drops):
-    # Today's per-source admission: each source keeps its round-robin share (5 and 5); the
-    # contract's Lossless totals (0 and 1) come with the pooled origin rule of a later step.
+    # The pooled equal origin: a LOSSLESS total a is admitted only when RR(a) fits, so a source
+    # behind the zero link caps it at its round-robin position: 0 when source 0 is behind it
+    # (RR(1) gives source 0 the unit), 1 when source 1 is (RR(2) gives source 1 a unit). LOSSY
+    # offers RR(10) = 5 and 5 and drops the share behind the zero link.
     g = graph(3, [(0, 2, caps[0], 1), (1, 2, caps[1], 1)])
     r, p = place(g, [0, 1], 2, COSTONLY, 10)
-    assert r.placed == lossless
-    assert [s for s, _ in r.local_outcomes] == [0, 1]
+    assert (r.placed, r.termination) == (lossless, ngc.Termination.EXHAUSTED)
+    assert [row.source for row in r.by_source] == [0, 1]
     assert len(p.records()) == 2
     r, _ = place(g, [0, 1], 2, config(ngc.CostOnly(), EB, LOSSY), 10)
     assert (r.placed, r.drops) == (5, drops)
@@ -137,13 +139,15 @@ def test_b3_delete_zero_and_sensitivity():
     for elig in (g.eligibility(excluded_nodes=[0]), g.eligibility(excluded_edges=[0])):
         assert place(g, [0, 1], 2, COSTONLY, 10, elig)[0].placed == 10
         assert place(g, [0, 1], 2, GLOBAL, 10, elig)[0].placed == 10
-    s = ngc.sensitivity(g, [0, 1], 2, ngc.SensitivityOptions(COSTONLY))
+    # B3-zero-first under the pooled equal origin admits 0; removing the zero link takes source 0
+    # out of the program, so the deletion gains 10 (a negative loss); removing 1 -> 2 leaves 0.
+    s = ngc.sensitivity(g, [0, 1], 2, ngc.QueryOptions(COSTONLY))
     assert (s.baseline.placed, [(e.edge, e.loss) for e in s.entries]) == (
-        10,
-        [(0, 0), (1, 10)],
+        0,
+        [(0, -10), (1, 0)],
     )
     # G8: a negative loss for the zero-capacity link.
-    s8 = ngc.sensitivity(graph(3, S), 0, 1, ngc.SensitivityOptions(COSTONLY))
+    s8 = ngc.sensitivity(graph(3, S), 0, 1, ngc.QueryOptions(COSTONLY))
     assert [(e.edge, e.loss) for e in s8.entries] == [(0, -5), (1, 0), (2, 0)]
 
 
@@ -170,14 +174,14 @@ def test_pinned_bundles_keep_their_zero_links(caps, bound):
 
 
 def test_global_min_cut_lists_zero_capacity_links_leaving_the_closure():
-    want = ngc.OutputOptions(bottleneck=True)
+    want = ngc.OutputOptions(min_cut=True)
     b = graph(3, [(0, 2, 0, 1), (1, 2, 10, 1)])
-    r = ngc.capacity(b, [0, 1], 2, ngc.CapacityOptions(GLOBAL, outputs=want))
+    r = ngc.capacity(b, [0, 1], 2, ngc.QueryOptions(GLOBAL, outputs=want))
     assert (r.placed, r.min_cut) == (10, [0, 1])
     s = graph(3, S)
-    r = ngc.capacity(s, 0, 1, ngc.CapacityOptions(GLOBAL, outputs=want))
+    r = ngc.capacity(s, 0, 1, ngc.QueryOptions(GLOBAL, outputs=want))
     assert (r.placed, r.min_cut) == (5, [0, 1])
-    masked = ngc.CapacityOptions(
+    masked = ngc.QueryOptions(
         GLOBAL, elig=s.eligibility(excluded_edges=[0]), outputs=want
     )
     assert ngc.capacity(s, 0, 1, masked).min_cut == [1]

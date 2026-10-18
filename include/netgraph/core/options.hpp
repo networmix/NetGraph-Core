@@ -45,11 +45,12 @@ enum class EdgePriority { Residual, Capacity, Headroom };
 // `multipath` keeps all equal-cost walks as a shortest-path DAG; false selects the canonical
 // single path. `multi_edge` keeps all eligible parallel edges between each (u, v) pair; false
 // keeps one by (minimum cost, higher priority under PreferHigherPriority, lowest EdgeId).
-// Both flags default to true. tie_break and priority are required. Invalid enum values throw
-// std::invalid_argument naming the field. Fields remain assignable, so every entry point that
-// uses a selection validates it again.
+// Every field has a default: Deterministic, Capacity, and both flags true. Invalid enum values
+// throw std::invalid_argument naming the field. Fields remain assignable, so every entry point
+// that uses a selection validates it again.
 struct PathSelection {
-  PathSelection(EdgeTieBreak tie_break_, EdgePriority priority_, bool multipath_ = true, bool multi_edge_ = true);
+  PathSelection(EdgeTieBreak tie_break_ = EdgeTieBreak::Deterministic, EdgePriority priority_ = EdgePriority::Capacity,
+                bool multipath_ = true, bool multi_edge_ = true);
   EdgeTieBreak tie_break;
   EdgePriority priority;
   bool multipath;
@@ -66,8 +67,15 @@ struct PathSelection {
 // EdgeId order.
 enum class FlowPlacement { MaxFlow, Weighted, EqualBalanced };
 
-// Lossless admits only what fits; Lossy forwards hop by hop without admission control and
-// drops what does not fit on each edge (EqualBalanced and Weighted only).
+// Lossless admits only the largest total that the routes carry with no loss at all; Lossy
+// forwards the whole finite offer hop by hop and records where it is lost (EqualBalanced and
+// Weighted only).
 enum class Admission { Lossless, Lossy };
+
+// How a demand's traffic enters at its sources, separately from how it is routed. Equal: a total
+// x enters as round robin over the roster (ascending NodeId, the first x mod H sources one unit
+// more); a source whose share cannot go anywhere keeps it and loses it, it never moves to another
+// source. Optimized: the controller chooses the integer injections (one virtual source).
+enum class Origin { Equal, Optimized };
 
 } // namespace netgraph::core

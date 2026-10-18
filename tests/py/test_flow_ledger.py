@@ -113,13 +113,13 @@ def test_lifetime_bound_rows_and_epochs():
     fg = ngc.FlowLedger(g)
     p = pinned(fg, 0, 1, [0], EB)
     r = p.place(0)
-    assert (r.placed, r.remaining, r.termination, r.local_outcomes) == (
+    assert (r.placed, r.remaining, r.termination, r.delivery_delta) == (
         0,
         0,
         T.COMPLETE,
-        [(0, T.COMPLETE)],
+        0,
     )
-    assert (r.routes_changed, r.weights_changed, r.drops, fg.records()) == (
+    assert (r.routes_changed, r.weights_changed, r.call_drops, fg.records()) == (
         False,
         False,
         [],
@@ -143,21 +143,26 @@ def test_lifetime_bound_rows_and_epochs():
         0,
     )
     r = p.place(INF)
-    assert (r.placed, r.termination, r.remaining, r.local_outcomes) == (
+    assert (r.placed, r.termination, r.remaining, r.requested) == (
         3,
         T.EXHAUSTED,
         INF,
-        [(0, T.EXHAUSTED)],
+        INF,
     )
+    assert (r.admitted, r.delivered, r.unadmitted) == (5, 5, None)
     assert (r.routes_changed, r.weights_changed, r.cost_distribution) == (
         False,
         False,
         None,
     )
-    with pytest.raises(ValueError, match=r"after \+inf"):
-        p.place(1)
-    with pytest.raises(ValueError, match=r"after \+inf"):
-        p.place(0)
+    for finite in (1, 0):
+        with pytest.raises(
+            ValueError,
+            match=exact(
+                "finite placement after infinite placement requires a new epoch"
+            ),
+        ):
+            p.place(finite)
     old = flow_id(p)
     p.remove()
     assert list(fg.allocated()) == [0]
@@ -230,7 +235,7 @@ def test_records_fields_and_counters_beyond_64_bits():
     assert (rec.owner, rec.sources, rec.destinations) == (0, [0], [3])
     # The bundle is the ledger's own PredDAG, shared by every snapshot (not a copy).
     assert rec.bundle is fg.records()[0].bundle is fg.record(rec.flow_id).bundle
-    assert (rec.placement, rec.admission) == (EB, LOSSY)
+    assert rec.admission == LOSSY
     assert list(rec.bundle.via_edges()) == [0, 1, 2, 3]
     assert (rec.route_cost, rec.offered, rec.delivered) == (2, 10, 6)
     assert rec.edges == [(0, 5), (1, 5), (2, 1), (3, 5)]
@@ -282,8 +287,8 @@ def test_record_endpoint_sets_are_ascending():
 
 def test_empty_split_graph_keeps_the_route_cost():
     # Weighted Residual with every route edge at residual 0 under another owner's flow: the
-    # record exists at zero delivery with an empty split graph; route_cost is the bundle's
-    # minimum walk cost, not a split-graph value.
+    # record exists at zero delivery with an empty split graph (no positive weight:
+    # NO_ACTIVE_WEIGHT); route_cost is the bundle's minimum walk cost, not a split-graph value.
     g = build(2, [(0, 1, 2, 3)])
     fg = ngc.FlowLedger(g)
     pinned(fg, 0, 1, [0], MF).place(2)
@@ -291,7 +296,7 @@ def test_empty_split_graph_keeps_the_route_cost():
     r = w.place(1)
     assert (r.placed, r.termination, r.routes_changed, r.weights_changed) == (
         0,
-        T.EXHAUSTED,
+        T.NO_ACTIVE_WEIGHT,
         True,
         False,
     )
@@ -374,30 +379,18 @@ def test_rejected_requests_leave_the_policy_and_the_ledger(routing):
         assert state() == before
         return before
 
-    physical = (
-        "requests are integer units or +inf (a physical request goes through "
-        "to_units first; got {})"
-    )
-    out_of_range = "request (units) = {} is out of range [0, 4611686018427387903]"
+    # One text for every offer outside the domain (contract 14.4).
+    offer = "offer must be an integer in [0, 2^62) or permitted +inf"
     bad = [
-        (1.5, physical.format("1.5")),
-        (-1, out_of_range.format(-1)),
-        (L62, out_of_range.format(L62)),
-    ]
-    bad += [
-        (True, "request (units) must be an integer (got bool)"),
-        (-INF, physical.format("-inf")),
-        (float("nan"), physical.format("nan")),
+        (value, offer)
+        for value in (1.5, -1, L62, True, -INF, float("nan"), np.float64(2.0), "1")
     ]
     rejected(bad)
     assert fg.records() == []
     assert p.place(np.int64(4)).placed == 4
     rejected(bad)
     p.place(INF)
-    after_inf = (
-        "a finite request after +inf is rejected within an epoch (the cumulative "
-        "finite request is undefined)"
-    )
+    after_inf = "finite placement after infinite placement requires a new epoch"
     before = rejected([(1, after_inf), (0, after_inf), *bad])
     if HOOKS:
         assert (before[2]["requested"], before[2]["infinite"]) == (4, True)
@@ -428,7 +421,7 @@ def test_pinned_construction_errors():
     fg = ngc.FlowLedger(g)
     with pytest.raises(ValueError, match="malformed bundle"):
         pinned(fg, 0, 2, [0, 1], MF)
-    with pytest.raises(ValueError, match="Lossy"):
+    with pytest.raises(ValueError, match=exact("MAX_FLOW requires admission=LOSSLESS")):
         pinned(fg, 0, 1, [0], MF, LOSSY)
     with pytest.raises(ValueError, match="Headroom"):
         pinned(fg, 0, 1, [0], W, priority=ngc.EdgePriority.HEADROOM)

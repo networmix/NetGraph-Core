@@ -331,14 +331,20 @@ def test_path_selection_and_enums():
         multipath=False,
     )
     assert "PREFER_HIGHER_PRIORITY" in repr(sel)
-    with pytest.raises(TypeError):
-        ngc.PathSelection()  # tie_break and priority are explicit
+    # Every field has a default (contract r8 3.2): DETERMINISTIC, CAPACITY, multipath, multi_edge.
+    default = ngc.PathSelection()
+    assert (default.tie_break, default.priority) == (
+        ngc.EdgeTieBreak.DETERMINISTIC,
+        ngc.EdgePriority.CAPACITY,
+    )
+    assert (default.multipath, default.multi_edge) == (True, True)
     assert {m.name for m in ngc.FlowPlacement.__members__.values()} == {
         "MAX_FLOW",
         "WEIGHTED",
         "EQUAL_BALANCED",
     }
     assert set(ngc.Admission.__members__) == {"LOSSLESS", "LOSSY"}
+    assert set(ngc.Origin.__members__) == {"EQUAL", "OPTIMIZED"}
     assert set(ngc.EdgePriority.__members__) == {"RESIDUAL", "CAPACITY", "HEADROOM"}
     assert set(ngc.EdgeTieBreak.__members__) == {
         "DETERMINISTIC",

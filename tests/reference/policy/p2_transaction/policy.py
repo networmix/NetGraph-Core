@@ -3,15 +3,24 @@
 One placement engine for every routing mode: ``CostOnly``, ``CapacityAware``,
 ``Global`` and ``Pinned``, the kernels ``MaxFlow``, ``Weighted`` and
 ``EqualBalanced`` and the admissions ``Lossless`` and ``Lossy`` (prototype 1's
-kernels). The transaction of 9.2 runs per source (9.3) for ``CostOnly`` and
-``CapacityAware``: the roster is fixed at construction (eligible sources that
-statically reach a destination, ascending NodeId), each source is offered the
-increment of its round-robin share of the cumulative request, and the stages run on
-the shared working residual ``W``; ``created`` is one counter per call; there is one
-commit. ``Pinned`` and ``Global`` have one "source", the policy. ``Global`` is a
-replacement kernel over the whole eligible graph with the canonical per-source
-decomposition. Local outcomes, the termination reduction and the flag table follow
-9.4 (revision 20: flags accumulate committed events). Epochs follow section 8.
+kernels). The transaction of 9.2 runs per source (9.3) for ``CapacityAware``: the
+roster is fixed at construction (eligible sources that statically reach a destination,
+ascending NodeId), each source is offered the increment of its round-robin share of the
+cumulative request, and the stages run on the shared working residual ``W``;
+``created`` is one counter per call; there is one commit. ``Pinned`` has one "source",
+the policy. ``Global`` is a replacement kernel over the whole eligible graph with the
+canonical per-source decomposition. Local outcomes, the termination reduction and the
+flag table follow 9.4 (revision 20: flags accumulate committed events). Epochs follow
+section 8.
+
+Step 2 of the next Core change (contract r8, sections 2.2, 4.1, 5.1, 9.1, 10.2, 14.1,
+14.2; README "Pooled sources and the origin"): ``CostOnly`` pools its sources. Its
+routes are prepared once per epoch on the residual at the first positive call's entry
+and joined into one program (``make_program``); EqualBalanced and Weighted forward the
+equal origin over it (``forward``: one split per router, attribution by highest
+averages); MaxFlow and Global are controllers (``_place_controller``) with the optimized
+origin. The result has the 14.1 shape (``PlacementResult``); CapacityAware keeps its
+per-source reduction of local outcomes, every other model has the 14.2 termination.
 
 Readings where the contract is silent are listed in ``NOTES.md`` (P-numbers).
 """
@@ -26,7 +35,7 @@ import _p1  # noqa: F401
 import flowcore
 import kernels as K
 import search
-from apportion import round_robin
+from apportion import highest_averages, round_robin, split
 from graph import Eligibility, check_dag_edges, check_disjoint, check_node_set
 from ledger import Draft, FlowGraph
 from units import (
@@ -82,10 +91,14 @@ class Pinned:
 
 @dataclass(frozen=True)
 class FlowPolicyConfig:
+    """Global takes no placement and no selection (both None); the origin is the model's
+    default (step 2: EQUAL for CostOnly EqualBalanced and Weighted, OPTIMIZED for CostOnly
+    MaxFlow and Global; the equal origin of the controllers is not modelled here)."""
+
     routing: object
-    placement: str
+    placement: str | None
     admission: str
-    selection: search.Selection
+    selection: search.Selection | None
 
 
 @dataclass
@@ -93,34 +106,58 @@ class Outputs:
     edge_flows: bool = False
     residual: bool = False
     bottleneck: bool = False
+    min_cut: bool = False
 
 
 @dataclass
 class PlacementResult:
+    """The result of one call (step 2 shape): this call's values, then the demand's state
+    after it (epoch totals), then the optional outputs."""
+
     placed: int
     remaining: int | None
     termination: str
     routes_changed: bool
     weights_changed: bool
-    drops: list[tuple[int, int]]
+    call_drops: list[tuple[int, int]]
+    call_source_loss: int = 0
+    requested: int | None = 0  # None: +inf
+    offered: int | None = None  # Lossy only
+    admitted: int = 0
+    delivered: int = 0
+    unadmitted: int | None = 0
+    source_loss: int = 0
+    drops: list[tuple[int, int]] = field(default_factory=list)
+    by_source: list[tuple] = field(default_factory=list)
+    total_cost: int | None = None
     cost_distribution: list[tuple[int, int]] | None = None
     edge_flows: list[int] | None = None
     residual: list[int] | None = None
     bottleneck: list[int] | None = None
     min_cut: list[int] | None = None
-    local_outcomes: list[tuple[int, str]] = field(default_factory=list)
     trace: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
         out = {
             "placed": self.placed,
             "remaining": "inf" if self.remaining is None else self.remaining,
+            "delivery_delta": self.placed,
+            "call_drops": [list(x) for x in self.call_drops],
+            "call_source_loss": self.call_source_loss,
             "termination": self.termination,
             "routes_changed": self.routes_changed,
             "weights_changed": self.weights_changed,
+            "requested": "inf" if self.requested is None else self.requested,
+            "admitted": self.admitted,
+            "delivered": self.delivered,
+            "source_loss": self.source_loss,
             "drops": [list(x) for x in self.drops],
-            "local_outcomes": [list(x) for x in self.local_outcomes],
+            "by_source": [list(x) for x in self.by_source],
         }
+        for name in ("offered", "unadmitted", "total_cost"):
+            value = getattr(self, name)
+            if value is not None:
+                out[name] = value
         if self.cost_distribution is not None:
             out["cost_distribution"] = [list(x) for x in self.cost_distribution]
         for name in ("edge_flows", "residual", "bottleneck", "min_cut"):
@@ -128,6 +165,142 @@ class PlacementResult:
             if value is not None:
                 out[name] = list(value)
         return out
+
+
+def ha(total: int, weights: list[int]) -> list[int]:
+    """Highest averages with zero weights allowed: a zero weight gets nothing, all-zero
+    weights give nothing (step 2: the attribution of pooled traffic to its sources)."""
+    out = [0] * len(weights)
+    pos = [i for i, w in enumerate(weights) if w > 0]
+    if pos and total:
+        for i, x in zip(
+            pos, highest_averages(total, [weights[i] for i in pos]), strict=True
+        ):
+            out[i] = x
+    return out
+
+
+@dataclass
+class Program:
+    """A CostOnly demand's pooled program (step 2, contract r8 5.1): the union of the roster's
+    routes, its members (EqualBalanced: every route edge; Weighted: the edges of positive weight
+    on the walks from a root to a destination), the frozen weights, per node its members in
+    ascending EdgeId and a topological order of every node."""
+
+    kernel: str
+    roots: list[int]
+    dsts: tuple[int, ...]
+    members: tuple[int, ...]
+    weights: dict[int, int] | None
+    out: dict[int, list[int]]
+    topo: list[int]
+
+
+def make_program(g, kernel, roots, dsts, union, priority, view) -> Program:
+    union = tuple(sorted(union))
+    if kernel != W_:
+        cand = union
+    elif priority == "Residual":
+        cand = tuple(e for e in union if view[e] >= 1)
+    else:
+        cand = tuple(e for e in union if g.capacity[e] >= 1)
+    members = tuple(sorted({e for r in roots for e in K.prune(g, cand, r, dsts)}))
+    weights = None
+    if kernel == W_:
+        weights = {
+            e: (view[e] if priority == "Residual" else g.capacity[e]) for e in members
+        }
+    out: dict[int, list[int]] = {}
+    nodes = set(roots) | set(dsts)
+    for e in members:
+        out.setdefault(g.src[e], []).append(e)
+        nodes.update((g.src[e], g.dst[e]))
+    indeg = dict.fromkeys(nodes, 0)
+    for e in members:
+        indeg[g.dst[e]] += 1
+    topo, ready = [], sorted(v for v in nodes if indeg[v] == 0)
+    while ready:
+        u = ready.pop(0)
+        topo.append(u)
+        for e in out.get(u, ()):
+            indeg[g.dst[e]] -= 1
+            if indeg[g.dst[e]] == 0:
+                ready.append(g.dst[e])
+                ready.sort()
+    assert len(topo) == len(nodes), "the pooled program is cyclic"
+    return Program(kernel, list(roots), tuple(dsts), members, weights, out, topo)
+
+
+def forward(g, prog: Program, inject, W):
+    """One forwarding of a pooled program: inject[i] at roots[i] (None: the first-hop
+    experiment, every root's out-members each injected with exactly their W), each node's
+    inflow (own injection plus carried arrivals) split once by round robin or highest
+    averages; a member's amount attributed to the roots by highest averages over their
+    remaining inflows (member by member), then (W given) the member carries min(arrivals, W[e])
+    attributed by highest averages over the roots' arrivals (contract 5.1, 9.1). Returns per
+    root: offered, source loss, delivered and {edge: carried}, {edge: dropped}; and the totals."""
+    k = len(prog.roots)
+    index = {r: i for i, r in enumerate(prog.roots)}
+    offered, lost, delivered = [0] * k, [0] * k, [0] * k
+    carried = [dict() for _ in range(k)]
+    dropped = [dict() for _ in range(k)]
+    inflow: dict[int, dict[int, int]] = {}
+    own_at: dict[int, int] = {}
+    for i, r in enumerate(prog.roots):
+        if inject is None:
+            if prog.out.get(r):
+                own_at[r] = i
+                offered[i] = sum(W[e] for e in prog.out[r])
+            continue
+        offered[i] = inject[i]
+        if not inject[i]:
+            continue
+        if not prog.out.get(r):
+            lost[i] = inject[i]
+        else:
+            inflow.setdefault(r, {})[i] = inject[i]
+    dset = set(prog.dsts)
+    for u in prog.topo:
+        rem = dict(inflow.get(u, {}))
+        if u in dset:
+            for i, x in rem.items():
+                delivered[i] += x
+            continue
+        own = own_at.get(u)
+        amount = sum(rem.values())
+        if amount == 0 and own is None:
+            continue
+        outs = prog.out.get(u, [])
+        weights = None if prog.weights is None else [prog.weights[e] for e in outs]
+        part = (
+            split("ha" if prog.kernel == W_ else "rr", amount, weights, len(outs))
+            if amount
+            else [0] * len(outs)
+        )
+        order = sorted(set(rem) | ({own} if own is not None else set()))
+        for e, x in zip(outs, part, strict=True):
+            row = ha(x, [rem.get(i, 0) for i in order])
+            for i, y in zip(order, row, strict=True):
+                rem[i] = rem.get(i, 0) - y
+            arrive = [
+                y + (W[e] if i == own else 0) for i, y in zip(order, row, strict=True)
+            ]
+            total = sum(arrive)
+            if total == 0:
+                continue
+            c = total if W is None else min(total, W[e])
+            keep = arrive if c == total else ha(c, arrive)
+            for i, a, kk in zip(order, arrive, keep, strict=True):
+                if kk:
+                    carried[i][e] = carried[i].get(e, 0) + kk
+                    inflow.setdefault(g.dst[e], {})
+                    inflow[g.dst[e]][i] = inflow[g.dst[e]].get(i, 0) + kk
+                if a - kk:
+                    dropped[i][e] = dropped[i].get(e, 0) + a - kk
+        assert all(v == 0 for v in rem.values()), (
+            "a router's inflow is attributed in full"
+        )
+    return offered, lost, delivered, carried, dropped, index
 
 
 # ====================================================================== working flows
@@ -213,8 +386,9 @@ class FlowPolicy:
         check_disjoint(self.sources, self.destinations)
         self._validate_cfg()
         self.mode = type(cfg.routing).__name__
-        self.kernel, self.admission = cfg.placement, cfg.admission
-        self.selection = cfg.selection
+        self.kernel = MF if self.mode == "Global" else cfg.placement
+        self.admission = cfg.admission
+        self.selection = cfg.selection or search.Selection()
         static = search.member_graph(g, elig, search.Selection())
         self._static = static
         node_ok = (lambda v: True) if elig is None else (lambda v: elig.node_allowed[v])
@@ -246,13 +420,26 @@ class FlowPolicy:
         r = cfg.routing
         if not isinstance(r, (CostOnly, CapacityAware, Global, Pinned)):
             raise ContractError("unknown routing variant")
-        if not isinstance(cfg.selection, search.Selection):
-            raise ContractError("selection is explicit (no default)")
-        K.check_kernel(cfg.placement, cfg.admission, cfg.selection.priority)
-        if cfg.admission == LOSSY and isinstance(r, (Global, CapacityAware)):
-            raise ContractError("Lossy is rejected with Global and CapacityAware")
-        if isinstance(r, Global) and cfg.placement != MF:
-            raise ContractError("Global requires placement = MaxFlow")
+        if isinstance(r, Global):
+            # Global takes no placement and no selection; a controller is lossless.
+            if cfg.placement is not None or cfg.selection is not None:
+                raise ContractError("Global takes no placement and no selection")
+            if cfg.admission != LOSSLESS:
+                raise ContractError("MAX_FLOW requires admission=LOSSLESS")
+        else:
+            if cfg.placement is None:
+                raise ContractError("placement is required")
+            sel = cfg.selection or search.Selection()
+            K.check_kernel(cfg.placement, cfg.admission, sel.priority)
+            if cfg.admission == LOSSY and isinstance(r, CapacityAware):
+                raise ContractError("Lossy is rejected with CapacityAware")
+            if (
+                isinstance(r, CostOnly)
+                and len(self.sources) > 1
+                and not sel.multipath
+                and sel.tie_break == search.PREFER
+            ):
+                raise ContractError("the pooled single-path rule (Q12)")
         if isinstance(r, CapacityAware):
             if not isinstance(r.flow_count, int) or r.flow_count < 1:
                 raise ContractError("flow_count >= 1")
@@ -297,8 +484,13 @@ class FlowPolicy:
     def _reset_epoch(self) -> None:
         self.cohorts: dict[int, list[Flow]] = {}
         self.requested = 0
+        self.offered = 0
         self.infinite = False
         self.epoch_started = False
+        self.prepared = False
+        self.program: Program | None = None
+        self.union: tuple[int, ...] = ()
+        self.curve: list[tuple[int, int]] = []
 
     def placed_demand(self) -> int:
         return sum(f.delivered for c in self.cohorts.values() for f in c)
@@ -476,39 +668,94 @@ class FlowPolicy:
         if req is not None and self.requested + req >= 1 << 127:
             raise ContractError("cumulative request counter overflow")
         outputs = outputs or Outputs()
+        controller = self.mode == "Global" or (
+            self.mode == "CostOnly" and self.kernel == MF
+        )
         if req == 0:
-            served = [(src, "complete") for src in self.roster]
-            return self._finish(
-                PlacementResult(
-                    0, 0, "complete", False, False, [], local_outcomes=served
-                ),
-                outputs,
-                None,
-            )
+            # The current state, every flag false; before the epoch's first positive call it is
+            # all zeros (contract r8 10.3). Global reports its curve once prepared.
+            r = PlacementResult(0, 0, "complete", False, False, [])
+            if self.mode == "Global" and self.prepared:
+                r.cost_distribution = list(self.curve)
+            return self._finish(r, outputs, None, controller)
         if not self.roster:
             # the epoch's finite-or-infinite state and `requested` record every positive
-            # request, also one that finds no roster (section 8)
+            # request, also one that finds no roster (section 8); a Lossy offer is lost before
+            # it enters (the demand's source loss; every source's row stays zero)
             if req is None:
                 self.infinite = True
             else:
                 self.requested += req
-            return self._finish(
-                PlacementResult(
-                    0, req, "no_route", False, False, [], trace={"roster": []}
-                ),
-                outputs,
-                None,
+                if self.admission == LOSSY:
+                    self.offered += req
+            self.prepared = True
+            r = PlacementResult(
+                0,
+                req,
+                "no_route",
+                False,
+                False,
+                [],
+                call_source_loss=req
+                if self.admission == LOSSY and req is not None
+                else 0,
+                trace={"roster": []},
             )
-        if self.mode == "Global":
-            return self._place_global(req, outputs)
+            if self.mode == "Global":
+                r.cost_distribution = []
+                if outputs.min_cut:
+                    r.min_cut = []
+            return self._finish(r, outputs, None, controller)
+        if controller:
+            return self._place_controller(req, outputs)
+        if self.mode == "CostOnly":
+            return self._place_pooled(req, outputs)
         return self._place_flows(req, outputs)
 
     def _finish(
-        self, result: PlacementResult, outputs: Outputs, sol
+        self, result: PlacementResult, outputs: Outputs, sol, controller=False
     ) -> PlacementResult:
+        """The demand's state after the call (contract r8 14.1) from the committed records,
+        then the optional outputs."""
+        lossy = self.admission == LOSSY
+        recs = self.records()
+        result.requested = None if self.infinite else self.requested
+        result.delivered = sum(r.delivered for r in recs)
+        rows = []
+        for s in self.sources:
+            mine = [r for r in recs if r.sources[0] == s]
+            delivered = sum(r.delivered for r in mine)
+            if lossy:
+                off = sum(r.offered or 0 for r in mine)
+                dropped = sum(x for r in mine for x in r.drops.values())
+                rows.append(
+                    (s, off, off, delivered, off - delivered - dropped, dropped)
+                )
+            else:
+                rows.append((s, None, delivered, delivered, 0, 0))
+        result.by_source = rows
+        if lossy:
+            drops: dict[int, int] = {}
+            for r in recs:
+                for e, x in r.drops.items():
+                    drops[e] = drops.get(e, 0) + x
+            result.drops = sorted((e, x) for e, x in drops.items() if x)
+            result.offered = self.offered
+            result.admitted = self.offered
+            result.unadmitted = 0
+            result.source_loss = self.offered - result.delivered - sum(drops.values())
+        else:
+            result.admitted = result.delivered
+            result.unadmitted = (
+                None if self.infinite else self.requested - result.delivered
+            )
+        if controller:
+            result.total_cost = sum(
+                self.g.cost[e] * x for r in recs for e, x in r.edges.items()
+            )
         if outputs.edge_flows:
             alloc = [0] * self.g.num_edges
-            for r in self.records():
+            for r in recs:
                 for e, x in r.edges.items():
                     alloc[e] += x
             result.edge_flows = alloc
@@ -516,67 +763,249 @@ class FlowPolicy:
             result.residual = self.fg.residual()
         if outputs.bottleneck:
             result.bottleneck = self.fg.bottleneck(self.sources, self.elig)
-            if self.mode == "Global":
-                result.min_cut = None if sol is None else sol.min_cut
+        if outputs.min_cut and self.mode == "Global" and sol is not None:
+            result.min_cut = sol.min_cut
         return result
 
-    # ------------------------------------------------------------ Global
+    # ------------------------------------------------------------ CostOnly (step 2)
 
-    def _place_global(self, req, outputs) -> PlacementResult:
+    def _prepare(self, W):
+        """The epoch's routes of a CostOnly demand on the residual at the first positive call's
+        entry: per roster source its route (record bundle, route cost), their union, and one
+        continuation per router (contract r8 5.1)."""
+        routes = {s: self._cost_only_route(s, W) for s in self.roster}
+        union = tuple(sorted({e for r in routes.values() for e in r}))
+        for r in routes.values():
+            for e in r:
+                u = self.g.src[e]
+                assert sorted(x for x in r if self.g.src[x] == u) == sorted(
+                    x for x in union if self.g.src[x] == u
+                ), "two roster sources continue differently at a router"
+        return routes, union
+
+    def _source_flow(self, s, route, prev) -> Flow:
+        plan = K.Plan(
+            self.kernel, self.admission, s, self._dests_ok, route, route, None
+        )
+        return Flow(
+            src=s,
+            route=route,
+            plan=plan,
+            cost=self._route_cost(route, s),
+            flow_id=None if prev is None else prev.flow_id,
+            offered=0 if self.admission == LOSSY else None,
+            new=prev is None,
+            seq=self.roster.index(s),
+        )
+
+    def _place_pooled(self, req, outputs) -> PlacementResult:
+        g, fg = self.g, self.fg
+        W = fg.residual()
+        created = not self.cohorts
+        trace: dict = {"prepare": None}
+        if created:
+            routes, union = self._prepare(W)
+            prog = make_program(
+                g,
+                self.kernel,
+                self.roster,
+                self._dests_ok,
+                union,
+                self.selection.priority,
+                W,
+            )
+            flows = {s: self._source_flow(s, routes[s], None) for s in self.roster}
+            trace["prepare"] = {s: list(routes[s]) for s in self.roster}
+        else:
+            prog = self.program
+            flows = {s: c[0] for s, c in copy.deepcopy(self.cohorts).items()}
+        k = len(self.roster)
+        if self.admission == LOSSLESS:
+            admitted = sum(f.delivered for f in flows.values())
+            own = merge(f.alloc for f in flows.values())
+            V = add_view(W, own)
+            # the largest total in [admitted, admitted + req] whose no-drop forwarding of the
+            # round-robin shares fits V and gives no root without a member a share
+            bound = 0
+            for i, r in enumerate(self.roster):
+                if not prog.out.get(r):
+                    bound = min(bound, i)
+                    break
+                bound += sum(V[e] for e in prog.out[r])
+            hi = bound if req is None else min(admitted + req, bound)
+
+            def fits(t):
+                inj = round_robin(t, k)
+                if any(
+                    x and not prog.out.get(r)
+                    for r, x in zip(self.roster, inj, strict=True)
+                ):
+                    return False
+                _, _, _, carried, _, _ = forward(g, prog, inj, None)
+                return all(x <= V[e] for e, x in merge(carried).items())
+
+            lo = admitted
+            if hi > lo and fits(hi):
+                lo = hi
+            else:
+                while hi - lo > 1:
+                    mid = (lo + hi) // 2
+                    if fits(mid):
+                        lo = mid
+                    else:
+                        hi = mid
+            _, _, delivered, carried, _, _ = forward(g, prog, round_robin(lo, k), None)
+            for i, s in enumerate(self.roster):
+                flows[s].alloc = dict(carried[i])
+                flows[s].T = flows[s].delivered = delivered[i]
+            placed = lo - admitted
+            call_drops, source_loss = [], 0
+            trace["T"] = [admitted, lo]
+        else:
+            if req is None:
+                inj = None
+            else:
+                old = round_robin(self.offered, k)
+                new = round_robin(self.offered + req, k)
+                inj = [b - a for a, b in zip(old, new, strict=True)]
+            offered, lost, delivered, carried, dropped, _ = forward(g, prog, inj, W)
+            for i, s in enumerate(self.roster):
+                f = flows[s]
+                for e, x in carried[i].items():
+                    f.alloc[e] = f.alloc.get(e, 0) + x
+                for e, x in dropped[i].items():
+                    f.drops[e] = f.drops.get(e, 0) + x
+                f.offered = (f.offered or 0) + offered[i]
+                f.delivered += delivered[i]
+            placed = sum(delivered)
+            call_drops = sorted(merge(dropped).items())
+            source_loss = sum(lost)
+            self.offered += sum(offered)
+            trace["offers"] = {
+                s: "inf" if inj is None else inj[i] for i, s in enumerate(self.roster)
+            }
+        cohorts = {s: [f] for s, f in flows.items()}
+        drafts, order = self._drafts(cohorts)
+        new_ids = fg._commit(self.owner, drafts)
+        self._assign_ids(order, new_ids)
+        self.cohorts = cohorts
+        self.program = prog
+        self.prepared = True
+        if req is None:
+            self.infinite = True
+        else:
+            self.requested += req
+        if not prog.members:
+            term = "no_active_weight"
+        elif self.admission == LOSSY:
+            term = "complete" if req is not None else "exhausted"
+        else:
+            term = "complete" if req is not None and placed == req else "exhausted"
+        result = PlacementResult(
+            placed,
+            None if req is None else req - placed,
+            term,
+            created,
+            False,
+            call_drops,
+            call_source_loss=source_loss,
+            trace=trace,
+        )
+        return self._finish(result, outputs, None)
+
+    # ------------------------------------------------------------ the controllers
+
+    def _place_controller(self, req, outputs) -> PlacementResult:
+        """Global over every eligible edge, CostOnly MaxFlow over the union of the roster's
+        routes: a minimum-cost flow of the cumulative value from one virtual source (the
+        optimized origin)."""
         g, fg = self.g, self.fg
         W = fg.residual()
         old = self.cohorts
         created = not old
+        glob = self.mode == "Global"
+        trace: dict = {}
+        if glob:
+            routes, union = None, None
+        elif created:
+            routes, union = self._prepare(W)
+            trace["prepare"] = {s: list(routes[s]) for s in self.roster}
+        else:
+            routes, union = None, self.union
+            trace["prepare"] = None
         own = merge(f.alloc for c in old.values() for f in c)
         V = add_view(W, own)
         P = self.placed_demand()
         cap = None if req is None else P + req
-        sol = flowcore.solve(g, V, self.roster, self._dests_ok, cap, elig=self.elig)
-        assert sol.placed >= P, "a Global call never reduces placed_demand()"
+        if glob:
+            sol = flowcore.solve(g, V, self.roster, self._dests_ok, cap, elig=self.elig)
+        else:
+            sol = flowcore.solve(g, V, self.roster, self._dests_ok, cap, edges=union)
+        assert sol.placed >= P, "a controller call never reduces placed_demand()"
         shares = self._decompose(sol)
         changed = created
         new_cohorts: dict[int, list[Flow]] = {}
         for s in self.roster:
             alloc = shares[s]
-            route = tuple(sorted(alloc))
             prev = old.get(s, [None])[0]
-            if prev is not None and prev.route != route:
-                changed = True
-            plan = K.Plan(MF, LOSSLESS, s, self._dests_ok, route, route, None)
-            f = Flow(
-                src=s,
-                route=route,
-                plan=plan,
-                cost=self._route_cost(route, s),
-                flow_id=None if prev is None else prev.flow_id,
-                T=sol.supply.get(s, 0),
-                alloc=alloc,
-                delivered=sol.supply.get(s, 0),
-                new=prev is None,
-                seq=self.roster.index(s),
-            )
+            if glob:
+                route = tuple(sorted(alloc))
+                if prev is not None and prev.route != route:
+                    changed = True
+                plan = K.Plan(MF, LOSSLESS, s, self._dests_ok, route, route, None)
+                f = Flow(
+                    src=s,
+                    route=route,
+                    plan=plan,
+                    cost=self._route_cost(route, s),
+                    flow_id=None if prev is None else prev.flow_id,
+                    new=prev is None,
+                    seq=self.roster.index(s),
+                )
+            else:
+                f = (
+                    copy.deepcopy(prev)
+                    if prev is not None
+                    else self._source_flow(s, routes[s], None)
+                )
+            f.T = f.delivered = sol.supply.get(s, 0)
+            f.alloc = alloc
             new_cohorts[s] = [f]
         placed = sol.placed - P
         drafts, order = self._drafts(new_cohorts)
         new_ids = fg._commit(self.owner, drafts)
         self._assign_ids(order, new_ids)
         self.cohorts = new_cohorts
+        if not glob and created:
+            self.union = union
+        self.prepared = True
         if req is None:
             self.infinite = True
         else:
             self.requested += req
-        if req is not None and placed == req:
-            term = "complete"
-        elif sol.placed == 0:
-            term = "no_route"
+        term = "complete" if req is not None and placed == req else "exhausted"
+        if glob:
+            trace.update(
+                {
+                    "V": V,
+                    "cap": cap,
+                    "flow_core": {**sol.payload(), "supply": sol.supply},
+                    "shares": {s: sorted(a.items()) for s, a in shares.items()},
+                }
+            )
+            self.curve = list(sol.cost_distribution)
         else:
-            term = "exhausted"
-        trace = {
-            "V": V,
-            "cap": cap,
-            "flow_core": {**sol.payload(), "supply": sol.supply},
-            "shares": {s: sorted(a.items()) for s, a in shares.items()},
-        }
+            trace.update(
+                {
+                    "cap": cap,
+                    "flow_core": {
+                        "placed": sol.placed,
+                        "edge_flows": list(sol.edge_flows),
+                        "supply": sol.supply,
+                    },
+                    "shares": {s: sorted(a.items()) for s, a in shares.items()},
+                }
+            )
         result = PlacementResult(
             placed,
             None if req is None else req - placed,
@@ -584,11 +1013,10 @@ class FlowPolicy:
             changed,
             False,
             [],
-            cost_distribution=list(sol.cost_distribution),
-            local_outcomes=[(src, term) for src in self.roster],
+            cost_distribution=list(sol.cost_distribution) if glob else None,
             trace=trace,
         )
-        return self._finish(result, outputs, sol)
+        return self._finish(result, outputs, sol, True)
 
     def _decompose(self, sol) -> dict[int, dict[int, int]]:
         """Canonical per-source decomposition (9.1): sources ascending; the smallest
@@ -640,6 +1068,8 @@ class FlowPolicy:
             "weights_changed": False,
             "seq": 0,
             "drops": {},
+            "offered": 0,
+            "source_loss": 0,
         }
         cohorts = copy.deepcopy(self.cohorts)
         entry = {s: sum(f.delivered for f in cohorts.get(s, [])) for s in self.roster}
@@ -661,6 +1091,8 @@ class FlowPolicy:
         new_ids = fg._commit(self.owner, drafts)
         self._assign_ids(order, new_ids)
         self.cohorts = {s: c for s, c in cohorts.items() if c}
+        self.offered += ctx["offered"]
+        self.prepared = True
         if req is None:
             self.infinite = True
         else:
@@ -671,9 +1103,22 @@ class FlowPolicy:
         assert placed >= 0
         if req is not None:
             assert placed <= req
-        outcomes = {st.src: self._local_outcome(st) for st in states}
-        unserved = [o for o in outcomes.values() if o != "complete"]
-        term = max(unserved, key=OUTCOME_RANK.__getitem__) if unserved else "complete"
+        if self.mode == "CapacityAware":
+            outcomes = {st.src: self._local_outcome(st) for st in states}
+            unserved = [o for o in outcomes.values() if o != "complete"]
+            term = (
+                max(unserved, key=OUTCOME_RANK.__getitem__) if unserved else "complete"
+            )
+        else:
+            # Pinned, the contract's termination (r8 14.2): no member anywhere is
+            # no_active_weight; a Lossy finite offer is complete.
+            if not any(f.plan.members for st in states for f in st.flows):
+                term = "no_active_weight"
+            elif self.admission == LOSSY:
+                term = "complete" if req is not None else "exhausted"
+            else:
+                term = "complete" if req is not None and placed == req else "exhausted"
+            outcomes = {st.src: term for st in states}
         trace = {
             "offers": {
                 st.src: "inf" if st.offer is None else st.offer for st in states
@@ -690,19 +1135,17 @@ class FlowPolicy:
             ctx["routes_changed"],
             ctx["weights_changed"],
             sorted(ctx["drops"].items()),
-            local_outcomes=[(st.src, outcomes[st.src]) for st in states],
+            call_source_loss=ctx["source_loss"],
             trace=trace,
         )
         return self._finish(result, outputs, None)
 
     def _local_outcome(self, st: SourceState) -> str:
+        """A CapacityAware source's outcome (Lossless)."""
         delivered = sum(f.delivered for f in st.flows) - st.P
         if st.offer == 0:
             return "complete"
-        if self.admission == LOSSY:
-            if st.offer is not None and st.trace.get("injected") == st.offer:
-                return "complete"
-        elif st.offer is not None and delivered == st.offer:
+        if st.offer is not None and delivered == st.offer:
             return "complete"
         if st.limit == "limit_flows" or st.capped:
             return "limit_flows"
@@ -733,11 +1176,7 @@ class FlowPolicy:
     def _stage1(self, st: SourceState, ctx) -> None:
         W = ctx["W"]
         tr: dict = {}
-        if self.mode == "CostOnly":
-            route = self._cost_only_route(st.src, W)
-            tr["route"] = list(route)
-            st.flows.append(self._new_flow(st.src, route, W, ctx))
-        elif self.mode == "Pinned":
+        if self.mode == "Pinned":
             for i, route in self.usable:
                 f = self._new_flow(st.src, route, W, ctx)
                 f.bundle_index = i
@@ -899,6 +1338,8 @@ class FlowPolicy:
             f.offered = (f.offered or 0) + call.offered
             f.delivered += call.delivered
             injected += call.injected
+            ctx["offered"] += call.offered
+            ctx["source_loss"] += call.offered - call.injected
             rows.append(
                 {
                     "offer": "inf" if offer is None else offer,
@@ -1018,7 +1459,6 @@ class FlowPolicy:
                     flow_id=None if f.new else f.flow_id,
                     sources=(f.src,),
                     destinations=self._dests_ok,
-                    placement=self.kernel,
                     admission=self.admission,
                     bundle=f.route,
                     route_cost=f.cost,

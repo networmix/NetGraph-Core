@@ -239,25 +239,79 @@ class Pinned:
 
 class FlowPolicyConfig:
     # reason: routing is one of the four routing modes (TypeError otherwise)
-    # generated: def __init__(self, *, routing: typing.Any, placement: FlowPlacement, admission: Admission, selection: PathSelection) -> None:
+    # generated: def __init__(self, *, routing: typing.Any, placement: FlowPlacement | None = None, admission: Admission = ..., selection: PathSelection | None = None, origin: Origin | None = None) -> None:
     def __init__(
         self,
         *,
         routing: CostOnly | CapacityAware | Global | Pinned,
-        placement: FlowPlacement,
-        admission: Admission,
-        selection: PathSelection,
+        placement: FlowPlacement | None = None,
+        admission: Admission = ...,
+        selection: PathSelection | None = None,
+        origin: Origin | None = None,
     ) -> None: ...
     # reason: the routing mode given at construction
     # generated: def routing(self) -> typing.Any:
     @property
     def routing(self) -> CostOnly | CapacityAware | Global | Pinned: ...
 
+class SourceFlow:
+    # reason: no constructor: one row of PlacementResult.by_source
+    # generated: (none)
+    def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
+    # reason: an exact int (a 128-bit counter)
+    # generated: def admitted(self) -> typing.Any:
+    @property
+    def admitted(self) -> int: ...
+    # reason: an exact int (a 128-bit counter)
+    # generated: def dropped(self) -> typing.Any:
+    @property
+    def dropped(self) -> int: ...
+    # reason: an exact int when LOSSY, None when LOSSLESS
+    # generated: def offered(self) -> typing.Any:
+    @property
+    def offered(self) -> int | None: ...
+    # reason: an exact int (a 128-bit counter)
+    # generated: def source_loss(self) -> typing.Any:
+    @property
+    def source_loss(self) -> int: ...
+
 class PlacementResult:
     # reason: no constructor: returned by FlowPolicy.place and the evaluators
     # generated: (none)
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
+    # reason: an exact int (a 128-bit counter)
+    # generated: def admitted(self) -> typing.Any:
+    @property
+    def admitted(self) -> int: ...
+    # reason: one SourceFlow per input source
+    # generated: def by_source(self) -> tuple:
+    @property
+    def by_source(self) -> tuple[SourceFlow, ...]: ...
     # reason: a list of (EdgeId, units) pairs
+    # generated: def call_drops(self) -> list:
+    @property
+    def call_drops(self) -> list[tuple[int, int]]: ...
+    # reason: an exact int when LOSSY, None when LOSSLESS
+    # generated: def offered(self) -> typing.Any:
+    @property
+    def offered(self) -> int | None: ...
+    # reason: an exact int, or float('inf') after an infinite request
+    # generated: def requested(self) -> typing.Any:
+    @property
+    def requested(self) -> int | float: ...
+    # reason: an exact int (a 128-bit counter)
+    # generated: def source_loss(self) -> typing.Any:
+    @property
+    def source_loss(self) -> int: ...
+    # reason: an exact int for the controllers, None otherwise
+    # generated: def total_cost(self) -> typing.Any:
+    @property
+    def total_cost(self) -> int | None: ...
+    # reason: an exact int, None after an unlimited LOSSLESS request
+    # generated: def unadmitted(self) -> typing.Any:
+    @property
+    def unadmitted(self) -> int | None: ...
+    # reason: a list of (EdgeId, units) pairs; units are exact Python ints
     # generated: def drops(self) -> list:
     @property
     def drops(self) -> list[tuple[int, int]]: ...
@@ -308,27 +362,7 @@ class FlowPolicy:
         self, flow_id: tuple[typing.SupportsIndex, typing.SupportsIndex]
     ) -> FlowRecord: ...
 
-class CapacityOptions:
-    # reason: elig, cache and outputs may be None
-    # generated: def __init__(self, config: FlowPolicyConfig, *, elig: Eligibility = None, cache: DagCache = None, outputs: typing.Any = None) -> None:
-    def __init__(
-        self,
-        config: FlowPolicyConfig,
-        *,
-        elig: Eligibility | None = None,
-        cache: DagCache | None = None,
-        outputs: OutputOptions | None = None,
-    ) -> None: ...
-    # reason: None when no cache was given
-    # generated: def cache(self) -> DagCache:
-    @property
-    def cache(self) -> DagCache | None: ...
-    # reason: None when no Eligibility was given
-    # generated: def elig(self) -> Eligibility:
-    @property
-    def elig(self) -> Eligibility | None: ...
-
-class SensitivityOptions:
+class QueryOptions:
     # reason: elig, cache and outputs may be None
     # generated: def __init__(self, config: FlowPolicyConfig, *, elig: Eligibility = None, cache: DagCache = None, outputs: typing.Any = None) -> None:
     def __init__(
@@ -473,7 +507,7 @@ def as_float(
     x: typing.SupportsIndex, resolution: typing.SupportsFloat | typing.SupportsIndex
 ) -> float: ...
 
-# reason: pairs of node sets, each pair a length-2 sequence (sources, destinations), an integer array included (so pairs may be an integer array of shape (k, 2), or (k, 2, m) for sets of m nodes); opts is CapacityOptions; per_pair_elig has one Eligibility or None per pair; workers is an integer or None; one PlacementResult per pair
+# reason: pairs of node sets, each pair a length-2 sequence (sources, destinations), an integer array included (so pairs may be an integer array of shape (k, 2), or (k, 2, m) for sets of m nodes); opts is QueryOptions; per_pair_elig has one Eligibility or None per pair; workers is an integer or None; one PlacementResult per pair
 # generated: def batch_capacity(graph: Graph, pairs: typing.Any, opts: typing.Any, per_pair_elig: typing.Any = None, workers: typing.Any = None) -> typing.Any:
 def batch_capacity(
     graph: Graph,
@@ -486,12 +520,12 @@ def batch_capacity(
         | numpy.typing.NDArray[numpy.integer]
     ]
     | numpy.typing.NDArray[numpy.integer],
-    opts: CapacityOptions,
+    opts: QueryOptions,
     per_pair_elig: collections.abc.Sequence[Eligibility | None] | None = None,
     workers: typing.SupportsIndex | None = None,
 ) -> list[PlacementResult]: ...
 
-# reason: sources and destinations are node sets; opts is CapacityOptions (TypeError otherwise)
+# reason: sources and destinations are node sets; opts is QueryOptions (TypeError otherwise)
 # generated: def capacity(graph: Graph, sources: typing.Any, destinations: typing.Any, opts: typing.Any) -> typing.Any:
 def capacity(
     graph: Graph,
@@ -501,7 +535,7 @@ def capacity(
     destinations: typing.SupportsIndex
     | collections.abc.Sequence[typing.SupportsIndex]
     | numpy.typing.NDArray[numpy.integer],
-    opts: CapacityOptions,
+    opts: QueryOptions,
 ) -> PlacementResult: ...
 
 # reason: src and dst are integers; opts is KspOptions; a list of (cost, Path)
@@ -521,7 +555,7 @@ def resolve_to_paths(
     max_paths: typing.SupportsIndex | None = None,
 ) -> list[Path]: ...
 
-# reason: sources and destinations are node sets; opts is SensitivityOptions; workers is an integer or None
+# reason: sources and destinations are node sets; opts is QueryOptions; workers is an integer or None
 # generated: def sensitivity(graph: Graph, sources: typing.Any, destinations: typing.Any, opts: typing.Any, workers: typing.Any = None) -> typing.Any:
 def sensitivity(
     graph: Graph,
@@ -531,7 +565,7 @@ def sensitivity(
     destinations: typing.SupportsIndex
     | collections.abc.Sequence[typing.SupportsIndex]
     | numpy.typing.NDArray[numpy.integer],
-    opts: SensitivityOptions,
+    opts: QueryOptions,
     workers: typing.SupportsIndex | None = None,
 ) -> SensitivityResult: ...
 

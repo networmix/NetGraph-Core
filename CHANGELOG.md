@@ -29,7 +29,8 @@ engine. It replaces the 0.11 API.
 - **Route structures**: `PredDAG.from_csr(graph, offsets, parents, via)` with the complete
   validation (shape, ranges, endpoints, duplicates, cycles, ascending via within a node); a DAG
   is stored over its member nodes and presents the CSR shape on demand. `Path(graph, hops)`
-  with `to_dag()`. `PathSelection`, `EdgeTieBreak` (`DETERMINISTIC`, `PREFER_HIGHER_PRIORITY`),
+  with `to_dag()`. `PathSelection` (every field defaulted: `DETERMINISTIC`, `CAPACITY`,
+  `multipath=True`, `multi_edge=True`), `EdgeTieBreak` (`DETERMINISTIC`, `PREFER_HIGHER_PRIORITY`),
   `EdgePriority` (`RESIDUAL`, `CAPACITY`, `HEADROOM`).
 - **Ledger**: `FlowLedger(graph, residual=None)` (replacing 0.11's `FlowGraph`) is the integer
   ledger: a baseline in units (validated within `[0, capacity_units]`), records as snapshots in
@@ -37,26 +38,33 @@ engine. It replaces the 0.11 API.
   reused), `capacity_units()`, `residual()`, `allocated()`, `bottleneck(sources, elig)`,
   `reset()` and `copy()` (both rejected while a policy is bound; `reset()` clears the records a
   destroyed policy left behind). `FlowRecord` carries the flow's endpoints as sets,
-  placement, admission, bundle (`PredDAG`), route cost, `offered` (Lossy only), delivery and
+  admission, bundle (`PredDAG`), route cost, `offered` (Lossy only), delivery and
   per-edge allocations and drops; counters are 128-bit (exact Python ints). Policies place and
   remove flows; `reset()` replaces an unbound ledger's baseline and clears its records.
 - **Kernels**: `FlowPlacement` (`MAX_FLOW`, `WEIGHTED`, `EQUAL_BALANCED`) and `Admission`
   (`LOSSLESS`, `LOSSY`). `MAX_FLOW` re-solves the flow with the flow core on its route over the free
   capacity plus its own allocation; `WEIGHTED` splits in proportion to weights fixed at creation
   from `priority` (highest averages, D'Hondt, EdgeId ties); `EQUAL_BALANCED` splits equally by
-  round robin from the lowest EdgeId; Lossy splits each offer per call and records transit drops.
+  round robin from the lowest EdgeId; Lossy splits each offer per call and records transit drops
+  and what is lost at a source.
 - **Policies**: `FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)`
-  is the one placement engine. `FlowPolicyConfig(routing=..., placement=..., admission=...,
-  selection=...)` has four explicit axes; the routing is `CostOnly()`, `CapacityAware(...)`
-  (flow count, an optional maximum, an `Absolute` or `Stretch` cost ceiling, a minimum flow
-  bandwidth in units, reoptimisation, `DiminishingReturns(window, fraction)`), `Global()` or
-  `Pinned(bundles)`; values outside an enumeration raise `ValueError`. `place(volume,
-  outputs=None)` runs the per-source transaction (creation, reoptimisation, amounts, growth; at
-  most `MAX_FLOWS_PER_CALL` creations per call) or, on Global, the cumulative minimum-cost flow on
-  the residual plus the policy's own allocation, and returns `PlacementResult` (`placed`,
-  `remaining`, `termination`, `local_outcomes`, `routes_changed`, `weights_changed`, `drops`,
-  Global's `cost_distribution`, and `edge_flows`, `residual`, `bottleneck` and Global's
-  `min_cut` when requested through `OutputOptions`). A request of 0 is validated like any other.
+  is the one placement engine. `FlowPolicyConfig(*, routing, placement=None,
+  admission=LOSSLESS, selection=None, origin=None)` takes keywords only; the routing is
+  `CostOnly()`, `CapacityAware(...)` (flow count, an optional maximum, an `Absolute` or `Stretch`
+  cost ceiling, a minimum flow bandwidth in units, reoptimisation, `DiminishingReturns(window,
+  fraction)`), `Global()` or `Pinned(bundles)`; each routing accepts the combinations of one
+  table (placement required except for Global, which takes none; `Origin.EQUAL` or `OPTIMIZED`;
+  admission; selection) and any other raises `ValueError`, the first defect in a stated order.
+  `place(volume, outputs=None)` forwards CostOnly's pooled program, re-solves the controllers
+  (Global and CostOnly `MAX_FLOW`: the cumulative minimum-cost flow on the residual plus the
+  policy's own allocation, under either origin), or runs CapacityAware's per-source transaction
+  (creation, reoptimisation, amounts, growth; at most `MAX_FLOWS_PER_CALL` creations per call),
+  and returns `PlacementResult`: this call's `placed`, `remaining`, `delivery_delta`,
+  `call_drops`, `call_source_loss`, `termination` and flags; the demand's `requested`,
+  `offered`, `admitted`, `delivered`, `unadmitted`, `source_loss`, `drops`, `by_source`
+  (`SourceFlow` rows), `total_cost` and `cost_distribution`; and `edge_flows`, `residual`,
+  `bottleneck` and `min_cut` when requested through `OutputOptions`. A request of 0 is
+  validated like any other.
   `remove()`, `records()`, `record(flow_id)` (the policy's own records), `placed_demand()` and
   `usable_bundles()` complete the policy.
 - **Failure guarantee**: every public call either completes or raises and changes nothing, also
@@ -96,15 +104,15 @@ engine. It replaces the 0.11 API.
     evaluator. A frozen lookup miss raises `DagCacheMiss`, an exception the evaluators pass on
     unchanged. `clear()` raises when frozen, and `thaw()` returns to building mode after the
     caller has joined every reader.
-- **Evaluators**: `capacity(graph, sources, destinations, CapacityOptions(...))` (with Global
-  and `MAX_FLOW` the exact maximum flow, its marginal cost curve and its minimum cut),
-  `batch_capacity(graph, pairs, opts, per_pair_elig=None, workers=None)` (pair order; the lowest
-  failing index raises) and `sensitivity(graph, sources, destinations, SensitivityOptions(...),
-  workers=None)` (every candidate edge and its signed unthresholded loss in units; a failed
-  deletion fails the call). A supplied building cache needs `workers == 1`; a frozen cache is
-  shared by every worker. With `workers=None` the count is 1 when a cache is supplied, otherwise
-  `NGRAPH_CORE_BATCH_THREADS` and `NGRAPH_CORE_SENSITIVITY_THREADS` (an integer in [1, 4096];
-  1 when unset or invalid).
+- **Evaluators**: one options type, `QueryOptions(config, *, elig=None, cache=None, outputs=None)`;
+  `capacity(graph, sources, destinations, opts)` (with `Global()` the exact maximum flow, its
+  marginal cost curve and its minimum cut), `batch_capacity(graph, pairs, opts, per_pair_elig=None,
+  workers=None)` (pair order; the lowest failing index raises) and `sensitivity(graph, sources,
+  destinations, opts, workers=None)` (every candidate edge and its signed unthresholded loss in
+  units; a failed deletion fails the call). A supplied building cache needs `workers == 1`; a frozen
+  cache is shared by every worker. With `workers=None` the count is 1 when a cache is supplied,
+  otherwise `NGRAPH_CORE_BATCH_THREADS` and `NGRAPH_CORE_SENSITIVITY_THREADS` (an integer in [1,
+  4096]; 1 when unset or invalid).
 - **Flow core**: one exact integer minimum-cost flow solver (successive shortest paths with
   potentials, then Dinic phases for each cost level; each edge is its own arc, visited in
   ascending EdgeId) serves Global routing, the `MAX_FLOW` kernel and the evaluators (sensitivity
@@ -116,7 +124,7 @@ engine. It replaces the 0.11 API.
   together; graphs of every accepted size still build and can be searched.
 - **C++ headers** (under `netgraph/core/`): `types.hpp`, `graph.hpp` (`Graph`, `to_units`,
   `as_float`; it includes `eligibility.hpp`), `eligibility.hpp`, `options.hpp` (the selection
-  axes, `FlowPlacement`, `Admission`), `pred_dag.hpp`, `flow_record.hpp` (`FlowId`,
+  axes, `FlowPlacement`, `Admission`, `Origin`), `pred_dag.hpp`, `flow_record.hpp` (`FlowId`,
   `Counter128`, `FlowRecord`), `flow_ledger.hpp`, `flow_policy.hpp`, `dag_cache.hpp`,
   `evaluators.hpp` and `search.hpp` (`spf`, `ksp`, `resolve_to_paths` and their options; the
   queue choice `SpfQueue { Auto, Heap }` is a C++-only trailing parameter of `spf`); each
@@ -128,8 +136,9 @@ engine. It replaces the 0.11 API.
   construct), next to `py.typed`. The stub carries the binding docstrings. `bash dev/stubs/run.sh
   generate` regenerates it; `make stubs-check` checks it against a fresh generation, the wheel
   and sdist contents, and typed client programs.
-- **Error messages**: the error for a finite request after `float('inf')` within an epoch no
-  longer cites a rule number.
+- **Error messages**: the error for a finite request after `float('inf')` within an epoch reads
+  `finite placement after infinite placement requires a new epoch` (it no longer cites a rule
+  number).
 - **Zero-capacity links stay in routing**: `spf`, `ksp`, the `DagCache` supports, the CostOnly
   routes, every roster and the `Stretch` baselines no longer skip edges below one unit of
   capacity; only a supplied residual (or an `Eligibility`) filters. Without a residual, `HEADROOM`
@@ -143,6 +152,33 @@ engine. It replaces the 0.11 API.
   edge with nothing free included (the cut's value is unchanged). Results change on graphs with
   zero-capacity edges: distances, DAGs, path lists, routes, rosters, records, amounts, drops,
   sensitivity entries and cuts.
+- **Pooled sources and the origin**: a demand with several sources is one demand. CostOnly with
+  `EQUAL_BALANCED` or `WEIGHTED` prepares one program per epoch at its first positive call (each
+  roster source's route on the residual at that call's entry; their union), splits the traffic of
+  all sources once at every router they share, and gives each source its part by highest averages
+  (records sum exactly to the totals); Lossless admits the largest equal total that fits with no
+  drop, so a source that cannot pass anything holds the demand at the number of sources before it.
+  CostOnly `MAX_FLOW` is now one controller on the union of the sources' routes, as Global is on the
+  whole graph. New `Origin` (`EQUAL`, `OPTIMIZED`): the controllers default to `OPTIMIZED` (the
+  previous behaviour) and with `EQUAL` deliver the largest total whose equal shares all fit (exact
+  binary search, then one solve from zero); split CostOnly is always `EQUAL`. `FlowPolicyConfig`
+  takes keywords only, `placement` and `selection` are optional (Global takes neither), `admission`
+  defaults to `LOSSLESS`, and `PathSelection` has defaults. `PlacementResult` drops `local_outcomes`
+  and gains the accounting of the demand (`requested`, `offered`, `admitted`, `delivered`,
+  `unadmitted`, `source_loss`, epoch `drops`, `by_source`, `total_cost`, `delivery_delta`,
+  `call_drops`, `call_source_loss`); its `drops` is now the epoch total per edge (this call's drops
+  are `call_drops`). New `Termination.NO_ACTIVE_WEIGHT` (routes exist but no member has a positive
+  weight); a controller whose maximum is 0 over existing routes ends `EXHAUSTED`, and a Lossy finite
+  request `COMPLETE`. `min_cut` is requested by `OutputOptions(min_cut=True)` (no longer by
+  `bottleneck`) and exists for optimized Global only; `cost_distribution` is `None` for equal Global
+  and before an epoch's first positive call. CostOnly with several sources rejects `multipath=False`
+  with `PREFER_HIGHER_PRIORITY`; only CostOnly accepts a `DagCache`. `FlowRecord.placement` is
+  removed (the kernel is the policy's configuration). `QueryOptions` replaces `CapacityOptions` and
+  `SensitivityOptions` (the same fields, one type for the three evaluators). Validation reports the
+  first defect in the order endpoints, ownership, enum values, the model table, the cache, the
+  routing's own fields, the endpoint counts; new error texts for the table, for every rejected offer
+  (`offer must be an integer in [0, 2^62) or permitted +inf`), for a finite request after an
+  infinite one, for counters at their limit and for the flow solver's size limits.
 
 ### Removed
 

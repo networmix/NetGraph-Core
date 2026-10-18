@@ -45,7 +45,9 @@ PathSelection sel(EdgeTieBreak t = EdgeTieBreak::Deterministic, EdgePriority p =
   return PathSelection(t, p, multipath, multi_edge);
 }
 
+// A configuration; Global takes neither a placement nor a selection, so `k` and `s` are left out.
 FlowPolicyConfig cfg(Routing r, FlowPlacement k, Admission a = Admission::Lossless, PathSelection s = sel()) {
+  if (std::holds_alternative<Global>(r)) return FlowPolicyConfig {.routing = std::move(r), .admission = a};
   return FlowPolicyConfig {std::move(r), k, a, s};
 }
 
@@ -178,7 +180,7 @@ TEST(ZeroCapacity, DagCacheValuesAndTheirConsumers) {
   FlowPolicy p(fg, v({0}), v({1}), cost_only_config(), nullptr, &cache);
   EXPECT_EQ(p.place(5).placed, 0);
   cache.freeze();
-  EXPECT_EQ(capacity(*g, v({0}), v({1}), CapacityOptions {cost_only_config(), nullptr, &cache}).placed, 0);
+  EXPECT_EQ(capacity(*g, v({0}), v({1}), QueryOptions {cost_only_config(), nullptr, &cache}).placed, 0);
 }
 
 // Z-16 to Z-21: G8 under every model.
@@ -189,7 +191,6 @@ TEST(ZeroCapacity, G8ForEveryModel) {
   EXPECT_EQ(eb.r.remaining, 5);
   EXPECT_EQ(eb.r.termination, Termination::Exhausted);
   EXPECT_TRUE(eb.r.routes_changed);
-  EXPECT_EQ(eb.r.local_outcomes, (std::vector<std::pair<NodeId, Termination>> {{0, Termination::Exhausted}}));
   ASSERT_EQ(eb.records.size(), 1U);
   EXPECT_EQ(eb.records[0].delivered, 0);
   EXPECT_EQ(dag_edges(*eb.records[0].bundle), (std::vector<EdgeId>{0}));
@@ -197,7 +198,7 @@ TEST(ZeroCapacity, G8ForEveryModel) {
   EXPECT_TRUE(eb.records[0].edges.empty());
   const auto lossy = place_once(g, {0}, {1}, cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy), 5);
   EXPECT_EQ(lossy.r.placed, 0);
-  EXPECT_EQ(lossy.r.drops, (Drops {{0, 5}}));
+  EXPECT_EQ(lossy.r.call_drops, (Drops {{0, 5}}));
   EXPECT_EQ(lossy.r.termination, Termination::Complete);
   ASSERT_EQ(lossy.records.size(), 1U);
   EXPECT_EQ(lossy.records[0].offered, (Counter128 {0, 5}));
@@ -206,8 +207,9 @@ TEST(ZeroCapacity, G8ForEveryModel) {
   for (const auto a : {Admission::Lossless, Admission::Lossy}) {
     const auto w = place_once(g, {0}, {1}, cfg(CostOnly {}, FlowPlacement::Weighted, a), 5);
     EXPECT_EQ(w.r.placed, 0);
-    EXPECT_TRUE(w.r.drops.empty());  // no member: the offer is lost at the source, never bypassed
-    EXPECT_EQ(w.r.termination, Termination::Exhausted);
+    EXPECT_TRUE(w.r.call_drops.empty());  // no member: the offer is lost at the source, never bypassed
+    EXPECT_EQ(w.r.call_source_loss, a == Admission::Lossy ? 5 : 0);
+    EXPECT_EQ(w.r.termination, Termination::NoActiveWeight);
     ASSERT_EQ(w.records.size(), 1U);
     EXPECT_EQ(dag_edges(*w.records[0].bundle), (std::vector<EdgeId>{0}));
     EXPECT_EQ(w.records[0].route_cost, 1);
@@ -236,11 +238,11 @@ TEST(ZeroCapacity, EqualSplitsKeepTheZeroMemberWeightedSplitsPruneIt) {
     EXPECT_EQ(place_once(g, {0}, {dst}, cost_only_config(), 10).r.placed, w.eb_lossless) << where;
     const auto lossy = place_once(g, {0}, {dst}, cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy), 10);
     EXPECT_EQ(lossy.r.placed, w.eb_lossy) << where;
-    EXPECT_EQ(lossy.r.drops, w.drops) << where;
+    EXPECT_EQ(lossy.r.call_drops, w.drops) << where;
     for (const auto a : {Admission::Lossless, Admission::Lossy}) {
       const auto wt = place_once(g, {0}, {dst}, cfg(CostOnly {}, FlowPlacement::Weighted, a), 10);
       EXPECT_EQ(wt.r.placed, w.weighted) << where;
-      EXPECT_TRUE(wt.r.drops.empty()) << where;
+      EXPECT_TRUE(wt.r.call_drops.empty()) << where;
     }
     EXPECT_EQ(place_once(g, {0}, {dst}, cfg(CostOnly {}, FlowPlacement::MaxFlow), 10).r.placed, w.maxflow) << where;
   };
@@ -274,8 +276,8 @@ TEST(ZeroCapacity, EqualSplitsKeepTheZeroMemberWeightedSplitsPruneIt) {
 TEST(ZeroCapacity, LossyInjectionAndAllZeroWeights) {
   const auto lossy_eb = cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy);
   const auto first = ordered(2, {{0, 1, 0, 1}, {0, 1, 10, 1}});
-  EXPECT_EQ(capacity(*first, v({0}), v({1}), CapacityOptions {lossy_eb}).placed, 10);
-  const auto s = capacity(*graph_s(), v({0}), v({1}), CapacityOptions {lossy_eb});
+  EXPECT_EQ(capacity(*first, v({0}), v({1}), QueryOptions {lossy_eb}).placed, 10);
+  const auto s = capacity(*graph_s(), v({0}), v({1}), QueryOptions {lossy_eb});
   EXPECT_EQ(s.placed, 0);
   EXPECT_EQ(s.termination, Termination::Exhausted);
   const auto wcmp = ordered(2, {{0, 1, 0, 1}, {0, 1, 40, 1}});
@@ -286,44 +288,42 @@ TEST(ZeroCapacity, LossyInjectionAndAllZeroWeights) {
   const auto w = place_once(one, {0}, {1}, cfg(CostOnly {}, FlowPlacement::Weighted, Admission::Lossy), 2);
   EXPECT_EQ(w.r.placed, 0);
   EXPECT_EQ(w.r.remaining, 2);
-  EXPECT_TRUE(w.r.drops.empty());
-  EXPECT_EQ(w.r.termination, Termination::Exhausted);
+  EXPECT_TRUE(w.r.call_drops.empty());
+  EXPECT_EQ(w.r.call_source_loss, 2);
+  EXPECT_EQ(w.r.termination, Termination::NoActiveWeight);
   ASSERT_EQ(w.records.size(), 1U);
   EXPECT_EQ(w.records[0].offered, (Counter128 {0, 2}));  // 2 offered, 0 delivered, no drop: lost at the source
   EXPECT_EQ(w.records[0].delivered, 0);
   const auto d = place_once(one, {0}, {1}, lossy_eb, 2);
   EXPECT_EQ(d.r.placed, 0);
-  EXPECT_EQ(d.r.drops, (Drops {{0, 2}}));
+  EXPECT_EQ(d.r.call_drops, (Drops {{0, 2}}));
   EXPECT_EQ(d.r.termination, Termination::Complete);
 }
 
-// Z-30 to Z-35: B3-zero-first, B3-positive-first and B3-delete-zero with today's per-source
-// admission (the contract's Lossless totals 0 and 1 arrive with the pooled origin rule).
+// Z-30 to Z-35: B3-zero-first, B3-positive-first and B3-delete-zero under the equal origin: a
+// source behind a zero-capacity link stays in the roster and receives its share, which Lossless
+// admits only when it is 0 (0 when it is the first source, 1 when the second) and Lossy loses.
 TEST(ZeroCapacity, ZeroCapacitySourcesStayInTheRoster) {
   const auto b = graph_b(0, 10);
   const auto ll = place_once(b, {0, 1}, {2}, cost_only_config(), 10);
-  EXPECT_EQ(ll.r.placed, 5);
+  EXPECT_EQ(ll.r.placed, 0);
   EXPECT_EQ(ll.r.termination, Termination::Exhausted);
-  EXPECT_EQ(ll.r.local_outcomes,
-            (std::vector<std::pair<NodeId, Termination>> {{0, Termination::Exhausted}, {1, Termination::Complete}}));
   ASSERT_EQ(ll.records.size(), 2U);
   EXPECT_EQ(ll.records[0].sources, v({0}));
   EXPECT_EQ(ll.records[0].delivered, 0);
   EXPECT_EQ(dag_edges(*ll.records[0].bundle), (std::vector<EdgeId>{0}));
-  EXPECT_EQ(ll.records[1].delivered, 5);
+  EXPECT_EQ(ll.records[1].delivered, 0);
   const auto lossy_eb = cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy);
   const auto ly = place_once(b, {0, 1}, {2}, lossy_eb, 10);
   EXPECT_EQ(ly.r.placed, 5);
-  EXPECT_EQ(ly.r.drops, (Drops {{0, 5}}));
+  EXPECT_EQ(ly.r.call_drops, (Drops {{0, 5}}));
   EXPECT_EQ(ly.r.termination, Termination::Complete);
   const auto bp = graph_b(10, 0);
   const auto pl = place_once(bp, {0, 1}, {2}, cost_only_config(), 10);
-  EXPECT_EQ(pl.r.placed, 5);
-  EXPECT_EQ(pl.r.local_outcomes,
-            (std::vector<std::pair<NodeId, Termination>> {{0, Termination::Complete}, {1, Termination::Exhausted}}));
+  EXPECT_EQ(pl.r.placed, 1);
   const auto py = place_once(bp, {0, 1}, {2}, lossy_eb, 10);
   EXPECT_EQ(py.r.placed, 5);
-  EXPECT_EQ(py.r.drops, (Drops {{1, 5}}));
+  EXPECT_EQ(py.r.call_drops, (Drops {{1, 5}}));
   // Z-33: the source or its link excluded: the roster is [1].
   const auto no_node = b->eligibility(std::vector<NodeId> {0}, {});
   const auto no_link = b->eligibility({}, std::vector<EdgeId> {0});
@@ -334,8 +334,7 @@ TEST(ZeroCapacity, ZeroCapacitySourcesStayInTheRoster) {
   // Z-34: Global keeps a zero-delivery record of source 0 with an empty bundle.
   const auto gl = place_once(b, {0, 1}, {2}, global_config(), 10);
   EXPECT_EQ(gl.r.placed, 10);
-  EXPECT_EQ(gl.r.local_outcomes,
-            (std::vector<std::pair<NodeId, Termination>> {{0, Termination::Complete}, {1, Termination::Complete}}));
+  EXPECT_EQ(gl.r.termination, Termination::Complete);
   ASSERT_EQ(gl.records.size(), 2U);
   EXPECT_EQ(gl.records[0].delivered, 0);
   EXPECT_TRUE(dag_edges(*gl.records[0].bundle).empty());
@@ -344,8 +343,6 @@ TEST(ZeroCapacity, ZeroCapacitySourcesStayInTheRoster) {
   const auto ca = place_once(b, {0, 1}, {2}, cfg(CapacityAware {.flow_count = 1}, FlowPlacement::EqualBalanced), 10);
   EXPECT_EQ(ca.r.placed, 5);
   EXPECT_EQ(ca.r.termination, Termination::NoRoute);
-  EXPECT_EQ(ca.r.local_outcomes,
-            (std::vector<std::pair<NodeId, Termination>> {{0, Termination::NoRoute}, {1, Termination::Complete}}));
   EXPECT_EQ(ca.records.size(), 1U);
 }
 
@@ -385,7 +382,7 @@ TEST(ZeroCapacity, PinnedBundlesKeepTheirZeroLinks) {
   EXPECT_EQ(place_once(p1, {0}, {1}, two(p1, FlowPlacement::EqualBalanced), std::nullopt).r.placed, 1);
   const auto lossy = place_once(p0, {0}, {1}, two(p0, FlowPlacement::EqualBalanced, Admission::Lossy), 4);
   EXPECT_EQ(lossy.r.placed, 2);
-  EXPECT_EQ(lossy.r.drops, (Drops {{0, 2}}));
+  EXPECT_EQ(lossy.r.call_drops, (Drops {{0, 2}}));
   for (const auto k : {FlowPlacement::Weighted, FlowPlacement::MaxFlow}) {
     const auto x = place_once(p0, {0}, {1}, two(p0, k), std::nullopt);
     EXPECT_EQ(x.r.placed, 4);
@@ -432,26 +429,29 @@ TEST(ZeroCapacity, PinnedWeightedPlansKeepOnlyPositiveEdges) {
 TEST(ZeroCapacity, EvaluatorsCountZeroCapacityRoutesAndCandidates) {
   const auto s = graph_s();
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {{{0}, {1}}, {{2}, {1}}};
-  const auto batch = batch_capacity(*s, pairs, CapacityOptions {cost_only_config()}, {}, 1);
+  const auto batch = batch_capacity(*s, pairs, QueryOptions {cost_only_config()}, {}, 1);
   ASSERT_EQ(batch.size(), 2U);
   EXPECT_EQ(batch[0].placed, 0);
   EXPECT_EQ(batch[1].placed, 5);
   // Z-44 (CostOnly, a negative loss) is in flow_policy_tests.cpp; Z-45: Global keeps its
   // positive-flow candidates.
-  EXPECT_EQ(entries(sensitivity(*s, v({0}), v({1}), SensitivityOptions {global_config()}, 1)),
+  EXPECT_EQ(entries(sensitivity(*s, v({0}), v({1}), QueryOptions {global_config()}, 1)),
             (std::vector<std::pair<EdgeId, Amount>> {{1, 5}, {2, 5}}));
   const auto b = graph_b(0, 10);
-  const auto eb = sensitivity(*b, v({0, 1}), v({2}), SensitivityOptions {cost_only_config()}, 1);
-  EXPECT_EQ(eb.baseline.placed, 10);
-  EXPECT_EQ(entries(eb), (std::vector<std::pair<EdgeId, Amount>> {{0, 0}, {1, 10}}));
+  // CostOnly EB under the equal origin (B3-zero-first): the baseline is 0; deleting the zero link
+  // takes source 0 out of the roster and raises the total to 10 (loss -10); deleting link 1 leaves
+  // source 0 alone (0).
+  const auto eb = sensitivity(*b, v({0, 1}), v({2}), QueryOptions {cost_only_config()}, 1);
+  EXPECT_EQ(eb.baseline.placed, 0);
+  EXPECT_EQ(entries(eb), (std::vector<std::pair<EdgeId, Amount>> {{0, -10}, {1, 0}}));
   const auto ca = sensitivity(*b, v({0, 1}), v({2}),
-                              SensitivityOptions {cfg(CapacityAware {.flow_count = 1}, FlowPlacement::EqualBalanced)}, 2);
+                              QueryOptions {cfg(CapacityAware {.flow_count = 1}, FlowPlacement::EqualBalanced)}, 2);
   EXPECT_EQ(ca.baseline.placed, 10);
   EXPECT_EQ(entries(ca), (std::vector<std::pair<EdgeId, Amount>> {{0, 0}, {1, 10}}));
   const auto p0 = ordered(2, {{0, 1, 0, 1}, {0, 1, 4, 1}});
   Pinned pin;
   pin.bundles = {dag_of(*p0, {0}), dag_of(*p0, {1})};
-  const auto ps = sensitivity(*p0, v({0}), v({1}), SensitivityOptions {cfg(pin, FlowPlacement::EqualBalanced)}, 1);
+  const auto ps = sensitivity(*p0, v({0}), v({1}), QueryOptions {cfg(pin, FlowPlacement::EqualBalanced)}, 1);
   EXPECT_EQ(ps.baseline.placed, 0);
   EXPECT_EQ(entries(ps), (std::vector<std::pair<EdgeId, Amount>> {{0, -4}, {1, 0}}));
 }
@@ -459,16 +459,16 @@ TEST(ZeroCapacity, EvaluatorsCountZeroCapacityRoutesAndCandidates) {
 // Z-56: Global's minimum cut lists the zero-capacity link leaving the closure (value unchanged);
 // an excluded link is never listed.
 TEST(ZeroCapacity, GlobalMinCutListsZeroCapacityLinksLeavingTheClosure) {
-  const OutputOptions want {false, false, true};
+  const OutputOptions want {false, false, true, true};
   const auto b = graph_b(0, 10);
-  const auto rb = capacity(*b, v({0, 1}), v({2}), CapacityOptions {global_config(), nullptr, nullptr, want});
+  const auto rb = capacity(*b, v({0, 1}), v({2}), QueryOptions {global_config(), nullptr, nullptr, want});
   EXPECT_EQ(rb.placed, 10);
   EXPECT_EQ(rb.min_cut, (std::optional<std::vector<EdgeId>> {{0, 1}}));
   const auto s = graph_s();
-  const auto rs = capacity(*s, v({0}), v({1}), CapacityOptions {global_config(), nullptr, nullptr, want});
+  const auto rs = capacity(*s, v({0}), v({1}), QueryOptions {global_config(), nullptr, nullptr, want});
   EXPECT_EQ(rs.placed, 5);
   EXPECT_EQ(rs.min_cut, (std::optional<std::vector<EdgeId>> {{0, 1}}));
   const auto no_zero = s->eligibility({}, std::vector<EdgeId> {0});
-  const auto rm = capacity(*s, v({0}), v({1}), CapacityOptions {global_config(), &no_zero, nullptr, want});
+  const auto rm = capacity(*s, v({0}), v({1}), QueryOptions {global_config(), &no_zero, nullptr, want});
   EXPECT_EQ(rm.min_cut, (std::optional<std::vector<EdgeId>> {{1}}));
 }

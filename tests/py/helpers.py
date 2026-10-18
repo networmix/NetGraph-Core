@@ -90,7 +90,12 @@ def sel(tie=DET, prio=CAP, mp=True, me=True):
 def config(
     routing, placement=ngc.FlowPlacement.EQUAL_BALANCED, admission=None, selection=None
 ):
-    """A FlowPolicyConfig: EqualBalanced, Lossless and sel() by default."""
+    """A FlowPolicyConfig: EqualBalanced, Lossless and sel() by default; Global takes neither a
+    placement nor a selection, so they are left out for it."""
+    if isinstance(routing, ngc.Global):
+        return ngc.FlowPolicyConfig(
+            routing=routing, admission=admission or ngc.Admission.LOSSLESS
+        )
     return ngc.FlowPolicyConfig(
         routing=routing,
         placement=placement,
@@ -99,15 +104,16 @@ def config(
     )
 
 
-# The exact maximum flow (Global routing, MaxFlow placement) and CostOnly EqualBalanced, both
-# Lossless with sel(). Configurations are immutable, so tests share these values.
-GLOBAL = config(ngc.Global(), ngc.FlowPlacement.MAX_FLOW)
+# The exact maximum flow (Global routing, the optimized origin) and CostOnly EqualBalanced, both
+# Lossless (CostOnly with sel()). Configurations are immutable, so tests share these values.
+GLOBAL = config(ngc.Global())
 COSTONLY = config(ngc.CostOnly())
 
 
 # The result classes whose public attributes are all fields (no methods).
 _RESULTS = (
     ngc.PlacementResult,
+    ngc.SourceFlow,
     ngc.SensitivityResult,
     ngc.SensitivityEntry,
     ngc.SpfResult,
@@ -149,7 +155,6 @@ def ledger_state(ledger):
                 r.owner,
                 r.sources,
                 r.destinations,
-                r.placement,
                 r.admission,
                 [
                     r.bundle.parent_offsets().tolist(),

@@ -51,11 +51,9 @@ struct InEdge {
 inline constexpr Amount kL62 = Amount {1} << 62;
 
 // The two policy configurations most tests use, both Lossless with deterministic ties and the
-// capacity priority: the exact maximum flow (Global routing, MaxFlow) and CostOnly EqualBalanced.
-inline FlowPolicyConfig global_config() {
-  return FlowPolicyConfig {Global {}, FlowPlacement::MaxFlow, Admission::Lossless,
-                           PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Capacity)};
-}
+// capacity priority: the exact maximum flow (Global routing, the optimized origin) and CostOnly
+// EqualBalanced.
+inline FlowPolicyConfig global_config() { return FlowPolicyConfig {.routing = Global {}}; }
 inline FlowPolicyConfig cost_only_config() {
   return FlowPolicyConfig {CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossless,
                            PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Capacity)};
@@ -68,8 +66,7 @@ inline std::tuple<std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::i
 }
 
 // The kernel-combination errors of the configuration check.
-inline const std::string kLossyKernelError =
-    "Lossy admission is rejected with the MaxFlow kernel: a controller never drops (EqualBalanced or Weighted only)";
+inline const std::string kLossyKernelError = "MAX_FLOW requires admission=LOSSLESS";
 inline const std::string kHeadroomKernelError = "the Weighted kernel is rejected with priority Headroom (weights are units)";
 
 inline Graph make_graph(std::int32_t n, const std::vector<InEdge>& edges, double q = 1.0) {
@@ -692,7 +689,8 @@ inline std::vector<std::string> plan_differences(const detail::KernelPlan& got, 
   };
   differ(got.placement == want.placement, "placement");
   differ(got.admission == want.admission, "admission");
-  differ(got.src == want.src, "src");
+  differ(vec(got.roots) == vec(want.roots), "roots");
+  differ(vec(got.root_pos) == vec(want.root_pos), "root_pos");
   differ(vec(got.dsts) == vec(want.dsts), "dsts");
   if (with_route) differ(got.route == want.route, "route");
   differ(got.members == want.members, "members");
@@ -702,8 +700,6 @@ inline std::vector<std::string> plan_differences(const detail::KernelPlan& got, 
   differ(vec(got.out_end) == vec(want.out_end), "out_end");
   differ(vec(got.head_pos) == vec(want.head_pos), "head_pos");
   differ(vec(got.terminal) == vec(want.terminal), "terminal");
-  differ(got.src_out_begin == want.src_out_begin, "src_out_begin");
-  differ(got.src_out_end == want.src_out_end, "src_out_end");
   return out;
 }
 

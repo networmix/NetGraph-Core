@@ -825,16 +825,16 @@ TEST(GraphLayout, ForeignGraphBoundObjectsAreRejectedAtTheirUseSites) {
   DagCache cache(twin);
   const std::string elig_msg = "foreign Eligibility: built for another graph";
   const std::string cache_msg = "foreign DagCache: bound to another graph";
-  EXPECT_EQ(error_of([&] { (void)capacity(g, s, d, CapacityOptions {cfg, &el}); }), elig_msg);
-  EXPECT_EQ(error_of([&] { (void)capacity(g, s, d, CapacityOptions {cfg, nullptr, &cache}); }), cache_msg);
+  EXPECT_EQ(error_of([&] { (void)capacity(g, s, d, QueryOptions {cfg, &el}); }), elig_msg);
+  EXPECT_EQ(error_of([&] { (void)capacity(g, s, d, QueryOptions {cfg, nullptr, &cache}); }), cache_msg);
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs {{s, d}};
-  EXPECT_EQ(error_of([&] { (void)batch_capacity(g, pairs, CapacityOptions {cfg, nullptr, &cache}, {}, 1); }), cache_msg);
-  EXPECT_EQ(error_of([&] { (void)sensitivity(g, s, d, SensitivityOptions {cfg, &el}, 1); }), elig_msg);
-  EXPECT_EQ(error_of([&] { (void)sensitivity(g, s, d, SensitivityOptions {cfg, nullptr, &cache}, 1); }), cache_msg);
+  EXPECT_EQ(error_of([&] { (void)batch_capacity(g, pairs, QueryOptions {cfg, nullptr, &cache}, {}, 1); }), cache_msg);
+  EXPECT_EQ(error_of([&] { (void)sensitivity(g, s, d, QueryOptions {cfg, &el}, 1); }), elig_msg);
+  EXPECT_EQ(error_of([&] { (void)sensitivity(g, s, d, QueryOptions {cfg, nullptr, &cache}, 1); }), cache_msg);
   const Path p(twin, {{0}, {2}});
   EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, p.to_dag(), 0, 3); }), "foreign PredDAG: built for another graph");
   // The same calls on the owning graph succeed (the controls).
-  EXPECT_NO_THROW((void)capacity(twin, s, d, CapacityOptions {cfg, &el, &cache}));
+  EXPECT_NO_THROW((void)capacity(twin, s, d, QueryOptions {cfg, &el, &cache}));
   EXPECT_EQ(resolve_to_paths(twin, p.to_dag(), 0, 3).size(), 1U);
 }
 

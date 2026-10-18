@@ -14,18 +14,14 @@ import netgraph_core as ng
 
 g = ng.Graph(2, [0], [1], [10], [1], 1.0)
 sel = ng.PathSelection(ng.EdgeTieBreak.DETERMINISTIC, ng.EdgePriority.CAPACITY)
-cfg = ng.FlowPolicyConfig(
-    routing=ng.Global(),
-    placement=ng.FlowPlacement.MAX_FLOW,
-    admission=ng.Admission.LOSSLESS,
-    selection=sel,
-)
+cfg = ng.FlowPolicyConfig(routing=ng.Global())
 
-# The eight result and factory classes have no constructor ("No constructor defined!").
+# The nine result and factory classes have no constructor ("No constructor defined!").
 ng.Eligibility()  # expect: reportCallIssue
 ng.PredDAG()  # expect: reportCallIssue
 ng.FlowRecord()  # expect: reportCallIssue
 ng.PlacementResult()  # expect: reportCallIssue
+ng.SourceFlow()  # expect: reportCallIssue
 ng.DagCacheStats()  # expect: reportCallIssue
 ng.SensitivityEntry()  # expect: reportCallIssue
 ng.SensitivityResult()  # expect: reportCallIssue
@@ -42,18 +38,22 @@ ng.Graph("wrong", [0], [1], [10], [1], 1.0)  # expect: reportArgumentType
 ng.Graph(2, [0], [1], [1.5], [1], 1.0)  # expect: reportArgumentType
 ng.FlowLedger(g, residual=np.zeros(1, dtype=np.float64))  # expect: reportArgumentType
 ng.spf(g, 0, ng.KspOptions(1, sel))  # expect: reportArgumentType
-ng.capacity(g, 0, 1, ng.SensitivityOptions(cfg))  # expect: reportArgumentType
+ng.capacity(g, 0, 1, cfg)  # expect: reportArgumentType
 guard = ng.DiminishingReturns(2, 0.5)
 ng.CapacityAware(max_path_cost=guard)  # expect: reportArgumentType
 ng.to_units("1.5", 1.0)  # expect: reportCallIssue, reportArgumentType
+# FlowPolicyConfig takes keywords only.
+ng.FlowPolicyConfig(ng.Global())  # expect: reportCallIssue
 # Integer arrays serve as hops and pairs; float arrays do not.
 ng.Path(g, np.zeros((1, 1), dtype=np.float64))  # expect: reportArgumentType
 float_pairs = np.zeros((1, 2), dtype=np.float64)
-ng.batch_capacity(g, float_pairs, ng.CapacityOptions(cfg))  # expect: reportArgumentType
+ng.batch_capacity(g, float_pairs, ng.QueryOptions(cfg))  # expect: reportArgumentType
 
 # Missing Optional checks: these results may be None.
 result = ng.spf(g, 0, ng.SpfOptions(ng.Direction.FORWARD, sel, targets=1))
 cost: int = result.target_cost  # expect: reportAssignmentType
 first = result.costs[0]  # expect: reportOptionalSubscript
-flows = ng.capacity(g, 0, 1, ng.CapacityOptions(cfg)).edge_flows
+flows = ng.capacity(g, 0, 1, ng.QueryOptions(cfg)).edge_flows
 total = flows.sum()  # expect: reportOptionalMemberAccess
+best = ng.capacity(g, 0, 1, ng.QueryOptions(cfg))
+cost_total: int = best.total_cost  # expect: reportAssignmentType

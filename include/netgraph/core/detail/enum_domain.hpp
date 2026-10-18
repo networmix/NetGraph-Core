@@ -33,6 +33,14 @@ inline void check_member(Admission v, const char* field) {
   not_a_member(field, static_cast<int>(v), "Admission");
 }
 
+inline void check_member(Origin v, const char* field) {
+  switch (v) {
+    case Origin::Equal:
+    case Origin::Optimized: return;
+  }
+  not_a_member(field, static_cast<int>(v), "Origin");
+}
+
 inline void check_member(EdgeTieBreak v, const char* field) {
   switch (v) {
     case EdgeTieBreak::Deterministic:

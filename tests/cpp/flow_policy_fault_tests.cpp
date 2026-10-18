@@ -1,5 +1,5 @@
 // Allocation-failure atomicity of the policy engine, the DagCache and the evaluators.
-// Exhaustive sweeps (each allocation fails once) cover the placement calls of the 13 routing and
+// Exhaustive sweeps (each allocation fails once) cover the placement calls of the 16 routing and
 // kernel modes below, with and without a static Eligibility; the zero and empty-roster calls; the
 // policy construction, with and without a supplied building cache and an Eligibility; the
 // DagCache construction and insertion; capacity() and batch_capacity() on one worker in every
@@ -82,8 +82,12 @@ std::vector<Mode> modes(const Graph& g) {
   out.push_back({"costonly eb", cost_only_config(), S, D});
   out.push_back({"costonly weighted residual", {CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, res}, S, D});
   out.push_back({"costonly lossy", {CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy, det}, S, D});
+  // Several sources: the deterministic single path (the pooled single-path rule rejects
+  // PreferHigherPriority with multipath false).
   out.push_back({"costonly single path collapse",
-                 {CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossless, tunnel}, S, D});
+                 {CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossless,
+                  PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Residual, false, false)},
+                 S, D});
   CapacityAware grow;
   grow.flow_count = 1;
   grow.max_flow_count = 4;
@@ -99,6 +103,13 @@ std::vector<Mode> modes(const Graph& g) {
   dim.min_flow_bandwidth = 1;
   out.push_back({"capacityaware weighted diminishing", {dim, FlowPlacement::Weighted, Admission::Lossless, res}, S, D});
   out.push_back({"global", global_config(), S, D});
+  // The equal origin of the controllers: the bisection's probe solves and the final solve.
+  out.push_back({"global equal", {.routing = Global {}, .origin = Origin::Equal}, S, D});
+  out.push_back({"costonly maxflow equal",
+                 {CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossless, det, Origin::Equal}, S, D});
+  // Pooled Weighted Lossy: source 1's zero-capacity member has weight 0 (pruned), the shares
+  // attributed across the shared routers.
+  out.push_back({"costonly weighted lossy", {CostOnly {}, FlowPlacement::Weighted, Admission::Lossy, det}, S, D});
   Pinned two;
   const auto inv = id_of_input(g);
   two.bundles = {dag_of(g, {inv[0], inv[4], inv[5]}), dag_of(g, {inv[1], inv[6]}), dag_of(g, {inv[12]})};
@@ -168,14 +179,12 @@ TEST(PolicyFaults, ZeroCapacityLinksTakePartInTheSweeps) {
     (void)p.place(5);
     const auto& pe = detail::PolicyAccess::engine(p);
     if (m.name == "costonly eb") {
-      bool member = false;
-      for (const auto& cohort : pe.cohorts) {
-        for (const auto& f : cohort) {
-          member = member || std::find(f.plan->members.begin(), f.plan->members.end(), inv[11]) != f.plan->members.end();
-        }
-      }
-      EXPECT_TRUE(member);
-      const auto s = sensitivity(*g, m.sources, m.destinations, SensitivityOptions {m.cfg}, 1);
+      // The pooled program of both sources holds the zero link as a member.
+      ASSERT_TRUE(pe.program != nullptr);
+      EXPECT_EQ(vec(pe.program->roots), (std::vector<NodeId> {0, 1}));
+      EXPECT_TRUE(std::find(pe.program->members.begin(), pe.program->members.end(), inv[11]) !=
+                  pe.program->members.end());
+      const auto s = sensitivity(*g, m.sources, m.destinations, QueryOptions {m.cfg}, 1);
       EXPECT_TRUE(std::any_of(s.entries.begin(), s.entries.end(), [&](const auto& e) { return e.edge == inv[11]; }));
     }
     if (std::holds_alternative<Pinned>(m.cfg.routing)) {
@@ -256,6 +265,7 @@ TEST(PolicyFaults, ConstructionFailsWithoutBindingAndTheCacheStaysConsistent) {
   for (const auto& m : modes(*g)) {
     for (const int v : {0, 1, 2, 3}) {
       const bool with_cache = (v & 1) != 0;
+      if (with_cache && !std::holds_alternative<CostOnly>(m.cfg.routing)) continue;  // rejected (below)
       const Eligibility* elig = (v & 2) != 0 ? &no_bypass : nullptr;
       const std::string variant = std::string(with_cache ? " cached" : "") + (elig != nullptr ? " eligibility" : "");
       // The reference: a clean construction on a fresh ledger and cache, then place(2).
@@ -319,13 +329,20 @@ TEST(PolicyFaults, ConstructionFailsWithoutBindingAndTheCacheStaysConsistent) {
       }
     }
   }
-  // Every CostOnly mode reads the supplied cache (an entry after a clean construction), the
-  // other modes none: the memo outcomes above are checked for every CostOnly mode.
+  // Every CostOnly mode reads the supplied cache (an entry after a clean construction), and the
+  // memo outcomes above are checked for every CostOnly mode; the other modes reject a cache before
+  // binding, without touching it.
   for (const auto& m : modes(*g)) {
     FlowLedger fg(g);
     DagCache cache(*g);
-    const FlowPolicy p(fg, m.sources, m.destinations, m.cfg, nullptr, &cache);
-    EXPECT_EQ(cache.stats().entries, std::holds_alternative<CostOnly>(m.cfg.routing) ? 1 : 0) << m.name;
+    if (std::holds_alternative<CostOnly>(m.cfg.routing)) {
+      const FlowPolicy p(fg, m.sources, m.destinations, m.cfg, nullptr, &cache);
+      EXPECT_EQ(cache.stats().entries, 1) << m.name;
+    } else {
+      EXPECT_THROW(FlowPolicy(fg, m.sources, m.destinations, m.cfg, nullptr, &cache), std::invalid_argument) << m.name;
+      EXPECT_EQ(cache.stats().entries, 0) << m.name;
+      EXPECT_TRUE(LedgerAccess::bound_owners(fg).empty()) << m.name;
+    }
   }
 }
 
@@ -478,7 +495,7 @@ long sweep_batch(const Mode& m, const Graph& g, std::span<const std::int32_t> wo
       {m.sources, m.destinations}, {{1}, {6}}, {{0}, {5}}};
   const std::vector<const Eligibility*> per_pair(o.per_pair != nullptr ? pairs.size() : 0, o.per_pair);
   std::optional<DagCache> cache;
-  const auto opts = [&] { return CapacityOptions {m.cfg, o.elig, cache ? &*cache : nullptr}; };
+  const auto opts = [&] { return QueryOptions {m.cfg, o.elig, cache ? &*cache : nullptr}; };
   if (o.cache) cache.emplace(g);
   const auto want = batch_capacity(g, pairs, opts(), per_pair, 1);
   const std::int64_t clean = cache ? cache->stats().entries : 0;
@@ -514,7 +531,7 @@ long sweep_batch(const Mode& m, const Graph& g, std::span<const std::int32_t> wo
 long sweep_sensitivity(const Mode& m, const Graph& g, std::span<const std::int32_t> workers_set, long step,
                        const Options& o = {}) {
   std::optional<DagCache> cache;
-  const auto opts = [&] { return SensitivityOptions {m.cfg, o.elig, cache ? &*cache : nullptr}; };
+  const auto opts = [&] { return QueryOptions {m.cfg, o.elig, cache ? &*cache : nullptr}; };
   if (o.cache) cache.emplace(g);
   const auto want = sensitivity(g, m.sources, m.destinations, opts(), 1);
   const std::int64_t clean = cache ? cache->stats().entries : 0;
@@ -612,7 +629,7 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
       const std::string name = m.name + " capacity" + o.name;
       std::optional<DagCache> cache;
       const auto copts = [&] {
-        return CapacityOptions {m.cfg, o.elig, cache ? &*cache : nullptr, OutputOptions {true, true, true}};
+        return QueryOptions {m.cfg, o.elig, cache ? &*cache : nullptr, OutputOptions {true, true, true}};
       };
       if (o.cache) cache.emplace(*g);
       const auto want = capacity(*g, m.sources, m.destinations, copts());
@@ -902,7 +919,8 @@ TEST(PolicyFaults, TheCacheComparatorsReportEveryDefect) {
 TEST(PolicyFaults, FrozenStatisticsFollowThePublicCall) {
   // A frozen cache's statistics are observable state (the memo allowance of a building cache
   // does not cover them). Every public call that can read a supplied frozen cache is swept: the
-  // policy constructor and capacity in every mode; batch_capacity at 1, 2 and 4 workers, in any
+  // policy constructor and capacity in every CostOnly mode (the other models reject a cache before
+  // reading it, statistics unchanged); batch_capacity at 1, 2 and 4 workers, in any
   // thread and in the worker threads only, with and without a miss; CostOnly sensitivity without
   // a re-evaluated deletion at 1, 2 and 4 workers in any thread; and CostOnly sensitivity whose
   // deletions miss at 1 worker in any thread and at 2 and 4 workers in the worker threads only.
@@ -916,12 +934,22 @@ TEST(PolicyFaults, FrozenStatisticsFollowThePublicCall) {
   cache.freeze();
   const auto reads = [](const Mode& m) -> std::int64_t { return std::holds_alternative<CostOnly>(m.cfg.routing) ? 1 : 0; };
   for (const auto& m : all) {
+    if (!std::holds_alternative<CostOnly>(m.cfg.routing)) {
+      const auto before = cache.stats();
+      FlowLedger fg(g);
+      EXPECT_THROW(FlowPolicy(fg, m.sources, m.destinations, m.cfg, nullptr, &cache), std::invalid_argument) << m.name;
+      EXPECT_THROW((void)capacity(*g, m.sources, m.destinations, QueryOptions {m.cfg, nullptr, &cache}),
+                   std::invalid_argument)
+          << m.name;
+      expect_stats(cache.stats(), before, m.name + " rejected");
+      continue;
+    }
     const long built = sweep_frozen_stats(m.name + " frozen construction", cache, false, 1, reads(m), false, [&] {
       FlowLedger fg(g);
       FlowPolicy p(fg, m.sources, m.destinations, m.cfg, nullptr, &cache);
     });
     EXPECT_GT(built, 2) << m.name;
-    const CapacityOptions opts {m.cfg, nullptr, &cache, OutputOptions {true, true, true}};
+    const QueryOptions opts {m.cfg, nullptr, &cache, OutputOptions {true, true, true}};
     const long placed = sweep_frozen_stats(m.name + " frozen capacity", cache, false, 3, reads(m), false,
                                            [&] { (void)capacity(*g, m.sources, m.destinations, opts); });
     EXPECT_GT(placed, 2) << m.name;
@@ -937,7 +965,7 @@ TEST(PolicyFaults, FrozenStatisticsFollowThePublicCall) {
                                  FlowPolicy p(fg, eb.sources, absent, eb.cfg, nullptr, &cache);
                                }),
             1);
-  const CapacityOptions shared {eb.cfg, nullptr, &cache};
+  const QueryOptions shared {eb.cfg, nullptr, &cache};
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {
       {eb.sources, eb.destinations}, {{1}, {6}}, {{0}, {5}}};
   // Pair 0 hits, pair 1 misses: a lower pair's hit is not kept by the failed batch.
@@ -963,14 +991,14 @@ TEST(PolicyFaults, FrozenStatisticsFollowThePublicCall) {
                                  cache, false, 3, 1, false,
                                  [&] {
                                    (void)sensitivity(*g, std::vector<NodeId> {5}, std::vector<NodeId> {6},
-                                                     SensitivityOptions {eb.cfg, nullptr, &cache}, workers);
+                                                     QueryOptions {eb.cfg, nullptr, &cache}, workers);
                                  }),
               2);
   }
   // CostOnly sensitivity whose deletions miss (a fresh uid per deletion): the baseline's hit is
   // dropped with the failed call, and the miss counts once.
   const auto costonly_miss = [&](std::int32_t workers) {
-    (void)sensitivity(*g, eb.sources, eb.destinations, SensitivityOptions {eb.cfg, nullptr, &cache}, workers);
+    (void)sensitivity(*g, eb.sources, eb.destinations, QueryOptions {eb.cfg, nullptr, &cache}, workers);
   };
   EXPECT_GT(sweep_frozen_stats("frozen costonly sensitivity miss", cache, false, 1, 0, true, [&] { costonly_miss(1); }),
             2);
@@ -1015,9 +1043,9 @@ TEST(PolicyFaults, FrozenStatisticsFollowThePublicCall) {
 TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
   // batch_capacity with a frozen cache shared by two and four workers, a failure anywhere or in
   // the worker threads only, then CostOnly sensitivity with that cache on one worker (its
-  // statistics with two and four workers: the test above), and Global sensitivity, which reads no
-  // cache, on two and four workers: the failure propagates as std::bad_alloc after the join, the
-  // cache keeps its entries, and a clean retry gives the reference.
+  // statistics with two and four workers: the test above): the failure propagates as
+  // std::bad_alloc after the join, the cache keeps its entries, and a clean retry gives the
+  // reference. Global sensitivity, which reads no cache, rejects it before any worker starts.
   const auto g = graph();
   const auto all = modes(*g);
   const auto& m = all[1];  // costonly eb: reads the cache
@@ -1027,8 +1055,8 @@ TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
   for (const auto& [s, t] : pairs) (void)cache.lookup(*g, t, Direction::Reverse, nullptr);
   const auto entries = cache.stats().entries;
   cache.freeze();
-  const auto want = batch_capacity(*g, pairs, CapacityOptions {m.cfg}, {}, 1);
-  const CapacityOptions shared {m.cfg, nullptr, &cache};
+  const auto want = batch_capacity(*g, pairs, QueryOptions {m.cfg}, {}, 1);
+  const QueryOptions shared {m.cfg, nullptr, &cache};
   for (const std::int32_t workers : {2, 4}) {
     for (const bool in_workers : {false, true}) {
       const long failures = sweep_evaluator(
@@ -1053,7 +1081,7 @@ TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
     return w.substr(0, w.find(", Eligibility uid "));
   };
   const auto costonly_sensitivity = [&](std::int32_t w) {
-    (void)sensitivity(*g, m.sources, m.destinations, SensitivityOptions {m.cfg, nullptr, &cache}, w);
+    (void)sensitivity(*g, m.sources, m.destinations, QueryOptions {m.cfg, nullptr, &cache}, w);
   };
   std::string want_miss;
   try {
@@ -1080,28 +1108,11 @@ TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
         }
       });
   EXPECT_GT(failures, 2) << "frozen sensitivity";
-  // Global sensitivity (each deletion repaired from the baseline's state) with the frozen cache
-  // shared by every worker: it reads no cache, and fails and retries as without one.
+  // Global sensitivity reads no cache: with the frozen cache it is rejected before any worker
+  // starts, the cache unchanged.
   const auto git = std::find_if(all.begin(), all.end(), [](const Mode& x) { return x.name == "global"; });
   ASSERT_NE(git, all.end());
-  const auto& gm = *git;
-  const auto want_global = sensitivity(*g, gm.sources, gm.destinations, SensitivityOptions {gm.cfg}, 1);
-  const SensitivityOptions gopts {gm.cfg, nullptr, &cache};
-  for (const std::int32_t workers : {2, 4}) {
-    for (const bool in_workers : {false, true}) {
-      const long global_failures = sweep_evaluator(
-          "frozen global sensitivity", workers, in_workers, 11,
-          [&](std::int32_t w) { (void)sensitivity(*g, gm.sources, gm.destinations, gopts, w); },
-          [&](std::int32_t w) {
-            const auto r = sensitivity(*g, gm.sources, gm.destinations, gopts, w);
-            ASSERT_EQ(r.entries.size(), want_global.entries.size());
-            for (std::size_t i = 0; i < r.entries.size(); ++i) {
-              EXPECT_EQ(r.entries[i].edge, want_global.entries[i].edge);
-              EXPECT_EQ(r.entries[i].loss, want_global.entries[i].loss);
-            }
-          });
-      EXPECT_GT(global_failures, 2) << "frozen global sensitivity workers " << workers;
-    }
-  }
+  EXPECT_THROW((void)sensitivity(*g, git->sources, git->destinations, QueryOptions {git->cfg, nullptr, &cache}, 2),
+               std::invalid_argument);
   EXPECT_EQ(cache.stats().entries, entries);
 }

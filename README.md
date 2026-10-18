@@ -60,14 +60,15 @@ specified in [docs/semantics.md](docs/semantics.md).
   between the same two nodes;
   `cost()` is the sum over hops of the minimum member cost and `to_dag()` gives the equivalent
   `PredDAG`.
-- **`PathSelection(tie_break, priority, multipath=True, multi_edge=True)`** with
-  `EdgeTieBreak` and `EdgePriority`: the selection axes the searches and policies read.
+- **`PathSelection(tie_break=DETERMINISTIC, priority=CAPACITY, multipath=True,
+  multi_edge=True)`** with `EdgeTieBreak` and `EdgePriority`: the selection axes the searches and
+  policies read.
 
 ### Ledger and kernels
 
 - **`FlowLedger(graph, residual=None)`**: the integer ledger of one graph: a baseline
   in units (replaced by `reset()`) and the records (`FlowRecord`: flow id, owner, endpoints,
-  placement, admission, bundle, route cost, offered, delivered, per-edge allocation and drops)
+  admission, bundle, route cost, offered, delivered, per-edge allocation and drops)
   of the flows placed on it. `allocated()` is the exact sum of the records and `residual()`
   the baseline minus it; `bottleneck(sources)` lists the full edges leaving the set of nodes
   the sources can still reach. `reset()` and `copy()` are rejected while a policy is bound
@@ -83,9 +84,15 @@ specified in [docs/semantics.md](docs/semantics.md).
 ### Policies
 
 - **`FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)`**: the placement
-  engine for one demand, bound to its ledger. `FlowPolicyConfig(routing=..., placement=...,
-  admission=..., selection=...)` sets four independent choices, all explicit. The routing is one of:
-  - `CostOnly()`: static shortest paths, as routers forward with an IGP such as OSPF;
+  engine for one demand, bound to its ledger. `FlowPolicyConfig(*, routing, placement=None,
+  admission=LOSSLESS, selection=None, origin=None)` chooses the routing, its kernel (required for
+  every routing but Global, which takes none), the admission, the path selection (default
+  `PathSelection()`) and the origin: `EQUAL` (every source sends the same round-robin share) or
+  `OPTIMIZED` (a controller chooses how much enters where; the default of the controllers). The
+  routing is one of:
+  - `CostOnly()`: static shortest paths, as routers forward with an IGP such as OSPF; the
+    sources of one demand are pooled (where their routes meet, a router splits their traffic
+    once); with `MAX_FLOW`, a controller restricted to those paths;
   - `CapacityAware(flow_count=1, max_flow_count=None, max_path_cost=None, min_flow_bandwidth=0,
     reoptimize=False, diminishing=None)`: tunnels that each search the free capacity (CSPF), with
     an `Absolute` or `Stretch` cost ceiling, a `DiminishingReturns(window, fraction)` guard, and at
@@ -94,11 +101,13 @@ specified in [docs/semantics.md](docs/semantics.md).
     destinations, on the free capacity plus its own allocation;
   - `Pinned(bundles)`: fixed routes given as `PredDAG`s.
 - **`place(volume, outputs=None)`** adds `volume` to the policy's request as one all-or-nothing
-  step (CostOnly and CapacityAware place source by source; Global re-solves what it already
-  delivers plus this request) and returns a `PlacementResult`: `placed`, `remaining`, `termination`, `local_outcomes`,
-  `routes_changed`, `weights_changed`, `drops`, `cost_distribution` (Global only), and, when
-  requested through `OutputOptions`, `edge_flows`, `residual`, `bottleneck` and (Global only)
-  `min_cut`.
+  step (CostOnly forwards over the program it prepares once per epoch; the controllers re-solve
+  what they already deliver plus this request; CapacityAware places source by source) and returns
+  a `PlacementResult`: this call's `placed`, `remaining`, `delivery_delta`, `call_drops`,
+  `call_source_loss`, `termination` and flags; the demand's `requested`, `offered`, `admitted`,
+  `delivered`, `unadmitted`, `source_loss`, `drops`, per-source rows `by_source`, `total_cost`
+  (controllers) and `cost_distribution` (optimized Global); and, when requested through
+  `OutputOptions`, `edge_flows`, `residual`, `bottleneck` and `min_cut` (optimized Global).
   `remove()` reverts the policy's flows; `records()`, `record(flow_id)`, `placed_demand()` and
   `usable_bundles()` read its state.
 - **Failure guarantee**: every public call either completes or raises one exception and leaves
@@ -150,13 +159,12 @@ values.
 
 ### Evaluators
 
-`capacity(graph, sources, destinations, CapacityOptions(config, elig=None, cache=None,
-outputs=None))` is `place(+inf)` of a policy on a fresh ledger; Global with MAX_FLOW gives the
+All three take one options type, `QueryOptions(config, *, elig=None, cache=None,
+outputs=None)`. `capacity(graph, sources, destinations, opts)` is `place(+inf)` of a policy on a fresh ledger; `Global()` gives the
 exact maximum flow with its marginal cost curve, and its minimum cut with
-`outputs=OutputOptions(bottleneck=True)`. `batch_capacity(graph, pairs,
+`outputs=OutputOptions(min_cut=True)`. `batch_capacity(graph, pairs,
 opts, per_pair_elig=None, workers=None)` evaluates pairs in pair order (the lowest failing
-index raises). `sensitivity(graph, sources, destinations, SensitivityOptions(...),
-workers=None)` reports, for every candidate edge, the signed loss in placed units when the
+index raises). `sensitivity(graph, sources, destinations, opts, workers=None)` reports, for every candidate edge, the signed loss in placed units when the
 edge is removed. With `workers=None` the worker count is 1 when a cache is supplied, otherwise
 it comes from `NGRAPH_CORE_BATCH_THREADS` and `NGRAPH_CORE_SENSITIVITY_THREADS`.
 
@@ -180,15 +188,11 @@ q = 2.0**-12
 caps = ngc.to_units([10.0, 10.0, 5.0, 5.0], q)
 graph = ngc.Graph(4, [0, 1, 0, 2], [1, 3, 2, 3], caps, [1, 1, 2, 2], q)
 
-config = ngc.FlowPolicyConfig(
-    routing=ngc.Global(),
-    placement=ngc.FlowPlacement.MAX_FLOW,
-    admission=ngc.Admission.LOSSLESS,
-    selection=ngc.PathSelection(ngc.EdgeTieBreak.DETERMINISTIC, ngc.EdgePriority.CAPACITY),
-)
-result = ngc.capacity(graph, 0, 3, ngc.CapacityOptions(config))
+config = ngc.FlowPolicyConfig(routing=ngc.Global())
+result = ngc.capacity(graph, 0, 3, ngc.QueryOptions(config))
 print(ngc.as_float(result.placed, q))   # 15.0
 print(result.cost_distribution)         # [(2, 40960), (4, 20480)]
+print(result.total_cost)                # 163840
 ```
 
 ## Installation

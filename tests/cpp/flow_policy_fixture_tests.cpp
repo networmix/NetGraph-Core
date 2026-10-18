@@ -4,8 +4,9 @@
 // frozen copy, the exporter, the regeneration check and the meaning of the data's historical
 // "source" string: tests/reference/policy/README.md): every ledger, policy and call of every
 // fixture in order, with the reference's values after each operation. The replay checks
-// every one of them on the engine: each call's result (placed, remaining, termination, local
-// outcomes, flags, drops, the cost curve, the requested outputs), its trace (the reference's keys),
+// every one of them on the engine: each call's result (this call's values, termination and flags,
+// the demand's state, the rows per source, the total cost, the cost curve, the requested outputs),
+// its trace (the reference's keys),
 // the ledger after it (allocations, residuals, every record field, next FlowId, owners) and the
 // policy state (roster, requested, +inf, placed demand, usable bundles, per source the flows'
 // ids, routes, T, deliveries, allocations, members and weights). An operation the reference
@@ -403,15 +404,6 @@ Int128 wide(const Counter128& c) {
   return test::int128_of(static_cast<std::int64_t>(c.hi), c.lo);
 }
 
-const char* placement_name(FlowPlacement p) {
-  switch (p) {
-    case FlowPlacement::MaxFlow: return "MaxFlow";
-    case FlowPlacement::Weighted: return "Weighted";
-    case FlowPlacement::EqualBalanced: return "EqualBalanced";
-  }
-  return "?";
-}
-
 const char* outcome_name(Termination t) {
   switch (t) {
     case Termination::Complete: return "complete";
@@ -419,26 +411,52 @@ const char* outcome_name(Termination t) {
     case Termination::LimitDiminishing: return "limit_diminishing";
     case Termination::NoRoute: return "no_route";
     case Termination::Exhausted: return "exhausted";
+    case Termination::NoActiveWeight: return "no_active_weight";
   }
   return "?";
+}
+
+J counter_pairs(const std::vector<std::pair<EdgeId, Counter128>>& v) {
+  J j = J::arr();
+  for (const auto& [e, c] : v) {
+    J p = J::arr();
+    p.push(J::integer(e));
+    p.push(J::integer(wide(c)));
+    j.push(std::move(p));
+  }
+  return j;
 }
 
 J result_json(const PlacementResult& r) {
   J j = J::obj();
   j.set("placed", J::integer(r.placed));
   j.set("remaining", r.remaining.has_value() ? J::integer(*r.remaining) : J::str("inf"));
+  j.set("delivery_delta", J::integer(r.delivery_delta));
+  j.set("call_drops", pairs(r.call_drops));
+  j.set("call_source_loss", J::integer(r.call_source_loss));
   j.set("termination", J::str(outcome_name(r.termination)));
   j.set("routes_changed", J::boolean(r.routes_changed));
   j.set("weights_changed", J::boolean(r.weights_changed));
-  j.set("drops", pairs(r.drops));
-  J lo = J::arr();
-  for (const auto& [s, o] : r.local_outcomes) {
-    J p = J::arr();
-    p.push(J::integer(s));
-    p.push(J::str(outcome_name(o)));
-    lo.push(std::move(p));
+  j.set("requested", r.requested.has_value() ? J::integer(wide(*r.requested)) : J::str("inf"));
+  j.set("admitted", J::integer(wide(r.admitted)));
+  j.set("delivered", J::integer(r.delivered));
+  j.set("source_loss", J::integer(wide(r.source_loss)));
+  j.set("drops", counter_pairs(r.drops));
+  J rows = J::arr();
+  for (const auto& x : r.by_source) {
+    J row = J::arr();
+    row.push(J::integer(x.source));
+    row.push(x.offered.has_value() ? J::integer(wide(*x.offered)) : J::null());
+    row.push(J::integer(wide(x.admitted)));
+    row.push(J::integer(x.delivered));
+    row.push(J::integer(wide(x.source_loss)));
+    row.push(J::integer(wide(x.dropped)));
+    rows.push(std::move(row));
   }
-  j.set("local_outcomes", std::move(lo));
+  j.set("by_source", std::move(rows));
+  if (r.offered.has_value()) j.set("offered", J::integer(wide(*r.offered)));
+  if (r.unadmitted.has_value()) j.set("unadmitted", J::integer(wide(*r.unadmitted)));
+  if (r.total_cost.has_value()) j.set("total_cost", J::integer(wide(*r.total_cost)));
   if (r.cost_distribution.has_value()) j.set("cost_distribution", pairs(*r.cost_distribution));
   if (r.edge_flows.has_value()) j.set("edge_flows", ints(*r.edge_flows));
   if (r.residual.has_value()) j.set("residual", ints(*r.residual));
@@ -458,7 +476,6 @@ J ledger_json(const FlowLedger& fg) {
     x.set("owner", J::integer(r.owner));
     x.set("sources", ints(r.sources));
     x.set("destinations", ints(r.destinations));
-    x.set("placement", J::str(placement_name(r.placement)));
     x.set("admission", J::str(r.admission == Admission::Lossy ? "Lossy" : "Lossless"));
     x.set("bundle", ints(detail::PredDAGBuilder::ascending(*r.bundle)));
     x.set("route_cost", r.route_cost == kUnreachable ? J::null() : J::integer(r.route_cost));
@@ -636,22 +653,26 @@ FlowPolicyConfig config_of(const Graph& g, const J& c) {
   } else if (kind != "CostOnly") {
     throw UnknownName("the data names an unknown routing (" + kind + ")");
   }
-  const FlowPlacement fp = named<FlowPlacement>("placement", c.at("placement").s,
-                                                {{"MaxFlow", FlowPlacement::MaxFlow},
-                                                 {"Weighted", FlowPlacement::Weighted},
-                                                 {"EqualBalanced", FlowPlacement::EqualBalanced}});
-  const Admission adm = named<Admission>("admission", c.at("admission").s,
-                                         {{"Lossless", Admission::Lossless}, {"Lossy", Admission::Lossy}});
-  const J& sel = c.at("selection");
-  const EdgeTieBreak tie = named<EdgeTieBreak>(
-      "tie break", sel.at("tie_break").s,
-      {{"Deterministic", EdgeTieBreak::Deterministic}, {"PreferHigherPriority", EdgeTieBreak::PreferHigherPriority}});
-  const EdgePriority prio = named<EdgePriority>("priority", sel.at("priority").s,
-                                                {{"Residual", EdgePriority::Residual},
-                                                 {"Capacity", EdgePriority::Capacity},
-                                                 {"Headroom", EdgePriority::Headroom}});
-  return FlowPolicyConfig {std::move(routing), fp, adm,
-                           PathSelection(tie, prio, sel.at("multipath").b, sel.at("multi_edge").b)};
+  FlowPolicyConfig out {.routing = std::move(routing)};
+  if (!c.at("placement").is_null()) {
+    out.placement = named<FlowPlacement>("placement", c.at("placement").s,
+                                         {{"MaxFlow", FlowPlacement::MaxFlow},
+                                          {"Weighted", FlowPlacement::Weighted},
+                                          {"EqualBalanced", FlowPlacement::EqualBalanced}});
+  }
+  out.admission = named<Admission>("admission", c.at("admission").s,
+                                   {{"Lossless", Admission::Lossless}, {"Lossy", Admission::Lossy}});
+  if (const J& sel = c.at("selection"); !sel.is_null()) {
+    const EdgeTieBreak tie = named<EdgeTieBreak>(
+        "tie break", sel.at("tie_break").s,
+        {{"Deterministic", EdgeTieBreak::Deterministic}, {"PreferHigherPriority", EdgeTieBreak::PreferHigherPriority}});
+    const EdgePriority prio = named<EdgePriority>("priority", sel.at("priority").s,
+                                                  {{"Residual", EdgePriority::Residual},
+                                                   {"Capacity", EdgePriority::Capacity},
+                                                   {"Headroom", EdgePriority::Headroom}});
+    out.selection = PathSelection(tie, prio, sel.at("multipath").b, sel.at("multi_edge").b);
+  }
+  return out;
 }
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
@@ -711,7 +732,6 @@ std::vector<std::string> replay(const J& fx, std::size_t* compared = nullptr,
   std::deque<Eligibility> eligs;
   std::vector<std::unique_ptr<FlowPolicy>> policies;
   std::vector<FlowLedger*> policy_ledger;
-  std::vector<J> curves;  // per policy: the cumulative Global curve of the epoch (zero-call check below)
   auto check = [&](const std::string& where, const char* what, const J& expected, const J& actual) {
     if (compared != nullptr) ++*compared;
     std::string why;
@@ -810,7 +830,6 @@ std::vector<std::string> replay(const J& fx, std::size_t* compared = nullptr,
       }
       policies.push_back(std::move(pol));
       policy_ledger.push_back(&fg);
-      curves.push_back(J::arr());
       check(where, "policy", expect->at("policy"), policy_json(*policies.back()));
       continue;
     }
@@ -829,7 +848,6 @@ std::vector<std::string> replay(const J& fx, std::size_t* compared = nullptr,
     FlowPolicy& pol = *policies[pi];
     if (kind == "remove") {
       pol.remove();
-      curves[pi] = J::arr();
       check(where, "ledger", expect->at("ledger"), ledger_json(fg));
       check(where, "policy", expect->at("policy"), policy_json(pol));
       continue;
@@ -852,7 +870,7 @@ std::vector<std::string> replay(const J& fx, std::size_t* compared = nullptr,
     OutputOptions outputs;
     if (!op.at("outputs").is_null()) {
       const auto& o = op.at("outputs").a;
-      outputs = OutputOptions {o[0].b, o[1].b, o[2].b};
+      outputs = OutputOptions {o[0].b, o[1].b, o[2].b, o[3].b};
     }
 #if NETGRAPH_CORE_PRIVATE_HOOKS
     detail::max_flows_per_call().store(op.at("cap").int64());
@@ -888,23 +906,7 @@ std::vector<std::string> replay(const J& fx, std::size_t* compared = nullptr,
       }
       continue;
     }
-    J actual = result_json(r);
-    const J& expected_result = expect->at("result");
-    if (std::holds_alternative<Global>(pol.config().routing)) {
-      // Where the engine reports more than the reference: a Global zero call reports the
-      // policy's cumulative curve, which the reference omits; it must equal the curve of the
-      // epoch's last positive call ([] before any), and only then is it set aside.
-      const J* got = actual.get("cost_distribution");
-      if (volume.has_value() && *volume == 0 && expected_result.get("cost_distribution") == nullptr && got != nullptr) {
-        std::string why;
-        if (!same(curves[pi], *got, "cost_distribution", why)) {
-          fails.push_back(name + " " + where + ": the zero call's curve is not the cumulative one: " + why);
-        }
-        std::erase_if(actual.o, [](const auto& kv) { return kv.first == "cost_distribution"; });
-      }
-      if (const J* c = expected_result.get("cost_distribution"); c != nullptr) curves[pi] = *c;
-    }
-    check(where, "result", expected_result, actual);
+    check(where, "result", expect->at("result"), result_json(r));
     if (detail::kTraced) check(where, "trace", expect->at("trace"), trace_json(trace));
     check(where, "ledger", expect->at("ledger"), ledger_json(fg));
     check(where, "policy", expect->at("policy"), policy_json(pol));
@@ -1063,21 +1065,16 @@ void expect_every_other_clause_reported() {
   volume.k = J::K::Dbl;
   volume.d = 0.5;
   EXPECT_TRUE(reported(fractional, "global_epochs op 3 (place): a non-integer request accepted"));
-  // Op 2 of global_epochs is a Global zero call on a fresh policy, op 3 a positive call with the
-  // curve [[1, 1]]. With op 3 moved before op 2, the zero call reports [[1, 1]], the remembered
-  // curve (the zero call's other sections, recorded before the positive call, differ); with op
-  // 3's curve changed as well, the two curves differ too.
-  const std::string zero_call = "global_epochs op 3 (place): the zero call's curve is not the cumulative one";
+  // Op 2 of global_epochs is a Global zero call on a fresh policy (no curve: nothing prepared),
+  // op 3 a positive call with the curve [[1, 1]]. With op 3 moved before op 2, the zero call
+  // reports the remembered curve [[1, 1]] where the data, recorded before any placement, has
+  // none: a result difference.
   ASSERT_EQ(dump(epochs.at("ops").a[2].at("volume")), "0");
+  ASSERT_EQ(epochs.at("ops").a[2].at("expect").at("result").get("cost_distribution"), nullptr);
   J swapped = epochs;
   auto& ops = member(swapped, "ops").a;
   std::swap(ops[2], ops[3]);
-  ASSERT_FALSE(reported(swapped, zero_call));
-  J* cost = first_leaf(member(member(member(ops[2], "expect"), "result"), "cost_distribution"));
-  ASSERT_NE(cost, nullptr);
-  corrupt(*cost);
-  EXPECT_TRUE(reported(swapped, "global_epochs op 2 (place): result"));
-  EXPECT_TRUE(reported(swapped, zero_call));
+  EXPECT_TRUE(reported(swapped, "global_epochs op 3 (place): result"));
   // Every call the data rejects, with the policy changed after it (its +inf flag flipped; after
   // that call only): the comparison with the policy before the call reports it.
   std::size_t rejected_calls = 0;
@@ -1124,13 +1121,15 @@ void expect_every_other_clause_reported() {
   }
   EXPECT_EQ(planted,
             (std::set<std::string> {"copy failed", "ledger ok", "place failed", "policy failed", "reset failed"}));
-  // A name the replay does not know, in the configuration of global_epochs' policy (op 1) and,
-  // for the cost ceiling, of creation_fewer_routes' CapacityAware policy (op 1): a failure of the
-  // replay, never taken for the engine rejecting the policy.
-  ASSERT_EQ(epochs.at("ops").a[1].at("op").s, "policy");
+  // A name the replay does not know, in the configuration of eb_unequal_1_10's CostOnly policy
+  // (op 1) and, for the cost ceiling, of creation_fewer_routes' CapacityAware policy (op 1): a
+  // failure of the replay, never taken for the engine rejecting the policy.
+  const auto& unequal = *std::find_if(fixtures.begin(), fixtures.end(),
+                                      [](const J& fx) { return fx.at("name").s == "eb_unequal_1_10"; });
+  ASSERT_EQ(unequal.at("ops").a[1].at("op").s, "policy");
   for (const std::string path :
        {"routing kind", "placement", "admission", "selection tie_break", "selection priority"}) {
-    J copy = epochs;
+    J copy = unequal;
     J* config = &member(member(copy, "ops").a[1], "config");
     std::string key = path;
     if (const auto space = path.find(' '); space != std::string::npos) {
@@ -1138,7 +1137,7 @@ void expect_every_other_clause_reported() {
       key = path.substr(space + 1);
     }
     member(*config, key) = J::str("Unknown");
-    EXPECT_TRUE(reported(copy, "global_epochs op 1 (policy): the data names an unknown ")) << path;
+    EXPECT_TRUE(reported(copy, "eb_unequal_1_10 op 1 (policy): the data names an unknown ")) << path;
   }
   const auto& fewer = *std::find_if(fixtures.begin(), fixtures.end(),
                                     [](const J& fx) { return fx.at("name").s == "creation_fewer_routes"; });
@@ -1261,7 +1260,7 @@ TEST(PolicyFixtures, ACorruptedExpectationFails) {
   }
   RecordProperty("corruptions", static_cast<int>(corrupted));
   EXPECT_EQ(fixtures, detail::kTraced ? 59U : 58U);
-  EXPECT_EQ(corrupted, detail::kTraced ? 1132U : 858U);
+  EXPECT_EQ(corrupted, detail::kTraced ? 1050U : 810U);
   EXPECT_GT(kinds[0], 200U);
   EXPECT_GT(kinds[1], 50U);
   EXPECT_GT(kinds[2], 50U);

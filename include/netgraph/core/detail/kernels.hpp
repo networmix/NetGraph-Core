@@ -1,11 +1,13 @@
-/* Placement kernels assign one flow's amounts to route edges. Apportionment splits an integer
-   total among recipients.
+/* Placement kernels assign the amounts of a plan's injections to route edges. Apportionment
+   splits an integer total among recipients.
 
-   A plan freezes the route, its split graph and any Weighted weights at creation. The split
-   graph keeps edges allowed by the kernel that lie on a source-to-destination walk; it removes
-   edges leaving destinations. Its edges are the plan's members. A member-aligned array has one
-   entry per member, in the same order as plan.members. Policies combine these allocations; the
-   ledger commits them.
+   A plan freezes the route, its split graph and any Weighted weights at creation. It has one or
+   more roots: the sources that inject (one for a flow of a single source; a CostOnly demand's
+   roster for its pooled program). The split graph keeps edges allowed by the kernel that lie on
+   a walk from a root to a destination; it removes edges leaving destinations. Its edges are the
+   plan's members. A router reached by several roots adds their traffic and splits it once.
+   A member-aligned array has one entry per member, in the same order as plan.members. Policies
+   combine these allocations; the ledger commits them.
 */
 #pragma once
 
@@ -54,44 +56,47 @@ inline std::size_t round_robin(Amount total, std::span<Amount> out) noexcept {
   });
 }
 
-// Highest averages (Jefferson/D'Hondt; Weighted and Lossy Weighted): give each next unit to
-// the member with largest w / (a + 1), where w is its weight and a its allocation so far.
-// Break ties by lower member index (ascending EdgeId). Start each member at its lower quota
-// floor(total * w / W), where W is the weight sum; then assign the fewer than k remaining units
-// by those quotients, comparing with exact 128-bit cross products. Weights are positive,
-// W < 2^62, total < 2^63. Increasing total never reduces any member's allocation (house
-// monotonicity).
+// Highest averages H(total, w) (Jefferson/D'Hondt; Weighted splits and the attribution of
+// pooled traffic to sources): give each next unit to the member with largest w / (a + 1), where w
+// is its weight and a its allocation so far. Break ties by lower member index. Start each member
+// at its lower quota floor(total * w / W), where W is the weight sum; then assign the fewer than k
+// remaining units by those quotients, comparing with exact 128-bit cross products. Weights are
+// >= 0 with W < 2^62, total < 2^63: a zero weight gets nothing, and all-zero weights give
+// nothing (out all 0). Equal positive weights give round robin. Increasing total never reduces
+// any member's allocation (house monotonicity).
 void highest_averages(Amount total, std::span<const Amount> weights, std::span<Amount> out);
 
 // ---------------------------------------------------------------- plans
 
 // Throws std::invalid_argument for a value outside its enumeration and for the unsupported
-// combinations (Lossy with MaxFlow, Weighted with priority Headroom).
+// combinations (Lossy with MaxFlow: "MAX_FLOW requires admission=LOSSLESS"; Weighted with priority
+// Headroom).
 void check_kernel(FlowPlacement placement, Admission admission, EdgePriority priority);
 // The combination rule of check_kernel alone, for a caller that has already checked the three
-// enumerations (validate_config).
+// enumerations (resolve_config).
 void check_kernel_combination(FlowPlacement placement, Admission admission, EdgePriority priority);
 
 struct KernelPlan {
   FlowPlacement placement {FlowPlacement::MaxFlow};
   Admission admission {Admission::Lossless};
-  NodeId src {0};
-  std::vector<EdgeId> route {};      // ascending: the flow's route (its record's bundle)
+  std::vector<EdgeId> route {};      // ascending: the plan's route (a single flow's record bundle)
   std::vector<EdgeId> members {};    // ascending: the split graph
   std::vector<Amount> weights {};    // Weighted: per member (positive), frozen; else empty
-  // Destinations ascend. Nodes have a topological order: every edge's tail precedes its head,
-  // with the source first. Position p's out-members are members[out_begin[p] .. out_end[p]);
-  // they are consecutive in ascending EdgeId because EdgeIds sort by source first. Each member
-  // also stores its head's position. Empty split graph means empty structure. All views share
-  // one block owned by the plan (layout()), so the structure takes one allocation.
+  // Destinations ascend. Nodes have a topological order: every member's tail precedes its head
+  // (a single root comes first). Position p's out-members are members[out_begin[p] ..
+  // out_end[p]); they are consecutive in ascending EdgeId because EdgeIds sort by source first.
+  // Each member also stores its head's position. Empty split graph means empty structure. The
+  // roots (ascending: the sources that inject) and per root its position, or -1 when it has no
+  // member. All views share one block owned by the plan (layout()), so the structure takes one
+  // allocation whatever the number of roots.
+  std::span<const NodeId> roots {};
+  std::span<const std::int32_t> root_pos {};
   std::span<const NodeId> dsts {};
   std::span<const NodeId> topo {};
   std::span<const std::int32_t> out_begin {};
   std::span<const std::int32_t> out_end {};
   std::span<const std::int32_t> head_pos {};
   std::span<const std::uint8_t> terminal {};
-  std::int32_t src_out_begin {0};
-  std::int32_t src_out_end {0};
 
   KernelPlan() = default;
   KernelPlan(const KernelPlan& other);
@@ -100,22 +105,25 @@ struct KernelPlan {
   KernelPlan& operator=(KernelPlan&& other) noexcept;
   ~KernelPlan() = default;
 
-  // The writable views of a new block: the destinations copied in, the structure for `positions`
-  // nodes and `num_members` members zeroed. One allocation, made before anything changes (a
-  // failure leaves the plan as it was); the previous block is released.
+  // The writable views of a new block: the roots and the destinations copied in, every root's
+  // position -1, the structure for `positions` nodes and `num_members` members zeroed. One
+  // allocation, made before anything changes (a failure leaves the plan as it was); the previous
+  // block is released.
   struct Layout {
+    std::span<std::int32_t> root_pos;
     std::span<NodeId> topo;
     std::span<std::int32_t> out_begin;
     std::span<std::int32_t> out_end;
     std::span<std::int32_t> head_pos;
     std::span<std::uint8_t> terminal;
   };
-  Layout layout(std::span<const NodeId> destinations, std::size_t positions, std::size_t num_members);
+  Layout layout(std::span<const NodeId> roots, std::span<const NodeId> destinations, std::size_t positions,
+                std::size_t num_members);
 
 private:
-  // Points the views into store_ for these sizes (the layout's order: dsts, topo, out_begin,
-  // out_end, head_pos, then terminal as bytes).
-  Layout point(std::size_t num_dsts, std::size_t positions, std::size_t num_members) noexcept;
+  // Points the views into store_ for these sizes (the layout's order: roots, root_pos, dsts, topo,
+  // out_begin, out_end, head_pos, then terminal as bytes).
+  Layout point(std::size_t num_roots, std::size_t num_dsts, std::size_t positions, std::size_t num_members) noexcept;
   std::vector<std::int32_t> store_ {};
 };
 
@@ -144,6 +152,11 @@ private:
 [[nodiscard]] KernelPlan make_plan(const Graph& g, FlowPlacement placement, Admission admission,
                                    EdgePriority priority, NodeId src, std::span<const NodeId> dsts,
                                    const PredDAG& route, std::span<const Amount> creation_view, Cost* cost = nullptr);
+// The same plan with several roots (a CostOnly demand's pooled program): the members are pruned to
+// the walks from any root to the destination set; `roots` ascending and disjoint from `dsts`.
+[[nodiscard]] KernelPlan make_plan(const Graph& g, FlowPlacement placement, Admission admission,
+                                   EdgePriority priority, std::span<const NodeId> roots, std::span<const NodeId> dsts,
+                                   const PredDAG& route, std::span<const Amount> creation_view);
 
 // The usable route of a Pinned bundle as a plan: the bundle's edges that `elig` allows (every
 // one when null), whatever their capacity, pruned to the walks from src to the destination set,
@@ -189,14 +202,18 @@ struct CreationProducts {
 
 // ---------------------------------------------------------------- allocation
 
-// The cumulative allocation alloc(T) of a Weighted or EqualBalanced plan, member-aligned:
-// node by node in topological order, the source's inflow T, every other node's inflow the sum
-// of its in-member allocations, split by round robin or highest averages. With `limit`
-// (member-aligned) it stops at the first member above its limit and returns false.
+// The cumulative allocation alloc(T) of a Weighted or EqualBalanced plan, member-aligned: T
+// enters as round robin over the roots (all of it for one root); node by node in topological
+// order, a node's inflow (its own injection plus the sum of its in-member allocations) is split
+// by round robin or highest averages. With `limit` (member-aligned) it stops at the first member
+// above its limit and returns false. A positive share of a root without a member (a share with no
+// route) is a logic error: the Lossless searches stay at or below the number of roots before the
+// first such root.
 bool allocate(const KernelPlan& plan, Amount total, std::span<Amount> out, std::span<const Amount> limit = {});
 
 // Find the largest T whose allocation fits each entry of member-aligned view_m. The upper
-// bound is the sum of the view on source members. Each member's allocation never decreases as
+// bound is the sum of the view on the roots' members, and at most the number of roots before the
+// first root without a member. Each member's allocation never decreases as
 // T grows, so a fitting and a failing T bound the answer. A floating-point estimate chooses
 // the first probe only; then double the step size to narrow the bounds and bisect them.
 // All fit checks, bounds, the returned value and allocation are exact. `iterations` counts
@@ -227,17 +244,48 @@ struct LosslessStep {
                                          std::span<const Amount> view_m, std::span<const Amount> own_m,
                                          std::optional<Amount> request);
 
-// One Lossy offer on the working residual (member-aligned `w_m`): split at every node by the
-// kernel's rule, each member carrying min(share, residual) and dropping the rest; `offer`
-// nullopt is +inf (every source member injected to its residual). `offered` is the offer, or
-// the injection for +inf; a source without members injects nothing.
-struct LossyStep {
+// The injection of one forwarding: per root (aligned with plan.roots), the amount it injects; or
+// (first_hop, the experiment of a Lossy +inf placement) every root's out-members, each injected
+// with exactly its own view, while traffic reaching a root from another root is split as usual.
+struct Injection {
+  std::span<const Amount> per_root {};
+  bool first_hop {false};
+};
+
+// The per-root part of a forwarding: what each root offered (first hop: injected), lost at the
+// source (a root without a member keeps its injection and loses it), delivered, and its (member,
+// carried, dropped)
+// entries in ascending member order. At a router the members' amounts are attributed to the roots
+// by highest averages over the roots' remaining inflows, member by member in member order; on a
+// member that drops, its carried amount is attributed by highest averages over the roots'
+// arrivals on it, the rest being each root's drop there.
+struct Attribution {
+  struct Entry {
+    std::int32_t member {0};
+    Amount carried {0};
+    Amount dropped {0};
+  };
+  std::vector<Amount> offered {};
+  std::vector<Amount> source_loss {};
+  std::vector<Amount> delivered {};
+  std::vector<std::vector<Entry>> entries {};
+};
+
+// One forwarding of `in` over the plan on the member-aligned view `w_m` (the working residual;
+// empty: no capacity limit, the no-drop forwarding of an admitted total): every node splits its
+// inflow (own injection plus carried arrivals) once by the kernel's rule, each member carries
+// min(arrivals, view) and drops the rest; with `attr`, the per-root part as well. `offered` is
+// the sum of the injections (first_hop: what was injected), `source_loss` the injections of roots
+// without a member.
+struct Forwarding {
   Amount offered {0};
   Amount injected {0};
+  Amount source_loss {0};
   Amount delivered {0};
   std::vector<Amount> carried {};  // member-aligned
   std::vector<Amount> drops {};    // member-aligned
 };
-[[nodiscard]] LossyStep lossy_step(const KernelPlan& plan, std::optional<Amount> offer, std::span<const Amount> w_m);
+[[nodiscard]] Forwarding forward(const KernelPlan& plan, const Injection& in, std::span<const Amount> w_m,
+                                 Attribution* attr = nullptr);
 
 } // namespace netgraph::core::detail

@@ -1,10 +1,11 @@
 /*
   capacity() is place(+inf) on a fresh ledger. batch_capacity() runs it per pair and
   sensitivity() per candidate deletion on `workers` threads; results follow input order and
-  the lowest failing index supplies the exception. Global repairs the baseline flow after
-  each deletion. CostOnly skips an edge that no roster source's reachable part of the static
-  shortest-path support contains: removing it changes no route or amount. Other deletions use
-  fresh ledgers.
+  the lowest failing index supplies the exception. Global with the optimized origin repairs the
+  baseline flow after each deletion. CostOnly skips an edge that no roster source's reachable
+  part of the static shortest-path support contains: removing it changes no route or amount.
+  Other deletions (the equal origin of Global among them: a deletion can raise its maximum) use
+  fresh ledgers. Only CostOnly reads a DagCache.
 */
 #include "netgraph/core/evaluators.hpp"
 
@@ -74,6 +75,12 @@ std::size_t worker_threads(std::size_t n, std::int32_t workers) {
 // any thread starts, so a failure throws in the caller; the worker body cannot throw (an
 // exception escaping a std::thread terminates the process): a task's exception is caught into
 // its slot, and every launched thread is joined before anything is rethrown.
+// A worker's cache for one evaluation: only CostOnly reads one (the other models reject a cache,
+// and the caller's was validated before the workers started).
+DagCache* worker_cache(const FlowPolicyConfig& cfg, DagCache& cache) noexcept {
+  return std::holds_alternative<CostOnly>(cfg.routing) ? &cache : nullptr;
+}
+
 template <class Task>
 void run_indexed(std::size_t n, std::int32_t workers, const Graph& g, DagCache* shared, Task task) {
   if (n == 0) return;
@@ -120,16 +127,15 @@ void run_indexed(std::size_t n, std::int32_t workers, const Graph& g, DagCache* 
 
 // CostOnly sensitivity: the edges of the full static support (every edge on a static shortest
 // path to the destination set) reachable from the roster sources through support edges. This is
-// not only the baseline's selected routes. A source's route is read from the part of this set
-// reachable from it, then selected on the priority values of the working residual when that
-// source's flow is created; earlier creations may already have used capacity, even on a fresh
-// ledger. Deleting an edge outside the set leaves every reachable node's distance and support
-// edges as they were (distances only grow, and no shortest path of a reachable node used the
-// edge), and the roster as it was (a roster source keeps its support edges; a deletion never
-// connects a source). The support ignores capacity, so this holds for edges of capacity 0 too.
-// So, creation by creation in their order, each sees the same reachable support and the
-// same residual, and every route and placement is unchanged: the loss is exactly 0 and the
-// deletion is not re-evaluated.
+// not only the baseline's selected routes. Each source's route is read from the part of this set
+// reachable from it, then selected on the priority values of the residual at the preparing call's
+// entry (a fresh ledger's capacities). Deleting an edge outside the set leaves every reachable
+// node's distance and support edges as they were (distances only grow, and no shortest path of a
+// reachable node used the edge), and the roster as it was (a roster source keeps its support
+// edges; a deletion never connects a source). The support ignores capacity, so this holds for
+// edges of capacity 0 too. So every source's route, the pooled program (or the controller's
+// support) built from them, and the view they are read on are unchanged, and so is every amount:
+// the loss is exactly 0 and the deletion is not re-evaluated.
 std::vector<std::uint8_t> reachable_support(const Graph& g, const detail::PolicyEngine& pe) {
   const auto num_edges = static_cast<std::size_t>(g.num_edges());
   std::vector<std::uint8_t> in_support(num_edges, 0);
@@ -160,15 +166,15 @@ std::vector<std::uint8_t> reachable_support(const Graph& g, const detail::Policy
 
 namespace detail {
 
-void check_batch_arguments(const Graph& g, const CapacityOptions& opts, std::int32_t workers) {
+void check_batch_arguments(const Graph& g, const QueryOptions& opts, std::int32_t workers) {
   check_common(g, opts.elig, opts.cache, workers);
-  if (std::holds_alternative<Pinned>(opts.cfg.routing)) {
+  if (std::holds_alternative<Pinned>(opts.config.routing)) {
     throw std::invalid_argument("Pinned routing is rejected in batch_capacity (bundles bind their endpoints)");
   }
-  validate_config(opts.cfg, 2, 2);  // Pinned (the endpoint-count rule) is rejected above
+  (void)resolve_config(opts.config, opts.cache != nullptr);
 }
 
-void check_batch_pair(const Graph& g, std::span<const NodeId> sources,
+void check_batch_pair(const Graph& g, const FlowPolicyConfig& cfg, std::span<const NodeId> sources,
                       std::span<const NodeId> destinations, const Eligibility* elig, std::size_t index) {
   const auto s = node_set(sources, g.num_nodes(), "sources");
   const auto t = node_set(destinations, g.num_nodes(), "destinations");
@@ -177,16 +183,17 @@ void check_batch_pair(const Graph& g, std::span<const NodeId> sources,
     throw std::invalid_argument("foreign Eligibility: per_pair_elig[" + std::to_string(index) +
                                 "] built for another graph");
   }
+  check_source_count(cfg, s.size(), t.size());
 }
 
 PlacementResult capacity_in_call(const Graph& g, std::span<const NodeId> sources,
-                                 std::span<const NodeId> destinations, const CapacityOptions& opts, FrozenTally& tally) {
-  return evaluate(g, sources, destinations, opts.cfg, opts.elig, opts.cache, opts.outputs, tally);
+                                 std::span<const NodeId> destinations, const QueryOptions& opts, FrozenTally& tally) {
+  return evaluate(g, sources, destinations, opts.config, opts.elig, opts.cache, opts.outputs, tally);
 }
 
 std::vector<PlacementResult> batch_capacity_in_call(
     const Graph& g, const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>>& pairs,
-    const CapacityOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers,
+    const QueryOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers,
     FrozenTally& tally) {
   check_batch_arguments(g, opts, workers);
   if (!per_pair_elig.empty() && per_pair_elig.size() != pairs.size()) {
@@ -194,7 +201,8 @@ std::vector<PlacementResult> batch_capacity_in_call(
                                 std::to_string(pairs.size()) + " pairs");
   }
   for (std::size_t i = 0; i < pairs.size(); ++i) {
-    check_batch_pair(g, pairs[i].first, pairs[i].second, per_pair_elig.empty() ? nullptr : per_pair_elig[i], i);
+    check_batch_pair(g, opts.config, pairs[i].first, pairs[i].second, per_pair_elig.empty() ? nullptr : per_pair_elig[i],
+                     i);
   }
   std::vector<std::optional<PlacementResult>> results(pairs.size());
   run_indexed(pairs.size(), workers, g, opts.cache, [&](std::size_t i, DagCache& cache, std::size_t /*t*/) {
@@ -209,7 +217,8 @@ std::vector<PlacementResult> batch_capacity_in_call(
         elig = &*both;
       }
     }
-    results[i] = evaluate(g, pairs[i].first, pairs[i].second, opts.cfg, elig, &cache, opts.outputs, tally);
+    results[i] =
+        evaluate(g, pairs[i].first, pairs[i].second, opts.config, elig, worker_cache(opts.config, cache), opts.outputs, tally);
   });
   std::vector<PlacementResult> out;
   out.reserve(results.size());
@@ -218,23 +227,24 @@ std::vector<PlacementResult> batch_capacity_in_call(
 }
 
 SensitivityResult sensitivity_in_call(const Graph& g, std::span<const NodeId> sources,
-                                      std::span<const NodeId> destinations, const SensitivityOptions& opts,
+                                      std::span<const NodeId> destinations, const QueryOptions& opts,
                                       std::int32_t workers, FrozenTally& tally) {
   check_common(g, opts.elig, opts.cache, workers);
-  const bool global = std::holds_alternative<Global>(opts.cfg.routing);
-  const bool cost_only = std::holds_alternative<CostOnly>(opts.cfg.routing);
+  // Global with the optimized origin (its default) repairs its baseline; the equal origin cannot.
+  const bool global = std::holds_alternative<Global>(opts.config.routing) && opts.config.origin != Origin::Equal;
+  const bool cost_only = std::holds_alternative<CostOnly>(opts.config.routing);
   SensitivityResult out;
   std::vector<std::uint8_t> on_route;  // CostOnly: the baseline's reachable support
-  detail::DeletionCapture capture;     // Global: the baseline solve's final state
+  detail::DeletionCapture capture;     // optimized Global: the baseline solve's final state
   {
     std::unique_ptr<DagCache> own;
     DagCache* cache = opts.cache;
-    if (cache == nullptr) {
+    if (cache == nullptr && cost_only) {
       own = std::make_unique<DagCache>(g);
       cache = own.get();
     }
     FlowLedger fg(borrowed(g));
-    FlowPolicy policy = PolicyAccess::make(fg, sources, destinations, opts.cfg, opts.elig, cache, tally);
+    FlowPolicy policy = PolicyAccess::make(fg, sources, destinations, opts.config, opts.elig, cache, tally);
     auto& pe = PolicyAccess::engine(policy);
     if (global) pe.capture = &capture;
     out.baseline = policy.place(std::nullopt, opts.outputs);
@@ -255,7 +265,8 @@ SensitivityResult sensitivity_in_call(const Graph& g, std::span<const NodeId> so
       }
     }
   } else {
-    // Every allowed edge: an edge of capacity 0 can carry a route (and a roster source).
+    // Every allowed edge: an edge of capacity 0 can carry a route (and a roster source), and a
+    // deletion can raise an equal origin's total (its source then leaves the roster).
     for (EdgeId e = 0; e < g.num_edges(); ++e) {
       if (opts.elig == nullptr || opts.elig->edge_ok(e)) candidates.push_back(e);
     }
@@ -284,7 +295,8 @@ SensitivityResult sensitivity_in_call(const Graph& g, std::span<const NodeId> so
       const EdgeId one[1] = {e};
       Eligibility deleted = g.eligibility({}, one);
       if (opts.elig != nullptr) deleted = Eligibility::intersect(*opts.elig, deleted);
-      const auto r = evaluate(g, sources, destinations, opts.cfg, &deleted, &cache, OutputOptions {}, tally);
+      const auto r =
+          evaluate(g, sources, destinations, opts.config, &deleted, worker_cache(opts.config, cache), OutputOptions {}, tally);
       entry.loss = base - r.placed;
     }
     if (&cache != opts.cache) cache.clear();
@@ -305,7 +317,7 @@ std::int32_t default_workers(bool sensitivity) noexcept {
 
 // Each evaluator is one public call on a supplied frozen cache's statistics.
 PlacementResult capacity(const Graph& g, std::span<const NodeId> sources,
-                         std::span<const NodeId> destinations, const CapacityOptions& opts) {
+                         std::span<const NodeId> destinations, const QueryOptions& opts) {
   return detail::frozen_call(opts.cache, [&](detail::FrozenTally& tally) {
     return detail::capacity_in_call(g, sources, destinations, opts, tally);
   });
@@ -313,14 +325,14 @@ PlacementResult capacity(const Graph& g, std::span<const NodeId> sources,
 
 std::vector<PlacementResult> batch_capacity(
     const Graph& g, const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>>& pairs,
-    const CapacityOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers) {
+    const QueryOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers) {
   return detail::frozen_call(opts.cache, [&](detail::FrozenTally& tally) {
     return detail::batch_capacity_in_call(g, pairs, opts, per_pair_elig, workers, tally);
   });
 }
 
 SensitivityResult sensitivity(const Graph& g, std::span<const NodeId> sources,
-                              std::span<const NodeId> destinations, const SensitivityOptions& opts,
+                              std::span<const NodeId> destinations, const QueryOptions& opts,
                               std::int32_t workers) {
   return detail::frozen_call(opts.cache, [&](detail::FrozenTally& tally) {
     return detail::sensitivity_in_call(g, sources, destinations, opts, workers, tally);

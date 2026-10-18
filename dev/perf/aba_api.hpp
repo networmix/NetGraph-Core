@@ -330,23 +330,20 @@ inline nc::PathSelection costonly_selection() {
 inline double costonly_capacity(const Graph& g, int src, int dst, Kernel k, const Elig& el) {
   const nc::NodeId s[1] = {src};
   const nc::NodeId t[1] = {dst};
-  nc::CapacityOptions opts {config(nc::CostOnly {}, k, costonly_selection()), el.get(), nullptr, {}};
+  nc::QueryOptions opts {config(nc::CostOnly {}, k, costonly_selection()), el.get(), nullptr, {}};
   return nc::as_float(nc::capacity(g.ref(), s, t, opts).placed, kResolution);
 }
 
-inline nc::FlowPolicyConfig global_config() {
-  return nc::FlowPolicyConfig {nc::Global {}, nc::FlowPlacement::MaxFlow, nc::Admission::Lossless,
-                               nc::PathSelection(nc::EdgeTieBreak::Deterministic, nc::EdgePriority::Capacity)};
-}
+inline nc::FlowPolicyConfig global_config() { return nc::FlowPolicyConfig {.routing = nc::Global {}}; }
 
-// Exact maximum flow: capacity() with Global + MaxFlow, totals only or with
-// every optional output (edge flows, residual, bottleneck with the Global min_cut).
+// Exact maximum flow: capacity() with Global (optimized origin), totals only or with
+// every optional output (edge flows, residual, bottleneck, min_cut).
 inline std::uint64_t maxflow_exact(const Graph& g, int src, int dst, const Elig& el, bool detailed) {
   const nc::NodeId s[1] = {src};
   const nc::NodeId t[1] = {dst};
   nc::OutputOptions out;
-  if (detailed) out = nc::OutputOptions {true, true, true};
-  nc::CapacityOptions opts {global_config(), el.get(), nullptr, out};
+  if (detailed) out = nc::OutputOptions {true, true, true, true};
+  nc::QueryOptions opts {global_config(), el.get(), nullptr, out};
   const auto r = nc::capacity(g.ref(), s, t, opts);
   Digest d;
   d.add_d(nc::as_float(r.placed, kResolution));
@@ -371,11 +368,11 @@ inline std::uint64_t fold_sensitivity(const nc::SensitivityResult& r) {
   return d.h;
 }
 
-// Exact-model sensitivity: Global + MaxFlow (candidates: the baseline's positive-flow edges).
+// Exact-model sensitivity: Global, optimized origin (candidates: the baseline's positive-flow edges).
 inline std::uint64_t sensitivity_exact(const Graph& g, int src, int dst, const Elig& el) {
   const nc::NodeId s[1] = {src};
   const nc::NodeId t[1] = {dst};
-  nc::SensitivityOptions opts {global_config(), el.get(), nullptr, {}};
+  nc::QueryOptions opts {global_config(), el.get(), nullptr, {}};
   return fold_sensitivity(nc::sensitivity(g.ref(), s, t, opts, 1));
 }
 
@@ -384,8 +381,69 @@ inline std::uint64_t sensitivity_policy_all_edges(const Graph& g, int src, int d
   const nc::NodeId s[1] = {src};
   const nc::NodeId t[1] = {dst};
   const auto cfg = config(nc::CostOnly {}, Kernel::EqualBalanced, costonly_selection());
-  nc::SensitivityOptions opts {cfg, el.get(), nullptr, {}};
+  nc::QueryOptions opts {cfg, el.get(), nullptr, {}};
   return fold_sensitivity(nc::sensitivity(g.ref(), s, t, opts, 1));
+}
+
+// Pooled CostOnly placement: one EqualBalanced policy (Lossless, or Lossy) per demand of several
+// sources to one destination on one shared ledger, place(to_units(volume)) each. The digest folds
+// every call's placed amount, its drop total and count, and every source row (source, admitted,
+// delivered, source loss, dropped).
+inline std::uint64_t pooled_place(const Graph& g, const std::vector<std::pair<std::vector<int>, int>>& demands,
+                                  double volume, bool lossy) {
+  const auto cfg = config(nc::CostOnly {}, lossy ? Kernel::Lossy : Kernel::EqualBalanced, costonly_selection());
+  nc::FlowLedger fg(g.g);
+  std::vector<std::unique_ptr<nc::FlowPolicy>> policies;
+  Digest d;
+  const auto units = nc::to_units(volume, kResolution);
+  for (const auto& [srcs, dst] : demands) {
+    const std::vector<nc::NodeId> sv(srcs.begin(), srcs.end());
+    const nc::NodeId tv[1] = {dst};
+    policies.push_back(std::make_unique<nc::FlowPolicy>(fg, sv, tv, cfg));
+    const auto r = policies.back()->place(units);
+    d.add_i(r.placed);
+    nc::Amount drops = 0;
+    for (const auto& [e, x] : r.call_drops) drops += x;
+    d.add_i(drops);
+    d.add_i(static_cast<std::int64_t>(r.call_drops.size()));
+    for (const auto& row : r.by_source) {
+      d.add_i(row.source);
+      d.add(row.admitted.lo);
+      d.add_i(row.delivered);
+      d.add(row.source_loss.lo);
+      d.add(row.dropped.lo);
+    }
+  }
+  return d.h;
+}
+
+// The equal-origin Global configuration (every roster source sends its round-robin share).
+inline nc::FlowPolicyConfig global_equal_config() {
+  return nc::FlowPolicyConfig {.routing = nc::Global {}, .origin = nc::Origin::Equal};
+}
+
+// capacity() of equal-origin Global from several sources to one destination. The digest folds the
+// placed amount, the exact total cost (both halves) and every source row's admitted amount.
+inline std::uint64_t global_equal_capacity(const Graph& g, const std::vector<int>& srcs, int dst) {
+  const std::vector<nc::NodeId> sv(srcs.begin(), srcs.end());
+  const nc::NodeId tv[1] = {dst};
+  const auto r = nc::capacity(g.ref(), sv, tv, nc::QueryOptions {global_equal_config(), nullptr, nullptr, {}});
+  Digest d;
+  d.add_i(r.placed);
+  d.add(r.total_cost->hi);
+  d.add(r.total_cost->lo);
+  for (const auto& row : r.by_source) {
+    d.add_i(row.source);
+    d.add(row.admitted.lo);
+  }
+  return d.h;
+}
+
+// sensitivity() of equal-origin Global (every allowed edge is a candidate, each solved afresh).
+inline std::uint64_t sensitivity_equal_global(const Graph& g, const std::vector<int>& srcs, int dst) {
+  const std::vector<nc::NodeId> sv(srcs.begin(), srcs.end());
+  const nc::NodeId tv[1] = {dst};
+  return fold_sensitivity(nc::sensitivity(g.ref(), sv, tv, nc::QueryOptions {global_equal_config()}, 1));
 }
 
 // Cohort placement: one TE_ECMP CapacityAware policy per pair on one shared ledger (NetGraph

@@ -46,6 +46,13 @@ storage search rows, which reads the library's queue rule through the private
 `detail::bucket_width` and `detail::uses_buckets`: a reference revision with another API needs
 the adapter adapted first.
 
+**Across an API change.** To compare with a reference revision whose API this adapter does not
+compile against, build the reference harness in a checkout of that revision instead, with its
+own driver adapted to its API and the same rows (`bash dev/perf/build.sh worktree OUT_DIR` in that
+checkout), move its `harness.json` aside so that the run does not refuse it for carrying another
+driver, and pass the binary as `--old-bin`. The run still requires both harnesses to list the same
+rows, record for record, and `report.json` records that side's build record as empty.
+
 **Exit statuses and acceptance.** `aba.py` exits 0 when the run completed, whatever its verdict
 and conformance; 1 when it aborted after starting blocks; 2 when it refused an input or failed
 before the first block; 130 for Ctrl-C before the first block. Every failure writes its reason
@@ -309,7 +316,9 @@ failed.
 | `kernel` | `kernel.{proportional,eb,lossy}.clos`, `kernel.{proportional,eb}.grid`, `kernel.weighted.clos` | placements on fixed cost-only DAGs into one ledger |
 | `capacity` | `capacity.costonly_{eb,prop}.failures` | CostOnly capacity over 32 failure states x 8 pairs |
 | `maxflow` | `maxflow.exact.{totals,detailed}` | exact maximum flow over 8 failure states x 4 pairs |
-| `sensitivity` | `sens.exact`, `sens.policy_all_edges` | exact-model sensitivity; policy-model loss for every eligible edge |
+| `sensitivity` | `sens.exact`, `sens.policy_all_edges`, `sens.equal_global` | exact-model sensitivity; policy-model loss for every eligible edge; equal-origin Global, every edge solved afresh |
+| `pooled` | `pooled.{ecmp,lossy}.clos` | 8 demands of 8 pooled sources on one ledger, Lossless / Lossy above capacity |
+| `global` | `global.equal.random` | equal-origin Global capacity, 2 demands of 4 sources |
 | `cohort` | `cohort.te_ecmp16`, `cohort.te_ecmp256` | TE_ECMP cohorts, 12 demands on one ledger |
 | `msd` | `msd.loop` | the maximum-supported-demand bracket and bisection with a per-series DAG cache |
 | `ksp` | `ksp.fabric3_k8` | k = 8 shortest paths for 8 pairs |

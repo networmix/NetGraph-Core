@@ -435,11 +435,8 @@ TEST(FlowCore, NetworkSizeLimits) {
   constexpr std::int32_t kMax = std::numeric_limits<std::int32_t>::max();
   constexpr std::size_t kPairs = (std::size_t {1} << 30) - 1;  // twice it, 2^31 - 2, fits int32; 2^31 does not
   constexpr std::size_t kHuge = std::numeric_limits<std::size_t>::max();
-  const std::string nodes =
-      "flow core: the number of nodes exceeds INT32_MAX - 2 (a solve adds a virtual source and sink)";
-  const std::string slots =
-      "flow core: the edges, sources and destinations of a solve number more than 2^30 - 1 together (each takes "
-      "two int32 arc slots)";
+  const std::string nodes = "flow solver node limit exceeded";
+  const std::string slots = "flow solver arc limit exceeded";
   auto error = [](std::int32_t n, std::size_t e, std::size_t s, std::size_t d) {
     return error_of([&] { (void)detail::network_vertices(n, e, s, d); });
   };

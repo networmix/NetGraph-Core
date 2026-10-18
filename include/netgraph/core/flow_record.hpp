@@ -46,7 +46,6 @@ struct FlowRecord {
   std::int64_t owner {0};
   std::vector<NodeId> sources {};
   std::vector<NodeId> destinations {};
-  FlowPlacement placement {FlowPlacement::MaxFlow};
   Admission admission {Admission::Lossless};
   std::shared_ptr<const PredDAG> bundle {};
   Cost route_cost {kUnreachable};

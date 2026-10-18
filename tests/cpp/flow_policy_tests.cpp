@@ -35,6 +35,8 @@
 #include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
+#include "netgraph/core/detail/private_hooks.hpp"
+#include "netgraph/core/detail/trace.hpp"
 #include "netgraph/core/detail/traversal.hpp"
 #include "netgraph/core/evaluators.hpp"
 #include "netgraph/core/flow_ledger.hpp"
@@ -53,7 +55,9 @@ PathSelection sel(EdgeTieBreak t = EdgeTieBreak::Deterministic, EdgePriority p =
   return PathSelection(t, p, multipath, multi_edge);
 }
 
+// A configuration; Global takes neither a placement nor a selection, so `k` and `s` are left out.
 FlowPolicyConfig cfg(Routing r, FlowPlacement k, Admission a = Admission::Lossless, PathSelection s = sel()) {
+  if (std::holds_alternative<Global>(r)) return FlowPolicyConfig {.routing = std::move(r), .admission = a};
   return FlowPolicyConfig {std::move(r), k, a, s};
 }
 
@@ -74,16 +78,14 @@ TEST(FlowPolicyConfig, EveryRejectedCombinationBeforeBinding) {
     EXPECT_EQ(error_of([&] { FlowPolicy p(fg, s, d, c); }), message);
     EXPECT_TRUE(detail::LedgerAccess::bound_owners(fg).empty());
   };
-  const std::string lossy_hop_by_hop =
-      "Lossy admission is rejected with Global and CapacityAware routing (hop-by-hop forwarding without admission "
-      "control neither grows nor reroutes)";
-  rejects(cfg(CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossy),
-          "Lossy admission is rejected with the MaxFlow kernel: a controller never drops (EqualBalanced or Weighted only)");
+  rejects(cfg(CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossy), "MAX_FLOW requires admission=LOSSLESS");
   rejects(cfg(CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Headroom)),
           "the Weighted kernel is rejected with priority Headroom (weights are units)");
-  rejects(cfg(Global {}, FlowPlacement::EqualBalanced), "Global routing requires placement = MaxFlow");
-  rejects(cfg(Global {}, FlowPlacement::EqualBalanced, Admission::Lossy), lossy_hop_by_hop);
-  rejects(cfg(CapacityAware {}, FlowPlacement::EqualBalanced, Admission::Lossy), lossy_hop_by_hop);
+  rejects({.routing = Global {}, .placement = FlowPlacement::MaxFlow}, "Global does not accept placement");
+  rejects({.routing = Global {}, .selection = PathSelection()}, "Global does not accept selection");
+  rejects({.routing = Global {}, .admission = Admission::Lossy}, "MAX_FLOW requires admission=LOSSLESS");
+  rejects(cfg(CapacityAware {}, FlowPlacement::EqualBalanced, Admission::Lossy),
+          "CapacityAware requires admission=LOSSLESS");
   CapacityAware ca;
   ca.flow_count = 0;
   rejects(cfg(ca, FlowPlacement::MaxFlow), "CapacityAware flow_count must be >= 1 (got 0)");
@@ -157,6 +159,13 @@ TEST(FlowPolicyConfig, EveryRejectedCombinationBeforeBinding) {
   const auto el = other->eligibility({}, std::vector<EdgeId> {0});
   EXPECT_EQ(error_of([&] { FlowPolicy p(fg, v({0}), v({3}), cfg(CostOnly {}, FlowPlacement::MaxFlow), &el); }),
             "foreign Eligibility: built for another graph");
+  // The endpoints come before the ownership of the mask and the cache (contract r8 14.3).
+  DagCache foreign_first(*other);
+  EXPECT_EQ(error_of([&] {
+              FlowPolicy p(fg, std::vector<NodeId> {}, v({3}), cfg(CostOnly {}, FlowPlacement::MaxFlow), &el,
+                           &foreign_first);
+            }),
+            "sources: the node set is empty");
   DagCache foreign_cache(*other);
   EXPECT_EQ(error_of([&] {
               FlowPolicy p(fg, v({0}), v({3}), cfg(CostOnly {}, FlowPlacement::MaxFlow), nullptr, &foreign_cache);
@@ -165,11 +174,11 @@ TEST(FlowPolicyConfig, EveryRejectedCombinationBeforeBinding) {
   EXPECT_TRUE(detail::LedgerAccess::bound_owners(fg).empty());
 }
 
-// Enumeration checks at construction: PathSelection and FlowPolicyConfig reject a value outside its
-// enumeration (here 97 to 99, reachable by a cast) with std::invalid_argument naming the field, in
-// validate_config's order; a selection assigned out of its domain after its own construction is
-// rejected by the configuration. Combinations are the consumers' (EveryRejectedCombinationBefore-
-// Binding above and SeveralDefectsReportTheFirstInTheContractOrder below).
+// Enumeration checks at construction: PathSelection rejects a value outside its enumeration (here
+// 98 and 99, reachable by a cast) with std::invalid_argument naming the field. FlowPolicyConfig is
+// a plain value: it holds any field, and its consumers check it (EveryRejectedCombinationBefore-
+// Binding above, EnumValuesOutsideTheirEnumerationAreRejected and
+// SeveralDefectsReportTheFirstInTheContractOrder below).
 TEST(FlowPolicyConfig, ConstructorsRejectEnumValuesOutsideTheirEnumeration) {
   EXPECT_EQ(error_of([] { (void)PathSelection(static_cast<EdgeTieBreak>(99), EdgePriority::Capacity); }),
             "tie_break: 99 is not a value of EdgeTieBreak");
@@ -177,45 +186,13 @@ TEST(FlowPolicyConfig, ConstructorsRejectEnumValuesOutsideTheirEnumeration) {
             "priority: 99 is not a value of EdgePriority");
   EXPECT_EQ(error_of([] { (void)PathSelection(static_cast<EdgeTieBreak>(98), static_cast<EdgePriority>(99)); }),
             "tie_break: 98 is not a value of EdgeTieBreak");
-  const auto s = sel();
-  EXPECT_EQ(error_of([&] {
-              (void)FlowPolicyConfig {CostOnly {}, static_cast<FlowPlacement>(99), Admission::Lossless, s};
-            }),
-            "placement: 99 is not a value of FlowPlacement");
-  EXPECT_EQ(error_of([&] {
-              (void)FlowPolicyConfig {CostOnly {}, FlowPlacement::MaxFlow, static_cast<Admission>(99), s};
-            }),
-            "admission: 99 is not a value of Admission");
-  auto tie = s;
-  tie.tie_break = static_cast<EdgeTieBreak>(99);
-  auto priority = s;
-  priority.priority = static_cast<EdgePriority>(99);
-  EXPECT_EQ(error_of([&] { (void)FlowPolicyConfig {CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossless, tie}; }),
-            "selection.tie_break: 99 is not a value of EdgeTieBreak");
-  EXPECT_EQ(error_of([&] {
-              (void)FlowPolicyConfig {CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossless, priority};
-            }),
-            "selection.priority: 99 is not a value of EdgePriority");
-  EXPECT_EQ(error_of([&] {
-              (void)FlowPolicyConfig {Global {}, static_cast<FlowPlacement>(97), static_cast<Admission>(98), tie};
-            }),
-            "placement: 97 is not a value of FlowPlacement");
-  EXPECT_EQ(error_of([&] {
-              (void)FlowPolicyConfig {Global {}, FlowPlacement::MaxFlow, static_cast<Admission>(98), tie};
-            }),
-            "admission: 98 is not a value of Admission");
-  // Every value inside its enumeration constructs, whatever the combination (Global with
-  // Weighted and Lossy constructs; the policy rejects it).
   for (auto t : {EdgeTieBreak::Deterministic, EdgeTieBreak::PreferHigherPriority}) {
     for (auto p : {EdgePriority::Residual, EdgePriority::Capacity, EdgePriority::Headroom}) {
       EXPECT_NO_THROW((void)PathSelection(t, p, false, false));
-      for (auto k : {FlowPlacement::MaxFlow, FlowPlacement::Weighted, FlowPlacement::EqualBalanced}) {
-        for (auto a : {Admission::Lossless, Admission::Lossy}) {
-          EXPECT_NO_THROW((void)(FlowPolicyConfig {Global {}, k, a, PathSelection(t, p)}));
-        }
-      }
     }
   }
+  EXPECT_NO_THROW((void)(FlowPolicyConfig {Global {}, static_cast<FlowPlacement>(97), static_cast<Admission>(98),
+                                           PathSelection(), static_cast<Origin>(96)}));
 }
 
 // Enumeration checks at every consuming entry: the fields stay assignable after construction, so a value
@@ -262,9 +239,9 @@ TEST(FlowPolicyConfig, EnumValuesOutsideTheirEnumerationAreRejected) {
       EXPECT_TRUE(contains(error_of([&] { FlowPolicy p(fg, v({0}), v({3}), c); }), b.field)) << b.field;
       EXPECT_TRUE(detail::LedgerAccess::bound_owners(fg).empty());
       EXPECT_TRUE(fg.records().empty());
-      CapacityOptions co {c};
+      QueryOptions co {c};
       EXPECT_TRUE(contains(error_of([&] { (void)capacity(*g, v({0}), v({3}), co); }), b.field)) << b.field;
-      EXPECT_TRUE(contains(error_of([&] { (void)sensitivity(*g, v({0}), v({3}), SensitivityOptions {c}, 1); }), b.field))
+      EXPECT_TRUE(contains(error_of([&] { (void)sensitivity(*g, v({0}), v({3}), QueryOptions {c}, 1); }), b.field))
           << b.field;
       if (!std::holds_alternative<Pinned>(mode)) {
         const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {{v({0}), v({3})}};
@@ -295,13 +272,12 @@ TEST(FlowPolicyConfig, EnumValuesOutsideTheirEnumerationAreRejected) {
   EXPECT_EQ(st.hits + st.misses + st.entries, 0);
 }
 
-// validate_config with several defects at once: one error, the first in the order
-// placement, admission, the selection's tie_break and priority (the fields assigned out of their
-// enumerations after construction), then the kernel combinations (Lossy with MaxFlow, Weighted
-// with Headroom), then the routing rules (Lossy with Global or CapacityAware, Global without
-// MaxFlow, CapacityAware's counts, Pinned's bundles). Exact texts: the selection's priority is
-// named "selection.priority", never the kernel check's "priority". The same first error at
-// construction and at the evaluators; nothing is bound.
+// The configuration with several defects at once: one error, the first in FlowPolicyConfig's
+// order: the enumeration values (placement, admission, origin, the selection's tie_break and
+// priority, assigned out of their enumerations), then the model's row of the matrix, its columns
+// left to right (placement, origin, admission, selection), then the DagCache, then CapacityAware's
+// parameters. Exact texts; the same first error at construction and at the evaluators; nothing is
+// bound.
 TEST(FlowPolicyConfig, SeveralDefectsReportTheFirstInTheContractOrder) {
   auto g = diamond(5, 5);
   FlowLedger fg(g);
@@ -309,60 +285,113 @@ TEST(FlowPolicyConfig, SeveralDefectsReportTheFirstInTheContractOrder) {
   const auto bad_admission = static_cast<Admission>(98);
   const auto bad_tie = static_cast<EdgeTieBreak>(97);
   const auto bad_priority = static_cast<EdgePriority>(96);
+  const auto bad_origin = static_cast<Origin>(95);
   CapacityAware zero;
   zero.flow_count = 0;
   struct Case {
     FlowPolicyConfig c;
     std::string error;
   };
-  const auto with = [](FlowPolicyConfig c, std::optional<FlowPlacement> k, std::optional<Admission> a,
-                       std::optional<EdgeTieBreak> t, std::optional<EdgePriority> p) {
-    if (k) c.placement = *k;
-    if (a) c.admission = *a;
-    auto& selection = c.selection;
-    if (t) selection.tie_break = *t;
-    if (p) selection.priority = *p;
-    return c;
+  const auto bad_sel = [&](std::optional<EdgeTieBreak> t, EdgePriority p) {
+    PathSelection s = sel();
+    if (t) s.tie_break = *t;
+    s.priority = p;
+    return s;
   };
-  const std::string lossy_routing =
-      "Lossy admission is rejected with Global and CapacityAware routing (hop-by-hop forwarding without admission "
-      "control neither grows nor reroutes)";
   const std::vector<Case> cases = {
-      {with(cfg(Global {}, FlowPlacement::MaxFlow, Admission::Lossy), bad_placement, bad_admission, bad_tie, bad_priority),
+      {{Global {}, bad_placement, bad_admission, bad_sel(bad_tie, bad_priority), bad_origin},
        "placement: 99 is not a value of FlowPlacement"},
-      {with(cfg(Global {}, FlowPlacement::Weighted), std::nullopt, bad_admission, bad_tie, bad_priority),
+      {{Global {}, FlowPlacement::Weighted, bad_admission, bad_sel(bad_tie, bad_priority), bad_origin},
        "admission: 98 is not a value of Admission"},
-      {with(cfg(zero, FlowPlacement::MaxFlow, Admission::Lossy), std::nullopt, std::nullopt, bad_tie, bad_priority),
+      {{Global {}, FlowPlacement::Weighted, Admission::Lossy, bad_sel(bad_tie, bad_priority), bad_origin},
+       "origin: 95 is not a value of Origin"},
+      {{zero, FlowPlacement::MaxFlow, Admission::Lossy, bad_sel(bad_tie, bad_priority), Origin::Optimized},
        "selection.tie_break: 97 is not a value of EdgeTieBreak"},
-      {with(cfg(zero, FlowPlacement::MaxFlow, Admission::Lossy), std::nullopt, std::nullopt, std::nullopt, bad_priority),
+      {{zero, FlowPlacement::MaxFlow, Admission::Lossy, bad_sel(std::nullopt, bad_priority), Origin::Optimized},
        "selection.priority: 96 is not a value of EdgePriority"},
-      {with(cfg(Global {}, FlowPlacement::Weighted), std::nullopt, std::nullopt, std::nullopt, bad_priority),
-       "selection.priority: 96 is not a value of EdgePriority"},
-      {cfg(Global {}, FlowPlacement::MaxFlow, Admission::Lossy), kLossyKernelError},
-      {cfg(zero, FlowPlacement::MaxFlow, Admission::Lossy), kLossyKernelError},
-      {cfg(Global {}, FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Headroom)),
+      // The rows, column by column.
+      {{Global {}, FlowPlacement::MaxFlow, Admission::Lossy, sel(), Origin::Equal}, "Global does not accept placement"},
+      {{Global {}, std::nullopt, Admission::Lossy, sel(), Origin::Equal}, "MAX_FLOW requires admission=LOSSLESS"},
+      {{Global {}, std::nullopt, Admission::Lossless, sel(), Origin::Equal}, "Global does not accept selection"},
+      {{CostOnly {}, std::nullopt, Admission::Lossy, sel(), Origin::Optimized}, "CostOnly requires placement"},
+      {{CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy, sel(), Origin::Optimized},
+       "CostOnly with EQUAL_BALANCED or WEIGHTED requires origin=EQUAL"},
+      {{CostOnly {}, FlowPlacement::Weighted, Admission::Lossy, sel(), Origin::Optimized},
+       "CostOnly with EQUAL_BALANCED or WEIGHTED requires origin=EQUAL"},
+      {{CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossy, sel(), Origin::Equal}, kLossyKernelError},
+      {{CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Headroom)},
        kHeadroomKernelError},
-      {cfg(zero, FlowPlacement::Weighted, Admission::Lossy, sel(EdgeTieBreak::Deterministic, EdgePriority::Headroom)),
+      {{zero, std::nullopt, Admission::Lossy, sel(), Origin::Optimized}, "CapacityAware requires placement"},
+      {{zero, FlowPlacement::MaxFlow, Admission::Lossy, sel(), Origin::Optimized}, "T1 requires origin=EQUAL"},
+      {{zero, FlowPlacement::MaxFlow, Admission::Lossy, sel(), Origin::Equal}, kLossyKernelError},
+      {{zero, FlowPlacement::EqualBalanced, Admission::Lossy}, "CapacityAware requires admission=LOSSLESS"},
+      {{zero, FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Headroom)},
        kHeadroomKernelError},
-      {cfg(Pinned {}, FlowPlacement::MaxFlow, Admission::Lossy), kLossyKernelError},
-      {cfg(zero, FlowPlacement::EqualBalanced, Admission::Lossy), lossy_routing},
-      {cfg(Global {}, FlowPlacement::Weighted, Admission::Lossy), lossy_routing},
+      {{zero, FlowPlacement::EqualBalanced}, "CapacityAware flow_count must be >= 1 (got 0)"},
+      {{Pinned {}, std::nullopt, Admission::Lossy, std::nullopt, Origin::Equal}, "Pinned requires placement"},
+      {{Pinned {}, FlowPlacement::MaxFlow, Admission::Lossy, std::nullopt, Origin::Equal}, "Pinned does not accept origin"},
+      {{Pinned {}, FlowPlacement::MaxFlow, Admission::Lossy}, kLossyKernelError},
   };
   for (const auto& k : cases) {
     EXPECT_EQ(error_of([&] { FlowPolicy p(fg, v({0}), v({3}), k.c); }), k.error);
     EXPECT_TRUE(detail::LedgerAccess::bound_owners(fg).empty());
     EXPECT_TRUE(fg.records().empty());
-    CapacityOptions co {k.c};
+    QueryOptions co {k.c};
     EXPECT_EQ(error_of([&] { (void)capacity(*g, v({0}), v({3}), co); }), k.error);
-    EXPECT_EQ(error_of([&] { (void)sensitivity(*g, v({0}), v({3}), SensitivityOptions {k.c}, 1); }), k.error);
+    EXPECT_EQ(error_of([&] { (void)sensitivity(*g, v({0}), v({3}), QueryOptions {k.c}, 1); }), k.error);
     if (std::holds_alternative<Pinned>(k.c.routing)) continue;  // batch_capacity rejects Pinned first
     const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {{v({0}), v({3})}};
     EXPECT_EQ(error_of([&] { (void)batch_capacity(*g, pairs, co, {}, 1); }), k.error);
   }
+  // A DagCache is read by CostOnly alone: the other models reject one, after their row.
+  DagCache cache(*g);
+  const std::vector<Case> cached = {
+      {global_config(), "Global does not use DagCache"},
+      {{Global {}, FlowPlacement::MaxFlow}, "Global does not accept placement"},
+      {{CapacityAware {}, FlowPlacement::EqualBalanced}, "T1 does not use DagCache"},
+      {{Pinned {}, FlowPlacement::EqualBalanced}, "Pinned does not use DagCache"},
+  };
+  for (const auto& k : cached) {
+    EXPECT_EQ(error_of([&] { FlowPolicy p(fg, v({0}), v({3}), k.c, nullptr, &cache); }), k.error);
+    EXPECT_EQ(error_of([&] { (void)capacity(*g, v({0}), v({3}), QueryOptions {k.c, nullptr, &cache}); }), k.error);
+  }
+  EXPECT_TRUE(detail::LedgerAccess::bound_owners(fg).empty());
 }
 
-// The four axes are required: a configuration has no default.
-static_assert(!std::is_default_constructible_v<FlowPolicyConfig>);
+// Every field has a default but the routing's own: an empty configuration is CostOnly without a
+// placement, rejected when used; the policy's snapshot resolves the origin and the selection.
+TEST(FlowPolicyConfig, DefaultsResolveAtThePolicy) {
+  auto g = diamond(5, 5);
+  FlowLedger fg(g);
+  const FlowPolicyConfig empty;
+  EXPECT_TRUE(std::holds_alternative<CostOnly>(empty.routing));
+  EXPECT_FALSE(empty.placement.has_value());
+  EXPECT_EQ(empty.admission, Admission::Lossless);
+  EXPECT_FALSE(empty.selection.has_value());
+  EXPECT_FALSE(empty.origin.has_value());
+  EXPECT_EQ(error_of([&] { FlowPolicy p(fg, v({0}), v({3}), empty); }), "CostOnly requires placement");
+  const auto snapshot = [&](FlowPolicyConfig c) {
+    FlowLedger own(g);
+    FlowPolicy p(own, v({0}), v({3}), std::move(c));
+    return p.config();
+  };
+  const auto eb = snapshot({.routing = CostOnly {}, .placement = FlowPlacement::EqualBalanced});
+  EXPECT_EQ(eb.origin, Origin::Equal);
+  EXPECT_TRUE(eb.selection == PathSelection());
+  EXPECT_EQ(snapshot({.routing = CostOnly {}, .placement = FlowPlacement::Weighted}).origin, Origin::Equal);
+  EXPECT_EQ(snapshot({.routing = CostOnly {}, .placement = FlowPlacement::MaxFlow}).origin, Origin::Optimized);
+  EXPECT_EQ(snapshot({.routing = CostOnly {}, .placement = FlowPlacement::MaxFlow, .origin = Origin::Equal}).origin,
+            Origin::Equal);
+  const auto global = snapshot({.routing = Global {}});
+  EXPECT_EQ(global.origin, Origin::Optimized);
+  EXPECT_FALSE(global.selection.has_value());
+  EXPECT_FALSE(global.placement.has_value());
+  EXPECT_EQ(snapshot({.routing = Global {}, .origin = Origin::Equal}).origin, Origin::Equal);
+  EXPECT_EQ(snapshot({.routing = CapacityAware {}, .placement = FlowPlacement::EqualBalanced}).origin, Origin::Equal);
+  Pinned pin;
+  pin.bundles = {dag_of(*g, {0, 2})};
+  EXPECT_FALSE(snapshot({.routing = pin, .placement = FlowPlacement::EqualBalanced}).origin.has_value());
+}
 
 // config() is the copy taken at construction: every field as given, and a later change of the
 // caller's object changes nothing.
@@ -508,23 +537,22 @@ TEST(FlowPolicyRequests, RejectedRequestsLeaveThePolicyAndTheLedger) {
       {"Global", global_config()},
       {"Pinned", cfg(pinned, FlowPlacement::MaxFlow)},
       {"CostOnly Lossy", cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy)}};
-  const std::string range_error = " is outside [0, 2^62) units (requests are integer units or +inf)";
-  const std::string after_inf =
-      "a finite request after +inf is rejected within an epoch (the cumulative finite request is undefined)";
+  const std::string range_error = "offer must be an integer in [0, 2^62) or permitted +inf";
+  const std::string after_inf = "finite placement after infinite placement requires a new epoch";
   for (const auto& [name, config] : configs) {
     FlowLedger fg(g);
     FlowPolicy p(fg, v({0}), v({3}), config);
     ASSERT_GT(p.place(4).placed, 0) << name;
     const auto finite = state_of(p, fg);
-    EXPECT_EQ(error_of([&] { (void)p.place(-1); }), "request -1" + range_error) << name;
-    EXPECT_EQ(error_of([&] { (void)p.place(kDomainLimit); }), "request 4611686018427387904" + range_error) << name;
+    EXPECT_EQ(error_of([&] { (void)p.place(-1); }), range_error) << name;
+    EXPECT_EQ(error_of([&] { (void)p.place(kDomainLimit); }), range_error) << name;
     expect_same(state_of(p, fg), finite, name);
     // Just below 2^127: 5 more would reach it, 4 would not.
     auto& requested = detail::PolicyAccess::engine(p).requested;
     const Counter128 saved = requested;
     requested = Counter128 {(std::uint64_t {1} << 63) - 1, std::numeric_limits<std::uint64_t>::max() - 4};
     const auto near_limit = state_of(p, fg);
-    EXPECT_EQ(error_of([&] { (void)p.place(5); }), "the cumulative request counter would reach 2^127") << name;
+    EXPECT_EQ(error_of([&] { (void)p.place(5); }), "requested limit exceeded") << name;
     expect_same(state_of(p, fg), near_limit, name);
     requested = saved;
     (void)p.place(std::nullopt);
@@ -532,7 +560,7 @@ TEST(FlowPolicyRequests, RejectedRequestsLeaveThePolicyAndTheLedger) {
     ASSERT_TRUE(infinite.epoch.infinite) << name;
     EXPECT_EQ(error_of([&] { (void)p.place(1); }), after_inf) << name;
     EXPECT_EQ(error_of([&] { (void)p.place(0); }), after_inf) << name;
-    EXPECT_EQ(error_of([&] { (void)p.place(-1); }), "request -1" + range_error) << name;
+    EXPECT_EQ(error_of([&] { (void)p.place(-1); }), range_error) << name;
     expect_same(state_of(p, fg), infinite, name);
     p.remove();
     EXPECT_EQ(p.place(1).placed, 1) << name;
@@ -553,8 +581,8 @@ TEST(FlowPolicyRequests, LossyCountersStopBelow2To127) {
   const auto below = [](std::uint64_t x) {
     return Counter128 {(std::uint64_t {1} << 63) - 1, std::numeric_limits<std::uint64_t>::max() - (x - 1)};
   };
-  const std::string offered_error = "the cumulative offered counter would reach 2^127";
-  const std::string drop_error = "a cumulative drop counter would reach 2^127";
+  const std::string offered_error = "offered limit exceeded";
+  const std::string drop_error = "drops limit exceeded";
   struct Case {
     std::uint64_t offered_below;
     std::optional<std::uint64_t> drop_below;
@@ -580,7 +608,7 @@ TEST(FlowPolicyRequests, LossyCountersStopBelow2To127) {
     }
     const auto r = p.place(std::nullopt);
     EXPECT_EQ(r.placed, 3) << name;
-    EXPECT_EQ(r.drops, (std::vector<std::pair<EdgeId, Amount>> {{1, 6}})) << name;
+    EXPECT_EQ(r.call_drops, (std::vector<std::pair<EdgeId, Amount>> {{1, 6}})) << name;
     const auto records = p.records();
     ASSERT_EQ(records.size(), 1U) << name;
     EXPECT_EQ(records[0].offered, below(1)) << name;
@@ -589,12 +617,13 @@ TEST(FlowPolicyRequests, LossyCountersStopBelow2To127) {
   }
 }
 
-// The per-source shares of the cumulative request R (round robin from the lowest source): after
-// R units source i of k has floor(R / k) + [i < R mod k]. Sources 0 .. k - 1 with their own
-// 100-unit edge to k. k = 3: place(2) from R = 0 offers [1, 1, 0]; the next place(2) (R = 2)
-// offers [1, 0, 1], which a rejected call that changed R would move. k = 7, where 2^64 = 2 mod 7:
-// from R = 2^64 place(1) offers its unit to source 2, from R = 2^64 + 5 (= 0 mod 7) to source 0,
-// so the high word of R counts with its exact weight.
+// The equal origin's shares (round robin from the lowest source): a total T gives source i of k
+// floor(T / k) + [i < T mod k]. Sources 0 .. k - 1 with their own 100-unit edge to k. k = 3,
+// Lossless: place(2) admits 2, shares [1, 1, 0]; the next place(2) admits 4, shares [2, 1, 1] (the
+// admitted total split from zero), which a rejected call would move. Lossy injects the increments
+// of the cumulative offer O; k = 7, where 2^64 = 2 mod 7: from O = 2^64 place(1) injects its unit
+// at source 2, from O = 2^64 + 5 (= 0 mod 7) at source 0, so the high word of O counts with its
+// exact weight.
 TEST(FlowPolicyRequests, RoundRobinSharesFollowTheCumulativeRequest) {
   auto star = [](std::int32_t k) {
     std::vector<InEdge> rows;
@@ -613,21 +642,21 @@ TEST(FlowPolicyRequests, RoundRobinSharesFollowTheCumulativeRequest) {
     FlowPolicy p(fg, sources(3), v({3}), cost_only_config());
     EXPECT_EQ(p.place(2).placed, 2);
     EXPECT_EQ(delivered_by_source(p), (Shares {{0, 1}, {1, 1}, {2, 0}}));
-    EXPECT_EQ(error_of([&] { (void)p.place(-1); }),
-              "request -1 is outside [0, 2^62) units (requests are integer units or +inf)");
-    EXPECT_EQ(error_of([&] { (void)p.place(kDomainLimit); }),
-              "request 4611686018427387904 is outside [0, 2^62) units (requests are integer units or +inf)");
+    EXPECT_EQ(error_of([&] { (void)p.place(-1); }), "offer must be an integer in [0, 2^62) or permitted +inf");
+    EXPECT_EQ(error_of([&] { (void)p.place(kDomainLimit); }), "offer must be an integer in [0, 2^62) or permitted +inf");
     EXPECT_EQ(p.place(2).placed, 2);
     EXPECT_EQ(delivered_by_source(p), (Shares {{0, 2}, {1, 1}, {2, 1}}));
   }
+  // Lossy injects the round-robin increments of the cumulative offer O (Lossless re-splits its
+  // admitted total from zero, above): the next unit goes to source O mod k.
   auto g = star(7);
-  for (const auto& [requested, to] : {std::pair {Counter128 {1, 0}, NodeId {2}}, std::pair {Counter128 {1, 5}, NodeId {0}}}) {
+  for (const auto& [offered, to] : {std::pair {Counter128 {1, 0}, NodeId {2}}, std::pair {Counter128 {1, 5}, NodeId {0}}}) {
     FlowLedger fg(g);
-    FlowPolicy p(fg, sources(7), v({7}), cost_only_config());
-    detail::PolicyAccess::engine(p).requested = requested;
-    EXPECT_EQ(p.place(1).placed, 1) << requested.lo;
-    for (const auto& [s, x] : delivered_by_source(p)) EXPECT_EQ(x, s == to ? 1 : 0) << requested.lo << " source " << s;
-    EXPECT_EQ(delivered_by_source(p).at(to), 1) << requested.lo;
+    FlowPolicy p(fg, sources(7), v({7}), cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy));
+    detail::PolicyAccess::engine(p).offered = offered;
+    EXPECT_EQ(p.place(1).placed, 1) << offered.lo;
+    for (const auto& [s, x] : delivered_by_source(p)) EXPECT_EQ(x, s == to ? 1 : 0) << offered.lo << " source " << s;
+    EXPECT_EQ(delivered_by_source(p).at(to), 1) << offered.lo;
   }
 }
 
@@ -662,11 +691,12 @@ TEST(FlowPolicyOutputs, OwnAllocationLedgerResidualBottleneckAndGlobalCut) {
   // Nothing requested: absent.
   r = p.place(1);
   EXPECT_FALSE(r.edge_flows || r.residual || r.bottleneck || r.min_cut);
-  // Global: the curve always, min_cut with bottleneck when the solve is maximal (at +inf; none
-  // under a cap of 2 below the maximum 8, which leaves a residual path).
+  // Global: the curve always, min_cut when requested and the solve is maximal (at +inf; none
+  // under a cap of 2 below the maximum 8, which leaves a residual path); bottleneck alone does
+  // not request it.
   FlowLedger fg2(g);
   FlowPolicy gl(fg2, v({0}), v({3}), global_config());
-  r = gl.place(2, OutputOptions {false, false, true});
+  r = gl.place(2, OutputOptions {false, false, true, true});
   EXPECT_EQ(r.placed, 2);
   ASSERT_TRUE(r.cost_distribution.has_value());
   EXPECT_EQ(*r.cost_distribution, curve({{2, 2}}));
@@ -674,11 +704,16 @@ TEST(FlowPolicyOutputs, OwnAllocationLedgerResidualBottleneckAndGlobalCut) {
   EXPECT_FALSE(r.min_cut.has_value());
   // At +inf the remaining 6 of the maximum 5 + 3: both edges out of node 0 saturate, so the
   // closure is {0} and the cut is 0 -> 1 and 0 -> 2 (EdgeIds 0 and 1).
-  r = gl.place(std::nullopt, OutputOptions {false, false, true});
+  r = gl.place(std::nullopt, OutputOptions {false, false, true, true});
   EXPECT_EQ(r.placed, 6);
   EXPECT_EQ(gl.placed_demand(), 8);
   ASSERT_TRUE(r.min_cut.has_value());
   EXPECT_EQ(*r.min_cut, (std::vector<EdgeId> {0, 1}));
+  FlowLedger fg3(g);
+  FlowPolicy gb(fg3, v({0}), v({3}), global_config());
+  r = gb.place(std::nullopt, OutputOptions {false, false, true});
+  EXPECT_TRUE(r.bottleneck.has_value());
+  EXPECT_FALSE(r.min_cut.has_value());
 }
 
 // The bottleneck output is the ledger's saturation report for the policy's sources under the
@@ -712,28 +747,27 @@ TEST(FlowPolicyGlobal, EmptyRosterReportsAnEmptyCurveAndAnEmptyCut) {
   auto g = shared(make_graph(3, {{0, 1, 5, 1}}));
   FlowLedger fg(g);
   FlowPolicy p(fg, v({0}), v({2}), global_config());
-  auto r = p.place(std::nullopt, OutputOptions {false, false, true});
+  auto r = p.place(std::nullopt, OutputOptions {false, false, true, true});
   EXPECT_EQ(r.termination, Termination::NoRoute);
   ASSERT_TRUE(r.cost_distribution.has_value());
   EXPECT_TRUE(r.cost_distribution->empty());
   ASSERT_TRUE(r.min_cut.has_value());
   EXPECT_TRUE(r.min_cut->empty());
   EXPECT_TRUE(p.records().empty());
-  // The zero request is a no-op: no solve, no cut; the cumulative curve is empty.
+  // The zero request is a no-op: no solve, no cut; nothing is prepared, so no curve.
   FlowPolicy q(fg, v({1}), v({2}), global_config());
-  r = q.place(0, OutputOptions {false, false, true});
+  r = q.place(0, OutputOptions {false, false, true, true});
   EXPECT_FALSE(r.min_cut.has_value());
-  ASSERT_TRUE(r.cost_distribution.has_value());
-  EXPECT_TRUE(r.cost_distribution->empty());
+  EXPECT_FALSE(r.cost_distribution.has_value());
 }
 
-// Global with a roster whose maximum flow is 0: NoRoute while nothing was ever placed, Exhausted
-// once something was. One edge 0 -> 1 of 2 units that a third party fills: the source statically
-// reaches the destination (it is on the roster), and place(1) finds no flow: NoRoute for the call
-// and the source, its record created empty (no bundle, no route cost, nothing delivered). After the
-// third party leaves, place(1) delivers 1; a third party then takes the other unit, and the next
-// place(1) re-solves 1 + 1 on a view of 1: nothing more, Exhausted.
-TEST(FlowPolicyGlobal, ARosterWithoutFlowIsNoRouteUntilSomethingWasPlaced) {
+// Global with a roster whose maximum flow is 0: Exhausted (a controller whose maximum is 0 over
+// existing routes), whether or not something was placed before. One edge 0 -> 1 of 2 units that a
+// third party fills: the source statically reaches the destination (it is on the roster), and
+// place(1) finds no flow: Exhausted, its record created empty (no bundle, no route cost, nothing
+// delivered). After the third party leaves, place(1) delivers 1; a third party then takes the other
+// unit, and the next place(1) re-solves 1 + 1 on a view of 1: nothing more, Exhausted.
+TEST(FlowPolicyGlobal, ARosterWithoutFlowIsExhausted) {
   auto g = shared(make_graph(2, {{0, 1, 2, 1}}));
   FlowLedger fg(g);
   Pinned edge;
@@ -743,8 +777,7 @@ TEST(FlowPolicyGlobal, ARosterWithoutFlowIsNoRouteUntilSomethingWasPlaced) {
   FlowPolicy p(fg, v({0}), v({1}), global_config());
   auto r = p.place(1);
   EXPECT_EQ(r.placed, 0);
-  EXPECT_EQ(r.termination, Termination::NoRoute);
-  EXPECT_EQ(r.local_outcomes, (std::vector<std::pair<NodeId, Termination>> {{0, Termination::NoRoute}}));
+  EXPECT_EQ(r.termination, Termination::Exhausted);
   ASSERT_TRUE(r.cost_distribution.has_value());
   EXPECT_TRUE(r.cost_distribution->empty());
   ASSERT_EQ(p.records().size(), 1U);
@@ -760,25 +793,23 @@ TEST(FlowPolicyGlobal, ARosterWithoutFlowIsNoRouteUntilSomethingWasPlaced) {
   r = p.place(1);
   EXPECT_EQ(r.placed, 0);
   EXPECT_EQ(r.termination, Termination::Exhausted);
-  EXPECT_EQ(r.local_outcomes, (std::vector<std::pair<NodeId, Termination>> {{0, Termination::Exhausted}}));
 }
 
-// A Global zero call reports the cumulative curve (its amounts sum to placed_demand();
-// empty before the first placement and after remove()) and changes nothing; it solves nothing,
-// so it claims no cut.
+// A Global zero call reports the cumulative curve (its amounts sum to placed_demand(); None
+// before the epoch's first positive call, also after remove()) and changes nothing; it solves
+// nothing, so it claims no cut.
 TEST(FlowPolicyGlobal, ZeroCallReportsTheCumulativeCurve) {
   using Curve = std::vector<std::pair<Cost, Amount>>;
   auto g = shared(make_graph(3, {{0, 1, 3, 7}, {0, 2, 4, 1}, {2, 1, 4, 1}}));
   FlowLedger fg(g);
   FlowPolicy p(fg, v({0}), v({1}), global_config());
   auto z = p.place(0);
-  ASSERT_TRUE(z.cost_distribution.has_value());
-  EXPECT_TRUE(z.cost_distribution->empty());
+  EXPECT_FALSE(z.cost_distribution.has_value());
   auto r = p.place(5);
   EXPECT_EQ(*r.cost_distribution, (Curve {{2, 4}, {7, 1}}));
   const auto allocated = fg.allocated();
   const auto requested = detail::PolicyAccess::engine(p).requested;
-  z = p.place(0, OutputOptions {true, true, true});
+  z = p.place(0, OutputOptions {true, true, true, true});
   EXPECT_EQ(z.placed, 0);
   EXPECT_EQ(*z.cost_distribution, *r.cost_distribution);
   EXPECT_FALSE(z.min_cut.has_value());
@@ -793,8 +824,7 @@ TEST(FlowPolicyGlobal, ZeroCallReportsTheCumulativeCurve) {
   EXPECT_EQ(sum, p.placed_demand());
   p.remove();
   z = p.place(0);
-  ASSERT_TRUE(z.cost_distribution.has_value());
-  EXPECT_TRUE(z.cost_distribution->empty());
+  EXPECT_FALSE(z.cost_distribution.has_value());
 }
 
 // The Global layer on random graphs (nonuniform costs 1 to 9 times a factor of 1, 1,000,003 or
@@ -807,7 +837,7 @@ TEST(FlowPolicyGlobal, ZeroCallReportsTheCumulativeCurve) {
 // maximum and curve, and batch_capacity() agrees with capacity() per pair.
 TEST(FlowPolicyGlobal, RandomCumulativeSolvesAreOptimalWithACertifiedCut) {
   std::mt19937_64 rng(20261010);
-  const OutputOptions all {true, true, true};
+  const OutputOptions all {true, true, true, true};
   auto below = [&](std::int64_t k) { return static_cast<std::int32_t>(rng() % static_cast<std::uint64_t>(k)); };
   int capped = 0, masked = 0, occupied = 0, with_flow = 0;
   int evaluated = 0;  // trials whose evaluators are compared (no other owner)
@@ -934,7 +964,7 @@ TEST(FlowPolicyGlobal, RandomCumulativeSolvesAreOptimalWithACertifiedCut) {
     // The evaluators on a fresh ledger (static capacities): the same maximum and cost.
     if (other.has_value()) continue;
     ++evaluated;
-    const CapacityOptions co {global_config(), elig, nullptr, all};
+    const QueryOptions co {global_config(), elig, nullptr, all};
     const auto cr = capacity(*g, srcs, dsts, co);
     EXPECT_EQ(cr.placed, max_flow) << where;
     ASSERT_TRUE(cr.cost_distribution.has_value()) << where;
@@ -986,7 +1016,9 @@ TEST(FlowPolicyRecords, RandomCostOnlyAndCapacityAwareRecordsAreFlows) {
       cost_only_config(),
       cfg(CostOnly {}, FlowPlacement::Weighted),
       cfg(CostOnly {}, FlowPlacement::MaxFlow),
-      cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossless, tunnel),
+      // The deterministic single path (several sources reject PreferHigherPriority with it).
+      cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossless,
+          sel(EdgeTieBreak::Deterministic, EdgePriority::Residual, false, false)),
       cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy),
       cfg(CostOnly {}, FlowPlacement::Weighted, Admission::Lossy, res),
       cfg(grow, FlowPlacement::EqualBalanced, Admission::Lossless, tunnel),
@@ -1174,8 +1206,18 @@ TEST(FlowPolicyRecords, OneFlowDeliversToTheNearestDestinations) {
 //   edges 5 and 10, no ceiling: 5, then 10, then no route is left: Exhausted (15), and the call
 //   is LimitDiminishing;
 //   one edge of 5 that a third party fills: no flow (NoRoute), and the call is LimitDiminishing.
+// The sources' outcomes are internal: the private hooks' trace lists them (by the names the
+// transaction trace uses).
 TEST(FlowPolicyOutcomes, TheCallTakesTheHighestUnservedOutcome) {
-  using Outcomes = std::vector<std::pair<NodeId, Termination>>;
+  const auto name_of = [](Termination t) -> std::string {
+    switch (t) {
+      case Termination::LimitFlows: return "limit_flows";
+      case Termination::LimitDiminishing: return "limit_diminishing";
+      case Termination::NoRoute: return "no_route";
+      case Termination::Exhausted: return "exhausted";
+      default: return "complete";
+    }
+  };
   struct Case {
     const char* name;
     std::vector<Amount> source0;
@@ -1208,9 +1250,21 @@ TEST(FlowPolicyOutcomes, TheCallTakesTheHighestUnservedOutcome) {
     ca.diminishing = DiminishingReturns {1, 0.5};
     FlowPolicy p(fg, v({0, 1}), v({2}), cfg(ca, FlowPlacement::MaxFlow, Admission::Lossless,
                                               sel(EdgeTieBreak::Deterministic, EdgePriority::Capacity, false)));
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    detail::Trace trace;
+    const auto r = detail::place_traced(p, 40, {}, trace);
+    const detail::Trace* outcomes = nullptr;
+    for (const auto& [key, value] : trace.fields) {
+      if (key == "local_outcomes") outcomes = &value;
+    }
+    ASSERT_NE(outcomes, nullptr) << c.name;
+    ASSERT_EQ(outcomes->fields.size(), 2U) << c.name;
+    EXPECT_EQ(outcomes->fields[0].second.s, name_of(c.first)) << c.name;
+    EXPECT_EQ(outcomes->fields[1].second.s, name_of(Termination::LimitDiminishing)) << c.name;
+#else
     const auto r = p.place(40);
+#endif
     EXPECT_EQ(r.placed, c.placed) << c.name;
-    EXPECT_EQ(r.local_outcomes, (Outcomes {{0, c.first}, {1, Termination::LimitDiminishing}})) << c.name;
     EXPECT_EQ(r.termination, c.call) << c.name;
   }
 }
@@ -1293,7 +1347,6 @@ TEST(CapacityAwareGates, PathCostCeilingExcludesACostlierRoute) {
       EXPECT_EQ(r.placed, c.placed) << where;
       EXPECT_EQ(r.remaining, 10 - c.placed) << where;
       EXPECT_EQ(r.termination, c.term) << where;
-      EXPECT_EQ(r.local_outcomes, (std::vector<std::pair<NodeId, Termination>> {{0, c.term}})) << where;
       EXPECT_EQ(r.routes_changed, !c.routes.empty()) << where;
       EXPECT_FALSE(r.weights_changed) << where;
       EXPECT_EQ(routes_of(p), c.routes) << where;
@@ -1492,7 +1545,7 @@ TEST(Evaluators, CapacityIsPlaceInfOnAFreshLedger) {
   for (const auto& c : {global_config(), cost_only_config(),
                         cfg(CapacityAware {.flow_count = 2, .max_flow_count = 4}, FlowPlacement::MaxFlow),
                         cfg(pin, FlowPlacement::EqualBalanced)}) {
-    const auto r = capacity(*g, v({0}), v({3}), CapacityOptions {c, nullptr, nullptr, OutputOptions {true, true, true}});
+    const auto r = capacity(*g, v({0}), v({3}), QueryOptions {c, nullptr, nullptr, OutputOptions {true, true, true}});
     FlowLedger fg(g);
     FlowPolicy p(fg, v({0}), v({3}), c);
     const auto want = p.place(std::nullopt, OutputOptions {true, true, true});
@@ -1500,7 +1553,7 @@ TEST(Evaluators, CapacityIsPlaceInfOnAFreshLedger) {
     expect_same(r, want, "capacity against place(+inf)");
   }
   // The exact maximum flow: Global's curve (cheapest walks first).
-  const auto exact = capacity(*g, v({0}), v({3}), CapacityOptions {global_config()});
+  const auto exact = capacity(*g, v({0}), v({3}), QueryOptions {global_config()});
   EXPECT_EQ(exact.placed, 8);
   EXPECT_EQ(*exact.cost_distribution, curve({{2, 5}, {4, 3}}));
 }
@@ -1512,7 +1565,7 @@ TEST(Evaluators, BatchOrderIntersectionsExceptionsAndWorkers) {
   std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {
       {{0}, {3}}, {{0}, {3}}, {{1}, {3}}, {{0}, {1, 2}}};
   const std::vector<const Eligibility*> per = {nullptr, &first_route, nullptr, nullptr};
-  const CapacityOptions opts {global_config(), &common, nullptr, OutputOptions {true, true, true}};
+  const QueryOptions opts {global_config(), &common, nullptr, OutputOptions {true, true, true, true}};
   const auto r1 = batch_capacity(*g, pairs, opts, per, 1);
   ASSERT_EQ(r1.size(), 4U);
   EXPECT_EQ(r1[0].placed, 5);  // common only: route 1
@@ -1545,11 +1598,11 @@ TEST(Evaluators, BatchOrderIntersectionsExceptionsAndWorkers) {
   EXPECT_TRUE(contains(error_of([&] { (void)batch_capacity(*g, pairs, opts, per_foreign, 1); }), "foreign"));
   Pinned pin;
   pin.bundles = {dag_of(*g, {0, 2})};
-  EXPECT_TRUE(contains(error_of([&] { (void)batch_capacity(*g, pairs, CapacityOptions {cfg(pin, FlowPlacement::MaxFlow)}, {}, 1); }),
+  EXPECT_TRUE(contains(error_of([&] { (void)batch_capacity(*g, pairs, QueryOptions {cfg(pin, FlowPlacement::MaxFlow)}, {}, 1); }),
                        "Pinned"));
   EXPECT_TRUE(contains(error_of([&] { (void)batch_capacity(*g, pairs, opts, per, 0); }), "workers"));
   DagCache cache(*g);
-  const CapacityOptions with_cache {cost_only_config(), nullptr, &cache};
+  const QueryOptions with_cache {cost_only_config(), nullptr, &cache};
   EXPECT_TRUE(contains(error_of([&] { (void)batch_capacity(*g, pairs, with_cache, {}, 2); }), "workers == 1"));
   const auto cached = batch_capacity(*g, pairs, with_cache, {}, 1);
   EXPECT_EQ(cache.stats().misses, 2);  // destination sets {3} and {1, 2}
@@ -1570,7 +1623,7 @@ TEST(Evaluators, BatchOrderIntersectionsExceptionsAndWorkers) {
   const std::vector<const Eligibility*> short_per = {nullptr};
   auto first_error = [&](const FlowPolicyConfig& c, const Eligibility* elig, DagCache* with,
                          const std::vector<const Eligibility*>& per_pair, std::int32_t workers) {
-    return error_of([&] { (void)batch_capacity(*g, bad, CapacityOptions {c, elig, with}, per_pair, workers); });
+    return error_of([&] { (void)batch_capacity(*g, bad, QueryOptions {c, elig, with}, per_pair, workers); });
   };
   EXPECT_EQ(first_error(pinned_bad, &foreign, &foreign_cache, short_per, 0), "workers must be >= 1 (got 0)");
   EXPECT_EQ(first_error(pinned_bad, &foreign, &foreign_cache, short_per, 2),
@@ -1582,8 +1635,9 @@ TEST(Evaluators, BatchOrderIntersectionsExceptionsAndWorkers) {
   EXPECT_EQ(first_error(pinned_bad, nullptr, &building, short_per, 1),
             "Pinned routing is rejected in batch_capacity (bundles bind their endpoints)");
   EXPECT_EQ(first_error(config_bad, nullptr, &building, short_per, 1), kLossyKernelError);
-  EXPECT_EQ(first_error(global_config(), nullptr, &building, short_per, 1), "per_pair_elig has 1 entries for 4 pairs");
-  EXPECT_EQ(first_error(global_config(), nullptr, &building, per, 1), "destinations: node 9 out of node range [0, 4)");
+  EXPECT_EQ(first_error(global_config(), nullptr, &building, short_per, 1), "Global does not use DagCache");
+  EXPECT_EQ(first_error(cost_only_config(), nullptr, &building, short_per, 1), "per_pair_elig has 1 entries for 4 pairs");
+  EXPECT_EQ(first_error(cost_only_config(), nullptr, &building, per, 1), "destinations: node 9 out of node range [0, 4)");
   EXPECT_EQ(stats_of(building.stats()), stats_of(DagCache(*g).stats()));
 }
 
@@ -1592,7 +1646,7 @@ TEST(Evaluators, BatchValidatesInPairOrderBeforeAnyWorker) {
   auto g = diamond(5, 3);
   std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {
       {{0}, {3}}, {{0}, {7}}, {{0}, {3}}, {{0}, {8}}};
-  const auto msg = error_of([&] { (void)batch_capacity(*g, pairs, CapacityOptions {global_config()}, {}, 4); });
+  const auto msg = error_of([&] { (void)batch_capacity(*g, pairs, QueryOptions {global_config()}, {}, 4); });
   EXPECT_TRUE(contains(msg, "node 7")) << msg;
   // Within one pair: the sources, then the destinations, then their overlap, then the pair's
   // Eligibility's graph.
@@ -1601,7 +1655,7 @@ TEST(Evaluators, BatchValidatesInPairOrderBeforeAnyWorker) {
   const std::vector<const Eligibility*> per = {&foreign};
   const auto pair_error = [&](std::vector<NodeId> s, std::vector<NodeId> d) {
     const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> one = {{s, d}};
-    return error_of([&] { (void)batch_capacity(*g, one, CapacityOptions {global_config()}, per, 1); });
+    return error_of([&] { (void)batch_capacity(*g, one, QueryOptions {global_config()}, per, 1); });
   };
   EXPECT_EQ(pair_error({}, {9}), "sources: the node set is empty");
   EXPECT_EQ(pair_error({0, 3}, {3, 9}), "destinations: node 9 out of node range [0, 4)");
@@ -1609,20 +1663,24 @@ TEST(Evaluators, BatchValidatesInPairOrderBeforeAnyWorker) {
   EXPECT_EQ(pair_error({0}, {3}), "foreign Eligibility: per_pair_elig[0] built for another graph");
 }
 
-// The sensitivity shortcuts (Global from the baseline's maximum flow, CostOnly without a
+// The sensitivity shortcuts (optimized Global from the baseline's maximum flow, CostOnly without a
 // re-evaluation of the edges outside the static shortest-path support reachable from the sources)
-// and the plain re-evaluations (CapacityAware, Pinned) give the losses of the definition, the
+// and the plain re-evaluations (equal Global, CapacityAware, Pinned) give the losses of the
+// definition, the
 // baseline's placed amount minus capacity() with the edge excluded, on random graphs with parallel
 // edges, self-loops, dispersed costs, zero capacities, endpoint sets and eligibility masks; every
 // CostOnly kernel with every tie break, multipath and multi_edge setting under the Capacity
-// priority, both admissions, and one Residual single-path selection (no Headroom); two
-// CapacityAware configurations (growth, and reoptimization under a Stretch ceiling); and Pinned
+// priority (the pooled single-path rule skips PreferHigherPriority single paths with two sources),
+// both admissions, one Residual single-path selection (no Headroom) and the equal origin of
+// MaxFlow; Global under both origins (equal: a deletion that removes a source from the roster can
+// raise the total, a negative loss); two CapacityAware configurations (growth, and reoptimization
+// under a Stretch ceiling); and Pinned
 // with two bundles (the static support toward the destination and the second shortest path) on
 // single endpoints. An edge without an entry has loss 0 by the same definition.
 TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
   std::mt19937 rng(20261005);
   auto pick = [&](int n) { return static_cast<int>(rng() % static_cast<unsigned>(n)); };
-  std::vector<FlowPolicyConfig> configs = {global_config()};
+  std::vector<FlowPolicyConfig> configs = {global_config(), {.routing = Global {}, .origin = Origin::Equal}};
   for (auto k : {FlowPlacement::MaxFlow, FlowPlacement::EqualBalanced, FlowPlacement::Weighted}) {
     for (bool multipath : {true, false}) {
       for (bool multi_edge : {true, false}) {
@@ -1634,6 +1692,7 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
   }
   configs.push_back(cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy));
   configs.push_back(cfg(CostOnly {}, FlowPlacement::Weighted, Admission::Lossy, sel(EdgeTieBreak::PreferHigherPriority, EdgePriority::Residual, false, false)));
+  configs.push_back({CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossless, sel(), Origin::Equal});
   configs.push_back(cfg(CapacityAware {.flow_count = 1, .max_flow_count = 3}, FlowPlacement::EqualBalanced,
                         Admission::Lossless, sel(EdgeTieBreak::PreferHigherPriority, EdgePriority::Residual, false, false)));
   configs.push_back(cfg(CapacityAware {.flow_count = 2, .max_path_cost = Stretch {2.0}, .reoptimize = true},
@@ -1646,6 +1705,7 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
   int pinned_losses = 0;
   int pinned_trials = 0;
   int zero_edge_losses = 0;  // entries of zero-capacity edges whose deletion changes the result
+  int negative = 0;          // equal-origin deletions that raise the total
   int absent = 0;
   for (int trial = 0; trial < 60; ++trial) {
     const int n = 4 + pick(7);
@@ -1677,16 +1737,20 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
       ++pinned_trials;
     }
     for (const auto& c : trial_configs) {
-      const bool global = std::holds_alternative<Global>(c.routing);
       const bool cost_only = std::holds_alternative<CostOnly>(c.routing);
+      if (cost_only && s.size() > 1 && !c.selection->multipath &&
+          c.selection->tie_break == EdgeTieBreak::PreferHigherPriority) {
+        continue;  // the pooled single-path rule
+      }
+      const bool global = std::holds_alternative<Global>(c.routing) && c.origin != Origin::Equal;
       const bool pinned = std::holds_alternative<Pinned>(c.routing);
       const std::vector<NodeId> cs = pinned ? std::vector<NodeId> {0} : s;
       const std::vector<NodeId> ct = pinned ? std::vector<NodeId> {t0} : t;
-      const auto r = sensitivity(*g, cs, ct, SensitivityOptions {c, elig}, 1 + pick(3));
+      const auto r = sensitivity(*g, cs, ct, QueryOptions {c, elig}, 1 + pick(3));
       // The baseline is capacity() itself, and the entries are the candidates in ascending order:
       // Global, the baseline's positive-flow edges; every other model, every allowed edge,
       // whatever its capacity.
-      const auto base = capacity(*g, cs, ct, CapacityOptions {c, elig, nullptr, OutputOptions {true, false, false}});
+      const auto base = capacity(*g, cs, ct, QueryOptions {c, elig, nullptr, OutputOptions {true, false, false}});
       ASSERT_EQ(r.baseline.placed, base.placed) << "trial " << trial;
       std::vector<EdgeId> candidates;
       for (EdgeId e = 0; e < g->num_edges(); ++e) {
@@ -1695,7 +1759,12 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
           candidates.push_back(e);
         }
       }
-      const std::string model = global ? " Global" : cost_only ? " CostOnly" : pinned ? " Pinned" : " CapacityAware";
+      const bool equal_global = std::holds_alternative<Global>(c.routing) && !global;
+      const std::string model = global          ? " Global"
+                                : equal_global  ? " Global equal"
+                                : cost_only     ? " CostOnly"
+                                : pinned        ? " Pinned"
+                                                : " CapacityAware";
       std::vector<EdgeId> listed;
       for (const auto& e : r.entries) listed.push_back(e.edge);
       ASSERT_EQ(listed, candidates) << "trial " << trial << model;
@@ -1704,7 +1773,7 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
         const EdgeId one[1] = {e};
         auto deleted = g->eligibility({}, one);
         if (elig != nullptr) deleted = Eligibility::intersect(*elig, deleted);
-        return base.placed - capacity(*g, cs, ct, CapacityOptions {c, &deleted}).placed;
+        return base.placed - capacity(*g, cs, ct, QueryOptions {c, &deleted}).placed;
       };
       for (const auto& e : r.entries) {
         const Amount want = loss(e.edge);
@@ -1713,6 +1782,7 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
         if (want != 0) ++(global ? global_losses : cost_only ? policy_losses : pinned ? pinned_losses : aware_losses);
         if (cost_only && want == 0) ++policy_zero;
         if (g->capacity_units()[static_cast<std::size_t>(e.edge)] == 0 && want != 0) ++zero_edge_losses;
+        if (want < 0) ++negative;
       }
       for (EdgeId e = 0; e < g->num_edges(); ++e) {
         if (std::find(listed.begin(), listed.end(), e) != listed.end()) continue;
@@ -1731,6 +1801,7 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
   EXPECT_GT(pinned_losses, 30);
   EXPECT_GT(pinned_trials, 20);
   EXPECT_GT(zero_edge_losses, 50);
+  EXPECT_GT(negative, 10);
   EXPECT_GT(absent, 500);
 }
 
@@ -1739,7 +1810,7 @@ TEST(Evaluators, SensitivityCandidatesAndSignedLosses) {
   // appears: 0 -> 1 of capacity 9 carries 4 (its tail 1 -> 2 holds 4) and its deletion
   // loses 4; a candidate set of saturated edges only would miss it.
   auto g = shared(make_graph(3, {{0, 1, 9, 1}, {1, 2, 4, 1}, {0, 2, 2, 5}}));
-  auto s = sensitivity(*g, v({0}), v({2}), SensitivityOptions {global_config()}, 1);
+  auto s = sensitivity(*g, v({0}), v({2}), QueryOptions {global_config()}, 1);
   EXPECT_EQ(s.baseline.placed, 6);
   EXPECT_FALSE(s.baseline.edge_flows.has_value());  // requested internally, not returned
   std::map<EdgeId, Amount> losses;
@@ -1754,7 +1825,7 @@ TEST(Evaluators, SensitivityCandidatesAndSignedLosses) {
   // third would cross the zero link. Without the thin link (members 1, 2): 1, loss 1; without the
   // wide link (0, 2): 1, loss 1; without the zero link (0, 1): 2, loss 0.
   auto p = shared(make_graph(2, {{0, 1, 1, 1}, {0, 1, 10, 1}, {0, 1, 0, 1}}));
-  const auto opts = SensitivityOptions {cost_only_config()};
+  const auto opts = QueryOptions {cost_only_config()};
   s = sensitivity(*p, v({0}), v({1}), opts, 1);
   EXPECT_EQ(s.baseline.placed, 2);
   // The exact (edge, loss) list in ascending EdgeId.
@@ -1770,7 +1841,7 @@ TEST(Evaluators, SensitivityCandidatesAndSignedLosses) {
   for (const auto& e : s4.entries) got4.emplace_back(e.edge, e.loss);
   EXPECT_EQ(got4, want);
   const auto el = p->eligibility({}, std::vector<EdgeId> {pin[0]});
-  const auto se = sensitivity(*p, v({0}), v({1}), SensitivityOptions {opts.cfg, &el}, 1);
+  const auto se = sensitivity(*p, v({0}), v({1}), QueryOptions {opts.config, &el}, 1);
   ASSERT_EQ(se.entries.size(), 2U);
   EXPECT_EQ(se.entries[0].edge, std::min(pin[1], pin[2]));
   EXPECT_EQ(se.entries[1].edge, std::max(pin[1], pin[2]));
@@ -1787,9 +1858,9 @@ TEST(Evaluators, SensitivityCandidatesAndSignedLosses) {
   // Invalid inputs propagate (before any worker).
   EXPECT_THROW((void)sensitivity(*p, v({0}), v({0}), opts, 1), std::invalid_argument);
   DagCache cache(*p);
-  EXPECT_THROW((void)sensitivity(*p, v({0}), v({1}), SensitivityOptions {opts.cfg, nullptr, &cache}, 2),
+  EXPECT_THROW((void)sensitivity(*p, v({0}), v({1}), QueryOptions {opts.config, nullptr, &cache}, 2),
                std::invalid_argument);
-  EXPECT_EQ(sensitivity(*p, v({0}), v({1}), SensitivityOptions {opts.cfg, nullptr, &cache}, 1).entries.size(), 3U);
+  EXPECT_EQ(sensitivity(*p, v({0}), v({1}), QueryOptions {opts.config, nullptr, &cache}, 1).entries.size(), 3U);
 }
 
 // The baseline is capacity() with the requested outputs, in every routing model; without a
@@ -1802,13 +1873,13 @@ TEST(Evaluators, SensitivityBaselineIsCapacityWithTheRequestedOutputs) {
   for (const auto& c : {global_config(), cost_only_config(),
                         cfg(CapacityAware {.flow_count = 2, .max_flow_count = 4}, FlowPlacement::MaxFlow),
                         cfg(pin, FlowPlacement::EqualBalanced)}) {
-    const auto s = sensitivity(*g, v({0}), v({3}), SensitivityOptions {c, nullptr, nullptr, all}, 1);
-    const auto want = capacity(*g, v({0}), v({3}), CapacityOptions {c, nullptr, nullptr, all});
+    const auto s = sensitivity(*g, v({0}), v({3}), QueryOptions {c, nullptr, nullptr, all}, 1);
+    const auto want = capacity(*g, v({0}), v({3}), QueryOptions {c, nullptr, nullptr, all});
     EXPECT_GT(want.placed, 0);
     ASSERT_TRUE(want.edge_flows.has_value() && want.residual.has_value() && want.bottleneck.has_value());
     expect_same(s.baseline, want, "sensitivity baseline with every output");
-    const auto plain = sensitivity(*g, v({0}), v({3}), SensitivityOptions {c}, 1);
-    expect_same(plain.baseline, capacity(*g, v({0}), v({3}), CapacityOptions {c}), "sensitivity baseline, no output");
+    const auto plain = sensitivity(*g, v({0}), v({3}), QueryOptions {c}, 1);
+    expect_same(plain.baseline, capacity(*g, v({0}), v({3}), QueryOptions {c}), "sensitivity baseline, no output");
   }
 }
 
@@ -1817,14 +1888,14 @@ TEST(Evaluators, SensitivityBaselineIsCapacityWithTheRequestedOutputs) {
 // candidate gets loss 0 without a placement. A supplied building cache shows which deletions were
 // placed: each placed deletion looks up its own fresh Eligibility uid (one miss and one entry),
 // after the baseline's one. Edges 0->2, 1->2, 2->3, 2->4, 3->5, 4->5 of 10 units at cost 1: all six
-// form the support toward 5. From source 0 the single path is 0->2->3->5, but 2->4 and 4->5, on no
-// baseline route, are in its reachable support and are re-evaluated (loss 0); 1->2 is not and is
-// skipped. From sources 0 and 1 the second source reaches 1->2 too.
+// form the support toward 5. From source 0 the MaxFlow controller sends 10 over 0->2->3->5 (the
+// lowest EdgeIds first), but 2->4 and 4->5, carrying nothing, are in its reachable support and are
+// re-evaluated (loss 0); 1->2 is not and is skipped. From sources 0 and 1 (pooled, 20) the second
+// source reaches 1->2 too, and every deletion loses 10.
 TEST(Evaluators, CostOnlySensitivityReevaluatesExactlyTheReachableSupport) {
   auto g = shared(make_graph(6, {{0, 2, 10, 1}, {1, 2, 10, 1}, {2, 3, 10, 1}, {2, 4, 10, 1}, {3, 5, 10, 1}, {4, 5, 10, 1}}));
   const auto in = id_of_input(*g);
-  const auto c = cfg(CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossless,
-                     sel(EdgeTieBreak::PreferHigherPriority, EdgePriority::Residual, false, true));
+  const auto c = cfg(CostOnly {}, FlowPlacement::MaxFlow);
   const auto losses_of = [&](const SensitivityResult& r) {
     std::map<std::size_t, Amount> out;  // by input position
     for (const auto& e : r.entries) {
@@ -1833,14 +1904,14 @@ TEST(Evaluators, CostOnlySensitivityReevaluatesExactlyTheReachableSupport) {
     return out;
   };
   DagCache one(*g);
-  const auto r1 = sensitivity(*g, v({0}), v({5}), SensitivityOptions {c, nullptr, &one}, 1);
+  const auto r1 = sensitivity(*g, v({0}), v({5}), QueryOptions {c, nullptr, &one}, 1);
   EXPECT_EQ(r1.baseline.placed, 10);
   EXPECT_EQ(losses_of(r1), (std::map<std::size_t, Amount> {{0, 10}, {1, 0}, {2, 0}, {3, 0}, {4, 0}, {5, 0}}));
   EXPECT_EQ(one.stats().hits, 0);
   EXPECT_EQ(one.stats().misses, 1 + 5);  // the baseline, then every candidate but 1->2
   EXPECT_EQ(one.stats().entries, 1 + 5);
   DagCache two(*g);
-  const auto r2 = sensitivity(*g, v({0, 1}), v({5}), SensitivityOptions {c, nullptr, &two}, 1);
+  const auto r2 = sensitivity(*g, v({0, 1}), v({5}), QueryOptions {c, nullptr, &two}, 1);
   EXPECT_EQ(r2.baseline.placed, 20);
   EXPECT_EQ(losses_of(r2), (std::map<std::size_t, Amount> {{0, 10}, {1, 10}, {2, 10}, {3, 10}, {4, 10}, {5, 10}}));
   EXPECT_EQ(two.stats().misses, 1 + 6);  // every candidate
@@ -1849,7 +1920,8 @@ TEST(Evaluators, CostOnlySensitivityReevaluatesExactlyTheReachableSupport) {
 
 // sensitivity's worker and cache rules are batch_capacity's, checked in its order before any work:
 // workers >= 1, the Eligibility's graph, the cache's graph, a supplied building cache only with
-// one worker; a frozen cache is shared by every worker.
+// one worker; a frozen cache is shared by every worker. A model that reads no cache (Global)
+// rejects one, frozen or not, after those checks.
 TEST(Evaluators, SensitivityChecksWorkersAndCachesAsTheBatchDoes) {
   auto g = diamond(5, 3);
   auto other = diamond(5, 3);
@@ -1857,7 +1929,7 @@ TEST(Evaluators, SensitivityChecksWorkersAndCachesAsTheBatchDoes) {
   DagCache foreign_cache(*other);
   DagCache building(*g);
   const auto first_error = [&](const Eligibility* elig, DagCache* cache, std::int32_t workers) {
-    return error_of([&] { (void)sensitivity(*g, v({0}), v({3}), SensitivityOptions {global_config(), elig, cache}, workers); });
+    return error_of([&] { (void)sensitivity(*g, v({0}), v({3}), QueryOptions {cost_only_config(), elig, cache}, workers); });
   };
   EXPECT_EQ(first_error(&foreign, &foreign_cache, 0), "workers must be >= 1 (got 0)");
   EXPECT_EQ(first_error(&foreign, &foreign_cache, 2), "foreign Eligibility: built for another graph");
@@ -1866,43 +1938,37 @@ TEST(Evaluators, SensitivityChecksWorkersAndCachesAsTheBatchDoes) {
             "a supplied building DagCache has one writer: it is rejected unless workers == 1 (got workers = 2; a "
             "frozen cache may be shared by every worker)");
   EXPECT_EQ(stats_of(building.stats()), stats_of(DagCache(*g).stats()));  // no lookup ran
-  const auto want = sensitivity(*g, v({0}), v({3}), SensitivityOptions {global_config()}, 1);
   building.freeze();
   for (const std::int32_t workers : {1, 2, 4}) {
-    const auto r = sensitivity(*g, v({0}), v({3}), SensitivityOptions {global_config(), nullptr, &building}, workers);
-    ASSERT_EQ(r.entries.size(), want.entries.size());
-    for (std::size_t i = 0; i < r.entries.size(); ++i) {
-      EXPECT_EQ(r.entries[i].edge, want.entries[i].edge);
-      EXPECT_EQ(r.entries[i].loss, want.entries[i].loss);
-    }
+    EXPECT_EQ(error_of([&] {
+                (void)sensitivity(*g, v({0}), v({3}), QueryOptions {global_config(), nullptr, &building}, workers);
+              }),
+              "Global does not use DagCache");
   }
+  EXPECT_EQ(stats_of(building.stats()), stats_of(DagCache(*g).stats()));
 }
 
-// Only CostOnly reads the cache: through an empty frozen cache Global, CapacityAware and Pinned
-// sensitivity give the entries of a call without a cache and count nothing; CostOnly's baseline
-// raises the miss.
+// Only CostOnly reads the cache: Global, CapacityAware and Pinned reject one (frozen too) before
+// any lookup and count nothing; CostOnly's baseline raises the miss of an empty frozen cache.
 TEST(Evaluators, SensitivityReadsTheCacheOnlyUnderCostOnly) {
   auto g = diamond(5, 3, 2);
   Pinned pin;
   pin.bundles = {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})};
   DagCache empty(*g);
   empty.freeze();
-  for (const auto& c : {global_config(), cfg(CapacityAware {.flow_count = 2, .max_flow_count = 4}, FlowPlacement::MaxFlow),
-                        cfg(pin, FlowPlacement::EqualBalanced)}) {
-    const auto want = sensitivity(*g, v({0}), v({3}), SensitivityOptions {c}, 1);
-    ASSERT_FALSE(want.entries.empty());
+  for (const auto& [c, model] :
+       {std::pair {global_config(), "Global"},
+        std::pair {cfg(CapacityAware {.flow_count = 2, .max_flow_count = 4}, FlowPlacement::MaxFlow), "T1"},
+        std::pair {cfg(pin, FlowPlacement::EqualBalanced), "Pinned"}}) {
     for (const std::int32_t workers : {1, 3}) {
-      const auto r = sensitivity(*g, v({0}), v({3}), SensitivityOptions {c, nullptr, &empty}, workers);
-      expect_same(r.baseline, want.baseline, "through an empty frozen cache");
-      ASSERT_EQ(r.entries.size(), want.entries.size());
-      for (std::size_t i = 0; i < r.entries.size(); ++i) {
-        EXPECT_EQ(r.entries[i].edge, want.entries[i].edge);
-        EXPECT_EQ(r.entries[i].loss, want.entries[i].loss);
-      }
+      EXPECT_EQ(error_of([&] {
+                  (void)sensitivity(*g, v({0}), v({3}), QueryOptions {c, nullptr, &empty}, workers);
+                }),
+                std::string(model) + " does not use DagCache");
     }
   }
   EXPECT_EQ(stats_of(empty.stats()), stats_of(DagCache(*g).stats()));
-  EXPECT_THROW((void)sensitivity(*g, v({0}), v({3}), SensitivityOptions {cost_only_config(), nullptr, &empty}, 1),
+  EXPECT_THROW((void)sensitivity(*g, v({0}), v({3}), QueryOptions {cost_only_config(), nullptr, &empty}, 1),
                DagCacheMiss);
   EXPECT_EQ(empty.stats().misses, 1);
 }

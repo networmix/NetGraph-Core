@@ -863,6 +863,50 @@ inline std::vector<Row> rows() {
                    return d.h;
                  });
                }});
+  // ---- pooled sources and the equal origin (step 2: several sources of one demand)
+  // Eight demands of eight source leaves each to one destination leaf on a Clos 64x32 (unit costs,
+  // links of 10..80): demand j has the leaves 8j..8j+7 and the leaf (8j + 36) mod 64. Every source
+  // splits over its 32 spines and the eight sources share each spine's one link into the
+  // destination: the pooled program, its attribution and (Lossless) its bisection. One ledger.
+  auto pooled_row = [](double volume, bool lossy) {
+    auto g = std::make_shared<Graph>(abaapi::build(gen_clos(64, 32, 22)));
+    std::vector<std::pair<std::vector<int>, int>> demands;
+    for (int j = 0; j < 8; ++j) {
+      std::vector<int> srcs;
+      for (int i = 0; i < 8; ++i) srcs.push_back(8 * j + i);
+      demands.push_back({srcs, (8 * j + 36) % 64});
+    }
+    return Iter([g, demands, volume, lossy] { return abaapi::pooled_place(*g, demands, volume, lossy); });
+  };
+  r.push_back({"pooled.ecmp.clos", "pooled",
+               "pooled CostOnly EqualBalanced Lossless placement, Clos 64x32, 8 demands of 8 source leaves to one leaf, "
+               "400 each on one ledger (the program, attribution and bisection over 8 x 32 + 32 links per demand)",
+               [=] { return pooled_row(400.0, false); }});
+  r.push_back({"pooled.lossy.clos", "pooled",
+               "pooled CostOnly EqualBalanced Lossy placement, the same Clos and demands, 4,000 each (above capacity: "
+               "drops attributed by highest averages on every shared spine link)",
+               [=] { return pooled_row(4000.0, true); }});
+  r.push_back({"global.equal.random", "global",
+               "capacity() of Global with the equal origin, random 1024 x6, 2 demands of 4 sources (the bisection's "
+               "probe solves and the final solve)",
+               [] {
+                 auto g = std::make_shared<Graph>(abaapi::build(gen_random(1024, 6, 23)));
+                 const std::vector<std::pair<std::vector<int>, int>> demands = {{{1, 257, 513, 769}, 600},
+                                                                                {{50, 300, 550, 800}, 999}};
+                 return Iter([g, demands] {
+                   Digest d;
+                   for (const auto& [srcs, dst] : demands) d.add(abaapi::global_equal_capacity(*g, srcs, dst));
+                   return d.h;
+                 });
+               }});
+  r.push_back({"sens.equal_global", "sensitivity",
+               "sensitivity() of Global with the equal origin (every edge a candidate, each solved afresh with its "
+               "bisection), random 64 x4 (256 edges), 3 sources to one destination",
+               [] {
+                 auto g = std::make_shared<Graph>(abaapi::build(gen_random(64, 4, 24)));
+                 const std::vector<int> srcs = {1, 17, 33};
+                 return Iter([g, srcs] { return abaapi::sensitivity_equal_global(*g, srcs, 50); });
+               }});
   // ---- cohort placement (TE_ECMP presets)
   auto cohort_row = [](int min_flows, int max_flows) {
     auto f = gen_fabric3(4, 8, 4, 8, 21);

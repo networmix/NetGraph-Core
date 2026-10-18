@@ -1394,8 +1394,8 @@ TEST(Sensitivity, GlobalLossesEqualCapacityWithTheEdgeExcluded) {
   int entries = 0, masked = 0, several = 0, scaled = 0, rerouted = 0, partial = 0, cut = 0;
   for (int trial = 0; trial < 300; ++trial) {
     const Case c = random_case(rng);
-    const SensitivityOptions opts {global_config(), c.el()};
-    const auto base = capacity(*c.g, c.sources, c.destinations, CapacityOptions {global_config(), c.el(), nullptr,
+    const QueryOptions opts {global_config(), c.el()};
+    const auto base = capacity(*c.g, c.sources, c.destinations, QueryOptions {global_config(), c.el(), nullptr,
                                                                                  OutputOptions {true, false, false}});
     const auto s1 = sensitivity(*c.g, c.sources, c.destinations, opts, 1);
     EXPECT_EQ(s1.baseline.placed, base.placed) << trial;
@@ -1412,7 +1412,7 @@ TEST(Sensitivity, GlobalLossesEqualCapacityWithTheEdgeExcluded) {
       const EdgeId one[1] = {entry.edge};
       Eligibility without = c.g->eligibility({}, one);
       if (c.elig) without = Eligibility::intersect(*c.elig, without);
-      const auto fresh = capacity(*c.g, c.sources, c.destinations, CapacityOptions {global_config(), &without});
+      const auto fresh = capacity(*c.g, c.sources, c.destinations, QueryOptions {global_config(), &without});
       EXPECT_EQ(entry.loss, base.placed - fresh.placed) << trial << " edge " << entry.edge;
       auto without_view = caps;
       without_view[static_cast<std::size_t>(entry.edge)] = 0;
@@ -1450,14 +1450,14 @@ TEST(Sensitivity, GlobalLossesEqualCapacityWithTheEdgeExcluded) {
 TEST(Sensitivity, GlobalBaselineKeepsEveryOutputsCombination) {
   const Case c = make_case(5, {{0, 1, 2, 1}, {1, 2, 2, 1}, {1, 3, 1, 2}, {3, 2, 1, 2}, {2, 4, 2, 1}, {0, 3, 1, 5}},
                            {0}, {4});
-  const auto reference = sensitivity(*c.g, c.sources, c.destinations, SensitivityOptions {global_config()}, 1);
+  const auto reference = sensitivity(*c.g, c.sources, c.destinations, QueryOptions {global_config()}, 1);
   ASSERT_FALSE(reference.entries.empty());
-  for (int bits = 0; bits < 8; ++bits) {
-    const OutputOptions outputs {(bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0};
-    SensitivityOptions opts {global_config()};
+  for (int bits = 0; bits < 16; ++bits) {
+    const OutputOptions outputs {(bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0, (bits & 8) != 0};
+    QueryOptions opts {global_config()};
     opts.outputs = outputs;
     const auto s = sensitivity(*c.g, c.sources, c.destinations, opts, 1);
-    const auto cap = capacity(*c.g, c.sources, c.destinations, CapacityOptions {global_config(), nullptr, nullptr, outputs});
+    const auto cap = capacity(*c.g, c.sources, c.destinations, QueryOptions {global_config(), nullptr, nullptr, outputs});
     EXPECT_EQ(s.baseline.placed, cap.placed) << bits;
     EXPECT_EQ(s.baseline.cost_distribution, cap.cost_distribution) << bits;
     EXPECT_EQ(s.baseline.edge_flows, cap.edge_flows) << bits;
@@ -1465,11 +1465,11 @@ TEST(Sensitivity, GlobalBaselineKeepsEveryOutputsCombination) {
     EXPECT_EQ(s.baseline.bottleneck, cap.bottleneck) << bits;
     EXPECT_EQ(s.baseline.min_cut, cap.min_cut) << bits;
     // Each requested output is present, each other one absent; Global's curve always, and its
-    // min_cut with bottleneck (the uncapped baseline is maximal).
+    // min_cut when requested (the uncapped baseline is maximal).
     EXPECT_EQ(s.baseline.edge_flows.has_value(), outputs.edge_flows) << bits;
     EXPECT_EQ(s.baseline.residual.has_value(), outputs.residual) << bits;
     EXPECT_EQ(s.baseline.bottleneck.has_value(), outputs.bottleneck) << bits;
-    EXPECT_EQ(s.baseline.min_cut.has_value(), outputs.bottleneck) << bits;
+    EXPECT_EQ(s.baseline.min_cut.has_value(), outputs.min_cut) << bits;
     EXPECT_TRUE(s.baseline.cost_distribution.has_value()) << bits;
     ASSERT_EQ(s.entries.size(), reference.entries.size()) << bits;
     for (std::size_t i = 0; i < s.entries.size(); ++i) {

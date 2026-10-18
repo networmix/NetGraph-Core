@@ -1,4 +1,4 @@
-// The enumerations of the placement and selection axes, and PathSelection.
+// The enumerations of the placement, origin and selection axes, and PathSelection.
 #include <pybind11/pybind11.h>
 
 #include <string>
@@ -13,21 +13,30 @@ namespace netgraph::core::bindings {
 
 void register_axes(py::module_& m) {
   py::enum_<FlowPlacement>(m, "FlowPlacement",
-                           "How one flow spreads over its route (its kernel). MAX_FLOW: the minimum-cost flow core, re-solved\n"
-                           "on the flow's route over the free capacity plus the flow's own allocation (it may move its own\n"
-                           "earlier placement, never another flow's). WEIGHTED (WCMP, weighted-cost multipath): every node\n"
-                           "splits in proportion to weights fixed when the flow is created (highest averages: whole-unit\n"
-                           "shares as close to proportional as possible). EQUAL_BALANCED (ECMP, equal-cost multipath): every\n"
-                           "node splits equally, by round robin.")
+                           "How traffic spreads over the routes (CostOnly's kernel; CapacityAware and Pinned flows too).\n"
+                           "MAX_FLOW: the minimum-cost flow core over the routes (a controller restricted to them), re-solved\n"
+                           "over the free capacity plus the policy's own allocation (it may move its own earlier placement,\n"
+                           "never another's). WEIGHTED (WCMP, weighted-cost multipath): every node splits in proportion to\n"
+                           "weights fixed when the routes are prepared (highest averages: whole-unit shares as close to\n"
+                           "proportional as possible). EQUAL_BALANCED (ECMP, equal-cost multipath): every node splits\n"
+                           "equally, by round robin.")
       .value("MAX_FLOW", FlowPlacement::MaxFlow)
       .value("WEIGHTED", FlowPlacement::Weighted)
       .value("EQUAL_BALANCED", FlowPlacement::EqualBalanced);
 
   py::enum_<Admission>(m, "Admission",
-                       "LOSSLESS admits only what fits; LOSSY forwards hop by hop without admission control and\n"
-                       "drops what does not fit on each edge (EQUAL_BALANCED and WEIGHTED only).")
+                       "LOSSLESS admits the largest total the routes carry with no loss at all; LOSSY sends the whole\n"
+                       "finite offer hop by hop and records where it is lost (EQUAL_BALANCED and WEIGHTED only).")
       .value("LOSSLESS", Admission::Lossless)
       .value("LOSSY", Admission::Lossy);
+
+  py::enum_<Origin>(m, "Origin",
+                    "How a demand's traffic enters at its sources, separately from how it is routed. EQUAL: round\n"
+                    "robin over the roster (ascending NodeId, the first sources one unit more); a source whose share\n"
+                    "cannot go anywhere keeps it and loses it (LOSSLESS then admits only totals that give it\n"
+                    "nothing). OPTIMIZED: the controller chooses the injections (one virtual source).")
+      .value("EQUAL", Origin::Equal)
+      .value("OPTIMIZED", Origin::Optimized);
 
   py::enum_<EdgeTieBreak>(m, "EdgeTieBreak",
                           "How a search breaks cost ties. Between parallel members of one (u, v) pair\n"
@@ -57,13 +66,13 @@ void register_axes(py::module_& m) {
       .value("REVERSE", Direction::Reverse);
 
   py::class_<PathSelection>(m, "PathSelection",
-                            "The selection of a search: tie_break and priority are explicit; multipath = True keeps\n"
-                            "every equal-cost walk (the DAG), False the one canonical single path; multi_edge = True\n"
-                            "keeps every eligible parallel member, False one per (u, v) pair. A tie_break or priority\n"
-                            "outside its enumeration raises ValueError.")
+                            "The selection of a search or a policy: tie_break (DETERMINISTIC by default), priority\n"
+                            "(CAPACITY by default); multipath = True keeps every equal-cost walk (the DAG), False the one\n"
+                            "canonical single path; multi_edge = True keeps every eligible parallel member, False one per\n"
+                            "(u, v) pair. A tie_break or priority outside its enumeration raises ValueError.")
       // The constructor checks both enumerations (ValueError naming the field).
-      .def(py::init<EdgeTieBreak, EdgePriority, bool, bool>(), py::arg("tie_break"), py::arg("priority"),
-           py::arg("multipath") = true, py::arg("multi_edge") = true)
+      .def(py::init<EdgeTieBreak, EdgePriority, bool, bool>(), py::arg_v("tie_break", EdgeTieBreak::Deterministic, "EdgeTieBreak.DETERMINISTIC"),
+           py::arg_v("priority", EdgePriority::Capacity, "EdgePriority.CAPACITY"), py::arg("multipath") = true, py::arg("multi_edge") = true)
       .def_readonly("tie_break", &PathSelection::tie_break, "the EdgeTieBreak")
       .def_readonly("priority", &PathSelection::priority, "the EdgePriority")
       .def_readonly("multipath", &PathSelection::multipath,

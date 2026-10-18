@@ -31,15 +31,9 @@ namespace netgraph::core::bindings {
 
 namespace {
 
-// The Python form of CapacityOptions and SensitivityOptions: the Eligibility and the cache are
+// The Python form of QueryOptions: the Eligibility and the cache are
 // held by reference count for the call (the C++ structs borrow raw pointers).
-struct PyCapacityOptions {
-  FlowPolicyConfig config;
-  std::shared_ptr<Eligibility> elig;
-  std::shared_ptr<DagCache> cache;
-  OutputOptions outputs;
-};
-struct PySensitivityOptions {
+struct PyQueryOptions {
   FlowPolicyConfig config;
   std::shared_ptr<Eligibility> elig;
   std::shared_ptr<DagCache> cache;
@@ -61,32 +55,22 @@ std::int32_t workers_of(const py::object& workers, bool sensitivity, bool cache_
 } // namespace
 
 void register_evaluators(py::module_& m) {
-  py::class_<PyCapacityOptions>(m, "CapacityOptions",
-                                "The configuration, the static Eligibility (None: all allowed), the DagCache (None:\n"
-                                "private per worker) and the optional outputs of capacity() and batch_capacity().")
+  py::class_<PyQueryOptions>(m, "QueryOptions",
+                             "The options of every evaluator (capacity, batch_capacity, sensitivity): the configuration,\n"
+                             "the static Eligibility (None: all allowed), the DagCache (None: private per worker) and\n"
+                             "the optional outputs of each result (sensitivity: of its baseline).")
       .def(py::init([](const FlowPolicyConfig& config, const std::shared_ptr<Eligibility>& elig,
                        const std::shared_ptr<DagCache>& cache, const py::object& outputs) {
-             return PyCapacityOptions {config, elig, cache, outputs_of(outputs)};
+             return PyQueryOptions {config, elig, cache, outputs_of(outputs)};
            }),
            py::arg("config"), py::kw_only(), py::arg("elig") = nullptr, py::arg("cache") = nullptr,
            py::arg("outputs") = py::none())
-      .def_readonly("config", &PyCapacityOptions::config, "the FlowPolicyConfig of every evaluated policy")
-      .def_readonly("elig", &PyCapacityOptions::elig, "the static Eligibility; None: everything allowed")
-      .def_readonly("cache", &PyCapacityOptions::cache, "the supplied DagCache; None: a private cache per worker")
-      .def_readonly("outputs", &PyCapacityOptions::outputs, "the OutputOptions of every result");
-
-  py::class_<PySensitivityOptions>(m, "SensitivityOptions",
-                                   "The configuration, Eligibility, DagCache and baseline outputs of sensitivity().")
-      .def(py::init([](const FlowPolicyConfig& config, const std::shared_ptr<Eligibility>& elig,
-                       const std::shared_ptr<DagCache>& cache, const py::object& outputs) {
-             return PySensitivityOptions {config, elig, cache, outputs_of(outputs)};
-           }),
-           py::arg("config"), py::kw_only(), py::arg("elig") = nullptr, py::arg("cache") = nullptr,
-           py::arg("outputs") = py::none())
-      .def_readonly("config", &PySensitivityOptions::config, "the FlowPolicyConfig of the baseline and every deletion")
-      .def_readonly("elig", &PySensitivityOptions::elig, "the static Eligibility; None: everything allowed")
-      .def_readonly("cache", &PySensitivityOptions::cache, "the supplied DagCache; None: a private cache per worker")
-      .def_readonly("outputs", &PySensitivityOptions::outputs, "the OutputOptions of the baseline result");
+      .def_readonly("config", &PyQueryOptions::config,
+                    "the FlowPolicyConfig of every evaluated policy (sensitivity: the baseline and every deletion)")
+      .def_readonly("elig", &PyQueryOptions::elig, "the static Eligibility; None: everything allowed")
+      .def_readonly("cache", &PyQueryOptions::cache, "the supplied DagCache; None: a private cache per worker")
+      .def_readonly("outputs", &PyQueryOptions::outputs,
+                    "the OutputOptions of every result (sensitivity: of the baseline)");
 
   py::class_<SensitivityEntry>(m, "SensitivityEntry",
                                 "One candidate edge: edge and loss (int units: the baseline minus the capacity without the\n"
@@ -107,10 +91,10 @@ void register_evaluators(py::module_& m) {
       [](const std::shared_ptr<Graph>& graph, const py::object& sources, const py::object& destinations,
          const py::object& opts) {
         if (!graph) throw py::value_error("graph must be a Graph");
-        const auto o = options_of<PyCapacityOptions>(opts, "CapacityOptions");
+        const auto o = options_of<PyQueryOptions>(opts, "QueryOptions");
         const auto s = node_ids(sources, graph->num_nodes(), "sources");
         const auto d = node_ids(destinations, graph->num_nodes(), "destinations");
-        const CapacityOptions c {o.config, o.elig.get(), o.cache.get(), o.outputs};
+        const QueryOptions c {o.config, o.elig.get(), o.cache.get(), o.outputs};
         // One public call on a frozen cache's statistics, its result object included: its hits count
         // only when the Python result exists.
         return detail::frozen_call(c.cache, [&](detail::FrozenTally& tally) {
@@ -124,8 +108,9 @@ void register_evaluators(py::module_& m) {
       },
       py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("opts"),
       "place(+inf) of a FlowPolicy with opts.config on a fresh ledger of the graph -> PlacementResult.\n"
-      "The exact maximum flow is the Global + MAX_FLOW configuration. A supplied frozen cache raises\n"
-      "DagCacheMiss for an absent key, unchanged.\n"
+      "The exact maximum flow is Global() (the optimized origin); with origin=EQUAL, the largest total whose\n"
+      "round-robin source shares are all carried. A supplied frozen cache raises DagCacheMiss for an absent\n"
+      "key, unchanged.\n"
       "A failed call raises; a supplied DagCache then behaves as the DagCache docstring states.");
 
   m.def(
@@ -135,9 +120,9 @@ void register_evaluators(py::module_& m) {
         if (!graph) throw py::value_error("graph must be a Graph");
         // The arguments first, then each pair completely and in pair order (the same two parts
         // as the C++ validation), so the lowest failing pair index is reported.
-        const auto o = options_of<PyCapacityOptions>(opts, "CapacityOptions");
+        const auto o = options_of<PyQueryOptions>(opts, "QueryOptions");
         const auto w = workers_of(workers, false, static_cast<bool>(o.cache));
-        const CapacityOptions c {o.config, o.elig.get(), o.cache.get(), o.outputs};
+        const QueryOptions c {o.config, o.elig.get(), o.cache.get(), o.outputs};
         detail::check_batch_arguments(*graph, c, w);
         if (not_a_sequence(pairs)) throw py::value_error("pairs must be a sequence of (sources, destinations)");
         const auto items = py::reinterpret_borrow<py::sequence>(pairs);
@@ -174,7 +159,7 @@ void register_evaluators(py::module_& m) {
             }
             per.push_back(e);
           }
-          detail::check_batch_pair(*graph, src, dst, e, i);
+          detail::check_batch_pair(*graph, c.config, src, dst, e, i);
           ps.emplace_back(std::move(src), std::move(dst));
         }
         return detail::frozen_call(c.cache, [&](detail::FrozenTally& tally) {
@@ -210,11 +195,11 @@ void register_evaluators(py::module_& m) {
       [](const std::shared_ptr<Graph>& graph, const py::object& sources, const py::object& destinations,
          const py::object& opts, const py::object& workers) {
         if (!graph) throw py::value_error("graph must be a Graph");
-        const auto o = options_of<PySensitivityOptions>(opts, "SensitivityOptions");
+        const auto o = options_of<PyQueryOptions>(opts, "QueryOptions");
         const auto s = node_ids(sources, graph->num_nodes(), "sources");
         const auto d = node_ids(destinations, graph->num_nodes(), "destinations");
         const auto w = workers_of(workers, true, static_cast<bool>(o.cache));
-        const SensitivityOptions c {o.config, o.elig.get(), o.cache.get(), o.outputs};
+        const QueryOptions c {o.config, o.elig.get(), o.cache.get(), o.outputs};
         return detail::frozen_call(c.cache, [&](detail::FrozenTally& tally) {
           SensitivityResult r;
           {
@@ -225,12 +210,14 @@ void register_evaluators(py::module_& m) {
         });
       },
       py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("opts"), py::arg("workers") = py::none(),
-      "The baseline capacity() and one SensitivityEntry per candidate edge. Candidates: with Global, the\n"
-      "edges that carry flow in the baseline (removing any other edge cannot lower a maximum flow); with\n"
-      "the other routings, every allowed edge, whatever its capacity (an edge of capacity 0 can carry a\n"
-      "route, so deleting it can change the result). loss = baseline.placed minus the placed of\n"
-      "capacity() without the edge, in signed units, never thresholded. Two shortcuts give exactly\n"
-      "that value: Global repairs a copy of the baseline's solve instead of solving again, and CostOnly\n"
+      "The baseline capacity() and one SensitivityEntry per candidate edge. Candidates: with Global and\n"
+      "the optimized origin, the edges that carry flow in the baseline (removing any other edge cannot\n"
+      "lower a maximum flow); otherwise every allowed edge, whatever its capacity (an edge of capacity 0\n"
+      "can carry a route, so deleting it can change the result, and with the equal origin a deletion that\n"
+      "removes a source from the roster can raise the total: a negative loss). loss = baseline.placed\n"
+      "minus the placed of capacity() without the edge, in signed units, never thresholded. Two\n"
+      "shortcuts give exactly that value: optimized Global repairs a copy of the baseline's solve\n"
+      "instead of solving again, and CostOnly\n"
       "gives loss 0 without placing to an edge outside the static shortest-path support reachable from\n"
       "the roster sources (no route can use it). workers as batch_capacity\n"
       "(NGRAPH_CORE_SENSITIVITY_THREADS). Only CostOnly reads the cache, and each placed deletion uses a\n"

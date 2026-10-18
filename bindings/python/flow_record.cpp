@@ -25,7 +25,7 @@ void register_flow_record(py::module_& m) {
   py::class_<FlowRecord>(
       m, "FlowRecord",
       "One flow of a ledger, as a snapshot: flow_id (ledger uid, id), owner (the policy's id),\n"
-      "sources, destinations, placement, admission, bundle (PredDAG: the flow's route),\n"
+      "sources, destinations, admission, bundle (PredDAG: the flow's route),\n"
       "route_cost (its minimum walk cost; None when empty), offered (Lossy only, else None),\n"
       "delivered, edges [(EdgeId, units)] and drops [(EdgeId, units)] (cumulative, ascending\n"
       "EdgeId). offered and the drops units are exact Python ints (they may exceed 64 bits).")
@@ -35,7 +35,6 @@ void register_flow_record(py::module_& m) {
       .def_readonly("owner", &FlowRecord::owner, "the ledger-local id of the policy that created the flow")
       .def_readonly("sources", &FlowRecord::sources, "the flow's source node ids, ascending")
       .def_readonly("destinations", &FlowRecord::destinations, "the flow's destination node ids, ascending")
-      .def_readonly("placement", &FlowRecord::placement, "the FlowPlacement (kernel) that spreads the flow over its route")
       .def_readonly("admission", &FlowRecord::admission, "LOSSLESS or LOSSY")
       .def_property_readonly(
           "bundle", [](const FlowRecord& r) { return std::const_pointer_cast<PredDAG>(r.bundle); },

@@ -140,7 +140,8 @@ def co(kernel, adm=LOSSLESS, sel=None):
 
 
 def glob():
-    return P.FlowPolicyConfig(P.Global(), MF, LOSSLESS, search.Selection())
+    # Step 2: Global takes neither a placement nor a selection.
+    return P.FlowPolicyConfig(P.Global(), None, LOSSLESS, None)
 
 
 class Ctx:
@@ -597,13 +598,13 @@ def lossy_diamond(s: PSnap):
     a = s.place("request 10", pol, 10)
     s.expect(
         "first",
-        (a.placed, a.termination, a.remaining, a.drops),
+        (a.placed, a.termination, a.remaining, a.call_drops),
         (6, "complete", 4, [(tail, 4)]),
     )
     b = s.place("request 1", pol, 1)
     s.expect(
         "second",
-        (b.placed, b.termination, b.remaining, b.drops),
+        (b.placed, b.termination, b.remaining, b.call_drops),
         (0, "complete", 1, [(tail, 1)]),
     )
     rec = pol.records()[0]
@@ -1350,12 +1351,13 @@ def two_direct(caps, costs=(1, 1)):
     "sources_lossy_per_source",
     "sources",
     ["24", "26", "19", "9.3"],
-    "Lossy per source (replaces the zero-cost forward-versus-reverse witness): "
-    "sources 0 and 1 reach 3 through X (0->X 4, 1->X 4, X->3 3) and source 1 also "
-    "through Y (1->Y 4, Y->3 4, cost 2 each). Request 8 offers [4, 4]; source 0 "
-    "places 3 and drops 1 on X->3; source 1's DAG is its own shortest walks (1->X->3 "
-    "only, cost 2 < 4) and the full X->3 drops its 4. Delivered 3, complete (both "
-    "offers injected).",
+    "Lossy with pooled sources (replaces the zero-cost forward-versus-reverse witness; "
+    "step 2, contract r8 5.1 and 9.1): sources 0 and 1 reach 3 through X (0->X 4, 1->X "
+    "4, X->3 3) and source 1 also through Y (1->Y 4, Y->3 4, cost 2 each). Request 8 "
+    "offers [4, 4]; source 1's routes are its own shortest walks (1->X->3 only, cost 2 < "
+    "4); router X holds 8 and sends it all on X->3, attributed [4, 4]; the link carries "
+    "3 = H(3, [4, 4]) = [2, 1]: source 0 delivers 2 and drops 2, source 1 delivers 1 "
+    "and drops 3. Delivered 3, complete.",
 )
 def sources_lossy(s: PSnap):
     edges = [(0, 3, 4, 1), (1, 3, 4, 1), (3, 5, 3, 1), (1, 4, 4, 2), (4, 5, 4, 2)]
@@ -1369,12 +1371,12 @@ def sources_lossy(s: PSnap):
     s.expect(
         "source 0",
         (recs[0].delivered, dict_to_input(c.g, recs[0].drops)),
-        (3, [0, 0, 1, 0, 0]),
+        (2, [0, 0, 2, 0, 0]),
     )
     s.expect(
         "source 1",
         (recs[1].delivered, dict_to_input(c.g, recs[1].drops)),
-        (0, [0, 0, 4, 0, 0]),
+        (1, [0, 0, 3, 0, 0]),
     )
 
 
@@ -1384,9 +1386,10 @@ def sources_lossy(s: PSnap):
     ["24", "26", "12", "9.3"],
     "Sources A (A->T 1, cost 1) and B (B->M 10, M->T 2, cost 1 each). Lossy "
     "request 20 (offers [10, 10]): A delivers 1 and drops 9 on A->T; B delivers 2 "
-    "and drops 8 on M->T; placed 3, complete. MaxFlow, Weighted and EB per source: "
-    "1 + 2 = 3, exhausted (the old pseudo-root EB gave 2). Route costs per record: "
-    "1 and 2.",
+    "and drops 8 on M->T; placed 3, complete. Lossless (step 2): MaxFlow is a controller "
+    "with the optimized origin, 1 + 2 = 3; Weighted and EB have the equal origin, the "
+    "largest total whose round-robin shares fit: 2 ([1, 1]; 3 would give A 2). All "
+    "exhausted. Route costs per record: 1 and 2.",
 )
 def sources_attribution(s: PSnap):
     c = Ctx(s, "attribution", (4, [(0, 3, 1, 1), (1, 2, 10, 1), (2, 3, 2, 1)]))
@@ -1415,14 +1418,14 @@ def sources_attribution(s: PSnap):
         ),
         (10, 2, 8, 2),
     )
-    for kernel in (MF, W, EB):
+    for kernel, want in ((MF, (3, [1, 2])), (W, (2, [1, 1])), (EB, (2, [1, 1]))):
         fg = c.ledger()
         pol = P.FlowPolicy(fg, [0, 1], 3, co(kernel))
         r = s.place(f"{kernel} 20", pol, 20, fg=fg)
         s.expect(
             f"{kernel}",
             (r.placed, r.termination, [x.delivered for x in pol.records()]),
-            (3, "exhausted", [1, 2]),
+            (want[0], "exhausted", want[1]),
         )
 
 
@@ -1430,10 +1433,10 @@ def sources_attribution(s: PSnap):
     "sources_eb_per_source",
     "sources",
     ["26", "9.3"],
-    "EqualBalanced per source (independent routers, rule 26): A (A->T 4, cost 1) "
-    "and B (B->T 10, cost 2). Request 20 offers [10, 10]: A places 4, B places 10, "
-    "total 14 (the old pseudo-root flow with joint equalisation capped both at 4: "
-    "8). +inf also 14.",
+    "EqualBalanced with the equal origin (step 2, contract r8 3.4 and 5.1): A (A->T 4, "
+    "cost 1) and B (B->T 10, cost 2). Lossless admits the largest total whose round-robin "
+    "shares fit: 8 ([4, 4]; 9 would give A 5). +inf also 8. (Independent per-source "
+    "placement, the rule before step 2, gave 4 + 10 = 14.)",
 )
 def sources_eb(s: PSnap):
     c = Ctx(s, "two_direct", two_direct((4, 10), (1, 2)))
@@ -1444,7 +1447,7 @@ def sources_eb(s: PSnap):
         s.expect(
             f"EB {v}",
             (r.placed, r.termination, [x.delivered for x in pol.records()]),
-            (14, term, [4, 10]),
+            (8, term, [4, 4]),
         )
 
 
@@ -1469,18 +1472,18 @@ def sources_augmentation(s: PSnap):
     "sources_inf_every_kernel",
     "sources",
     ["24", "15", "9.3"],
-    "+inf per source on the attribution graph: MaxFlow 3, Weighted 3, EB 3 "
-    "(exhausted); Lossy injects every source member to its residual (A 1, B 10): "
-    "delivered 3, offered 11, drops 8, exhausted.",
+    "+inf on the attribution graph: MaxFlow 3 (optimized origin), Weighted 2 and EB 2 "
+    "(equal origin: [1, 1]) (exhausted); Lossy injects every source member to its "
+    "residual (A 1, B 10): delivered 3, offered 11, drops 8, exhausted.",
 )
 def sources_inf(s: PSnap):
     c = Ctx(s, "attribution", (4, [(0, 3, 1, 1), (1, 2, 10, 1), (2, 3, 2, 1)]))
-    for kernel in (MF, W, EB):
+    for kernel, want in ((MF, 3), (W, 2), (EB, 2)):
         fg = c.ledger()
         r = s.place(
             f"{kernel} +inf", P.FlowPolicy(fg, [0, 1], 3, co(kernel)), INF, fg=fg
         )
-        s.expect(f"{kernel}", (r.placed, r.termination), (3, "exhausted"))
+        s.expect(f"{kernel}", (r.placed, r.termination), (want, "exhausted"))
     fg = c.ledger()
     pol = P.FlowPolicy(fg, [0, 1], 3, co(EB, LOSSY))
     r = s.place("Lossy +inf", pol, INF, fg=fg)
@@ -1531,12 +1534,12 @@ def sources_validation(s: PSnap):
     "sources_maxflow_vs_global",
     "sources",
     ["24", "27", "9.3"],
-    "Independent sources versus the controller: 0->2 (cost 2), 1->2 (cost 1), "
-    "2->3 (cost 1) and 0->3 (cost 5), unit capacities. CostOnly MaxFlow per source: "
-    "source 0's DAG is its shortest walk 0->2->3 (cost 3) and takes the shared "
-    "edge; source 1 then finds 2->3 full: +inf places 1. Global's unique optimum "
-    "(cost 7 against 8) routes source 0 over 0->3 and source 1 over 1->2->3: 2 (the "
-    "per-source DAGs cannot cancel across sources).",
+    "Shortest routes versus the whole graph: 0->2 (cost 2), 1->2 (cost 1), 2->3 "
+    "(cost 1) and 0->3 (cost 5), unit capacities. CostOnly MaxFlow (step 2) is one "
+    "controller on the union of the sources' shortest walks, 0->2->3 (cost 3) and "
+    "1->2->3: the shared edge 2->3 limits +inf to 1 (0->3 is on no source's shortest "
+    "walk). Global's unique optimum (cost 7 against 8) routes source 0 over 0->3 and "
+    "source 1 over 1->2->3: 2.",
 )
 def sources_vs_global(s: PSnap):
     c = Ctx(
@@ -1546,7 +1549,7 @@ def sources_vs_global(s: PSnap):
     r = s.place(
         "CostOnly MaxFlow +inf", P.FlowPolicy(fg, [0, 1], 3, co(MF)), INF, fg=fg
     )
-    s.expect("per source", r.placed, 1)
+    s.expect("union of the shortest walks", r.placed, 1)
     fg = c.ledger()
     pg = P.FlowPolicy(fg, [0, 1], 3, glob())
     r = s.place("Global +inf", pg, INF, fg=fg)
@@ -1562,11 +1565,12 @@ def sources_vs_global(s: PSnap):
     "sources_split_cumulative",
     "sources",
     ["24", "16.7", "9.3"],
-    "The source split is over the cumulative request (16.7): sources A, B, C with "
-    "direct links of 10. place(1); place(1) offers [1, 0, 0] then [0, 1, 0] (round "
-    "robin of 2 is [1, 1, 0]), identical to place(2); a per-call split would offer "
-    "[1, 0, 0] twice (control). Lossy follows the same cumulative split: two calls "
-    "of 1 over two sources offer [1, 1].",
+    "Cumulative requests (16.7; step 2): sources A, B, C with direct links of 10. "
+    "CostOnly MaxFlow is a controller with the optimized origin that re-solves the "
+    "cumulative value from zero: place(1); place(1) supplies [1, 0, 0] then [2, 0, 0] "
+    "(the root's arc to the lowest NodeId first, its path takes both units), identical "
+    "to place(2). Lossy follows the cumulative round-robin split: two calls of 1 over "
+    "two sources offer [1, 0] then [0, 1].",
 )
 def sources_split(s: PSnap):
     c = Ctx(s, "three_direct", (4, [(0, 3, 10, 1), (1, 3, 10, 1), (2, 3, 10, 1)]))
@@ -1575,14 +1579,13 @@ def sources_split(s: PSnap):
     a = s.place("call 1", pol, 1)
     b = s.place("call 2", pol, 1)
     s.expect(
-        "offers",
-        (a.trace["offers"], b.trace["offers"]),
-        ({0: 1, 1: 0, 2: 0}, {0: 0, 1: 1, 2: 0}),
+        "supplies",
+        (a.trace["flow_core"]["supply"], b.trace["flow_core"]["supply"]),
+        ({0: 1, 1: 0, 2: 0}, {0: 2, 1: 0, 2: 0}),
     )
     fg2 = c.ledger()
     s.place("one call of 2", P.FlowPolicy(fg2, [0, 1, 2], 3, co(MF)), 2, fg=fg2)
     s.expect("1 + 1 equals 2", c.alloc(fg), c.alloc(fg2))
-    s.expect("per-call split control differs", [1, 0, 0] + [1, 0, 0] != [1, 1, 0], True)
     c2 = Ctx(s, "two_direct", two_direct((5, 5)))
     fg3 = c2.ledger()
     lp = P.FlowPolicy(fg3, [0, 1], 2, co(EB, LOSSY))
@@ -1599,27 +1602,31 @@ def sources_split(s: PSnap):
     "sources_1_9_request_4",
     "sources",
     ["24", "9.3", "9.4"],
-    "Review-13 source budget witness: sources with capacities [1, 9], request 4 "
-    "offers [2, 2]; deliveries [1, 2]; unserved remainders are not redistributed: "
-    "placed 3, remaining 1; local outcomes exhausted and complete; call exhausted.",
+    "Review-13 source budget witness under step 2's origins: sources with capacities "
+    "[1, 9], request 4. MaxFlow (the optimized origin) supplies [1, 3]: placed 4, "
+    "complete. Weighted and EB (the equal origin) admit the largest total whose "
+    "round-robin shares fit: 2 ([1, 1]; 3 would give the 1-link source 2), remaining 2, "
+    "exhausted.",
 )
 def sources_1_9(s: PSnap):
     c = Ctx(s, "two_direct_1_9", two_direct((1, 9)))
-    for kernel in (MF, W, EB):
+    for kernel, want in (
+        (MF, ([1, 3], 4, 0, "complete")),
+        (W, ([1, 1], 2, 2, "exhausted")),
+        (EB, ([1, 1], 2, 2, "exhausted")),
+    ):
         fg = c.ledger()
         pol = P.FlowPolicy(fg, [0, 1], 2, co(kernel))
         r = s.place(f"{kernel} request 4", pol, 4, fg=fg)
         s.expect(
             f"{kernel}",
             (
-                r.trace["offers"],
                 [x.delivered for x in pol.records()],
                 r.placed,
                 r.remaining,
-                r.trace["local_outcomes"],
                 r.termination,
             ),
-            ({0: 2, 1: 2}, [1, 2], 3, 1, {0: "exhausted", 1: "complete"}, "exhausted"),
+            want,
         )
 
 
@@ -1627,11 +1634,11 @@ def sources_1_9(s: PSnap):
     "sources_partition_1_1_vs_2_0",
     "sources",
     ["24", "16.4", "9.2"],
-    "Source-set allocation is partition-dependent (review-14 R3; 16.4 excludes "
-    "competing sources): 0->2 and 1->2 (2 each) share 2->3 (2). place(2); place(2) "
-    "gives deliveries [1, 1] (the second call finds 2->3 full); place(4) gives "
-    "[2, 0] (source 0 is placed first in ascending NodeId). Same total, different "
-    "records: independent sources, no reassignment.",
+    "Source-set allocation of CostOnly MaxFlow (review-14 R3; step 2): 0->2 and 1->2 "
+    "(2 each) share 2->3 (2). The controller re-solves the cumulative value from zero "
+    "with one virtual source, so place(2); place(2) and place(4) both give deliveries "
+    "[2, 0] (the root's arc to source 0 comes first): partition-independent (before step "
+    "2 the independent per-source placement gave [1, 1] and [2, 0]).",
 )
 def sources_partition(s: PSnap):
     c = Ctx(s, "shared_2", (4, [(0, 2, 2, 1), (1, 2, 2, 1), (2, 3, 2, 1)]))
@@ -1642,7 +1649,7 @@ def sources_partition(s: PSnap):
         for v in calls:
             s.place(f"{calls} call {v}", pol, v, fg=fg)
         out.append([x.delivered for x in pol.records()])
-    s.expect("partition dependence", out, [[1, 1], [2, 0]])
+    s.expect("partition independence", out, [[2, 0], [2, 0]])
 
 
 @fixture(
@@ -1736,7 +1743,11 @@ def termination(s: PSnap):
     c0 = Ctx(s, "no_roster", (2, [(1, 0, 1, 1)]))
     p0 = P.FlowPolicy(c0.ledger(), 0, 1, co(EB))
     r = s.place("empty roster", p0, 1)
-    s.expect("empty roster", (r.termination, r.local_outcomes), ("no_route", []))
+    s.expect(
+        "empty roster",
+        (r.termination, r.by_source),
+        ("no_route", [(0, None, 0, 0, 0, 0)]),
+    )
     s.place("empty roster +inf", p0, INF)
     s.raises("finite after +inf with an empty roster", p0.place, 1)
 
@@ -1828,7 +1839,7 @@ def global_chain(s: PSnap):
     "global",
     ["2.2", "27"],
     "Attained value at the policy level: Global place(2) on one 3-unit edge places "
-    "2 (min_cut None: a residual path is left; requested with bottleneck outputs), "
+    "2 (min_cut None: a residual path is left; requested with the min_cut output), "
     "the cumulative solve passes the certificate; a mutated producer returning 1 "
     "under cap 2 is rejected; place(+inf) then places the last unit and min_cut is "
     "[0].",
@@ -1837,7 +1848,7 @@ def global_underfill(s: PSnap):
     c = Ctx(s, "one_edge", (2, [(0, 1, 3, 7)]))
     fg = c.ledger()
     pol = P.FlowPolicy(fg, 0, 1, glob())
-    r = s.place("place(2)", pol, 2, outputs=P.Outputs(bottleneck=True))
+    r = s.place("place(2)", pol, 2, outputs=P.Outputs(bottleneck=True, min_cut=True))
     s.expect("capped", (r.placed, r.termination, r.min_cut), (2, "complete", None))
     payload = {k: v for k, v in r.trace["flow_core"].items() if k != "supply"}
     s.check(
@@ -1848,7 +1859,9 @@ def global_underfill(s: PSnap):
         "underfill rejected",
         bool(certify.check_solve(c.g, [3], [0], [1], 2, bad, tier="a")),
     )
-    r = s.place("place(+inf)", pol, INF, outputs=P.Outputs(bottleneck=True))
+    r = s.place(
+        "place(+inf)", pol, INF, outputs=P.Outputs(bottleneck=True, min_cut=True)
+    )
     s.expect("maximal", (r.placed, r.termination, r.min_cut), (1, "exhausted", [0]))
 
 
@@ -1939,9 +1952,9 @@ def global_epochs(s: PSnap):
     "epochs_place_remove_place",
     "lifetime",
     ["8", "9.3", "24"],
-    "Section 8's epoch law for CostOnly over two sources: place(1) offers [1, 0] "
-    "and creates both records (ids [0, 1], source 1 at zero delivery); remove(); "
-    "place(1) offers [1, 0] again (requested reset) with ids [2, 3]; "
+    "Section 8's epoch law for CostOnly MaxFlow over two sources: place(1) supplies "
+    "[1, 0] and creates both records (ids [0, 1], source 1 at zero delivery); remove(); "
+    "place(1) supplies [1, 0] again (requested reset) with ids [2, 3]; "
     "place(+inf); remove(); place(1) is accepted; remove() on an empty cohort "
     "resets the epoch state.",
 )
@@ -1953,7 +1966,7 @@ def epochs(s: PSnap):
     s.expect(
         "epoch 1",
         (
-            r.trace["offers"],
+            r.trace["flow_core"]["supply"],
             [x.flow_id[1] for x in pol.records()],
             [x.delivered for x in pol.records()],
         ),
@@ -1963,13 +1976,13 @@ def epochs(s: PSnap):
     r = s.place("place(1) after remove", pol, 1)
     s.expect(
         "epoch 2",
-        (r.trace["offers"], [x.flow_id[1] for x in pol.records()]),
+        (r.trace["flow_core"]["supply"], [x.flow_id[1] for x in pol.records()]),
         ({0: 1, 1: 0}, [2, 3]),
     )
     s.place("place(+inf)", pol, INF)
     pol.remove()
     r = s.place("place(1) after +inf and remove", pol, 1)
-    s.expect("accepted", (r.placed, r.trace["offers"]), (1, {0: 1, 1: 0}))
+    s.expect("accepted", (r.placed, r.trace["flow_core"]["supply"]), (1, {0: 1, 1: 0}))
     pol.remove()
     pol.remove()
     s.expect(

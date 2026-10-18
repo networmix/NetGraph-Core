@@ -22,7 +22,9 @@ struct DeletionCapture;
 
 // A live flow of the policy between calls. Its amounts are its ledger record (delivered = the
 // cumulative T of a Lossless flow; edges; Lossy offered and drops); the plan is frozen at the
-// flow's creation (and replaced by an adopted reroute). Global flows have no plan.
+// flow's creation (and replaced by an adopted reroute). The flows of CostOnly and Global are
+// one per roster source and have no plan of their own (CostOnly's sources share the epoch's
+// program).
 struct LiveFlow {
   std::int64_t id {-1};
   NodeId src {0};
@@ -47,7 +49,9 @@ struct PolicyEngine {
 
   FlowLedger& fg;
   std::shared_ptr<const Graph> graph {};
-  FlowPolicyConfig config;
+  FlowPolicyConfig config;       // validated, origin and selection resolved
+  PathSelection selection {};    // *config.selection, or the default for Global (unread)
+  Origin origin {Origin::Equal};  // *config.origin, or Equal for Pinned (one source)
   const Eligibility* elig {nullptr};
   std::vector<NodeId> sources {};       // the normalised sets
   std::vector<NodeId> destinations {};
@@ -61,9 +65,15 @@ struct PolicyEngine {
   std::int64_t owner {0};
   // State accumulated since construction or the last remove() (the policy epoch).
   std::vector<std::vector<LiveFlow>> cohorts {};  // per roster index, in FlowId order
-  std::vector<std::pair<Cost, Amount>> curve {};  // Global: the cumulative marginal curve
+  // CostOnly: the epoch's pooled program over the roster (EqualBalanced and Weighted), or the
+  // union of the roster's routes (MaxFlow), prepared at the epoch's first positive call.
+  std::shared_ptr<const KernelPlan> program {};
+  std::vector<EdgeId> program_edges {};
+  std::vector<std::pair<Cost, Amount>> curve {};  // Global, optimized origin: the cumulative marginal curve
   Counter128 requested {};
+  Counter128 offered {};  // Lossy: the traffic sent (with an empty roster: lost at the sources)
   bool infinite {false};
+  bool prepared {false};  // the epoch's first positive call has run
   // Global: a capture request for the next solve's final state (the exact sensitivity model's
   // baseline); set and cleared by the evaluator.
   DeletionCapture* capture {nullptr};
@@ -83,8 +93,17 @@ struct PolicyAccess {
   }
 };
 
-// The configuration checks of FlowPolicy (enumeration values first, then the combinations),
-// shared with the evaluators' argument checks.
-void validate_config(const FlowPolicyConfig& cfg, std::size_t num_sources, std::size_t num_destinations);
+// The configuration checks of FlowPolicy, shared with the evaluators' argument checks, in
+// FlowPolicyConfig's order (the enumeration values, the model's row, the DagCache: `cache` says
+// whether one is supplied, CapacityAware's parameters); returns its selection and origin with an
+// absent one resolved (nothing else is copied). Then, with the normalized endpoint counts, Pinned's
+// single endpoints and the pooled single-path rule (check_source_count: an absent selection is
+// PathSelection(), multipath, so it reads the configuration resolved or not alike).
+struct ResolvedAxes {
+  std::optional<PathSelection> selection;
+  std::optional<Origin> origin;
+};
+[[nodiscard]] ResolvedAxes resolve_config(const FlowPolicyConfig& cfg, bool cache);
+void check_source_count(const FlowPolicyConfig& cfg, std::size_t num_sources, std::size_t num_destinations);
 
 } // namespace netgraph::core::detail

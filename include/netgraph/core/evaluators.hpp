@@ -1,6 +1,6 @@
 /* The evaluators: capacity (a FlowPolicy placement of +inf on
-   a fresh ledger; the exact maximum flow is capacity() with routing Global and placement
-   MaxFlow), batch_capacity (capacity per pair) and sensitivity (the loss of deleting each
+   a fresh ledger; the exact maximum flow is capacity() with routing Global and the optimized
+   origin), batch_capacity (capacity per pair) and sensitivity (the loss of deleting each
    candidate edge). */
 #pragma once
 
@@ -16,17 +16,11 @@
 
 namespace netgraph::core {
 
-// The configuration, the static Eligibility, the DagCache and the optional outputs of one
-// evaluation (the Eligibility and the cache outlive the call).
-struct CapacityOptions {
-  FlowPolicyConfig cfg;
-  const Eligibility* elig {nullptr};
-  DagCache* cache {nullptr};
-  OutputOptions outputs {};
-};
-// The same fields; `outputs` apply to the baseline.
-struct SensitivityOptions {
-  FlowPolicyConfig cfg;
+// The options of every evaluator: the configuration, the static Eligibility, the DagCache and the
+// optional outputs of each result (sensitivity: of its baseline). The Eligibility and the cache
+// outlive the call.
+struct QueryOptions {
+  FlowPolicyConfig config;
   const Eligibility* elig {nullptr};
   DagCache* cache {nullptr};
   OutputOptions outputs {};
@@ -48,9 +42,9 @@ struct SensitivityResult {
 // hits count when it returns; a failed call changes no statistic, except one miss when it raises
 // DagCacheMiss.
 
-// place(+inf) of a FlowPolicy with opts.cfg on a fresh ledger of g (its capacities).
+// place(+inf) of a FlowPolicy with opts.config on a fresh ledger of g (its capacities).
 [[nodiscard]] PlacementResult capacity(const Graph& g, std::span<const NodeId> sources,
-                                       std::span<const NodeId> destinations, const CapacityOptions& opts);
+                                       std::span<const NodeId> destinations, const QueryOptions& opts);
 
 // Run capacity() per pair, returning results in pair order. Intersect opts.elig with
 // per_pair_elig[i]; null entries are allowed, and an empty span supplies no per-pair values.
@@ -58,7 +52,8 @@ struct SensitivityResult {
 // Before starting workers, validate in order: workers >= 1; opts.elig's and the cache's graph;
 // a supplied building cache with workers > 1; Pinned (rejected because bundles bind endpoints);
 // the configuration; and per_pair_elig's length. Then validate each pair completely in index
-// order: endpoint sets, overlap, Eligibility's graph. This reports the lowest failing pair index.
+// order: endpoint sets, overlap, Eligibility's graph, the pooled single-path rule for its sources.
+// This reports the lowest failing pair index.
 // A supplied building cache requires workers == 1 because it allows one writer. Workers share
 // a supplied frozen cache, and the one worker uses a supplied building cache; without a supplied
 // cache each worker gets a private building cache before threads start.
@@ -69,14 +64,16 @@ struct SensitivityResult {
 // effective per-pair values with no common Eligibility, or one that contains them.
 [[nodiscard]] std::vector<PlacementResult> batch_capacity(
     const Graph& g, const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>>& pairs,
-    const CapacityOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers);
+    const QueryOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers);
 
-// Return baseline capacity() and one entry per candidate edge. Global candidates carry
-// positive baseline flow; other models use every edge opts.elig allows, whatever its capacity
-// (deleting an edge of capacity 0 can change routes and rosters, so its loss can be nonzero).
-// Loss is baseline placed minus placed with that edge deleted, using the same config and cache.
-// Global starts from the baseline solve's final state and repairs it after deleting the edge,
-// using one state copy per worker. The result is the exact maximum flow at minimum cost.
+// Return baseline capacity() and one entry per candidate edge. Global candidates with the
+// optimized origin carry positive baseline flow; otherwise every edge opts.elig allows, whatever
+// its capacity (deleting an edge of capacity 0 can change routes and rosters, so its loss can be
+// nonzero; with the equal origin, a deletion that removes a source from the roster can raise the
+// total, a negative loss). Loss is baseline placed minus placed with that edge deleted, using the
+// same config and cache. Optimized Global starts from the baseline solve's final state and repairs
+// it after deleting the edge, using one state copy per worker. The result is the exact maximum
+// flow at minimum cost.
 // CostOnly skips a deletion when no roster source's reachable part of the static shortest-path
 // support contains the edge: no route uses it, so loss is 0. All other deletions use a fresh
 // ledger. A failed deletion fails the call (no partial result), raising the exception of the
@@ -86,7 +83,7 @@ struct SensitivityResult {
 // Only CostOnly reads the cache. A deletion that needs placement with a frozen cache raises
 // DagCacheMiss for its fresh uid.
 [[nodiscard]] SensitivityResult sensitivity(const Graph& g, std::span<const NodeId> sources,
-                                            std::span<const NodeId> destinations, const SensitivityOptions& opts,
+                                            std::span<const NodeId> destinations, const QueryOptions& opts,
                                             std::int32_t workers);
 
 } // namespace netgraph::core

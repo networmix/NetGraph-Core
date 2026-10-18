@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from helpers import (
     ALL_OUT,
+    CAP,
     COSTONLY,
     GLOBAL,
     INF,
@@ -47,10 +48,23 @@ def test_configurations_are_structural_and_explicit():
         ngc.FlowPolicyConfig(
             ngc.CostOnly(), ngc.FlowPlacement.MAX_FLOW, ngc.Admission.LOSSLESS, sel()
         )
+    # Keyword-only; every field but the routing has a default: placement, selection and origin
+    # None, admission LOSSLESS (contract r8 3.1). A wrong class is TypeError.
+    plain = ngc.FlowPolicyConfig(routing=ngc.CostOnly())
+    assert (plain.placement, plain.admission, plain.selection, plain.origin) == (
+        None,
+        ngc.Admission.LOSSLESS,
+        None,
+        None,
+    )
     with pytest.raises(TypeError):
-        ngc.FlowPolicyConfig(
-            routing=ngc.CostOnly(), placement=ngc.FlowPlacement.MAX_FLOW
-        )
+        ngc.FlowPolicyConfig(placement=ngc.FlowPlacement.MAX_FLOW)
+    with pytest.raises(TypeError):
+        ngc.FlowPolicyConfig(routing=ngc.CostOnly(), origin="EQUAL")
+    with pytest.raises(TypeError):
+        ngc.FlowPolicyConfig(routing=ngc.CostOnly(), placement=1)
+    with pytest.raises(TypeError):
+        ngc.FlowPolicyConfig(routing=ngc.Global(), weights=None)  # an unknown keyword
     with pytest.raises(TypeError, match="incompatible"):
         ngc.CostOnly(flow_count=2)  # a field outside its routing variant: TypeError
     with pytest.raises(TypeError, match="incompatible"):
@@ -110,20 +124,33 @@ def test_configurations_are_structural_and_explicit():
         d.diminishing,
     ) == (1, None, None, 0, False, None)
     s = sel(ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY, RES, False, True)
-    cfg = config(ngc.Global(), ngc.FlowPlacement.MAX_FLOW, ngc.Admission.LOSSY, s)
+    cfg = ngc.FlowPolicyConfig(
+        routing=ngc.Global(),
+        placement=ngc.FlowPlacement.MAX_FLOW,
+        admission=ngc.Admission.LOSSY,
+        selection=s,
+        origin=ngc.Origin.EQUAL,
+    )  # a plain value: the combination is checked where it is used
     assert cfg.placement == ngc.FlowPlacement.MAX_FLOW
     assert cfg.admission == ngc.Admission.LOSSY
     assert cfg.selection == s
-    assert (ngc.OutputOptions().edge_flows, ngc.OutputOptions().residual) == (
-        False,
-        False,
-    )
-    assert ngc.OutputOptions().bottleneck is False
-    for flags in ((True, False, False), (False, True, False), (False, False, True)):
+    assert cfg.origin == ngc.Origin.EQUAL
+    assert ngc.PathSelection() == sel(ngc.EdgeTieBreak.DETERMINISTIC, CAP, True, True)
+    o = ngc.OutputOptions()
+    assert (o.edge_flows, o.residual, o.bottleneck, o.min_cut) == (False,) * 4
+    for flags in (
+        (True, False, False, False),
+        (False, True, False, False),
+        (False, False, True, False),
+        (False, False, False, True),
+    ):
         o = ngc.OutputOptions(
-            edge_flows=flags[0], residual=flags[1], bottleneck=flags[2]
+            edge_flows=flags[0],
+            residual=flags[1],
+            bottleneck=flags[2],
+            min_cut=flags[3],
         )
-        assert (o.edge_flows, o.residual, o.bottleneck) == flags
+        assert (o.edge_flows, o.residual, o.bottleneck, o.min_cut) == flags
     # Pinned keeps the bundles in supply order, copied from the given list: each read is a new
     # list of the same PredDAG objects, and changing a list read changes nothing.
     g = diamond()
@@ -136,12 +163,29 @@ def test_configurations_are_structural_and_explicit():
     first.append(b)
     second = pinned.bundles
     assert second == [b, a] and second is not first
-    # A policy's config is the configuration it was built with.
+    # A policy's config is the configuration it was built with, its absent origin and selection
+    # resolved to the model's defaults (Pinned takes no origin).
     pol = ngc.FlowPolicy(
         ngc.FlowLedger(g), 0, 3, config(pinned, ngc.FlowPlacement.MAX_FLOW)
     )
     assert pol.config.placement == ngc.FlowPlacement.MAX_FLOW
     assert pol.config.routing.bundles == [b, a]
+    assert pol.config.origin is None
+    for routing, placement, origin in (
+        (ngc.CostOnly(), ngc.FlowPlacement.EQUAL_BALANCED, ngc.Origin.EQUAL),
+        (ngc.CostOnly(), ngc.FlowPlacement.WEIGHTED, ngc.Origin.EQUAL),
+        (ngc.CostOnly(), ngc.FlowPlacement.MAX_FLOW, ngc.Origin.OPTIMIZED),
+        (ngc.Global(), None, ngc.Origin.OPTIMIZED),
+        (ngc.CapacityAware(), ngc.FlowPlacement.MAX_FLOW, ngc.Origin.EQUAL),
+    ):
+        got = ngc.FlowPolicy(
+            ngc.FlowLedger(g),
+            0,
+            3,
+            ngc.FlowPolicyConfig(routing=routing, placement=placement),
+        ).config
+        assert got.origin == origin
+        assert got.selection == (None if placement is None else ngc.PathSelection())
     # The constructors' own checks: an integer field outside its C++ type raises ValueError; a
     # field of the wrong class, a reoptimize that is not a truth value and an unknown keyword
     # raise TypeError. reoptimize takes a bool, a number or None by its truth value.
@@ -286,8 +330,17 @@ def test_validation_messages_before_binding():
         config(ngc.CostOnly(), ngc.FlowPlacement.MAX_FLOW, ngc.Admission.LOSSY),
         LOSSY_KERNEL,
     )
-    rejects(config(ngc.CapacityAware(), admission=ngc.Admission.LOSSY), LOSSY_ROUTING)
-    rejects(config(ngc.Global()), "Global routing requires placement = MaxFlow")
+    rejects(
+        config(ngc.CapacityAware(), admission=ngc.Admission.LOSSY),
+        "CapacityAware requires admission=LOSSLESS",
+    )
+    rejects(
+        ngc.FlowPolicyConfig(
+            routing=ngc.Global(), placement=ngc.FlowPlacement.MAX_FLOW
+        ),
+        "Global does not accept placement",
+    )
+    rejects(ngc.FlowPolicyConfig(routing=ngc.CostOnly()), "CostOnly requires placement")
     rejects(
         config(ngc.CapacityAware(flow_count=0)),
         "CapacityAware flow_count must be >= 1 (got 0)",
@@ -369,82 +422,132 @@ def test_validation_messages_before_binding():
     assert pol.records() == []
 
 
-LOSSY_KERNEL = (
-    "Lossy admission is rejected with the MaxFlow kernel: a controller never drops "
-    "(EqualBalanced or Weighted only)"
-)
+LOSSY_KERNEL = "MAX_FLOW requires admission=LOSSLESS"
 HEADROOM_KERNEL = (
     "the Weighted kernel is rejected with priority Headroom (weights are units)"
 )
-LOSSY_ROUTING = (
-    "Lossy admission is rejected with Global and CapacityAware routing (hop-by-hop "
-    "forwarding without admission control neither grows nor reroutes)"
-)
 P = ngc.FlowPlacement
 A = ngc.Admission
-
-
-def zero_flow_count():
-    return ngc.CapacityAware(flow_count=0)
+ORIGIN = ngc.Origin
 
 
 @pytest.mark.parametrize(
-    ("routing", "placement", "admission", "priority", "msg"),
+    ("routing", "placement", "admission", "selection", "origin", "msg"),
     [
-        (ngc.Global, P.MAX_FLOW, A.LOSSY, "CAPACITY", LOSSY_KERNEL),
-        (zero_flow_count, P.MAX_FLOW, A.LOSSY, "CAPACITY", LOSSY_KERNEL),
-        (ngc.Global, P.WEIGHTED, A.LOSSLESS, "HEADROOM", HEADROOM_KERNEL),
-        (zero_flow_count, P.WEIGHTED, A.LOSSY, "HEADROOM", HEADROOM_KERNEL),
-        (zero_flow_count, P.EQUAL_BALANCED, A.LOSSY, "CAPACITY", LOSSY_ROUTING),
-        (ngc.Global, P.WEIGHTED, A.LOSSY, "CAPACITY", LOSSY_ROUTING),
+        # The rows of the matrix, their columns left to right: placement, origin, admission,
+        # selection (contract r8 3.2, 14.3, 14.4).
+        (
+            ngc.Global,
+            P.MAX_FLOW,
+            A.LOSSY,
+            True,
+            ORIGIN.EQUAL,
+            "Global does not accept placement",
+        ),
+        (ngc.Global, None, A.LOSSY, True, ORIGIN.EQUAL, LOSSY_KERNEL),
+        (
+            ngc.Global,
+            None,
+            A.LOSSLESS,
+            True,
+            ORIGIN.EQUAL,
+            "Global does not accept selection",
+        ),
+        (
+            ngc.CostOnly,
+            None,
+            A.LOSSY,
+            True,
+            ORIGIN.OPTIMIZED,
+            "CostOnly requires placement",
+        ),
+        (
+            ngc.CostOnly,
+            P.EQUAL_BALANCED,
+            A.LOSSY,
+            True,
+            ORIGIN.OPTIMIZED,
+            "CostOnly with EQUAL_BALANCED or WEIGHTED requires origin=EQUAL",
+        ),
+        (ngc.CostOnly, P.MAX_FLOW, A.LOSSY, True, ORIGIN.EQUAL, LOSSY_KERNEL),
+        (
+            ngc.CapacityAware,
+            P.MAX_FLOW,
+            A.LOSSY,
+            True,
+            ORIGIN.OPTIMIZED,
+            "T1 requires origin=EQUAL",
+        ),
+        (
+            ngc.CapacityAware,
+            P.EQUAL_BALANCED,
+            A.LOSSY,
+            True,
+            None,
+            "CapacityAware requires admission=LOSSLESS",
+        ),
     ],
 )
 def test_several_defects_report_the_first_in_the_contract_order(
-    routing, placement, admission, priority, msg
+    routing, placement, admission, selection, origin, msg
 ):
-    # Several defects at once: the kernel combinations (Lossy with MaxFlow,
-    # Weighted with Headroom) before the routing rules (Lossy with Global or CapacityAware,
-    # Global without MaxFlow, CapacityAware's counts); one exact ValueError text at
+    # Several defects at once: one exact ValueError text, the first in the matrix's order, at
     # construction and at the three evaluators (batch_capacity's precheck included); nothing is
     # bound.
     g = diamond()
     fg = ngc.FlowLedger(g)
-    cfg = config(
-        routing(), placement, admission, sel(prio=getattr(ngc.EdgePriority, priority))
+    cfg = ngc.FlowPolicyConfig(
+        routing=routing(),
+        placement=placement,
+        admission=admission,
+        selection=sel() if selection else None,
+        origin=origin,
     )
     with pytest.raises(ValueError) as e:
         ngc.FlowPolicy(fg, 0, 3, cfg)
     assert str(e.value) == msg
     with pytest.raises(ValueError) as e:
-        ngc.capacity(g, 0, 3, ngc.CapacityOptions(cfg))
+        ngc.capacity(g, 0, 3, ngc.QueryOptions(cfg))
     assert str(e.value) == msg
     with pytest.raises(ValueError) as e:
-        ngc.batch_capacity(g, [(0, 3)], ngc.CapacityOptions(cfg))
+        ngc.batch_capacity(g, [(0, 3)], ngc.QueryOptions(cfg))
     assert str(e.value) == msg
     with pytest.raises(ValueError) as e:
-        ngc.sensitivity(g, 0, 3, ngc.SensitivityOptions(cfg), 1)
+        ngc.sensitivity(g, 0, 3, ngc.QueryOptions(cfg), 1)
     assert str(e.value) == msg
     fg.reset()  # nothing bound
 
 
 def test_enum_values_outside_their_enumeration_are_rejected():
-    # An enum built from an integer outside the enumeration is a domain error named
-    # by its field, at every constructor that takes it, so it never reaches a policy or record.
+    # An enum built from an integer outside the enumeration is a domain error named by its field:
+    # at PathSelection's constructor, and for FlowPolicyConfig (a plain value) wherever it is used,
+    # first among its checks, so it never reaches a policy or record.
     with pytest.raises(
         ValueError, match="tie_break: 99 is not a value of EdgeTieBreak"
     ):
         ngc.PathSelection(ngc.EdgeTieBreak(99), ngc.EdgePriority.CAPACITY)
     with pytest.raises(ValueError, match="priority: 99 is not a value of EdgePriority"):
         ngc.PathSelection(ngc.EdgeTieBreak.DETERMINISTIC, ngc.EdgePriority(99))
+    g = diamond()
     for routing in (ngc.CostOnly(), ngc.CapacityAware(), ngc.Global()):
-        with pytest.raises(
-            ValueError, match="placement: 99 is not a value of FlowPlacement"
+        for cfg, message in (
+            (
+                ngc.FlowPolicyConfig(routing=routing, placement=ngc.FlowPlacement(99)),
+                "placement: 99 is not a value of FlowPlacement",
+            ),
+            (
+                ngc.FlowPolicyConfig(routing=routing, admission=ngc.Admission(99)),
+                "admission: 99 is not a value of Admission",
+            ),
+            (
+                ngc.FlowPolicyConfig(routing=routing, origin=ngc.Origin(99)),
+                "origin: 99 is not a value of Origin",
+            ),
         ):
-            config(routing, ngc.FlowPlacement(99))
-        with pytest.raises(
-            ValueError, match="admission: 99 is not a value of Admission"
-        ):
-            config(routing, ngc.FlowPlacement.MAX_FLOW, ngc.Admission(99))
+            with pytest.raises(ValueError, match=exact(message)):
+                ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, cfg)
+            with pytest.raises(ValueError, match=exact(message)):
+                ngc.capacity(g, 0, 3, ngc.QueryOptions(cfg))
     assert len(ngc.FlowPlacement.__members__) == 3  # the loop below is not empty
     for valid in ngc.FlowPlacement.__members__.values():
         assert config(ngc.CostOnly(), valid).placement == valid
@@ -456,9 +559,30 @@ def test_placement_result_fields_and_outputs():
     pol = ngc.FlowPolicy(fg, [0], [3], COSTONLY)
     r = pol.place(4)
     assert (r.placed, r.remaining, r.termination) == (4, 0, T.COMPLETE)
-    assert r.local_outcomes == [(0, T.COMPLETE)]
-    assert (r.routes_changed, r.weights_changed, r.drops) == (True, False, [])
-    assert r.cost_distribution is None
+    assert not hasattr(r, "local_outcomes")
+    assert (r.routes_changed, r.weights_changed, r.call_drops) == (True, False, [])
+    assert (r.delivery_delta, r.call_source_loss, r.drops, r.source_loss) == (
+        4,
+        0,
+        [],
+        0,
+    )
+    assert (r.requested, r.offered, r.admitted, r.delivered, r.unadmitted) == (
+        4,
+        None,
+        4,
+        4,
+        0,
+    )
+    row = r.by_source[0]
+    assert isinstance(r.by_source, tuple) and len(r.by_source) == 1
+    assert (row.source, row.offered, row.admitted, row.delivered) == (0, None, 4, 4)
+    assert (row.source_loss, row.dropped) == (0, 0)
+    with pytest.raises(TypeError):
+        ngc.SourceFlow()
+    with pytest.raises(AttributeError):
+        row.delivered = 1
+    assert r.cost_distribution is None and r.total_cost is None
     assert (
         r.edge_flows is None
         and r.residual is None
@@ -485,10 +609,7 @@ def test_placement_result_fields_and_outputs():
     assert pol.placed_demand() == 7
     with pytest.raises(
         ValueError,
-        match=exact(
-            "requests are integer units or +inf (a physical request goes through "
-            "to_units first; got 1.5)"
-        ),
+        match=exact("offer must be an integer in [0, 2^62) or permitted +inf"),
     ):
         pol.place(1.5)
     with pytest.raises(_ConversionFailed):  # a float request whose own conversion fails
@@ -496,7 +617,10 @@ def test_placement_result_fields_and_outputs():
     for bad in (_OverflowingFloat(1.0), _OverflowingIndex()):  # its OverflowError too
         with pytest.raises(OverflowError, match=exact("own conversion")):
             pol.place(bad)
-    with pytest.raises(ValueError, match=r"after \+inf"):
+    with pytest.raises(
+        ValueError,
+        match=exact("finite placement after infinite placement requires a new epoch"),
+    ):
         pol.place(np.int64(1))
     pol.remove()
     assert pol.records() == [] and list(fg.allocated()) == [0, 0, 0, 0]
@@ -505,8 +629,10 @@ def test_placement_result_fields_and_outputs():
     fg2 = ngc.FlowLedger(diamond(5, 3, 2))
     gl = ngc.FlowPolicy(fg2, 0, 3, GLOBAL)
     r = gl.place(INF, ngc.OutputOptions(bottleneck=True))
-    assert r.cost_distribution == [(2, 5), (4, 3)]
-    assert sorted(r.min_cut) == ids(diamond(5, 3, 2), [0, 2])
+    assert r.cost_distribution == [(2, 5), (4, 3)] and r.min_cut is None
+    gl.remove()
+    r = gl.place(INF, ngc.OutputOptions(min_cut=True))
+    assert r.min_cut == sorted(ids(diamond(5, 3, 2), [0, 2]))
     assert [rec.delivered for rec in gl.records()] == [8]
 
 
@@ -574,10 +700,15 @@ def test_path_cost_ceiling_excludes_a_costlier_route(kernel, ceiling, placed, ro
     # no route: placed 0, no_route.
     g = three_routes(2, 2, 2)
     p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 4, gated(kernel, ceiling))
-    r = p.place(10)
     term = T.NO_ROUTE if placed == 0 else T.EXHAUSTED
+    if (
+        HOOKS
+    ):  # the trace shows the per-source reduction CapacityAware keeps until step 4
+        r, trace = p._place_traced(10, ngc.OutputOptions())
+        assert trace["local_outcomes"] == {0: term.name.lower()}
+    else:
+        r = p.place(10)
     assert (r.placed, r.remaining, r.termination) == (placed, 10 - placed, term)
-    assert r.local_outcomes == [(0, term)]
     assert (r.routes_changed, r.weights_changed) == (bool(routes), False)
     assert routes_of(g, p) == routes
 
@@ -722,7 +853,7 @@ def test_pinned_usable_bundles_and_records():
     )
     assert all_down.usable_bundles() == 0
     r = all_down.place(1)
-    assert (r.placed, r.termination, r.local_outcomes) == (0, T.NO_ROUTE, [])
+    assert (r.placed, r.termination, r.by_source[0].admitted) == (0, T.NO_ROUTE, 0)
 
 
 def test_dag_cache_statistics_and_projection():
@@ -759,7 +890,7 @@ def test_dag_cache_statistics_and_projection():
 
 def test_capacity_batch_and_workers(monkeypatch):
     g = diamond(5, 3)
-    opts = ngc.CapacityOptions(GLOBAL, outputs=ngc.OutputOptions(edge_flows=True))
+    opts = ngc.QueryOptions(GLOBAL, outputs=ngc.OutputOptions(edge_flows=True))
     r = ngc.capacity(g, 0, 3, opts)
     assert (r.placed, r.termination, r.cost_distribution) == (8, T.EXHAUSTED, [(2, 8)])
     assert int(np.sum(r.edge_flows)) == 16
@@ -769,32 +900,32 @@ def test_capacity_batch_and_workers(monkeypatch):
     want = [5, 0, 5, 8]
     for workers in (1, 3, None):
         got = ngc.batch_capacity(
-            g, pairs, ngc.CapacityOptions(GLOBAL, elig=common), per, workers
+            g, pairs, ngc.QueryOptions(GLOBAL, elig=common), per, workers
         )
         assert [x.placed for x in got] == want
     # workers=None reads NGRAPH_CORE_BATCH_THREADS. The count changes only how many threads run,
     # never a result, so this checks only that the default path with the variable set gives the
     # same results (its parsing: the C++ test Evaluators.DefaultWorkersParseTheEnvironment).
     monkeypatch.setenv("NGRAPH_CORE_BATCH_THREADS", "4")
-    got = ngc.batch_capacity(g, pairs, ngc.CapacityOptions(GLOBAL, elig=common), per)
+    got = ngc.batch_capacity(g, pairs, ngc.QueryOptions(GLOBAL, elig=common), per)
     assert [x.placed for x in got] == want
-    assert ngc.batch_capacity(g, [], ngc.CapacityOptions(GLOBAL)) == []
+    assert ngc.batch_capacity(g, [], ngc.QueryOptions(GLOBAL)) == []
     with pytest.raises(ValueError, match="node 7"):
         ngc.batch_capacity(
-            g, [(0, 3), (0, 7), (0, 8)], ngc.CapacityOptions(GLOBAL), workers=4
+            g, [(0, 3), (0, 7), (0, 8)], ngc.QueryOptions(GLOBAL), workers=4
         )
     with pytest.raises(
         ValueError, match=exact("per_pair_elig has 1 entries for 4 pairs")
     ):
-        ngc.batch_capacity(g, pairs, ngc.CapacityOptions(GLOBAL), [None])
+        ngc.batch_capacity(g, pairs, ngc.QueryOptions(GLOBAL), [None])
     with pytest.raises(ValueError, match="Pinned"):
         ngc.batch_capacity(
             g,
             pairs,
-            ngc.CapacityOptions(config(ngc.Pinned([dag_of(g, ids(g, [0, 1]))]))),
+            ngc.QueryOptions(config(ngc.Pinned([dag_of(g, ids(g, [0, 1]))]))),
         )
     cache = ngc.DagCache(g)
-    eb = ngc.CapacityOptions(COSTONLY, cache=cache)
+    eb = ngc.QueryOptions(COSTONLY, cache=cache)
     with pytest.raises(ValueError, match="workers == 1"):
         ngc.batch_capacity(g, pairs, eb, workers=2)
     got = ngc.batch_capacity(
@@ -802,25 +933,25 @@ def test_capacity_batch_and_workers(monkeypatch):
     )  # None with a cache: 1 worker, even with the env set
     assert [x.placed for x in got] == [7, 7, 5, 7]  # EB: [4, 3] over links of 5 and 3
     with pytest.raises(ValueError, match="workers"):
-        ngc.batch_capacity(g, pairs, ngc.CapacityOptions(GLOBAL), workers=0)
+        ngc.batch_capacity(g, pairs, ngc.QueryOptions(GLOBAL), workers=0)
 
 
 def test_sensitivity_candidates_and_signed_losses(monkeypatch):
     # Global: an unsaturated critical edge appears.
     g = build(3, [(0, 1, 9, 1), (1, 2, 4, 1), (0, 2, 2, 5)])
-    s = ngc.sensitivity(g, 0, 2, ngc.SensitivityOptions(GLOBAL))
+    s = ngc.sensitivity(g, 0, 2, ngc.QueryOptions(GLOBAL))
     assert s.baseline.placed == 6
     pos = g.input_index()
     assert {int(pos[e.edge]): e.loss for e in s.entries} == {0: 4, 1: 4, 2: 2}
     # workers=None reads NGRAPH_CORE_SENSITIVITY_THREADS: the same results on 3 workers (only that
     # the default path with the variable set works; its parsing is tested in C++).
     monkeypatch.setenv("NGRAPH_CORE_SENSITIVITY_THREADS", "3")
-    assert plain(ngc.sensitivity(g, 0, 2, ngc.SensitivityOptions(GLOBAL))) == plain(s)
+    assert plain(ngc.sensitivity(g, 0, 2, ngc.QueryOptions(GLOBAL))) == plain(s)
     # A policy model: every allowed edge is a candidate, a zero-capacity one too. Equal splitting
     # over parallel links of 1, 10 and 0 fits 2 units (a third would cross the zero link);
     # without the thin link 1 fits, without the wide link 1, without the zero link 2.
     p = build(2, [(0, 1, 1, 1), (0, 1, 10, 1), (0, 1, 0, 1)])
-    opts = ngc.SensitivityOptions(COSTONLY)
+    opts = ngc.QueryOptions(COSTONLY)
     s = ngc.sensitivity(p, 0, 1, opts, workers=2)
     assert s.baseline.placed == 2
     pos = p.input_index()
@@ -836,8 +967,8 @@ def test_sensitivity_candidates_and_signed_losses(monkeypatch):
         ngc.sensitivity(p, 0, 0, opts)
     # The baseline is capacity() with the requested outputs.
     for cfg in (GLOBAL, COSTONLY):
-        s = ngc.sensitivity(g, 0, 2, ngc.SensitivityOptions(cfg, outputs=ALL_OUT))
-        want = ngc.capacity(g, 0, 2, ngc.CapacityOptions(cfg, outputs=ALL_OUT))
+        s = ngc.sensitivity(g, 0, 2, ngc.QueryOptions(cfg, outputs=ALL_OUT))
+        want = ngc.capacity(g, 0, 2, ngc.QueryOptions(cfg, outputs=ALL_OUT))
         assert want.edge_flows is not None and want.residual is not None
         assert plain(s.baseline) == plain(want)
 
@@ -848,7 +979,7 @@ def test_evaluator_options_and_results():
     g = diamond()
     el = g.eligibility(excluded_edges=ids(g, [0]))
     cache = ngc.DagCache(g)
-    for cls in (ngc.CapacityOptions, ngc.SensitivityOptions):
+    for cls in (ngc.QueryOptions, ngc.QueryOptions):
         o = cls(GLOBAL, elig=el, cache=cache, outputs=ngc.OutputOptions(residual=True))
         assert (
             o.config.placement == GLOBAL.placement and o.elig is el and o.cache is cache
@@ -874,8 +1005,8 @@ def test_explicit_workers_win_over_the_environment(monkeypatch):
     monkeypatch.setenv("NGRAPH_CORE_SENSITIVITY_THREADS", "4")
     g = diamond(5, 3)
     building = ngc.DagCache(g)
-    bopts = ngc.CapacityOptions(COSTONLY, cache=building)
-    sopts = ngc.SensitivityOptions(COSTONLY, cache=building)
+    bopts = ngc.QueryOptions(COSTONLY, cache=building)
+    sopts = ngc.QueryOptions(COSTONLY, cache=building)
     want = [r.placed for r in ngc.batch_capacity(g, [(0, 3), (1, 3)], bopts, workers=1)]
     assert want == [7, 5]
     assert [r.placed for r in ngc.batch_capacity(g, [(0, 3), (1, 3)], bopts)] == want
@@ -888,7 +1019,7 @@ def test_explicit_workers_win_over_the_environment(monkeypatch):
         with pytest.raises(ValueError, match="unless workers == 1"):
             call()
     with pytest.raises(ValueError, match=exact("workers must be >= 1 (got 0)")):
-        ngc.sensitivity(g, 0, 3, ngc.SensitivityOptions(GLOBAL), workers=0)
+        ngc.sensitivity(g, 0, 3, ngc.QueryOptions(GLOBAL), workers=0)
 
 
 def test_python_keeps_what_a_policy_and_an_option_need_alive():
@@ -899,7 +1030,7 @@ def test_python_keeps_what_a_policy_and_an_option_need_alive():
     want = [g.capacity_units().tolist(), g.cost().tolist(), g.edge_dst().tolist()]
     ledger = ngc.FlowLedger(g)
     policy = ngc.FlowPolicy(ledger, 0, 3, COSTONLY)
-    opts = ngc.CapacityOptions(
+    opts = ngc.QueryOptions(
         COSTONLY, elig=g.eligibility(excluded_edges=ids(g, [2])), cache=ngc.DagCache(g)
     )
     gc.collect()
@@ -938,7 +1069,7 @@ def test_exception_classes_of_conversions():
     for big in (10**400, -(10**400)):
         with pytest.raises(
             ValueError,
-            match=exact(f"request (units) = {big} is out of range [0, {L62 - 1}]"),
+            match=exact("offer must be an integer in [0, 2^62) or permitted +inf"),
         ):
             p.place(big)
     # An index's own failure (a float's: test_placement_result_fields_and_outputs).
@@ -978,9 +1109,9 @@ def test_evaluator_results_survive_python_allocation_failures():
     # completes returns what a clean call returns.
     g = diamond(5, 3)
     calls = [
-        (ngc.capacity, (g, 0, 3, ngc.CapacityOptions(GLOBAL))),
-        (ngc.batch_capacity, (g, [(0, 3), (1, 3)], ngc.CapacityOptions(GLOBAL))),
-        (ngc.sensitivity, (g, 0, 3, ngc.SensitivityOptions(GLOBAL))),
+        (ngc.capacity, (g, 0, 3, ngc.QueryOptions(GLOBAL))),
+        (ngc.batch_capacity, (g, [(0, 3), (1, 3)], ngc.QueryOptions(GLOBAL))),
+        (ngc.sensitivity, (g, 0, 3, ngc.QueryOptions(GLOBAL))),
     ]
     for fn, args in calls:
         # An evaluator keeps no state between calls: nothing to snapshot.
@@ -992,7 +1123,7 @@ def test_batch_reports_the_lowest_failing_pair():
     # The arguments first, then each pair completely in pair order, across the
     # Python/C++ boundary.
     g = build(2, [(0, 1, 3, 7)])
-    opts = ngc.CapacityOptions(GLOBAL)
+    opts = ngc.QueryOptions(GLOBAL)
     overlap = (
         "node 0 is in both endpoint sets: sources and destinations must not overlap"
     )
@@ -1021,7 +1152,7 @@ def test_batch_reports_the_lowest_failing_pair():
 def test_batch_checks_an_explicit_empty_eligibility_list():
     # A given per_pair_elig has one entry per pair, also when it is empty.
     g = build(2, [(0, 1, 3, 7)])
-    opts = ngc.CapacityOptions(GLOBAL)
+    opts = ngc.QueryOptions(GLOBAL)
     with pytest.raises(
         ValueError, match=exact("per_pair_elig has 0 entries for 1 pairs")
     ):
@@ -1034,15 +1165,16 @@ def test_batch_checks_an_explicit_empty_eligibility_list():
 
 def test_global_zero_call_reports_the_cumulative_curve():
     # Global's curve is cumulative (its amounts sum to placed_demand()); a zero call
-    # reports it ([] before the first placement and after remove()), changes nothing and claims
-    # no cut.
+    # reports it (None before the epoch's preparation and after remove()), changes nothing and
+    # claims no cut, even when asked for one.
     g = build(2, [(0, 1, 3, 7)])
     ledger = ngc.FlowLedger(g)
     p = ngc.FlowPolicy(ledger, 0, 1, GLOBAL)
-    assert p.place(0).cost_distribution == []
+    assert p.place(0).cost_distribution is None
     assert p.place(2).cost_distribution == [(7, 2)]
     z = p.place(0, ALL_OUT)
     assert (z.placed, z.cost_distribution, z.min_cut) == (0, [(7, 2)], None)
+    assert p.place(0, ngc.OutputOptions(min_cut=True)).min_cut is None  # a zero call
     assert p.placed_demand() == 2 and [int(x) for x in ledger.allocated()] == [2]
     p.remove()
-    assert p.place(0).cost_distribution == []
+    assert p.place(0).cost_distribution is None

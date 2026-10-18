@@ -7,11 +7,11 @@ to this file (``py.typed`` marks the package as typed).
 - The graph on integer units: ``Graph``, ``Eligibility``, ``to_units``, ``as_float``.
 - Route structures: ``PredDAG``, ``Path``.
 - Route selection and placement settings: ``PathSelection``, ``EdgeTieBreak``,
-  ``EdgePriority``, ``FlowPlacement``, ``Admission``.
+  ``EdgePriority``, ``FlowPlacement``, ``Admission``, ``Origin``.
 - The ledger of placed traffic: ``FlowLedger`` and its ``FlowRecord`` snapshots.
 - The policy engine: ``FlowPolicy``, ``FlowPolicyConfig``, the routings ``CostOnly``,
-  ``CapacityAware``, ``Global``, ``Pinned``, and ``PlacementResult``, ``OutputOptions``,
-  ``Termination``.
+  ``CapacityAware``, ``Global``, ``Pinned``, and ``PlacementResult`` (with its ``SourceFlow``
+  rows), ``OutputOptions``, ``Termination``.
 - The shortest-path cache: ``DagCache`` (building and frozen modes), ``DagCacheMiss``.
 - The evaluators: ``capacity``, ``batch_capacity``, ``sensitivity``.
 - The searches: ``spf`` (``Direction``, ``SpfOptions``, ``SpfResult``, ``UNREACHABLE``),
@@ -28,7 +28,6 @@ from _netgraph_core import (
     Absolute,
     Admission,
     CapacityAware,
-    CapacityOptions,
     CostOnly,
     DagCache,
     DagCacheMiss,
@@ -46,15 +45,17 @@ from _netgraph_core import (
     Global,
     Graph,
     KspOptions,
+    Origin,
     OutputOptions,
     Path,
     PathSelection,
     Pinned,
     PlacementResult,
     PredDAG,
+    QueryOptions,
     SensitivityEntry,
-    SensitivityOptions,
     SensitivityResult,
+    SourceFlow,
     SpfOptions,
     SpfResult,
     Stretch,
@@ -84,6 +85,7 @@ __all__ = [
     "PathSelection",
     "FlowPlacement",
     "Admission",
+    "Origin",
     "FlowLedger",
     "FlowRecord",
     "Absolute",
@@ -97,13 +99,13 @@ __all__ = [
     "OutputOptions",
     "Termination",
     "PlacementResult",
+    "SourceFlow",
     "FlowPolicy",
     "MAX_FLOWS_PER_CALL",
     "DagCache",
     "DagCacheMiss",
     "DagCacheStats",
-    "CapacityOptions",
-    "SensitivityOptions",
+    "QueryOptions",
     "SensitivityEntry",
     "SensitivityResult",
     "capacity",

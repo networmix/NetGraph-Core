@@ -25,7 +25,6 @@ class FlowRecord:
     owner: int
     sources: tuple[int, ...]
     destinations: tuple[int, ...]
-    placement: str
     admission: str
     bundle: tuple[int, ...]
     route_cost: int
@@ -50,7 +49,6 @@ class FlowRecord:
             "owner": self.owner,
             "sources": list(self.sources),
             "destinations": list(self.destinations),
-            "placement": self.placement,
             "admission": self.admission,
             "bundle": list(self.bundle),
             "bundle_input": None
@@ -71,7 +69,6 @@ class Draft:
     flow_id: tuple[int, int] | None
     sources: tuple[int, ...]
     destinations: tuple[int, ...]
-    placement: str
     admission: str
     bundle: tuple[int, ...]
     route_cost: int
@@ -266,7 +263,6 @@ class FlowGraph:
                 owner=owner,
                 sources=d.sources,
                 destinations=d.destinations,
-                placement=d.placement,
                 admission=d.admission,
                 bundle=d.bundle,
                 route_cost=d.route_cost,

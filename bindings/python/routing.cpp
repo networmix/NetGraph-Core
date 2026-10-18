@@ -118,10 +118,13 @@ void register_routing(py::module_& m) {
       });
 
   py::class_<CostOnly>(m, "CostOnly",
-                       "Routing like IGP forwarding (OSPF, IS-IS routers): one flow per roster source on the static\n"
-                       "shortest-path DAG (read from the DagCache; the selection is applied when the flow is created),\n"
-                       "never refreshed, grown or reoptimised. An edge of capacity 0 stays in the DAG: EQUAL_BALANCED\n"
-                       "still sends it its share, which it cannot carry, and WEIGHTED gives it weight 0.")
+                       "Routing like IGP forwarding (OSPF, IS-IS routers) on each roster source's static shortest-path\n"
+                       "DAG (read from the DagCache; the selection is applied at the epoch's first positive call),\n"
+                       "never refreshed, grown or reoptimised; one record per roster source. EQUAL_BALANCED and\n"
+                       "WEIGHTED pool the sources (origin EQUAL): where their routes meet, a router splits their traffic\n"
+                       "once. MAX_FLOW is a controller on the union of those routes (origin OPTIMIZED or EQUAL). An edge\n"
+                       "of capacity 0 stays in the DAG: EQUAL_BALANCED still sends it its share, which it cannot\n"
+                       "carry, and WEIGHTED gives it weight 0.")
       .def(py::init<>(), "CostOnly routing (no parameters)")
       .def("__repr__", [](const CostOnly&) { return std::string("CostOnly()"); });
 
@@ -195,8 +198,10 @@ void register_routing(py::module_& m) {
                      "the minimum-cost flow of what the policy already delivers plus this call's request\n"
                      "(placed_demand() + volume; what an earlier call could not place is not requested again) over\n"
                      "the eligible graph, on the free capacity plus its own allocation (it may move its own traffic,\n"
-                     "never another's). Placement MAX_FLOW only. A positive call on a network beyond the flow core's\n"
-                     "int32 numbering raises ValueError (see FlowPolicy.place).")
+                     "never another's). It takes no placement and no selection. Origin OPTIMIZED (the default): the\n"
+                     "controller chooses how much enters at each source; EQUAL: every roster source sends its\n"
+                     "round-robin share of the largest total whose shares all fit. A positive call on a network\n"
+                     "beyond the flow core's int32 numbering raises ValueError (see FlowPolicy.place).")
       .def(py::init<>(), "Global routing (no parameters)")
       .def("__repr__", [](const Global&) { return std::string("Global()"); });
 

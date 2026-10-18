@@ -8,11 +8,11 @@ to this file (``py.typed`` marks the package as typed).
 - The graph on integer units: ``Graph``, ``Eligibility``, ``to_units``, ``as_float``.
 - Route structures: ``PredDAG``, ``Path``.
 - Route selection and placement settings: ``PathSelection``, ``EdgeTieBreak``,
-  ``EdgePriority``, ``FlowPlacement``, ``Admission``.
+  ``EdgePriority``, ``FlowPlacement``, ``Admission``, ``Origin``.
 - The ledger of placed traffic: ``FlowLedger`` and its ``FlowRecord`` snapshots.
 - The policy engine: ``FlowPolicy``, ``FlowPolicyConfig``, the routings ``CostOnly``,
-  ``CapacityAware``, ``Global``, ``Pinned``, and ``PlacementResult``, ``OutputOptions``,
-  ``Termination``.
+  ``CapacityAware``, ``Global``, ``Pinned``, and ``PlacementResult`` (with its ``SourceFlow``
+  rows), ``OutputOptions``, ``Termination``.
 - The shortest-path cache: ``DagCache`` (building and frozen modes), ``DagCacheMiss``.
 - The evaluators: ``capacity``, ``batch_capacity``, ``sensitivity``.
 - The searches: ``spf`` (``Direction``, ``SpfOptions``, ``SpfResult``, ``UNREACHABLE``),
@@ -41,6 +41,7 @@ __all__: list[str] = [
     "PathSelection",
     "FlowPlacement",
     "Admission",
+    "Origin",
     "FlowLedger",
     "FlowRecord",
     "Absolute",
@@ -54,13 +55,13 @@ __all__: list[str] = [
     "OutputOptions",
     "Termination",
     "PlacementResult",
+    "SourceFlow",
     "FlowPolicy",
     "MAX_FLOWS_PER_CALL",
     "DagCache",
     "DagCacheMiss",
     "DagCacheStats",
-    "CapacityOptions",
-    "SensitivityOptions",
+    "QueryOptions",
     "SensitivityEntry",
     "SensitivityResult",
     "capacity",
@@ -79,12 +80,13 @@ __version__: str
 
 class FlowPlacement:
     """
-    How one flow spreads over its route (its kernel). MAX_FLOW: the minimum-cost flow core, re-solved
-    on the flow's route over the free capacity plus the flow's own allocation (it may move its own
-    earlier placement, never another flow's). WEIGHTED (WCMP, weighted-cost multipath): every node
-    splits in proportion to weights fixed when the flow is created (highest averages: whole-unit
-    shares as close to proportional as possible). EQUAL_BALANCED (ECMP, equal-cost multipath): every
-    node splits equally, by round robin.
+    How traffic spreads over the routes (CostOnly's kernel; CapacityAware and Pinned flows too).
+    MAX_FLOW: the minimum-cost flow core over the routes (a controller restricted to them), re-solved
+    over the free capacity plus the policy's own allocation (it may move its own earlier placement,
+    never another's). WEIGHTED (WCMP, weighted-cost multipath): every node splits in proportion to
+    weights fixed when the routes are prepared (highest averages: whole-unit shares as close to
+    proportional as possible). EQUAL_BALANCED (ECMP, equal-cost multipath): every node splits
+    equally, by round robin.
 
     Members:
 
@@ -125,8 +127,8 @@ class FlowPlacement:
 
 class Admission:
     """
-    LOSSLESS admits only what fits; LOSSY forwards hop by hop without admission control and
-    drops what does not fit on each edge (EQUAL_BALANCED and WEIGHTED only).
+    LOSSLESS admits the largest total the routes carry with no loss at all; LOSSY sends the whole
+    finite offer hop by hop and records where it is lost (EQUAL_BALANCED and WEIGHTED only).
 
     Members:
 
@@ -150,6 +152,47 @@ class Admission:
     def __int__(self) -> int: ...
     @typing.overload
     def __ne__(self, other: Admission, /) -> bool: ...
+    @typing.overload
+    def __ne__(self, other: typing.Any, /) -> bool: ...
+    def __repr__(self) -> str: ...
+    def __setstate__(
+        self, state: typing.SupportsInt | typing.SupportsIndex, /
+    ) -> None: ...
+    def __str__(self) -> str: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+
+class Origin:
+    """
+    How a demand's traffic enters at its sources, separately from how it is routed. EQUAL: round
+    robin over the roster (ascending NodeId, the first sources one unit more); a source whose share
+    cannot go anywhere keeps it and loses it (LOSSLESS then admits only totals that give it
+    nothing). OPTIMIZED: the controller chooses the injections (one virtual source).
+
+    Members:
+
+      EQUAL
+
+      OPTIMIZED
+    """
+
+    EQUAL: typing.ClassVar[Origin]
+    OPTIMIZED: typing.ClassVar[Origin]
+    __members__: typing.ClassVar[dict[str, Origin]]
+
+    @typing.overload
+    def __eq__(self, other: Origin, /) -> bool: ...
+    @typing.overload
+    def __eq__(self, other: typing.Any, /) -> bool: ...
+    def __getstate__(self) -> int: ...
+    def __hash__(self) -> int: ...
+    def __index__(self) -> int: ...
+    def __init__(self, value: typing.SupportsInt | typing.SupportsIndex) -> None: ...
+    def __int__(self) -> int: ...
+    @typing.overload
+    def __ne__(self, other: Origin, /) -> bool: ...
     @typing.overload
     def __ne__(self, other: typing.Any, /) -> bool: ...
     def __repr__(self) -> str: ...
@@ -292,18 +335,18 @@ class Direction:
 
 class PathSelection:
     """
-    The selection of a search: tie_break and priority are explicit; multipath = True keeps
-    every equal-cost walk (the DAG), False the one canonical single path; multi_edge = True
-    keeps every eligible parallel member, False one per (u, v) pair. A tie_break or priority
-    outside its enumeration raises ValueError.
+    The selection of a search or a policy: tie_break (DETERMINISTIC by default), priority
+    (CAPACITY by default); multipath = True keeps every equal-cost walk (the DAG), False the one
+    canonical single path; multi_edge = True keeps every eligible parallel member, False one per
+    (u, v) pair. A tie_break or priority outside its enumeration raises ValueError.
     """
 
     def __eq__(self, arg0: typing.Any) -> bool: ...
     def __hash__(self) -> int: ...
     def __init__(
         self,
-        tie_break: EdgeTieBreak,
-        priority: EdgePriority,
+        tie_break: EdgeTieBreak = ...,
+        priority: EdgePriority = ...,
         multipath: bool = True,
         multi_edge: bool = True,
     ) -> None: ...
@@ -593,7 +636,7 @@ class Path:
 class FlowRecord:
     """
     One flow of a ledger, as a snapshot: flow_id (ledger uid, id), owner (the policy's id),
-    sources, destinations, placement, admission, bundle (PredDAG: the flow's route),
+    sources, destinations, admission, bundle (PredDAG: the flow's route),
     route_cost (its minimum walk cost; None when empty), offered (Lossy only, else None),
     delivered, edges [(EdgeId, units)] and drops [(EdgeId, units)] (cumulative, ascending
     EdgeId). offered and the drops units are exact Python ints (they may exceed 64 bits).
@@ -655,12 +698,6 @@ class FlowRecord:
     def owner(self) -> int:
         """
         the ledger-local id of the policy that created the flow
-        """
-
-    @property
-    def placement(self) -> FlowPlacement:
-        """
-        the FlowPlacement (kernel) that spreads the flow over its route
         """
 
     @property
@@ -841,10 +878,13 @@ class DiminishingReturns:
 
 class CostOnly:
     """
-    Routing like IGP forwarding (OSPF, IS-IS routers): one flow per roster source on the static
-    shortest-path DAG (read from the DagCache; the selection is applied when the flow is created),
-    never refreshed, grown or reoptimised. An edge of capacity 0 stays in the DAG: EQUAL_BALANCED
-    still sends it its share, which it cannot carry, and WEIGHTED gives it weight 0.
+    Routing like IGP forwarding (OSPF, IS-IS routers) on each roster source's static shortest-path
+    DAG (read from the DagCache; the selection is applied at the epoch's first positive call),
+    never refreshed, grown or reoptimised; one record per roster source. EQUAL_BALANCED and
+    WEIGHTED pool the sources (origin EQUAL): where their routes meet, a router splits their traffic
+    once. MAX_FLOW is a controller on the union of those routes (origin OPTIMIZED or EQUAL). An edge
+    of capacity 0 stays in the DAG: EQUAL_BALANCED still sends it its share, which it cannot
+    carry, and WEIGHTED gives it weight 0.
     """
 
     def __init__(self) -> None:
@@ -926,8 +966,10 @@ class Global:
     the minimum-cost flow of what the policy already delivers plus this call's request
     (placed_demand() + volume; what an earlier call could not place is not requested again) over
     the eligible graph, on the free capacity plus its own allocation (it may move its own traffic,
-    never another's). Placement MAX_FLOW only. A positive call on a network beyond the flow core's
-    int32 numbering raises ValueError (see FlowPolicy.place).
+    never another's). It takes no placement and no selection. Origin OPTIMIZED (the default): the
+    controller chooses how much enters at each source; EQUAL: every roster source sends its
+    round-robin share of the largest total whose shares all fit. A positive call on a network
+    beyond the flow core's int32 numbering raises ValueError (see FlowPolicy.place).
     """
 
     def __init__(self) -> None:
@@ -959,18 +1001,26 @@ class Pinned:
 
 class FlowPolicyConfig:
     """
-    The four explicit axes (independent settings) of a policy: routing (CostOnly, CapacityAware,
-    Global or Pinned), placement (FlowPlacement), admission (Admission) and selection
-    (PathSelection). A placement or admission outside its enumeration raises ValueError.
+    One demand's settings: routing (CostOnly, CapacityAware, Global or Pinned), placement
+    (FlowPlacement: required for CostOnly, CapacityAware and Pinned; Global takes none), admission
+    (LOSSLESS by default), selection (PathSelection; None: PathSelection(); Global takes none) and
+    origin (Origin; None: the model's default, EQUAL for CostOnly EQUAL_BALANCED and WEIGHTED and for
+    CapacityAware, OPTIMIZED for CostOnly MAX_FLOW and Global; Pinned takes none). A field that does
+    not apply to the model must stay None. The combination is checked when a policy or an evaluator
+    uses the configuration (ValueError): the enumeration values, then the model's row (placement,
+    origin, admission, selection), then a DagCache (only CostOnly reads one), then CapacityAware's
+    parameters, then the pooled single-path rule (CostOnly with several input sources rejects
+    multipath=False with PREFER_HIGHER_PRIORITY).
     """
 
     def __init__(
         self,
         *,
         routing: CostOnly | CapacityAware | Global | Pinned,
-        placement: FlowPlacement,
-        admission: Admission,
-        selection: PathSelection,
+        placement: FlowPlacement | None = None,
+        admission: Admission = ...,
+        selection: PathSelection | None = None,
+        origin: Origin | None = None,
     ) -> None: ...
     def __repr__(self) -> str: ...
     @property
@@ -980,9 +1030,15 @@ class FlowPolicyConfig:
         """
 
     @property
-    def placement(self) -> FlowPlacement:
+    def origin(self) -> Origin | None:
         """
-        how every flow spreads over its route (FlowPlacement)
+        the Origin, or None (a policy's config: the model's default resolved; Pinned: None)
+        """
+
+    @property
+    def placement(self) -> FlowPlacement | None:
+        """
+        the FlowPlacement, or None (Global)
         """
 
     @property
@@ -992,16 +1048,17 @@ class FlowPolicyConfig:
         """
 
     @property
-    def selection(self) -> PathSelection:
+    def selection(self) -> PathSelection | None:
         """
-        the PathSelection the routing's searches read
+        the PathSelection, or None (a policy's config: PathSelection() resolved; Global: None)
         """
 
 class OutputOptions:
     """
     Optional outputs of a placement (all false by default; absent outputs are None):
     edge_flows (the policy's own allocation per edge after the call), residual and
-    bottleneck (the ledger's after the call); on Global, bottleneck adds min_cut.
+    bottleneck (the ledger's after the call), and min_cut (Global with the optimized origin,
+    when its solve reached the maximum flow; None for every other model, origin or call).
     """
 
     def __init__(
@@ -1010,17 +1067,24 @@ class OutputOptions:
         edge_flows: bool = False,
         residual: bool = False,
         bottleneck: bool = False,
+        min_cut: bool = False,
     ) -> None: ...
     @property
     def bottleneck(self) -> bool:
         """
-        request PlacementResult.bottleneck (and min_cut on Global)
+        request PlacementResult.bottleneck
         """
 
     @property
     def edge_flows(self) -> bool:
         """
         request PlacementResult.edge_flows
+        """
+
+    @property
+    def min_cut(self) -> bool:
+        """
+        request PlacementResult.min_cut
         """
 
     @property
@@ -1031,22 +1095,18 @@ class OutputOptions:
 
 class Termination:
     """
-    How a call ended, per source (local_outcomes) and for the whole call (termination).
-    A source's offer is served when it is 0, when (LOSSLESS) the delivery equals it, or when (LOSSY,
-    finite offer) all of it was forwarded, drops included. A source's outcome is the first that
-    applies:
-      COMPLETE: served.
-      LIMIT_FLOWS: creating or adding flows was stopped by MAX_FLOWS_PER_CALL, or adding flows by a
-        CapacityAware max_flow_count above flow_count.
-      LIMIT_DIMINISHING: the diminishing guard stopped adding flows.
-      NO_ROUTE: the source has no flows after the call (Global: the maximum flow is 0 and nothing
-        was ever placed).
-      EXHAUSTED: any other unserved case (every flow full and no new route helps, a full fixed-size
-        set of flows, Global at the maximum flow, a LOSSY infinite offer).
-    Global and Pinned act as one source. The call's termination is COMPLETE for a request of 0 or
-    when every source is served, NO_ROUTE for a positive request with an empty roster, else the
-    highest outcome of the unserved sources in the order LIMIT_FLOWS > LIMIT_DIMINISHING >
-    EXHAUSTED > NO_ROUTE.
+    How a call ended, the first that applies: COMPLETE for a zero request; NO_ROUTE for a positive
+    request with an empty roster (no eligible source statically reaches an allowed destination);
+    NO_ACTIVE_WEIGHT when routes exist but none has a positive weight (WEIGHTED over edges of
+    capacity 0 only); a LOSSY finite request: COMPLETE (delivery and losses account for the whole
+    offer, which does not mean nothing was lost); otherwise COMPLETE when the whole request was
+    delivered, else EXHAUSTED (an infinite request is EXHAUSTED). A controller whose maximum is 0
+    over existing routes is EXHAUSTED, not NO_ROUTE.
+    CapacityAware alone reduces per-source outcomes: a source is served when its offer is 0 or
+    delivered; an unserved source's outcome is LIMIT_FLOWS (creating or adding flows was stopped by
+    MAX_FLOWS_PER_CALL, or adding flows by a max_flow_count above flow_count), else
+    LIMIT_DIMINISHING (the diminishing guard), else NO_ROUTE (no flows), else EXHAUSTED; the call
+    takes the highest unserved outcome in that order, COMPLETE when every source is served.
 
     Members:
 
@@ -1059,12 +1119,15 @@ class Termination:
       NO_ROUTE
 
       EXHAUSTED
+
+      NO_ACTIVE_WEIGHT
     """
 
     COMPLETE: typing.ClassVar[Termination]
     EXHAUSTED: typing.ClassVar[Termination]
     LIMIT_DIMINISHING: typing.ClassVar[Termination]
     LIMIT_FLOWS: typing.ClassVar[Termination]
+    NO_ACTIVE_WEIGHT: typing.ClassVar[Termination]
     NO_ROUTE: typing.ClassVar[Termination]
     __members__: typing.ClassVar[dict[str, Termination]]
 
@@ -1091,21 +1154,78 @@ class Termination:
     @property
     def value(self) -> int: ...
 
-class PlacementResult:
+class SourceFlow:
     """
-    One placement call: placed (units), remaining (request - placed; float('inf') for an infinite
-    request), termination, local_outcomes [(source, Termination)] per roster source, routes_changed,
-    weights_changed, and this call's drops [(EdgeId, units)]. cost_distribution: Global only, the
-    marginal cost curve [(cost, units)] of the policy's flow so far, else None: in ascending cost,
-    delivering `units` more raised the minimum total flow cost by `cost` per unit (more delivery can
-    reroute earlier flow, so these are not the costs of the final paths); a zero call leaves it
-    unchanged. Optional outputs, None unless requested:
-    edge_flows and residual (int64[E]), bottleneck, and min_cut (Global with bottleneck; None when the
-    solve did not reach the maximum flow).
+    One normalized input source's forwarding in the epoch (read-only; zero rows included: a
+    masked or unreachable source): source, offered (LOSSY: its injections; None when
+    LOSSLESS), admitted (LOSSLESS: what it delivers; LOSSY: offered), delivered, source_loss
+    (offered units lost at the source for lack of a usable route) and dropped (its losses on
+    links). LOSSY: offered = delivered + source_loss + dropped. Exact ints.
     """
 
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
     def __repr__(self) -> str: ...
+    @property
+    def admitted(self) -> int:
+        """
+        LOSSLESS: the units it delivers; LOSSY: offered
+        """
+
+    @property
+    def delivered(self) -> int:
+        """
+        the units it delivers to the destinations
+        """
+
+    @property
+    def dropped(self) -> int:
+        """
+        LOSSY: its units dropped on links; 0 when LOSSLESS
+        """
+
+    @property
+    def offered(self) -> int | None:
+        """
+        LOSSY: the units this source injected; None when LOSSLESS
+        """
+
+    @property
+    def source(self) -> int:
+        """
+        the source node id
+        """
+
+    @property
+    def source_loss(self) -> int:
+        """
+        LOSSY: its offered units lost at the source (no usable route); 0 when LOSSLESS
+        """
+
+class PlacementResult:
+    """
+    The result of one call. This call: placed (units delivered by the call), remaining (request -
+    placed; float('inf') for an infinite request), delivery_delta (new minus old delivery: placed for a
+    placement), call_drops [(EdgeId, units)], call_source_loss, termination, routes_changed and
+    weights_changed. The demand's state after the call (totals of the epoch): requested (float('inf')
+    after an infinite request), offered (LOSSY: the traffic sent; None when LOSSLESS), admitted,
+    delivered, unadmitted (LOSSLESS: requested - delivered, None after an infinite request; LOSSY: 0),
+    source_loss, drops [(EdgeId, units)], by_source (one SourceFlow per normalized input source,
+    ascending NodeId), total_cost (controllers: Global and CostOnly MAX_FLOW; else None) and
+    cost_distribution (Global with the optimized origin only). LOSSY: offered = source_loss +
+    sum(drops) + delivered. The rows sum to the totals, except for LOSSY with an empty roster, where the
+    whole offer is the demand's source loss and every row is zero. Optional outputs, None unless
+    requested: edge_flows and residual (int64[E]), bottleneck, min_cut. Amounts that accumulate are
+    exact ints (they may exceed 64 bits).
+    """
+
+    def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
+    def __repr__(self) -> str: ...
+    @property
+    def admitted(self) -> int:
+        """
+        LOSSLESS: the total carried; LOSSY: offered
+        """
+
     @property
     def bottleneck(self) -> list[int] | None:
         """
@@ -1114,17 +1234,49 @@ class PlacementResult:
         """
 
     @property
+    def by_source(self) -> tuple[SourceFlow, ...]:
+        """
+        one SourceFlow per normalized input source, ascending NodeId (zero rows included)
+        """
+
+    @property
+    def call_drops(self) -> list[tuple[int, int]]:
+        """
+        this call's drops on links [(EdgeId, units)], ascending EdgeId (empty unless LOSSY)
+        """
+
+    @property
+    def call_source_loss(self) -> int:
+        """
+        this call's offered units lost at sources without a usable route (LOSSY)
+        """
+
+    @property
     def cost_distribution(self) -> list[tuple[int, int]] | None:
         """
-        Global: the marginal cost curve [(cost, units)] of the policy's cumulative flow (a zero
-        call reports it unchanged); None for the other routing modes
+        Global with the optimized origin: the marginal cost curve [(cost, units)] of the policy's
+        cumulative flow (a zero call reports it unchanged; None before the epoch's first positive
+        call); in ascending cost, delivering `units` more raised the minimum total flow cost by `cost`
+        per unit (more delivery can reroute earlier flow, so these are not the costs of the final
+        paths). None for the other models and the equal origin
+        """
+
+    @property
+    def delivered(self) -> int:
+        """
+        the units the demand delivers
+        """
+
+    @property
+    def delivery_delta(self) -> int:
+        """
+        the delivery after the call minus before it (placed, for a placement)
         """
 
     @property
     def drops(self) -> list[tuple[int, int]]:
         """
-        this call's transit drops [(EdgeId, units)], ascending EdgeId (empty unless Lossy; records
-        keep the cumulative drops)
+        the epoch's drops on links [(EdgeId, units)], ascending EdgeId (empty unless LOSSY)
         """
 
     @property
@@ -1135,31 +1287,39 @@ class PlacementResult:
         """
 
     @property
-    def local_outcomes(self) -> list[tuple[int, Termination]]:
+    def min_cut(self) -> list[int] | None:
         """
-        [(source, Termination)] for every roster source, ascending node id
+        if requested (OutputOptions(min_cut=True)), Global with the optimized origin, when the solve
+        reached the maximum flow: the minimum cut closest to the sources, every allowed edge leaving
+        the nodes the roster sources reach in the residual network (free capacity plus the policy's
+        own allocation), an edge with nothing free (capacity 0, or held by others) included,
+        ascending EdgeId; [] for an empty roster. None otherwise (another model, the equal origin, a
+        call below the maximum, a zero call)
         """
 
     @property
-    def min_cut(self) -> list[int] | None:
+    def offered(self) -> int | None:
         """
-        Global with bottleneck requested: a minimum cut (edges whose removal separates the sources from
-        the destinations, with the smallest total capacity) of the policy's view (free capacity plus its
-        own allocation), when the solve reached the maximum flow: every allowed edge leaving the nodes the
-        sources still reach, an edge with nothing free (capacity 0, or held by others) included; None
-        otherwise (also on a zero call)
+        LOSSY: the traffic sent in the epoch (the first-hop injection of an infinite request); None
+        when LOSSLESS
         """
 
     @property
     def placed(self) -> int:
         """
-        the units placed by this call
+        the units placed (delivered) by this call
         """
 
     @property
     def remaining(self) -> int | float:
         """
         the request minus placed, in units (an amount, not a status); float('inf') for an infinite request
+        """
+
+    @property
+    def requested(self) -> int | float:
+        """
+        the sum of the epoch's requests; float('inf') after an infinite one
         """
 
     @property
@@ -1171,15 +1331,34 @@ class PlacementResult:
     @property
     def routes_changed(self) -> bool:
         """
-        True when this call committed a route change: a flow created (also at zero delivery), rerouted
-        or added, or a change in the edges a Global source's share uses; a candidate equal to the
-        current route is not a change
+        True when this call committed a route change: routes prepared or a flow created (also at
+        zero delivery), rerouted or added, or a change in the edges a Global source's share uses; a
+        candidate equal to the current route is not a change
+        """
+
+    @property
+    def source_loss(self) -> int:
+        """
+        LOSSY: the offered units lost at sources (no usable route, or an empty roster); 0 when LOSSLESS
         """
 
     @property
     def termination(self) -> Termination:
         """
         the call's outcome (Termination)
+        """
+
+    @property
+    def total_cost(self) -> int | None:
+        """
+        controllers (Global, CostOnly MAX_FLOW): the exact sum of cost * flow over the policy's
+        allocation; None for the other models
+        """
+
+    @property
+    def unadmitted(self) -> int | None:
+        """
+        LOSSLESS: requested - delivered, None after an infinite request; LOSSY: 0
         """
 
     @property
@@ -1308,10 +1487,11 @@ class FlowPolicy:
     ) -> None:
         """
         Bind a policy to ledger. elig (None: everything allowed) and cache (None: none; only CostOnly
-        routing reads it) belong to the ledger's graph; the policy keeps the ledger, elig and cache
-        alive. The roster (the sources that statically reach an allowed destination, over allowed edges
-        whatever their capacity) and, for Pinned, the usable bundles are fixed here. Everything is
-        validated before the policy binds.
+        routing reads it, another model rejects it) belong to the ledger's graph; the policy keeps the
+        ledger, elig and cache alive. The roster (the sources that statically reach an allowed
+        destination, over allowed edges whatever their capacity) and, for Pinned, the usable bundles
+        are fixed here. Everything is validated before the policy binds, in this order: the endpoints,
+        elig's and cache's graph, the configuration (FlowPolicyConfig's order), Pinned's bundles.
         """
 
     def place(
@@ -1322,11 +1502,15 @@ class FlowPolicy:
         """
         Place volume (int units in [0, 2^62), or float('inf')) all or nothing -> PlacementResult.
         Requests add up within an epoch (from construction or the last remove()); after float('inf') any
-        finite request is rejected, 0 included. A request of 0 places nothing. outputs (OutputOptions;
-        None: none) requests edge_flows, residual and bottleneck. Everything is validated before any
-        change; a failed call raises with the ledger and the policy unchanged. A solve of the flow core
-        (Global, or a MAX_FLOW flow) on a network beyond its int32 numbering raises ValueError: more than
-        INT32_MAX - 2 nodes, or more than 2^30 - 1 edges, sources and destinations together.
+        finite request is rejected, 0 included. A request of 0 places nothing and reports the current
+        state. CostOnly prepares its routes at the epoch's first positive request; LOSSLESS admits the
+        largest total in [admitted, admitted + volume] that the routes carry with no loss (a refused unit
+        is not offered again); LOSSY forwards the new round-robin injections (earlier drops are not
+        offered again). outputs (OutputOptions; None: none) requests edge_flows, residual, bottleneck and
+        min_cut. Everything is validated before any change; a failed call raises with the ledger and the
+        policy unchanged. A solve of the flow core (Global, CostOnly MAX_FLOW, or a MAX_FLOW flow) on a
+        network beyond its int32 numbering raises ValueError: more than INT32_MAX - 2 nodes, or more than
+        2^30 - 1 edges, sources and destinations together.
         """
 
     def placed_demand(self) -> int:
@@ -1361,50 +1545,15 @@ class FlowPolicy:
     @property
     def config(self) -> FlowPolicyConfig:
         """
-        the FlowPolicyConfig the policy was built with
+        the configuration as validated at construction, its absent origin and selection
+        resolved to the model's defaults
         """
 
-class CapacityOptions:
+class QueryOptions:
     """
-    The configuration, the static Eligibility (None: all allowed), the DagCache (None:
-    private per worker) and the optional outputs of capacity() and batch_capacity().
-    """
-
-    def __init__(
-        self,
-        config: FlowPolicyConfig,
-        *,
-        elig: Eligibility | None = None,
-        cache: DagCache | None = None,
-        outputs: OutputOptions | None = None,
-    ) -> None: ...
-    @property
-    def cache(self) -> DagCache | None:
-        """
-        the supplied DagCache; None: a private cache per worker
-        """
-
-    @property
-    def config(self) -> FlowPolicyConfig:
-        """
-        the FlowPolicyConfig of every evaluated policy
-        """
-
-    @property
-    def elig(self) -> Eligibility | None:
-        """
-        the static Eligibility; None: everything allowed
-        """
-
-    @property
-    def outputs(self) -> OutputOptions:
-        """
-        the OutputOptions of every result
-        """
-
-class SensitivityOptions:
-    """
-    The configuration, Eligibility, DagCache and baseline outputs of sensitivity().
+    The options of every evaluator (capacity, batch_capacity, sensitivity): the configuration,
+    the static Eligibility (None: all allowed), the DagCache (None: private per worker) and
+    the optional outputs of each result (sensitivity: of its baseline).
     """
 
     def __init__(
@@ -1424,7 +1573,7 @@ class SensitivityOptions:
     @property
     def config(self) -> FlowPolicyConfig:
         """
-        the FlowPolicyConfig of the baseline and every deletion
+        the FlowPolicyConfig of every evaluated policy (sensitivity: the baseline and every deletion)
         """
 
     @property
@@ -1436,7 +1585,7 @@ class SensitivityOptions:
     @property
     def outputs(self) -> OutputOptions:
         """
-        the OutputOptions of the baseline result
+        the OutputOptions of every result (sensitivity: of the baseline)
         """
 
 class SensitivityEntry:
@@ -1660,7 +1809,7 @@ def batch_capacity(
         | numpy.typing.NDArray[numpy.integer]
     ]
     | numpy.typing.NDArray[numpy.integer],
-    opts: CapacityOptions,
+    opts: QueryOptions,
     per_pair_elig: collections.abc.Sequence[Eligibility | None] | None = None,
     workers: typing.SupportsIndex | None = None,
 ) -> list[PlacementResult]:
@@ -1687,12 +1836,13 @@ def capacity(
     destinations: typing.SupportsIndex
     | collections.abc.Sequence[typing.SupportsIndex]
     | numpy.typing.NDArray[numpy.integer],
-    opts: CapacityOptions,
+    opts: QueryOptions,
 ) -> PlacementResult:
     """
     place(+inf) of a FlowPolicy with opts.config on a fresh ledger of the graph -> PlacementResult.
-    The exact maximum flow is the Global + MAX_FLOW configuration. A supplied frozen cache raises
-    DagCacheMiss for an absent key, unchanged.
+    The exact maximum flow is Global() (the optimized origin); with origin=EQUAL, the largest total whose
+    round-robin source shares are all carried. A supplied frozen cache raises DagCacheMiss for an absent
+    key, unchanged.
     A failed call raises; a supplied DagCache then behaves as the DagCache docstring states.
     """
 
@@ -1736,16 +1886,18 @@ def sensitivity(
     destinations: typing.SupportsIndex
     | collections.abc.Sequence[typing.SupportsIndex]
     | numpy.typing.NDArray[numpy.integer],
-    opts: SensitivityOptions,
+    opts: QueryOptions,
     workers: typing.SupportsIndex | None = None,
 ) -> SensitivityResult:
     """
-    The baseline capacity() and one SensitivityEntry per candidate edge. Candidates: with Global, the
-    edges that carry flow in the baseline (removing any other edge cannot lower a maximum flow); with
-    the other routings, every allowed edge, whatever its capacity (an edge of capacity 0 can carry a
-    route, so deleting it can change the result). loss = baseline.placed minus the placed of
-    capacity() without the edge, in signed units, never thresholded. Two shortcuts give exactly
-    that value: Global repairs a copy of the baseline's solve instead of solving again, and CostOnly
+    The baseline capacity() and one SensitivityEntry per candidate edge. Candidates: with Global and
+    the optimized origin, the edges that carry flow in the baseline (removing any other edge cannot
+    lower a maximum flow); otherwise every allowed edge, whatever its capacity (an edge of capacity 0
+    can carry a route, so deleting it can change the result, and with the equal origin a deletion that
+    removes a source from the roster can raise the total: a negative loss). loss = baseline.placed
+    minus the placed of capacity() without the edge, in signed units, never thresholded. Two
+    shortcuts give exactly that value: optimized Global repairs a copy of the baseline's solve
+    instead of solving again, and CostOnly
     gives loss 0 without placing to an edge outside the static shortest-path support reachable from
     the roster sources (no route can use it). workers as batch_capacity
     (NGRAPH_CORE_SENSITIVITY_THREADS). Only CostOnly reads the cache, and each placed deletion uses a

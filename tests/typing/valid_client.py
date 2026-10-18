@@ -90,15 +90,27 @@ for record in policy.records():
     assert_type(ledger.record(record.flow_id), ng.FlowRecord)
 policy.remove()
 
-# The evaluators, with optional arguments left out or None.
+# The result's accounting: exact ints, None where a field does not apply, per-source rows.
+assert_type(result.requested, int | float)
+assert_type(result.offered, int | None)
+assert_type(result.unadmitted, int | None)
+assert_type(result.total_cost, int | None)
+assert_type(result.call_drops, list[tuple[int, int]])
+for row in result.by_source:
+    assert_type(row, ng.SourceFlow)
+    assert_type(row.admitted, int)
+    assert_type(row.offered, int | None)
+
+# The evaluators, with optional arguments left out or None. Only CostOnly reads a cache; the
+# controllers' origin defaults to OPTIMIZED.
 cfg = ng.FlowPolicyConfig(
-    routing=ng.Global(),
+    routing=ng.CostOnly(),
     placement=ng.FlowPlacement.MAX_FLOW,
-    admission=ng.Admission.LOSSLESS,
-    selection=sel,
+    origin=ng.Origin.EQUAL,
 )
+assert_type(cfg.origin, ng.Origin | None)
 cache = ng.DagCache(g)
-opts = ng.CapacityOptions(cfg, elig=None, cache=cache)
+opts = ng.QueryOptions(cfg, elig=None, cache=cache)
 assert_type(opts.elig, ng.Eligibility | None)
 placed: int = ng.capacity(g, 0, 3, opts).placed
 batch = ng.batch_capacity(g, [(0, 3), ([0, 1], np.array([3]))], opts, workers=1)
@@ -108,11 +120,12 @@ from_rows = ng.batch_capacity(g, np.array([[0, 3], [1, 3]], dtype=np.int64), opt
 from_pair = ng.batch_capacity(g, [np.array([0, 3], dtype=np.int64)], opts)
 assert_type(from_rows, list[ng.PlacementResult])
 assert_type(from_pair, list[ng.PlacementResult])
-sens = ng.sensitivity(g, 0, 3, ng.SensitivityOptions(cfg))
+global_cfg = ng.FlowPolicyConfig(routing=ng.Global())
+sens = ng.sensitivity(g, 0, 3, ng.QueryOptions(global_cfg))
 for entry in sens.entries:
     assert_type(entry.loss, int)
 assert_type(cache.stats().hits, int)
-routing = cfg.routing
+routing = global_cfg.routing
 if isinstance(routing, ng.Global):
     print("Global routing:", routing)
 print(placed, len(batch), len(paths), ng.UNREACHABLE, ng.__version__)

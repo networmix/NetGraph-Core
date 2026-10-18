@@ -159,7 +159,6 @@ def ledger_state(fg) -> dict:
                 "owner": r.owner,
                 "sources": list(r.sources),
                 "destinations": list(r.destinations),
-                "placement": r.placement,
                 "admission": r.admission,
                 "bundle": sorted(r.bundle),
                 "route_cost": None
@@ -241,7 +240,9 @@ def config_json(cfg) -> dict:
         "routing": routing,
         "placement": cfg.placement,
         "admission": cfg.admission,
-        "selection": {
+        "selection": None
+        if sel is None
+        else {
             "multipath": sel.multipath,
             "multi_edge": sel.multi_edge,
             "tie_break": sel.tie_break,
@@ -352,7 +353,12 @@ def make_rec_policy(P):
                 else jsonable(volume),
                 "outputs": None
                 if outputs is None
-                else [outputs.edge_flows, outputs.residual, outputs.bottleneck],
+                else [
+                    outputs.edge_flows,
+                    outputs.residual,
+                    outputs.bottleneck,
+                    outputs.min_cut,
+                ],
                 "cap": P.MAX_FLOWS_PER_CALL,
             }
             try:

@@ -50,6 +50,17 @@ Contents:
 - **Cohort.** The flows a policy manages for one source; growth adds a flow to it
   (`CapacityAware`).
 - **Roster.** The sources of a policy that take part in placement, fixed when the policy is built.
+- **Origin.** How a demand's total enters at its roster sources: in equal round-robin shares
+  (`EQUAL`) or as a controller chooses (`OPTIMIZED`).
+- **Round robin `RR(x, k, i)`.** `x` units over `k` members: `x // k` each, and one more for the
+  first `x % k` members.
+- **Highest averages `H(x, w)`.** `x` units over members with integer weights `w`, given one at a
+  time to the member with the largest `w[i] / (assigned[i] + 1)`, ties to the earlier member; a
+  zero weight gets nothing.
+- **Program.** The routes and splits a `CostOnly` policy prepares once per epoch and forwards
+  over.
+- **Controller.** A routing that solves a flow problem for the whole demand: `Global`, and
+  `CostOnly` with `MAX_FLOW`.
 - **Offer.** The part of a request that a call asks one source to place.
 - **Epoch.** The period from a policy's construction, or a `remove()`, to the next `remove()`;
   requests add up within it.
@@ -87,6 +98,7 @@ PREFER = ngc.PathSelection(ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY, ngc.EdgePrio
 
 def config(routing, placement=ngc.FlowPlacement.EQUAL_BALANCED,
            admission=ngc.Admission.LOSSLESS, selection=DET):
+    """A configuration with a kernel (every routing but Global, which takes none)."""
     return ngc.FlowPolicyConfig(routing=routing, placement=placement,
                                 admission=admission, selection=selection)
 ```
@@ -446,7 +458,9 @@ drops on each edge what does not fit.
   the free capacity plus the flow's own current allocation. It may move the flow's own earlier
   allocation (that is what lets it reach the maximum); it never moves another flow's. It fills
   the cheapest walks of a mixed-cost bundle first. Per-edge changes between calls can be
-  negative. `MAX_FLOW` is Lossless only: a controller never drops. A flow beyond the flow core's
+  negative. With `CostOnly` routing it solves the whole demand at once, over the union of its
+  sources' routes ([section 7](#routing-modes)). `MAX_FLOW` is Lossless only: a controller never
+  drops. A flow beyond the flow core's
   size limit raises `ValueError` ([section 2](#2-the-graph), Size).
 - **`WEIGHTED`** splits at every node by highest averages over weights frozen when the flow is
   created: the members' priority values at that moment (residual units under `RESIDUAL`, static
@@ -464,9 +478,10 @@ drops on each edge what does not fit.
   routing). Each call's offer is split at every node by the kernel's rule; each edge carries the
   smaller of its share and its residual, and the rest is dropped on that edge. The delivery is
   what reaches the destination set. An infinite offer injects into each first edge exactly its
-  residual. Records keep `offered`, `delivered` and per-edge `drops`; the transit drops are the
-  sum of `drops`, and the source drops are `offered - delivered - transit drops`. Lossy calls are
-  independent: nothing is re-offered and two calls are not equivalent to one.
+  residual. A share that has no edge to go on (a `WEIGHTED` node whose members all have weight 0)
+  is lost where it is: at a source it is `source_loss`. Records keep `offered`, `delivered` and
+  per-edge `drops`. Lossy calls are independent: nothing is re-offered and two calls are not
+  equivalent to one.
 
 On a diamond with paths of capacity 10 and 2, equal-share forwarding stops at 5 units: round
 robin gives the odd unit to the lower EdgeId (3 and 2), and a sixth unit would put 3 units on the
@@ -483,7 +498,7 @@ for kernel in kernels:
 ledger = ngc.FlowLedger(g)
 pol = ngc.FlowPolicy(ledger, 0, 3, config(ngc.CostOnly(), admission=ngc.Admission.LOSSY))
 r = pol.place(10)
-print("LOSSY", r.placed, r.remaining, r.termination.name, "drops", r.drops)
+print("LOSSY", r.placed, r.remaining, r.termination.name, "drops", r.call_drops)
 rec = pol.records()[0]
 print("record", rec.offered, rec.delivered, rec.drops)
 ```
@@ -501,8 +516,9 @@ and what did not fit is accounted as drops, not as a shortfall ([section 7](#out
 
 An edge of capacity 0 on the only shortest route is still that route. Equal splitting sends it
 the whole offer: Lossless places nothing, Lossy drops all of it there. Weighted splitting gives
-it weight 0 and has no other edge in its route, so the offer is lost at the source; neither takes
-the costlier detour. A controller (`Global`) uses the detour:
+it weight 0 and has no other edge in its route, so nothing can be sent (`NO_ACTIVE_WEIGHT`) and
+a Lossy offer is lost at the source; neither takes the costlier detour. A controller (`Global`)
+uses the detour:
 
 ```python
 # Edge 0: 0 -> 1 of capacity 0 (cost 1); the detour 0 -> 2 -> 1 (5 units, cost 2).
@@ -513,17 +529,18 @@ for kernel in (ngc.FlowPlacement.EQUAL_BALANCED, ngc.FlowPlacement.WEIGHTED):
     for admission in (ngc.Admission.LOSSLESS, ngc.Admission.LOSSY):
         cfg = config(ngc.CostOnly(), placement=kernel, admission=admission)
         r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg).place(5)
-        print(kernel.name, admission.name, r.placed, r.drops, r.termination.name)
-cfg = config(ngc.Global(), ngc.FlowPlacement.MAX_FLOW)
+        print(kernel.name, admission.name, r.placed, r.call_drops, r.call_source_loss,
+              r.termination.name)
+cfg = ngc.FlowPolicyConfig(routing=ngc.Global())
 print("Global", ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg).place(5).placed)
 ```
 
 ```text
 spf 1 [0]
-EQUAL_BALANCED LOSSLESS 0 [] EXHAUSTED
-EQUAL_BALANCED LOSSY 0 [(0, 5)] COMPLETE
-WEIGHTED LOSSLESS 0 [] EXHAUSTED
-WEIGHTED LOSSY 0 [] EXHAUSTED
+EQUAL_BALANCED LOSSLESS 0 [] 0 EXHAUSTED
+EQUAL_BALANCED LOSSY 0 [(0, 5)] 0 COMPLETE
+WEIGHTED LOSSLESS 0 [] 0 NO_ACTIVE_WEIGHT
+WEIGHTED LOSSY 0 [] 5 NO_ACTIVE_WEIGHT
 Global 5
 ```
 
@@ -548,7 +565,7 @@ records hold.
   in FlowId order; `record(flow_id)` reads one. A FlowId is the pair `(ledger uid, id)`; ids are
   never reused. A FlowId of another ledger, or a retired or unknown id, raises `ValueError`.
 - **`FlowRecord`** fields: `flow_id`; `owner` (the policy's id); `sources` and `destinations`
-  (node sets); `placement` and `admission`; `bundle` (the flow's route as a `PredDAG`);
+  (node sets); `admission`; `bundle` (the flow's route as a `PredDAG`);
   `route_cost` (the cheapest walk of the bundle, cached; `None` for an empty bundle); `offered`
   (Lossy records only, else `None`); `delivered`; `edges` (`[(EdgeId, units)]`, ascending) and
   `drops` (`[(EdgeId, units)]`, cumulative, ascending).
@@ -572,43 +589,79 @@ A policy destroyed without `remove()` leaves its records and allocations in the 
 
 **In plain words.** A `FlowPolicy` is the routing model of one demand between a set of sources
 and a set of destinations. `place(volume)` asks it to carry more; it routes, fills and possibly
-grows its flows, commits everything at once, and reports how much was placed, what stopped it
-and whether routes or weights changed. `remove()` takes all of its traffic back out.
+grows its flows, commits everything at once, and reports how much was placed, what stopped it,
+where traffic was lost and how much each source carried. `remove()` takes all of its traffic
+back out. A demand with several sources is one demand, not several: how its traffic enters at
+the sources is its **origin**, and where the routes of its sources meet, their traffic is added
+and split once.
 
 ### Configuration
 
-`FlowPolicyConfig(routing=..., placement=..., admission=..., selection=...)` has four explicit
-axes (independent settings) and no defaults. The routing is one of:
+`FlowPolicyConfig(*, routing, placement=None, admission=Admission.LOSSLESS, selection=None,
+origin=None)` takes keywords only. The routing is one of:
 
 | Routing | Models | Fields (defaults) |
 | --- | --- | --- |
-| `CostOnly()` | IGP forwarding (as OSPF or IS-IS routers do): static shortest paths, never refreshed | none |
+| `CostOnly()` | IGP forwarding (as OSPF or IS-IS routers do): static shortest paths, never refreshed; with `MAX_FLOW`, a controller restricted to those paths | none |
 | `CapacityAware(...)` | distributed CSPF tunnels (constrained shortest path first: each tunnel head picks a shortest path with enough free capacity) | `flow_count=1`, `max_flow_count=None`, `max_path_cost=None`, `min_flow_bandwidth=0`, `reoptimize=False`, `diminishing=None` |
 | `Global()` | an ideal controller that sees the whole network | none |
 | `Pinned(bundles)` | explicit routes given by the caller | a list of `PredDAG` (a `Path` converts with `to_dag()`); copied when the policy is built |
 
-`FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)` binds the policy to
-its ledger. `sources` and `destinations` are one node id or a sequence; the two sets must not
-overlap. Construction validates everything before the policy binds (a field that a routing does
-not have is a `TypeError`; every other defect a `ValueError`): the endpoint sets, a foreign
-`Eligibility` or `DagCache`, and the configuration below. The order between these three groups
-of checks is not specified: when defects of two groups meet, the one reported may differ between
-the C++ constructor and Python. The configuration's rules:
+Each routing accepts exactly the combinations of this table; any other raises `ValueError` before
+any work, a request of 0 included. A field marked "none" must be left `None`:
+
+| Routing | `placement` | `origin` default / allowed | `admission` | `selection` |
+| --- | --- | --- | --- | --- |
+| `CostOnly` | `EQUAL_BALANCED` (ECMP) or `WEIGHTED` (WCMP) | `EQUAL` / `EQUAL` | `LOSSLESS`, `LOSSY` | all four fields |
+| `CostOnly` | `MAX_FLOW` | `OPTIMIZED` / both | `LOSSLESS` | all four fields |
+| `Global` | none | `OPTIMIZED` / both | `LOSSLESS` | none |
+| `CapacityAware` | any kernel (required) | `EQUAL` / `EQUAL` | `LOSSLESS` | all four fields |
+| `Pinned` | any kernel (required) | none | `LOSSLESS`, `LOSSY` (not with `MAX_FLOW`) | only `priority`, with `WEIGHTED` |
+
+`selection=None` means `PathSelection()` (`DETERMINISTIC`, `CAPACITY`, `multipath=True`,
+`multi_edge=True`) for the routings that read it, and `origin=None` means the routing's default.
+A policy's `config()` returns the configuration with both filled in (`selection` stays `None` for
+`Global` and `origin` for `Pinned`). Further rules:
 
 - `WEIGHTED` with priority `HEADROOM` is rejected.
-- `LOSSY` is rejected with `MAX_FLOW`, with `Global` and with `CapacityAware`.
-- `Global` requires `MAX_FLOW`.
 - `flow_count >= 1`; `max_flow_count` is `None` (no ceiling) or at least `flow_count`;
   `min_flow_bandwidth` is in [0, 2^62) units; `max_path_cost` is `None`, `Absolute(c)` with
   `c >= 0` or `Stretch(f)` with `f` finite and at least 1 (as for `ksp`); `diminishing` is `None`
   (off) or `DiminishingReturns(window, fraction)` with `window >= 1` and `fraction` strictly
   between 0 and 1.
+- Only `CostOnly` reads a `DagCache`; any other routing given one is rejected.
 - `Pinned`: one source and one destination; at least one bundle; no duplicate bundles; every
   bundle runs from the policy's source to its destination and has at least one walk.
+- **The pooled single-path rule.** `CostOnly` with more than one source (counted after removing
+  repeats, before any Eligibility) rejects `multipath=False` together with
+  `PREFER_HIGHER_PRIORITY`: the bottleneck choice could then differ per source at a router the
+  sources share.
 
-What each routing reads from `selection`: `CostOnly` and `CapacityAware` read all four fields.
-`Global` and `Pinned` read only `priority`, and only with the `WEIGHTED` kernel (for membership
-and weights). Ignoring a field is not an error.
+`FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)` binds the policy to
+its ledger. `sources` and `destinations` are one node id or a sequence; the two sets must not
+overlap. Construction validates everything before the policy binds (a field that a routing does
+not have is a `TypeError`; every other defect a `ValueError`), and when several defects meet, the
+first in this order is reported: the endpoint sets (empty, out of range, the lowest node in both);
+a foreign `Eligibility` or `DagCache`; enum values outside their enumeration; the table above,
+its row (routing, then placement) and then its columns left to right (placement, origin,
+admission, selection); the cache rule; `CapacityAware`'s own fields; the endpoint counts
+(`Pinned`'s single endpoints, the pooled single-path rule); `Pinned`'s bundles.
+
+### The origin
+
+The origin says how a demand's total enters at its roster sources, separately from how it is
+routed:
+
+- **`EQUAL`**: a total `x` enters as the round robin `RR(x, k, i) = x // k + (1 if i < x % k else
+  0)` at roster member `i` (`k` members, ascending node id): the first members get one extra
+  unit. A source whose share cannot go anywhere keeps it and loses it; the share is never moved
+  to another source. Lossless therefore admits only totals that give such a source nothing, and
+  Lossy loses its share.
+- **`OPTIMIZED`** (controllers only): the controller chooses how much enters at each source (one
+  virtual source joined to every roster source), whatever maximises the delivery and then
+  minimises its cost.
+
+There is no weighted origin; sources with fixed or uneven amounts are separate demands.
 
 ### The source roster
 
@@ -617,16 +670,27 @@ the allowed sources that have a static walk to an allowed destination over allow
 their capacity, in ascending node id: a source whose only routes cross an edge of capacity 0 is in
 the roster, receives its share and cannot place it (a failure is expressed with an Eligibility,
 which removes the source). For `Pinned` it is the single source when at least one bundle is
-usable. The roster decides which records exist and which `local_outcomes` are reported. A
-positive request with an empty roster creates nothing and ends `NO_ROUTE`.
+usable. The roster decides which sources receive shares and which records exist; `by_source`
+reports every input source, a source outside the roster with a zero row. A positive request with
+an empty roster creates nothing and ends `NO_ROUTE`.
 
 ### Routing modes
 
-- **`CostOnly`** creates one flow per roster source, on the static shortest-path DAG toward the
-  destination set, or with `multipath=False` on that source's canonical path. The route is read
-  from the [DAG cache](#9-the-dag-cache) and the selection is applied when the flow is created
-  (priorities read from the residual at that moment for `RESIDUAL` and `HEADROOM`, from the
-  static capacities for `CAPACITY`). The route is never refreshed, grown or reoptimised.
+- **`CostOnly` with `EQUAL_BALANCED` or `WEIGHTED`** forwards like IGP routers. At the epoch's
+  first positive call it prepares a **program**, the routes and splits used for the whole epoch:
+  each roster source's route is its static shortest-path DAG toward the destination set (with
+  `multipath=False`, its canonical path), read from the [DAG cache](#9-the-dag-cache), with the
+  selection applied on the ledger's residual at that call's entry (priorities read from that
+  residual for `RESIDUAL` and `HEADROOM`, from the static capacities for `CAPACITY`; `WEIGHTED`
+  freezes its weights there). The program is the union of these routes: at a router several
+  sources pass, their traffic for the demand is added (with the router's own injection when it
+  is a source) and split once over its members, by round robin (`EQUAL_BALANCED`) or by highest
+  averages over the weights (`WEIGHTED`). Every source that passes a router has the same
+  continuation there, so the union lends no source a link outside its own route. The program is
+  never refreshed, grown or reoptimised within the epoch.
+- **`CostOnly` with `MAX_FLOW`** is a controller restricted to shortest paths: it solves like
+  `Global` (below), but only over the union of the roster sources' routes prepared as above,
+  edges of capacity 0 included (so a zero-capacity shortest route is never bypassed).
 - **`CapacityAware`** routes by the canonical path or the DAG of [section 4](#4-search) on the
   current free capacity, excluding edges with less than `max(1, min_flow_bandwidth)` units free and
   routes above `max_path_cost` (`Stretch` is relative to the static shortest cost, computed when the
@@ -642,17 +706,22 @@ positive request with an empty roster creates nothing and ends `NO_ROUTE`.
   the result is not an upper bound.
 - **`Global`** re-solves, on every positive call, the minimum-cost flow of the amount the
   policy already delivers plus this call's request (`placed_demand()` plus the request; what an
-  earlier call could not place is not requested again) from its whole source set to its whole
+  earlier call could not place is not requested again) from its roster to its whole
   destination set over every eligible edge, on the free capacity plus its own allocation (it may
-  move its own traffic, never another owner's). Hence `place(a)` followed by `place(b)` ends in
-  the same allocation as `place(a + b)` on an unchanged network, and the result is always a
-  minimum-cost flow of the amount the policy delivers. It keeps one record per roster source; each record's bundle is the set of edges
-  that carry that source's share, extracted in a canonical order, and is rebuilt on every positive call
-  under the same FlowId. A source with no share has an empty bundle and `route_cost` `None`.
-  `cost_distribution` reports the marginal cost curve of the cumulative flow: `(cost, units)`
-  pairs in ascending cost, saying how many units cost that much at the margin. A positive call on
-  a network beyond the flow core's size limit raises `ValueError` ([section 2](#2-the-graph),
-  Size).
+  move its own traffic, never another owner's): the largest delivery up to that amount, and among
+  those the cheapest. Hence `place(a)` followed by `place(b)` ends in the same allocation as
+  `place(a + b)` on an unchanged network. With `EQUAL` origin the virtual source's arc to roster
+  source `i` carries exactly `RR(T, k, i)`: the delivered total `T` is the largest whose equal
+  shares all fit (found by exact binary search over the totals; a total fits only when the solve
+  reaches it), and that total is solved once more from zero, so the result does not depend on the
+  search. A positive call on a network beyond the flow core's size limit raises `ValueError`
+  ([section 2](#2-the-graph), Size).
+- **Records of the controllers** (`Global`, `CostOnly` with `MAX_FLOW`): one record per roster
+  source, holding that source's share of the solved flow (its edges and its delivery), extracted
+  in a canonical order. A `Global` record's bundle is the set of edges that carry the share,
+  rebuilt on every positive call under the same FlowId; a source with no share has an empty
+  bundle and `route_cost` `None`. A `CostOnly` `MAX_FLOW` record's bundle is its source's
+  prepared route, and the share stays inside it.
 - **`Pinned`** creates one flow per usable bundle, in the order given. A bundle is usable when at
   least one of its walks survives the Eligibility, whatever the capacities of its edges; its
   `route_cost` is the cheapest such walk. Bundles that become equal after that pruning keep separate flows. When no bundle is
@@ -663,19 +732,75 @@ positive request with an empty roster creates nothing and ends `NO_ROUTE`.
 - **Destinations** (`CostOnly`, `CapacityAware`): a route goes to the nearest destinations, and
   one flow may deliver to several of them at that cost. A record's `delivered` is its total; the
   delivery to one destination is the sum of the record's `edges` entering it.
-- **Sources** (`CostOnly`, `CapacityAware`) act as independent routers or tunnel heads. The
-  policy's cumulative request is split over the roster by round robin in ascending node id, and
-  each source is offered the increase of its share in this call (an infinite request offers
-  infinity to every source). Sources are placed one after another, in ascending node id, on the
-  shared free capacity; what one source cannot place is not passed to another. Lossy sources are
-  split the same way: two calls of 1 unit over two sources offer 1 to each.
-- **`Global`** optimises the whole source set and destination set together and may use a
-  costlier destination to carry more.
+- **`CostOnly` split routing pools its sources.** Each record (one per roster source) holds the
+  part of the program's traffic that is that source's. At every router the members' amounts are
+  given back to the sources member by member, in member order, by highest averages over what each
+  source still holds there; on an edge that drops traffic (Lossy), what the edge carries is
+  divided by highest averages over what each source brought to it. Highest averages `H(x, w)`
+  gives `x` units one at a time to the member with the largest `w[i] / (assigned[i] + 1)`, ties to
+  the earlier member; a zero weight gets nothing. So the records sum exactly to the totals, and a
+  source's record uses only edges of its own route.
+- **The controllers** (`Global`, `CostOnly` with `MAX_FLOW`) optimise the whole roster and
+  destination set together; `Global` may use a costlier destination to carry more.
+- **`CapacityAware` sources** act as independent tunnel heads. The policy's cumulative request is
+  split over the roster by round robin in ascending node id, and each source is offered the
+  increase of its share in this call (an infinite request offers infinity to every source).
+  Sources are placed one after another, in ascending node id, on the shared free capacity; what
+  one source cannot place is not passed to another. A split request is therefore not equivalent
+  to one large request.
 - **`Pinned`** has a single source and a single destination.
 
-Because sources are placed in order, a split request is not equivalent to one large request:
-two sources sharing a 2-unit edge get `[1, 1]` from `place(2); place(2)` but `[2, 0]` from
-`place(4)`.
+Two sources with one unit each meet at node 2, whose two members lead to the destination. Pooled,
+node 2 splits the two units once, one per member, and gives one member to each source; split
+separately, each source would send its unit to the first member:
+
+```python
+# Edges 0: 0 -> 2, 1: 1 -> 2, then the two members 2: 2 -> 3 and 3: 2 -> 3.
+g = graph(4, [(0, 2, 5, 1), (1, 2, 5, 1), (2, 3, 1, 1), (2, 3, 1, 1)])
+pol = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, config(ngc.CostOnly()))
+r = pol.place(2)
+print(r.placed, r.termination.name, [(row.source, row.delivered) for row in r.by_source])
+print([(rec.sources, rec.edges) for rec in pol.records()])
+```
+
+```text
+2 COMPLETE [(0, 1), (1, 1)]
+[([0], [(0, 1), (2, 1)]), ([1], [(1, 1), (3, 1)])]
+```
+
+### The equal origin and a source that cannot pass anything
+
+A roster source whose every route crosses an edge with no free capacity stays in the roster: it
+receives its share and loses it. Lossless admits only totals that give it nothing, which is the
+number of roster sources before it, because the first remainder units go to the lowest node ids:
+0 when it is the first source. Lossy loses its share where its program puts it: on the edge that
+limits it (`drops`), or at the source when it has no member to send it on (`source_loss`). An
+Eligibility that excludes the source or the edge removes it from the roster instead.
+
+```python
+# Source 0 reaches node 2 only over the 0-unit edge 0; source 1 over the 10-unit edge 1.
+g = graph(3, [(0, 2, 0, 1), (1, 2, 10, 1)])
+equal = ngc.FlowPolicyConfig(routing=ngc.Global(), origin=ngc.Origin.EQUAL)
+for name, cfg in (("CostOnly", config(ngc.CostOnly())),
+                  ("Global EQUAL", equal),
+                  ("Global OPTIMIZED", ngc.FlowPolicyConfig(routing=ngc.Global()))):
+    r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, cfg).place(10)
+    print(name, r.placed, r.termination.name)
+lossy = config(ngc.CostOnly(), admission=ngc.Admission.LOSSY)
+r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, lossy).place(10)
+print("LOSSY", r.placed, r.call_drops, [(row.source, row.dropped) for row in r.by_source])
+r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, config(ngc.CostOnly()),
+                   g.eligibility(excluded_nodes=[0])).place(10)
+print("source 0 excluded", r.placed)
+```
+
+```text
+CostOnly 0 EXHAUSTED
+Global EQUAL 0 EXHAUSTED
+Global OPTIMIZED 10 COMPLETE
+LOSSY 5 [(0, 5)] [(0, 5), (1, 0)]
+source 0 excluded 10
+```
 
 ### The placement call
 
@@ -683,38 +808,50 @@ two sources sharing a 2-unit edge get `[1, 1]` from `place(2); place(2)` but `[2
 
 1. **Validation** happens before anything changes. Within an epoch, a finite request after an
    infinite one is rejected (the cumulative request would be undefined), `place(0)` included.
-2. **A request of 0** is `COMPLETE` and does nothing: it creates no flow.
-3. **`Global`** re-solves as described above.
-4. **`CostOnly`, `CapacityAware`, `Pinned`** run, per source and on one shared working copy of
-   the free capacity: creation (while the source has no flows), reoptimisation (`CapacityAware`
-   with `reoptimize`), filling (each flow, or each equal-share cohort, raised toward its
-   maximum), growth (`CapacityAware`).
-5. **Commit.** All changes to the ledger and the policy are committed together at the end, or
+2. **A request of 0** is `COMPLETE` and does nothing: it creates no flow and prepares nothing. It
+   reports the demand's state, with both flags false.
+3. **`CostOnly` split routing** prepares the program at the epoch's first positive call (one
+   record per roster source, also at zero delivery). Lossless then admits the largest total `a`
+   between what it already delivers and that plus the request whose forwarding of `RR(a)` from
+   zero fits the free capacity plus the policy's own allocation with no drop and gives no share to
+   a source without a member (exact binary search: the totals that fit form a prefix). Lossy
+   injects at the sources this call's increase of the round robin, `RR(offered + v) -
+   RR(offered)`, and forwards it hop by hop on the free capacity: each edge carries the smaller of
+   what reaches it and its residual and drops the rest. An infinite Lossy request is the
+   **first-hop experiment**: each source injects on each of its first edges exactly that edge's
+   residual, on top of the traffic other sources send through it, and forwarding runs as usual.
+4. **The controllers** re-solve as described above.
+5. **`CapacityAware` and `Pinned`** run, per source and on one shared working copy of the free
+   capacity: creation (while the source has no flows), reoptimisation (`CapacityAware` with
+   `reoptimize`), filling (each flow, or each equal-share cohort, raised toward its maximum),
+   growth (`CapacityAware`).
+6. **Commit.** All changes to the ledger and the policy are committed together at the end, or
    none are ([section 8](#8-failures-threads-and-lifetimes)).
 
 What the call guarantees:
 
 - `placed` is the increase in delivery made by this call, and `0 <= placed <= volume`. For Lossy
   it is this call's delivery. `remaining = volume - placed` (`float('inf')` for an infinite
-  request; for Lossy it includes what was dropped).
+  request; for Lossy it includes what was lost).
 - A call never reduces `placed_demand()`, the sum of `delivered` over the policy's records. The
   total of an equal-share cohort never decreases; one tunnel's amount can decrease when growth
   re-splits a larger total over more tunnels (`[3, 3]` plus a new tunnel can become
   `[3, 2, 2]`).
-- The first positive request creates the source's flows even when none of them can deliver
+- The first positive request creates the policy's records even when none of them can deliver
   anything yet (`CapacityAware` only creates a flow on a route it finds). Such a zero-delivery
   record keeps its FlowId for the rest of the epoch and can fill on a later call.
-- **Additivity.** For one source and a Lossless kernel on a fixed route or cohort, with the rest
-  of the network unchanged between the calls, `place(a); place(b)` equals `place(a + b)`
-  exactly; `Global` is additive in value and cost curve on an unchanged network. Competing
-  sources of one policy and Lossy are not additive.
+- **Additivity.** With the rest of the network unchanged between the calls, `place(a); place(b)`
+  equals `place(a + b)` exactly for Lossless `CostOnly` split routing, the controllers (value,
+  allocation and cost curve) and a single Lossless `Pinned` flow or cohort. Lossy calls are not
+  additive: each forwards its own injection on the free capacity the earlier calls left, and
+  nothing is offered again. `CapacityAware` sources are not additive.
 
 ### Epochs
 
 `remove()` takes every flow of the policy out of the ledger (allocations reverted, records gone,
 ids retired) and starts a new epoch: the cumulative request, the round-robin position of the
-source split and the finite-or-infinite state are reset. The next positive request creates new
-flows with new ids; ids are never reused.
+source split, the finite-or-infinite state and the prepared program are reset. The next positive
+request prepares again and creates new flows with new ids; ids are never reused.
 
 ```python
 g = graph(4, [(0, 1, 10, 1), (1, 3, 10, 1), (0, 2, 2, 1), (2, 3, 2, 1)])
@@ -739,34 +876,32 @@ The first unit goes to source 0 and the second to source 1 (round robin of the c
 request); the first call creates both records, source 1's at zero delivery. After `remove()` the
 split starts again at source 0, under new ids.
 
-### Outcomes
+### Termination
 
-Each roster source ends a call with a **local outcome**; the call's `termination` combines them.
-A source's offer is **served** when it is 0, when (Lossless) the delivery equals the offer, or
-when (Lossy, finite offer) the whole offer was forwarded, drops included. A Lossy infinite offer
-is never served. The local outcome is the first row that applies:
+The call's `termination` is the first row that applies (an invalid call raises instead):
 
-| Local outcome | When |
+| Termination | When |
 | --- | --- |
-| `COMPLETE` | the offer is served |
-| `LIMIT_FLOWS` | not served, and creation or growth was stopped by `MAX_FLOWS_PER_CALL` or by `max_flow_count` when `max_flow_count > flow_count` |
-| `LIMIT_DIMINISHING` | not served, and the `diminishing` guard stopped growth |
-| `NO_ROUTE` | not served, and the source has no flows after the call (no route was found; `Pinned`: no usable bundle; `Global`: the maximum flow is 0 and nothing was ever placed) |
-| `EXHAUSTED` | not served otherwise: every flow is at its maximum on its route and growth found nothing that helps (a costlier helpful route may still exist), a fixed-size cohort (`max_flow_count == flow_count`) is full, `Global` is at the maximum flow, or a Lossy infinite offer |
+| `COMPLETE` | the request is 0 |
+| `NO_ROUTE` | the request is positive and the roster is empty (`Pinned`: no usable bundle) |
+| `NO_ACTIVE_WEIGHT` | routes exist, but none has an edge it may use: every `WEIGHTED` member has weight 0, so the program sends nothing anywhere |
+| `COMPLETE` | Lossy with a finite request: the whole request was forwarded, and delivery and losses account for all of it (it does not mean nothing was lost) |
+| `COMPLETE` | Lossless: the whole request was admitted |
+| `EXHAUSTED` | otherwise: Lossless below the request, any infinite request (the first-hop experiment included), a controller whose maximum is 0 over existing routes |
 
-`local_outcomes` lists `(source, outcome)` for every roster source in ascending node id. For
-`Global` and `Pinned` the policy acts as one, so every entry equals the call's `termination`.
+`CapacityAware` keeps its own reduction over its sources. Each roster source ends the call
+served (its offer is 0 or was delivered) or with the first local outcome that applies:
+`LIMIT_FLOWS` (creation or growth was stopped by `MAX_FLOWS_PER_CALL`, or by `max_flow_count` when
+`max_flow_count > flow_count`), `LIMIT_DIMINISHING` (the `diminishing` guard stopped growth),
+`NO_ROUTE` (the source has no flows after the call), else `EXHAUSTED` (every flow at its maximum and
+growth found nothing that helps, a costlier helpful route may still exist; or a fixed-size cohort
+is full). A request of 0 is `COMPLETE` and an empty roster `NO_ROUTE`; otherwise the call is
+`COMPLETE` when every source is served, else the highest outcome among the unserved sources in the
+order `LIMIT_FLOWS` > `LIMIT_DIMINISHING` > `EXHAUSTED` > `NO_ROUTE`. `LIMIT_FLOWS` is reported when
+the ceiling is reached before the offer is met, even if no further route would have existed.
 
-The call's **`termination`**: an invalid call raises instead of returning; a request of 0 is
-`COMPLETE`; a positive request with an empty roster is `NO_ROUTE`; otherwise, if every source is
-served, `COMPLETE`, else the highest local outcome among the unserved sources in the order
-
-`LIMIT_FLOWS` > `LIMIT_DIMINISHING` > `EXHAUSTED` > `NO_ROUTE`.
-
-A served source never changes the result: two sources without a route give `NO_ROUTE`, one
-`EXHAUSTED` and one `NO_ROUTE` give `EXHAUSTED`, one `LIMIT_FLOWS` and one `EXHAUSTED` give
-`LIMIT_FLOWS`. `remaining` is an amount, never a status: a Lossy call can be `COMPLETE` with a
-positive `remaining`.
+`remaining` is an amount, never a status: a Lossy call can be `COMPLETE` with a positive
+`remaining`.
 
 ```python
 # Source 0 has two disjoint 1-unit tunnels to node 4; source 1 one 1-unit edge.
@@ -775,7 +910,7 @@ tunnel = ngc.PathSelection(ngc.EdgeTieBreak.DETERMINISTIC, ngc.EdgePriority.RESI
                            multipath=False)
 
 def show(r):
-    print(r.placed, r.termination.name, [(s, t.name) for s, t in r.local_outcomes])
+    print(r.placed, r.termination.name, [(row.source, row.delivered) for row in r.by_source])
 
 # Request 10: each source is offered 5. Source 0 stops at its ceiling of 2 tunnels.
 pol = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 4,
@@ -783,22 +918,18 @@ pol = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 4,
                             selection=tunnel))
 show(pol.place(10))
 
-# Another demand holds source 1's only edge; request 6 offers 3 to each source.
+# Weighted splitting by residual where another demand holds the only edge: no positive weight.
 ledger = ngc.FlowLedger(g)
 ngc.FlowPolicy(ledger, 1, 4, config(ngc.CostOnly())).place(1)
-pol = ngc.FlowPolicy(ledger, [0, 1], 4,
-                     config(ngc.CapacityAware(max_flow_count=3), ngc.FlowPlacement.MAX_FLOW,
-                            selection=tunnel))
-show(pol.place(6))
+weighted = config(ngc.CostOnly(), ngc.FlowPlacement.WEIGHTED,
+                  selection=ngc.PathSelection(priority=ngc.EdgePriority.RESIDUAL))
+show(ngc.FlowPolicy(ledger, 1, 4, weighted).place(1))
 ```
 
 ```text
-3 LIMIT_FLOWS [(0, 'LIMIT_FLOWS'), (1, 'EXHAUSTED')]
-2 EXHAUSTED [(0, 'EXHAUSTED'), (1, 'NO_ROUTE')]
+3 LIMIT_FLOWS [(0, 2), (1, 1)]
+0 NO_ACTIVE_WEIGHT [(1, 0)]
 ```
-
-`LIMIT_FLOWS` is reported when the ceiling is reached before the offer is met, even if no further
-route would have existed.
 
 ### Flags
 
@@ -808,10 +939,10 @@ ends with both false, even when it places nothing.
 
 | Committed change | `routes_changed` | `weights_changed` |
 | --- | --- | --- |
-| a cohort is created, in any routing mode, also at zero delivery and in a new epoch after `remove()` (`CapacityAware` only with a route, possibly on a later call) | true | unchanged |
+| records are created, in any routing mode, also at zero delivery and in a new epoch after `remove()` (`CapacityAware` only with a route, possibly on a later call) | true | unchanged |
 | a retained flow is moved to a new route (`reoptimize`) | true | true when a `WEIGHTED` flow's weights were captured again (also when the call places nothing) |
 | growth adds a flow (also on a route equal to an existing flow's: routes belong to flows) | true | unchanged |
-| a `Global` call changes the edges some source's share uses, also with `placed == 0` | true | `Global` never sets it |
+| a `Global` call changes the edges some source's share uses, also with `placed == 0` | true | a controller never sets it |
 | nothing of the above: a request of 0, rejected candidates only, `Global` with every source's edges unchanged | unchanged | unchanged |
 
 A candidate route equal to the flow's current route is not a change.
@@ -832,49 +963,73 @@ print(r.placed, r.termination.name, r.routes_changed, [x.delivered for x in pol.
 
 ### The result
 
-`place` returns a `PlacementResult`:
+`place` returns a `PlacementResult`. Its fields describe either this call or the demand's state
+after it (totals over the epoch); a per-call loss field carries the `call_` prefix, a state field
+does not, so the two are never confused.
 
-- `placed`, `remaining`, `termination`, `local_outcomes`, `routes_changed`, `weights_changed` as
-  above;
-- `drops`: this call's transit drops as `[(EdgeId, units)]` (records keep the cumulative drops);
-- `cost_distribution`: `Global` only, the marginal cost curve of the policy's cumulative flow (a
-  request of 0 reports it unchanged); `None` for every other mode. For other modes, the sum of
-  `(route_cost, delivered)` over the records is a histogram of delivery by each record's cheapest
-  walk cost: the cost every unit travels at for `CostOnly` and `CapacityAware`, whose routes have
-  one cost, but not for a `Pinned` bundle whose walks differ in cost;
-- optional outputs, `None` unless requested through `OutputOptions(edge_flows=False,
-  residual=False, bottleneck=False)`: `edge_flows` is the policy's own allocation per edge after
-  the call (the ledger's total is `allocated()`); `residual` and `bottleneck` are the ledger's
-  after the call; on `Global`, requesting `bottleneck` also returns `min_cut`.
+- **This call**: `placed`, `remaining`, `termination`, `routes_changed` and `weights_changed` as
+  above; `delivery_delta`, the change of the delivery (for `place` it equals `placed`);
+  `call_drops`, this call's drops per edge as `[(EdgeId, units)]`; `call_source_loss`, the units
+  this call lost at sources.
+- **The demand's state**: `requested` (the sum of the requests, `float('inf')` after an infinite
+  one), `offered`, `admitted`, `delivered`, `unadmitted`, `source_loss`, `drops` (per edge, as
+  `[(EdgeId, units)]`), `by_source` and `total_cost`. Every amount is an exact Python integer and
+  may exceed 64 bits.
+- **Accounting.** Lossless: `offered` is `None`, `source_loss` 0, no drops, `admitted = delivered`,
+  and `requested = unadmitted + delivered` for a finite request (`unadmitted` is `None` after an
+  infinite one). Lossy: `offered` is the traffic actually sent, `admitted = offered`, `unadmitted =
+  0`, and `offered = source_loss + sum(drops) + delivered`; `offered = requested` except in the
+  first-hop experiment, where `requested` is infinite and `offered` the finite injection.
+  `delivered + sum(drops)` is what entered the network.
+- **`by_source`** is a tuple of `SourceFlow` rows, one per input source in ascending node id, a
+  source outside the roster included (a zero row): `source`, `offered` (`None` when Lossless),
+  `admitted`, `delivered`, `source_loss` and `dropped` (its share of `drops`). The rows sum to the
+  totals, with one exception: a Lossy positive request with an empty roster reports `offered =
+  requested` and all of it as `source_loss`, lost before entering, while every row stays zero.
+- **`total_cost`**: the controllers only, the exact `sum(cost[e] * flow[e])` of the policy's
+  allocation; `None` otherwise.
+- **`cost_distribution`**: `Global` with `OPTIMIZED` origin only, the marginal cost curve of the
+  policy's cumulative flow (a request of 0 reports it unchanged; `None` before the epoch's first
+  positive call). `None` for every other mode, `EQUAL` origin included: the marginal costs of an
+  equal flow need not increase. For other modes, the sum of `(route_cost, delivered)` over the
+  records is a histogram of delivery by each record's cheapest walk cost: the cost every unit
+  travels at for `CostOnly` split routing and `CapacityAware`, whose routes have one cost, but not
+  for a `Pinned` bundle whose walks differ in cost.
+- **Optional outputs**, `None` unless requested through `OutputOptions(edge_flows=False,
+  residual=False, bottleneck=False, min_cut=False)`: `edge_flows` is the policy's own allocation
+  per edge after the call (the ledger's total is `allocated()`); `residual` and `bottleneck` are
+  the ledger's after the call; `min_cut` is described below.
 - **`bottleneck` and `min_cut` are different things.** `bottleneck` is the saturation report of
-  [section 6](#6-the-ledger), available in every mode. `min_cut` exists on `Global` only: the
-  edges of a minimum cut of the policy's view, the one on the sources' side: the allowed edges
-  that leave the nodes the sources can still reach once the flow is maximal (counting the option
-  to undo flow on an edge), in ascending EdgeId, an edge with nothing free in the view (capacity
-  0, or held by other policies) included: it adds 0 to the cut's value and is listed because
-  every allowed edge leaving that set is listed. It is present only when the solve reached the
-  maximum on its view; when a request below the maximum stopped it, and on a request of 0
-  (nothing is solved), `min_cut` is `None`.
+  [section 6](#6-the-ledger), available in every mode. `min_cut` exists only for `Global` with
+  `OPTIMIZED` origin: the edges of a minimum cut of the policy's view, the one on the sources' side:
+  the allowed edges that leave the nodes the sources can still reach once the flow is maximal
+  (counting the option to undo flow on an edge), in ascending EdgeId, an edge with nothing free in
+  the view (capacity 0, or held by other policies) included: it adds 0 to the cut's value and is
+  listed because every allowed edge leaving that set is listed; `[]` for an empty roster. It is
+  present only when the solve reached the maximum on its view; when a request below the maximum
+  stopped it, on a request of 0 (nothing is solved), and in every other mode, `min_cut` is `None`.
 
 ```python
 g = graph(4, [(0, 1, 10, 1), (1, 3, 10, 1), (0, 2, 5, 2), (2, 3, 5, 2)])
 ledger = ngc.FlowLedger(g)
-pol = ngc.FlowPolicy(ledger, 0, 3, config(ngc.Global(), ngc.FlowPlacement.MAX_FLOW))
-want = ngc.OutputOptions(bottleneck=True)
+pol = ngc.FlowPolicy(ledger, 0, 3, ngc.FlowPolicyConfig(routing=ngc.Global()))
+want = ngc.OutputOptions(bottleneck=True, min_cut=True)
 r = pol.place(12, want)
 print(r.placed, r.cost_distribution, r.min_cut, r.bottleneck, r.termination.name)
 r = pol.place(float("inf"), want)
 print(r.placed, r.cost_distribution, r.min_cut, r.bottleneck, r.termination.name)
+print(r.requested, r.admitted, r.unadmitted, r.total_cost)
 ```
 
 ```text
 12 [(2, 10), (4, 2)] None [0] COMPLETE
 3 [(2, 10), (4, 5)] [0, 1] [0, 1] EXHAUSTED
+inf 15 None 40
 ```
 
 After 12 units the cheap path (cost 2) is full and the solve stopped below the maximum, so there
 is no cut; `bottleneck` already reports the full edge 0. The second call adds 3 units at cost 4
-and reaches the maximum of 15.
+and reaches the maximum of 15, at a total cost of 10 x 2 + 5 x 4 = 40.
 
 ## 8. Failures, threads and lifetimes
 
@@ -958,7 +1113,8 @@ error).
   available when its residual makes it the right one.
 - **Who reads it.** `CostOnly` policies read the cache (keyed by their destination set, reverse
   direction, and Eligibility uid); so do the evaluators when they run a `CostOnly` configuration.
-  The other routing modes do not read it.
+  The other routing modes do not read it and reject a supplied cache (`ValueError`, for example
+  `Global does not use DagCache`).
 
 | Operation | Building | Frozen |
 | --- | --- | --- |
@@ -989,7 +1145,7 @@ error).
 ```python
 g = graph(5, [(0, 1, 10, 1), (1, 3, 10, 1), (0, 2, 2, 1), (2, 3, 2, 1), (3, 4, 9, 1)])
 cache = ngc.DagCache(g)
-opts = ngc.CapacityOptions(config(ngc.CostOnly()), cache=cache)
+opts = ngc.QueryOptions(config(ngc.CostOnly()), cache=cache)
 rs = ngc.batch_capacity(g, [(0, 3), (1, 3)], opts)          # building: workers defaults to 1
 print([r.placed for r in rs], cache.stats().hits, cache.stats().misses)
 cache.freeze()
@@ -1017,11 +1173,15 @@ answers can differ from placing into a ledger that other demands already occupy.
 
 **Exact rules.**
 
-- **`capacity(graph, sources, destinations, CapacityOptions(config, elig=None, cache=None,
-  outputs=None))`** is `place(float('inf'))` of a `FlowPolicy` with `config` on a fresh ledger of
-  the graph, and returns its `PlacementResult`. The exact maximum flow is the configuration
-  `Global` with `MAX_FLOW`: its result carries the marginal cost curve and, with
-  `OutputOptions(bottleneck=True)`, the minimum cut.
+- **`QueryOptions(config, *, elig=None, cache=None, outputs=None)`** is the one options type of
+  the three evaluators: the configuration, the static Eligibility (`None`: everything allowed),
+  the DagCache (`None`: a private cache per worker) and the optional outputs of each result
+  (`sensitivity`: of its baseline).
+- **`capacity(graph, sources, destinations, opts)`** is `place(float('inf'))` of a `FlowPolicy`
+  with `opts.config` on a fresh ledger of the graph, and returns its `PlacementResult`. The exact maximum flow is the configuration
+  `Global()` (its default origin is `OPTIMIZED`): its result carries the marginal cost curve and,
+  with `OutputOptions(min_cut=True)`, the minimum cut. With `EQUAL` origin it is the largest total
+  whose equal shares all fit.
 - **`batch_capacity(graph, pairs, opts, per_pair_elig=None, workers=None)`** runs `capacity` for
   each `(sources, destinations)` pair and returns the results in pair order. Pair `i` uses
   `opts.elig` intersected with `per_pair_elig[i]` (entries may be `None`; a given list has one
@@ -1029,26 +1189,29 @@ answers can differ from placing into a ledger that other demands already occupy.
   worker count, the graph of `opts.elig` and of the cache, the cache rule, `Pinned`, which is
   rejected because its bundles fix the endpoints, the configuration, then the length of
   `per_pair_elig`), then each pair completely (its endpoint sets, their overlap, its
-  Eligibility's graph) in pair order, so the error of the lowest failing pair is the one raised.
+  Eligibility's graph, the pooled single-path rule of [section 7](#configuration) for its
+  sources) in pair order, so the error of the lowest failing pair is the one raised.
   An empty batch returns `[]`.
-- **`sensitivity(graph, sources, destinations, SensitivityOptions(config, elig=None, cache=None,
-  outputs=None), workers=None)`** returns a `SensitivityResult`: `baseline` (the result of
+- **`sensitivity(graph, sources, destinations, opts, workers=None)`** returns a `SensitivityResult`: `baseline` (the result of
   `capacity`, with the requested outputs) and `entries`, one `SensitivityEntry(edge, loss)` per
   candidate edge, in ascending EdgeId.
-  - **Candidates.** With `Global`: the edges that carry flow in the baseline (removing an edge
-    without flow cannot lower a maximum flow). With every other routing: every allowed edge,
-    whatever its capacity (an edge of capacity 0 can carry a route and keep a source in the
-    roster, so deleting it can change the result either way). An edge without an entry has loss 0.
+  - **Candidates.** With `Global` and `OPTIMIZED` origin: the edges that carry flow in the
+    baseline (removing an edge without flow cannot lower a maximum flow). With every other
+    configuration, `EQUAL` origin included: every allowed edge, whatever its capacity (an edge of
+    capacity 0 can carry a route and keep a source in the roster, so deleting it can change the
+    result either way). An edge without an entry has loss 0.
   - **Loss** is `baseline.placed` minus the `placed` of `capacity` with that edge also excluded,
     in units, signed and never rounded or thresholded. A negative loss means the model carries
     more without the edge (for example, equal splitting no longer sends a share down a thin
-    path). `Global` computes each deletion by repairing a copy of the baseline's solve, which
-    gives exactly the value of a fresh solve; `CostOnly` gives loss 0 without recomputation to an
-    edge outside the static shortest-path support reachable from the roster sources (no route
-    can use it); these are equivalent forms of the same definition.
+    path, or a source behind it no longer holds the equal origin back). `Global` with `OPTIMIZED`
+    origin computes each deletion by repairing a copy of the baseline's solve, which gives exactly
+    the value of a fresh solve; with `EQUAL` origin each deletion is solved afresh. `CostOnly`
+    gives loss 0 without recomputation to an edge outside the static shortest-path support
+    reachable from the roster sources (no route can use it); these are equivalent forms of the
+    same definition.
   - **Cache.** Each deletion uses a new Eligibility uid, so a `CostOnly` deletion that has to
-    be placed raises `DagCacheMiss` through a frozen cache. The other routing modes read no
-    cache. Private caches are cleared between candidates.
+    be placed raises `DagCacheMiss` through a frozen cache. The other routing modes reject a
+    supplied cache. Private caches are cleared between candidates.
 - **Workers.** An explicit `workers` (an integer of at least 1) is always honoured; the
   evaluator uses at most one thread per pair or candidate. With `workers=None` the default is 1
   when a cache is supplied, and otherwise comes from the environment:
@@ -1069,11 +1232,10 @@ answers can differ from placing into a ledger that other demands already occupy.
 
 ```python
 g = graph(4, [(0, 1, 10, 1), (1, 3, 10, 1), (0, 2, 2, 1), (2, 3, 2, 1)])
-for routing, kernel in ((ngc.CostOnly(), ngc.FlowPlacement.EQUAL_BALANCED),
-                        (ngc.Global(), ngc.FlowPlacement.MAX_FLOW)):
-    s = ngc.sensitivity(g, 0, 3, ngc.SensitivityOptions(config(routing, kernel)))
-    print(type(routing).__name__, s.baseline.placed,
-          [(e.edge, e.loss) for e in s.entries])
+for name, cfg in (("CostOnly", config(ngc.CostOnly())),
+                  ("Global", ngc.FlowPolicyConfig(routing=ngc.Global()))):
+    s = ngc.sensitivity(g, 0, 3, ngc.QueryOptions(cfg))
+    print(name, s.baseline.placed, [(e.edge, e.loss) for e in s.entries])
 ```
 
 ```text
@@ -1095,11 +1257,11 @@ self-contained:
 | `netgraph/core/graph.hpp` | `Graph`, `to_units`, `as_float` |
 | `netgraph/core/eligibility.hpp` | `Eligibility` |
 | `netgraph/core/pred_dag.hpp` | `PredDAG`, `Path` |
-| `netgraph/core/options.hpp` | `Direction`, `Absolute`, `Stretch`, `EdgeTieBreak`, `EdgePriority`, `PathSelection`, `FlowPlacement`, `Admission` |
+| `netgraph/core/options.hpp` | `Direction`, `Absolute`, `Stretch`, `EdgeTieBreak`, `EdgePriority`, `PathSelection`, `FlowPlacement`, `Admission`, `Origin` |
 | `netgraph/core/search.hpp` | `spf`, `ksp`, `resolve_to_paths`, `SpfOptions`, `SpfResult`, `KspOptions`, `SpfQueue` |
 | `netgraph/core/flow_record.hpp` | `FlowId`, `Counter128` (the 128-bit cumulative counter), `FlowRecord` |
 | `netgraph/core/flow_ledger.hpp` | `FlowLedger` |
-| `netgraph/core/flow_policy.hpp` | `FlowPolicy`, its configuration and result types, `Termination`, `kMaxFlowsPerCall` |
+| `netgraph/core/flow_policy.hpp` | `FlowPolicy`, its configuration and result types (`SourceFlow` among them), `Termination`, `kMaxFlowsPerCall` |
 | `netgraph/core/dag_cache.hpp` | `DagCache`, `DagCacheMiss` |
 | `netgraph/core/evaluators.hpp` | `capacity`, `batch_capacity`, `sensitivity` and their option and result types |
 
@@ -1108,6 +1270,9 @@ Spelling differences: Python enum members and constants are upper case
 (`EdgeTieBreak::Deterministic`) and C++ constants carry a `k` prefix (`kMaxFlowsPerCall`,
 `kUnreachable`). Where Python returns `None` for an unreachable cost (`target_cost`, `route_cost`),
 C++ returns `kUnreachable`; an infinite request is an empty `std::optional` volume, and its
-`remaining` is empty too. A Python `ValueError` is a `std::invalid_argument` in C++. `spf` takes a
+`remaining` and `requested` are empty too. An optional field that Python reports as `None`
+(`placement`, `selection` and `origin` of a configuration, `offered`, `unadmitted`, `total_cost`,
+`cost_distribution`, the optional outputs) is an empty `std::optional` in C++; the epoch's amounts
+are `Counter128` values. A Python `ValueError` is a `std::invalid_argument` in C++. `spf` takes a
 trailing C++-only `SpfQueue` argument that chooses the search's internal queue; the results never
 depend on it.

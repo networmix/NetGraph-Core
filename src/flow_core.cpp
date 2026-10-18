@@ -22,8 +22,10 @@
   EdgeId; for a self-loop visit forward before reverse. Virtual vertices s* and t* connect the
   real source and destination sets. A real endpoint's virtual arc comes first; s* visits
   sources and t* visits destinations by ascending NodeId. Virtual arcs cost 0 and carry
-  2^63 - 2 units, above every attainable value. Starting from zero flow makes zero potentials
-  valid: usable real arcs have positive costs and virtual arcs cost 0.
+  2^63 - 2 units, above every attainable value, unless the solve gives the sources' arcs their own
+  capacities (the equal origin: source i's arc carries at most its round-robin share). Starting
+  from zero flow makes zero potentials valid: usable real arcs have positive costs and virtual
+  arcs cost 0.
 
   Deletion re-solves start from a captured final state. During capture, track working
   potentials without changing the original searches. Keep the sum of tier maxima D_k and
@@ -143,15 +145,12 @@ std::int32_t network_vertices(std::int32_t num_nodes, std::size_t num_edges, std
                               std::size_t num_destinations) {
   constexpr std::int32_t kMax = std::numeric_limits<std::int32_t>::max();
   if (num_nodes > kMax - 2) {
-    throw std::invalid_argument(
-        "flow core: the number of nodes exceeds INT32_MAX - 2 (a solve adds a virtual source and sink)");
+    throw std::invalid_argument("flow solver node limit exceeded");
   }
   // Each term is compared with what the earlier ones leave, so no sum of counts can wrap.
   constexpr auto kPairs = static_cast<std::size_t>(kMax / 2);  // 2^30 - 1
   if (num_edges > kPairs || num_sources > kPairs - num_edges || num_destinations > kPairs - num_edges - num_sources) {
-    throw std::invalid_argument(
-        "flow core: the edges, sources and destinations of a solve number more than 2^30 - 1 together (each "
-        "takes two int32 arc slots)");
+    throw std::invalid_argument("flow solver arc limit exceeded");
   }
   return num_nodes + 2;
 }
@@ -229,7 +228,7 @@ public:
       in.edge_slot[k] = fwd;
     }
     for (std::size_t i = 0; i < in.sources.size(); ++i) {
-      link(take(s_), in.sources[i], kMaxFlowCap, 0, in.src_rev[i], s_);
+      link(take(s_), in.sources[i], in.src_cap.empty() ? kMaxFlowCap : in.src_cap[i], 0, in.src_rev[i], s_);
     }
     for (std::size_t i = 0; i < in.destinations.size(); ++i) {
       link(in.dst_fwd[i], t_, kMaxFlowCap, 0, take(t_), in.destinations[i]);
@@ -820,7 +819,8 @@ FlowCoreResult place_global_units(const Graph& g,
                                   std::span<const NodeId> destinations,
                                   const Eligibility* elig,
                                   std::optional<Amount> cap,
-                                  DeletionCapture* capture) {
+                                  DeletionCapture* capture,
+                                  std::span<const Amount> source_caps) {
   const auto num_edges = static_cast<std::size_t>(g.num_edges());
   check_edge_amounts(g, view, "view");
   const auto srcs = node_set(sources, g.num_nodes(), "sources");
@@ -834,6 +834,9 @@ FlowCoreResult place_global_units(const Graph& g,
   }
   if (capture != nullptr && capture->graph.get() != &g) {
     throw std::logic_error("flow core: a capture request bound to another graph");
+  }
+  if (!source_caps.empty() && (source_caps.size() != srcs.size() || capture != nullptr)) {
+    throw std::logic_error("flow core: source capacities not aligned with the sources, or captured");
   }
   FlowCoreResult out;
   const bool zero = cap.has_value() && *cap == 0;
@@ -856,6 +859,7 @@ FlowCoreResult place_global_units(const Graph& g,
   in.cost.clear();
   in.cap.clear();
   in.sources.clear();
+  in.src_cap.clear();
   in.destinations.clear();
   in.edges.reserve(num_edges);
   for (std::size_t e = 0; e < num_edges; ++e) {
@@ -866,8 +870,10 @@ FlowCoreResult place_global_units(const Graph& g,
     in.cost.push_back(cost[e]);
     in.cap.push_back(view[e]);
   }
-  for (NodeId s : srcs) {
-    if (elig == nullptr || elig->node_ok(s)) in.sources.push_back(s);
+  for (std::size_t i = 0; i < srcs.size(); ++i) {
+    if (elig != nullptr && !elig->node_ok(srcs[i])) continue;
+    in.sources.push_back(srcs[i]);
+    if (!source_caps.empty()) in.src_cap.push_back(source_caps[i]);
   }
   for (NodeId d : dsts) {
     if (elig == nullptr || elig->node_ok(d)) in.destinations.push_back(d);
@@ -899,7 +905,7 @@ FlowCoreResult place_global_units(const Graph& g,
 
 SubsetFlow solve_subset(const Graph& g, std::span<const EdgeId> edges, std::span<const Amount> caps,
                         std::span<const NodeId> sources, std::span<const NodeId> destinations,
-                        std::optional<Amount> cap) {
+                        std::optional<Amount> cap, std::span<const Amount> source_caps) {
   SubsetFlow out;
   out.flows.assign(edges.size(), 0);
   if (cap.has_value() && *cap == 0) return out;
@@ -927,6 +933,7 @@ SubsetFlow solve_subset(const Graph& g, std::span<const EdgeId> edges, std::span
     in.cost.push_back(cost[ei]);
   }
   for (NodeId v : sources) in.sources.push_back(map.add(v));
+  in.src_cap.assign(source_caps.begin(), source_caps.end());
   for (NodeId v : destinations) in.destinations.push_back(map.add(v));
   in.num_nodes = static_cast<std::int32_t>(map.size());
   in.cap.assign(caps.begin(), caps.end());
