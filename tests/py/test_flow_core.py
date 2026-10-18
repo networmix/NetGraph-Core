@@ -116,7 +116,9 @@ def test_zero_cap_and_positive_cap_on_zero_view():
     assert certify(g, [5, 5], [0], [2], 0, z) == []
     zero_view = to_ids(g, [0, 5])
     p = solve(g, [0], [2], 4, view=zero_view)
-    assert p["placed"] == 0 and p["min_cut"] == [] and p["potentials"] == [0, -1, -1]
+    # The closure {0} is separated from 2 only by the edge 0 -> 1 of view 0 (id 0): it is the
+    # cut, of value 0.
+    assert p["placed"] == 0 and p["min_cut"] == [0] and p["potentials"] == [0, -1, -1]
     assert p["counters"]["dijkstra_runs"] == 1
     assert certify(g, zero_view, [0], [2], 4, p) == []
 

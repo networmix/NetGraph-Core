@@ -125,7 +125,9 @@ void run_indexed(std::size_t n, std::int32_t workers, const Graph& g, DagCache* 
 // source's flow is created; earlier creations may already have used capacity, even on a fresh
 // ledger. Deleting an edge outside the set leaves every reachable node's distance and support
 // edges as they were (distances only grow, and no shortest path of a reachable node used the
-// edge). So, creation by creation in their order, each sees the same reachable support and the
+// edge), and the roster as it was (a roster source keeps its support edges; a deletion never
+// connects a source). The support ignores capacity, so this holds for edges of capacity 0 too.
+// So, creation by creation in their order, each sees the same reachable support and the
 // same residual, and every route and placement is unchanged: the loss is exactly 0 and the
 // deletion is not re-evaluated.
 std::vector<std::uint8_t> reachable_support(const Graph& g, const detail::PolicyEngine& pe) {
@@ -253,11 +255,9 @@ SensitivityResult sensitivity_in_call(const Graph& g, std::span<const NodeId> so
       }
     }
   } else {
-    const auto capacity_units = g.capacity_units();
+    // Every allowed edge: an edge of capacity 0 can carry a route (and a roster source).
     for (EdgeId e = 0; e < g.num_edges(); ++e) {
-      if ((opts.elig == nullptr || opts.elig->edge_ok(e)) && capacity_units[static_cast<std::size_t>(e)] >= 1) {
-        candidates.push_back(e);
-      }
+      if (opts.elig == nullptr || opts.elig->edge_ok(e)) candidates.push_back(e);
     }
   }
   const Amount base = out.baseline.placed;

@@ -7,6 +7,7 @@
 // the fault-injection executable (fault_injection.hpp).
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <exception>
 #include <functional>
 #include <new>
@@ -37,10 +38,11 @@ struct Query {
   SpfQueue queue;
 };
 
-// test_utils.hpp's random graph from its own seed, every capacity at least 1 unit.
+// test_utils.hpp's random graph from its own seed, capacities 0 to 4 (an edge of capacity 0 is
+// searched like any other).
 Graph seeded_graph(int n, int m, Cost max_cost, unsigned seed) {
   std::mt19937 rng(seed);
-  return random_graph(rng, n, m, max_cost, 1, 1);
+  return random_graph(rng, n, m, max_cost);
 }
 
 SpfResult run(const Graph& g, const Query& q, const std::vector<Amount>& residual) {
@@ -107,7 +109,9 @@ TEST(SearchFaults, EveryAllocationOfSpfFailsCleanly) {
   const auto big = seeded_graph(400, 2400, 3, 99);
   const auto tiny = make_graph(3, {{0, 1, 1, 1}, {1, 2, 1, 1}});
   std::vector<Amount> residual(static_cast<std::size_t>(big.num_edges()));
-  for (std::size_t e = 0; e < residual.size(); ++e) residual[e] = big.capacity_units()[e] - static_cast<Amount>(e % 2);
+  for (std::size_t e = 0; e < residual.size(); ++e) {
+    residual[e] = std::max<Amount>(0, big.capacity_units()[e] - static_cast<Amount>(e % 2));
+  }
   const PathSelection det(EdgeTieBreak::Deterministic, EdgePriority::Capacity);
   const PathSelection collapse(EdgeTieBreak::PreferHigherPriority, EdgePriority::Residual, true, false);
   const PathSelection single(EdgeTieBreak::PreferHigherPriority, EdgePriority::Headroom, false, true);

@@ -72,7 +72,8 @@ struct SensitivityResult {
     const CapacityOptions& opts, std::span<const Eligibility* const> per_pair_elig, std::int32_t workers);
 
 // Return baseline capacity() and one entry per candidate edge. Global candidates carry
-// positive baseline flow; other models use every edge opts.elig allows with capacity >= 1 unit.
+// positive baseline flow; other models use every edge opts.elig allows, whatever its capacity
+// (deleting an edge of capacity 0 can change routes and rosters, so its loss can be nonzero).
 // Loss is baseline placed minus placed with that edge deleted, using the same config and cache.
 // Global starts from the baseline solve's final state and repairs it after deleting the edge,
 // using one state copy per worker. The result is the exact maximum flow at minimum cost.

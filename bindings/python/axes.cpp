@@ -42,7 +42,9 @@ void register_axes(py::module_& m) {
   py::enum_<EdgePriority>(m, "EdgePriority",
                           "The per-edge value PREFER_HIGHER_PRIORITY reads and, with WEIGHTED, the value that decides which\n"
                           "edges a flow uses and their weights: RESIDUAL (residual units), CAPACITY (static capacity units),\n"
-                          "HEADROOM (residual / capacity, compared exactly as a fraction; rejected with WEIGHTED).")
+                          "HEADROOM (residual / capacity, compared exactly as a fraction, 0 on an edge of capacity 0;\n"
+                          "rejected with WEIGHTED). A search without a residual reads the static capacity as the residual:\n"
+                          "RESIDUAL and CAPACITY read the capacity, HEADROOM 1 (0 on an edge of capacity 0).")
       .value("RESIDUAL", EdgePriority::Residual)
       .value("CAPACITY", EdgePriority::Capacity)
       .value("HEADROOM", EdgePriority::Headroom);

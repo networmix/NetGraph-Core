@@ -423,11 +423,12 @@ KernelPlan make_plan(const Graph& g, FlowPlacement placement, Admission admissio
   auto creation = [&](EdgeId e) {
     return creation_view[static_cast<std::size_t>(std::lower_bound(edges.begin(), edges.end(), e) - edges.begin())];
   };
-  // Membership: MaxFlow every route edge (its view decides), Weighted Residual creation view
-  // >= 1 unit, every other kernel static capacity >= 1 unit.
+  // Membership: MaxFlow and EqualBalanced every route edge (an edge of capacity 0 is a member
+  // that carries nothing), Weighted the edges of positive weight: creation view >= 1 unit
+  // (Residual) or static capacity >= 1 unit (Capacity).
   auto member = [&](EdgeId e) {
-    if (by_view) return creation(e) >= 1;
-    return placement == FlowPlacement::MaxFlow || capacity[static_cast<std::size_t>(e)] >= 1;
+    if (placement != FlowPlacement::Weighted) return true;
+    return (by_view ? creation(e) : capacity[static_cast<std::size_t>(e)]) >= 1;
   };
   build_split(g, route, src, dsts, member, &plan, cost);
   // The route's cost is the members' only when every route edge is a member.
@@ -448,16 +449,31 @@ KernelPlan make_route_plan(const Graph& g, FlowPlacement placement, Admission ad
   plan.placement = placement;
   plan.admission = admission;
   plan.src = src;
-  auto usable = [&](EdgeId e) {
-    return capacity[static_cast<std::size_t>(e)] >= 1 && (elig == nullptr || elig->edge_ok(e));
-  };
-  build_split(g, bundle, src, dsts, usable, &plan, cost);
+  auto allowed = [&](EdgeId e) { return elig == nullptr || elig->edge_ok(e); };
+  build_split(g, bundle, src, dsts, allowed, &plan, cost);
   plan.route = plan.members;
-  if (placement == FlowPlacement::Weighted && priority == EdgePriority::Capacity) {
+  if (placement != FlowPlacement::Weighted || priority != EdgePriority::Capacity) return plan;
+  // Weighted with capacity weights: the members are the route edges of positive capacity, on
+  // the walks that remain, weighted by their capacities. When every route edge has a positive
+  // capacity they are the route itself; otherwise a second pass over the bundle keeps them (the
+  // route and its cost stay).
+  const bool all_positive = std::all_of(plan.route.begin(), plan.route.end(),
+                                        [&](EdgeId e) { return capacity[static_cast<std::size_t>(e)] >= 1; });
+  if (all_positive) {
     plan.weights.reserve(plan.members.size());
     for (EdgeId e : plan.members) plan.weights.push_back(capacity[static_cast<std::size_t>(e)]);
+    return plan;
   }
-  return plan;
+  KernelPlan weighted;
+  build_split(g, bundle, src, dsts, [&](EdgeId e) { return allowed(e) && capacity[static_cast<std::size_t>(e)] >= 1; },
+              &weighted, nullptr);
+  weighted.placement = placement;
+  weighted.admission = admission;
+  weighted.src = src;
+  weighted.route = std::move(plan.route);
+  weighted.weights.reserve(weighted.members.size());
+  for (EdgeId e : weighted.members) weighted.weights.push_back(capacity[static_cast<std::size_t>(e)]);
+  return weighted;
 }
 
 // ---------------------------------------------------------------- CostOnly creation
@@ -635,7 +651,7 @@ std::optional<CreationProducts> cost_only_creation(const Graph& g, const std::sh
           if (replaces(g, sup[static_cast<std::size_t>(j)], best, prefer, view)) best = sup[static_cast<std::size_t>(j)];
         }
       }
-      if (placement != FlowPlacement::MaxFlow && capacity[static_cast<std::size_t>(best)] < 1) return std::nullopt;
+      if (placement == FlowPlacement::Weighted && capacity[static_cast<std::size_t>(best)] < 1) return std::nullopt;
       s.route[w] = best;
       s.tail[w] = static_cast<std::int32_t>(i);
       ++w;

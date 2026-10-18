@@ -816,13 +816,22 @@ def test_sensitivity_candidates_and_signed_losses(monkeypatch):
     # the default path with the variable set works; its parsing is tested in C++).
     monkeypatch.setenv("NGRAPH_CORE_SENSITIVITY_THREADS", "3")
     assert plain(ngc.sensitivity(g, 0, 2, ngc.SensitivityOptions(GLOBAL))) == plain(s)
-    # A policy model: signed losses; zero-capacity edges absent.
+    # A policy model: every allowed edge is a candidate, a zero-capacity one too. Equal splitting
+    # over parallel links of 1, 10 and 0 fits 2 units (a third would cross the zero link);
+    # without the thin link 1 fits, without the wide link 1, without the zero link 2.
     p = build(2, [(0, 1, 1, 1), (0, 1, 10, 1), (0, 1, 0, 1)])
     opts = ngc.SensitivityOptions(COSTONLY)
     s = ngc.sensitivity(p, 0, 1, opts, workers=2)
     assert s.baseline.placed == 2
     pos = p.input_index()
-    assert {int(pos[e.edge]): e.loss for e in s.entries} == {0: -8, 1: 1}
+    assert {int(pos[e.edge]): e.loss for e in s.entries} == {0: 1, 1: 1, 2: 0}
+    # A negative loss on a zero-capacity link (G8): the only shortest route 0 -> 1 has capacity
+    # 0, so equal splitting carries 0; without it the route 0 -> 2 -> 1 carries 5.
+    g8 = build(3, [(0, 1, 0, 1), (0, 2, 5, 1), (2, 1, 5, 1)])
+    s8 = ngc.sensitivity(g8, 0, 1, opts)
+    assert s8.baseline.placed == 0
+    pos8 = g8.input_index()
+    assert {int(pos8[e.edge]): e.loss for e in s8.entries} == {0: -5, 1: 0, 2: 0}
     with pytest.raises(ValueError, match="both endpoint sets"):
         ngc.sensitivity(p, 0, 0, opts)
     # The baseline is capacity() with the requested outputs.

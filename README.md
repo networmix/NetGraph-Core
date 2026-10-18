@@ -16,6 +16,10 @@ C++ graph engine for network flow analysis, traffic engineering simulation, and 
   through `to_units` (round half up) and leave through `as_float`.
 - **Positive costs**: edge costs are integers `>= 1`, so the shortest-path DAG (every edge on
   some shortest path) has no cycle and does not depend on search order or tie rules.
+- **Zero capacity is not absence**: an edge of capacity 0 stays in routing, as a configured but
+  empty link does: searches, routes and rosters use it, an equal split still sends it a share
+  (which is lost), a weighted split gives it weight 0. Only an explicit residual or an
+  `Eligibility` removes an edge from a search.
 - **Stable edge ids**: edges are numbered by sorting on `(src, cost, dst)`, ties kept in input
   order; that number is the public `EdgeId`, and `input_index()` maps it back to the input position.
 - **One flow core**: an exact integer minimum-cost flow solver (the most traffic, sent as cheaply

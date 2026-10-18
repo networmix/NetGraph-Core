@@ -57,9 +57,9 @@ Contents:
   forwards hop by hop and drops what does not fit on each edge.
 - **Static.** Depending only on the graph, the costs and the Eligibility, not on traffic already
   placed (a static walk, the static shortest cost).
-- **Member graph.** The edges a search may use: eligible, at least 1 unit of capacity (and, when
-  a residual is supplied, at least the search's residual threshold), and one member per pair
-  with `multi_edge=False`.
+- **Member graph.** The edges a search may use: eligible (and, when a residual is supplied, at
+  least the search's residual threshold), whatever their capacity, and one member per pair with
+  `multi_edge=False`.
 - **Kernel.** The rule that spreads one flow over its route: `MAX_FLOW`, `WEIGHTED` or
   `EQUAL_BALANCED`.
 - **Bundle.** The route of one flow, as a `PredDAG`.
@@ -118,9 +118,12 @@ separate kind of number: positive integers that are never converted.
 - **`as_float(x, q)`** converts units to physical values (`x * q`, correctly rounded, exact
   below `2^53` units): an `int` gives a `float`, an integer array a `float64` array. A result
   beyond the finite doubles raises `ValueError`. Costs are never converted.
-- **Routability.** An edge with less than 1 unit of capacity (or, when a residual is supplied,
-  less than the search's residual threshold) carries nothing and is never part of a route. A
-  physical request below `q / 2` converts to 0 units. A request of 0 units is accepted after
+- **Routability.** An edge with less than 1 unit of capacity carries nothing, but it stays in
+  routing: searches, routes and rosters treat it like any other edge, and only a supplied
+  residual (below the search's threshold) or an Eligibility removes an edge from a search. An
+  equal split still sends such an edge its share, which it cannot carry
+  ([section 5](#5-placement-kernels-and-admission)). A physical request below `q / 2` converts to
+  0 units. A request of 0 units is accepted after
   validation and does nothing (its result is `COMPLETE`).
 - **Splitting units.** When a node forwards `I` units over `k` member edges:
   - **round robin** (`EQUAL_BALANCED`): every member gets `I // k` units and the first `I % k`
@@ -273,8 +276,9 @@ parallel edges). Both are immutable, bound to their graph and checked once when 
 **In plain words.** `spf` finds shortest paths from a set of roots, forward or in reverse,
 either to every node or only to the nearest of a set of targets. It returns the shortest-path
 DAG, which contains every shortest route at once, or, on request, one canonical path chosen by a
-fixed rule. `ksp` lists the K shortest simple paths in a fixed order. All searches see only
-eligible edges with at least 1 unit of capacity; a supplied residual can exclude more.
+fixed rule. `ksp` lists the K shortest simple paths in a fixed order. All searches see every
+eligible edge, whatever its capacity: an edge of capacity 0 is a route like any other. Only a
+supplied residual filters edges by capacity.
 
 ### Options shared by the searches
 
@@ -289,12 +293,14 @@ eligible edges with at least 1 unit of capacity; a supplied residual can exclude
   - `priority`: the per-edge value that `PREFER_HIGHER_PRIORITY` reads (and that the Weighted
     kernel uses for membership and weights): `RESIDUAL` (residual units), `CAPACITY` (static
     capacity units) or `HEADROOM` (residual divided by capacity, compared exactly as a
-    fraction). A search without a residual array reads static capacities for every priority.
+    fraction; 0 on an edge of capacity 0). A search without a residual array reads the static
+    capacity as the residual: `RESIDUAL` and `CAPACITY` read the capacity, `HEADROOM` reads 1 on
+    an edge of positive capacity and 0 on an edge of capacity 0.
 - **The member rule** (`multi_edge=False`). Of the eligible parallel members of a pair, keep the
   one with the lowest cost; among those, under `PREFER_HIGHER_PRIORITY`, the one with the
   highest priority value; then the lowest EdgeId. This choice happens before any route is
   searched, so it can change which walks exist.
-- **Static eligibility** (always): the Eligibility and at least 1 unit of capacity.
+- **Static eligibility** (always): the Eligibility. Capacity is never a condition.
 - **Residual gating** (only when a `residual` array is supplied): `residual` is an `int64` array
   in EdgeId order with every entry in `[0, capacity_units[e]]`. It excludes edges whose residual
   is below the threshold (`min_residual` units for `spf`, 1 unit for `ksp`) and supplies the
@@ -388,7 +394,8 @@ returns a list of `(cost, Path)` pairs; every hop of every Path has one member.
   ignored.
 - **Ceiling.** `max_path_cost` is `None`, `Absolute(c)` (cost at most `c`, `c >= 0`; `Absolute(0)`
   is a valid budget) or `Stretch(f)` (cost at most `f` times the static shortest cost of the
-  member graph under the Eligibility, residual ignored; `f` finite and at least 1). Both are
+  member graph under the Eligibility, residual ignored, edges of capacity 0 included; `f` finite
+  and at least 1). Both are
   inclusive and compared exactly: `f` is read as the exact binary fraction a float is. With
   `Stretch`, no static route gives `[]`.
 - **Residual gating** at 1 unit when a residual is supplied.
@@ -428,10 +435,13 @@ drops on each edge what does not fit.
 - **Split graph.** A flow uses the part of its route (DAG or bundle) that reaches its destination
   set through the edges its kernel may use (its member edges). Which edges: `MAX_FLOW` uses the
   edges with capacity in its view (the free capacity plus the flow's own allocation);
-  `EQUAL_BALANCED` uses the edges with at least 1 unit of static capacity; `WEIGHTED` uses, by its
-  `priority`, the edges with positive residual when the flow was created (`RESIDUAL`) or with at
-  least 1 unit of static capacity (`CAPACITY`). `WEIGHTED` with `HEADROOM` is rejected. Lossy
-  keeps its kernel's membership.
+  `EQUAL_BALANCED` uses every edge of the route, an edge of capacity 0 included: a router splits
+  over every next hop it has, so that edge receives its round-robin share and carries none of it
+  (Lossless can then admit nothing on that branch; Lossy drops the share on that edge);
+  `WEIGHTED` uses the edges of positive weight, by its `priority` the edges with positive residual
+  when the flow was created (`RESIDUAL`) or with at least 1 unit of static capacity
+  (`CAPACITY`), and drops a branch left without such an edge (never taking a route outside its
+  own). `WEIGHTED` with `HEADROOM` is rejected. Lossy keeps its kernel's membership.
 - **`MAX_FLOW`** solves the minimum-cost flow of the flow's cumulative amount on its route, over
   the free capacity plus the flow's own current allocation. It may move the flow's own earlier
   allocation (that is what lets it reach the maximum); it never moves another flow's. It fills
@@ -488,6 +498,34 @@ record 10 7 [(1, 3)]
 
 The Lossy call is `COMPLETE` although 3 units were dropped: the whole offer of 10 was forwarded,
 and what did not fit is accounted as drops, not as a shortfall ([section 7](#outcomes)).
+
+An edge of capacity 0 on the only shortest route is still that route. Equal splitting sends it
+the whole offer: Lossless places nothing, Lossy drops all of it there. Weighted splitting gives
+it weight 0 and has no other edge in its route, so the offer is lost at the source; neither takes
+the costlier detour. A controller (`Global`) uses the detour:
+
+```python
+# Edge 0: 0 -> 1 of capacity 0 (cost 1); the detour 0 -> 2 -> 1 (5 units, cost 2).
+g = graph(3, [(0, 1, 0, 1), (0, 2, 5, 1), (2, 1, 5, 1)])
+r = ngc.spf(g, 0, ngc.SpfOptions(F, DET, targets=1))
+print("spf", r.target_cost, r.dag.via_edges().tolist())
+for kernel in (ngc.FlowPlacement.EQUAL_BALANCED, ngc.FlowPlacement.WEIGHTED):
+    for admission in (ngc.Admission.LOSSLESS, ngc.Admission.LOSSY):
+        cfg = config(ngc.CostOnly(), placement=kernel, admission=admission)
+        r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg).place(5)
+        print(kernel.name, admission.name, r.placed, r.drops, r.termination.name)
+cfg = config(ngc.Global(), ngc.FlowPlacement.MAX_FLOW)
+print("Global", ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg).place(5).placed)
+```
+
+```text
+spf 1 [0]
+EQUAL_BALANCED LOSSLESS 0 [] EXHAUSTED
+EQUAL_BALANCED LOSSY 0 [(0, 5)] COMPLETE
+WEIGHTED LOSSLESS 0 [] EXHAUSTED
+WEIGHTED LOSSY 0 [] EXHAUSTED
+Global 5
+```
 
 ## 6. The ledger
 
@@ -575,8 +613,10 @@ and weights). Ignoring a field is not an error.
 ### The source roster
 
 The roster is fixed when the policy is built. For `CostOnly`, `CapacityAware` and `Global` it is
-the allowed sources that have a static walk to an allowed destination over edges of at least 1
-unit, in ascending node id. For `Pinned` it is the single source when at least one bundle is
+the allowed sources that have a static walk to an allowed destination over allowed edges, whatever
+their capacity, in ascending node id: a source whose only routes cross an edge of capacity 0 is in
+the roster, receives its share and cannot place it (a failure is expressed with an Eligibility,
+which removes the source). For `Pinned` it is the single source when at least one bundle is
 usable. The roster decides which records exist and which `local_outcomes` are reported. A
 positive request with an empty roster creates nothing and ends `NO_ROUTE`.
 
@@ -614,7 +654,7 @@ positive request with an empty roster creates nothing and ends `NO_ROUTE`.
   a network beyond the flow core's size limit raises `ValueError` ([section 2](#2-the-graph),
   Size).
 - **`Pinned`** creates one flow per usable bundle, in the order given. A bundle is usable when at
-  least one of its walks survives the Eligibility over edges of at least 1 unit of capacity; its
+  least one of its walks survives the Eligibility, whatever the capacities of its edges; its
   `route_cost` is the cheapest such walk. Bundles that become equal after that pruning keep separate flows. When no bundle is
   usable, `usable_bundles()` is 0 and a positive request ends `NO_ROUTE`.
 
@@ -808,9 +848,11 @@ print(r.placed, r.termination.name, r.routes_changed, [x.delivered for x in pol.
   after the call; on `Global`, requesting `bottleneck` also returns `min_cut`.
 - **`bottleneck` and `min_cut` are different things.** `bottleneck` is the saturation report of
   [section 6](#6-the-ledger), available in every mode. `min_cut` exists on `Global` only: the
-  edges of a minimum cut of the policy's view, the one on the sources' side: the edges of
-  positive capacity in that view that leave the nodes the sources can still reach once the flow is maximal
-  (counting the option to undo flow on an edge), in ascending EdgeId. It is present only when the solve reached the
+  edges of a minimum cut of the policy's view, the one on the sources' side: the allowed edges
+  that leave the nodes the sources can still reach once the flow is maximal (counting the option
+  to undo flow on an edge), in ascending EdgeId, an edge with nothing free in the view (capacity
+  0, or held by other policies) included: it adds 0 to the cut's value and is listed because
+  every allowed edge leaving that set is listed. It is present only when the solve reached the
   maximum on its view; when a request below the maximum stopped it, and on a request of 0
   (nothing is solved), `min_cut` is `None`.
 
@@ -994,8 +1036,9 @@ answers can differ from placing into a ledger that other demands already occupy.
   `capacity`, with the requested outputs) and `entries`, one `SensitivityEntry(edge, loss)` per
   candidate edge, in ascending EdgeId.
   - **Candidates.** With `Global`: the edges that carry flow in the baseline (removing an edge
-    without flow cannot lower a maximum flow). With every other routing: every allowed edge with
-    at least 1 unit of capacity. An edge without an entry has loss 0.
+    without flow cannot lower a maximum flow). With every other routing: every allowed edge,
+    whatever its capacity (an edge of capacity 0 can carry a route and keep a source in the
+    roster, so deleting it can change the result either way). An edge without an entry has loss 0.
   - **Loss** is `baseline.placed` minus the `placed` of `capacity` with that edge also excluded,
     in units, signed and never rounded or thresholded. A negative loss means the model carries
     more without the edge (for example, equal splitting no longer sends a share down a thin

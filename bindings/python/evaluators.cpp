@@ -227,8 +227,9 @@ void register_evaluators(py::module_& m) {
       py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("opts"), py::arg("workers") = py::none(),
       "The baseline capacity() and one SensitivityEntry per candidate edge. Candidates: with Global, the\n"
       "edges that carry flow in the baseline (removing any other edge cannot lower a maximum flow); with\n"
-      "the other routings, every allowed edge of at least 1 unit. loss = baseline.placed minus the placed\n"
-      "of capacity() without the edge, in signed units, never thresholded. Two shortcuts give exactly\n"
+      "the other routings, every allowed edge, whatever its capacity (an edge of capacity 0 can carry a\n"
+      "route, so deleting it can change the result). loss = baseline.placed minus the placed of\n"
+      "capacity() without the edge, in signed units, never thresholded. Two shortcuts give exactly\n"
       "that value: Global repairs a copy of the baseline's solve instead of solving again, and CostOnly\n"
       "gives loss 0 without placing to an edge outside the static shortest-path support reachable from\n"
       "the roster sources (no route can use it). workers as batch_capacity\n"

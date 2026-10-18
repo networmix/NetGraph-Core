@@ -1,7 +1,7 @@
 """Search semantics of APPROACH revision 24, section 6, as internal routines.
 
-* member graph: static eligibility, capacity >= 1 unit, optional residual gating at
-  ``min_residual``; ``multi_edge = False`` keeps one member per ``(u, v)`` by
+* member graph: static eligibility (capacity is never read: an edge of capacity 0 is a
+  member like any other), optional residual gating at ``min_residual``; ``multi_edge = False`` keeps one member per ``(u, v)`` by
   ``select_adjacency``: minimum cost, then (``PreferHigherPriority``) the highest
   priority value, then the lowest EdgeId;
 * the unique shortest-path DAG (positive costs, 2.4): tight edges; with targets the
@@ -16,8 +16,10 @@
   compared exactly (``stretch_le`` never forms a product above 128 bits).
 
 Priority values: ``Residual`` = residual units, ``Capacity`` = static capacity
-units, ``Headroom`` = the exact rational ``residual / capacity``. A search without a
-residual reads static capacities for every priority (section 10).
+units, ``Headroom`` = the exact rational ``residual / capacity`` (0 on an edge of
+capacity 0). A search without a residual reads the static capacity as the residual:
+``Residual`` and ``Capacity`` the capacity, ``Headroom`` 1 (0 on an edge of capacity 0)
+(contract r8 3.5, step 1 of the next Core change).
 """
 
 from __future__ import annotations
@@ -54,12 +56,13 @@ class Selection:
 
 def priority_fn(g: Graph, priority: str, residual):
     """Per-edge priority value (exact: ints or Fractions)."""
-    if residual is None or priority == "Capacity":
+    free = (lambda e: g.capacity[e]) if residual is None else (lambda e: residual[e])
+    if priority == "Capacity":
         return lambda e: g.capacity[e]
     if priority == "Residual":
-        return lambda e: residual[e]
+        return free
     if priority == "Headroom":
-        return lambda e: Fraction(residual[e], g.capacity[e])
+        return lambda e: Fraction(free(e), g.capacity[e]) if g.capacity[e] else 0
     raise ContractError(f"unknown priority {priority!r}")
 
 
@@ -90,8 +93,6 @@ def member_graph(
     ok = []
     for e in range(g.num_edges):
         if elig is not None and not elig.edge_allowed[e]:
-            continue
-        if g.capacity[e] < 1:
             continue
         if residual is not None and residual[e] < min_residual:
             continue

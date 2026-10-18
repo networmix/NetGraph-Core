@@ -2,7 +2,8 @@
 // examples: the diamond and the three-hop graph, whose first path is the canonical single path
 // of the forward and the reverse search; a shared bottleneck that leaves the fewest hops first; the prefix-capped spur; a
 // candidate's bottleneck including its prefix; parallel members under Expand and Collapse;
-// accepted paths that never return after a shared prefix; zero-capacity edges; the ceilings on
+// accepted paths that never return after a shared prefix; zero-capacity edges (searched like any
+// other; a residual filters them; Headroom 0 on them); the ceilings on
 // chain-plus-bypasses and the exact Stretch ceiling at large costs and factors), the defects in the contract order, and agreement with exhaustive
 // enumeration (search_reference.hpp) on random graphs; the resolver's order, splitting and
 // truncation against an enumeration of every walk of a DAG, from either search direction and on
@@ -236,24 +237,74 @@ TEST(Ksp, EndpointDefectsReportTheFirstInOrder) {
   EXPECT_TRUE(run(g, 2, 0, 1, sel()).empty());
 }
 
-TEST(Ksp, ZeroCapacityEdgesAreNeverMembers) {
+TEST(Ksp, ZeroCapacityEdgesAreSearchedAndOnlyAResidualFiltersThem) {
+  // Ids: 0: 0->1, 1: 0->2 (cost 1), 2: 0->3 cap 0, 3: 0->3 cap 1 (cost 2), 4: 1->3, 5: 2->3 (cost 1).
   auto g = bgraph(4, {{0, 1, 1, 1}, {1, 3, 1, 1}, {0, 2, 1, 1}, {2, 3, 1, 1}, {0, 3, 0, 2}, {0, 3, 1, 2}});
-  std::vector<EdgeId> zero;
-  for (EdgeId e = 0; e < g.num_edges(); ++e) {
-    if (g.capacity_units()[static_cast<std::size_t>(e)] == 0) zero.push_back(e);
-  }
-  ASSERT_EQ(zero.size(), 1U);
-  auto with_zero = run(g, 0, 3, 8, sel());
+  ASSERT_EQ(g.capacity_units()[2], 0);
+  auto walks = [](const std::vector<std::pair<Cost, Path>>& r) {
+    std::vector<std::vector<EdgeId>> out;
+    for (const auto& [c, p] : r) out.push_back(walk_of(p));
+    return out;
+  };
+  // Four walks of cost 2, the zero-capacity edge searched like any other: the one-hop walks
+  // first ([2] before [3] by EdgeId), then the two-hop walks.
+  auto all = run(g, 0, 3, 8, sel());
+  EXPECT_EQ(costs_of(all), (std::vector<Cost>{2, 2, 2, 2}));
+  EXPECT_EQ(walks(all), (std::vector<std::vector<EdgeId>>{{2}, {3}, {0, 4}, {1, 5}}));
+  // A residual equal to the capacities filters the zero-capacity edge (it has no unit free), and
+  // so does an Eligibility excluding it.
+  const std::vector<EdgeId> zero = {2};
   auto el = g.eligibility({}, zero);
-  auto excluded = run(g, 0, 3, 8, sel(), std::nullopt, nullptr, &el);
-  // The three walks of cost 2 that avoid the zero-capacity edge: 0-1-3, 0-2-3 and the direct edge
-  // of capacity 1.
-  ASSERT_EQ(costs_of(with_zero), (std::vector<Cost> {2, 2, 2}));
-  ASSERT_EQ(with_zero.size(), excluded.size());
-  for (std::size_t i = 0; i < with_zero.size(); ++i) {
-    EXPECT_TRUE(with_zero[i].second == excluded[i].second);
-    for (EdgeId e : walk_of(with_zero[i].second)) EXPECT_NE(e, zero[0]);
-  }
+  const std::vector<std::vector<EdgeId>> without = {{3}, {0, 4}, {1, 5}};
+  EXPECT_EQ(walks(run(g, 0, 3, 8, sel(), std::nullopt, nullptr, &el)), without);
+  const std::vector<Amount> full(g.capacity_units().begin(), g.capacity_units().end());
+  EXPECT_EQ(walks(run(g, 0, 3, 8, sel(), std::nullopt, &full)), without);
+}
+
+TEST(Ksp, ZeroEdgeExamplesOfTheContract) {
+  // KSP-zero-edge and KSP-zero-edge-residual (ids 0: 0->1 cap 0, 1: 0->2 cap 5, 2: 2->1 cap 5,
+  // costs 1): k = 2 lists [0] (cost 1) and [1, 2] (cost 2); the residual (0, 5, 5) leaves [1, 2].
+  auto g = bgraph(3, {{0, 1, 0, 1}, {0, 2, 5, 1}, {2, 1, 5, 1}});
+  auto r = run(g, 0, 1, 2, sel());
+  ASSERT_EQ(r.size(), 2U);
+  EXPECT_EQ(costs_of(r), (std::vector<Cost>{1, 2}));
+  EXPECT_EQ(walk_of(r[0].second), (std::vector<EdgeId>{0}));
+  EXPECT_EQ(walk_of(r[1].second), (std::vector<EdgeId>{1, 2}));
+  const std::vector<Amount> res = {0, 5, 5};
+  auto gated = run(g, 0, 1, 2, sel(), std::nullopt, &res);
+  ASSERT_EQ(gated.size(), 1U);
+  EXPECT_EQ(costs_of(gated), (std::vector<Cost>{2}));
+  EXPECT_EQ(walk_of(gated[0].second), (std::vector<EdgeId>{1, 2}));
+  // A-X8-Stretch-exact's ceiling: ids 0: 0->1 cap 0 cost 5, 1: 0->1 cap 1 cost 6. The static
+  // baseline counts the zero-capacity edge: 5; the double 1.2 is 5404319552844595 / 2^52, so
+  // 1.2 * 5 is just below 6 and only the cost-5 walk fits.
+  auto h = bgraph(2, {{0, 1, 0, 5}, {0, 1, 1, 6}});
+  auto ceiled = run(h, 0, 1, 2, sel(), Stretch {1.2});
+  ASSERT_EQ(ceiled.size(), 1U);
+  EXPECT_EQ(costs_of(ceiled), (std::vector<Cost>{5}));
+  EXPECT_EQ(walk_of(ceiled[0].second), (std::vector<EdgeId>{0}));
+  EXPECT_EQ(costs_of(run(h, 0, 1, 2, sel(), Stretch {1.2 + 1e-9})), (std::vector<Cost>{5, 6}));
+}
+
+TEST(Ksp, HeadroomWithoutAResidualReadsOneOrZero) {
+  // Two equal-cost walks: [0, 2] over 0->1 (cap 0) and 1->3, [1, 3] over 0->2 and 2->3 (cap 5).
+  // HEADROOM without a residual reads capacity / capacity: 0 on the zero-capacity edge, else 1.
+  // PREFER_HIGHER_PRIORITY ranks the bottleneck-1 walk first; DETERMINISTIC the EdgeId order.
+  auto g = bgraph(4, {{0, 1, 0, 1}, {0, 2, 5, 1}, {1, 3, 5, 1}, {2, 3, 5, 1}});
+  const auto head = PathSelection(EdgeTieBreak::PreferHigherPriority, EdgePriority::Headroom);
+  auto r = run(g, 0, 3, 2, head);
+  ASSERT_EQ(r.size(), 2U);
+  EXPECT_EQ(walk_of(r[0].second), (std::vector<EdgeId>{1, 3}));
+  EXPECT_EQ(walk_of(r[1].second), (std::vector<EdgeId>{0, 2}));
+  auto d = run(g, 0, 3, 2, sel());
+  ASSERT_EQ(d.size(), 2U);
+  EXPECT_EQ(walk_of(d[0].second), (std::vector<EdgeId>{0, 2}));
+  // On positive capacities 1 and 5 every edge reads 1: the bottlenecks tie and the EdgeId order
+  // decides (CAPACITY would rank the capacity-5 walk first).
+  auto q = bgraph(4, {{0, 1, 1, 1}, {0, 2, 5, 1}, {1, 3, 1, 1}, {2, 3, 5, 1}});
+  EXPECT_EQ(walk_of(run(q, 0, 3, 1, head)[0].second), (std::vector<EdgeId>{0, 2}));
+  const auto cap = PathSelection(EdgeTieBreak::PreferHigherPriority, EdgePriority::Capacity);
+  EXPECT_EQ(walk_of(run(q, 0, 3, 1, cap)[0].second), (std::vector<EdgeId>{1, 3}));
 }
 
 TEST(Ksp, CeilingsOnChainPlusBypasses) {

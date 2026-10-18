@@ -53,11 +53,15 @@ using detail::LedgerAccess;
 namespace {
 
 // Sources 0 and 1, destinations 5 and 6: three equal-cost routes with a parallel pair and a
-// shared middle, a costlier bypass, and a second destination.
+// shared middle, a costlier bypass, and a second destination. Two links of capacity 0 (inputs 11
+// and 12): 1 -> 6 ties source 1's other routes, so its shortest support (and every split there)
+// holds a zero-capacity member; 0 -> 5 is costlier than 0's routes and serves as an all-zero
+// Pinned bundle (a Weighted plan without a member).
 std::shared_ptr<const Graph> graph() {
   return std::make_shared<const Graph>(
       make_graph(7, {{0, 2, 6, 1}, {0, 3, 4, 1}, {1, 3, 5, 1}, {1, 4, 3, 1}, {2, 5, 3, 1}, {2, 5, 2, 1},
-                     {3, 5, 4, 1}, {4, 6, 9, 1}, {3, 6, 2, 2}, {0, 6, 3, 4}, {2, 4, 2, 1}}));
+                     {3, 5, 4, 1}, {4, 6, 9, 1}, {3, 6, 2, 2}, {0, 6, 3, 4}, {2, 4, 2, 1}, {1, 6, 0, 2},
+                     {0, 5, 0, 3}}));
 }
 
 struct Mode {
@@ -97,7 +101,7 @@ std::vector<Mode> modes(const Graph& g) {
   out.push_back({"global", global_config(), S, D});
   Pinned two;
   const auto inv = id_of_input(g);
-  two.bundles = {dag_of(g, {inv[0], inv[4], inv[5]}), dag_of(g, {inv[1], inv[6]})};
+  two.bundles = {dag_of(g, {inv[0], inv[4], inv[5]}), dag_of(g, {inv[1], inv[6]}), dag_of(g, {inv[12]})};
   out.push_back({"pinned eb cohort", {two, FlowPlacement::EqualBalanced, Admission::Lossless, det}, {0}, {5}});
   out.push_back({"pinned lossy", {two, FlowPlacement::Weighted, Admission::Lossy, det}, {0}, {5}});
   // CostOnly creation in one pass: its Collapse branch (multipath, multi_edge false,
@@ -151,6 +155,37 @@ std::unique_ptr<FlowPolicy> third_party(FlowLedger& fg, const Graph& g) {
 }
 
 } // namespace
+
+// The sweeps below reach the zero-capacity paths (not vacuous): source 1's CostOnly EqualBalanced
+// route holds the zero link 1 -> 6 as a member, and its sensitivity lists it; the all-zero Pinned
+// bundle is usable, with no member under the Weighted kernel.
+TEST(PolicyFaults, ZeroCapacityLinksTakePartInTheSweeps) {
+  const auto g = graph();
+  const auto inv = id_of_input(*g);
+  for (const auto& m : modes(*g)) {
+    FlowLedger fg(g);
+    FlowPolicy p(fg, m.sources, m.destinations, m.cfg);
+    (void)p.place(5);
+    const auto& pe = detail::PolicyAccess::engine(p);
+    if (m.name == "costonly eb") {
+      bool member = false;
+      for (const auto& cohort : pe.cohorts) {
+        for (const auto& f : cohort) {
+          member = member || std::find(f.plan->members.begin(), f.plan->members.end(), inv[11]) != f.plan->members.end();
+        }
+      }
+      EXPECT_TRUE(member);
+      const auto s = sensitivity(*g, m.sources, m.destinations, SensitivityOptions {m.cfg}, 1);
+      EXPECT_TRUE(std::any_of(s.entries.begin(), s.entries.end(), [&](const auto& e) { return e.edge == inv[11]; }));
+    }
+    if (std::holds_alternative<Pinned>(m.cfg.routing)) {
+      EXPECT_EQ(p.usable_bundles(), 3) << m.name;
+      ASSERT_EQ(pe.cohorts.size(), 1U) << m.name;
+      ASSERT_EQ(pe.cohorts[0].size(), 3U) << m.name;
+      EXPECT_EQ(pe.cohorts[0][2].plan->members.empty(), m.cfg.placement == FlowPlacement::Weighted) << m.name;
+    }
+  }
+}
 
 TEST(PolicyFaults, EveryAllocationOfEveryRoutingModeFailsAtomically) {
   const auto g = graph();

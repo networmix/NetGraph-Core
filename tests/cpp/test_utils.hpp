@@ -531,15 +531,16 @@ inline std::vector<char> residual_closure(const Graph& g, std::span<const Amount
   return seen;
 }
 
-// The cut of a closure: every allowed edge of positive view from a node of the closure to a node
-// outside it, ascending EdgeId. On a maximal flow, the closure of the sources holds no
-// destination and this is the minimum cut the flow certifies.
-inline std::vector<EdgeId> closure_cut(const Graph& g, std::span<const Amount> view, const std::vector<char>& closure,
-                                       const Eligibility* elig) {
+// The cut of a closure: every allowed edge from a node of the closure to a node outside it,
+// whatever its view, ascending EdgeId (an edge of view 0 adds 0 to the value; it is listed
+// because every edge leaving the closure is, also where it leads to a dead end). On a maximal
+// flow, the closure of the sources holds no destination and this is the minimum cut the flow
+// certifies.
+inline std::vector<EdgeId> closure_cut(const Graph& g, const std::vector<char>& closure, const Eligibility* elig) {
   std::vector<EdgeId> cut;
   for (std::size_t e = 0; e < static_cast<std::size_t>(g.num_edges()); ++e) {
     if (elig != nullptr && !elig->edge_ok(static_cast<EdgeId>(e))) continue;
-    if (view[e] > 0 && closure[static_cast<std::size_t>(g.edge_src()[e])] != 0 &&
+    if (closure[static_cast<std::size_t>(g.edge_src()[e])] != 0 &&
         closure[static_cast<std::size_t>(g.edge_dst()[e])] == 0) {
       cut.push_back(static_cast<EdgeId>(e));
     }
@@ -600,7 +601,7 @@ inline std::vector<std::string> certify(const Graph& g, std::span<const Amount> 
   if (connected) {
     if (r.min_cut.has_value()) fails.push_back("min_cut present on a connected solve");
   } else {
-    const std::vector<EdgeId> expect = closure_cut(g, view, seen, elig);
+    const std::vector<EdgeId> expect = closure_cut(g, seen, elig);
     Int128 cut_value = 0;
     for (const EdgeId e : expect) cut_value += view[static_cast<std::size_t>(e)];
     if (!r.min_cut.has_value()) fails.push_back("min_cut missing on a maximal solve");

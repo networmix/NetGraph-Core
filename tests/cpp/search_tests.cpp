@@ -78,18 +78,19 @@ void expect_canonical(const Graph& g, const PredDAG& dag) {
 
 } // namespace
 
-TEST(Search, MemberGraphStaticEligibilityCapacityAndResidual) {
+TEST(Search, MemberGraphIsEligibilityAndResidualNeverCapacity) {
   // ids: 0: 0->1 cap 0, 1: 0->1 cap 3, 2: 0->1 cap 5 (cost 2), 3: 1->2 cap 4. A full search keeps
-  // the tight members: the cost-2 member is never tight while a cost-1 member exists.
+  // the tight members, the zero-capacity id 0 included (capacity is never a condition): the
+  // cost-2 member is never tight while a cost-1 member exists.
   auto g = make_graph(3, {{0, 1, 0, 1}, {0, 1, 3, 1}, {0, 1, 5, 2}, {1, 2, 4, 1}});
-  EXPECT_EQ(edges_of(run(g, {0}, Direction::Forward, std::nullopt, sel()).dag), (std::vector<EdgeId>{1, 3}));
+  EXPECT_EQ(edges_of(run(g, {0}, Direction::Forward, std::nullopt, sel()).dag), (std::vector<EdgeId>{0, 1, 3}));
   // A residual gates at min_residual: residual [0, 1, 5, 4] at 2 units removes id 1, so the
   // cost-2 member carries node 1 (distance 2).
   const std::vector<Amount> res = {0, 1, 5, 4};
   auto gated = run(g, {0}, Direction::Forward, std::nullopt, sel(), &res, 2);
   EXPECT_EQ(*gated.costs, (std::vector<Cost>{0, 2, 3}));
   EXPECT_EQ(edges_of(gated.dag), (std::vector<EdgeId>{2, 3}));
-  // min_residual without a residual gates nothing (static eligibility stays one unit).
+  // min_residual without a residual gates nothing.
   auto static_only = run(g, {0}, Direction::Forward, std::nullopt, sel(), nullptr, 4);
   EXPECT_EQ(*static_only.costs, (std::vector<Cost>{0, 1, 2}));
   const std::vector<EdgeId> xe = {3};
@@ -124,7 +125,7 @@ TEST(Search, CollapseBySelectAdjacency) {
   EXPECT_EQ(member(head, &h1), (std::vector<EdgeId>{1}));
   // Equal rational headroom (2/4 == 1/2): the lowest EdgeId.
   EXPECT_EQ(member(head, &h2), (std::vector<EdgeId>{0}));
-  // Without a residual every priority reads static capacities.
+  // Without a residual the Residual priority reads the static capacities.
   EXPECT_EQ(member(resid), (std::vector<EdgeId>{1}));
 }
 
@@ -845,12 +846,12 @@ TEST(Search, QueueDispatchAtTheWidthLimit) {
 
 namespace {
 
-// A textbook Dijkstra over the candidate edges (the test's own, for large graphs where
-// Bellman-Ford is too slow): the costs and the tight-edge set of a full forward search.
+// A textbook Dijkstra over every edge, whatever its capacity (the test's own, for large graphs
+// where Bellman-Ford is too slow): the costs and the tight-edge set of a full forward search.
 std::pair<std::vector<Cost>, std::vector<EdgeId>> dijkstra(const Graph& g, const std::vector<NodeId>& roots) {
   std::vector<std::vector<std::size_t>> out(static_cast<std::size_t>(g.num_nodes()));
   for (std::size_t e = 0; e < static_cast<std::size_t>(g.num_edges()); ++e) {
-    if (g.capacity_units()[e] >= 1) out[static_cast<std::size_t>(g.edge_src()[e])].push_back(e);
+    out[static_cast<std::size_t>(g.edge_src()[e])].push_back(e);
   }
   std::vector<Cost> d(static_cast<std::size_t>(g.num_nodes()), kUnreachable);
   std::priority_queue<std::pair<Cost, NodeId>, std::vector<std::pair<Cost, NodeId>>, std::greater<>> pq;
@@ -874,7 +875,7 @@ std::pair<std::vector<Cost>, std::vector<EdgeId>> dijkstra(const Graph& g, const
   for (std::size_t e = 0; e < static_cast<std::size_t>(g.num_edges()); ++e) {
     const Cost du = d[static_cast<std::size_t>(g.edge_src()[e])];
     const Cost dv = d[static_cast<std::size_t>(g.edge_dst()[e])];
-    if (g.capacity_units()[e] >= 1 && du != kUnreachable && dv != kUnreachable && du + g.cost()[e] == dv) {
+    if (du != kUnreachable && dv != kUnreachable && du + g.cost()[e] == dv) {
       tight.push_back(static_cast<EdgeId>(e));
     }
   }
@@ -1012,7 +1013,7 @@ TEST(Search, InternalEntriesMatchThePublicSearch) {
             ++routed;
           }
           // CostOnly: the static support toward dests projected with static priorities equals the
-          // static search from src (no residual: every priority reads capacities).
+          // static search from src (no residual: Residual reads the capacities).
           const auto support = detail::static_support(g, dests, Direction::Reverse, nullptr);
           const detail::PriorityValues values {&g, EdgePriority::Residual, {}};
           auto proj = detail::support_route(g, detail::PredDAGBuilder::ascending(support), src, dests, s,
@@ -1070,7 +1071,8 @@ TEST(Search, InternalEntriesMatchThePublicSearch) {
 TEST(Search, ReverseSupportsOrderEveryTailsEdgesAtAnyDegree) {
   // A reverse full search emits each tail's tight out-edges in ascending EdgeId, by one
   // bit per out-edge id up to 64 out-edges and by sorting above: hubs with 1, 63, 64, 65 and 129
-  // out-edges, tight (cost 1, parallel copies, ties) and not (cost 2 or no capacity), and hubs of
+  // out-edges, tight (cost 1, parallel copies, ties; a fifth of capacity 0, tight like any other)
+  // and not (cost 2), and hubs of
   // 64, 65 and 66 out-edges that are all tight, against the reference's full DAG, with and
   // without an Eligibility.
   // Ids rank a node's costlier edges last, so the all-tight variant makes the last ids tight too.

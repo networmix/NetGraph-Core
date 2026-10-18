@@ -7,8 +7,8 @@
 // The selection of a search is spelled in target terms (Sel: multipath, multi_edge,
 // prefer_priority as PreferHigherPriority on the Residual priority); the default Sel is
 // multipath and multi_edge with the Deterministic tie-break. A supplied residual always gates its
-// edges at min_residual = 1 unit (through to_units), and static capacity >= 1 unit is
-// unconditional.
+// edges at min_residual = 1 unit (through to_units); capacity is no condition of a search (the
+// row graphs have no edge below 1 unit, so this does not change their digests).
 // * spf (spf.full.*, except the storage row spf.full.random1m, which runs search_run below):
 //   spf(g, {src}, Forward, no targets), the default selection, with or without the masks (as one
 //   Eligibility) and the residual. Digest: 16 sampled costs, the DAG's entry count and its first
@@ -379,7 +379,7 @@ inline std::uint64_t sensitivity_exact(const Graph& g, int src, int dst, const E
   return fold_sensitivity(nc::sensitivity(g.ref(), s, t, opts, 1));
 }
 
-// Policy-model sensitivity over every allowed edge of at least 1 unit: CostOnly EqualBalanced.
+// Policy-model sensitivity over every allowed edge: CostOnly EqualBalanced.
 inline std::uint64_t sensitivity_policy_all_edges(const Graph& g, int src, int dst, const Elig& el) {
   const nc::NodeId s[1] = {src};
   const nc::NodeId t[1] = {dst};

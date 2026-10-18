@@ -211,13 +211,25 @@ std::vector<char> closure_of(const Network& net, std::span<const Amount> res) {
 // Whether the real sources reach t* over positive residual arcs.
 bool connected(const Network& net, std::span<const Amount> res) { return closure_of(net, res).back() != 0; }
 
-// The cut of a residual: the network's edges of positive capacity, the deleted one aside, from the
-// closure of the real sources to its complement, ascending EdgeId.
+// A solve from zero with e deleted as sensitivity deletes it: excluded by an Eligibility
+// (intersected with the case's), its view 0. An excluded edge is no edge of the network, so it is
+// never a cut edge; an allowed edge of view 0 leaving the closure is one.
+FlowCoreResult fresh_without(const Case& c, EdgeId e) {
+  auto view = c.view;
+  view[static_cast<std::size_t>(e)] = 0;
+  const EdgeId one[1] = {e};
+  Eligibility deleted = c.g->eligibility({}, one);
+  if (c.el() != nullptr) deleted = Eligibility::intersect(*c.el(), deleted);
+  return place_global_units(*c.g, view, c.sources, c.destinations, &deleted, std::nullopt);
+}
+
+// The cut of a residual: the network's edges, the deleted one aside, from the closure of the real
+// sources to its complement, whatever their view capacity, ascending EdgeId.
 std::vector<EdgeId> closure_cut(const Network& net, std::span<const Amount> res, std::size_t deleted) {
   const auto seen = closure_of(net, res);
   std::vector<EdgeId> cut;
   for (std::size_t k = 0; k < net.edges.size(); ++k) {
-    if (k == deleted || net.cap[k] <= 0) continue;
+    if (k == deleted) continue;
     if (seen[static_cast<std::size_t>(net.tail[k])] != 0 && seen[static_cast<std::size_t>(net.head[k])] == 0) {
       cut.push_back(net.edges[k]);
     }
@@ -297,8 +309,8 @@ void expect_deletion(const Case& c, const DeletionState& st, EdgeId e, const Del
     EXPECT_TRUE(r.edge_flows[x] >= 0 && r.edge_flows[x] <= view[x]) << where << " edge " << x;
     if (c.el() != nullptr && !c.el()->edge_ok(static_cast<EdgeId>(x))) EXPECT_EQ(r.edge_flows[x], 0) << where;
   }
-  // From zero on V \ {e}, and the independent Bellman-Ford curve.
-  const auto fresh = place_global_units(*c.g, view, c.sources, c.destinations, c.el(), std::nullopt);
+  // From zero on V \ {e} with e excluded, and the independent Bellman-Ford curve.
+  const auto fresh = fresh_without(c, e);
   const auto ref = independent_curve(*c.g, view, c.sources, c.destinations, c.el());
   EXPECT_EQ(r.value, fresh.placed) << where;
   EXPECT_EQ(r.value, ref.back().first) << where;
@@ -1099,9 +1111,7 @@ TEST(FlowCoreDeletion, ZeroFlowDeletions) {
   EXPECT_EQ(req.state->edge_flows()[static_cast<std::size_t>(spare)], 0);
   FlowCoreResult base;
   (void)capture_of(positive, &base);
-  auto view = positive.view;
-  view[static_cast<std::size_t>(spare)] = 0;
-  const auto fresh = place_global_units(*positive.g, view, positive.sources, positive.destinations, nullptr, std::nullopt);
+  const auto fresh = fresh_without(positive, spare);
   ASSERT_TRUE(base.min_cut.has_value() && fresh.min_cut.has_value());
   EXPECT_NE(*base.min_cut, *fresh.min_cut);
   const Case zero = make_case(2, {{0, 1, 0, 1}}, {0}, {1});
@@ -1119,9 +1129,7 @@ TEST(FlowCoreDeletion, TiedFlowsDifferValueCostAndCutAgree) {
   const auto req = capture_of(c);
   const EdgeId dear = id_of_input(*c.g)[1];
   const auto r = DeletionResolver(*req.state).resolve(dear);
-  auto view = c.view;
-  view[static_cast<std::size_t>(dear)] = 0;
-  const auto fresh = place_global_units(*c.g, view, c.sources, c.destinations, nullptr, std::nullopt);
+  const auto fresh = fresh_without(c, dear);
   EXPECT_EQ(r.edge_flows, (std::vector<Amount> {1, 0, 0, 1}));
   EXPECT_EQ(fresh.edge_flows, (std::vector<Amount> {1, 0, 1, 0}));
   EXPECT_EQ(r.value, 1);
@@ -1269,9 +1277,7 @@ namespace {
 // Whether a re-solve of e agrees with a solve from zero on the view without e: the value, the
 // cost and the minimum cut (independent of the resolver).
 bool matches_fresh_solve(const Case& c, EdgeId e, const DeletionResult& r) {
-  auto view = c.view;
-  view[static_cast<std::size_t>(e)] = 0;
-  const auto fresh = place_global_units(*c.g, view, c.sources, c.destinations, c.el(), std::nullopt);
+  const auto fresh = fresh_without(c, e);
   return r.value == fresh.placed && flow_cost(*c.g, r.edge_flows) == flow_cost(*c.g, fresh.edge_flows) &&
          fresh.min_cut.has_value() && r.cut == *fresh.min_cut;
 }

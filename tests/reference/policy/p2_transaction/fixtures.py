@@ -955,9 +955,11 @@ def weighted_additivity(s: PSnap):
     "admission",
     ["13", "9.4", "8"],
     "Zero request: complete, nothing created, flags false. Overlapping endpoint "
-    "sets (src == dst) are rejected at construction (rule 13). No route: CostOnly "
-    "over zero-capacity links has an empty static roster (no_route, nothing "
-    "created); CapacityAware on a zero baseline has a static roster but no residual "
+    "sets (src == dst) are rejected at construction (rule 13). Zero capacity is "
+    "not a missing route (contract r8 3.5, step 1): CostOnly over zero-capacity "
+    "links has the source in its roster and creates its zero-delivery record on "
+    "the static support (exhausted: MaxFlow carries 0 there). No route: "
+    "CapacityAware on a zero baseline has a static roster but no residual "
     "route (no_route, no id consumed); Pinned with every bundle excluded "
     "(usable_bundles 0, no_route).",
 )
@@ -983,10 +985,17 @@ def admission(s: PSnap):
     fg0 = c0.ledger()
     p0 = P.FlowPolicy(fg0, 0, 3, co(MF))
     r = s.place("CostOnly over zero-capacity links", p0, 1, fg=fg0)
+    # Both routes of the diamond cost 2, so the static support is all four links and the
+    # MaxFlow route is that support; every link has capacity 0, so the flow carries 0.
     s.expect(
-        "CostOnly no route",
-        (r.termination, p0.roster, fg0.records()),
-        ("no_route", [], []),
+        "CostOnly zero capacity",
+        (
+            r.termination,
+            r.placed,
+            p0.roster,
+            [(x.delivered, x.route_cost, len(x.bundle)) for x in fg0.records()],
+        ),
+        ("exhausted", 0, [0], [(0, 2, 4)]),
     )
     fgz = c.ledger([0, 0, 0, 0])
     pz = P.FlowPolicy(fgz, 0, 3, ca(EB, fc=2))
@@ -1675,7 +1684,8 @@ def eb_reservation_binding(s: PSnap):
     "exhausted give limit_flows; two sources without routes give no_route; one "
     "exhausted and one no_route give exhausted; a fixed-count cohort full is "
     "exhausted; a Lossy finite offer consumed with drops is complete; v = 0 is "
-    "complete; an empty static roster is no_route.",
+    "complete; an empty static roster (no walk from the source; a zero-capacity "
+    "walk would count) is no_route.",
 )
 def termination(s: PSnap):
     # limit_flows + exhausted: source 0 grows over two 1-unit links with max 3 >
@@ -1723,7 +1733,7 @@ def termination(s: PSnap):
     )
     r = s.place("v = 0", P.FlowPolicy(cl.ledger(), 0, 1, co(EB)), 0)
     s.expect("v = 0", r.termination, "complete")
-    c0 = Ctx(s, "no_roster", (2, [(0, 1, 0, 1)]))
+    c0 = Ctx(s, "no_roster", (2, [(1, 0, 1, 1)]))
     p0 = P.FlowPolicy(c0.ledger(), 0, 1, co(EB))
     r = s.place("empty roster", p0, 1)
     s.expect("empty roster", (r.termination, r.local_outcomes), ("no_route", []))

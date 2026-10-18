@@ -259,15 +259,16 @@ TEST(FlowCore, ZeroCapIsThePrescribedZeroPayload) {
 }
 
 TEST(FlowCore, PositiveCapOnZeroView) {
-  // A positive cap runs one failed Dijkstra even when
-  // the view gives the sources no out-capacity; roots at 0, min_cut [].
+  // A positive cap runs one failed Dijkstra even when the view gives the sources no
+  // out-capacity; roots at 0; min_cut is the edge 0 -> 1 of view 0 (the closure {0} is separated
+  // from the destination only by it; its value is 0).
   auto g = make_graph(3, {{0, 1, 5, 1}, {1, 2, 5, 1}});
   const std::vector<Amount> view = to_ids(g, std::vector<Amount>{0, 5});
   auto r = solve(g, {0}, {2}, 4, &view);
   EXPECT_EQ(r.placed, 0);
   EXPECT_TRUE(r.cost_distribution.empty());
   ASSERT_TRUE(r.min_cut.has_value());
-  EXPECT_TRUE(r.min_cut->empty());
+  EXPECT_EQ(*r.min_cut, (std::vector<EdgeId>{0}));
   EXPECT_EQ(r.potentials, (std::vector<Cost>{0, kNeverReached, kNeverReached}));
   EXPECT_EQ(counters_of(r), (Counters{1, 2, 2, 0, 0}));
   expect_certified(g, {0}, {2}, 4, r, &view);
@@ -276,7 +277,7 @@ TEST(FlowCore, PositiveCapOnZeroView) {
   auto z = solve(g, {0}, {2}, 1, &zeros);
   EXPECT_EQ(z.placed, 0);
   ASSERT_TRUE(z.min_cut.has_value());
-  EXPECT_TRUE(z.min_cut->empty());
+  EXPECT_EQ(*z.min_cut, (std::vector<EdgeId>{0}));
   EXPECT_EQ(z.potentials[0], 0);
   expect_certified(g, {0}, {2}, 1, z, &zeros);
 }

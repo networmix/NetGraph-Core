@@ -1603,8 +1603,8 @@ PlacementResult place_impl(PolicyEngine& pe, std::optional<Amount> volume, const
     out.termination = Termination::NoRoute;
     if (detail::is<Global>(pe)) {
       // No source reaches an allowed destination: the cumulative flow is 0 and maximal, so its
-      // marginal curve is empty and the full-residual cut is empty (the closure of the
-      // sources has no arc of positive view leaving it); None would claim a residual path.
+      // marginal curve is empty and the full-residual cut is empty (no roster source, so the
+      // closure is empty and no arc leaves it); None would claim a residual path.
       out.cost_distribution.emplace();
       if (outputs.bottleneck) out.min_cut.emplace();
     }

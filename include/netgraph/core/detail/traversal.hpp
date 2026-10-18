@@ -5,7 +5,8 @@
    Dijkstra finalises the nearest pending node, scanning out-edges for Forward and in-edges
    for Reverse. Both heap and cyclic distance-bucket queues pop in (distance, node) order;
    buckets are used when the graph's costs fit 65,536 buckets. A candidate must pass static
-   eligibility, have capacity >= 1 unit, and pass any residual-capacity threshold.
+   eligibility and any residual-capacity threshold; its capacity is never read (an edge of
+   capacity 0 is searched like any other).
    A tight edge extends a shortest path exactly: d(u) + cost(e) = d(v) in traversal direction.
    Positive costs make these edges unique for a fixed member graph regardless of equal-distance
    pop order. Record them in per-node lists; on output, multi_edge = false (Collapse) selects
@@ -37,7 +38,8 @@
 namespace netgraph::core::detail {
 
 // An exact priority value: num / den with den >= 1 (den == 1 for Residual and Capacity, the
-// capacity for Headroom); `infinite` above every finite value (the bottleneck of an empty walk).
+// capacity for Headroom on a positive edge); `infinite` above every finite value (the bottleneck
+// of an empty walk).
 struct Priority {
   Amount num {0};
   Amount den {1};
@@ -46,11 +48,13 @@ struct Priority {
 [[nodiscard]] int compare(const Priority& a, const Priority& b) noexcept;  // -1, 0, 1
 
 // The priority value of an edge with `residual` units left of `capacity`: the residual units
-// (Residual), the capacity units (Capacity) or the rational residual / capacity (Headroom).
+// (Residual), the capacity units (Capacity) or the rational residual / capacity (Headroom; 0 on
+// an edge of capacity 0).
 [[nodiscard]] Priority priority_value(EdgePriority priority, Amount residual, Amount capacity) noexcept;
 
-// The per-edge priority values a search reads: `residual` empty (no residual) reads the static
-// capacity for every priority; else priority_value on the residual.
+// The per-edge priority values a search reads: priority_value on `residual`, or, when it is
+// empty (no residual), on the static capacity as the residual (Residual and Capacity read the
+// capacity, Headroom 1 on a positive edge and 0 on an edge of capacity 0).
 struct PriorityValues {
   const Graph* g {nullptr};
   EdgePriority priority {EdgePriority::Capacity};
@@ -92,9 +96,9 @@ inline constexpr std::int64_t kMaxBucketWidth = std::int64_t {1} << 16;
 
 // ---------------------------------------------------------------- searches of validated inputs
 
-// The candidates of a search beyond capacity >= 1 unit (validated by the caller): the static
-// Eligibility (null: everything allowed) and a residual gate (`residual` empty: none; else E
-// entries, an edge needs residual >= min_residual >= 1).
+// The candidates of a search (validated by the caller): the static Eligibility (null:
+// everything allowed) and a residual gate (`residual` empty: none; else E entries, an edge needs
+// residual >= min_residual >= 1). Capacity is not a condition.
 struct Gate {
   const Eligibility* elig {nullptr};
   std::span<const Amount> residual {};
@@ -130,9 +134,9 @@ struct SearchRoute {
                                      const Eligibility* elig);
 
 // The static cost from each of `sources` to the nearest of `dests` (in range, ascending, no
-// duplicates, possibly empty; allowed ones) over the statically eligible edges of at least 1 unit,
-// kUnreachable where there is no walk, and everywhere when no destination is allowed (the
-// CapacityAware and Global rosters and the Stretch baselines).
+// duplicates, possibly empty; allowed ones) over the statically eligible edges, whatever their
+// capacity, kUnreachable where there is no walk, and everywhere when no destination is allowed
+// (the CapacityAware and Global rosters and the Stretch baselines).
 [[nodiscard]] std::vector<Cost> static_costs(const Graph& g, const Eligibility* elig, std::span<const NodeId> dests,
                                              std::span<const NodeId> sources);
 

@@ -28,7 +28,8 @@ enum class SpfQueue { Auto, Heap };
 // A supplied residual gives unused capacity: int64[E] in EdgeId order, each in
 // [0, capacity_units], borrowed for this call. Only edges with residual >= min_residual are
 // usable, and these values also supply residual-based priorities. min_residual must be >= 1
-// and applies only when residual is supplied. Eligibility and capacity >= 1 unit always apply.
+// and applies only when residual is supplied. The Eligibility always applies. Without a
+// residual no edge is skipped for its capacity: an edge of capacity 0 is searched like any other.
 // Invalid direction enum values throw std::invalid_argument naming the field. Fields remain
 // assignable, so spf validates them again.
 struct SpfOptions {
@@ -67,10 +68,11 @@ struct SpfResult {
 // ksp requires k >= 1 and a selection. multi_edge = true keeps all eligible parallel edges;
 // false keeps one per (u, v) pair by select_adjacency. multipath is ignored.
 // max_path_cost is inclusive: Absolute(c), c >= 0, or Stretch(f), finite f in [1, inf), times
-// the static shortest cost under the Eligibility, ignoring residual capacity. f is compared
-// exactly, as for CostCeiling.
+// the static shortest cost under the Eligibility (edges of capacity 0 included, residual
+// ignored). f is compared exactly, as for CostCeiling.
 // A residual is validated as for spf and borrowed for the call; edges need at least 1 unused
-// unit, and it supplies priority values. Fields remain assignable, so ksp validates them.
+// unit, and it supplies priority values. Without a residual no edge is skipped for its capacity.
+// Fields remain assignable, so ksp validates them.
 struct KspOptions {
   KspOptions(std::int64_t k_, PathSelection selection_);
   std::int64_t k;

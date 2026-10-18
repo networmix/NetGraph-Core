@@ -198,11 +198,7 @@ def check_solve(g, view, sources, dests, cap, sol, *, edges=None, tier="b"):
         if mc is not None:
             fails.append("min_cut present on a connected (non-maximal) solve")
     else:
-        expect = sorted(
-            e
-            for e in active
-            if g.src[e] in seen and g.dst[e] not in seen and view[e] > 0
-        )
+        expect = sorted(e for e in active if g.src[e] in seen and g.dst[e] not in seen)
         if mc is None:
             fails.append("min_cut missing on a maximal solve")
         elif sorted(mc) != expect or list(mc) != sorted(mc):

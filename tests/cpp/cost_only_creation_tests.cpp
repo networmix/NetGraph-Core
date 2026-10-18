@@ -117,6 +117,7 @@ struct Tally {
   long weighted {0};
   long anycast {0};
   long unrouted {0};  // declined although the selection and kernel qualify: the general path has no route
+  long zero_weight {0};  // declined: a Weighted route with an edge of capacity 0 (weight 0, no member)
   long beyond_int32 {0};  // answers whose route cost exceeds INT32_MAX
 };
 
@@ -166,14 +167,17 @@ Tally compare_with_general_path(std::mt19937& rng, int trials, Cost factor) {
           const auto want = general_path(g, support, src, dsts, sel, view, W, k.placement, k.admission);
           const auto got = cost_only_creation(g, support, src, dsts, sel, view, k.placement, k.admission);
           // It answers exactly where the general path's members are its whole multipath route under a
-          // kernel of static membership (on a valid support that is every route that exists).
+          // kernel of static membership (on a valid support: every route that exists, except a
+          // Weighted route with an edge of capacity 0, which has weight 0 and is no member).
           const bool qualifies =
               sel.multipath && !(k.placement == FlowPlacement::Weighted && sel.priority == EdgePriority::Residual);
-          const bool applies = qualifies && !want.route.empty();
+          const bool applies = qualifies && !want.route.empty() && want.plan.members == want.route;
           EXPECT_EQ(got.has_value(), applies) << where;
           if (got.has_value() != applies) return t;
           if (!got.has_value()) {
-            t.unrouted += qualifies ? 1 : 0;
+            t.unrouted += qualifies && want.route.empty() ? 1 : 0;
+            t.zero_weight += qualifies && !want.route.empty() ? 1 : 0;
+            if (qualifies && !want.route.empty()) EXPECT_EQ(k.placement, FlowPlacement::Weighted) << where;
             continue;
           }
           EXPECT_EQ(want.plan.members, want.route) << where;  // the precondition the shortcut checks
@@ -242,6 +246,7 @@ TEST(CostOnlyCreation, EqualsTheGeneralPathForEverySourceSelectionAndKernel) {
   EXPECT_GT(t.weighted, 4000);
   EXPECT_GT(t.anycast, 4000);
   EXPECT_GT(t.unrouted, 10000);
+  EXPECT_GT(t.zero_weight, 1000);
 }
 
 TEST(CostOnlyCreation, WideCostsEqualTheGeneralPath) {
@@ -427,8 +432,8 @@ TEST(CostOnlyCreation, CraftedSupportsGiveNothingOrTheGeneralPath) {
 TEST(CostOnlyCreation, DeclinesEachBrokenPrecondition) {
   // 0 -> 1 -> 3 and 0 -> 2 -> 3, destination 3: the general path keeps the whole route, and so
   // does the one pass. Each variant breaks one precondition; the one pass then answers nothing (the
-  // general path's members differ from its route, or it throws), except that MaxFlow keeps a
-  // member below one unit.
+  // general path's members differ from its route, or it throws), except that MaxFlow and
+  // EqualBalanced keep a member below one unit (only Weighted gives it weight 0 and drops it).
   const Graph g = make_graph(6, {{0, 1, 2, 1}, {0, 2, 2, 1}, {1, 3, 2, 1}, {2, 3, 2, 1}, {3, 4, 2, 1},
                                  {1, 5, 2, 1}, {2, 1, 2, 1}, {1, 2, 0, 1}});
   const auto inv = id_of_input(g);
@@ -454,9 +459,11 @@ TEST(CostOnlyCreation, DeclinesEachBrokenPrecondition) {
   EXPECT_FALSE(run({0, 1, 2, 3, 4}, FlowPlacement::EqualBalanced).second.has_value());
   // A node that reaches no destination (1 -> 5).
   EXPECT_FALSE(run({0, 1, 2, 3, 5}, FlowPlacement::EqualBalanced).second.has_value());
-  // A member below one unit (1 -> 2 has no capacity): declined for EB, kept by MaxFlow.
-  EXPECT_FALSE(run({0, 1, 2, 3, 7}, FlowPlacement::EqualBalanced).second.has_value());
+  // A member below one unit (1 -> 2 has no capacity): declined for Weighted, kept by MaxFlow and
+  // EqualBalanced.
+  EXPECT_FALSE(run({0, 1, 2, 3, 7}, FlowPlacement::Weighted).second.has_value());
   EXPECT_TRUE(run({0, 1, 2, 3, 7}, FlowPlacement::MaxFlow).second.has_value());
+  EXPECT_TRUE(run({0, 1, 2, 3, 7}, FlowPlacement::EqualBalanced).second.has_value());
   // A cycle (1 -> 2 -> 1): declined, and the general path throws.
   {
     const auto [support, got] = run({0, 1, 2, 3, 6, 7}, FlowPlacement::MaxFlow);

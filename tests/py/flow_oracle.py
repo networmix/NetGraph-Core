@@ -209,9 +209,7 @@ def certify(
             fails.append("min_cut on a connected solve")
     else:
         expect = [
-            e
-            for e in range(m)
-            if edge_ok[e] and src[e] in seen and dst[e] not in seen and view[e] > 0
+            e for e in range(m) if edge_ok[e] and src[e] in seen and dst[e] not in seen
         ]
         if payload["min_cut"] != expect:
             fails.append(f"min_cut {payload['min_cut']} != closure cut {expect}")

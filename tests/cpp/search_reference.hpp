@@ -42,23 +42,27 @@ struct Query {
   EdgePriority priority {EdgePriority::Capacity};
 };
 
+// Without a residual the free capacity is the static capacity (docs/semantics.md#4-search):
+// Residual and Capacity read the capacity, Headroom capacity / capacity. Headroom is 0 on an edge
+// of capacity 0.
 inline Prio prio_of(const Query& q, EdgeId e) {
   const auto ei = static_cast<std::size_t>(e);
   const Amount cap = q.g->capacity_units()[ei];
-  if (q.residual == nullptr || q.priority == EdgePriority::Capacity) return {cap, 1, false};
-  const Amount r = (*q.residual)[ei];
+  const Amount r = q.residual == nullptr ? cap : (*q.residual)[ei];
+  if (q.priority == EdgePriority::Capacity) return {cap, 1, false};
   if (q.priority == EdgePriority::Residual) return {r, 1, false};
+  if (cap == 0) return {0, 1, false};
   return {r, cap, false};
 }
 
-// The member flags per edge.
+// The member flags per edge: allowed, and with a residual at least min_residual of it; the
+// capacity is never read.
 inline std::vector<char> members(const Query& q) {
   const Graph& g = *q.g;
   const auto m = static_cast<std::size_t>(g.num_edges());
   std::vector<char> cand(m, 0);
   for (std::size_t e = 0; e < m; ++e) {
     if (q.elig != nullptr && !q.elig->edge_ok(static_cast<EdgeId>(e))) continue;
-    if (g.capacity_units()[e] < 1) continue;
     if (q.residual != nullptr && (*q.residual)[e] < q.min_residual) continue;
     cand[e] = 1;
   }

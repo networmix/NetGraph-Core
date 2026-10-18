@@ -63,7 +63,8 @@ void register_search(py::module_& m) {
       "None: a full search) stops the search at the nearest targets (anycast: any nearest target will\n"
       "do); residual (int64 units per EdgeId, each in [0, capacity_units]) makes the search skip edges\n"
       "with fewer than min_residual residual units (an integer >= 1; without a residual it has no\n"
-      "effect) and supplies the priority values; elig (None: everything allowed). A direction outside its\n"
+      "effect) and supplies the priority values: it is the only capacity filter, and without it an edge\n"
+      "of capacity 0 is searched like any other; elig (None: everything allowed). A direction outside its\n"
       "enumeration raises ValueError here; the other fields are validated by spf, in the order its\n"
       "docstring gives.")
       .def(py::init([](Direction direction, const PathSelection& selection, const py::object& targets,
@@ -78,8 +79,8 @@ void register_search(py::module_& m) {
       .def_readonly("selection", &PySpfOptions::selection, "the PathSelection the search reads")
       .def_readonly("targets", &PySpfOptions::targets, "the targets as given (validated by spf); None: a full search")
       .def_readonly("residual", &PySpfOptions::residual,
-                    "the residual units per EdgeId as given (validated by spf); None: static capacities, no\n"
-                    "residual gating (edges below 1 unit of capacity are still skipped)")
+                    "the residual units per EdgeId as given (validated by spf); None: no capacity filter;\n"
+                    "priorities read static capacity")
       .def_readonly("min_residual", &PySpfOptions::min_residual,
                     "the gating threshold in units as given (validated by spf: an integer >= 1)")
       .def_readonly("elig", &PySpfOptions::elig, "the static Eligibility; None: everything allowed");
@@ -165,10 +166,11 @@ void register_search(py::module_& m) {
       },
       py::arg("graph"), py::arg("roots"), py::arg("opts"),
       "Shortest paths from the roots for FORWARD, or to the roots for REVERSE (one NodeId or a sequence;\n"
-      "every root at distance 0), over the eligible edges of at least 1 unit of capacity (and of residual\n"
-      ">= min_residual with a residual) -> SpfResult. Without targets every reachable node gets its\n"
-      "distance: costs and the full DAG of tight edges (the edges on some shortest walk; one per (u, v)\n"
-      "pair with multi_edge = False). With targets the search stops at the nearest targets' cost:\n"
+      "every root at distance 0), over the eligible edges (only those with residual >= min_residual when\n"
+      "a residual is given; an edge of capacity 0 is searched like any other) -> SpfResult. Without\n"
+      "targets every reachable node gets its distance: costs and the full DAG of tight edges (the edges\n"
+      "on some shortest walk; one per (u, v) pair with multi_edge = False). With targets the search\n"
+      "stops at the nearest targets' cost:\n"
       "target_cost and the DAG of the walks between the roots and a nearest target (for REVERSE, from\n"
       "the target to a root, in the edges' own direction);\n"
       "with multipath = False, instead the canonical single path, the walk minimising (cost, -bottleneck\n"

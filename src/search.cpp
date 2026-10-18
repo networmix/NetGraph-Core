@@ -46,14 +46,14 @@ int compare(const Priority& a, const Priority& b) noexcept {
 Priority priority_value(EdgePriority priority, Amount residual, Amount capacity) noexcept {
   if (priority == EdgePriority::Capacity) return {capacity, 1, false};
   if (priority == EdgePriority::Residual) return {residual, 1, false};
+  if (capacity == 0) return {0, 1, false};  // a zero-capacity edge has headroom 0
   return {residual, capacity, false};
 }
 
 Priority PriorityValues::of(EdgeId e) const noexcept {
   const auto ei = static_cast<std::size_t>(e);
   const Amount cap = g->capacity_units()[ei];
-  if (residual.empty()) return {cap, 1, false};
-  return priority_value(priority, residual[ei], cap);
+  return priority_value(priority, residual.empty() ? cap : residual[ei], cap);
 }
 
 PriorityFn PriorityFn::of(const PriorityValues& values) noexcept {
@@ -415,7 +415,6 @@ template <Direction D, class Q>
 Cost loop(Workspace& ws, Q& q, const SearchIn& in) {
   const Graph& g = *in.g;
   const Cost* const cost = g.cost().data();
-  const Amount* const cap = g.capacity_units().data();
   const NodeId* const edst = g.edge_dst().data();
   const std::int32_t* const row = g.row_offsets().data();
   const std::int32_t* const in_row = g.in_row_offsets().data();
@@ -433,7 +432,7 @@ Cost loop(Workspace& ws, Q& q, const SearchIn& in) {
   const bool lists = in.lists;
   const Spur* const spur = in.spur;
   auto candidate = [&](std::size_t e) noexcept {
-    return (allowed == nullptr || allowed[e] != 0) && cap[e] >= 1 && (res == nullptr || res[e] >= minr);
+    return (allowed == nullptr || allowed[e] != 0) && (res == nullptr || res[e] >= minr);
   };
   // Records a node in `touched` before its first write (never allocates) and a tight edge in the
   // pool before it is linked (a failed growth changes nothing).

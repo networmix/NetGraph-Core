@@ -288,12 +288,7 @@ class FlowPolicy:
             if not K.prune(g, edges, src, (dst,)):
                 raise ContractError("malformed bundle: no src -> dst walk")
             out.append(edges)
-            ok = [
-                e
-                for e in edges
-                if g.capacity[e] >= 1
-                and (self.elig is None or self.elig.edge_allowed[e])
-            ]
+            ok = [e for e in edges if self.elig is None or self.elig.edge_allowed[e]]
             self._pruned.append(K.prune(g, ok, src, (dst,)))
         return out
 

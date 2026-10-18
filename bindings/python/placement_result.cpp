@@ -97,7 +97,9 @@ void register_placement_result(py::module_& m) {
       .def_readonly("min_cut", &PlacementResult::min_cut,
                     "Global with bottleneck requested: a minimum cut (edges whose removal separates the sources from\n"
                     "the destinations, with the smallest total capacity) of the policy's view (free capacity plus its\n"
-                    "own allocation), when the solve reached the maximum flow; None otherwise (also on a zero call)")
+                    "own allocation), when the solve reached the maximum flow: every allowed edge leaving the nodes the\n"
+                    "sources still reach, an edge with nothing free (capacity 0, or held by others) included; None\n"
+                    "otherwise (also on a zero call)")
       .def("__repr__", [](const PlacementResult& r) {
         return "PlacementResult(placed=" + std::to_string(r.placed) + ", termination=" +
                std::string(py::str(py::cast(r.termination).attr("name"))) + ")";

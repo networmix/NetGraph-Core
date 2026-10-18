@@ -18,7 +18,8 @@ the library and without the untracked design tree the code came from.
 
 The data is frozen: it is never regenerated from the build. The command below proves that it
 still equals what the reference computes; a change of the data is a deliberate data change,
-reviewed as such.
+reviewed as such. One such change has been made, when edges of capacity 0 became ordinary
+routing edges ("Zero-capacity links stay in routing" below).
 
 ## The historical `source` string inside the data
 
@@ -50,8 +51,8 @@ that every module of the reference was imported from this directory (an installe
 the same name, such as `graph` or `units`, would otherwise shadow it) and that no module of the
 library (`netgraph_core`, `_netgraph_core`) was imported.
 
-The data file: 742,048 bytes, sha256
-`1b661708b10c6d49b9466d2de02b9fe3f2e050c957b67add34f7762255796673` (59 fixtures, 636
+The data file: 742,513 bytes, sha256
+`522b000ece8da69dffccc02df3553bdfb9947115c2bf9970cb64b1ba437083c7` (59 fixtures, 636
 operations).
 
 This directory is excluded from the source distribution (`sdist.exclude` in `pyproject.toml`);
@@ -61,8 +62,8 @@ the wheel holds only the `netgraph_core` package. No test imports it.
 
 The copies are the complete set of modules the exporter imports, found by running it and
 listing the imported modules (lazy imports inside functions included: every fixture runs).
-Their bodies are unchanged; they cite the design contract's sections and notes, which are not
-in the repository. `p2_transaction/_p1.py` appends the sibling `p1_amount/` to `sys.path`, so
+Their bodies are unchanged except for the zero-capacity change at the end of this file; they
+cite the design contract's sections and notes, which are not in the repository. `p2_transaction/_p1.py` appends the sibling `p1_amount/` to `sys.path`, so
 the two directory names are part of the layout. `run_fixtures.py` is used only for its
 `run_one`; its own `main` would write snapshots beside it and is not used.
 
@@ -73,17 +74,17 @@ the copies were taken on 2026-10-09.
 | --- | --- | --- | --- |
 | `export_policy_fixtures.py` | `equivalence/export_policy_fixtures.py` | `0aea76a050b2d83e7398559af6a7d484a5a82a48b35bac9a3686f5fdf73211d2` | `bdd6e63006d46408ae0779e8197f1ec149a93f252605353d8f5c5e3da8907e40` (relocated, below) |
 | `p2_transaction/_p1.py` | `prototypes/p2_transaction/_p1.py` | `3ec5468e1ee8357faa9d85e6d748c718de63baee22e064c204324e42de42ec98` | same |
-| `p2_transaction/fixtures.py` | `prototypes/p2_transaction/fixtures.py` | `ea05c85ce851fd7b7c6ff34b6a9eedbfd7b280187d0bf7e7965e626e4fe52071` | same |
-| `p2_transaction/policy.py` | `prototypes/p2_transaction/policy.py` | `b367b71c6052cb70c9b107ec7fdd15f491349cfd6fdfcb12a18f24ab69a4d27b` | same |
+| `p2_transaction/fixtures.py` | `prototypes/p2_transaction/fixtures.py` | `ea05c85ce851fd7b7c6ff34b6a9eedbfd7b280187d0bf7e7965e626e4fe52071` | `a67420d9052059c10cec1ca0637ccd36b5347c2256cb340a7b3bd69042b13cc9` (zero capacity, below) |
+| `p2_transaction/policy.py` | `prototypes/p2_transaction/policy.py` | `b367b71c6052cb70c9b107ec7fdd15f491349cfd6fdfcb12a18f24ab69a4d27b` | `3997b5efd25d366f169aeddde6204cb2cad2b5c8c120dc73069f3514d8aa9b07` (zero capacity, below) |
 | `p2_transaction/recorder.py` | `prototypes/p2_transaction/recorder.py` | `fb4a8f20ccc6ecef4bc6d934226df33d84ee4dbf70c59aad9f33a097b9d0eb8a` | same |
 | `p2_transaction/run_fixtures.py` | `prototypes/p2_transaction/run_fixtures.py` | `c20d655a2324c42201e9b743c51ef16bb47942dda56782e2d16b135a9c4db2fa` | same |
 | `p1_amount/apportion.py` | `prototypes/p1_amount/apportion.py` | `c1e2f5082a99db1d0e7de5cf4e713ad5790aca3d85060583d536f5bc7fdcd4b1` | same |
-| `p1_amount/certify.py` | `prototypes/p1_amount/certify.py` | `e4f0cce8a68fd512026e6e1c84c558b370d0741564b8191b8893de5cf173ad95` | same |
-| `p1_amount/flowcore.py` | `prototypes/p1_amount/flowcore.py` | `72b3d8c91a077017cf759d4c834576b1babd513024e9e227650d273d8b08da2c` | same |
+| `p1_amount/certify.py` | `prototypes/p1_amount/certify.py` | `e4f0cce8a68fd512026e6e1c84c558b370d0741564b8191b8893de5cf173ad95` | `8d27afb711fd54f7063e75fe60137a5e37dbeea7dafb01d5788f6922d7f9c5b7` (zero capacity, below) |
+| `p1_amount/flowcore.py` | `prototypes/p1_amount/flowcore.py` | `72b3d8c91a077017cf759d4c834576b1babd513024e9e227650d273d8b08da2c` | `63a6cf7047cb2fe91d5992f23e5d9bada1b89e70a4cff595be0a24ddabb681df` (zero capacity, below) |
 | `p1_amount/graph.py` | `prototypes/p1_amount/graph.py` | `44051d4a496a423c73ed473b6d4da045c32e30b40701bec0ecb19b8d9e5822a8` | same |
-| `p1_amount/kernels.py` | `prototypes/p1_amount/kernels.py` | `6e8db4d6de8c275d0335a9fddad28b7f84daa7af04d3ab872e4078cc4f709729` | same |
+| `p1_amount/kernels.py` | `prototypes/p1_amount/kernels.py` | `6e8db4d6de8c275d0335a9fddad28b7f84daa7af04d3ab872e4078cc4f709729` | `b01f6f24846e39679308fa80ea0c95804fcb653f0aea7c999662423dfab0afc5` (zero capacity, below) |
 | `p1_amount/ledger.py` | `prototypes/p1_amount/ledger.py` | `19a8ab41f7ae26ece8b8a0f151c55a287f0cdf22a779d8c6d2f9d8e5dc43fcf6` | same |
-| `p1_amount/search.py` | `prototypes/p1_amount/search.py` | `3ab124b99fa68e25d467cfbb22a4e9900ade86e10001269df84f3c99ad31e04a` | same |
+| `p1_amount/search.py` | `prototypes/p1_amount/search.py` | `3ab124b99fa68e25d467cfbb22a4e9900ade86e10001269df84f3c99ad31e04a` | `c79bfdc6d2a11197364f9bf7f3f41c8594843c72742f3285cbf685a4c117560c` (zero capacity, below) |
 | `p1_amount/snap.py` | `prototypes/p1_amount/snap.py` | `0d62ff46d3c804bdbc80fae3c2c59a25aa0b34c013a086e7e81b7f722bdc0552` | same |
 | `p1_amount/units.py` | `prototypes/p1_amount/units.py` | `38b37a22ae56f592a63554683e860b44036cce678a7080f406a69c281a620cfe` | same |
 
@@ -92,7 +93,7 @@ The rest of the two prototype directories (their notes, tests, snapshots, the MS
 
 ## Relocation changes
 
-Only the exporter changed, and only where it named the design tree's layout:
+At the relocation only the exporter changed, and only where it named the design tree's layout:
 
 1. The usage line names the new path; a paragraph says the file is a relocated copy and points
    here (the rest of the docstring describes the original layout and is kept).
@@ -107,3 +108,37 @@ Only the exporter changed, and only where it named the design tree's layout:
    another `recorder.py` in the original layout; the removal is kept.
 
 The output, including the `source` string, is unchanged: the check above compares the bytes.
+
+## Zero-capacity links stay in routing
+
+The library's rule changed: an edge of capacity 0 is no longer treated as missing. Searches,
+static supports, rosters and Stretch baselines read no capacity (only an explicit residual
+filters), an `EqualBalanced` route keeps such an edge as a member that receives its round-robin
+share and carries nothing, a `Weighted` route gives it weight 0 (no member), a priority read
+without a residual reads the capacity as the free capacity (`Headroom` 1, or 0 on an edge of
+capacity 0), and a minimum cut lists every edge leaving the sources' residual closure, whatever its
+free capacity. The reference was changed in exactly these places, by hand from that rule:
+
+1. `p1_amount/search.py`: `member_graph` no longer skips edges below 1 unit; `priority_fn`
+   reads the capacity as the residual when none is given, and `Headroom` is 0 on an edge of
+   capacity 0; the module docstring says so.
+2. `p1_amount/kernels.py`: `make_plan` takes every route edge as a member for `MaxFlow` and
+   `EqualBalanced` (the `Weighted` rules are unchanged); the module docstring says so.
+3. `p2_transaction/policy.py`: a `Pinned` bundle's usable route keeps the allowed edges whatever
+   their capacity.
+4. `p1_amount/flowcore.py` and `p1_amount/certify.py`: the minimum cut (and its certificate) is
+   every active edge leaving the residual closure of the sources, an edge of view 0 too: it adds
+   0 to the cut's value and is listed because every edge leaving the closure is. No fixture's
+   data changes by this rule.
+5. `p2_transaction/fixtures.py`: the two fixtures whose own hand-derived checks stated the old
+   rule. `admission_zero_and_no_route`: `CostOnly` (MaxFlow) on the diamond whose four links have
+   capacity 0 now has source 0 in its roster and, on `place(1)`, creates one zero-delivery record
+   whose bundle is the whole static support (both routes cost 2), route cost 2, `exhausted`
+   (previously an empty roster and `no_route`). `termination_reduction`: its empty-roster case
+   now uses a graph whose only edge leads away from the destination (`1 -> 0`, capacity 1),
+   since a zero-capacity edge would put the source in the roster; its three results are unchanged
+   (only the ledger's residual reads that edge's 1 unit).
+
+Every other fixture is unchanged: the exported data differs from the earlier file only in these
+two fixtures' operations (`admission_zero_and_no_route` operations 6 and 7,
+`termination_reduction` operations 20 to 22) and that graph.

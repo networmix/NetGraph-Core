@@ -130,6 +130,19 @@ engine. It replaces the 0.11 API.
   and sdist contents, and typed client programs.
 - **Error messages**: the error for a finite request after `float('inf')` within an epoch no
   longer cites a rule number.
+- **Zero-capacity links stay in routing**: `spf`, `ksp`, the `DagCache` supports, the CostOnly
+  routes, every roster and the `Stretch` baselines no longer skip edges below one unit of
+  capacity; only a supplied residual (or an `Eligibility`) filters. Without a residual, `HEADROOM`
+  reads 1 on an edge of positive capacity and 0 on an edge of capacity 0 (it read the capacity
+  before), and `HEADROOM` of an edge of capacity 0 is 0 everywhere. `EQUAL_BALANCED` keeps a
+  zero-capacity member and its round-robin share (Lossless then admits nothing on that branch;
+  Lossy drops the share there); `WEIGHTED` gives it weight 0 and drops a branch left without a
+  member, without routing around it; `MAX_FLOW` keeps it and never bypasses it. A `Pinned` bundle
+  keeps its zero-capacity edges. `sensitivity` lists every allowed edge (its loss can be
+  negative), and Global's `min_cut` lists every edge leaving the sources' residual closure, an
+  edge with nothing free included (the cut's value is unchanged). Results change on graphs with
+  zero-capacity edges: distances, DAGs, path lists, routes, rosters, records, amounts, drops,
+  sensitivity entries and cuts.
 
 ### Removed
 

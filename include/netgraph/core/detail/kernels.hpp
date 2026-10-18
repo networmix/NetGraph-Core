@@ -133,9 +133,10 @@ private:
 // The plan of a new flow on `route` (acyclic; the flow's DAG or path, its record's bundle), its
 // membership captured on `creation_view` (aligned with the route's edges in ascending EdgeId:
 // the view of the search that created the route; read only by a Weighted Residual membership,
-// may be empty otherwise): MaxFlow every route edge (its view decides), Weighted by `priority`
-// (Residual: creation view >= 1 unit; Capacity: static capacity >= 1 unit) with the weights read
-// from the same values, EqualBalanced static capacity >= 1 unit; Lossy keeps its kernel's
+// may be empty otherwise): MaxFlow and EqualBalanced every route edge (an edge of capacity 0 is
+// a member that carries nothing: EqualBalanced still gives it its round-robin share), Weighted
+// the edges of positive weight by `priority` (Residual: creation view >= 1 unit; Capacity: static
+// capacity >= 1 unit) with the weights read from the same values; Lossy keeps its kernel's
 // membership. The members are pruned to the walks from src to the destination set (none
 // leaving a destination) and given their topological structure, in one pass. With `cost`, the
 // route's minimum walk cost (route_cost) is computed in the same pass when every route edge is a
@@ -144,13 +145,13 @@ private:
                                    EdgePriority priority, NodeId src, std::span<const NodeId> dsts,
                                    const PredDAG& route, std::span<const Amount> creation_view, Cost* cost = nullptr);
 
-// The usable route of a Pinned bundle as a plan: of the bundle's edges the ones with static
-// capacity >= 1 unit that `elig` allows (every one when null), pruned to the walks from src to
-// the destination set; route == members, with the topological structure. It is the plan of
-// every kernel whose membership is static (MaxFlow, EqualBalanced, Weighted with Capacity:
-// weights the capacities); a Weighted Residual plan is made from its route at creation
-// (make_plan). With `cost`, the usable route's minimum walk cost (kUnreachable when it is
-// empty), computed in the same pass.
+// The usable route of a Pinned bundle as a plan: the bundle's edges that `elig` allows (every
+// one when null), whatever their capacity, pruned to the walks from src to the destination set,
+// with make_plan's membership: route == members for MaxFlow and EqualBalanced; Weighted with
+// Capacity keeps the route edges of positive capacity on the walks that remain (its weights the
+// capacities). It is the plan of every kernel whose membership is static; a Weighted Residual
+// plan is made from its route at creation (make_plan). With `cost`, the usable route's minimum
+// walk cost (kUnreachable when it is empty), computed in the same pass.
 [[nodiscard]] KernelPlan make_route_plan(const Graph& g, FlowPlacement placement, Admission admission,
                                          EdgePriority priority, NodeId src, std::span<const NodeId> dsts,
                                          const PredDAG& bundle, const Eligibility* elig, Cost* cost = nullptr);

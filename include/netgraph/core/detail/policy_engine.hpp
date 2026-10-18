@@ -33,8 +33,9 @@ struct LiveFlow {
 };
 
 // One supplied Pinned bundle prepared at construction: its usable route (static eligibility,
-// capacity >= 1 unit, pruned to the src -> dst walks) as the plan of every static-membership
-// kernel, its cost, and the record bundle (the supplied DAG itself when nothing was pruned).
+// whatever the capacities, pruned to the src -> dst walks) as the plan of every
+// static-membership kernel, its cost, and the record bundle (the supplied DAG itself when nothing
+// was pruned).
 struct PreparedPinnedBundle {
   std::shared_ptr<const KernelPlan> route_plan {};
   Cost cost {kUnreachable};

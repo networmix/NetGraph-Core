@@ -120,7 +120,8 @@ void register_routing(py::module_& m) {
   py::class_<CostOnly>(m, "CostOnly",
                        "Routing like IGP forwarding (OSPF, IS-IS routers): one flow per roster source on the static\n"
                        "shortest-path DAG (read from the DagCache; the selection is applied when the flow is created),\n"
-                       "never refreshed, grown or reoptimised.")
+                       "never refreshed, grown or reoptimised. An edge of capacity 0 stays in the DAG: EQUAL_BALANCED\n"
+                       "still sends it its share, which it cannot carry, and WEIGHTED gives it weight 0.")
       .def(py::init<>(), "CostOnly routing (no parameters)")
       .def("__repr__", [](const CostOnly&) { return std::string("CostOnly()"); });
 
@@ -201,8 +202,8 @@ void register_routing(py::module_& m) {
 
   py::class_<Pinned>(m, "Pinned",
                      "Routing on routes the caller gives: one flow per usable bundle (a PredDAG with at least one\n"
-                     "src -> dst walk over eligible edges of at least 1 unit of capacity), in the given order; one\n"
-                     "source and one destination. A Path converts with to_dag(). The list is copied at construction.")
+                     "src -> dst walk over eligible edges, whatever their capacity), in the given order; one source\n"
+                     "and one destination. A Path converts with to_dag(). The list is copied at construction.")
       .def(py::init([](const py::object& bundles) {
              if (not_a_sequence(bundles)) throw py::type_error("Pinned bundles must be a sequence of PredDAG");
              Pinned p;

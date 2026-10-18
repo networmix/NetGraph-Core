@@ -123,8 +123,9 @@ void register_flow_policy(py::module_& m) {
            py::arg("cache") = nullptr,
            "Bind a policy to ledger. elig (None: everything allowed) and cache (None: none; only CostOnly\n"
            "routing reads it) belong to the ledger's graph; the policy keeps the ledger, elig and cache\n"
-           "alive. The roster (the sources that statically reach an allowed destination) and, for Pinned,\n"
-           "the usable bundles are fixed here. Everything is validated before the policy binds.")
+           "alive. The roster (the sources that statically reach an allowed destination, over allowed edges\n"
+           "whatever their capacity) and, for Pinned, the usable bundles are fixed here. Everything is\n"
+           "validated before the policy binds.")
       .def(
           "place",
           [](FlowPolicy& p, const py::object& volume, const py::object& outputs) {
@@ -154,8 +155,8 @@ void register_flow_policy(py::module_& m) {
           "one of the policy's live records by FlowId (ValueError for a FlowId of another ledger or policy, a\n"
           "retired or an unknown id)")
       .def("usable_bundles", &FlowPolicy::usable_bundles,
-           "Pinned: the bundles with a src -> dst walk over eligible edges of at least 1 unit of capacity (0\n"
-           "for the other modes)")
+           "Pinned: the bundles with a src -> dst walk over eligible edges, whatever their capacity (0 for\n"
+           "the other modes)")
       .def_property_readonly("config", &FlowPolicy::config, "the FlowPolicyConfig the policy was built with");
 #if NETGRAPH_CORE_PRIVATE_HOOKS
   flow_policy

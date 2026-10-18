@@ -2,10 +2,11 @@
 
 A plan is frozen at creation: the flow's route (a DAG of edge ids), its split graph
 (members pruned to the walks from the source to the destination set) and, for
-Weighted, the weights. Membership: MaxFlow takes the route (the view decides);
-Weighted by its ``priority`` axis (``Residual``: residual >= 1 unit on the creation
-view; ``Capacity``: static capacity >= 1 unit); EqualBalanced by static capacity >= 1
-unit; Lossy keeps its kernel's membership.
+Weighted, the weights. Membership: MaxFlow and EqualBalanced take the route (an edge of
+capacity 0 is a member that carries nothing; EqualBalanced still gives it its share);
+Weighted the edges of positive weight by its ``priority`` axis (``Residual``: residual
+>= 1 unit on the creation view; ``Capacity``: static capacity >= 1 unit); Lossy keeps
+its kernel's membership.
 
 * ``alloc(plan, T)``: node by node in topological order, the source's inflow being
   ``T``; round robin (EqualBalanced) or highest averages over the frozen weights
@@ -114,13 +115,10 @@ def make_plan(
     route = tuple(sorted(route))
     dsts = tuple(sorted(dsts))
     weights = None
-    if kernel == MAX_FLOW:
+    if kernel != WEIGHTED:
         cand = route
-    elif kernel == WEIGHTED:
-        if priority == "Residual":
-            cand = tuple(e for e in route if view[e] >= 1)
-        else:
-            cand = tuple(e for e in route if g.capacity[e] >= 1)
+    elif priority == "Residual":
+        cand = tuple(e for e in route if view[e] >= 1)
     else:
         cand = tuple(e for e in route if g.capacity[e] >= 1)
     members = prune(g, cand, src, dsts)

@@ -40,7 +40,8 @@ struct DiminishingReturns {
 
 // Each routing mode has only the fields it uses.
 // CostOnly: one flow per source on the static shortest-path DAG (all shortest paths, with no
-//   directed cycles), or its canonical single path; never refreshed, grown or reoptimised.
+//   directed cycles, edges of capacity 0 included), or its canonical single path; never
+//   refreshed, grown or reoptimised.
 // CapacityAware: flow_count flows found by shortest-path searches that require enough unused
 //   capacity on each edge. Grow up to max_flow_count (absent: no ceiling), subject to
 //   min_flow_bandwidth (units) and max_path_cost. Rerouting is optional; `diminishing`
@@ -48,8 +49,8 @@ struct DiminishingReturns {
 // Global: replace the policy's allocation with a minimum-cost flow of what it already delivers
 //   plus this call's request (placed_demand() + volume: what an earlier call could not place is
 //   not requested again) over the whole eligible graph (placement MaxFlow only).
-// Pinned: one flow per usable supplied route bundle, in supply order; single endpoints only.
-//   Convert a Path with to_dag().
+// Pinned: one flow per usable supplied route bundle (a walk survives the Eligibility, whatever
+//   the capacities), in supply order; single endpoints only. Convert a Path with to_dag().
 struct CostOnly {};
 struct CapacityAware {
   std::int32_t flow_count {1};
@@ -126,8 +127,9 @@ struct PlacementResult {
   std::optional<std::vector<Amount>> edge_flows {};
   std::optional<std::vector<Amount>> residual {};
   std::optional<std::vector<EdgeId>> bottleneck {};
-  // Global, when bottleneck is requested: positive-view edges leaving the set reachable from
-  // the real sources through residual arcs, including reverse arcs that cancel flow. A maximal
+  // Global, when bottleneck is requested: the edges leaving the set reachable from the real
+  // sources through residual arcs, including reverse arcs that cancel flow, whatever their view
+  // (an allowed edge of capacity 0 is listed; an excluded edge is not an edge here). A maximal
   // solve returns this minimum cut; an empty roster returns an empty cut for its maximal flow
   // of 0. nullopt if not requested, not Global, stopped by the cap, or a zero call (no solve).
   std::optional<std::vector<EdgeId>> min_cut {};
@@ -157,7 +159,8 @@ struct PlacementResult {
 //
 // Lifetime: the ledger, the Eligibility and the DagCache outlive the policy (the policy holds
 // pointers to them). The roster (the eligible sources that statically reach an allowed
-// destination) and, for Pinned, the usable bundles are fixed at construction.
+// destination, over allowed edges whatever their capacity) and, for Pinned, the usable bundles
+// are fixed at construction.
 class FlowPolicy {
 public:
   FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,

@@ -154,6 +154,7 @@ if(NETGRAPH_CORE_BUILD_TESTS)
     tests/cpp/flow_ledger_tests.cpp
     tests/cpp/flow_policy_fixture_tests.cpp
     tests/cpp/flow_policy_tests.cpp
+    tests/cpp/zero_capacity_tests.cpp
   )
   target_compile_definitions(netgraph_core_tests PRIVATE NETGRAPH_CORE_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
   # Allocation-failure tests replace the global operator new: a separate executable.

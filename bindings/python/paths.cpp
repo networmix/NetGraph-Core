@@ -74,7 +74,8 @@ void register_paths(py::module_& m) {
       "ignored); max_path_cost (None, Absolute(c) with c >= 0, or Stretch(f) with f finite in [1, inf)\n"
       "times the static shortest cost under the Eligibility, residual ignored; inclusive); residual\n"
       "(int64 units per EdgeId, each in [0, capacity_units]: edges with less than 1 unit are skipped, and\n"
-      "the values feed the priority); elig (None: everything allowed). The fields are validated by ksp,\n"
+      "the values feed the priority; it is the only capacity filter, and without it an edge of capacity 0\n"
+      "is searched like any other); elig (None: everything allowed). The fields are validated by ksp,\n"
       "in the order its docstring gives.")
       .def(py::init([](const py::object& k, const PathSelection& selection, const py::object& max_path_cost,
                        const py::object& residual, const std::shared_ptr<Eligibility>& elig) {
@@ -87,8 +88,8 @@ void register_paths(py::module_& m) {
       .def_readonly("max_path_cost", &PyKspOptions::max_path_cost,
                     "the inclusive cost ceiling as given: None, Absolute or Stretch (validated by ksp)")
       .def_readonly("residual", &PyKspOptions::residual,
-                    "the residual units per EdgeId as given (validated by ksp); None: static capacities, no\n"
-                    "residual gating (edges below 1 unit of capacity are still skipped)")
+                    "the residual units per EdgeId as given (validated by ksp); None: no capacity filter;\n"
+                    "priorities read static capacity")
       .def_readonly("elig", &PyKspOptions::elig, "the static Eligibility; None: everything allowed");
 
   m.def(
@@ -137,10 +138,11 @@ void register_paths(py::module_& m) {
         return out;
       },
       py::arg("graph"), py::arg("src"), py::arg("dst"), py::arg("opts"),
-      "The k shortest simple src -> dst paths over the eligible edges of at least 1 unit, as the options\n"
-      "further limit them -> [(cost, Path)], each hop a single edge. Order: lowest cost; then, under\n"
-      "PREFER_HIGHER_PRIORITY only, highest bottleneck (the smallest priority value along the path); then\n"
-      "fewest hops; then the smallest EdgeId sequence. The result is the first k paths of that order\n"
+      "The k shortest simple src -> dst paths over the eligible edges (only those with residual >= 1 when\n"
+      "a residual is given; an edge of capacity 0 is searched like any other) -> [(cost, Path)], each hop\n"
+      "a single edge. Order: lowest cost; then, under PREFER_HIGHER_PRIORITY only, highest bottleneck\n"
+      "(the smallest priority value along the path); then fewest hops; then the smallest EdgeId\n"
+      "sequence. The result is the first k paths of that order\n"
       "within the inclusive cost ceiling. Validated in this order before any work (ValueError): src and\n"
       "dst in range, src == dst, k >= 1, the ceiling, the residual (length, then every entry), a foreign\n"
       "Eligibility. An excluded endpoint, no static route under Stretch, or no path gives [].");

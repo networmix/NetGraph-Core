@@ -38,7 +38,7 @@ private:
 };
 
 // A cache of static shortest-path supports bound to one graph uid. A support contains every
-// statically eligible edge with capacity >= 1 unit on a shortest path from the roots (Forward)
+// statically eligible edge, whatever its capacity, on a shortest path from the roots (Forward)
 // or to them (Reverse), ignoring residual capacity. It keeps every equal-cost path and every
 // parallel edge. The key is (sorted root set, direction, Eligibility uid; 0 for no Eligibility).
 // Values are immutable shared PredDAGs; reverse searches keep the original edge orientation.

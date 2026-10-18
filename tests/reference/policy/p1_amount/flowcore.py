@@ -315,9 +315,9 @@ def solve(
     if seen[T]:
         min_cut = None
     else:
-        min_cut = sorted(
-            e for e in active if seen[g.src[e]] and not seen[g.dst[e]] and view[e] > 0
-        )
+        # Every active edge leaving the closure, an edge of view 0 too (it adds 0 to the
+        # value and is listed because every edge leaving the closure is).
+        min_cut = sorted(e for e in active if seen[g.src[e]] and not seen[g.dst[e]])
     return FlowSolve(
         placed=total,
         cost_distribution=curve,

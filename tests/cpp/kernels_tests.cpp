@@ -554,8 +554,12 @@ TEST(Plans, MembershipByKernelAndPriority) {
   const auto inv = id_of_input(g);
   auto mf = plan_of(g, FlowPlacement::MaxFlow, 0, {1}, all_ids(g), view);
   EXPECT_EQ(mf.members, (std::vector<EdgeId>{0, 1, 2}));  // MaxFlow: the view decides
+  // EqualBalanced: every route edge, the zero-capacity one included (it takes its round-robin
+  // share and carries nothing).
   auto eb = plan_of(g, FlowPlacement::EqualBalanced, 0, {1}, all_ids(g), view);
-  EXPECT_EQ(eb.members, (std::vector<EdgeId>{inv[0], inv[1]}));  // static capacity >= 1
+  EXPECT_EQ(eb.members, (std::vector<EdgeId>{0, 1, 2}));
+  // Weighted: the edges of positive weight (residual weights on the creation view, capacity
+  // weights on the capacities).
   auto wr = plan_of(g, FlowPlacement::Weighted, 0, {1}, all_ids(g), view, EdgePriority::Residual);
   EXPECT_EQ(wr.members, (std::vector<EdgeId>{inv[1]}));
   EXPECT_EQ(wr.weights, (std::vector<Amount>{4}));
@@ -573,17 +577,25 @@ TEST(Plans, MembershipByKernelAndPriority) {
 }
 
 TEST(Plans, SplitGraphPruning) {
-  // EqualBalanced with a zero-capacity tail. 0->1, 0->2, 1->3, 2->4 (cap 0), 4->3: the
-  // branch through 2 cannot reach 3 over members, so it is pruned (no stranded unit).
+  // A zero-capacity tail. 0->1, 0->2, 1->3, 2->4 (cap 0), 4->3. EqualBalanced keeps the branch
+  // through 2: its share is stranded on 2->4, so T = 2 puts a unit there and T_max is 1.
+  // Weighted gives 2->4 weight 0: node 2 is left without a member, so the branch is pruned and
+  // the whole total takes the other branch.
   auto g = make_graph(5, {{0, 1, 2, 1}, {0, 2, 2, 1}, {1, 3, 2, 1}, {2, 4, 0, 1}, {4, 3, 2, 1}});
   const auto inv = id_of_input(g);
   auto eb = plan_of(g, FlowPlacement::EqualBalanced, 0, {3}, all_ids(g), caps(g));
-  std::vector<EdgeId> want = {inv[0], inv[2]};
-  std::sort(want.begin(), want.end());
-  EXPECT_EQ(eb.members, want);
+  EXPECT_EQ(eb.members, all_ids(g));
   std::vector<Amount> a(eb.members.size());
   ASSERT_TRUE(allocate(eb, 2, a));
-  EXPECT_EQ(dense_input(g, eb, a), (std::vector<Amount>{2, 0, 2, 0, 0}));
+  EXPECT_EQ(dense_input(g, eb, a), (std::vector<Amount>{1, 1, 1, 1, 1}));
+  EXPECT_EQ(t_max(eb, caps(g)).value, 1);  // every edge is a member: the capacities are member-aligned
+  auto w = plan_of(g, FlowPlacement::Weighted, 0, {3}, all_ids(g), caps(g), EdgePriority::Capacity);
+  std::vector<EdgeId> want = {inv[0], inv[2]};
+  std::sort(want.begin(), want.end());
+  EXPECT_EQ(w.members, want);
+  std::vector<Amount> b(w.members.size());
+  ASSERT_TRUE(allocate(w, 2, b));
+  EXPECT_EQ(dense_input(g, w, b), (std::vector<Amount>{2, 0, 2, 0, 0}));
   // Destinations are terminal; a destination set keeps both destinations.
   auto g2 = make_graph(4, {{0, 1, 3, 1}, {1, 2, 3, 1}, {0, 2, 3, 2}, {2, 3, 3, 1}});
   auto any = plan_of(g2, FlowPlacement::EqualBalanced, 0, {1, 2}, all_ids(g2), caps(g2));
@@ -592,7 +604,7 @@ TEST(Plans, SplitGraphPruning) {
   std::sort(want2.begin(), want2.end());
   EXPECT_EQ(any.members, want2);
   EXPECT_EQ(cost_of(g2, any), 1);
-  // An empty split graph: route cost unreachable, T_max 0.
+  // An empty split graph (a route that reaches no destination): route cost unreachable, T_max 0.
   auto none = plan_of(g, FlowPlacement::EqualBalanced, 0, {3}, std::vector<EdgeId> {inv[1], inv[3]}, caps(g));
   EXPECT_TRUE(none.members.empty());
   EXPECT_EQ(cost_of(g, none), kUnreachable);
@@ -601,19 +613,22 @@ TEST(Plans, SplitGraphPruning) {
 
 TEST(Plans, SplitGraphEqualsTheWalkDefinition) {
   // On random DAGs (parallel edges, zero capacities, statically excluded edges and nodes, edges
-  // into the source and out of a destination, one or two destinations) the split graph of a
-  // bundle is, by definition, the usable edges (capacity >= 1 unit, allowed) on some walk from
-  // the source to a destination that enters no destination before its end: the members equal an
-  // independent reachability computation, the route cost equals an independent shortest walk,
-  // the topological structure orders every member's tail before its head, and an allocation
-  // conserves its total and equals the per-node reference (each node's inflow split over its
-  // members by the kernel's rule). make_plan on the DAG of the usable edges gives the same plan as
-  // make_route_plan filtering the bundle (the two entry points of the one builder), for every
-  // kernel. MaxFlow's make_plan keeps every route edge, with no capacity filter: on the bundle
-  // itself its members are the walk definition over all the bundle's edges.
+  // into the source and out of a destination, one or two destinations) the route of a bundle is,
+  // by definition, its allowed edges, whatever their capacity, on some walk from the source to a
+  // destination that enters no destination before its end, and the split graph is the route for
+  // MaxFlow and EqualBalanced, and for Weighted (capacity weights) the same definition over the
+  // allowed edges of at least 1 unit: the route and the members equal an independent
+  // reachability computation, the route cost equals an independent shortest walk over the
+  // allowed edges, the topological structure orders every member's tail before its head, and an
+  // allocation conserves its total and equals the per-node reference (each node's inflow split
+  // over its members by the kernel's rule). make_plan on the DAG of the allowed edges gives the
+  // same plan as make_route_plan filtering the bundle (the two entry points of the one builder),
+  // for every kernel, but for the route field. On the bundle itself (no Eligibility) make_plan's
+  // MaxFlow and EqualBalanced members are the walk definition over all the bundle's edges.
   std::mt19937 rng(2024);
   int compared = 0;
-  int maxflow_differs = 0;  // trials where MaxFlow's members include an edge below one unit
+  int masked_differs = 0;    // trials where the Eligibility changes the route
+  int weighted_differs = 0;  // trials where Weighted's members omit a zero-capacity route edge
   int splitting = 0;        // such plans with a split, and two destinations or a source other than 0
   for (int trial = 0; trial < 2000; ++trial) {
     const int n = 3 + static_cast<int>(rng() % 8);
@@ -648,15 +663,20 @@ TEST(Plans, SplitGraphEqualsTheWalkDefinition) {
     const auto edge_src = g.edge_src();
     const auto edge_dst = g.edge_dst();
     const auto cost = g.cost();
-    std::vector<EdgeId> usable;
+    std::vector<EdgeId> usable;    // allowed
+    std::vector<EdgeId> positive;  // allowed, at least 1 unit
     for (EdgeId e : PredDAGBuilder::ascending(bundle)) {
-      if (capacity[static_cast<std::size_t>(e)] >= 1 && (!elig || elig->edge_ok(e))) usable.push_back(e);
+      if (elig && !elig->edge_ok(e)) continue;
+      usable.push_back(e);
+      if (capacity[static_cast<std::size_t>(e)] >= 1) positive.push_back(e);
     }
     // The definition over the usable edges; the shortest walk by Bellman-Ford over those that
     // leave no destination.
     std::vector<std::uint8_t> is_dst(static_cast<std::size_t>(n), 0);
     for (NodeId d : dsts) is_dst[static_cast<std::size_t>(d)] = 1;
     const auto want = walk_members(g, usable, src, dsts);
+    const auto weighted_want = walk_members(g, positive, src, dsts);
+    weighted_differs += weighted_want != want ? 1 : 0;
     std::vector<Cost> dist(static_cast<std::size_t>(n), kUnreachable);
     dist[static_cast<std::size_t>(src)] = 0;
     for (int round = 0; round < n; ++round) {
@@ -672,24 +692,25 @@ TEST(Plans, SplitGraphEqualsTheWalkDefinition) {
     }
     const auto usable_dag = PredDAGBuilder::of_edges(g, usable);
     const auto bundle_edges = PredDAGBuilder::ascending(bundle);
-    const auto maxflow_want = walk_members(g, std::vector<EdgeId>(bundle_edges.begin(), bundle_edges.end()), src, dsts);
-    EXPECT_EQ(make_plan(g, FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Capacity, src, dsts, bundle, {})
-                  .members,
-              maxflow_want)
-        << "trial " << trial;
-    maxflow_differs += maxflow_want != want ? 1 : 0;
+    const auto unmasked_want = walk_members(g, std::vector<EdgeId>(bundle_edges.begin(), bundle_edges.end()), src, dsts);
+    for (const auto kernel : {FlowPlacement::MaxFlow, FlowPlacement::EqualBalanced}) {
+      EXPECT_EQ(make_plan(g, kernel, Admission::Lossless, EdgePriority::Capacity, src, dsts, bundle, {}).members,
+                unmasked_want)
+          << "trial " << trial;
+    }
+    masked_differs += unmasked_want != want ? 1 : 0;
     for (const auto kernel : {FlowPlacement::EqualBalanced, FlowPlacement::Weighted, FlowPlacement::MaxFlow}) {
       Cost got_cost = -1;
       const auto on_bundle = make_route_plan(g, kernel, Admission::Lossless, EdgePriority::Capacity, src, dsts, bundle,
                                              elig ? &*elig : nullptr, &got_cost);
-      ASSERT_EQ(on_bundle.members, want) << "trial " << trial;
+      ASSERT_EQ(on_bundle.members, kernel == FlowPlacement::Weighted ? weighted_want : want) << "trial " << trial;
       EXPECT_EQ(on_bundle.route, want);
       EXPECT_EQ(got_cost, want_cost) << "trial " << trial;
       EXPECT_EQ(prune(g, usable_dag, src, dsts), want);
       Cost plan_cost = -1;
       const auto on_usable =
           make_plan(g, kernel, Admission::Lossless, EdgePriority::Capacity, src, dsts, usable_dag, {}, &plan_cost);
-      // The same plan but for its route, which is the whole usable DAG (plan_differences,
+      // The same plan but for its route, which is the whole allowed DAG (plan_differences,
       // test_utils.hpp).
       EXPECT_EQ(plan_differences(on_usable, on_bundle, false), std::vector<std::string> {}) << "trial " << trial;
       // The plan built on the usable edges reports the same shortest-walk cost, and so does the
@@ -739,7 +760,8 @@ TEST(Plans, SplitGraphEqualsTheWalkDefinition) {
     }
   }
   EXPECT_GT(compared, 1000);
-  EXPECT_GT(maxflow_differs, 100);
+  EXPECT_GT(masked_differs, 100);
+  EXPECT_GT(weighted_differs, 100);
   EXPECT_GT(splitting, 300);
 }
 
@@ -1302,14 +1324,26 @@ TEST(LossyKernel, DiamondDropsAndInfiniteInjection) {
   auto s2 = lossy_step(p2, 7, on_members(p2, caps(g2)));
   EXPECT_EQ(dense_input(g2, p2, s2.carried), (std::vector<Amount>{1, 3, 3}));
   EXPECT_EQ(s2.delivered, 7);
-  // A source without members injects nothing (the offer is a source drop).
+  // One link of capacity 0. EqualBalanced keeps it as a member: the offer enters it and is
+  // dropped on it. Weighted gives it weight 0: the source has no member and injects nothing (the
+  // offer is a source drop).
   auto g3 = make_graph(2, {{0, 1, 0, 1}});
   const auto p3 = plan_of(g3, FlowPlacement::EqualBalanced, 0, {1}, all_ids(g3), caps(g3), EdgePriority::Residual,
                           Admission::Lossy);
-  auto s3 = lossy_step(p3, 5, {});
+  ASSERT_EQ(p3.members, (std::vector<EdgeId>{0}));
+  auto s3 = lossy_step(p3, 5, on_members(p3, caps(g3)));
   EXPECT_EQ(s3.offered, 5);
-  EXPECT_EQ(s3.injected, 0);
+  EXPECT_EQ(s3.injected, 5);
   EXPECT_EQ(s3.delivered, 0);
+  EXPECT_EQ(s3.carried, (std::vector<Amount>{0}));
+  EXPECT_EQ(s3.drops, (std::vector<Amount>{5}));
+  const auto w3 = plan_of(g3, FlowPlacement::Weighted, 0, {1}, all_ids(g3), caps(g3), EdgePriority::Capacity,
+                          Admission::Lossy);
+  ASSERT_TRUE(w3.members.empty());
+  auto s4 = lossy_step(w3, 5, {});
+  EXPECT_EQ(s4.offered, 5);
+  EXPECT_EQ(s4.injected, 0);
+  EXPECT_EQ(s4.delivered, 0);
 }
 
 // Lossy steps on random DAGs (parallel arcs, zero capacities, one or two destinations, a
@@ -1321,6 +1355,7 @@ TEST(LossyKernel, RandomStepsEqualThePerNodeReference) {
   std::mt19937 rng(1915);
   int weighted_transit_drops = 0;  // Weighted steps that drop at a node other than the source
   int balanced_transit_drops = 0;  // the same for EqualBalanced
+  int zero_member_drops = 0;       // EqualBalanced members of capacity 0 that dropped their share
   int infinite = 0;                // +inf offers that injected something
   int delivering = 0;              // steps that delivered something
   for (int trial = 0; trial < 1000; ++trial) {
@@ -1335,9 +1370,11 @@ TEST(LossyKernel, RandomStepsEqualThePerNodeReference) {
     const bool weighted = trial % 2 == 1;
     const auto kernel = weighted ? FlowPlacement::Weighted : FlowPlacement::EqualBalanced;
     const auto plan = plan_of(g, kernel, 0, dsts, all_ids(g), caps(g), EdgePriority::Capacity, Admission::Lossy);
+    // The split graph: every edge for EqualBalanced (a zero-capacity member takes its share and
+    // drops it), the edges of positive weight (capacity) for Weighted.
     std::vector<EdgeId> usable;
     for (EdgeId e : all_ids(g)) {
-      if (g.capacity_units()[static_cast<std::size_t>(e)] >= 1) usable.push_back(e);
+      if (!weighted || g.capacity_units()[static_cast<std::size_t>(e)] >= 1) usable.push_back(e);
     }
     ASSERT_EQ(plan.members, walk_members(g, usable, 0, dsts)) << "trial " << trial;
     std::vector<std::pair<NodeId, NodeId>> arcs;
@@ -1361,11 +1398,15 @@ TEST(LossyKernel, RandomStepsEqualThePerNodeReference) {
     bool transit_drop = false;
     for (std::size_t i = 0; i < arcs.size(); ++i) transit_drop = transit_drop || (arcs[i].first != 0 && want.drops[i] > 0);
     (weighted ? weighted_transit_drops : balanced_transit_drops) += transit_drop ? 1 : 0;
+    for (std::size_t i = 0; i < arcs.size(); ++i) {
+      zero_member_drops += g.capacity_units()[static_cast<std::size_t>(plan.members[i])] == 0 && want.drops[i] > 0 ? 1 : 0;
+    }
     infinite += !offer.has_value() && want.injected > 0 ? 1 : 0;
     delivering += want.delivered > 0 ? 1 : 0;
   }
   EXPECT_GT(weighted_transit_drops, 0);
   EXPECT_GT(balanced_transit_drops, 0);
+  EXPECT_GT(zero_member_drops, 0);
   EXPECT_GT(infinite, 0);
   EXPECT_GT(delivering, 0);
 }

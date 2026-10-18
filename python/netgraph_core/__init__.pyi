@@ -209,7 +209,9 @@ class EdgePriority:
     """
     The per-edge value PREFER_HIGHER_PRIORITY reads and, with WEIGHTED, the value that decides which
     edges a flow uses and their weights: RESIDUAL (residual units), CAPACITY (static capacity units),
-    HEADROOM (residual / capacity, compared exactly as a fraction; rejected with WEIGHTED).
+    HEADROOM (residual / capacity, compared exactly as a fraction, 0 on an edge of capacity 0;
+    rejected with WEIGHTED). A search without a residual reads the static capacity as the residual:
+    RESIDUAL and CAPACITY read the capacity, HEADROOM 1 (0 on an edge of capacity 0).
 
     Members:
 
@@ -841,7 +843,8 @@ class CostOnly:
     """
     Routing like IGP forwarding (OSPF, IS-IS routers): one flow per roster source on the static
     shortest-path DAG (read from the DagCache; the selection is applied when the flow is created),
-    never refreshed, grown or reoptimised.
+    never refreshed, grown or reoptimised. An edge of capacity 0 stays in the DAG: EQUAL_BALANCED
+    still sends it its share, which it cannot carry, and WEIGHTED gives it weight 0.
     """
 
     def __init__(self) -> None:
@@ -937,8 +940,8 @@ class Global:
 class Pinned:
     """
     Routing on routes the caller gives: one flow per usable bundle (a PredDAG with at least one
-    src -> dst walk over eligible edges of at least 1 unit of capacity), in the given order; one
-    source and one destination. A Path converts with to_dag(). The list is copied at construction.
+    src -> dst walk over eligible edges, whatever their capacity), in the given order; one source
+    and one destination. A Path converts with to_dag(). The list is copied at construction.
     """
 
     def __init__(self, bundles: collections.abc.Sequence[PredDAG]) -> None:
@@ -1142,7 +1145,9 @@ class PlacementResult:
         """
         Global with bottleneck requested: a minimum cut (edges whose removal separates the sources from
         the destinations, with the smallest total capacity) of the policy's view (free capacity plus its
-        own allocation), when the solve reached the maximum flow; None otherwise (also on a zero call)
+        own allocation), when the solve reached the maximum flow: every allowed edge leaving the nodes the
+        sources still reach, an edge with nothing free (capacity 0, or held by others) included; None
+        otherwise (also on a zero call)
         """
 
     @property
@@ -1304,8 +1309,9 @@ class FlowPolicy:
         """
         Bind a policy to ledger. elig (None: everything allowed) and cache (None: none; only CostOnly
         routing reads it) belong to the ledger's graph; the policy keeps the ledger, elig and cache
-        alive. The roster (the sources that statically reach an allowed destination) and, for Pinned,
-        the usable bundles are fixed here. Everything is validated before the policy binds.
+        alive. The roster (the sources that statically reach an allowed destination, over allowed edges
+        whatever their capacity) and, for Pinned, the usable bundles are fixed here. Everything is
+        validated before the policy binds.
         """
 
     def place(
@@ -1348,8 +1354,8 @@ class FlowPolicy:
 
     def usable_bundles(self) -> int:
         """
-        Pinned: the bundles with a src -> dst walk over eligible edges of at least 1 unit of capacity (0
-        for the other modes)
+        Pinned: the bundles with a src -> dst walk over eligible edges, whatever their capacity (0 for
+        the other modes)
         """
 
     @property
@@ -1464,7 +1470,8 @@ class KspOptions:
     ignored); max_path_cost (None, Absolute(c) with c >= 0, or Stretch(f) with f finite in [1, inf)
     times the static shortest cost under the Eligibility, residual ignored; inclusive); residual
     (int64 units per EdgeId, each in [0, capacity_units]: edges with less than 1 unit are skipped, and
-    the values feed the priority); elig (None: everything allowed). The fields are validated by ksp,
+    the values feed the priority; it is the only capacity filter, and without it an edge of capacity 0
+    is searched like any other); elig (None: everything allowed). The fields are validated by ksp,
     in the order its docstring gives.
     """
 
@@ -1506,8 +1513,8 @@ class KspOptions:
         | None
     ):
         """
-        the residual units per EdgeId as given (validated by ksp); None: static capacities, no
-        residual gating (edges below 1 unit of capacity are still skipped)
+        the residual units per EdgeId as given (validated by ksp); None: no capacity filter;
+        priorities read static capacity
         """
 
     @property
@@ -1522,7 +1529,8 @@ class SpfOptions:
     None: a full search) stops the search at the nearest targets (anycast: any nearest target will
     do); residual (int64 units per EdgeId, each in [0, capacity_units]) makes the search skip edges
     with fewer than min_residual residual units (an integer >= 1; without a residual it has no
-    effect) and supplies the priority values; elig (None: everything allowed). A direction outside its
+    effect) and supplies the priority values: it is the only capacity filter, and without it an edge
+    of capacity 0 is searched like any other; elig (None: everything allowed). A direction outside its
     enumeration raises ValueError here; the other fields are validated by spf, in the order its
     docstring gives.
     """
@@ -1569,8 +1577,8 @@ class SpfOptions:
         | None
     ):
         """
-        the residual units per EdgeId as given (validated by spf); None: static capacities, no
-        residual gating (edges below 1 unit of capacity are still skipped)
+        the residual units per EdgeId as given (validated by spf); None: no capacity filter;
+        priorities read static capacity
         """
 
     @property
@@ -1692,10 +1700,11 @@ def ksp(
     graph: Graph, src: typing.SupportsIndex, dst: typing.SupportsIndex, opts: KspOptions
 ) -> list[tuple[int, Path]]:
     """
-    The k shortest simple src -> dst paths over the eligible edges of at least 1 unit, as the options
-    further limit them -> [(cost, Path)], each hop a single edge. Order: lowest cost; then, under
-    PREFER_HIGHER_PRIORITY only, highest bottleneck (the smallest priority value along the path); then
-    fewest hops; then the smallest EdgeId sequence. The result is the first k paths of that order
+    The k shortest simple src -> dst paths over the eligible edges (only those with residual >= 1 when
+    a residual is given; an edge of capacity 0 is searched like any other) -> [(cost, Path)], each hop
+    a single edge. Order: lowest cost; then, under PREFER_HIGHER_PRIORITY only, highest bottleneck
+    (the smallest priority value along the path); then fewest hops; then the smallest EdgeId
+    sequence. The result is the first k paths of that order
     within the inclusive cost ceiling. Validated in this order before any work (ValueError): src and
     dst in range, src == dst, k >= 1, the ceiling, the residual (length, then every entry), a foreign
     Eligibility. An excluded endpoint, no static route under Stretch, or no path gives [].
@@ -1733,8 +1742,9 @@ def sensitivity(
     """
     The baseline capacity() and one SensitivityEntry per candidate edge. Candidates: with Global, the
     edges that carry flow in the baseline (removing any other edge cannot lower a maximum flow); with
-    the other routings, every allowed edge of at least 1 unit. loss = baseline.placed minus the placed
-    of capacity() without the edge, in signed units, never thresholded. Two shortcuts give exactly
+    the other routings, every allowed edge, whatever its capacity (an edge of capacity 0 can carry a
+    route, so deleting it can change the result). loss = baseline.placed minus the placed of
+    capacity() without the edge, in signed units, never thresholded. Two shortcuts give exactly
     that value: Global repairs a copy of the baseline's solve instead of solving again, and CostOnly
     gives loss 0 without placing to an edge outside the static shortest-path support reachable from
     the roster sources (no route can use it). workers as batch_capacity
@@ -1753,10 +1763,11 @@ def spf(
 ) -> SpfResult:
     """
     Shortest paths from the roots for FORWARD, or to the roots for REVERSE (one NodeId or a sequence;
-    every root at distance 0), over the eligible edges of at least 1 unit of capacity (and of residual
-    >= min_residual with a residual) -> SpfResult. Without targets every reachable node gets its
-    distance: costs and the full DAG of tight edges (the edges on some shortest walk; one per (u, v)
-    pair with multi_edge = False). With targets the search stops at the nearest targets' cost:
+    every root at distance 0), over the eligible edges (only those with residual >= min_residual when
+    a residual is given; an edge of capacity 0 is searched like any other) -> SpfResult. Without
+    targets every reachable node gets its distance: costs and the full DAG of tight edges (the edges
+    on some shortest walk; one per (u, v) pair with multi_edge = False). With targets the search
+    stops at the nearest targets' cost:
     target_cost and the DAG of the walks between the roots and a nearest target (for REVERSE, from
     the target to a root, in the edges' own direction);
     with multipath = False, instead the canonical single path, the walk minimising (cost, -bottleneck

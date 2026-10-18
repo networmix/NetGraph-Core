@@ -37,8 +37,9 @@ enum class EdgeTieBreak { Deterministic, PreferHigherPriority };
 
 // Per-edge priority for PreferHigherPriority and for Weighted membership and weights:
 // Residual is unused capacity in units on the search's view; Capacity is static capacity in
-// units; Headroom is the exact ratio residual / capacity (rejected with Weighted).
-// Without a supplied residual, a search uses static capacity as the value for every priority.
+// units; Headroom is the exact ratio residual / capacity, 0 on an edge of capacity 0 (rejected
+// with Weighted). Without a supplied residual, a search reads the static capacity as the unused
+// capacity: Residual and Capacity read the capacity, Headroom 1 (0 on an edge of capacity 0).
 enum class EdgePriority { Residual, Capacity, Headroom };
 
 // `multipath` keeps all equal-cost walks as a shortest-path DAG; false selects the canonical

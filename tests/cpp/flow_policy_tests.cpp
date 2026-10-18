@@ -893,17 +893,44 @@ TEST(FlowPolicyGlobal, RandomCumulativeSolvesAreOptimalWithACertifiedCut) {
     with_flow += max_flow > 0 ? 1 : 0;
     check_own(max_flow, r, where + " +inf");
     // The cut, as the flow certificates define it (residual_closure and closure_cut,
-    // test_utils.hpp): the residual closure of the allowed sources is the nodes they still reach
+    // test_utils.hpp): the residual closure of the roster sources is the nodes they still reach
     // over allowed edges, forward where the policy's own flow leaves room in the view and backward
-    // where it can be undone; no destination is in it, and the cut is every allowed edge of
-    // positive view that leaves it, in ascending EdgeId, with a capacity equal to the maximum flow.
+    // where it can be undone; no destination is in it, and the cut is every allowed edge that
+    // leaves it, whatever its view, in ascending EdgeId, with a capacity equal to the maximum flow.
     ASSERT_TRUE(r.min_cut.has_value() && r.edge_flows.has_value()) << where;
     Amount cut_capacity = 0;
     for (const EdgeId e : *r.min_cut) cut_capacity += view[static_cast<std::size_t>(e)];
     EXPECT_EQ(cut_capacity, max_flow) << where;
-    const auto closure = residual_closure(*g, view, *r.edge_flows, srcs, elig);
+    // The closure is seeded at the roster: the allowed sources with a walk over allowed edges
+    // (whatever their capacity) to an allowed destination. Another source can reach no
+    // destination, so it needs no cut edge; contract r8 14.1: the cut of an empty roster is [].
+    std::vector<NodeId> roster;
+    for (const NodeId src : srcs) {
+      if (elig != nullptr && !elig->node_ok(src)) continue;
+      std::vector<char> reach(static_cast<std::size_t>(g->num_nodes()), 0);
+      std::vector<NodeId> stack = {src};
+      reach[static_cast<std::size_t>(src)] = 1;
+      while (!stack.empty()) {
+        const NodeId u = stack.back();
+        stack.pop_back();
+        for (EdgeId e = 0; e < g->num_edges(); ++e) {
+          const NodeId w = g->edge_dst()[static_cast<std::size_t>(e)];
+          if (g->edge_src()[static_cast<std::size_t>(e)] != u || reach[static_cast<std::size_t>(w)] != 0) continue;
+          if (elig != nullptr && !elig->edge_ok(e)) continue;
+          reach[static_cast<std::size_t>(w)] = 1;
+          stack.push_back(w);
+        }
+      }
+      if (std::any_of(dsts.begin(), dsts.end(), [&](NodeId d) {
+            return (elig == nullptr || elig->node_ok(d)) && reach[static_cast<std::size_t>(d)] != 0;
+          })) {
+        roster.push_back(src);
+      }
+    }
+    EXPECT_EQ(roster, detail::PolicyAccess::engine(p).roster) << where;
+    const auto closure = residual_closure(*g, view, *r.edge_flows, roster, elig);
     for (const NodeId d : dsts) EXPECT_EQ(closure[static_cast<std::size_t>(d)], 0) << where << " destination " << d;
-    EXPECT_EQ(*r.min_cut, closure_cut(*g, view, closure, elig)) << where;
+    EXPECT_EQ(*r.min_cut, closure_cut(*g, closure, elig)) << where;
     // The evaluators on a fresh ledger (static capacities): the same maximum and cost.
     if (other.has_value()) continue;
     ++evaluated;
@@ -1618,6 +1645,7 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
   int aware_losses = 0;
   int pinned_losses = 0;
   int pinned_trials = 0;
+  int zero_edge_losses = 0;  // entries of zero-capacity edges whose deletion changes the result
   int absent = 0;
   for (int trial = 0; trial < 60; ++trial) {
     const int n = 4 + pick(7);
@@ -1656,14 +1684,14 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
       const std::vector<NodeId> ct = pinned ? std::vector<NodeId> {t0} : t;
       const auto r = sensitivity(*g, cs, ct, SensitivityOptions {c, elig}, 1 + pick(3));
       // The baseline is capacity() itself, and the entries are the candidates in ascending order:
-      // Global, the baseline's positive-flow edges; CostOnly, every allowed edge of at least one
-      // unit of capacity.
+      // Global, the baseline's positive-flow edges; every other model, every allowed edge,
+      // whatever its capacity.
       const auto base = capacity(*g, cs, ct, CapacityOptions {c, elig, nullptr, OutputOptions {true, false, false}});
       ASSERT_EQ(r.baseline.placed, base.placed) << "trial " << trial;
       std::vector<EdgeId> candidates;
       for (EdgeId e = 0; e < g->num_edges(); ++e) {
         const auto ei = static_cast<std::size_t>(e);
-        if (global ? (*base.edge_flows)[ei] > 0 : (elig == nullptr || elig->edge_ok(e)) && g->capacity_units()[ei] >= 1) {
+        if (global ? (*base.edge_flows)[ei] > 0 : elig == nullptr || elig->edge_ok(e)) {
           candidates.push_back(e);
         }
       }
@@ -1684,6 +1712,7 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
         ++entries;
         if (want != 0) ++(global ? global_losses : cost_only ? policy_losses : pinned ? pinned_losses : aware_losses);
         if (cost_only && want == 0) ++policy_zero;
+        if (g->capacity_units()[static_cast<std::size_t>(e.edge)] == 0 && want != 0) ++zero_edge_losses;
       }
       for (EdgeId e = 0; e < g->num_edges(); ++e) {
         if (std::find(listed.begin(), listed.end(), e) != listed.end()) continue;
@@ -1693,7 +1722,7 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
     }
   }
   // Not vacuous: many entries, losses under every model, zero-loss CostOnly deletions, Pinned
-  // trials, and edges without an entry.
+  // trials, deletions of zero-capacity edges that change the result, and edges without an entry.
   EXPECT_GT(entries, 3000);
   EXPECT_GT(global_losses, 100);
   EXPECT_GT(policy_losses, 500);
@@ -1701,6 +1730,7 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
   EXPECT_GT(aware_losses, 100);
   EXPECT_GT(pinned_losses, 30);
   EXPECT_GT(pinned_trials, 20);
+  EXPECT_GT(zero_edge_losses, 50);
   EXPECT_GT(absent, 500);
 }
 
@@ -1719,17 +1749,19 @@ TEST(Evaluators, SensitivityCandidatesAndSignedLosses) {
   EXPECT_EQ(losses.at(inv[1]), 4);
   EXPECT_EQ(losses.at(inv[2]), 2);
   EXPECT_EQ(losses.size(), 3U);
-  // A policy model: every allowed edge of >= 1 unit; a loss can be negative (EqualBalanced over
-  // parallel links of 1 and 10 delivers 2; without the thin link it delivers 10).
+  // A policy model: every allowed edge, whatever its capacity. EqualBalanced over parallel
+  // links of 1, 10 and 0 (ids 0, 1, 2): round robin over the three members fits 2 units and the
+  // third would cross the zero link. Without the thin link (members 1, 2): 1, loss 1; without the
+  // wide link (0, 2): 1, loss 1; without the zero link (0, 1): 2, loss 0.
   auto p = shared(make_graph(2, {{0, 1, 1, 1}, {0, 1, 10, 1}, {0, 1, 0, 1}}));
   const auto opts = SensitivityOptions {cost_only_config()};
   s = sensitivity(*p, v({0}), v({1}), opts, 1);
   EXPECT_EQ(s.baseline.placed, 2);
-  // The exact (edge, loss) list in ascending EdgeId: the zero-capacity link is absent (loss zero).
+  // The exact (edge, loss) list in ascending EdgeId.
   const auto pin = id_of_input(*p);
   std::vector<std::pair<EdgeId, Amount>> got;
   for (const auto& e : s.entries) got.emplace_back(e.edge, e.loss);
-  std::vector<std::pair<EdgeId, Amount>> want = {{pin[0], -8}, {pin[1], 1}};
+  std::vector<std::pair<EdgeId, Amount>> want = {{pin[0], 1}, {pin[1], 1}, {pin[2], 0}};
   std::sort(want.begin(), want.end());
   EXPECT_EQ(got, want);
   // Workers give the same entries; an excluded edge is no candidate.
@@ -1739,14 +1771,25 @@ TEST(Evaluators, SensitivityCandidatesAndSignedLosses) {
   EXPECT_EQ(got4, want);
   const auto el = p->eligibility({}, std::vector<EdgeId> {pin[0]});
   const auto se = sensitivity(*p, v({0}), v({1}), SensitivityOptions {opts.cfg, &el}, 1);
-  ASSERT_EQ(se.entries.size(), 1U);
-  EXPECT_EQ(se.entries[0].edge, pin[1]);
+  ASSERT_EQ(se.entries.size(), 2U);
+  EXPECT_EQ(se.entries[0].edge, std::min(pin[1], pin[2]));
+  EXPECT_EQ(se.entries[1].edge, std::max(pin[1], pin[2]));
+  // A loss can be negative, also for a zero-capacity link (the owner page's G8: ids 0: 0 -> 1 of
+  // capacity 0, 1: 0 -> 2, 2: 2 -> 1 of 5, costs 1): the only shortest route crosses the zero
+  // link, so EqualBalanced carries 0; without it the route 0 -> 2 -> 1 carries 5, a loss of -5.
+  // The other two edges lie outside the reachable support (loss 0 without a placement).
+  auto g8 = shared(make_graph(3, {{0, 1, 0, 1}, {0, 2, 5, 1}, {2, 1, 5, 1}}));
+  const auto s8 = sensitivity(*g8, v({0}), v({1}), opts, 1);
+  EXPECT_EQ(s8.baseline.placed, 0);
+  std::vector<std::pair<EdgeId, Amount>> got8;
+  for (const auto& e : s8.entries) got8.emplace_back(e.edge, e.loss);
+  EXPECT_EQ(got8, (std::vector<std::pair<EdgeId, Amount>> {{0, -5}, {1, 0}, {2, 0}}));
   // Invalid inputs propagate (before any worker).
   EXPECT_THROW((void)sensitivity(*p, v({0}), v({0}), opts, 1), std::invalid_argument);
   DagCache cache(*p);
   EXPECT_THROW((void)sensitivity(*p, v({0}), v({1}), SensitivityOptions {opts.cfg, nullptr, &cache}, 2),
                std::invalid_argument);
-  EXPECT_EQ(sensitivity(*p, v({0}), v({1}), SensitivityOptions {opts.cfg, nullptr, &cache}, 1).entries.size(), 2U);
+  EXPECT_EQ(sensitivity(*p, v({0}), v({1}), SensitivityOptions {opts.cfg, nullptr, &cache}, 1).entries.size(), 3U);
 }
 
 // The baseline is capacity() with the requested outputs, in every routing model; without a

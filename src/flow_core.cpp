@@ -258,8 +258,8 @@ public:
   }
 
   // The solve to the cap or to disconnection. Output in local coordinates: `flows` aligned with
-  // the input edges, `cut` as input edge indices (positive capacity, from the full residual
-  // closure of the real sources to its complement, ascending EdgeId) when the destinations are
+  // the input edges, `cut` as input edge indices (every edge from the full residual closure of
+  // the real sources to its complement, ascending EdgeId) when the destinations are
   // outside the closure, potentials per local vertex (kNeverReached when never settled).
   struct Output {
     Amount placed {0};
@@ -693,16 +693,16 @@ private:
     return seen_[static_cast<std::size_t>(t_)] == 0;
   }
 
-  // The input edges of positive view capacity from the closure to its complement (ascending),
-  // the input edge `skip` (a deleted edge) left out.
+  // The input edges from the closure to its complement (ascending), whatever their view
+  // capacity: an edge of view 0 there adds nothing to the cut's value and is listed because every
+  // edge leaving the closure is; the input edge `skip` (a deleted edge) left out.
   [[nodiscard]] std::vector<std::int32_t> cut_edges(std::int64_t skip) const {
     const std::int32_t* const tail = net_->tail.data();
     const std::int32_t* const head = net_->head.data();
-    const Amount* const cap = net_->cap.data();
     std::vector<std::int32_t> cut;
     for (std::size_t k = 0; k < net_->edges.size(); ++k) {
       if (static_cast<std::int64_t>(k) != skip && seen_[static_cast<std::size_t>(tail[k])] != 0 &&
-          seen_[static_cast<std::size_t>(head[k])] == 0 && cap[k] > 0) {
+          seen_[static_cast<std::size_t>(head[k])] == 0) {
         cut.push_back(static_cast<std::int32_t>(k));
       }
     }

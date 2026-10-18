@@ -55,9 +55,9 @@ struct FlowCoreResult {
   // allocation. Costs strictly increase; units are positive.
   std::vector<std::pair<Cost, Amount>> cost_distribution {};
   std::vector<Amount> edge_flows {};  // per edge, id order
-  // Edges with positive view from the full residual closure of the real sources to its
-  // complement, ascending id; nullopt while the destinations stay connected (a cap stopped the
-  // solve) and on an input cap of 0.
+  // Edges from the full residual closure of the real sources to its complement, whatever their
+  // view (an edge of view 0 adds 0 to the value), ascending id; nullopt while the destinations
+  // stay connected (a cap stopped the solve) and on an input cap of 0.
   std::optional<std::vector<EdgeId>> min_cut {};
   std::vector<Cost> potentials {};  // per node; kNeverReached when never settled
   FlowCoreCounters counters {};
@@ -169,8 +169,9 @@ struct DeletionResult {
   // The working potentials of all real and virtual vertices (local coordinates, s* = N and
   // t* = N + 1), valid on every positive residual arc.
   std::vector<I128> potentials {};
-  // The full residual closure of the real sources to its complement on the deleted view, edges
-  // of positive view capacity, ascending EdgeId: value == sum(view capacity[cut]).
+  // The edges from the full residual closure of the real sources to its complement on the
+  // deleted view, whatever their view capacity, ascending EdgeId: value == sum(view
+  // capacity[cut]).
   std::vector<EdgeId> cut {};
   std::vector<Amount> edge_flows {};  // the final flow per EdgeId (the deleted edge 0)
   FlowCoreCounters counters {};       // this call's, from zero
