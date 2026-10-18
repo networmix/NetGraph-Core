@@ -9,6 +9,7 @@
 #include "netgraph/core/flow_record.hpp"
 #include "netgraph/core/pred_dag.hpp"
 #include "values.hpp"
+#include "publication.hpp"
 #include "registration.hpp"
 
 namespace py = pybind11;
@@ -25,7 +26,8 @@ void register_flow_record(py::module_& m) {
   py::class_<FlowRecord>(
       m, "FlowRecord",
       "One flow of a ledger, as a snapshot: flow_id (ledger uid, id), owner (the policy's id),\n"
-      "sources, destinations, admission, bundle (PredDAG: the flow's route),\n"
+      "sources, destinations, admission, entry (a Pinned policy's program entry, else None), bundle\n"
+      "(PredDAG: the flow's route),\n"
       "route_cost (its minimum walk cost; None when empty), offered (Lossy only, else None),\n"
       "delivered, edges [(EdgeId, units)] and drops [(EdgeId, units)] (cumulative, ascending\n"
       "EdgeId). offered and the drops units are exact Python ints (they may exceed 64 bits).")
@@ -36,8 +38,11 @@ void register_flow_record(py::module_& m) {
       .def_readonly("sources", &FlowRecord::sources, "the flow's source node ids, ascending")
       .def_readonly("destinations", &FlowRecord::destinations, "the flow's destination node ids, ascending")
       .def_readonly("admission", &FlowRecord::admission, "LOSSLESS or LOSSY")
+      .def_readonly("entry", &FlowRecord::entry,
+                    "the program entry the record carries (a Pinned policy: the entry identifier); None for the\n"
+                    "records kept per roster source (CostOnly, Global) or per flow (CapacityAware)")
       .def_property_readonly(
-          "bundle", [](const FlowRecord& r) { return std::const_pointer_cast<PredDAG>(r.bundle); },
+          "bundle", [](const FlowRecord& r) { return typed_shared(r.bundle); },
           "the flow's route (an immutable PredDAG shared with the ledger)")
       .def_property_readonly(
           "route_cost", [](const FlowRecord& r) { return cost_or_none(r.route_cost); },

@@ -38,6 +38,8 @@ struct PyQueryOptions {
   std::shared_ptr<Eligibility> elig;
   std::shared_ptr<DagCache> cache;
   OutputOptions outputs;
+  std::optional<std::optional<Amount>> offered;
+  [[nodiscard]] QueryOptions native() const { return QueryOptions {config, elig.get(), cache.get(), outputs, offered}; }
 };
 
 // workers: an explicit integer is passed through (validated by the evaluator); None takes the
@@ -57,20 +59,33 @@ std::int32_t workers_of(const py::object& workers, bool sensitivity, bool cache_
 void register_evaluators(py::module_& m) {
   py::class_<PyQueryOptions>(m, "QueryOptions",
                              "The options of every evaluator (capacity, batch_capacity, sensitivity): the configuration,\n"
-                             "the static Eligibility (None: all allowed), the DagCache (None: private per worker) and\n"
-                             "the optional outputs of each result (sensitivity: of its baseline).")
+                             "the static Eligibility (None: all allowed), the DagCache (None: private per worker), the\n"
+                             "optional outputs of each result (sensitivity: of its baseline) and offered (int units or\n"
+                             "float('inf'); None: absent), the offer of a Pinned LOSSY evaluation: required and finite\n"
+                             "there; a LOSSLESS model rejects it (`<model> LOSSLESS capacity does not accept offered`),\n"
+                             "CostOnly LOSSY too (`CostOnly LOSSY capacity uses first-hop injection`).")
       .def(py::init([](const FlowPolicyConfig& config, const std::shared_ptr<Eligibility>& elig,
-                       const std::shared_ptr<DagCache>& cache, const py::object& outputs) {
-             return PyQueryOptions {config, elig, cache, outputs_of(outputs)};
+                       const std::shared_ptr<DagCache>& cache, const py::object& outputs, const py::object& offered) {
+             std::optional<std::optional<Amount>> o;
+             if (!offered.is_none()) o = units_or_inf(offered, "offered must be an integer in [0, 2^62) or permitted +inf");
+             return PyQueryOptions {config, elig, cache, outputs_of(outputs), o};
            }),
            py::arg("config"), py::kw_only(), py::arg("elig") = nullptr, py::arg("cache") = nullptr,
-           py::arg("outputs") = py::none())
+           py::arg("outputs") = py::none(), py::arg("offered") = py::none())
       .def_readonly("config", &PyQueryOptions::config,
                     "the FlowPolicyConfig of every evaluated policy (sensitivity: the baseline and every deletion)")
       .def_readonly("elig", &PyQueryOptions::elig, "the static Eligibility; None: everything allowed")
       .def_readonly("cache", &PyQueryOptions::cache, "the supplied DagCache; None: a private cache per worker")
       .def_readonly("outputs", &PyQueryOptions::outputs,
-                    "the OutputOptions of every result (sensitivity: of the baseline)");
+                    "the OutputOptions of every result (sensitivity: of the baseline)")
+      .def_property_readonly(
+          "offered",
+          [](const PyQueryOptions& o) -> py::object {
+            if (!o.offered.has_value()) return py::none();
+            if (!o.offered->has_value()) return py::float_(std::numeric_limits<double>::infinity());
+            return py::int_(**o.offered);
+          },
+          "the offer of a Pinned LOSSY evaluation (int units, or float('inf')); None: absent");
 
   py::class_<SensitivityEntry>(m, "SensitivityEntry",
                                 "One candidate edge: edge and loss (int units: the baseline minus the capacity without the\n"
@@ -94,7 +109,7 @@ void register_evaluators(py::module_& m) {
         const auto o = options_of<PyQueryOptions>(opts, "QueryOptions");
         const auto s = node_ids(sources, graph->num_nodes(), "sources");
         const auto d = node_ids(destinations, graph->num_nodes(), "destinations");
-        const QueryOptions c {o.config, o.elig.get(), o.cache.get(), o.outputs};
+        const QueryOptions c = o.native();
         // One public call on a frozen cache's statistics, its result object included: its hits count
         // only when the Python result exists.
         return detail::frozen_call(c.cache, [&](detail::FrozenTally& tally) {
@@ -107,7 +122,8 @@ void register_evaluators(py::module_& m) {
         });
       },
       py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("opts"),
-      "place(+inf) of a FlowPolicy with opts.config on a fresh ledger of the graph -> PlacementResult.\n"
+      "place(+inf) of a FlowPolicy with opts.config on a fresh ledger of the graph (Pinned LOSSY:\n"
+      "place(opts.offered)) -> PlacementResult.\n"
       "The exact maximum flow is Global() (the optimized origin); with origin=EQUAL, the largest total whose\n"
       "round-robin source shares are all carried. A supplied frozen cache raises DagCacheMiss for an absent\n"
       "key, unchanged.\n"
@@ -122,7 +138,7 @@ void register_evaluators(py::module_& m) {
         // as the C++ validation), so the lowest failing pair index is reported.
         const auto o = options_of<PyQueryOptions>(opts, "QueryOptions");
         const auto w = workers_of(workers, false, static_cast<bool>(o.cache));
-        const QueryOptions c {o.config, o.elig.get(), o.cache.get(), o.outputs};
+        const QueryOptions c = o.native();
         detail::check_batch_arguments(*graph, c, w);
         if (not_a_sequence(pairs)) throw py::value_error("pairs must be a sequence of (sources, destinations)");
         const auto items = py::reinterpret_borrow<py::sequence>(pairs);
@@ -181,7 +197,8 @@ void register_evaluators(py::module_& m) {
       "intersected with per_pair_elig[i] (None entries allowed; a given sequence has one entry per pair,\n"
       "also when empty). workers >= 1; None: NGRAPH_CORE_BATCH_THREADS or 1, and 1 when a cache is\n"
       "supplied. Everything is validated before a worker starts, the arguments first, then each pair\n"
-      "completely in pair order, so the error of the lowest failing pair is raised. Pinned is rejected;\n"
+      "completely in pair order, so the error of the lowest failing pair is raised. Pinned is rejected\n"
+      "(`batch_capacity does not accept Pinned`: a program has fixed endpoints);\n"
       "an empty batch returns [].\n"
       "Caches: a supplied building cache needs workers == 1; a frozen cache is shared by every worker\n"
       "(pass workers explicitly), and its DagCacheMiss reaches the caller unchanged (the lowest failing\n"
@@ -199,7 +216,7 @@ void register_evaluators(py::module_& m) {
         const auto s = node_ids(sources, graph->num_nodes(), "sources");
         const auto d = node_ids(destinations, graph->num_nodes(), "destinations");
         const auto w = workers_of(workers, true, static_cast<bool>(o.cache));
-        const QueryOptions c {o.config, o.elig.get(), o.cache.get(), o.outputs};
+        const QueryOptions c = o.native();
         return detail::frozen_call(c.cache, [&](detail::FrozenTally& tally) {
           SensitivityResult r;
           {
@@ -210,16 +227,17 @@ void register_evaluators(py::module_& m) {
         });
       },
       py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("opts"), py::arg("workers") = py::none(),
-      "The baseline capacity() and one SensitivityEntry per candidate edge. Candidates: with Global and\n"
-      "the optimized origin, the edges that carry flow in the baseline (removing any other edge cannot\n"
+      "The baseline capacity() and one SensitivityEntry per candidate edge. Candidates: with unrestricted\n"
+      "Global and the optimized origin, the edges that carry flow in the baseline (removing any other edge cannot\n"
       "lower a maximum flow); otherwise every allowed edge, whatever its capacity (an edge of capacity 0\n"
       "can carry a route, so deleting it can change the result, and with the equal origin a deletion that\n"
       "removes a source from the roster can raise the total: a negative loss). loss = baseline.placed\n"
       "minus the placed of capacity() without the edge, in signed units, never thresholded. Two\n"
-      "shortcuts give exactly that value: optimized Global repairs a copy of the baseline's solve\n"
-      "instead of solving again, and CostOnly\n"
+      "shortcuts give exactly that value: unrestricted optimized Global repairs a copy of the baseline's\n"
+      "solve instead of solving again, and CostOnly\n"
       "gives loss 0 without placing to an edge outside the static shortest-path support reachable from\n"
-      "the roster sources (no route can use it). workers as batch_capacity\n"
+      "the roster sources (no route can use it). Global with a support solves every deletion afresh; Pinned\n"
+      "replays the same program under each deletion. workers as batch_capacity\n"
       "(NGRAPH_CORE_SENSITIVITY_THREADS). Only CostOnly reads the cache, and each placed deletion uses a\n"
       "new Eligibility uid, so a frozen cache raises DagCacheMiss there.\n"
       "A failed deletion fails the call (the lowest failing candidate's exception, no partial result); a\n"

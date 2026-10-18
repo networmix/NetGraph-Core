@@ -37,6 +37,12 @@ PUBLIC = {
     "CapacityAware",
     "Global",
     "Pinned",
+    "WeightBasis",
+    "TunnelStatus",
+    "Tunnel",
+    "Route",
+    "ForwardingProgram",
+    "TunnelFlow",
     "FlowPolicyConfig",
     "OutputOptions",
     "Termination",
@@ -160,8 +166,15 @@ RETIRED_SEARCH = {
 
 
 # Retired members: PlacementResult's per-source termination list (the result reports one
-# termination and per-source rows in by_source) and FlowRecord's kernel (only ever written).
-RETIRED_MEMBERS = {"PlacementResult": {"local_outcomes"}, "FlowRecord": {"placement"}}
+# termination and per-source rows in by_source), FlowRecord's kernel (only ever written),
+# FlowPolicy's usable-bundle count and Pinned's bundle list (Pinned forwards a ForwardingProgram;
+# FlowPolicy.program and PlacementResult.by_tunnel report what is forwarded).
+RETIRED_MEMBERS = {
+    "PlacementResult": {"local_outcomes"},
+    "FlowRecord": {"placement"},
+    "FlowPolicy": {"usable_bundles"},
+    "Pinned": {"bundles"},
+}
 
 
 def test_retired_spellings_are_absent():
@@ -216,7 +229,7 @@ def _refusal_inputs():
         spf=ngc.SpfOptions(ngc.Direction.FORWARD, sel()),
         ksp=ngc.KspOptions(1, sel()),
         dag=ngc.Path(g, [[0], [1]]).to_dag(),
-        path=ngc.Path(g, [[0]]),
+        route=ngc.Route(0, ngc.Path(g, [[0], [1]])),
     )
 
 
@@ -224,8 +237,8 @@ GRAPH = "graph must be a Graph"
 INTERSECT = "Eligibility.intersect takes two Eligibility values"
 PAIR = "each pair must be (sources, destinations)"
 ROUTING = "routing must be CostOnly, CapacityAware, Global or Pinned (got {})"
-SEQUENCE = "Pinned bundles must be a sequence of PredDAG"
-BUNDLE = "Pinned bundles must be PredDAG values (a Path converts with to_dag())"
+ROUTES = "routes must be a sequence of Route"
+BUNDLE = "Route bundle must be a Path or a PredDAG (got {})"
 
 # Each wrong argument, the exception class and the whole message it is refused with. A None
 # where a Graph, an Eligibility or a PredDAG is expected reaches the binding as a null value
@@ -358,11 +371,37 @@ REFUSALS = {
         ValueError,
         "diminishing fraction must be a number (got str)",
     ),
-    "Pinned-bundles-int": (lambda s: ngc.Pinned(5), TypeError, SEQUENCE),
-    "Pinned-bundles-None": (lambda s: ngc.Pinned(None), TypeError, SEQUENCE),
-    "Pinned-bundle-int": (lambda s: ngc.Pinned([5]), TypeError, BUNDLE),
-    "Pinned-bundle-None": (lambda s: ngc.Pinned([None]), TypeError, BUNDLE),
-    "Pinned-bundle-Path": (lambda s: ngc.Pinned([s.path]), TypeError, BUNDLE),
+    "Pinned-program-None": (
+        lambda s: ngc.Pinned(None),
+        TypeError,
+        "Pinned program must be a ForwardingProgram",
+    ),
+    "Route-bundle-int": (lambda s: ngc.Route(0, 5), TypeError, BUNDLE.format("int")),
+    "Route-bundle-None": (
+        lambda s: ngc.Route(0, None),
+        TypeError,
+        BUNDLE.format("NoneType"),
+    ),
+    "from_routes-graph-None": (
+        lambda s: ngc.ForwardingProgram.from_routes(None, [0], [2], [s.route]),
+        ValueError,
+        GRAPH,
+    ),
+    "from_routes-routes-int": (
+        lambda s: ngc.ForwardingProgram.from_routes(s.g, [0], [2], 5),
+        TypeError,
+        ROUTES,
+    ),
+    "from_routes-route-int": (
+        lambda s: ngc.ForwardingProgram.from_routes(s.g, [0], [2], [5]),
+        TypeError,
+        ROUTES,
+    ),
+    "from_routes-route-None": (
+        lambda s: ngc.ForwardingProgram.from_routes(s.g, [0], [2], [None]),
+        TypeError,
+        ROUTES,
+    ),
 }
 
 

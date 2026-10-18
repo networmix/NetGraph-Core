@@ -1,7 +1,8 @@
 /*
   Pybind11 module `_netgraph_core`: the graph on integer units with Eligibility and the unit
   conversions, the route structures (PredDAG, Path), the selection and placement axes, the
-  ledger with its records, the policy engine with its configuration and results, the DagCache,
+  ledger with its records, the forwarding programs, the policy engine with its configuration
+  and results, the DagCache,
   the evaluators (capacity, batch_capacity, sensitivity) and the public search (spf, ksp,
   resolve_to_paths); and one private entry: the flow core's _place_global_units.
   A build with the private hooks (CMake NETGRAPH_CORE_PRIVATE_HOOKS: the editable development
@@ -30,9 +31,9 @@ using namespace netgraph::core;
 
 PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
   m.doc() =
-      "NetGraph-Core: the graph on integer units, the route structures, the integer ledger, the policy\n"
-      "engine FlowPolicy, the DagCache, the evaluators (capacity, batch_capacity, sensitivity) and the\n"
-      "searches (spf, ksp, resolve_to_paths).\n"
+      "NetGraph-Core: the graph on integer units, the route structures, the integer ledger, the forwarding\n"
+      "programs, the policy engine FlowPolicy, the DagCache, the evaluators (capacity, batch_capacity,\n"
+      "sensitivity) and the searches (spf, ksp, resolve_to_paths).\n"
       "Every public call either completes or raises and leaves Core state as it was, with two limits:\n"
       "(1) pybind11 does not check every allocation when it constructs a bound object from Python, or\n"
       "converts an attribute or a returned value into a new Python object outside the library's checked\n"
@@ -51,6 +52,7 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
   bindings::register_path(m);
   bindings::register_flow_record(m);
   bindings::register_flow_ledger(m);
+  bindings::register_program(m);
   bindings::register_routing(m);
   bindings::register_policy_config(m);
   bindings::register_placement_result(m);

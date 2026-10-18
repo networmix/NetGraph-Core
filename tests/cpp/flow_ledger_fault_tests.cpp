@@ -33,7 +33,7 @@
 #include "netgraph/core/detail/pred_dag_builder.hpp"
 #include "netgraph/core/flow_ledger.hpp"
 #include "fault_injection.hpp"
-#include "pinned_one.hpp"
+#include "route_policy.hpp"
 #include "test_utils.hpp"
 
 using namespace netgraph::core;
@@ -42,20 +42,28 @@ using detail::LedgerAccess;
 
 namespace {
 
+// The policies on one route the sweeps run: Global with the route as its support, and Pinned over
+// the route as a supplied split route under each kernel, weight basis and admission.
 struct Kernel {
-  FlowPlacement placement;
+  std::string name;
   Admission admission;
-  EdgePriority priority;
+  std::function<FlowPolicyConfig(const FlowLedger&, NodeId, NodeId, std::shared_ptr<const PredDAG>)> config;
 };
 
 const std::vector<Kernel>& kernels() {
+  using D = std::shared_ptr<const PredDAG>;
+  auto split = [](FlowPlacement placement, Admission admission, WeightBasis weights) {
+    return [=](const FlowLedger& fg, NodeId s, NodeId d, D dag) {
+      return split_route(fg, s, d, std::move(dag), placement, admission, weights);
+    };
+  };
   static const std::vector<Kernel> all = {
-      {FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual},
-      {FlowPlacement::Weighted, Admission::Lossless, EdgePriority::Residual},
-      {FlowPlacement::Weighted, Admission::Lossless, EdgePriority::Capacity},
-      {FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Residual},
-      {FlowPlacement::EqualBalanced, Admission::Lossy, EdgePriority::Residual},
-      {FlowPlacement::Weighted, Admission::Lossy, EdgePriority::Capacity},
+      {"global support", Admission::Lossless, [](const FlowLedger&, NodeId, NodeId, D dag) { return on_support(std::move(dag)); }},
+      {"weighted snapshot", Admission::Lossless, split(FlowPlacement::Weighted, Admission::Lossless, WeightBasis::ResidualSnapshot)},
+      {"weighted capacity", Admission::Lossless, split(FlowPlacement::Weighted, Admission::Lossless, WeightBasis::Capacity)},
+      {"equal balanced", Admission::Lossless, split(FlowPlacement::EqualBalanced, Admission::Lossless, WeightBasis::Capacity)},
+      {"equal balanced lossy", Admission::Lossy, split(FlowPlacement::EqualBalanced, Admission::Lossy, WeightBasis::Capacity)},
+      {"weighted capacity lossy", Admission::Lossy, split(FlowPlacement::Weighted, Admission::Lossy, WeightBasis::Capacity)},
   };
   return all;
 }
@@ -206,8 +214,16 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { x.infinite = !x.infinite; },
       [](auto& x) { x.prepared = !x.prepared; },
       [](auto& x) { ++x.placed; },
-      [](auto& x) { x.curve.emplace_back(9, 1); },
-      [](auto& x) { x.program.push_back(0); },
+      [](auto& x) {
+        if (!x.curve) x.curve.emplace();
+        x.curve->emplace_back(9, 1);
+      },
+      [](auto& x) { x.program.present = !x.program.present; },
+      [](auto& x) { x.program.tunnels.emplace_back(); },
+      [](auto& x) { x.program.members.emplace_back(); },
+      [](auto& x) { x.support.push_back(0); },
+      [](auto& x) { x.head_lost.emplace_back(); },
+      [](auto& x) { x.by_tunnel.emplace_back(); },
       [](auto& x) { x.cohorts.emplace_back(); },
       [](auto& x) { ++x.cohorts[0][0].id; },
       [](auto& x) { ++x.cohorts[0][0].cost; },
@@ -313,19 +329,18 @@ TEST(LedgerFaults, EveryAllocationOfAPlacementFailsAtomically) {
     const auto dag = all_edges(*c.g);
     for (const auto& k : kernels()) {
       for (const auto& sc : scenarios()) {
-        const std::string where = c.name + " kernel " + std::to_string(static_cast<int>(k.placement)) + "/" +
-                                  std::to_string(static_cast<int>(k.admission)) + "/" +
-                                  std::to_string(static_cast<int>(k.priority)) + " " + sc.name;
+        // A Lossy program forwarding needs a finite offer (no first-hop experiment).
+        if (k.admission == Admission::Lossy && !sc.call.has_value()) continue;
+        const std::string where = c.name + " " + k.name + " " + sc.name;
         // A third party's 1-unit EqualBalanced placement on the same bundle, then the policy's
         // earlier calls.
         const auto setup = [&](FlowLedger& fg) {
-          auto third = std::make_shared<PinnedOne>(fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced,
-                                                   Admission::Lossless, EdgePriority::Residual);
+          auto third = std::make_shared<RoutePolicy>(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless));
           (void)third->place(1);
-          auto p = std::make_shared<PinnedOne>(fg, c.src, c.dst, dag, k.placement, k.admission, k.priority);
+          auto p = std::make_shared<RoutePolicy>(fg, c.src, c.dst, k.config(fg, c.src, c.dst, dag));
           for (auto v : sc.before) (void)p->place(v);
           FlowPolicy* policy = &p->policy();
-          return Staged {std::make_shared<std::pair<std::shared_ptr<PinnedOne>, std::shared_ptr<PinnedOne>>>(
+          return Staged {std::make_shared<std::pair<std::shared_ptr<RoutePolicy>, std::shared_ptr<RoutePolicy>>>(
                              std::move(third), std::move(p)),
                          policy};
         };
@@ -347,21 +362,20 @@ TEST(LedgerFaults, PolicyConstructionFailsWithoutBinding) {
     for (const auto& k : kernels()) {
       {
         FlowLedger warm(c.g);
-        (void)PinnedOne(warm, c.src, c.dst, dag, k.placement, k.admission, k.priority).place(1);
+        (void)RoutePolicy(warm, c.src, c.dst, k.config(warm, c.src, c.dst, dag)).place(1);
       }
       long injected = 0;
       for (long at = 0;; ++at) {
         const std::string w = c.name + " construction allocation " + std::to_string(at);
         FlowLedger fg(c.g);
         {
-          PinnedOne other(fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless,
-                           EdgePriority::Residual);
+          RoutePolicy other(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless));
           (void)other.place(1);
         }  // an orphan
         const LedgerState before = ledger_state(fg);
-        std::optional<PinnedOne> p;
+        std::optional<RoutePolicy> p;
         const long live = g_live.load();
-        if (!fails_at(at, [&] { p.emplace(fg, c.src, c.dst, dag, k.placement, k.admission, k.priority); })) {
+        if (!fails_at(at, [&] { p.emplace(fg, c.src, c.dst, k.config(fg, c.src, c.dst, dag)); })) {
           EXPECT_EQ(LedgerAccess::bound_owners(fg).size(), 1U);
           break;
         }
@@ -385,8 +399,7 @@ TEST(LedgerFaults, EveryAllocationOfAResetFailsAtomically) {
     const auto with_orphan = [&] {
       auto fg = std::make_unique<FlowLedger>(c.g);
       // The policy is destroyed without remove(): its record is an orphan.
-      (void)PinnedOne(*fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless,
-                      EdgePriority::Residual)
+      (void)RoutePolicy(*fg, c.src, c.dst, split_route(*fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless))
           .place(2);
       return fg;
     };
@@ -493,10 +506,9 @@ TEST(LedgerFaults, EveryAllocationOfALedgerCopyOrMoveFailsWithoutALeak) {
     for (auto& x : half) x /= 2;
     FlowLedger fg(c.g, half);
     {
-      PinnedOne first(fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless,
-                      EdgePriority::Residual);
+      RoutePolicy first(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless));
       (void)first.place(1);
-      PinnedOne second(fg, c.src, c.dst, dag, FlowPlacement::Weighted, Admission::Lossy, EdgePriority::Capacity);
+      RoutePolicy second(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, FlowPlacement::Weighted, Admission::Lossy));
       (void)second.place(2);
     }  // two orphans: a copy may only be taken of a ledger without bound policies
     const LedgerState source = ledger_state(fg);
@@ -564,7 +576,7 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
   const auto dag = all_edges(*large);
   const std::int32_t n = large->num_nodes();
   const auto policy = [&](FlowLedger& fg) {
-    return PinnedOne(fg, 0, n - 1, dag, FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Residual);
+    return RoutePolicy(fg, 0, n - 1, split_route(fg, 0, n - 1, dag, FlowPlacement::EqualBalanced, Admission::Lossless));
   };
   // The reference, without a failure: the empty ledger, the ledger and epoch right after the
   // construction, and the result, ledger and epoch of place(2).
@@ -577,7 +589,7 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
   {
     FlowLedger fg(large);
     fresh = ledger_state(fg);
-    PinnedOne p = policy(fg);
+    RoutePolicy p = policy(fg);
     built = ledger_state(fg);
     built_epoch = epoch(p.policy());
     want = p.place(2);
@@ -590,14 +602,14 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
   // scratch and the kernels' buffers) on the small graph.
   const auto warm_up = [&] {
     FlowLedger fg(small);
-    PinnedOne p(fg, 0, 2, small_dag, FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Residual);
+    RoutePolicy p(fg, 0, 2, split_route(fg, 0, 2, small_dag, FlowPlacement::EqualBalanced, Admission::Lossless));
     EXPECT_EQ(p.place(2).placed, 2);
   };
   sweep_scratch_growth(
       "construction", warm_up,
       [&](long at, const std::string& w) {
         FlowLedger fg(large);
-        std::optional<PinnedOne> p;
+        std::optional<RoutePolicy> p;
         const bool failed = fails_at(at, [&] { p.emplace(policy(fg)); });
         if (failed) {
           EXPECT_FALSE(p.has_value()) << w;
@@ -614,7 +626,7 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
       },
       [&] {
         FlowLedger fg(large);
-        std::optional<PinnedOne> p(policy(fg));
+        std::optional<RoutePolicy> p(policy(fg));
         (void)p->place(2);  // the scratch grows to the large graph
         p->remove();
         p.reset();
@@ -626,7 +638,7 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
       "placement", warm_up,
       [&](long at, const std::string& w) {
         FlowLedger fg(large);
-        PinnedOne p = policy(fg);
+        RoutePolicy p = policy(fg);
         const LedgerState before = ledger_state(fg);
         const Epoch before_epoch = epoch(p.policy());
         PlacementResult got;
@@ -644,7 +656,7 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
       },
       [&] {
         FlowLedger fg(large);
-        PinnedOne p = policy(fg);
+        RoutePolicy p = policy(fg);
         (void)p.place(2);  // the scratch grows to the large graph
         p.remove();
         long warm = 0;
@@ -679,8 +691,8 @@ TEST(LedgerFaults, RemovalAndReleaseNeverAllocate) {
     const auto dag = all_edges(*c.g);
     for (const auto& k : kernels()) {
       FlowLedger fg(c.g);
-      auto p = std::make_unique<PinnedOne>(fg, c.src, c.dst, dag, k.placement, k.admission, k.priority);
-      expect_removal_and_release_allocate_nothing(fg, p, c.name + " kernel " + std::to_string(static_cast<int>(k.placement)));
+      auto p = std::make_unique<RoutePolicy>(fg, c.src, c.dst, k.config(fg, c.src, c.dst, dag));
+      expect_removal_and_release_allocate_nothing(fg, p, c.name + " " + k.name);
     }
   }
 }

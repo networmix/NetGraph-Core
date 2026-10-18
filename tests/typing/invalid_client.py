@@ -16,7 +16,7 @@ g = ng.Graph(2, [0], [1], [10], [1], 1.0)
 sel = ng.PathSelection(ng.EdgeTieBreak.DETERMINISTIC, ng.EdgePriority.CAPACITY)
 cfg = ng.FlowPolicyConfig(routing=ng.Global())
 
-# The nine result and factory classes have no constructor ("No constructor defined!").
+# The twelve result and factory classes have no constructor ("No constructor defined!").
 ng.Eligibility()  # expect: reportCallIssue
 ng.PredDAG()  # expect: reportCallIssue
 ng.FlowRecord()  # expect: reportCallIssue
@@ -26,6 +26,9 @@ ng.DagCacheStats()  # expect: reportCallIssue
 ng.SensitivityEntry()  # expect: reportCallIssue
 ng.SensitivityResult()  # expect: reportCallIssue
 ng.SpfResult()  # expect: reportCallIssue
+ng.ForwardingProgram()  # expect: reportCallIssue
+ng.Tunnel()  # expect: reportCallIssue
+ng.TunnelFlow()  # expect: reportCallIssue
 
 # dtype mistakes: the capacities are an int64 array of ints. (NumPy's own stubs type an element
 # read arr[i] as Any, so "text: str = g.capacity_units()[0]" cannot be caught by any stub; an
@@ -44,6 +47,8 @@ ng.CapacityAware(max_path_cost=guard)  # expect: reportArgumentType
 ng.to_units("1.5", 1.0)  # expect: reportCallIssue, reportArgumentType
 # FlowPolicyConfig takes keywords only.
 ng.FlowPolicyConfig(ng.Global())  # expect: reportCallIssue
+dag = ng.Path(g, [[0]]).to_dag()
+ng.Pinned([dag])  # expect: reportArgumentType
 # Integer arrays serve as hops and pairs; float arrays do not.
 ng.Path(g, np.zeros((1, 1), dtype=np.float64))  # expect: reportArgumentType
 float_pairs = np.zeros((1, 2), dtype=np.float64)
@@ -57,3 +62,4 @@ flows = ng.capacity(g, 0, 1, ng.QueryOptions(cfg)).edge_flows
 total = flows.sum()  # expect: reportOptionalMemberAccess
 best = ng.capacity(g, 0, 1, ng.QueryOptions(cfg))
 cost_total: int = best.total_cost  # expect: reportAssignmentType
+weights = best.program.source_weights  # expect: reportOptionalMemberAccess

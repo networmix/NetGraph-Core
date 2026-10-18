@@ -1,15 +1,15 @@
 """The policy engine ``FlowPolicy`` in integer units (APPROACH revision 24, 8 and 9).
 
-One placement engine for every routing mode: ``CostOnly``, ``CapacityAware``,
-``Global`` and ``Pinned``, the kernels ``MaxFlow``, ``Weighted`` and
+One placement engine for the routing modes ``CostOnly``, ``CapacityAware`` and
+``Global`` (with or without a support), the kernels ``MaxFlow``, ``Weighted`` and
 ``EqualBalanced`` and the admissions ``Lossless`` and ``Lossy`` (prototype 1's
 kernels). The transaction of 9.2 runs per source (9.3) for ``CapacityAware``: the
 roster is fixed at construction (eligible sources that statically reach a destination,
 ascending NodeId), each source is offered the increment of its round-robin share of the
 cumulative request, and the stages run on the shared working residual ``W``;
-``created`` is one counter per call; there is one commit. ``Pinned`` has one "source",
-the policy. ``Global`` is a replacement kernel over the whole eligible graph with the
-canonical per-source decomposition. Local outcomes, the termination reduction and the
+``created`` is one counter per call; there is one commit. ``Global`` is a replacement
+kernel over the whole eligible graph (or exactly over its support) with the canonical
+per-source decomposition. Local outcomes, the termination reduction and the
 flag table follow 9.4 (revision 20: flags accumulate committed events). Epochs follow
 section 8.
 
@@ -21,6 +21,15 @@ equal origin over it (``forward``: one split per router, attribution by highest
 averages); MaxFlow and Global are controllers (``_place_controller``) with the optimized
 origin. The result has the 14.1 shape (``PlacementResult``); CapacityAware keeps its
 per-source reduction of local outcomes, every other model has the 14.2 termination.
+
+Step 3 (contract r8, sections 4.1, 5.2, 8, 10.4; README "Programs and Global with a
+support"): ``Pinned`` is gone from the reference (its programs are checked by the library's
+own tests); ``Global(support)`` is the controller restricted to a supplied DAG, trimmed to the
+walks from the sources to the allowed destinations; CostOnly Weighted takes its weights from a
+weight basis (``weights``: capacity, or the residual snapshot at preparation) instead of the
+selection's priority; the change flags of CostOnly and the controllers compare programs (a
+CostOnly program is created at the epoch's first positive call; a controller's program is its
+solve cut into paths, compared path by path, with the optimized origin's supplies).
 
 Readings where the contract is silent are listed in ``NOTES.md`` (P-numbers).
 """
@@ -81,12 +90,7 @@ class CapacityAware:
 
 @dataclass(frozen=True)
 class Global:
-    pass
-
-
-@dataclass(frozen=True)
-class Pinned:
-    bundles: tuple[tuple[int, ...], ...]
+    support: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,9 @@ class FlowPolicyConfig:
     placement: str | None
     admission: str
     selection: search.Selection | None
+    weights: str | None = (
+        None  # CostOnly Weighted: "Capacity" (None) or "ResidualSnapshot"
+    )
 
 
 @dataclass
@@ -196,20 +203,21 @@ class Program:
     topo: list[int]
 
 
-def make_program(g, kernel, roots, dsts, union, priority, view) -> Program:
+def make_program(g, kernel, roots, dsts, union, basis, view) -> Program:
+    """Weighted weights by the weight basis (contract r8 5.2): the static capacity, or the free
+    capacity `view` at preparation (ResidualSnapshot)."""
     union = tuple(sorted(union))
+    snapshot = basis == "ResidualSnapshot"
     if kernel != W_:
         cand = union
-    elif priority == "Residual":
+    elif snapshot:
         cand = tuple(e for e in union if view[e] >= 1)
     else:
         cand = tuple(e for e in union if g.capacity[e] >= 1)
     members = tuple(sorted({e for r in roots for e in K.prune(g, cand, r, dsts)}))
     weights = None
     if kernel == W_:
-        weights = {
-            e: (view[e] if priority == "Residual" else g.capacity[e]) for e in members
-        }
+        weights = {e: (view[e] if snapshot else g.capacity[e]) for e in members}
     out: dict[int, list[int]] = {}
     nodes = set(roots) | set(dsts)
     for e in members:
@@ -320,7 +328,6 @@ class Flow:
     drops: dict[int, int] = field(default_factory=dict)
     new: bool = False
     seq: int = 0
-    bundle_index: int | None = None
 
 
 def add_view(W: list[int], alloc: dict[int, int]) -> list[int]:
@@ -387,6 +394,7 @@ class FlowPolicy:
         self._validate_cfg()
         self.mode = type(cfg.routing).__name__
         self.kernel = MF if self.mode == "Global" else cfg.placement
+        self.support = cfg.routing.support if self.mode == "Global" else None
         self.admission = cfg.admission
         self.selection = cfg.selection or search.Selection()
         static = search.member_graph(g, elig, search.Selection())
@@ -394,10 +402,25 @@ class FlowPolicy:
         node_ok = (lambda v: True) if elig is None else (lambda v: elig.node_allowed[v])
         self._dests_ok = tuple(d for d in self.destinations if node_ok(d))
         self.baseline: dict[int, int | None] = {}
-        if self.mode == "Pinned":
-            self.bundles = self._validate_bundles()
-            self.usable = [(i, route) for i, route in enumerate(self._pruned) if route]
-            self.roster = [self.sources[0]] if self.usable else []
+        if self.support is not None:
+            # The support trimmed to the walks from each allowed source to an allowed destination
+            # over its allowed edges; the roster is the sources that reach one inside it.
+            ok = [
+                e
+                for e in check_dag_edges(g, self.support)
+                if elig is None or elig.edge_allowed[e]
+            ]
+            trimmed: set[int] = set()
+            roster = []
+            for s in self.sources:
+                if not node_ok(s):
+                    continue
+                part = K.prune(g, ok, s, self._dests_ok)
+                if part:
+                    roster.append(s)
+                    trimmed.update(part)
+            self.roster = roster
+            self.trimmed = tuple(sorted(trimmed))
         else:
             roster = []
             for s in self.sources:
@@ -418,7 +441,7 @@ class FlowPolicy:
     def _validate_cfg(self) -> None:
         cfg = self.cfg
         r = cfg.routing
-        if not isinstance(r, (CostOnly, CapacityAware, Global, Pinned)):
+        if not isinstance(r, (CostOnly, CapacityAware, Global)):
             raise ContractError("unknown routing variant")
         if isinstance(r, Global):
             # Global takes no placement and no selection; a controller is lossless.
@@ -430,7 +453,16 @@ class FlowPolicy:
             if cfg.placement is None:
                 raise ContractError("placement is required")
             sel = cfg.selection or search.Selection()
-            K.check_kernel(cfg.placement, cfg.admission, sel.priority)
+            # Only CapacityAware's Weighted flows read their weights from the priority.
+            K.check_kernel(
+                cfg.placement,
+                cfg.admission,
+                sel.priority if isinstance(r, CapacityAware) else "Capacity",
+            )
+            if cfg.weights is not None and not (
+                isinstance(r, CostOnly) and cfg.placement == W_
+            ):
+                raise ContractError("weights require CostOnly placement=WEIGHTED")
             if cfg.admission == LOSSY and isinstance(r, CapacityAware):
                 raise ContractError("Lossy is rejected with CapacityAware")
             if (
@@ -454,30 +486,6 @@ class FlowPolicy:
                     raise ContractError("diminishing.window >= 1")
                 if not 0 < d.fraction < 1:
                     raise ContractError("diminishing.fraction in (0, 1)")
-        if isinstance(r, Pinned):
-            if len(self.sources) != 1 or len(self.destinations) != 1:
-                raise ContractError("Pinned requires single endpoints")
-
-    def _validate_bundles(self):
-        g = self.g
-        bundles = self.cfg.routing.bundles
-        if not bundles:
-            raise ContractError("an empty bundle list is rejected")
-        src, dst = self.sources[0], self.destinations[0]
-        seen = set()
-        out = []
-        self._pruned = []
-        for b in bundles:
-            edges = check_dag_edges(g, b)
-            if edges in seen:
-                raise ContractError("duplicate bundle (pre-prune)")
-            seen.add(edges)
-            if not K.prune(g, edges, src, (dst,)):
-                raise ContractError("malformed bundle: no src -> dst walk")
-            out.append(edges)
-            ok = [e for e in edges if self.elig is None or self.elig.edge_allowed[e]]
-            self._pruned.append(K.prune(g, ok, src, (dst,)))
-        return out
 
     # ------------------------------------------------------------ state
 
@@ -491,6 +499,9 @@ class FlowPolicy:
         self.program: Program | None = None
         self.union: tuple[int, ...] = ()
         self.curve: list[tuple[int, int]] = []
+        # A controller's program (10.4): its paths (source, walk) and its weights (the paths'
+        # amounts, the optimized origin's supplies); None before the first solve.
+        self.paths: tuple | None = None
 
     def placed_demand(self) -> int:
         return sum(f.delivered for c in self.cohorts.values() for f in c)
@@ -500,9 +511,6 @@ class FlowPolicy:
 
     def record(self, flow_id):
         return self.fg.record(flow_id)
-
-    def usable_bundles(self) -> int:
-        return len(self.usable) if self.mode == "Pinned" else 0
 
     def flow_ids(self) -> list[tuple[int, int]]:
         return sorted(f.flow_id for c in self.cohorts.values() for f in c)
@@ -525,7 +533,6 @@ class FlowPolicy:
                         "delivered": f.delivered,
                         "alloc": sorted(f.alloc.items()),
                         "plan": f.plan.to_json(),
-                        "bundle_index": f.bundle_index,
                     }
                     for f in c
                 ]
@@ -675,7 +682,7 @@ class FlowPolicy:
             # The current state, every flag false; before the epoch's first positive call it is
             # all zeros (contract r8 10.3). Global reports its curve once prepared.
             r = PlacementResult(0, 0, "complete", False, False, [])
-            if self.mode == "Global" and self.prepared:
+            if self._dense_global() and self.prepared:
                 r.cost_distribution = list(self.curve)
             return self._finish(r, outputs, None, controller)
         if not self.roster:
@@ -701,7 +708,7 @@ class FlowPolicy:
                 else 0,
                 trace={"roster": []},
             )
-            if self.mode == "Global":
+            if self._dense_global():
                 r.cost_distribution = []
                 if outputs.min_cut:
                     r.min_cut = []
@@ -763,9 +770,13 @@ class FlowPolicy:
             result.residual = self.fg.residual()
         if outputs.bottleneck:
             result.bottleneck = self.fg.bottleneck(self.sources, self.elig)
-        if outputs.min_cut and self.mode == "Global" and sol is not None:
+        if outputs.min_cut and self._dense_global() and sol is not None:
             result.min_cut = sol.min_cut
         return result
+
+    def _dense_global(self) -> bool:
+        """Global over every eligible edge (no support): the curve and the cut."""
+        return self.mode == "Global" and self.support is None
 
     # ------------------------------------------------------------ CostOnly (step 2)
 
@@ -811,7 +822,7 @@ class FlowPolicy:
                 self.roster,
                 self._dests_ok,
                 union,
-                self.selection.priority,
+                self.cfg.weights or "Capacity",
                 W,
             )
             flows = {s: self._source_flow(s, routes[s], None) for s in self.roster}
@@ -901,12 +912,14 @@ class FlowPolicy:
             term = "complete" if req is not None else "exhausted"
         else:
             term = "complete" if req is not None and placed == req else "exhausted"
+        # The flags compare programs (10.4): the epoch's first call creates one (its routes and
+        # its weights); an increment changes neither.
         result = PlacementResult(
             placed,
             None if req is None else req - placed,
             term,
             created,
-            False,
+            created,
             call_drops,
             call_source_loss=source_loss,
             trace=trace,
@@ -924,9 +937,10 @@ class FlowPolicy:
         old = self.cohorts
         created = not old
         glob = self.mode == "Global"
+        dense = self._dense_global()
         trace: dict = {}
         if glob:
-            routes, union = None, None
+            routes, union = None, self.trimmed if not dense else None
         elif created:
             routes, union = self._prepare(W)
             trace["prepare"] = {s: list(routes[s]) for s in self.roster}
@@ -937,21 +951,18 @@ class FlowPolicy:
         V = add_view(W, own)
         P = self.placed_demand()
         cap = None if req is None else P + req
-        if glob:
+        if dense:
             sol = flowcore.solve(g, V, self.roster, self._dests_ok, cap, elig=self.elig)
         else:
             sol = flowcore.solve(g, V, self.roster, self._dests_ok, cap, edges=union)
         assert sol.placed >= P, "a controller call never reduces placed_demand()"
-        shares = self._decompose(sol)
-        changed = created
+        shares, paths = self._decompose(sol)
         new_cohorts: dict[int, list[Flow]] = {}
         for s in self.roster:
             alloc = shares[s]
             prev = old.get(s, [None])[0]
             if glob:
                 route = tuple(sorted(alloc))
-                if prev is not None and prev.route != route:
-                    changed = True
                 plan = K.Plan(MF, LOSSLESS, s, self._dests_ok, route, route, None)
                 f = Flow(
                     src=s,
@@ -976,6 +987,23 @@ class FlowPolicy:
         new_ids = fg._commit(self.owner, drafts)
         self._assign_ids(order, new_ids)
         self.cohorts = new_cohorts
+        # The program (10.4): the paths in decomposition order with their amounts, and the
+        # optimized origin's supplies (every roster source, zero included). No program and a
+        # program without a path are equal.
+        program = (
+            tuple((s, walk) for s, walk, _ in paths),
+            (
+                tuple(x for _, _, x in paths),
+                tuple(sol.supply.get(s, 0) for s in self.roster),
+            ),
+        )
+        before = self.paths or ((), None)
+        if not before[0] and not program[0]:
+            routes_changed = weights_changed = False
+        else:
+            routes_changed = before[0] != program[0]
+            weights_changed = before[1] != program[1]
+        self.paths = program
         if not glob and created:
             self.union = union
         self.prepared = True
@@ -984,7 +1012,7 @@ class FlowPolicy:
         else:
             self.requested += req
         term = "complete" if req is not None and placed == req else "exhausted"
-        if glob:
+        if dense:
             trace.update(
                 {
                     "V": V,
@@ -1010,22 +1038,24 @@ class FlowPolicy:
             placed,
             None if req is None else req - placed,
             term,
-            changed,
-            False,
+            routes_changed,
+            weights_changed,
             [],
-            cost_distribution=list(sol.cost_distribution) if glob else None,
+            cost_distribution=list(sol.cost_distribution) if dense else None,
             trace=trace,
         )
         return self._finish(result, outputs, sol, True)
 
-    def _decompose(self, sol) -> dict[int, dict[int, int]]:
-        """Canonical per-source decomposition (9.1): sources ascending; the smallest
-        EdgeId walk with positive remaining flow to the first destination reached,
-        saturated by min(walk bottleneck, remaining virtual supply)."""
+    def _decompose(self, sol):
+        """Canonical per-source decomposition (9.1, contract r8 4.1): sources ascending; the
+        smallest EdgeId walk with positive remaining flow to the first destination reached,
+        saturated by min(walk bottleneck, remaining virtual supply). Returns the per-source shares
+        and the paths (source, walk, amount) in that order."""
         g = self.g
         remaining = dict(enumerate(sol.edge_flows))
         dests = set(self._dests_ok)
         out: dict[int, dict[int, int]] = {}
+        paths: list[tuple[int, tuple[int, ...], int]] = []
         for s in self.roster:
             mine: dict[int, int] = {}
             left = sol.supply.get(s, 0)
@@ -1043,16 +1073,15 @@ class FlowPolicy:
                     remaining[e] -= amount
                     mine[e] = mine.get(e, 0) + amount
                 left -= amount
+                paths.append((s, tuple(walk), amount))
             out[s] = mine
         assert all(x == 0 for x in remaining.values()), "decomposition covers the flow"
-        return out
+        return out, paths
 
     # ------------------------------------------------------------ route-search modes
 
     def _offers(self, req) -> list[int | None]:
         k = len(self.roster)
-        if self.mode == "Pinned":
-            return [req]
         if req is None:
             return [None] * k
         old = round_robin(self.requested, k)
@@ -1103,22 +1132,10 @@ class FlowPolicy:
         assert placed >= 0
         if req is not None:
             assert placed <= req
-        if self.mode == "CapacityAware":
-            outcomes = {st.src: self._local_outcome(st) for st in states}
-            unserved = [o for o in outcomes.values() if o != "complete"]
-            term = (
-                max(unserved, key=OUTCOME_RANK.__getitem__) if unserved else "complete"
-            )
-        else:
-            # Pinned, the contract's termination (r8 14.2): no member anywhere is
-            # no_active_weight; a Lossy finite offer is complete.
-            if not any(f.plan.members for st in states for f in st.flows):
-                term = "no_active_weight"
-            elif self.admission == LOSSY:
-                term = "complete" if req is not None else "exhausted"
-            else:
-                term = "complete" if req is not None and placed == req else "exhausted"
-            outcomes = {st.src: term for st in states}
+        outcomes = {st.src: self._local_outcome(st) for st in states}
+        unserved = [o for o in outcomes.values() if o != "complete"]
+        term = max(unserved, key=OUTCOME_RANK.__getitem__) if unserved else "complete"
+
         trace = {
             "offers": {
                 st.src: "inf" if st.offer is None else st.offer for st in states
@@ -1160,68 +1177,59 @@ class FlowPolicy:
             self._stage1(st, ctx)
         if not st.flows:
             return
-        if self.mode == "CapacityAware" and self.cfg.routing.reoptimize:
+        if self.cfg.routing.reoptimize:
             self._stage2(st, ctx)
-        if self.admission == LOSSY:
-            self._stage3_lossy(st, ctx)
-        elif self.kernel == EB:
+        if self.kernel == EB:
             self._stage3_eb(st, ctx)
         else:
             self._stage3_seq(st, ctx)
-        if self.mode == "CapacityAware":
-            self._stage4(st, ctx)
+        self._stage4(st, ctx)
 
     # ---- stage 1
 
     def _stage1(self, st: SourceState, ctx) -> None:
         W = ctx["W"]
         tr: dict = {}
-        if self.mode == "Pinned":
-            for i, route in self.usable:
-                f = self._new_flow(st.src, route, W, ctx)
-                f.bundle_index = i
-                st.flows.append(f)
-            tr["usable"] = [i for i, _ in self.usable]
-        else:
-            r = self.cfg.routing
-            S = list(W)
-            rem = st.offer
-            target = None
-            if self.kernel == EB and st.offer is not None:
-                target = (st.P + st.offer) // r.flow_count
-            tr.update(eb_target=target, reservations=[])
-            budget = min(r.flow_count, MAX_FLOWS_PER_CALL - ctx["created"])
-            stopped = False
-            for _ in range(budget):
-                route = self._search(st.src, S)
-                if route is None:
-                    stopped = True
-                    break
-                f = self._new_flow(st.src, route, S, ctx)
-                evals: list[int] = []
-                bound = self._t_max(f, S, evals)
-                if self.kernel == EB:
-                    t = bound if target is None else min(target, bound)
-                else:
-                    t = bound if rem is None else min(rem, bound)
-                    if rem is not None:
-                        rem -= t
-                a = self._alloc(f, S, t) if t else {}
-                tr["reservations"].append(
-                    {
-                        "route": list(route),
-                        "S": list(S),
-                        "T_bound": bound,
-                        "reserved": t,
-                    }
-                )
-                S = sub_view(S, a)
-                st.flows.append(f)
-                ctx["created"] += 1
-                st.created_here += 1
-            # the call-wide cap blocked (part of) the creation, not a missing route
-            st.capped = budget < r.flow_count and not stopped
-            tr["created_cap_blocked"] = st.capped
+        # CapacityAware (the only staged model).
+        r = self.cfg.routing
+        S = list(W)
+        rem = st.offer
+        target = None
+        if self.kernel == EB and st.offer is not None:
+            target = (st.P + st.offer) // r.flow_count
+        tr.update(eb_target=target, reservations=[])
+        budget = min(r.flow_count, MAX_FLOWS_PER_CALL - ctx["created"])
+        stopped = False
+        for _ in range(budget):
+            route = self._search(st.src, S)
+            if route is None:
+                stopped = True
+                break
+            f = self._new_flow(st.src, route, S, ctx)
+            evals: list[int] = []
+            bound = self._t_max(f, S, evals)
+            if self.kernel == EB:
+                t = bound if target is None else min(target, bound)
+            else:
+                t = bound if rem is None else min(rem, bound)
+                if rem is not None:
+                    rem -= t
+            a = self._alloc(f, S, t) if t else {}
+            tr["reservations"].append(
+                {
+                    "route": list(route),
+                    "S": list(S),
+                    "T_bound": bound,
+                    "reserved": t,
+                }
+            )
+            S = sub_view(S, a)
+            st.flows.append(f)
+            ctx["created"] += 1
+            st.created_here += 1
+        # the call-wide cap blocked (part of) the creation, not a missing route
+        st.capped = budget < r.flow_count and not stopped
+        tr["created_cap_blocked"] = st.capped
         if st.flows:
             ctx["routes_changed"] = True
         st.trace["stage1"] = tr
@@ -1317,42 +1325,6 @@ class FlowPolicy:
             "evals": evals,
             "shares": [f.T for f in flows],
         }
-
-    def _stage3_lossy(self, st: SourceState, ctx) -> None:
-        flows = st.flows
-        offers = (
-            [None] * len(flows)
-            if st.offer is None
-            else round_robin(st.offer, len(flows))
-        )
-        injected = 0
-        rows = []
-        for f, offer in zip(flows, offers, strict=True):
-            call = K.lossy(self.g, f.plan, offer, ctx["W"])
-            ctx["W"] = sub_view(ctx["W"], call.carried)
-            for e, x in call.carried.items():
-                f.alloc[e] = f.alloc.get(e, 0) + x
-            for e, x in call.drops.items():
-                f.drops[e] = f.drops.get(e, 0) + x
-                ctx["drops"][e] = ctx["drops"].get(e, 0) + x
-            f.offered = (f.offered or 0) + call.offered
-            f.delivered += call.delivered
-            injected += call.injected
-            ctx["offered"] += call.offered
-            ctx["source_loss"] += call.offered - call.injected
-            rows.append(
-                {
-                    "offer": "inf" if offer is None else offer,
-                    "offered": call.offered,
-                    "delivered": call.delivered,
-                    "carried": sorted(call.carried.items()),
-                    "drops": sorted(call.drops.items()),
-                }
-            )
-        st.trace["stage3"] = rows
-        st.trace["injected"] = injected
-
-    # ---- stage 4
 
     def _stage4(self, st: SourceState, ctx) -> None:
         r = self.cfg.routing

@@ -76,6 +76,8 @@ add_library(netgraph_core STATIC
   src/dag_cache.cpp
   src/flow_policy.cpp
   src/evaluators.cpp
+  src/program.cpp
+  src/forwarding.cpp
 )
 target_include_directories(netgraph_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -98,6 +100,7 @@ pybind11_add_module(_netgraph_core
   bindings/python/path.cpp
   bindings/python/flow_record.cpp
   bindings/python/flow_ledger.cpp
+  bindings/python/program.cpp
   bindings/python/routing.cpp
   bindings/python/policy_config.cpp
   bindings/python/placement_result.cpp
@@ -156,6 +159,7 @@ if(NETGRAPH_CORE_BUILD_TESTS)
     tests/cpp/flow_policy_tests.cpp
     tests/cpp/zero_capacity_tests.cpp
     tests/cpp/pooled_origin_tests.cpp
+    tests/cpp/program_tests.cpp
   )
   target_compile_definitions(netgraph_core_tests PRIVATE NETGRAPH_CORE_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
   # Allocation-failure tests replace the global operator new: a separate executable.

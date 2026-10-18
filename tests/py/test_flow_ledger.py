@@ -1,7 +1,7 @@
 """The integer ledger FlowLedger through the bindings (docs/semantics.md#6-the-ledger):
 baselines on unnarrowed values, snapshots and records, FlowIds, bottleneck, and the lifetime
-table driven by manual placements: FlowPolicy with Pinned routing and one bundle (a manual
-flow), whose PlacementResult the tests read."""
+table driven by manual placements on one fixed route (a manual flow: Global with the route as its
+support, or Pinned over a program of the one split route), whose PlacementResult the tests read."""
 
 from __future__ import annotations
 
@@ -18,12 +18,10 @@ from helpers import (
     L62,
     RES,
     build,
-    config,
     dag_of,
     exact,
     ids,
     ledger_state,
-    sel,
 )
 from private_hooks import HOOKS, needs_hooks
 
@@ -33,13 +31,28 @@ T = ngc.Termination
 
 
 def pinned(fg, src, dst, edges, placement, admission=None, priority=None):
-    """A manual flow: a FlowPolicy with Pinned routing and one bundle (the edges' DAG)."""
-    cfg = config(
-        ngc.Pinned([dag_of(fg.graph(), edges)]),
-        placement,
-        admission,
-        sel(prio=RES if priority is None else priority),
+    """A manual flow on the edges' DAG: MAX_FLOW is Global with that DAG as its support (a
+    controller restricted to it); EQUAL_BALANCED and WEIGHTED are Pinned over a program of the one
+    split route (WEIGHTED's weights: the ledger's residual now, frozen, as the old flow read them
+    at its creation, unless the priority is CAPACITY)."""
+    g = fg.graph()
+    admission = admission or ngc.Admission.LOSSLESS
+    if placement == ngc.FlowPlacement.MAX_FLOW:
+        cfg = ngc.FlowPolicyConfig(
+            routing=ngc.Global(support=dag_of(g, edges)), admission=admission
+        )
+        return ngc.FlowPolicy(fg, src, dst, cfg)
+    snapshot = placement == ngc.FlowPlacement.WEIGHTED and (priority or RES) == RES
+    program = ngc.ForwardingProgram.from_routes(
+        g,
+        src,
+        dst,
+        [ngc.Route(src, dag_of(g, edges))],
+        placement=placement,
+        weights=ngc.WeightBasis.RESIDUAL_SNAPSHOT if snapshot else None,
+        residual=fg.residual() if snapshot else None,
     )
+    cfg = ngc.FlowPolicyConfig(routing=ngc.Pinned(program), admission=admission)
     return ngc.FlowPolicy(fg, src, dst, cfg)
 
 
@@ -286,9 +299,10 @@ def test_record_endpoint_sets_are_ascending():
 
 
 def test_empty_split_graph_keeps_the_route_cost():
-    # Weighted Residual with every route edge at residual 0 under another owner's flow: the
-    # record exists at zero delivery with an empty split graph (no positive weight:
-    # NO_ACTIVE_WEIGHT); route_cost is the bundle's minimum walk cost, not a split-graph value.
+    # Weighted with a residual snapshot of 0 on every route edge under another owner's flow:
+    # the record exists at zero delivery with an empty split graph (no positive weight:
+    # NO_ACTIVE_WEIGHT); route_cost is the route's minimum walk cost, not a split-graph value.
+    # The first preparation installs the program: routes and weights changed.
     g = build(2, [(0, 1, 2, 3)])
     fg = ngc.FlowLedger(g)
     pinned(fg, 0, 1, [0], MF).place(2)
@@ -298,7 +312,7 @@ def test_empty_split_graph_keeps_the_route_cost():
         0,
         T.NO_ACTIVE_WEIGHT,
         True,
-        False,
+        True,
     )
     rec = fg.record(flow_id(w))
     assert (rec.route_cost, rec.delivered, rec.edges) == (3, 0, [])
@@ -416,19 +430,28 @@ def test_ledger_bottleneck_with_eligibility_and_errors():
         fg.bottleneck([0], build(4, [(0, 1, 1, 1)]).eligibility(excluded_edges=[0]))
 
 
-def test_pinned_construction_errors():
+def test_manual_flow_construction_errors():
     g = build(3, [(0, 1, 5, 1), (2, 1, 5, 1)])
     fg = ngc.FlowLedger(g)
-    with pytest.raises(ValueError, match="malformed bundle"):
-        pinned(fg, 0, 2, [0, 1], MF)
+    with pytest.raises(
+        ValueError, match=exact("routes[0]: no walk from head 0 to a destination")
+    ):
+        pinned(fg, 0, 2, [0, 1], EB)
+    # As a support, a route without a walk leaves the roster empty.
+    assert pinned(fg, 0, 2, [0, 1], MF).place(1).termination == T.NO_ROUTE
     with pytest.raises(ValueError, match=exact("MAX_FLOW requires admission=LOSSLESS")):
         pinned(fg, 0, 1, [0], MF, LOSSY)
-    with pytest.raises(ValueError, match="Headroom"):
-        pinned(fg, 0, 1, [0], W, priority=ngc.EdgePriority.HEADROOM)
     with pytest.raises(ValueError, match="both endpoint sets"):
         pinned(fg, 1, 1, [0], MF)
     other = build(3, [(0, 1, 5, 1), (2, 1, 5, 1)])
-    foreign = config(ngc.Pinned([dag_of(other, [0])]), MF, selection=sel(prio=RES))
-    with pytest.raises(ValueError, match="foreign PredDAG"):
+    foreign = ngc.FlowPolicyConfig(routing=ngc.Global(support=dag_of(other, [0])))
+    with pytest.raises(ValueError, match=exact("support belongs to another graph")):
         ngc.FlowPolicy(fg, 0, 1, foreign)
+    foreign_route = ngc.ForwardingProgram.from_routes(
+        other, 0, 1, [ngc.Route(0, dag_of(other, [0]))]
+    )
+    with pytest.raises(ValueError, match=exact("program belongs to another graph")):
+        ngc.FlowPolicy(
+            fg, 0, 1, ngc.FlowPolicyConfig(routing=ngc.Pinned(foreign_route))
+        )
     fg.reset()  # no policy is bound

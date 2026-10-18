@@ -8,10 +8,12 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
+#include <pybind11/typing.h>
 
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "netgraph/core/evaluators.hpp"
 #include "netgraph/core/flow_policy.hpp"
@@ -78,6 +80,20 @@ py::object object_of(T value) {
   return std::move(obj);
 }
 
+// A tuple of new Python objects of the bound class T, one per row (object_of each): a failed
+// allocation raises and releases what was made (pybind11's cast of a vector of bound values
+// allocates each object unchecked).
+template <class T>
+py::tuple tuple_of(const std::vector<T>& rows) {
+  PyObject* raw = PyTuple_New(static_cast<Py_ssize_t>(rows.size()));
+  if (raw == nullptr) throw py::error_already_set();
+  auto out = py::reinterpret_steal<py::tuple>(raw);
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    PyTuple_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), object_of<T>(rows[i]).release().ptr());
+  }
+  return out;
+}
+
 // A new Python object of the bound class T (held by std::shared_ptr) owning `value`, through the
 // same checked allocation as new_object: for the values without a default constructor (PredDAG,
 // Path) that a search returns. A failure raises and releases everything made so far.
@@ -85,5 +101,71 @@ template <class T>
 py::object object_from(T value) {
   return emplace_object<T, std::shared_ptr<T>>(std::move(value)).first;
 }
+
+// The Python object of a shared value of the bound class T (held by std::shared_ptr): None for a
+// null pointer; the object already registered for it, if any (as pybind11's cast); else a new
+// object made by emplace_object's steps with `holder` in place of a new value. pybind11's own
+// cast of an existing holder marks the object as owner before it registers the value, so a
+// failed registration deletes the value while the holder still owns it (a double free); here
+// the object owns nothing until it holds its copy of the holder (a copy never allocates).
+template <class T>
+py::object shared_object(std::shared_ptr<T> holder) {
+  if (!holder) return py::none();
+  const py::detail::type_info* tinfo = py::detail::get_type_info(typeid(T), /*throw_if_missing=*/true);
+  if (tinfo->holder_enum_v != py::detail::holder_enum_t::std_shared_ptr) {
+    py::pybind11_fail("shared_object: the bound class is not held by std::shared_ptr");
+  }
+  if (py::handle existing = py::detail::find_registered_python_instance(holder.get(), tinfo)) {
+    return py::reinterpret_steal<py::object>(existing);
+  }
+  PyTypeObject* type = tinfo->type;
+  PyObject* raw = type->tp_alloc(type, 0);
+  if (raw == nullptr) throw py::error_already_set();
+  auto obj = py::reinterpret_steal<py::object>(raw);
+  auto* inst = reinterpret_cast<py::detail::instance*>(raw);
+  inst->allocate_layout();
+  inst->owned = false;
+  py::detail::values_and_holders(inst).begin()->value_ptr() = holder.get();
+  tinfo->init_instance(inst, &holder);
+  inst->owned = true;
+  return obj;
+}
+
+template <class T>
+py::object shared_object(std::shared_ptr<const T> holder) {
+  return shared_object(std::const_pointer_cast<T>(std::move(holder)));
+}
+
+// A py::object known to be a T, for signatures: pybind11 names it as T (the specialization of
+// handle_type_name below), so a binding that returns shared_object's result keeps its type.
+template <class T>
+class Typed : public py::object {
+public:
+  Typed() = default;
+  Typed(py::handle h, py::object::stolen_t) : py::object(h, py::object::stolen_t {}) {}
+  Typed(py::handle h, py::object::borrowed_t) : py::object(h, py::object::borrowed_t {}) {}
+  static bool check_(py::handle h) { return py::isinstance<T>(h); }
+};
+
+// shared_object(holder) as a T (holder not null) or as T | None.
+template <class T>
+Typed<std::remove_const_t<T>> typed_shared(std::shared_ptr<T> holder) {
+  return py::reinterpret_steal<Typed<std::remove_const_t<T>>>(shared_object(std::move(holder)).release());
+}
+template <class T>
+py::typing::Optional<std::remove_const_t<T>> optional_shared(std::shared_ptr<T> holder) {
+  return py::reinterpret_steal<py::typing::Optional<std::remove_const_t<T>>>(shared_object(std::move(holder)).release());
+}
+
+} // namespace netgraph::core::bindings
+
+namespace pybind11::detail {
+template <class T>
+struct handle_type_name<netgraph::core::bindings::Typed<T>> {
+  static constexpr auto name = make_caster<T>::name;
+};
+} // namespace pybind11::detail
+
+namespace netgraph::core::bindings {
 
 } // namespace netgraph::core::bindings

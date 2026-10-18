@@ -1,4 +1,4 @@
-"""The 59 fixtures of the independent reference replayed through the bindings (the ledger and
+"""The 55 fixtures of the independent reference replayed through the bindings (the ledger and
 the policies).
 
 ``tests/data/policy_fixtures.json`` was exported from the independent reference
@@ -10,7 +10,7 @@ termination, local outcomes, flags, drops, the cost curve and the requested outp
 trace (the reference's keys: offers, created, per source the creation reservations, reroute
 decisions, amounts and growth steps; Global's view, cap, flow-core payload and shares), the
 ledger after it (allocations, residuals, every record field, next FlowId, owners) and the
-policy state (roster, requested, +inf, placed demand, usable bundles, per source the flows'
+policy state (roster, requested, +inf, placed demand, per source the flows'
 ids, routes, T, deliveries, allocations, members and weights). An operation the reference
 rejects must raise here too (the messages differ), and a rejected placement leaves the policy's
 state as it was. Normalised on both sides: the T_max probe
@@ -52,6 +52,11 @@ PRIORITY = {
     "Residual": ngc.EdgePriority.RESIDUAL,
     "Capacity": ngc.EdgePriority.CAPACITY,
     "Headroom": ngc.EdgePriority.HEADROOM,
+}
+WEIGHTS = {
+    "Capacity": ngc.WeightBasis.CAPACITY,
+    "Explicit": ngc.WeightBasis.EXPLICIT,
+    "ResidualSnapshot": ngc.WeightBasis.RESIDUAL_SNAPSHOT,
 }
 
 
@@ -103,10 +108,9 @@ def config_of(g, c):
     if kind == "CostOnly":
         routing = ngc.CostOnly()
     elif kind == "Global":
-        routing = ngc.Global()
-    elif kind == "Pinned":
-        routing = ngc.Pinned([dag_of(g, b) for b in r["bundles"]])
-    else:
+        support = r.get("support")
+        routing = ngc.Global(support=None if support is None else dag_of(g, support))
+    elif kind == "CapacityAware":
         ceiling = None
         if r["max_path_cost"] is not None:
             name, value = r["max_path_cost"]
@@ -124,6 +128,8 @@ def config_of(g, c):
             reoptimize=r["reoptimize"],
             diminishing=dim,
         )
+    else:
+        raise AssertionError(f"the data names an unknown routing ({kind})")
     sel = c["selection"]
     return ngc.FlowPolicyConfig(
         routing=routing,
@@ -137,6 +143,7 @@ def config_of(g, c):
             sel["multipath"],
             sel["multi_edge"],
         ),
+        weights=None if c.get("weights") is None else WEIGHTS[c["weights"]],
     )
 
 
@@ -230,7 +237,6 @@ def policy_json(pol):
         "requested": st["requested"],
         "infinite": st["infinite"],
         "placed_demand": st["placed_demand"],
-        "usable": pol.usable_bundles(),
         "cohorts": cohorts,
     }
 
@@ -341,8 +347,8 @@ def replay(fx, at=None):
 
 
 def test_the_data_holds_every_fixture():
-    assert len(FIXTURES) == 59
-    assert len({fx["name"] for fx in FIXTURES}) == 59
+    assert len(FIXTURES) == 55
+    assert len({fx["name"] for fx in FIXTURES}) == 55
 
 
 @needs_hooks

@@ -164,15 +164,16 @@ TEST(ConfigOrigin, MatrixTexts) {
     EXPECT_EQ(construct_error(kB1, {0, 1}, {3}, cfg), text);
     EXPECT_EQ(error_of([&] { (void)capacity(*g, v({0, 1}), v({3}), QueryOptions {cfg}); }), text);
   }
-  // C10, C12 and C8 for Pinned.
-  Pinned pin;
-  pin.bundles = {dag_of(*g, {0})};
-  EXPECT_EQ(construct_error(kB1, {0}, {3}, FlowPolicyConfig {pin, FlowPlacement::MaxFlow, Admission::Lossless,
-                                                             std::nullopt, Origin::Equal}),
-            "Pinned does not accept origin");
-  EXPECT_EQ(construct_error(kB1, {0}, {3}, FlowPolicyConfig {.routing = pin}), "Pinned requires placement");
-  EXPECT_EQ(construct_error(kB1, {0}, {3}, FlowPolicyConfig {pin, FlowPlacement::MaxFlow, Admission::Lossy}),
-            "MAX_FLOW requires admission=LOSSLESS");
+  // C10, C12 and C8 for Pinned: it takes neither a placement nor an origin (its program has it).
+  const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0})});
+  const auto pinned_error = [&](const FlowPolicyConfig& c) {
+    FlowLedger fg(g);
+    return error_of([&] { FlowPolicy p(fg, v({0}), v({3}), c); });
+  };
+  EXPECT_EQ(pinned_error(FlowPolicyConfig {.routing = pin, .origin = Origin::Equal}), "Pinned does not accept origin");
+  EXPECT_EQ(pinned_error(FlowPolicyConfig {pin, FlowPlacement::MaxFlow, Admission::Lossy}),
+            "Pinned does not accept placement");
+  EXPECT_EQ(pinned_error(FlowPolicyConfig {.routing = pin, .admission = Admission::Lossy}), "");
   // C11: only CostOnly reads a cache (policy and evaluators).
   DagCache cache(*g);
   FlowLedger fg(g);
@@ -180,7 +181,7 @@ TEST(ConfigOrigin, MatrixTexts) {
       {glob(), {0, 1}, "Global does not use DagCache"},
       {FlowPolicyConfig {.routing = CapacityAware {}, .placement = FlowPlacement::MaxFlow}, {0, 1},
        "T1 does not use DagCache"},
-      {FlowPolicyConfig {.routing = pin, .placement = FlowPlacement::MaxFlow}, {0}, "Pinned does not use DagCache"},
+      {FlowPolicyConfig {.routing = pin}, {0}, "Pinned does not use DagCache"},
   };
   for (const auto& [cfg, s, text] : cached) {
     EXPECT_EQ(error_of([&] { FlowPolicy p(fg, s, v({3}), cfg, nullptr, &cache); }), text);
@@ -370,8 +371,9 @@ TEST(Pooled, TransitThroughASource) {
 
 // P14: Residual weights read once, on the residual at the first positive call's entry.
 TEST(Pooled, ResidualWeightsOnTheCommonView) {
-  Case k(kSnap, {0, 1}, {3}, cost_only(FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Residual)),
-         {}, {10, 10, 2, 10});
+  auto snapshot = cost_only(FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Residual));
+  snapshot.weights = WeightBasis::ResidualSnapshot;
+  Case k(kSnap, {0, 1}, {3}, snapshot, {}, {10, 10, 2, 10});
   const auto r = k.place(std::nullopt);
   EXPECT_EQ(r.placed, 12);
   EXPECT_EQ(k.records(), (decltype(k.records()) {{{{0, 6}, {2, 1}, {3, 5}}, 6}, {{{1, 6}, {2, 1}, {3, 5}}, 6}}));
@@ -381,12 +383,11 @@ TEST(Pooled, ResidualWeightsOnTheCommonView) {
 TEST(Pooled, WeightsFrozenForTheEpoch) {
   const auto g = graph(kSnap);
   FlowLedger fg(g);
-  Pinned pin;
-  pin.bundles = {dag_of(*g, {2})};
-  auto other = std::make_unique<FlowPolicy>(fg, v({2}), v({3}), FlowPolicyConfig {.routing = pin, .placement = FlowPlacement::EqualBalanced});
+  auto other = std::make_unique<FlowPolicy>(fg, v({2}), v({3}), FlowPolicyConfig {.routing = pinned_dags(*g, 2, 3, {dag_of(*g, {2})})});
   EXPECT_EQ(other->place(8).placed, 8);
-  FlowPolicy p(fg, v({0, 1}), v({3}),
-               cost_only(FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Residual)));
+  auto snapshot = cost_only(FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Residual));
+  snapshot.weights = WeightBasis::ResidualSnapshot;
+  FlowPolicy p(fg, v({0, 1}), v({3}), snapshot);
   EXPECT_EQ(p.place(2).placed, 2);
   other->remove();
   const auto r = p.place(10, kEdges);
@@ -1078,17 +1079,17 @@ TEST(ResultShape, RowsForEveryInputSource) {
   EXPECT_EQ(rows(k.place(3)),
             (std::vector<Row> {{0, kNone, 3, 3, 0, 0}, {1, kNone, 0, 0, 0, 0}, {4, kNone, 0, 0, 0, 0}}));
   const auto g = graph(kB1);
-  Pinned pin;
-  pin.bundles = {dag_of(*g, {0})};
+  const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0})});
   for (const auto& cfg : {cost_only(), cost_only(FlowPlacement::Weighted),
                           FlowPolicyConfig {.routing = CapacityAware {}, .placement = FlowPlacement::EqualBalanced}}) {
     FlowLedger fg(g);
     EXPECT_FALSE(FlowPolicy(fg, v({0, 1}), v({3}), cfg).place(1).total_cost.has_value());
   }
   FlowLedger fg(g);
-  EXPECT_FALSE(FlowPolicy(fg, v({0}), v({3}), FlowPolicyConfig {.routing = pin, .placement = FlowPlacement::MaxFlow})
-                   .place(1)
-                   .total_cost.has_value());
+  EXPECT_FALSE(FlowPolicy(fg, v({0}), v({3}), FlowPolicyConfig {.routing = pin}).place(1).total_cost.has_value());
+  FlowLedger fs(g);
+  EXPECT_EQ(*FlowPolicy(fs, v({0}), v({3}), FlowPolicyConfig {.routing = Global {dag_of(*g, {0})}}).place(1).total_cost,
+            c(1));
   Case mf(kB1, {0, 1}, {3}, cost_only(FlowPlacement::MaxFlow));
   EXPECT_EQ(*mf.place(12).total_cost, c(32));
 }
@@ -1107,10 +1108,10 @@ TEST(ResultShape, CapacityAwareKeepsItsComputation) {
 // S8, S9 (D-zero-service): Pinned over a zero edge in the new shape.
 TEST(ResultShape, PinnedInTheNewShape) {
   const auto g = graph(kZero);
-  Pinned pin;
-  pin.bundles = {dag_of(*g, {0})};
   FlowLedger fg(g);
-  FlowPolicy w(fg, v({0}), v({1}), FlowPolicyConfig {pin, FlowPlacement::Weighted, Admission::Lossy});
+  FlowPolicy w(fg, v({0}), v({1}),
+               FlowPolicyConfig {.routing = pinned_dags(*g, 0, 1, {dag_of(*g, {0})}, FlowPlacement::Weighted),
+                                 .admission = Admission::Lossy});
   const auto r = w.place(2);
   EXPECT_EQ(r.placed, 0);
   EXPECT_EQ(r.termination, Termination::NoActiveWeight);
@@ -1119,7 +1120,8 @@ TEST(ResultShape, PinnedInTheNewShape) {
   EXPECT_EQ(lo(r.offered), 2);
   EXPECT_EQ(rows(r), (std::vector<Row> {{0, 2, 2, 0, 2, 0}}));
   FlowLedger fg2(g);
-  FlowPolicy eb(fg2, v({0}), v({1}), FlowPolicyConfig {pin, FlowPlacement::EqualBalanced, Admission::Lossy});
+  FlowPolicy eb(fg2, v({0}), v({1}),
+                FlowPolicyConfig {.routing = pinned_dags(*g, 0, 1, {dag_of(*g, {0})}), .admission = Admission::Lossy});
   const auto e = eb.place(2);
   EXPECT_EQ(e.drops, (Counters {{0, c(2)}}));
   EXPECT_EQ(e.termination, Termination::Complete);

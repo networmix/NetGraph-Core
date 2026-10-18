@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "netgraph/core/detail/traversal.hpp"
+#include "netgraph/core/eligibility.hpp"
 #include "netgraph/core/graph.hpp"
 #include "netgraph/core/options.hpp"
 #include "netgraph/core/pred_dag.hpp"
@@ -61,7 +62,7 @@ inline std::size_t round_robin(Amount total, std::span<Amount> out) noexcept {
 // is its weight and a its allocation so far. Break ties by lower member index. Start each member
 // at its lower quota floor(total * w / W), where W is the weight sum; then assign the fewer than k
 // remaining units by those quotients, comparing with exact 128-bit cross products. Weights are
-// >= 0 with W < 2^62, total < 2^63: a zero weight gets nothing, and all-zero weights give
+// in [0, 2^62) (their sum is exact, any size), total < 2^63: a zero weight gets nothing, and all-zero weights give
 // nothing (out all 0). Equal positive weights give round robin. Increasing total never reduces
 // any member's allocation (house monotonicity).
 void highest_averages(Amount total, std::span<const Amount> weights, std::span<Amount> out);
@@ -69,12 +70,20 @@ void highest_averages(Amount total, std::span<const Amount> weights, std::span<A
 // ---------------------------------------------------------------- plans
 
 // Throws std::invalid_argument for a value outside its enumeration and for the unsupported
-// combinations (Lossy with MaxFlow: "MAX_FLOW requires admission=LOSSLESS"; Weighted with priority
-// Headroom).
-void check_kernel(FlowPlacement placement, Admission admission, EdgePriority priority);
-// The combination rule of check_kernel alone, for a caller that has already checked the three
+// combination (Lossy with MaxFlow: "MAX_FLOW requires admission=LOSSLESS").
+void check_kernel(FlowPlacement placement, Admission admission);
+// The combination rule of check_kernel alone, for a caller that has already checked the
 // enumerations (resolve_config).
-void check_kernel_combination(FlowPlacement placement, Admission admission, EdgePriority priority);
+void check_kernel_combination(FlowPlacement placement, Admission admission);
+
+// Where a Weighted plan's member weights come from (ignored by the other kernels): Capacity, the
+// static capacity; Explicit, `values` per EdgeId (one entry per edge; a positive weight on an edge
+// of capacity 0 is 0); ResidualSnapshot, `values` aligned with the route's edges in ascending
+// EdgeId (the free capacity read on the creation view). A route edge of weight 0 is no member.
+struct WeightSource {
+  WeightBasis basis {WeightBasis::Capacity};
+  std::span<const Amount> values {};
+};
 
 struct KernelPlan {
   FlowPlacement placement {FlowPlacement::MaxFlow};
@@ -127,10 +136,11 @@ private:
   std::vector<std::int32_t> store_ {};
 };
 
-// The edges of `dag` that lie on some walk from `src` to the destination set (edges leaving a
-// destination removed: destinations are terminal), ascending.
+// The edges of `dag` that `elig` allows (every one when null) and that lie on some walk from
+// `src` to the destination set (edges leaving a destination removed: destinations are terminal),
+// ascending.
 [[nodiscard]] std::vector<EdgeId> prune(const Graph& g, const PredDAG& dag, NodeId src,
-                                        std::span<const NodeId> dsts);
+                                        std::span<const NodeId> dsts, const Eligibility* elig = nullptr);
 
 // The minimum walk cost from `src` to the destination set over `route` (a record's bundle:
 // its route cost); kUnreachable when the route has no such walk. The split-graph builder's
@@ -139,35 +149,39 @@ private:
                               std::span<const NodeId> dsts);
 
 // The plan of a new flow on `route` (acyclic; the flow's DAG or path, its record's bundle), its
-// membership captured on `creation_view` (aligned with the route's edges in ascending EdgeId:
-// the view of the search that created the route; read only by a Weighted Residual membership,
-// may be empty otherwise): MaxFlow and EqualBalanced every route edge (an edge of capacity 0 is
-// a member that carries nothing: EqualBalanced still gives it its round-robin share), Weighted
-// the edges of positive weight by `priority` (Residual: creation view >= 1 unit; Capacity: static
-// capacity >= 1 unit) with the weights read from the same values; Lossy keeps its kernel's
-// membership. The members are pruned to the walks from src to the destination set (none
-// leaving a destination) and given their topological structure, in one pass. With `cost`, the
-// route's minimum walk cost (route_cost) is computed in the same pass when every route edge is a
-// member. `dsts` ascending and disjoint from src.
+// Weighted weights from `weights` (WeightSource; its creation view aligned with the route's edges
+// in ascending EdgeId): MaxFlow and EqualBalanced every route edge (an edge of capacity 0 is a
+// member that carries nothing: EqualBalanced still gives it its round-robin share), Weighted the
+// edges of positive weight, with those weights; Lossy keeps its kernel's membership. The members
+// are pruned to the walks from src to the destination set (none leaving a destination) and given
+// their topological structure, in one pass. With `cost`, the route's minimum walk cost
+// (route_cost) is computed in the same pass when every route edge is a member. `dsts` ascending
+// and disjoint from src.
 [[nodiscard]] KernelPlan make_plan(const Graph& g, FlowPlacement placement, Admission admission,
-                                   EdgePriority priority, NodeId src, std::span<const NodeId> dsts,
-                                   const PredDAG& route, std::span<const Amount> creation_view, Cost* cost = nullptr);
+                                   const WeightSource& weights, NodeId src, std::span<const NodeId> dsts,
+                                   const PredDAG& route, Cost* cost = nullptr);
 // The same plan with several roots (a CostOnly demand's pooled program): the members are pruned to
 // the walks from any root to the destination set; `roots` ascending and disjoint from `dsts`.
 [[nodiscard]] KernelPlan make_plan(const Graph& g, FlowPlacement placement, Admission admission,
-                                   EdgePriority priority, std::span<const NodeId> roots, std::span<const NodeId> dsts,
-                                   const PredDAG& route, std::span<const Amount> creation_view);
+                                   const WeightSource& weights, std::span<const NodeId> roots,
+                                   std::span<const NodeId> dsts, const PredDAG& route);
 
-// The usable route of a Pinned bundle as a plan: the bundle's edges that `elig` allows (every
-// one when null), whatever their capacity, pruned to the walks from src to the destination set,
-// with make_plan's membership: route == members for MaxFlow and EqualBalanced; Weighted with
-// Capacity keeps the route edges of positive capacity on the walks that remain (its weights the
-// capacities). It is the plan of every kernel whose membership is static; a Weighted Residual
-// plan is made from its route at creation (make_plan). With `cost`, the usable route's minimum
-// walk cost (kUnreachable when it is empty), computed in the same pass.
-[[nodiscard]] KernelPlan make_route_plan(const Graph& g, FlowPlacement placement, Admission admission,
-                                         EdgePriority priority, NodeId src, std::span<const NodeId> dsts,
-                                         const PredDAG& bundle, const Eligibility* elig, Cost* cost = nullptr);
+// The plan of a supplied split route (from_routes): `dag` pruned to the walks from `src` to the
+// destination set (the plan's route, ascending), its members every route edge (EqualBalanced) or
+// the route edges of positive weight (Weighted: `basis` with `edge_values` one entry per edge, the
+// explicit weights or the residual snapshot; a weight on an edge of capacity 0 is 0 unless the
+// basis is the snapshot), with `cost` the route's minimum walk cost. One pass over `dag`, and a
+// second only when a Weighted route edge has weight 0. Equal to make_plan on the pruned route.
+[[nodiscard]] KernelPlan make_route_plan(const Graph& g, FlowPlacement placement, WeightBasis basis,
+                                         std::span<const Amount> edge_values, NodeId src,
+                                         std::span<const NodeId> dsts, const PredDAG& dag, Cost* cost);
+
+// A plan's replay under a mask (8.4): its members that `elig` allows (every one when null), pruned
+// to the walks from `roots` (ascending) to `dsts` (ascending; the allowed destinations), with the
+// members' frozen weights; members of capacity 0 stay (an EqualBalanced member keeps its share).
+// The route is the plan's.
+[[nodiscard]] KernelPlan restrict_plan(const Graph& g, const KernelPlan& plan, std::span<const NodeId> roots,
+                                       std::span<const NodeId> dsts, const Eligibility* elig);
 
 // ---------------------------------------------------------------- CostOnly creation
 
@@ -188,7 +202,8 @@ struct CreationProducts {
 // all static shortest paths to sorted destinations `dsts`; start at `src` and apply selection
 // on `view`. The result matches support_route, bundle construction and make_plan: reuse
 // `support` if it is the whole route, otherwise build its bundle with PredDAGBuilder::of_edges.
-// Requires multipath and static membership (all kernels except Weighted with Residual).
+// Requires multipath and static membership (all kernels except Weighted with ResidualSnapshot
+// weights; a Weighted route edge of weight 0 also returns nullopt).
 // While building, check: every route edge can be a member; none leaves a destination; every
 // route node reaches a destination; the source is first in topological order; no cycle exists;
 // and each tail's members are consecutive. These checks ensure members == route.
@@ -198,7 +213,8 @@ struct CreationProducts {
                                                                  const std::shared_ptr<const PredDAG>& support,
                                                                  NodeId src, std::span<const NodeId> dsts,
                                                                  const PathSelection& selection, PriorityFn view,
-                                                                 FlowPlacement placement, Admission admission);
+                                                                 FlowPlacement placement, Admission admission,
+                                                                 const WeightSource& weights);
 
 // ---------------------------------------------------------------- allocation
 

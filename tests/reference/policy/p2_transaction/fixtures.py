@@ -5,8 +5,11 @@ The 44 fixtures of the grid prototype regenerated in units (the old names mapped
 stated in input coordinates; bundles and expected per-edge arrays are input
 positions translated through the inverse of ``input_index()``. Expected values are
 derived in the fixture text or bodies (round robin, highest averages, hand-traced
-transactions), never read back from the engine. "Manual" owners are ``Pinned``
-policies with one bundle.
+transactions), never read back from the engine. "Manual" owners are ``Global``
+policies whose support is one bundle (a controller restricted to it; step 3 converted the
+former single-bundle ``Pinned`` MaxFlow owners by this rule: the same minimum-cost flow on the
+same DAG). CostOnly Weighted configurations with the selection priority Residual take the
+residual-snapshot weight basis (step 3: weights no longer come from the priority).
 
 Graph shapes (input positions):
 * ``diamond(s0, t0, s1, t1)``: 0 -[0]-> 1 -[1]-> 3 and 0 -[2]-> 2 -[3]-> 3; route 0
@@ -46,7 +49,6 @@ FIXTURE_MAP = {
     "creation_fewer_routes": "creation_fewer_routes",
     "creation_retry_after_release": "creation_retry_after_release",
     "eb_1_plus_2_vs_3": "eb_1_plus_2_vs_3",
-    "eb_three_members_g_1_1": "eb_correlated_remainders",
     "eb_unequal_1_10": "eb_unequal_1_10",
     "eight_versus_ten_capacity": "eight_versus_ten_capacity",
     "eight_versus_ten_headroom": "eight_versus_ten_headroom",
@@ -65,9 +67,6 @@ FIXTURE_MAP = {
     "limits_diminishing": "limits_diminishing",
     "limits_max_flows_created": "limits_kmaxflowspercall",
     "lossy_diamond_10_then_1": "lossy_diamond_10_then_1",
-    "lossy_shared_ingress": "lossy_shared_ingress",
-    "pinned_bundle_rules": "pinned_bundle_rules",
-    "pinned_kernels_5_1": "pinned_kernels_5_1",
     "reopt_double_spend": "reopt_double_spend",
     "request_12_on_5_5": "request_12_on_5_5",
     "retention_third_party_removal": "retention_third_party_removal",
@@ -136,7 +135,11 @@ def ca(kernel, priority="Capacity", fc=1, mx=None, reopt=False, sel=None, **kw):
 
 
 def co(kernel, adm=LOSSLESS, sel=None):
-    return P.FlowPolicyConfig(P.CostOnly(), kernel, adm, sel or search.Selection())
+    sel = sel or search.Selection()
+    # By rule (step 3): Weighted with the Residual priority read its weights from the residual
+    # at preparation, which is the residual-snapshot weight basis.
+    weights = "ResidualSnapshot" if kernel == W and sel.priority == "Residual" else None
+    return P.FlowPolicyConfig(P.CostOnly(), kernel, adm, sel, weights)
 
 
 def glob():
@@ -160,17 +163,10 @@ class Ctx:
             return FlowGraph(self.g)
         return FlowGraph(self.g, [residual_input[p] for p in self.g.input_index()])
 
-    def pin(self, kernel, bundles, adm=LOSSLESS, sel=None):
-        return P.FlowPolicyConfig(
-            P.Pinned(tuple(self.ids(b) for b in bundles)),
-            kernel,
-            adm,
-            sel or search.Selection(),
-        )
-
     def manual(self, fg, src, dst, positions, amount, label="manual owner"):
-        """A fixed-structure owner: a Pinned MaxFlow policy with one bundle."""
-        pol = P.FlowPolicy(fg, src, dst, self.pin(MF, [positions]))
+        """A fixed-structure owner: Global with one bundle as its support."""
+        cfg = P.FlowPolicyConfig(P.Global(self.ids(positions)), None, LOSSLESS, None)
+        pol = P.FlowPolicy(fg, src, dst, cfg)
         r = self.s.place(label, pol, amount, fg=fg)
         return pol, r
 
@@ -474,13 +470,9 @@ def hidden_beneficial(s: PSnap):
 def _four_calls(s: PSnap, kernel, adm, expected):
     for shape, caps in (("equal", (5, 5)), ("unequal", (1, 10))):
         c = Ctx(s, f"diamond_{shape}", diamond(caps[0], caps[0], caps[1], caps[1]))
-        for mode in ("CostOnly", "Pinned"):
+        for mode in ("CostOnly",):
             fg = c.ledger()
-            cfg = (
-                co(kernel, adm)
-                if mode == "CostOnly"
-                else c.pin(kernel, [[0, 1], [2, 3]], adm)
-            )
+            cfg = co(kernel, adm)
             pol = P.FlowPolicy(fg, 0, 3, cfg)
             got = [
                 s.place(f"{shape} {mode} call {i}", pol, 1, fg=fg).placed
@@ -494,7 +486,7 @@ def _four_calls(s: PSnap, kernel, adm, expected):
     "four_calls",
     ["8a", "16.4"],
     "MaxFlow, four calls of 1 on equal (5/5) and unequal (1/10) routes, one "
-    "CostOnly flow on the diamond and two Pinned flows: 1, 1, 1, 1.",
+    "CostOnly flow on the diamond: 1, 1, 1, 1.",
 )
 def four_calls_mf(s: PSnap):
     _four_calls(s, MF, LOSSLESS, {"equal": [1] * 4, "unequal": [1] * 4})
@@ -609,44 +601,6 @@ def lossy_diamond(s: PSnap):
     )
     rec = pol.records()[0]
     s.expect("record", (rec.offered, rec.delivered, rec.drops), (11, 6, {tail: 5}))
-
-
-@fixture(
-    "lossy_shared_ingress",
-    "lossy",
-    ["19", "16.6"],
-    "Two Pinned Lossy EB flows share an ingress of capacity 2 (tails 1 and 10): "
-    "requests 2 then 2 deliver 2 then 0 (the second offers are dropped on the full "
-    "ingress, complete); one request 4 delivers 1 (the first flow spends the ingress "
-    "on its 1-tail, the second flow's offer of 2 is dropped on the ingress). Not "
-    "additive (rule 19).",
-)
-def lossy_shared(s: PSnap):
-    c = Ctx(
-        s,
-        "shared_ingress",
-        (4, [(0, 1, 2, 1), (1, 3, 1, 1), (1, 2, 10, 1), (2, 3, 10, 1)]),
-    )
-    bundles = [[0, 1], [0, 2, 3]]
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 3, c.pin(EB, bundles, LOSSY))
-    a = s.place("request 2", pol, 2)
-    b = s.place("request 2 again", pol, 2)
-    s.expect(
-        "2 then 2",
-        ((a.placed, a.termination), (b.placed, b.termination)),
-        ((2, "complete"), (0, "complete")),
-    )
-    fg2 = c.ledger()
-    pol2 = P.FlowPolicy(fg2, 0, 3, c.pin(EB, bundles, LOSSY))
-    r = s.place("request 4", pol2, 4, fg=fg2)
-    s.expect("single 4", (r.placed, r.termination), (1, "complete"))
-    recs = pol2.records()
-    s.expect(
-        "records (offered, delivered, drops)",
-        [(x.offered, x.delivered, dict_to_input(c.g, x.drops)) for x in recs],
-        [(2, 1, [0, 1, 0, 0]), (2, 0, [2, 0, 0, 0])],
-    )
 
 
 # ====================================================================== +inf
@@ -877,49 +831,19 @@ def third_party(s: PSnap):
 
 
 @fixture(
-    "eb_correlated_remainders",
-    "units",
-    ["16.5", "9.2"],
-    "Round-robin remainders correlate across flows sharing a split: three parallel "
-    "1-unit links. A Pinned EB flow on the three links places 3. Two Pinned bundles "
-    "that become equal after pruning (the second carries a dead branch) keep two "
-    "flows on the same split: T = 2 gives each flow its unit on the lowest-id link "
-    "(2 > 1), so the cohort places 1 (exact and feasible; no start rotation, "
-    "decided).",
-)
-def eb_correlated(s: PSnap):
-    c = Ctx(
-        s,
-        "parallel_1_dead",
-        (3, [(0, 1, 1, 1), (0, 1, 1, 1), (0, 1, 1, 1), (0, 2, 1, 1)]),
-    )
-    fg = c.ledger()
-    r = s.place("one flow", P.FlowPolicy(fg, 0, 1, c.pin(EB, [[0, 1, 2]])), 3, fg=fg)
-    s.expect("one flow", (r.placed, r.termination), (3, "complete"))
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 1, c.pin(EB, [[0, 1, 2], [0, 1, 2, 3]]))
-    r = s.place("two flows on the same split", pol, 3, fg=fg)
-    s.expect(
-        "cohort", (r.placed, r.termination, c.shares(pol)), (1, "exhausted", [1, 0])
-    )
-    s.expect("routes equal after pruning", c.routes_of(pol), [[0, 1, 2], [0, 1, 2]])
-
-
-@fixture(
     "eb_1_plus_2_vs_3",
     "units",
     ["16.4", "16.5"],
     "Three ample parallel links: EB place(1); place(2) equals place(3) exactly "
-    "([1, 1, 1]) for one CostOnly flow and for a Pinned cohort of three single-link "
-    "flows (round robin over the cohort in FlowId order).",
+    "([1, 1, 1]) for one CostOnly flow.",
 )
 def eb_additivity(s: PSnap):
     c = Ctx(s, "parallel_10", parallel([10, 10, 10]))
-    for mode in ("CostOnly", "Pinned"):
+    for mode in ("CostOnly",):
         finals = []
         for calls in ([1, 2], [3]):
             fg = c.ledger()
-            cfg = co(EB) if mode == "CostOnly" else c.pin(EB, [[0], [1], [2]])
+            cfg = co(EB)
             pol = P.FlowPolicy(fg, 0, 1, cfg)
             got = [s.place(f"{mode} {v}", pol, v, fg=fg).placed for v in calls]
             s.expect(f"{mode} {calls}", got, calls)
@@ -961,8 +885,7 @@ def weighted_additivity(s: PSnap):
     "links has the source in its roster and creates its zero-delivery record on "
     "the static support (exhausted: MaxFlow carries 0 there). No route: "
     "CapacityAware on a zero baseline has a static roster but no residual "
-    "route (no_route, no id consumed); Pinned with every bundle excluded "
-    "(usable_bundles 0, no_route).",
+    "route (no_route, no id consumed).",
 )
 def admission(s: PSnap):
     c = Ctx(s, "diamond_5", diamond(5, 5, 5, 5))
@@ -1004,11 +927,6 @@ def admission(s: PSnap):
     s.expect(
         "CapacityAware no route", (r.termination, fgz.next_flow_id()), ("no_route", 0)
     )
-    fgd = c.ledger()
-    elig = c.g.eligibility(excluded_edges=c.ids([0, 2]))
-    pd = P.FlowPolicy(fgd, 0, 3, c.pin(MF, [[0, 1], [2, 3]]), elig)
-    r = s.place("Pinned all down", pd, 1, fg=fgd)
-    s.expect("Pinned no route", (r.termination, pd.usable_bundles()), ("no_route", 0))
 
 
 # ====================================================================== limits
@@ -1020,8 +938,7 @@ def admission(s: PSnap):
     ["8b", "9.2", "9.4"],
     "kMaxFlowsPerCall is an engine constant (10,000); the fixture lowers the "
     "module's test hook to 3. Growth over five 1-unit links stops after 3 creations "
-    "(limit_flows, placed 3); a Pinned policy with 5 bundles still creates 5 flows "
-    "(the cap counts CapacityAware creations); two CapacityAware sources share one "
+    "(limit_flows, placed 3); two CapacityAware sources share one "
     "created counter: source 0 creates 3, source 1's creation is blocked by the cap "
     "(local limit_flows, nothing committed for it, no id consumed).",
 )
@@ -1039,10 +956,6 @@ def limits_created(s: PSnap):
             (r.placed, r.termination, len(pol.flow_ids())),
             (3, "limit_flows", 3),
         )
-        fg = c.ledger()
-        pin = P.FlowPolicy(fg, 0, 1, c.pin(MF, [[i] for i in range(5)]))
-        r = s.place("Pinned 5 bundles", pin, 5, fg=fg)
-        s.expect("Pinned not capped", (r.placed, len(pin.flow_ids())), (5, 5))
         c2 = Ctx(s, "two_sources", (3, [(0, 2, 1, 1)] * 4 + [(1, 2, 1, 1)] * 4))
         fg = c2.ledger()
         two = P.FlowPolicy(fg, [0, 1], 2, ca(MF, priority="Residual"))
@@ -1144,75 +1057,6 @@ def lifetime(s: PSnap):
     s.expect("reset clears orphans", (fg.records(), fg.next_flow_id()), ([], 3))
 
 
-# ====================================================================== Pinned
-
-
-@fixture(
-    "pinned_kernels_5_1",
-    "pinned",
-    ["8a", "19", "16.5"],
-    "Pinned routes of capacity 5 and 1, request 8: MaxFlow 6 and Weighted 6 "
-    "(sequential fill, exhausted, remaining 2); EqualBalanced 3 (round robin over "
-    "the cohort: [2, 1]); Lossy 5 (offers [4, 4]: the 1-route carries 1 and drops 3 "
-    "on its first link; complete).",
-)
-def pinned_kernels(s: PSnap):
-    c = Ctx(s, "diamond_5_1", diamond(5, 5, 1, 1))
-    for kernel, adm, placed, term in (
-        (MF, LOSSLESS, 6, "exhausted"),
-        (W, LOSSLESS, 6, "exhausted"),
-        (EB, LOSSLESS, 3, "exhausted"),
-        (EB, LOSSY, 5, "complete"),
-    ):
-        fg = c.ledger()
-        pol = P.FlowPolicy(fg, 0, 3, c.pin(kernel, [[0, 1], [2, 3]], adm))
-        r = s.place(f"{kernel}/{adm} request 8", pol, 8, fg=fg)
-        s.expect(f"{kernel}/{adm}", (r.placed, r.termination), (placed, term))
-        if adm == LOSSY:
-            s.expect("Lossy drops", r.drops, [(c.ids([2])[0], 3)])
-
-
-@fixture(
-    "pinned_bundle_rules",
-    "pinned",
-    ["13", "12", "9.1"],
-    "Pinned rules: an empty list, duplicate bundles (pre-prune), a bundle without a "
-    "src -> dst walk and a source set are rejected; bundles that become equal after "
-    "pruning keep independent flows; a multi-walk DAG bundle with mixed costs "
-    "reports its minimum-cost walk as route_cost (3, not 4).",
-)
-def pinned_rules(s: PSnap):
-    c = Ctx(
-        s,
-        "mixed",
-        (4, [(0, 1, 5, 1), (1, 3, 5, 2), (0, 2, 5, 1), (2, 3, 5, 3), (0, 3, 5, 9)]),
-    )
-    fg = c.ledger()
-    s.raises(
-        "empty list",
-        P.FlowPolicy,
-        fg,
-        0,
-        3,
-        P.FlowPolicyConfig(P.Pinned(()), MF, LOSSLESS, search.Selection()),
-    )
-    s.raises("duplicate", P.FlowPolicy, fg, 0, 3, c.pin(MF, [[0, 1], [0, 1]]))
-    s.raises("malformed", P.FlowPolicy, fg, 0, 3, c.pin(MF, [[0, 2]]))
-    s.raises("source set", P.FlowPolicy, fg, [0, 1], 3, c.pin(MF, [[0, 1]]))
-    elig = c.g.eligibility(excluded_edges=c.ids([4]))
-    pol = P.FlowPolicy(fg, 0, 3, c.pin(MF, [[0, 1], [0, 1, 4]]), elig)
-    s.expect("two usable bundles", pol.usable_bundles(), 2)
-    s.place("request 1", pol, 1)
-    s.expect(
-        "independent flows on equal pruned routes", c.routes_of(pol), [[0, 1], [0, 1]]
-    )
-    fg2 = c.ledger()
-    multi = P.FlowPolicy(fg2, 0, 3, c.pin(MF, [[0, 1, 2, 3]]))
-    s.place("multi-walk bundle", multi, 7, fg=fg2)
-    s.expect("route_cost is the min-cost walk", multi.records()[0].route_cost, 3)
-    s.expect("cheapest walk fills first", c.alloc(fg2), [5, 5, 2, 2, 0])
-
-
 # ====================================================================== flags
 
 
@@ -1309,15 +1153,15 @@ def flag_table(s: PSnap):
     ["9.4", "8"],
     "Revision-20 witness: a first place(1) on a static route whose unit another "
     "owner holds creates a zero-delivery record: routes_changed true, termination "
-    "exhausted, the record stays (CostOnly and Pinned); a second zero-delivery call "
-    "keeps the same ids and sets no flag (revision 21).",
+    "exhausted, the record stays (CostOnly); a second zero-delivery call keeps the same "
+    "ids and sets no flag (revision 21).",
 )
 def flag_zero_delivery(s: PSnap):
     c = Ctx(s, "one_unit", parallel([1]))
-    for mode in ("CostOnly", "Pinned"):
+    for mode in ("CostOnly",):
         fg = c.ledger()
         c.manual(fg, 0, 1, [0], 1)
-        cfg = co(EB) if mode == "CostOnly" else c.pin(EB, [[0]])
+        cfg = co(EB)
         pol = P.FlowPolicy(fg, 0, 1, cfg)
         r = s.place(f"{mode} place(1)", pol, 1, fg=fg)
         s.expect(
@@ -1503,8 +1347,8 @@ def sources_inf(s: PSnap):
     "sources_limits_and_validation",
     "sources",
     ["13", "9.3"],
-    "Endpoint-set validation: Pinned with a source set, an empty source set and "
-    "overlapping sets are rejected; an excluded source is skipped from the roster "
+    "Endpoint-set validation: an empty source set and overlapping sets are "
+    "rejected; an excluded source is skipped from the roster "
     "(roster [1]); a source that does not reach a destination statically is not in "
     "the roster; three sources of a CostOnly policy create three records.",
 )
@@ -1515,7 +1359,6 @@ def sources_validation(s: PSnap):
         (5, [(0, 3, 5, 1), (1, 3, 5, 1), (2, 3, 5, 1), (4, 0, 1, 1)]),
     )
     fg = c.ledger()
-    s.raises("Pinned source set", P.FlowPolicy, fg, [0, 1], 3, c.pin(MF, [[0]]))
     s.raises("empty source set", P.FlowPolicy, fg, [], 3, co(MF))
     s.raises("overlap", P.FlowPolicy, fg, [0, 3], 3, co(MF))
     elig = c.g.eligibility(excluded_nodes=[0])

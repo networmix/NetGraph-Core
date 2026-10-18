@@ -12,6 +12,7 @@
 #if NETGRAPH_CORE_PRIVATE_HOOKS
 #include "netgraph/core/detail/ledger_access.hpp"
 #endif
+#include "publication.hpp"
 #include "registration.hpp"
 
 namespace py = pybind11;
@@ -37,7 +38,7 @@ void register_flow_ledger(py::module_& m) {
            "physical baseline goes through to_units first); None: the capacities. ValueError otherwise.")
       .def("uid", &FlowLedger::uid, "process-unique ledger uid (the first half of every FlowId)")
       .def(
-          "graph", [](const FlowLedger& fg) { return std::const_pointer_cast<Graph>(fg.graph()); },
+          "graph", [](const FlowLedger& fg) { return typed_shared(fg.graph()); },
           "the ledger's graph")
       .def(
           "capacity_units",

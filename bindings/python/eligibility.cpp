@@ -8,6 +8,7 @@
 
 #include "netgraph/core/eligibility.hpp"
 #include "values.hpp"
+#include "publication.hpp"
 #include "registration.hpp"
 
 namespace py = pybind11;
@@ -38,12 +39,12 @@ void register_eligibility(py::module_& m) {
           "bool[E] read-only view (not excluded and both endpoints allowed)")
       .def_static(
           "intersect",
-          [](const std::shared_ptr<Eligibility>& a, const std::shared_ptr<Eligibility>& b) -> std::shared_ptr<Eligibility> {
+          [](const std::shared_ptr<Eligibility>& a, const std::shared_ptr<Eligibility>& b) {
             if (!a || !b) throw py::value_error("Eligibility.intersect takes two Eligibility values");
             auto r = Eligibility::intersect(*a, *b);
-            if (r.uid() == a->uid()) return a;
-            if (r.uid() == b->uid()) return b;
-            return std::make_shared<Eligibility>(std::move(r));
+            if (r.uid() == a->uid()) return typed_shared(a);
+            if (r.uid() == b->uid()) return typed_shared(b);
+            return typed_shared(std::make_shared<Eligibility>(std::move(r)));
           },
           py::arg("a"), py::arg("b"),
           "The intersection of two values of one graph (ValueError for values of different graphs):\n"

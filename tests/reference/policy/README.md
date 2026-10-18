@@ -2,7 +2,7 @@
 
 ## In plain words
 
-`tests/data/policy_fixtures.json` holds 59 small scenarios (graphs, ledgers, policies and their
+`tests/data/policy_fixtures.json` holds 55 small scenarios (graphs, ledgers, policies and their
 calls) together with the result every call must produce. Both replay tests read it:
 `tests/cpp/flow_policy_fixture_tests.cpp` runs the scenarios on the C++ engine and
 `tests/py/test_flow_policy_fixtures.py` runs them through the Python binding; each compares
@@ -52,8 +52,8 @@ that every module of the reference was imported from this directory (an installe
 the same name, such as `graph` or `units`, would otherwise shadow it) and that no module of the
 library (`netgraph_core`, `_netgraph_core`) was imported.
 
-The data file: 741,400 bytes, sha256
-`e353ef06eb62f2ab3d60b33d586a6ccf46851c5d22f89dce67f5621e06859d26` (59 fixtures, 636
+The data file: 651,786 bytes, sha256
+`47e332040c3a65719036e8dc59dc5995037be5bc8920a8153dba2ced751a7257` (55 fixtures, 533
 operations).
 
 This directory is excluded from the source distribution (`sdist.exclude` in `pyproject.toml`);
@@ -73,10 +73,10 @@ the copies were taken on 2026-10-09.
 
 | Copy (this directory) | Original | sha256 of the original | sha256 of the copy |
 | --- | --- | --- | --- |
-| `export_policy_fixtures.py` | `equivalence/export_policy_fixtures.py` | `0aea76a050b2d83e7398559af6a7d484a5a82a48b35bac9a3686f5fdf73211d2` | `43ff1a092de611e813507376080ac98d6eb19ee08348b72982ae1796a61cde4f` (relocated; pooled sources, below) |
+| `export_policy_fixtures.py` | `equivalence/export_policy_fixtures.py` | `0aea76a050b2d83e7398559af6a7d484a5a82a48b35bac9a3686f5fdf73211d2` | `e538ae31cab50370a8058003a52d7a2f3d0e25eb2de8cd7c22970255b0875e77` (relocated; pooled sources; programs, below) |
 | `p2_transaction/_p1.py` | `prototypes/p2_transaction/_p1.py` | `3ec5468e1ee8357faa9d85e6d748c718de63baee22e064c204324e42de42ec98` | same |
-| `p2_transaction/fixtures.py` | `prototypes/p2_transaction/fixtures.py` | `ea05c85ce851fd7b7c6ff34b6a9eedbfd7b280187d0bf7e7965e626e4fe52071` | `64f616349a76887741879afac04c9d09ad82bd962b0c424ff557503c0451d8a6` (zero capacity; pooled sources, below) |
-| `p2_transaction/policy.py` | `prototypes/p2_transaction/policy.py` | `b367b71c6052cb70c9b107ec7fdd15f491349cfd6fdfcb12a18f24ab69a4d27b` | `aeab8cc02c67309d1cb55dd00b926b98b04886b30f228be234df1f89fbe22bb7` (zero capacity; pooled sources, below) |
+| `p2_transaction/fixtures.py` | `prototypes/p2_transaction/fixtures.py` | `ea05c85ce851fd7b7c6ff34b6a9eedbfd7b280187d0bf7e7965e626e4fe52071` | `60e61213de983cad3f3c70943e3d6afa8dbffe001595d3d245087e0a7e67ecdf` (zero capacity; pooled sources; programs, below) |
+| `p2_transaction/policy.py` | `prototypes/p2_transaction/policy.py` | `b367b71c6052cb70c9b107ec7fdd15f491349cfd6fdfcb12a18f24ab69a4d27b` | `d1c773d670f6b5cf6f0cf4fdf4a69779ef85a656ffcbcec4e52f16795e8bf0f7` (zero capacity; pooled sources; programs, below) |
 | `p2_transaction/recorder.py` | `prototypes/p2_transaction/recorder.py` | `fb4a8f20ccc6ecef4bc6d934226df33d84ee4dbf70c59aad9f33a097b9d0eb8a` | same |
 | `p2_transaction/run_fixtures.py` | `prototypes/p2_transaction/run_fixtures.py` | `c20d655a2324c42201e9b743c51ef16bb47942dda56782e2d16b135a9c4db2fa` | same |
 | `p1_amount/apportion.py` | `prototypes/p1_amount/apportion.py` | `c1e2f5082a99db1d0e7de5cf4e713ad5790aca3d85060583d536f5bc7fdcd4b1` | same |
@@ -197,3 +197,48 @@ per-source outcomes. The reference was changed in exactly these places, by hand 
    and `Draft` and from the record's JSON, `p2_transaction/policy.py` no longer passes it, and the
    exporter no longer writes it. The data lost exactly the 759 record `placement` keys; nothing
    else changed.
+
+## Forwarding programs
+
+The library's rule changed again: `Pinned` forwards a `ForwardingProgram` (8.1) instead of a list
+of bundles, `Global(support=dag)` is the controller restricted to a DAG's edges, CostOnly
+`Weighted` takes its weights from a weight basis (`CAPACITY` by default, `RESIDUAL_SNAPSHOT`)
+instead of the selection's priority, and the change flags compare the installed program before and
+after a call. The reference was changed in exactly these places, by hand from those rules:
+
+1. `p2_transaction/policy.py`: `Global` takes a `support` (the controller's edges are the
+   support's edges on walks from the sources to the destinations, trimmed); `FlowPolicyConfig`
+   takes `weights` (CostOnly `Weighted`: `CAPACITY` or `RESIDUAL_SNAPSHOT`, the residual at the
+   preparing call's entry); `Pinned` is gone (no fixture builds one any more); the flags compare
+   the epoch's programs (the ordered heads, each entry's route; the injection and every weight),
+   so a first program sets both flags and a controller's re-solve that changes only an amount sets
+   `weights_changed`; `_decompose` returns the controller's paths.
+2. `export_policy_fixtures.py`: a configuration writes its `support` and `weights`; a policy's
+   state no longer has `usable`.
+3. `p2_transaction/fixtures.py`: every single-bundle "manual" owner (a `Pinned` `MaxFlow` policy
+   on one bundle, 29 owners) is `Global(support=bundle)`: the amounts are unchanged and a record's
+   bundle is the edges that carry its share; the nine `Weighted` configurations whose prose reads
+   the residual name `weights=RESIDUAL_SNAPSHOT` (their values are unchanged); `co()` builds the
+   CostOnly kernels as before. The other Pinned policies are removed, each with the test that now
+   covers what it showed (contract rules 8 to 10, values derived by hand):
+
+   | Removed | What it showed | Covering test |
+   | --- | --- | --- |
+   | `lossy_shared_ingress` (whole fixture) | two Lossy flows on one ingress, consumed in order | the loss rule inside one program: `ProgramLossy.Merge`, `PinnedMapping.SingleBundle` (M5), `test_programs.py::test_loss_rule`; Lossy calls are not additive: `PinnedProgram.Increments` (L10) |
+   | `eb_correlated_remainders` (whole fixture) | the cohort's round robin over flows that share a split | `PinnedProgram.SplitContextsAreSeparate` (each split route splits its own share), `PinnedProgram.Duplicates` (identical routes take their own shares) |
+   | `pinned_kernels_5_1` (whole fixture) | each kernel on routes of 5 and 1 | `PinnedMapping.SingleBundle` (M3, M4: round robin over entries; `Global(support)` for MaxFlow), `PinnedProgram.Duplicates` (`E-static-path-fill`), `ProgramLossy.Merge` (`E-support-pinned-loss`) |
+   | `pinned_bundle_rules` (whole fixture) | the bundle list's rejections, equal bundles kept, a mixed-cost DAG's `route_cost` | `FromRoutes.Texts`, `FromRoutes.Order`, `FromRoutes.ZeroWeightKept`, `PinnedProgram.FieldTexts`, `PinnedProgram.Endpoints`, `PinnedProgram.SeveralEndpoints`, `PinnedMapping.SingleBundle` (M8 to M10), `test_programs.py::test_pinned_facts_of_the_retired_reference_fixtures` (`route_cost` 3) |
+   | the Pinned halves of `four_calls_MaxFlow`, `_W`, `_EB`, `_Lossy` (12 operations each) | four calls of 1 on two pinned routes | `PinnedProgram.Increments` (L9 to L11), `Operations.PlaceContinuesTheEpoch`, `Operations.ControllerWeights` (a supported or unrestricted controller's increments) |
+   | the Pinned cohort of `eb_1_plus_2_vs_3` (7 operations) | `place(1); place(2)` equals `place(3)` | `test_programs.py::test_pinned_facts_of_the_retired_reference_fixtures` (Lossless Pinned is additive) |
+   | the Pinned part of `admission_zero_and_no_route` (3 operations) | every bundle excluded: `NO_ROUTE` | the same test (every tunnel failed: `NO_ROUTE`), `Replay.TunnelFailedByNode` |
+   | the Pinned policy of `limits_kmaxflowspercall` (3 operations) | the creation cap does not count Pinned flows | `test_programs.py::test_the_creation_cap_does_not_limit_pinned_records` |
+   | the Pinned half of `flag_zero_delivery_creation` (6 operations) | a zero-delivery creation and its flags | `test_programs.py::test_pinned_facts_of_the_retired_reference_fixtures` (both flags on the first program, none on the next zero call), `Operations.OfferOnly` |
+   | the rejected Pinned source set of `sources_limits_and_validation` (1 operation) | Pinned required single endpoints | `PinnedProgram.SeveralEndpoints` (accepted now) |
+
+   The policy ids of the fixtures that lost a policy are renumbered.
+
+The data changed in exactly these ways: four fixtures and 103 operations fewer; the 29 owners'
+configurations and record bundles; `support` and `weights` in the configurations; every policy
+state lost its `usable` key (332 keys); and the flags of the first program of each epoch
+(`weights_changed` true) and of two CostOnly `MaxFlow` re-solves whose paths change
+(`routes_changed` true).

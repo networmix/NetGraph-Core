@@ -1,6 +1,8 @@
 // Allocation-failure atomicity of the policy engine, the DagCache and the evaluators.
-// Exhaustive sweeps (each allocation fails once) cover the placement calls of the 16 routing and
-// kernel modes below, with and without a static Eligibility; the zero and empty-roster calls; the
+// Exhaustive sweeps (each allocation fails once) cover the placement calls of the routing and
+// kernel modes below (supplied programs of split routes and of crossing tunnels, Global with a
+// support among them), with and without a static Eligibility; the full-offer calls evaluate,
+// replace and forward (with black holes) of every mode; the zero and empty-roster calls; the
 // policy construction, with and without a supplied building cache and an Eligibility; the
 // DagCache construction and insertion; capacity() and batch_capacity() on one worker in every
 // mode (batch_capacity: every mode but Pinned), without options, with an Eligibility and, in the
@@ -12,8 +14,9 @@
 // threads only. The scratch-growth test sweeps every allocation of a placement on a 3,000-node
 // graph after warming up on a 3-node graph, on a fresh thread for each attempt. After each injected
 // std::bad_alloc the ledger (aggregate, residual, every record field, owners, next FlowId) and
-// the policy's epoch state (requested, +inf, Global's cumulative curve, and per flow its id, route
-// cost and plan: route, members, weights) equal their state before the call; a clean retry gives
+// the policy's epoch state (requested, +inf, Global's cumulative curve, the installed program, the
+// by_tunnel rows, and per flow its id, route cost and plan: route, members, weights) equal their
+// state before the call; a clean retry gives
 // the reference result (no poisoned per-thread scratch); and remove() leaves the ledger as the
 // reference's own remove() does. No failed call leaves an allocation live once its attempt's
 // objects are gone (a supplied building cache with its kept entries included). remove(), a
@@ -69,7 +72,20 @@ struct Mode {
   FlowPolicyConfig cfg;
   std::vector<NodeId> sources;
   std::vector<NodeId> destinations;
+  // The evaluators' offer (a Pinned Lossy evaluation requires a finite one).
+  std::optional<std::optional<Amount>> offered {};
 };
+
+// The evaluators' options of a mode.
+QueryOptions query_of(const Mode& m, const Eligibility* elig = nullptr, DagCache* cache = nullptr,
+                      OutputOptions outputs = {}) {
+  return QueryOptions {m.cfg, elig, cache, outputs, m.offered};
+}
+
+// A Pinned Lossy forwarding needs a finite offer (no first-hop experiment).
+bool finite_only(const Mode& m) {
+  return std::holds_alternative<Pinned>(m.cfg.routing) && m.cfg.admission == Admission::Lossy;
+}
 
 std::vector<Mode> modes(const Graph& g) {
   std::vector<Mode> out;
@@ -80,7 +96,9 @@ std::vector<Mode> modes(const Graph& g) {
   const std::vector<NodeId> D = {5, 6};
   out.push_back({"costonly maxflow", {CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossless, det}, S, D});
   out.push_back({"costonly eb", cost_only_config(), S, D});
-  out.push_back({"costonly weighted residual", {CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, res}, S, D});
+  out.push_back({"costonly weighted residual",
+                 {CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, res, std::nullopt, WeightBasis::ResidualSnapshot},
+                 S, D});
   out.push_back({"costonly lossy", {CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy, det}, S, D});
   // Several sources: the deterministic single path (the pooled single-path rule rejects
   // PreferHigherPriority with multipath false).
@@ -110,11 +128,34 @@ std::vector<Mode> modes(const Graph& g) {
   // Pooled Weighted Lossy: source 1's zero-capacity member has weight 0 (pruned), the shares
   // attributed across the shared routers.
   out.push_back({"costonly weighted lossy", {CostOnly {}, FlowPlacement::Weighted, Admission::Lossy, det}, S, D});
-  Pinned two;
+  // Pinned over supplied programs: three split routes of source 0 (one all-zero: a Weighted
+  // route without a member), Lossless EqualBalanced and Lossy Weighted; and two sources' crossing
+  // tunnels, Lossy, which meet on shared links (the general loss rule).
   const auto inv = id_of_input(g);
-  two.bundles = {dag_of(g, {inv[0], inv[4], inv[5]}), dag_of(g, {inv[1], inv[6]}), dag_of(g, {inv[12]})};
-  out.push_back({"pinned eb cohort", {two, FlowPlacement::EqualBalanced, Admission::Lossless, det}, {0}, {5}});
-  out.push_back({"pinned lossy", {two, FlowPlacement::Weighted, Admission::Lossy, det}, {0}, {5}});
+  const NodeId s0[1] = {0};
+  const NodeId d5[1] = {5};
+  const std::vector<Route> split = {Route {0, dag_of(g, {inv[0], inv[4], inv[5]}), 1},
+                                    Route {0, dag_of(g, {inv[1], inv[6]}), 2}, Route {0, dag_of(g, {inv[12]}), 1}};
+  RouteOptions weighted;
+  weighted.placement = FlowPlacement::Weighted;
+  out.push_back({"pinned eb split routes",
+                 {.routing = Pinned {ForwardingProgram::from_routes(g, s0, d5, split), nullptr}}, {0}, {5}});
+  out.push_back({"pinned lossy",
+                 {.routing = Pinned {ForwardingProgram::from_routes(g, s0, d5, split, weighted), nullptr},
+                  .admission = Admission::Lossy},
+                 {0}, {5}, std::optional<Amount> {6}});
+  auto walk = [&](std::vector<std::size_t> inputs) {
+    std::vector<std::vector<EdgeId>> hops;
+    for (auto i : inputs) hops.push_back({inv[i]});
+    return std::make_shared<const Path>(g, hops);
+  };
+  const std::vector<Route> crossing = {Route {0, walk({0, 10, 7}), 2}, Route {0, walk({1, 8}), 1},
+                                       Route {1, walk({3, 7}), 1}, Route {1, walk({2, 8}), 1}};
+  out.push_back({"pinned tunnels lossy",
+                 {.routing = Pinned {ForwardingProgram::from_routes(g, S, std::vector<NodeId> {6}, crossing), nullptr},
+                  .admission = Admission::Lossy},
+                 S, {6}, std::optional<Amount> {6}});
+  out.push_back({"global support", {.routing = Global {dag_of(g, {inv[0], inv[1], inv[4], inv[6], inv[2]})}}, S, D});
   // CostOnly creation in one pass: its Collapse branch (multipath, multi_edge false,
   // on the creation view) and its Weighted weights (Capacity priority).
   out.push_back({"costonly eb multipath collapse",
@@ -122,6 +163,10 @@ std::vector<Mode> modes(const Graph& g) {
                   PathSelection(EdgeTieBreak::PreferHigherPriority, EdgePriority::Residual, true, false)},
                  S, D});
   out.push_back({"costonly weighted capacity", {CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, det}, S, D});
+  out.push_back({"costonly weighted explicit",
+                 {CostOnly {}, FlowPlacement::Weighted, Admission::Lossy, det, std::nullopt, WeightBasis::Explicit,
+                  std::make_shared<const std::vector<Amount>>(std::vector<Amount> {3, 1, 2, 2, 1, 4, 2, 1, 1, 5, 2, 7, 3})},
+                 S, D});
   return out;
 }
 
@@ -153,14 +198,11 @@ Eligibility without_input_edge(const Graph& g, std::size_t position) {
 Eligibility without_bypass(const Graph& g) { return without_input_edge(g, 9); }
 Eligibility without_cross(const Graph& g) { return without_input_edge(g, 10); }
 
-// A third party holding one unit on the first route's edges.
+// A third party holding one unit on the first route's edges (Global on that route as its support).
 std::unique_ptr<FlowPolicy> third_party(FlowLedger& fg, const Graph& g) {
   const auto inv = id_of_input(g);
-  Pinned p;
-  p.bundles = {dag_of(g, {inv[0], inv[4]})};
   auto t = std::make_unique<FlowPolicy>(fg, std::vector<NodeId> {0}, std::vector<NodeId> {5},
-                                        FlowPolicyConfig {p, FlowPlacement::MaxFlow, Admission::Lossless,
-                                                          PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Capacity)});
+                                        FlowPolicyConfig {.routing = Global {dag_of(g, {inv[0], inv[4]})}});
   (void)t->place(1);
   return t;
 }
@@ -180,18 +222,19 @@ TEST(PolicyFaults, ZeroCapacityLinksTakePartInTheSweeps) {
     const auto& pe = detail::PolicyAccess::engine(p);
     if (m.name == "costonly eb") {
       // The pooled program of both sources holds the zero link as a member.
-      ASSERT_TRUE(pe.program != nullptr);
-      EXPECT_EQ(vec(pe.program->roots), (std::vector<NodeId> {0, 1}));
-      EXPECT_TRUE(std::find(pe.program->members.begin(), pe.program->members.end(), inv[11]) !=
-                  pe.program->members.end());
-      const auto s = sensitivity(*g, m.sources, m.destinations, QueryOptions {m.cfg}, 1);
+      ASSERT_TRUE(pe.epoch.program != nullptr);
+      const auto& plan = *detail::ProgramAccess::data(*pe.epoch.program).contexts.front().plan;
+      EXPECT_EQ(vec(plan.roots), (std::vector<NodeId> {0, 1}));
+      EXPECT_TRUE(std::find(plan.members.begin(), plan.members.end(), inv[11]) != plan.members.end());
+      const auto s = sensitivity(*g, m.sources, m.destinations, query_of(m), 1);
       EXPECT_TRUE(std::any_of(s.entries.begin(), s.entries.end(), [&](const auto& e) { return e.edge == inv[11]; }));
     }
-    if (std::holds_alternative<Pinned>(m.cfg.routing)) {
-      EXPECT_EQ(p.usable_bundles(), 3) << m.name;
-      ASSERT_EQ(pe.cohorts.size(), 1U) << m.name;
-      ASSERT_EQ(pe.cohorts[0].size(), 3U) << m.name;
-      EXPECT_EQ(pe.cohorts[0][2].plan->members.empty(), m.cfg.placement == FlowPlacement::Weighted) << m.name;
+    if (m.name == "pinned eb split routes" || m.name == "pinned lossy") {
+      // Three split routes, three records; the all-zero route keeps its EqualBalanced member and
+      // has none under the Weighted kernel.
+      ASSERT_EQ(pe.view.data->contexts.size(), 3U) << m.name;
+      ASSERT_EQ(pe.epoch.cohorts.size(), 3U) << m.name;
+      EXPECT_EQ(pe.view.plan(2)->members.empty(), m.name == "pinned lossy") << m.name;
     }
   }
 }
@@ -201,6 +244,7 @@ TEST(PolicyFaults, EveryAllocationOfEveryRoutingModeFailsAtomically) {
   const Eligibility no_bypass = without_bypass(*g);
   for (const auto& m : modes(*g)) {
     for (const auto& sc : scenarios()) {
+      if (finite_only(m) && !sc.call.has_value()) continue;
       for (const Eligibility* elig : {static_cast<const Eligibility*>(nullptr), &no_bypass}) {
         const std::string where = m.name + " / " + sc.name + (elig != nullptr ? " / eligibility" : "");
         // The third party, then the policy's earlier calls.
@@ -222,6 +266,125 @@ TEST(PolicyFaults, EveryAllocationOfEveryRoutingModeFailsAtomically) {
   }
 }
 
+// The full-offer calls on a policy that has placed (its program installed): evaluate (nothing
+// published, the epoch untouched), replace (the old records retired and new ones created in one
+// exchange of the ledger; to zero, and to +inf when Lossless) and, for the computing models,
+// forward over the installed program, with and without black holes. Every allocation of the call
+// fails once, through the shared placement sweep: a failure changes neither the ledger nor the
+// epoch state and leaves no allocation live; the completing call, the retry and remove() leave the
+// ledger as the reference's do.
+TEST(PolicyFaults, EveryFullOfferCallFailsAtomically) {
+  const auto g = graph();
+  const auto inv = id_of_input(*g);
+  const EdgeId dark_edges[] = {inv[4], inv[6]};
+  const Eligibility dark = g->eligibility({}, dark_edges);
+  struct Op {
+    std::string name;
+    std::function<PlacementResult(FlowPolicy&)> call;
+  };
+  for (const auto& m : modes(*g)) {
+    const bool lossy = m.cfg.admission == Admission::Lossy;
+    const bool pinned = std::holds_alternative<Pinned>(m.cfg.routing);
+    const bool program = !std::holds_alternative<CapacityAware>(m.cfg.routing);
+    std::vector<Op> ops = {{"evaluate", [](FlowPolicy& p) { return p.evaluate(6, {true, true, true}); }},
+                           {"replace", [](FlowPolicy& p) { return p.replace(6, {true, true, true}); }},
+                           {"replace to zero", [](FlowPolicy& p) { return p.replace(0); }}};
+    if (!lossy) ops.push_back({"replace +inf", [](FlowPolicy& p) { return p.replace(std::nullopt); }});
+    if (program && !pinned) {
+      ops.push_back({"forward", [](FlowPolicy& p) { return p.forward(6, nullptr, {true, true, true}); }});
+      ops.push_back({"forward black holes", [&](FlowPolicy& p) { return p.forward(6, &dark); }});
+    }
+    for (const auto& op : ops) {
+      const std::string where = m.name + " / " + op.name;
+      const auto setup = [&](FlowLedger& fg) {
+        auto third = std::shared_ptr<FlowPolicy>(third_party(fg, *g));
+        auto p = std::make_shared<FlowPolicy>(fg, m.sources, m.destinations, m.cfg);
+        (void)p->place(3);
+        FlowPolicy* policy = p.get();
+        return Staged {std::make_shared<std::pair<std::shared_ptr<FlowPolicy>, std::shared_ptr<FlowPolicy>>>(
+                           std::move(third), std::move(p)),
+                       policy};
+      };
+      const long injected = sweep_placement(g, where, setup, op.call);
+      if (::testing::Test::HasFailure()) return;
+      EXPECT_GT(injected, 0) << where;  // not vacuous
+    }
+  }
+}
+
+// Lossy forwarding with links that wait on each other in a cycle (contract 9.4): the rounds'
+// scratch, the independent check and the error path. CYC(x, y): tunnel 0 meets X (input edge 0)
+// before Y (input edge 3), tunnel 1 Y before X. With x = y = 1 the rounds settle: every
+// allocation of a replace(2) fails atomically. With weights 1, 2 and y = 2 the rounds alternate:
+// the period-two ValueError and every allocation failure before it publish nothing and leave no
+// allocation live.
+TEST(PolicyFaults, CyclicLossyForwardingFailsAtomically) {
+  auto cyc = [](Amount x, Amount y) {
+    return shared(make_graph(6, {{0, 1, x, 1}, {1, 2, 1000, 1}, {1, 5, 1000, 1}, {2, 3, y, 1}, {3, 0, 1000, 1},
+                                 {3, 5, 1000, 1}, {4, 0, 1000, 1}, {4, 2, 1000, 1}}));
+  };
+  auto program = [](const Graph& g, Amount w1) {
+    const auto inv = id_of_input(g);
+    auto walk = [&](std::vector<std::size_t> inputs) {
+      std::vector<std::vector<EdgeId>> hops;
+      for (auto i : inputs) hops.push_back({inv[i]});
+      return std::make_shared<const Path>(g, hops);
+    };
+    const NodeId s[1] = {4};
+    const NodeId d[1] = {5};
+    const std::vector<Route> routes = {Route {4, walk({6, 0, 1, 3, 5}), 1}, Route {4, walk({7, 3, 4, 0, 2}), w1}};
+    return ForwardingProgram::from_routes(g, s, d, routes);
+  };
+  auto config = [](std::shared_ptr<const ForwardingProgram> prog) {
+    return FlowPolicyConfig {.routing = Pinned {std::move(prog), nullptr}, .admission = Admission::Lossy};
+  };
+  const std::vector<NodeId> S = {4};
+  const std::vector<NodeId> D = {5};
+  {
+    const auto g = cyc(1, 1);
+    const auto prog = program(*g, 1);
+    const auto setup = [&](FlowLedger& fg) {
+      auto p = std::make_shared<FlowPolicy>(fg, S, D, config(prog));
+      FlowPolicy* policy = p.get();
+      return Staged {std::move(p), policy};
+    };
+    const long injected = sweep_placement(g, "converging cycle", setup, [](FlowPolicy& p) { return p.replace(2); });
+    EXPECT_GT(injected, 0);  // not vacuous
+  }
+  const auto g = cyc(1, 2);
+  const auto prog = program(*g, 2);
+  long injected = 0;
+  for (long at = 0;; ++at) {
+    const std::string w = "period two allocation " + std::to_string(at);
+    const long live = g_live.load();
+    bool completed = false;
+    {
+      FlowLedger fg(g);
+      FlowPolicy p(fg, S, D, config(prog));
+      const LedgerState initial = ledger_state(fg);
+      const Epoch initial_epoch = epoch(p);
+      bool raised = false;
+      if (fails_at(at, [&] {
+            try {
+              (void)p.replace(3);
+            } catch (const std::invalid_argument& e) {
+              raised = std::string(e.what()) == "lossy forwarding iteration entered a period-2 cycle";
+            }
+          })) {
+        ++injected;
+      } else {
+        EXPECT_TRUE(raised) << w;
+        completed = true;
+      }
+      expect_same(ledger_state(fg), initial, w);
+      expect_same(epoch(p), initial_epoch, w);
+    }
+    EXPECT_EQ(g_live.load(), live) << w << ": a leak";
+    if (completed || ::testing::Test::HasFailure()) break;
+  }
+  EXPECT_GT(injected, 0);  // not vacuous
+}
+
 // The calls that place nothing publish only their outputs and, for a positive request, the
 // epoch's request: a zero request, and a positive or +inf request when no source reaches a
 // destination (an empty roster; the endpoints swapped: 5 and 6 have no out-edges). Each runs
@@ -238,7 +401,7 @@ TEST(PolicyFaults, ZeroAndEmptyRosterCallsFailAtomically) {
   };
   const std::vector<Case> cases = {{false, 0, "zero"}, {true, 4, "empty roster"}, {true, std::nullopt, "empty roster +inf"}};
   for (const auto& m : modes(*g)) {
-    if (std::holds_alternative<Pinned>(m.cfg.routing)) continue;  // bundles bind their endpoints
+    if (std::holds_alternative<Pinned>(m.cfg.routing)) continue;  // a program binds its endpoints
     for (const auto& c : cases) {
       const auto& s = c.swap ? m.destinations : m.sources;
       const auto& d = c.swap ? m.sources : m.destinations;
@@ -495,7 +658,7 @@ long sweep_batch(const Mode& m, const Graph& g, std::span<const std::int32_t> wo
       {m.sources, m.destinations}, {{1}, {6}}, {{0}, {5}}};
   const std::vector<const Eligibility*> per_pair(o.per_pair != nullptr ? pairs.size() : 0, o.per_pair);
   std::optional<DagCache> cache;
-  const auto opts = [&] { return QueryOptions {m.cfg, o.elig, cache ? &*cache : nullptr}; };
+  const auto opts = [&] { return query_of(m, o.elig, cache ? &*cache : nullptr); };
   if (o.cache) cache.emplace(g);
   const auto want = batch_capacity(g, pairs, opts(), per_pair, 1);
   const std::int64_t clean = cache ? cache->stats().entries : 0;
@@ -531,7 +694,7 @@ long sweep_batch(const Mode& m, const Graph& g, std::span<const std::int32_t> wo
 long sweep_sensitivity(const Mode& m, const Graph& g, std::span<const std::int32_t> workers_set, long step,
                        const Options& o = {}) {
   std::optional<DagCache> cache;
-  const auto opts = [&] { return QueryOptions {m.cfg, o.elig, cache ? &*cache : nullptr}; };
+  const auto opts = [&] { return query_of(m, o.elig, cache ? &*cache : nullptr); };
   if (o.cache) cache.emplace(g);
   const auto want = sensitivity(g, m.sources, m.destinations, opts(), 1);
   const std::int64_t clean = cache ? cache->stats().entries : 0;
@@ -617,7 +780,7 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
   const Eligibility no_cross = without_cross(*g);
   const std::int32_t one[] = {1};
   const std::vector<std::string> exhaustive_sensitivity = {"costonly eb", "capacityaware weighted diminishing", "global",
-                                                           "pinned eb cohort"};
+                                                           "pinned eb split routes", "pinned tunnels lossy"};
   int swept_sensitivity = 0;
   long attempts = 0;
   for (const auto& m : modes(*g)) {
@@ -629,7 +792,7 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
       const std::string name = m.name + " capacity" + o.name;
       std::optional<DagCache> cache;
       const auto copts = [&] {
-        return QueryOptions {m.cfg, o.elig, cache ? &*cache : nullptr, OutputOptions {true, true, true}};
+        return query_of(m, o.elig, cache ? &*cache : nullptr, OutputOptions {true, true, true});
       };
       if (o.cache) cache.emplace(*g);
       const auto want = capacity(*g, m.sources, m.destinations, copts());
@@ -688,7 +851,7 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
     }
   }
   RecordProperty("allocation_attempts", std::to_string(attempts));
-  EXPECT_EQ(swept_sensitivity, 4 * 2 + 1);  // four modes with two option sets, CostOnly's with three
+  EXPECT_EQ(swept_sensitivity, 4 * 2 + 3);  // four modes with two option sets, CostOnly's with three
 }
 
 TEST(PolicyFaults, BatchWorkersFailWithoutTerminating) {
@@ -724,13 +887,14 @@ TEST(PolicyFaults, RemovalAndReleaseNeverAllocate) {
 // The working-residual overlay and the per-source scratch grow with the graph. Each attempt runs
 // on a new thread (its scratch empty) that first places on a 3-node graph, then the swept call on
 // a larger one, so every allocation of that call fails once while its scratch grows from the
-// small size; the failed call changes nothing, and a clean retry on the same graph (or the call
-// itself, once no failure is reached) gives the reference call's result, every output included,
-// ledger and epoch (ASan reports any access outside a partly grown array). The same call on a new
-// thread whose scratch has first grown to the large graph allocates less: the sweep reached the
-// growth.
-TEST(PolicyFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
-  const FlowPolicyConfig cfg = cost_only_config();
+// small size; the failed call changes nothing, and a clean retry on the same thread and graph (or
+// the call itself, once no failure is reached) gives the reference call's result, every output
+// included, ledger and epoch (ASan reports any access outside a partly grown array). The same call
+// on a new thread whose scratch has first grown to the large graph allocates less: the sweep
+// reached the growth. `config` gives the policy's configuration on a graph.
+void expect_scratch_growth_failure_leaves_nothing_half_grown(
+    const std::string& name, const std::function<FlowPolicyConfig(const Graph&)>& config) {
+  SCOPED_TRACE(name);
   const OutputOptions all {true, true, true};
   const auto small = chain_graph(3, 5);
   const auto large = chain_graph(3000, 5);
@@ -741,22 +905,22 @@ TEST(PolicyFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
   Epoch want_epoch;
   {
     FlowLedger fg(large);
-    FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {n - 1}, cfg);
+    FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {n - 1}, config(*large));
     want = p.place(2, all);
     want_state = ledger_state(fg);
     want_epoch = epoch(p);
   }
   ASSERT_EQ(want.placed, 2);  // the whole chain carries the request: the comparison is not of zeros
   sweep_scratch_growth(
-      "placement",
+      name + " placement",
       [&] {
         FlowLedger fg(small);
-        FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {2}, cfg);
+        FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {2}, config(*small));
         EXPECT_EQ(p.place(2, all).placed, 2);
       },
       [&](long at, const std::string& w) {
         FlowLedger fg(large);
-        FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {n - 1}, cfg);
+        FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {n - 1}, config(*large));
         const LedgerState before = ledger_state(fg);
         const Epoch before_epoch = epoch(p);
         PlacementResult got;
@@ -774,7 +938,7 @@ TEST(PolicyFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
       },
       [&] {
         FlowLedger fg(large);
-        FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {n - 1}, cfg);
+        FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {n - 1}, config(*large));
         (void)p.place(2, all);  // the scratch grows to the large graph
         p.remove();
         long warm = 0;
@@ -786,6 +950,24 @@ TEST(PolicyFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
         }
         return warm;
       });
+}
+
+// A split kernel's placement (CostOnly EqualBalanced): the working residual and the kernels'
+// scratch.
+TEST(PolicyFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
+  expect_scratch_growth_failure_leaves_nothing_half_grown("costonly eb",
+                                                          [](const Graph&) { return cost_only_config(); });
+}
+
+// A controller's placement also grows the decomposition's per-thread scratch (cursors, range ends,
+// destination and slot marks, each grown on its own): Global over every edge (positions are
+// EdgeIds) and Global on a support (positions index the support).
+TEST(PolicyFaults, ControllerScratchGrowthFailureLeavesNothingHalfGrown) {
+  expect_scratch_growth_failure_leaves_nothing_half_grown("global", [](const Graph&) { return global_config(); });
+  if (::testing::Test::HasFailure()) return;
+  expect_scratch_growth_failure_leaves_nothing_half_grown("global support", [](const Graph& g) {
+    return FlowPolicyConfig {.routing = Global {all_edges(g)}};
+  });
 }
 
 TEST(PolicyFaults, FrozenLookupsFailWithoutCounting) {
@@ -938,7 +1120,7 @@ TEST(PolicyFaults, FrozenStatisticsFollowThePublicCall) {
       const auto before = cache.stats();
       FlowLedger fg(g);
       EXPECT_THROW(FlowPolicy(fg, m.sources, m.destinations, m.cfg, nullptr, &cache), std::invalid_argument) << m.name;
-      EXPECT_THROW((void)capacity(*g, m.sources, m.destinations, QueryOptions {m.cfg, nullptr, &cache}),
+      EXPECT_THROW((void)capacity(*g, m.sources, m.destinations, query_of(m, nullptr, &cache)),
                    std::invalid_argument)
           << m.name;
       expect_stats(cache.stats(), before, m.name + " rejected");
@@ -1055,7 +1237,7 @@ TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
   for (const auto& [s, t] : pairs) (void)cache.lookup(*g, t, Direction::Reverse, nullptr);
   const auto entries = cache.stats().entries;
   cache.freeze();
-  const auto want = batch_capacity(*g, pairs, QueryOptions {m.cfg}, {}, 1);
+  const auto want = batch_capacity(*g, pairs, query_of(m), {}, 1);
   const QueryOptions shared {m.cfg, nullptr, &cache};
   for (const std::int32_t workers : {2, 4}) {
     for (const bool in_workers : {false, true}) {
@@ -1081,7 +1263,7 @@ TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
     return w.substr(0, w.find(", Eligibility uid "));
   };
   const auto costonly_sensitivity = [&](std::int32_t w) {
-    (void)sensitivity(*g, m.sources, m.destinations, QueryOptions {m.cfg, nullptr, &cache}, w);
+    (void)sensitivity(*g, m.sources, m.destinations, query_of(m, nullptr, &cache), w);
   };
   std::string want_miss;
   try {

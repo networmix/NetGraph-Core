@@ -48,6 +48,10 @@ REQUIRED = [
     "ng.SensitivityEntry()",
     "ng.SensitivityResult()",
     "ng.SpfResult()",
+    "ng.ForwardingProgram()",
+    "ng.Tunnel()",
+    "ng.TunnelFlow()",
+    "ng.Pinned([dag])",
     "npt.NDArray[np.float64] = g.capacity_units()",
     "text: str = g.capacity_units().item(0)",
     'ng.Graph("wrong"',
@@ -64,6 +68,7 @@ REQUIRED = [
     "first = result.costs[0]",
     "total = flows.sum()",
     "cost_total: int = best.total_cost",
+    "weights = best.program.source_weights",
 ]
 
 

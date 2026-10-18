@@ -68,7 +68,7 @@ specified in [docs/semantics.md](docs/semantics.md).
 
 - **`FlowLedger(graph, residual=None)`**: the integer ledger of one graph: a baseline
   in units (replaced by `reset()`) and the records (`FlowRecord`: flow id, owner, endpoints,
-  admission, bundle, route cost, offered, delivered, per-edge allocation and drops)
+  admission, program entry, bundle, route cost, offered, delivered, per-edge allocation and drops)
   of the flows placed on it. `allocated()` is the exact sum of the records and `residual()`
   the baseline minus it; `bottleneck(sources)` lists the full edges leaving the set of nodes
   the sources can still reach. `reset()` and `copy()` are rejected while a policy is bound
@@ -77,17 +77,18 @@ specified in [docs/semantics.md](docs/semantics.md).
 - **Kernels**, the rules that spread one flow over its route (`FlowPlacement`: `MAX_FLOW`,
   `WEIGHTED`, `EQUAL_BALANCED`; `Admission`: `LOSSLESS`, `LOSSY`): `MAX_FLOW` re-solves the flow
   with the flow core on its DAG, over the free capacity plus its own allocation; `WEIGHTED` splits
-  at every node in proportion to weights fixed when the flow is created (highest averages:
-  whole-unit shares as close to proportional as possible); `EQUAL_BALANCED` splits equally (round
+  at every node in proportion to integer weights frozen when the route is prepared, from a
+  `WeightBasis` (`CAPACITY`, `EXPLICIT`, `RESIDUAL_SNAPSHOT`) (highest averages: whole-unit shares
+  as close to proportional as possible); `EQUAL_BALANCED` splits equally (round
   robin); `LOSSY` forwards hop by hop and records what it drops.
 
 ### Policies
 
 - **`FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)`**: the placement
   engine for one demand, bound to its ledger. `FlowPolicyConfig(*, routing, placement=None,
-  admission=LOSSLESS, selection=None, origin=None)` chooses the routing, its kernel (required for
-  every routing but Global, which takes none), the admission, the path selection (default
-  `PathSelection()`) and the origin: `EQUAL` (every source sends the same round-robin share) or
+  admission=LOSSLESS, selection=None, origin=None, weights=None, edge_weights=None)` chooses the
+  routing, its kernel (required for CostOnly and CapacityAware), the admission, the path
+  selection (default `PathSelection()`), the weight basis of CostOnly `WEIGHTED` and the origin: `EQUAL` (every source sends the same round-robin share) or
   `OPTIMIZED` (a controller chooses how much enters where; the default of the controllers). The
   routing is one of:
   - `CostOnly()`: static shortest paths, as routers forward with an IGP such as OSPF; the
@@ -97,19 +98,30 @@ specified in [docs/semantics.md](docs/semantics.md).
     reoptimize=False, diminishing=None)`: tunnels that each search the free capacity (CSPF), with
     an `Absolute` or `Stretch` cost ceiling, a `DiminishingReturns(window, fraction)` guard, and at
     most `MAX_FLOWS_PER_CALL` (10,000) new flows per call;
-  - `Global()`: an ideal controller: the minimum-cost flow from all the policy's sources to its
-    destinations, on the free capacity plus its own allocation;
-  - `Pinned(bundles)`: fixed routes given as `PredDAG`s.
+  - `Global(support=None)`: an ideal controller: the minimum-cost flow from all the policy's
+    sources to its destinations, on the free capacity plus its own allocation, optionally only
+    over the edges of a support DAG;
+  - `Pinned(program, black_holes=None)`: forwarding over a given `ForwardingProgram`, computing
+    nothing; the policy's Eligibility fails the tunnels it touches (their heads split over the
+    survivors) and `black_holes` makes failed elements swallow what reaches them (stale
+    forwarding).
+- **`ForwardingProgram`**: the routes and integer weights of one demand. CostOnly and Global
+  produce one (`policy.program`, `result.program`; CapacityAware has none); `ForwardingProgram.from_routes(graph,
+  sources, destinations, routes)` builds one from `Route(head, Path or PredDAG, weight=1)`
+  entries.
 - **`place(volume, outputs=None)`** adds `volume` to the policy's request as one all-or-nothing
   step (CostOnly forwards over the program it prepares once per epoch; the controllers re-solve
   what they already deliver plus this request; CapacityAware places source by source) and returns
   a `PlacementResult`: this call's `placed`, `remaining`, `delivery_delta`, `call_drops`,
   `call_source_loss`, `termination` and flags; the demand's `requested`, `offered`, `admitted`,
   `delivered`, `unadmitted`, `source_loss`, `drops`, per-source rows `by_source`, `total_cost`
-  (controllers) and `cost_distribution` (optimized Global); and, when requested through
-  `OutputOptions`, `edge_flows`, `residual`, `bottleneck` and `min_cut` (optimized Global).
-  `remove()` reverts the policy's flows; `records()`, `record(flow_id)`, `placed_demand()` and
-  `usable_bundles()` read its state.
+  (controllers), `cost_distribution` (optimized Global), the `program` and per-tunnel rows
+  `by_tunnel`; and, when requested through `OutputOptions`, `edge_flows`, `residual`,
+  `bottleneck` and `min_cut` (optimized Global).
+  `evaluate(offer)` computes a whole new offer without publishing it, `replace(offer)` publishes
+  it, `forward(offer, black_holes=None)` sends it over the installed program; `remove()` reverts
+  the policy's flows; `records()`, `record(flow_id)`, `placed_demand()` and `program` read its
+  state.
 - **Failure guarantee**: every public call either completes or raises one exception and leaves
   every ledger, policy, cache and scratch buffer as it was, whatever fails (validation, memory, a
   worker thread, building the Python result). Two limits: pybind11 does not check every
@@ -160,11 +172,12 @@ values.
 ### Evaluators
 
 All three take one options type, `QueryOptions(config, *, elig=None, cache=None,
-outputs=None)`. `capacity(graph, sources, destinations, opts)` is `place(+inf)` of a policy on a fresh ledger; `Global()` gives the
+outputs=None, offered=None)`. `capacity(graph, sources, destinations, opts)` is `place(+inf)` of a policy on a fresh ledger
+(a Lossy Pinned policy places the finite `offered` instead); `Global()` gives the
 exact maximum flow with its marginal cost curve, and its minimum cut with
 `outputs=OutputOptions(min_cut=True)`. `batch_capacity(graph, pairs,
 opts, per_pair_elig=None, workers=None)` evaluates pairs in pair order (the lowest failing
-index raises). `sensitivity(graph, sources, destinations, opts, workers=None)` reports, for every candidate edge, the signed loss in placed units when the
+index raises; Pinned, whose program fixes its endpoints, is rejected). `sensitivity(graph, sources, destinations, opts, workers=None)` reports, for every candidate edge, the signed loss in placed units when the
 edge is removed. With `workers=None` the worker count is 1 when a cache is supplied, otherwise
 it comes from `NGRAPH_CORE_BATCH_THREADS` and `NGRAPH_CORE_SENSITIVITY_THREADS`.
 

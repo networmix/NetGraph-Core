@@ -1,4 +1,4 @@
-// The 59 fixtures of the independent reference replayed through FlowPolicy.
+// The 55 fixtures of the independent reference replayed through FlowPolicy.
 //
 // tests/data/policy_fixtures.json was exported from the independent reference (its
 // frozen copy, the exporter, the regeneration check and the meaning of the data's historical
@@ -8,14 +8,14 @@
 // the demand's state, the rows per source, the total cost, the cost curve, the requested outputs),
 // its trace (the reference's keys),
 // the ledger after it (allocations, residuals, every record field, next FlowId, owners) and the
-// policy state (roster, requested, +inf, placed demand, usable bundles, per source the flows'
+// policy state (roster, requested, +inf, placed demand, per source the flows'
 // ids, routes, T, deliveries, allocations, members and weights). An operation the reference
 // rejects must throw std::invalid_argument here too (the messages differ); any other exception
 // is a failure. Normalised on both sides: the T_max probe
 // counts, the flow core's operation counters and ledger uids. The trace and the creation cap need
 // the private hooks (NETGRAPH_CORE_PRIVATE_HOOKS): without them, in the shipped configuration, the
-// replay compares everything but the trace on the 58 fixtures that keep the default cap, and the
-// corruption test corrupts what that replay compares: every section but the trace, in those 58
+// replay compares everything but the trace on the 54 fixtures that keep the default cap, and the
+// corruption test corrupts what that replay compares: every section but the trace, in those 54
 // fixtures.
 #include <gtest/gtest.h>
 
@@ -285,7 +285,7 @@ const J& data() {
 TEST(PolicyFixtures, TheDataHoldsEveryReferenceFixture) {
   const J& d = data();
   EXPECT_EQ(d.at("format").s, "p2-fixtures/1");
-  EXPECT_EQ(d.at("fixtures").a.size(), 59U);
+  EXPECT_EQ(d.at("fixtures").a.size(), 55U);
 }
 
 namespace {
@@ -504,15 +504,14 @@ J policy_json(const FlowPolicy& policy) {
   const bool lossy = pe.config.admission == Admission::Lossy;
   J j = J::obj();
   j.set("roster", ints(pe.roster));
-  j.set("requested", J::integer(wide(pe.requested)));
-  j.set("infinite", J::boolean(pe.infinite));
+  j.set("requested", J::integer(wide(pe.epoch.requested)));
+  j.set("infinite", J::boolean(pe.epoch.infinite));
   j.set("placed_demand", J::integer(policy.placed_demand()));
-  j.set("usable", J::integer(policy.usable_bundles()));
   J cohorts = J::arr();
   for (std::size_t i = 0; i < pe.roster.size(); ++i) {
-    if (pe.cohorts[i].empty()) continue;
+    if (pe.epoch.cohorts[i].empty()) continue;
     J flows = J::arr();
-    for (const auto& s : pe.cohorts[i]) {
+    for (const auto& s : pe.epoch.cohorts[i]) {
       const FlowRecord& rec = LedgerAccess::live(pe.fg, s.id);
       std::vector<EdgeId> route;
       std::vector<EdgeId> members;
@@ -623,11 +622,9 @@ FlowPolicyConfig config_of(const Graph& g, const J& c) {
   const std::string kind = r.at("kind").s;
   Routing routing = CostOnly {};
   if (kind == "Global") {
-    routing = Global {};
-  } else if (kind == "Pinned") {
-    Pinned p;
-    for (const auto& b : r.at("bundles").a) p.bundles.push_back(test::dag_of(g, int32s(b)));
-    routing = std::move(p);
+    Global gl;
+    if (const J* support = r.get("support")) gl.support = test::dag_of(g, int32s(*support));
+    routing = gl;
   } else if (kind == "CapacityAware") {
     CapacityAware ca;
     ca.flow_count = static_cast<std::int32_t>(r.at("flow_count").int64());
@@ -671,6 +668,12 @@ FlowPolicyConfig config_of(const Graph& g, const J& c) {
                                                    {"Capacity", EdgePriority::Capacity},
                                                    {"Headroom", EdgePriority::Headroom}});
     out.selection = PathSelection(tie, prio, sel.at("multipath").b, sel.at("multi_edge").b);
+  }
+  if (const J* w = c.get("weights")) {
+    out.weights = named<WeightBasis>("weight basis", w->s,
+                                     {{"Capacity", WeightBasis::Capacity},
+                                      {"Explicit", WeightBasis::Explicit},
+                                      {"ResidualSnapshot", WeightBasis::ResidualSnapshot}});
   }
   return out;
 }
@@ -933,8 +936,8 @@ TEST(PolicyFixtures, EveryFixtureReplaysIdentically) {
     for (const auto& f : fails) ADD_FAILURE() << f;
   }
   // With the hooks every fixture; without them all but the one that lowers the creation cap.
-  EXPECT_EQ(replayed, detail::kTraced ? 59U : 58U);
-  EXPECT_GT(sections, 1000U);
+  EXPECT_EQ(replayed, detail::kTraced ? 55U : 54U);
+  EXPECT_EQ(sections, detail::kTraced ? 1096U : 864U);  // the data's count, not vacuous
   EXPECT_EQ(compared, sections);  // every expectation was compared, none skipped
 }
 
@@ -1033,7 +1036,7 @@ void expect_every_other_clause_reported() {
     corrupt(*first);
     EXPECT_TRUE(reported(reordered, name + ": the engine ranks the edges differently")) << name;
   }
-  EXPECT_EQ(exercised, detail::kTraced ? 59U : 58U);
+  EXPECT_EQ(exercised, detail::kTraced ? 55U : 54U);
   // Every section of every other operation kind and outcome in the data, and every flag.
   EXPECT_EQ(sections, (std::set<std::string> {"copy failed ledger", "destroy ok ledger", "place failed ledger",
                                               "policy ok policy", "remove ok ledger", "remove ok policy",
@@ -1086,7 +1089,7 @@ void expect_every_other_clause_reported() {
       const auto fails = replay(fx, nullptr, [n](std::size_t at, FlowPolicy& p) {
         if (at != n) return;
         auto& engine = detail::PolicyAccess::engine(p);
-        engine.infinite = !engine.infinite;
+        engine.epoch.infinite = !engine.epoch.infinite;
       });
       const std::string at = fx.at("name").s + " op " + std::to_string(n) + " (place)";
       EXPECT_TRUE(test::has_failure(fails, at + ": the rejected call changed the policy")) << at;
@@ -1259,8 +1262,8 @@ TEST(PolicyFixtures, ACorruptedExpectationFails) {
     }
   }
   RecordProperty("corruptions", static_cast<int>(corrupted));
-  EXPECT_EQ(fixtures, detail::kTraced ? 59U : 58U);
-  EXPECT_EQ(corrupted, detail::kTraced ? 1050U : 810U);
+  EXPECT_EQ(fixtures, detail::kTraced ? 55U : 54U);
+  EXPECT_EQ(corrupted, detail::kTraced ? 975U : 753U);
   EXPECT_GT(kinds[0], 200U);
   EXPECT_GT(kinds[1], 50U);
   EXPECT_GT(kinds[2], 50U);

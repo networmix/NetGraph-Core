@@ -13,13 +13,14 @@ namespace netgraph::core::bindings {
 
 void register_axes(py::module_& m) {
   py::enum_<FlowPlacement>(m, "FlowPlacement",
-                           "How traffic spreads over the routes (CostOnly's kernel; CapacityAware and Pinned flows too).\n"
+                           "How traffic spreads over the routes (CostOnly's kernel; CapacityAware's flows; the interior split\n"
+                           "of supplied PredDAG routes, EQUAL_BALANCED or WEIGHTED).\n"
                            "MAX_FLOW: the minimum-cost flow core over the routes (a controller restricted to them), re-solved\n"
                            "over the free capacity plus the policy's own allocation (it may move its own earlier placement,\n"
                            "never another's). WEIGHTED (WCMP, weighted-cost multipath): every node splits in proportion to\n"
                            "weights fixed when the routes are prepared (highest averages: whole-unit shares as close to\n"
-                           "proportional as possible). EQUAL_BALANCED (ECMP, equal-cost multipath): every node splits\n"
-                           "equally, by round robin.")
+                           "proportional as possible; the weights come from WeightBasis). EQUAL_BALANCED (ECMP, equal-cost\n"
+                           "multipath): every node splits equally, by round robin.")
       .value("MAX_FLOW", FlowPlacement::MaxFlow)
       .value("WEIGHTED", FlowPlacement::Weighted)
       .value("EQUAL_BALANCED", FlowPlacement::EqualBalanced);
@@ -38,6 +39,17 @@ void register_axes(py::module_& m) {
       .value("EQUAL", Origin::Equal)
       .value("OPTIMIZED", Origin::Optimized);
 
+  py::enum_<WeightBasis>(m, "WeightBasis",
+                         "Where WEIGHTED member weights come from (CostOnly WEIGHTED and supplied PredDAG routes).\n"
+                         "CAPACITY (the default): each member's static capacity. EXPLICIT: edge_weights, one integer per\n"
+                         "edge (a positive weight on an edge of capacity 0 becomes 0). RESIDUAL_SNAPSHOT: each member's free\n"
+                         "capacity read once when the routes are prepared, against one common view, and frozen for the\n"
+                         "epoch. A member of weight 0 is pruned with the branches it leaves without a destination, inside\n"
+                         "the route only. The selection's priority never chooses weights.")
+      .value("CAPACITY", WeightBasis::Capacity)
+      .value("EXPLICIT", WeightBasis::Explicit)
+      .value("RESIDUAL_SNAPSHOT", WeightBasis::ResidualSnapshot);
+
   py::enum_<EdgeTieBreak>(m, "EdgeTieBreak",
                           "How a search breaks cost ties. Between parallel members of one (u, v) pair\n"
                           "(multi_edge = False): DETERMINISTIC keeps the lowest EdgeId, PREFER_HIGHER_PRIORITY the\n"
@@ -49,10 +61,11 @@ void register_axes(py::module_& m) {
       .value("PREFER_HIGHER_PRIORITY", EdgeTieBreak::PreferHigherPriority);
 
   py::enum_<EdgePriority>(m, "EdgePriority",
-                          "The per-edge value PREFER_HIGHER_PRIORITY reads and, with WEIGHTED, the value that decides which\n"
-                          "edges a flow uses and their weights: RESIDUAL (residual units), CAPACITY (static capacity units),\n"
-                          "HEADROOM (residual / capacity, compared exactly as a fraction, 0 on an edge of capacity 0;\n"
-                          "rejected with WEIGHTED). A search without a residual reads the static capacity as the residual:\n"
+                          "The per-edge value PREFER_HIGHER_PRIORITY reads (single-path and parallel-member choices) and,\n"
+                          "for CapacityAware's WEIGHTED flows, the value that decides which edges a flow uses and their\n"
+                          "weights: RESIDUAL (residual units), CAPACITY (static capacity units), HEADROOM (residual /\n"
+                          "capacity, compared exactly as a fraction, 0 on an edge of capacity 0; rejected with\n"
+                          "CapacityAware's WEIGHTED). A search without a residual reads the static capacity as the residual:\n"
                           "RESIDUAL and CAPACITY read the capacity, HEADROOM 1 (0 on an edge of capacity 0).")
       .value("RESIDUAL", EdgePriority::Residual)
       .value("CAPACITY", EdgePriority::Capacity)

@@ -40,6 +40,12 @@ std::atomic<std::int64_t>& max_flows_per_call() noexcept;
 PlacementResult place_traced(FlowPolicy& policy, std::optional<Amount> volume, const OutputOptions& outputs, Trace& trace,
                              const std::function<void()>* staged = nullptr);
 
+// Any call of a policy with a `staged` callback (place_traced's, without the trace): it runs once
+// the result is final and before anything is published (evaluate: before it returns).
+enum class CallKind { Place, Evaluate, Replace, Forward };
+PlacementResult call_staged(FlowPolicy& policy, CallKind kind, std::optional<Amount> offer, const Eligibility* black_holes,
+                            const OutputOptions& outputs, const std::function<void()>* staged);
+
 } // namespace netgraph::core::detail
 
 #endif

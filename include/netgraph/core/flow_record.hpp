@@ -38,15 +38,19 @@ struct Counter128 {
 
 // A snapshot of one ledger flow, returned by records() or record(id). `bundle` is its route
 // structure; `route_cost` is the minimum walk cost from its sources to its destinations over
-// that bundle, or kUnreachable if none exists. Lossy records alone have `offered`: the cumulative
-// amount submitted to this flow before any drops. `edges` and `drops` contain positive values
-// in ascending EdgeId; per-call and cumulative drop totals are derived.
+// that bundle, or kUnreachable if none exists. `entry` is the program entry the record carries
+// (a Pinned policy: one record per entry, the entry identifier of its program); absent for the
+// records kept per roster source (CostOnly, Global) or per flow (CapacityAware). Lossy records
+// alone have `offered`: the cumulative amount submitted to this flow before any drops. `edges`
+// and `drops` contain positive values in ascending EdgeId; per-call and cumulative drop totals are
+// derived.
 struct FlowRecord {
   FlowId flow_id {};
   std::int64_t owner {0};
   std::vector<NodeId> sources {};
   std::vector<NodeId> destinations {};
   Admission admission {Admission::Lossless};
+  std::optional<std::int32_t> entry {};
   std::shared_ptr<const PredDAG> bundle {};
   Cost route_cost {kUnreachable};
   std::optional<Counter128> offered {};

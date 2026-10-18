@@ -1,5 +1,6 @@
 // The routing modes of a policy (CostOnly, CapacityAware, Global, Pinned) and their parameters:
-// the cost ceilings Absolute and Stretch, the DiminishingReturns guard.
+// the cost ceilings Absolute and Stretch, the DiminishingReturns guard, Global's support and
+// Pinned's program and black holes.
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -13,8 +14,11 @@
 
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/options.hpp"
+#include "netgraph/core/eligibility.hpp"
 #include "netgraph/core/pred_dag.hpp"
+#include "netgraph/core/program.hpp"
 #include "integers.hpp"
+#include "publication.hpp"
 #include "registration.hpp"
 
 namespace py = pybind11;
@@ -197,41 +201,63 @@ void register_routing(py::module_& m) {
                      "Routing: an ideal central controller that sees the whole network. Every positive call re-solves\n"
                      "the minimum-cost flow of what the policy already delivers plus this call's request\n"
                      "(placed_demand() + volume; what an earlier call could not place is not requested again) over\n"
-                     "the eligible graph, on the free capacity plus its own allocation (it may move its own traffic,\n"
+                     "the eligible graph, or exactly over `support` (a PredDAG of the policy's graph, trimmed to the\n"
+                     "walks from the sources to the allowed destinations under the Eligibility; every other edge\n"
+                     "carries nothing), on the free capacity plus its own allocation (it may move its own traffic,\n"
                      "never another's). It takes no placement and no selection. Origin OPTIMIZED (the default): the\n"
                      "controller chooses how much enters at each source; EQUAL: every roster source sends its\n"
-                     "round-robin share of the largest total whose shares all fit. A positive call on a network\n"
-                     "beyond the flow core's int32 numbering raises ValueError (see FlowPolicy.place).")
-      .def(py::init<>(), "Global routing (no parameters)")
-      .def("__repr__", [](const Global&) { return std::string("Global()"); });
+                     "round-robin share of the largest total whose shares all fit. Its program is the solve cut into\n"
+                     "paths per source, each a tunnel weighted by its amount. A positive call on a network beyond the\n"
+                     "flow core's int32 numbering raises ValueError (see FlowPolicy.place).")
+      .def(py::init([](const py::object& support) {
+             Global gl;
+             if (!support.is_none()) {
+               if (!py::isinstance<PredDAG>(support)) throw py::type_error("Global support must be a PredDAG or None");
+               gl.support = support.cast<std::shared_ptr<PredDAG>>();
+             }
+             return gl;
+           }),
+           py::kw_only(), py::arg("support") = py::none(),
+           "Global(*, support=None): support a PredDAG of the policy's graph (checked when a policy is built\n"
+           "with it: `support belongs to another graph`) or None for every eligible edge")
+      .def_property_readonly(
+          "support",
+          [](const Global& gl) {
+            return optional_shared(gl.support);
+          },
+          "the supplied support (a PredDAG), or None")
+      .def("__repr__", [](const Global& gl) { return std::string(gl.support ? "Global(support=...)" : "Global()"); });
 
   py::class_<Pinned>(m, "Pinned",
-                     "Routing on routes the caller gives: one flow per usable bundle (a PredDAG with at least one\n"
-                     "src -> dst walk over eligible edges, whatever their capacity), in the given order; one source\n"
-                     "and one destination. A Path converts with to_dag(). The list is copied at construction.")
-      .def(py::init([](const py::object& bundles) {
-             if (not_a_sequence(bundles)) throw py::type_error("Pinned bundles must be a sequence of PredDAG");
+                     "Routing: forwarding over a given program, computing nothing (the program's endpoints must be\n"
+                     "the policy's). The policy's Eligibility repairs failures: a tunnel touching an excluded element is\n"
+                     "FAILED, a split route loses its excluded members, and the roster is rebuilt from the program's\n"
+                     "basis (a head that no longer reaches a destination leaves the equal pool). black_holes: the nodes\n"
+                     "and edges this Eligibility excludes are silent failures; the program is forwarded unchanged and\n"
+                     "traffic reaching them is dropped there (stale forwarding; None: no black holes). One record per\n"
+                     "program entry.")
+      .def(py::init([](const std::shared_ptr<ForwardingProgram>& program, const std::shared_ptr<Eligibility>& black_holes) {
+             if (!program) throw py::type_error("Pinned program must be a ForwardingProgram");
              Pinned p;
-             for (const auto& b : py::reinterpret_borrow<py::sequence>(bundles)) {
-               if (!py::isinstance<PredDAG>(b)) {
-                 throw py::type_error("Pinned bundles must be PredDAG values (a Path converts with to_dag())");
-               }
-               p.bundles.push_back(b.cast<std::shared_ptr<PredDAG>>());
-             }
+             p.program = program;
+             p.black_holes = black_holes;
              return p;
            }),
-           py::arg("bundles"),
-           "Pinned(bundles): a sequence of PredDAG of one graph, copied; the policy checks them when it is\n"
-           "built (non-empty, no duplicates, each with a src -> dst walk)")
+           py::arg("program"), py::kw_only(), py::arg("black_holes") = nullptr,
+           "Pinned(program, *, black_holes=None): a ForwardingProgram and an Eligibility of the same graph (both\n"
+           "kept by reference; checked when a policy is built with them)")
       .def_property_readonly(
-          "bundles",
+          "program", [](const Pinned& p) { return typed_shared(p.program); },
+          "the forwarded program (shared, immutable)")
+      .def_property_readonly(
+          "black_holes",
           [](const Pinned& p) {
-            py::list out;
-            for (const auto& b : p.bundles) out.append(std::const_pointer_cast<PredDAG>(b));
-            return out;
+            return optional_shared(p.black_holes);
           },
-          "the bundles in supply order (a new list of the shared, immutable PredDAG values)")
-      .def("__repr__", [](const Pinned& p) { return "Pinned(bundles=" + std::to_string(p.bundles.size()) + ")"; });
+          "the black holes (an Eligibility), or None")
+      .def("__repr__", [](const Pinned& p) {
+        return "Pinned(tunnels=" + std::to_string(p.program->tunnels().size()) + ")";
+      });
 }
 
 } // namespace netgraph::core::bindings

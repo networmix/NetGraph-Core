@@ -25,7 +25,9 @@
 //   multipath, multi_edge))), no residual, no ceiling, no masks. Digest: the path count, then per
 //   path its cost, hop count and B' edge ids (the graph's edge ids, ordered by source, cost, target
 //   and input position).
-// The kernel rows place on fixed DAGs read with the public spf with targets (base_dag).
+// The kernel rows place on fixed DAGs read with the public spf with targets (base_dag): MaxFlow
+// as Global restricted to the DAG (Global(support = dag)), the other kernels as Pinned over a
+// program of the one split route (from_routes per placement; Weighted with the capacity weights).
 //
 // The storage rows' interface (README "Rows"): construct_prepare and construct_run (the
 // constructor on prepared unit capacities, then the sampled digest of construct_sample),
@@ -41,6 +43,7 @@
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/graph.hpp"
+#include "netgraph/core/program.hpp"
 #include "netgraph/core/search.hpp"
 #include "netgraph/core/detail/traversal.hpp"
 
@@ -303,20 +306,27 @@ inline nc::FlowPolicyConfig config(nc::Routing routing, Kernel k, nc::PathSelect
   return nc::FlowPolicyConfig {std::move(routing), a.placement, a.admission, sel};
 }
 
-// Manual placements on fixed DAGs into one ledger: one Pinned policy with that one bundle per
-// placement, destroyed after the call (its record stays in the ledger as an orphan).
+// Manual placements on fixed DAGs into one ledger: one policy per placement on that one DAG
+// (MaxFlow: Global with the DAG as its support; the other kernels: Pinned over the program of the
+// one split route), destroyed after the call (its records stay in the ledger as orphans).
 struct Ledger {
   nc::FlowLedger fg;
   explicit Ledger(const Graph& g) : fg(g.g) {}
   double place(int src, int dst, const Dag& dag, double amount, Kernel k) {
-    nc::Pinned pinned;
-    pinned.bundles.push_back(dag.dag);
     const auto a = axes(k);
     const nc::NodeId s[1] = {src};
     const nc::NodeId t[1] = {dst};
-    nc::FlowPolicy policy(fg, s, t,
-                          nc::FlowPolicyConfig {std::move(pinned), a.placement, a.admission,
-                                                nc::PathSelection(nc::EdgeTieBreak::Deterministic, a.priority)});
+    nc::FlowPolicyConfig cfg;
+    cfg.admission = a.admission;
+    if (k == Kernel::MaxFlow) {
+      cfg.routing = nc::Global {dag.dag};
+    } else {
+      nc::RouteOptions options;
+      options.placement = a.placement;
+      const nc::Route routes[1] = {nc::Route {src, dag.dag, 1}};
+      cfg.routing = nc::Pinned {nc::ForwardingProgram::from_routes(*fg.graph(), s, t, routes, options), nullptr};
+    }
+    nc::FlowPolicy policy(fg, s, t, std::move(cfg));
     const auto r = policy.place(nc::to_units(amount, kResolution));
     return nc::as_float(r.placed, kResolution);
   }
@@ -413,6 +423,111 @@ inline std::uint64_t pooled_place(const Graph& g, const std::vector<std::pair<st
       d.add(row.source_loss.lo);
       d.add(row.dropped.lo);
     }
+  }
+  return d.h;
+}
+
+// ---- forwarding programs (step 3)
+
+// One demand's program: the optimized Global solve of `volume` from `srcs` to `dst` on a fresh
+// ledger (its paths with their solved amounts, the captured source weights).
+struct Program {
+  std::shared_ptr<const nc::ForwardingProgram> p;
+  std::vector<nc::NodeId> srcs;
+  nc::NodeId dst {0};
+};
+inline Program global_program(const Graph& g, const std::vector<int>& srcs, int dst, double volume) {
+  Program out;
+  out.srcs.assign(srcs.begin(), srcs.end());
+  out.dst = dst;
+  nc::FlowLedger fg(g.g);
+  const nc::NodeId tv[1] = {dst};
+  nc::FlowPolicy policy(fg, out.srcs, tv, nc::FlowPolicyConfig {.routing = nc::Global {}});
+  out.p = policy.replace(nc::to_units(volume, kResolution)).program;
+  return out;
+}
+
+// The failure states as shared Eligibility values (a Pinned black-hole set is held by reference).
+using Masks = std::vector<std::shared_ptr<const nc::Eligibility>>;
+inline Masks masks(const Graph& g, const std::vector<std::vector<int>>& states) {
+  Masks out;
+  for (const auto& st : states) out.push_back(std::make_shared<const nc::Eligibility>(*eligibility(g, {}, st).el));
+  return out;
+}
+
+inline void add_rows(Digest& d, const nc::PlacementResult& r) {
+  d.add_i(r.placed);
+  d.add(r.source_loss.lo);
+  nc::Amount drops = 0;
+  for (const auto& [e, x] : r.call_drops) drops += x;
+  d.add_i(drops);
+  for (const auto& t : r.by_tunnel) {
+    d.add_i(static_cast<std::int64_t>(t.status));
+    d.add(t.assigned.lo);
+    d.add_i(t.delivered);
+  }
+}
+
+// An installed program's policy: forward(offer) for each offer (no route computation). The policy
+// and its ledger live for the whole row; each call retires and creates its records.
+struct Installed {
+  nc::FlowLedger fg;
+  std::unique_ptr<nc::FlowPolicy> policy;
+  Installed(const Graph& g, const std::vector<int>& srcs, int dst, double volume) : fg(g.g) {
+    const std::vector<nc::NodeId> sv(srcs.begin(), srcs.end());
+    const nc::NodeId tv[1] = {dst};
+    policy = std::make_unique<nc::FlowPolicy>(fg, sv, tv, nc::FlowPolicyConfig {.routing = nc::Global {}});
+    (void)policy->replace(nc::to_units(volume, kResolution));
+  }
+  std::uint64_t forward_all(const std::vector<double>& offers) {
+    Digest d;
+    for (double o : offers) add_rows(d, policy->forward(nc::to_units(o, kResolution)));
+    return d.h;
+  }
+};
+
+// Pinned Lossy over a program under each failure state, each on a fresh ledger: the state as the
+// policy's mask (replay: failed tunnels, the heads split over the survivors) or as its black holes
+// (stale forwarding: the program unchanged, traffic dropped at the failures); replace(offer).
+inline std::uint64_t pinned_failures(const Graph& g, const Program& prog, const Masks& states, double offer,
+                                     bool stale) {
+  Digest d;
+  const nc::NodeId tv[1] = {prog.dst};
+  const auto units = nc::to_units(offer, kResolution);
+  for (const auto& st : states) {
+    nc::FlowLedger fg(g.g);
+    nc::FlowPolicyConfig cfg;
+    cfg.routing = nc::Pinned {prog.p, stale ? st : nullptr};
+    cfg.admission = nc::Admission::Lossy;
+    nc::FlowPolicy policy(fg, prog.srcs, tv, std::move(cfg), stale ? nullptr : st.get());
+    add_rows(d, policy.replace(units));
+  }
+  return d.h;
+}
+
+// A CostOnly EqualBalanced demand replaced while an outside CostOnly demand changes its load: for
+// each load, the outside policy replaces its offer, then the demand replace(offer) re-prepares its
+// program on the new released view and retires its records. One ledger for the row's iteration.
+inline std::uint64_t replace_under_load(const Graph& g, const std::vector<int>& srcs, int dst,
+                                        const std::vector<int>& outside_srcs, int outside_dst,
+                                        const std::vector<double>& loads, double offer) {
+  const auto cfg = config(nc::CostOnly {}, Kernel::EqualBalanced, costonly_selection());
+  nc::FlowLedger fg(g.g);
+  const std::vector<nc::NodeId> sv(srcs.begin(), srcs.end());
+  const std::vector<nc::NodeId> ov(outside_srcs.begin(), outside_srcs.end());
+  const nc::NodeId tv[1] = {dst};
+  const nc::NodeId otv[1] = {outside_dst};
+  nc::FlowPolicy demand(fg, sv, tv, cfg);
+  nc::FlowPolicy outside(fg, ov, otv, cfg);
+  Digest d;
+  const auto units = nc::to_units(offer, kResolution);
+  for (double load : loads) {
+    (void)outside.replace(nc::to_units(load, kResolution));
+    const auto r = demand.replace(units);
+    d.add_i(r.placed);
+    d.add_i(r.delivery_delta);
+    d.add_i(r.routes_changed ? 1 : 0);
+    d.add_i(r.weights_changed ? 1 : 0);
   }
   return d.h;
 }

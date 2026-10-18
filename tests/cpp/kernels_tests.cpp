@@ -194,13 +194,17 @@ std::vector<Amount> dense_input(const Graph& g, const KernelPlan& plan, const st
   return to_input(g, by_id);
 }
 
+// A plan on `route` whose Weighted weights are the creation view `view` (ResidualSnapshot, the
+// default) or the capacities (Capacity).
 KernelPlan plan_of(const Graph& g, FlowPlacement p, NodeId src, std::vector<NodeId> dsts,
                    std::vector<EdgeId> route, const std::vector<Amount>& view,
-                   EdgePriority prio = EdgePriority::Residual, Admission adm = Admission::Lossless) {
+                   WeightBasis basis = WeightBasis::ResidualSnapshot, Admission adm = Admission::Lossless) {
   std::sort(route.begin(), route.end());
   std::vector<Amount> on_route;  // the creation view is route-aligned
   for (EdgeId e : route) on_route.push_back(view[static_cast<std::size_t>(e)]);
-  return make_plan(g, p, adm, prio, src, dsts, PredDAGBuilder::of_edges(g, route), on_route);
+  const WeightSource weights {basis, basis == WeightBasis::ResidualSnapshot ? std::span<const Amount>(on_route)
+                                                                             : std::span<const Amount> {}};
+  return make_plan(g, p, adm, weights, src, dsts, PredDAGBuilder::of_edges(g, route));
 }
 
 // The route cost of a plan's route (its record's bundle).
@@ -531,7 +535,7 @@ TEST(Apportion, HamiltonHoleControl) {
   // The kernel's T_max on the same plan (parallel links 1, 3, 3 with Capacity weights, link 0
   // held by a third party): exactly 4, allocation [0, 2, 2].
   auto g = make_graph(2, {{0, 1, 1, 1}, {0, 1, 3, 1}, {0, 1, 3, 1}});
-  const auto plan = plan_of(g, FlowPlacement::Weighted, 0, {1}, all_ids(g), caps(g), EdgePriority::Capacity);
+  const auto plan = plan_of(g, FlowPlacement::Weighted, 0, {1}, all_ids(g), caps(g), WeightBasis::Capacity);
   const auto view_dense = to_ids(g, std::vector<Amount> {0, 3, 3});
   const auto tm = t_max(plan, on_members(plan, view_dense));
   EXPECT_EQ(tm.value, 4);
@@ -543,64 +547,53 @@ TEST(Apportion, HamiltonHoleControl) {
   EXPECT_EQ(dense_input(g, plan, at3), (std::vector<Amount>{0, 2, 1}));
 }
 
-// The kernel entries keep their complete check: with several defects at once, one
-// error, the first in the order placement, admission, priority (named "priority": a kernel entry
-// takes it as a field of its own), then the combinations Lossy with MaxFlow and Weighted with
-// Headroom; at check_kernel and at the three entries that call it.
+// The kernel entries keep their complete check: with several defects at once, one error, the
+// first in the order placement, admission, then the combination Lossy with MaxFlow; at
+// check_kernel and at the two entries that call it. Weighted takes no priority (its weights come
+// from a WeightSource), so Headroom is no kernel defect.
 TEST(Plans, KernelEntriesReportTheFirstDefectInOrder) {
   const auto bad_placement = static_cast<FlowPlacement>(99);
   const auto bad_admission = static_cast<Admission>(98);
-  const auto bad_priority = static_cast<EdgePriority>(97);
   struct Case {
     FlowPlacement k;
     Admission a;
-    EdgePriority p;
     std::string error;
   };
   const std::vector<Case> cases = {
-      {bad_placement, bad_admission, bad_priority, "placement: 99 is not a value of FlowPlacement"},
-      {bad_placement, Admission::Lossy, EdgePriority::Headroom, "placement: 99 is not a value of FlowPlacement"},
-      {FlowPlacement::MaxFlow, bad_admission, bad_priority, "admission: 98 is not a value of Admission"},
-      {FlowPlacement::MaxFlow, Admission::Lossy, bad_priority, "priority: 97 is not a value of EdgePriority"},
-      {FlowPlacement::Weighted, Admission::Lossy, bad_priority, "priority: 97 is not a value of EdgePriority"},
-      {FlowPlacement::MaxFlow, Admission::Lossy, EdgePriority::Headroom, kLossyKernelError},
-      {FlowPlacement::Weighted, Admission::Lossy, EdgePriority::Headroom, kHeadroomKernelError},
-      {FlowPlacement::Weighted, Admission::Lossless, EdgePriority::Headroom, kHeadroomKernelError},
+      {bad_placement, bad_admission, "placement: 99 is not a value of FlowPlacement"},
+      {bad_placement, Admission::Lossy, "placement: 99 is not a value of FlowPlacement"},
+      {FlowPlacement::MaxFlow, bad_admission, "admission: 98 is not a value of Admission"},
+      {FlowPlacement::MaxFlow, Admission::Lossy, kLossyKernelError},
+      {FlowPlacement::Weighted, Admission::Lossy, ""},
+      {FlowPlacement::Weighted, Admission::Lossless, ""},
   };
   const auto g = make_graph(3, {{0, 1, 2, 1}, {1, 2, 2, 1}});
   const auto support = all_edges(g);
   const std::vector<NodeId> dsts = {2};
   const PriorityValues values {&g, EdgePriority::Capacity, {}};
   for (const auto& c : cases) {
-    EXPECT_EQ(error_of([&] { check_kernel(c.k, c.a, c.p); }), c.error);
-    EXPECT_EQ(error_of([&] { (void)make_plan(g, c.k, c.a, c.p, 0, dsts, *support, {}); }), c.error);
-    EXPECT_EQ(error_of([&] { (void)make_route_plan(g, c.k, c.a, c.p, 0, dsts, *support, nullptr); }), c.error);
-    PathSelection selection(EdgeTieBreak::Deterministic, EdgePriority::Capacity);
-    selection.priority = c.p;
-    EXPECT_EQ(error_of([&] { (void)cost_only_creation(g, support, 0, dsts, selection, PriorityFn::of(values), c.k, c.a); }),
+    EXPECT_EQ(error_of([&] { check_kernel(c.k, c.a); }), c.error);
+    EXPECT_EQ(error_of([&] { (void)make_plan(g, c.k, c.a, WeightSource {}, 0, dsts, *support); }), c.error);
+    PathSelection selection(EdgeTieBreak::Deterministic, EdgePriority::Headroom);
+    EXPECT_EQ(error_of([&] {
+                (void)cost_only_creation(g, support, 0, dsts, selection, PriorityFn::of(values), c.k, c.a, WeightSource {});
+              }),
               c.error);
   }
 }
 
-// validate_config's part of the kernel check: the two combinations only,
-// never a domain, which the configuration has checked under its own field names just before.
+// validate_config's part of the kernel check: the one combination only, never a domain, which the
+// configuration has checked under its own field names just before.
 TEST(Plans, TheCombinationRuleAloneChecksNoDomain) {
   const auto bad_placement = static_cast<FlowPlacement>(99);
   const auto bad_admission = static_cast<Admission>(98);
-  const auto bad_priority = static_cast<EdgePriority>(97);
-  EXPECT_EQ(error_of([&] { check_kernel_combination(FlowPlacement::MaxFlow, Admission::Lossy, bad_priority); }),
-            kLossyKernelError);
-  EXPECT_EQ(error_of([&] { check_kernel_combination(FlowPlacement::Weighted, bad_admission, EdgePriority::Headroom); }),
-            kHeadroomKernelError);
-  EXPECT_EQ(error_of([&] { check_kernel_combination(bad_placement, bad_admission, bad_priority); }), "");
+  EXPECT_EQ(error_of([&] { check_kernel_combination(FlowPlacement::MaxFlow, Admission::Lossy); }), kLossyKernelError);
+  EXPECT_EQ(error_of([&] { check_kernel_combination(bad_placement, bad_admission); }), "");
   for (auto k : {FlowPlacement::MaxFlow, FlowPlacement::Weighted, FlowPlacement::EqualBalanced}) {
     for (auto a : {Admission::Lossless, Admission::Lossy}) {
-      for (auto pr : {EdgePriority::Residual, EdgePriority::Capacity, EdgePriority::Headroom}) {
-        const bool rejected = (a == Admission::Lossy && k == FlowPlacement::MaxFlow) ||
-                              (k == FlowPlacement::Weighted && pr == EdgePriority::Headroom);
-        EXPECT_EQ(error_of([&] { check_kernel_combination(k, a, pr); }).empty(), !rejected);
-        EXPECT_EQ(error_of([&] { check_kernel_combination(k, a, pr); }), error_of([&] { check_kernel(k, a, pr); }));
-      }
+      const bool rejected = a == Admission::Lossy && k == FlowPlacement::MaxFlow;
+      EXPECT_EQ(error_of([&] { check_kernel_combination(k, a); }).empty(), !rejected);
+      EXPECT_EQ(error_of([&] { check_kernel_combination(k, a); }), error_of([&] { check_kernel(k, a); }));
     }
   }
 }
@@ -618,16 +611,16 @@ TEST(Plans, MembershipByKernelAndPriority) {
   EXPECT_EQ(eb.members, (std::vector<EdgeId>{0, 1, 2}));
   // Weighted: the edges of positive weight (residual weights on the creation view, capacity
   // weights on the capacities).
-  auto wr = plan_of(g, FlowPlacement::Weighted, 0, {1}, all_ids(g), view, EdgePriority::Residual);
+  auto wr = plan_of(g, FlowPlacement::Weighted, 0, {1}, all_ids(g), view, WeightBasis::ResidualSnapshot);
   EXPECT_EQ(wr.members, (std::vector<EdgeId>{inv[1]}));
   EXPECT_EQ(wr.weights, (std::vector<Amount>{4}));
-  auto wc = plan_of(g, FlowPlacement::Weighted, 0, {1}, all_ids(g), view, EdgePriority::Capacity);
+  auto wc = plan_of(g, FlowPlacement::Weighted, 0, {1}, all_ids(g), view, WeightBasis::Capacity);
   EXPECT_EQ(wc.members, (std::vector<EdgeId>{inv[0], inv[1]}));
   EXPECT_EQ(wc.weights, (std::vector<Amount>{4, 4}));
   // Lossy keeps its kernel's membership and weights.
-  for (const auto& [kernel, prio, lossless] : {std::tuple {FlowPlacement::EqualBalanced, EdgePriority::Residual, &eb},
-                                               std::tuple {FlowPlacement::Weighted, EdgePriority::Residual, &wr},
-                                               std::tuple {FlowPlacement::Weighted, EdgePriority::Capacity, &wc}}) {
+  for (const auto& [kernel, prio, lossless] : {std::tuple {FlowPlacement::EqualBalanced, WeightBasis::ResidualSnapshot, &eb},
+                                               std::tuple {FlowPlacement::Weighted, WeightBasis::ResidualSnapshot, &wr},
+                                               std::tuple {FlowPlacement::Weighted, WeightBasis::Capacity, &wc}}) {
     const auto lossy = plan_of(g, kernel, 0, {1}, all_ids(g), view, prio, Admission::Lossy);
     EXPECT_EQ(lossy.members, lossless->members) << static_cast<int>(kernel) << " " << static_cast<int>(prio);
     EXPECT_EQ(lossy.weights, lossless->weights) << static_cast<int>(kernel) << " " << static_cast<int>(prio);
@@ -647,7 +640,7 @@ TEST(Plans, SplitGraphPruning) {
   ASSERT_TRUE(allocate(eb, 2, a));
   EXPECT_EQ(dense_input(g, eb, a), (std::vector<Amount>{1, 1, 1, 1, 1}));
   EXPECT_EQ(t_max(eb, caps(g)).value, 1);  // every edge is a member: the capacities are member-aligned
-  auto w = plan_of(g, FlowPlacement::Weighted, 0, {3}, all_ids(g), caps(g), EdgePriority::Capacity);
+  auto w = plan_of(g, FlowPlacement::Weighted, 0, {3}, all_ids(g), caps(g), WeightBasis::Capacity);
   std::vector<EdgeId> want = {inv[0], inv[2]};
   std::sort(want.begin(), want.end());
   EXPECT_EQ(w.members, want);
@@ -680,8 +673,8 @@ TEST(Plans, SplitGraphEqualsTheWalkDefinition) {
   // allowed edges, the topological structure orders every member's tail before its head, and an
   // allocation conserves its total and equals the per-node reference (each node's inflow split
   // over its members by the kernel's rule). make_plan on the DAG of the allowed edges gives the
-  // same plan as make_route_plan filtering the bundle (the two entry points of the one builder),
-  // for every kernel, but for the route field. On the bundle itself (no Eligibility) make_plan's
+  // same plan as restrict_plan of the bundle's plan under the Eligibility (a replay's plan), for
+  // every kernel, but for the route field. On the bundle itself (no Eligibility) make_plan's
   // MaxFlow and EqualBalanced members are the walk definition over all the bundle's edges.
   std::mt19937 rng(2024);
   int compared = 0;
@@ -752,22 +745,21 @@ TEST(Plans, SplitGraphEqualsTheWalkDefinition) {
     const auto bundle_edges = PredDAGBuilder::ascending(bundle);
     const auto unmasked_want = walk_members(g, std::vector<EdgeId>(bundle_edges.begin(), bundle_edges.end()), src, dsts);
     for (const auto kernel : {FlowPlacement::MaxFlow, FlowPlacement::EqualBalanced}) {
-      EXPECT_EQ(make_plan(g, kernel, Admission::Lossless, EdgePriority::Capacity, src, dsts, bundle, {}).members,
-                unmasked_want)
+      EXPECT_EQ(make_plan(g, kernel, Admission::Lossless, WeightSource {}, src, dsts, bundle).members, unmasked_want)
           << "trial " << trial;
     }
     masked_differs += unmasked_want != want ? 1 : 0;
     for (const auto kernel : {FlowPlacement::EqualBalanced, FlowPlacement::Weighted, FlowPlacement::MaxFlow}) {
-      Cost got_cost = -1;
-      const auto on_bundle = make_route_plan(g, kernel, Admission::Lossless, EdgePriority::Capacity, src, dsts, bundle,
-                                             elig ? &*elig : nullptr, &got_cost);
+      const auto unmasked = make_plan(g, kernel, Admission::Lossless, WeightSource {}, src, dsts, bundle);
+      const auto on_bundle = restrict_plan(g, unmasked, std::vector<NodeId> {src}, dsts, elig ? &*elig : nullptr);
       ASSERT_EQ(on_bundle.members, kernel == FlowPlacement::Weighted ? weighted_want : want) << "trial " << trial;
-      EXPECT_EQ(on_bundle.route, want);
+      EXPECT_EQ(on_bundle.route, unmasked.route);
+      EXPECT_EQ(on_bundle.weights.size(), kernel == FlowPlacement::Weighted ? on_bundle.members.size() : 0U);
+      const Cost got_cost = route_cost(g, PredDAGBuilder::of_edges(g, prune(g, bundle, src, dsts, elig ? &*elig : nullptr)), src, dsts);
       EXPECT_EQ(got_cost, want_cost) << "trial " << trial;
       EXPECT_EQ(prune(g, usable_dag, src, dsts), want);
       Cost plan_cost = -1;
-      const auto on_usable =
-          make_plan(g, kernel, Admission::Lossless, EdgePriority::Capacity, src, dsts, usable_dag, {}, &plan_cost);
+      const auto on_usable = make_plan(g, kernel, Admission::Lossless, WeightSource {}, src, dsts, usable_dag, &plan_cost);
       // The same plan but for its route, which is the whole allowed DAG (plan_differences,
       // test_utils.hpp).
       EXPECT_EQ(plan_differences(on_usable, on_bundle, false), std::vector<std::string> {}) << "trial " << trial;
@@ -844,7 +836,7 @@ TEST(Allocation, SplitAndReconvergeMatchesThePerNodeReferenceAtEveryValue) {
       for (std::size_t i = 0; i < a.size(); ++i) ok = ok && a[i] <= view_in[i];
       if (ok) brute = t;
     }
-    const auto plan = plan_of(g, kernel, 0, {5}, all_ids(g), caps(g), EdgePriority::Capacity);
+    const auto plan = plan_of(g, kernel, 0, {5}, all_ids(g), caps(g), WeightBasis::Capacity);
     const auto vm = on_members(plan, view);
     std::vector<Amount> own(plan.members.size(), 0);
     Amount total = 0;
@@ -903,7 +895,7 @@ TEST(Allocation, TMaxExactAgainstBruteForce) {
       view[e] = static_cast<Amount>(rng() % static_cast<std::uint32_t>(g.capacity_units()[e] + 1));
     }
     const auto kernel = (rng() % 2) == 0 ? FlowPlacement::Weighted : FlowPlacement::EqualBalanced;
-    const auto plan = plan_of(g, kernel, 0, {n - 1}, all_ids(g), caps(g), EdgePriority::Capacity);
+    const auto plan = plan_of(g, kernel, 0, {n - 1}, all_ids(g), caps(g), WeightBasis::Capacity);
     ASSERT_EQ(plan.members, walk_members(g, all_ids(g), 0, {n - 1})) << "trial " << trial;
     if (plan.members.empty()) continue;
     // The members as arcs in ascending EdgeId, with their weights.
@@ -963,7 +955,7 @@ TEST(Allocation, TMaxSearchIsExactAndWithinTheProbeBudgetOnLargeRanges) {
       view[e] = (rng() % 4) == 0 ? static_cast<Amount>(rng() % 3) : static_cast<Amount>(rng() % static_cast<std::uint64_t>(c + 1));
     }
     const auto kernel = (rng() % 2) == 0 ? FlowPlacement::Weighted : FlowPlacement::EqualBalanced;
-    const auto plan = plan_of(g, kernel, 0, {n - 1}, all_ids(g), caps(g), EdgePriority::Capacity);
+    const auto plan = plan_of(g, kernel, 0, {n - 1}, all_ids(g), caps(g), WeightBasis::Capacity);
     if (plan.members.empty()) continue;
     const auto vm = on_members(plan, view);
     const auto tm = t_max(plan, vm);
@@ -1310,26 +1302,26 @@ TEST(MaxFlowKernel, RandomStepsAreCertifiedOnTheirSubset) {
 }
 
 TEST(WeightedKernel, CapacityVersusResidualMembershipAfterOccupancy) {
-  // Weighted membership by capacity versus residual after occupancy: parallel links [4, 4], another
-  // owner holds 3 on link 0 (residual [1, 4]).
+  // Weighted membership by capacity versus a residual snapshot after occupancy: parallel links
+  // [4, 4], another owner holds 3 on link 0 (residual [1, 4]).
   auto g = make_graph(2, {{0, 1, 4, 1}, {0, 1, 4, 1}});
-  auto run = [&](EdgePriority prio, std::vector<Amount> residual_in, Amount request) {
+  auto run = [&](WeightBasis prio, std::vector<Amount> residual_in, Amount request) {
     const auto w = to_ids(g, residual_in);
     const auto plan = plan_of(g, FlowPlacement::Weighted, 0, {1}, all_ids(g), w, prio);
     auto s = first_step(g, plan, w, request);
     return std::make_pair(s.total, dense_input(g, plan, s.alloc));
   };
-  EXPECT_EQ(run(EdgePriority::Residual, {1, 4}, 5), std::make_pair(Amount {5}, std::vector<Amount>{1, 4}));
-  EXPECT_EQ(run(EdgePriority::Capacity, {1, 4}, 5), std::make_pair(Amount {2}, std::vector<Amount>{1, 1}));
-  EXPECT_EQ(run(EdgePriority::Residual, {0, 4}, 5), std::make_pair(Amount {4}, std::vector<Amount>{0, 4}));
-  EXPECT_EQ(run(EdgePriority::Capacity, {0, 4}, 5), std::make_pair(Amount {0}, std::vector<Amount>{0, 0}));
+  EXPECT_EQ(run(WeightBasis::ResidualSnapshot, {1, 4}, 5), std::make_pair(Amount {5}, std::vector<Amount>{1, 4}));
+  EXPECT_EQ(run(WeightBasis::Capacity, {1, 4}, 5), std::make_pair(Amount {2}, std::vector<Amount>{1, 1}));
+  EXPECT_EQ(run(WeightBasis::ResidualSnapshot, {0, 4}, 5), std::make_pair(Amount {4}, std::vector<Amount>{0, 4}));
+  EXPECT_EQ(run(WeightBasis::Capacity, {0, 4}, 5), std::make_pair(Amount {0}, std::vector<Amount>{0, 0}));
   // Frozen plans after the owner leaves: Capacity grows to 5 as [3, 2]; Residual stays at 4.
   const auto held = to_ids(g, std::vector<Amount> {0, 4});
   const auto free = to_ids(g, std::vector<Amount> {4, 4});
-  const auto pc = plan_of(g, FlowPlacement::Weighted, 0, {1}, all_ids(g), held, EdgePriority::Capacity);
+  const auto pc = plan_of(g, FlowPlacement::Weighted, 0, {1}, all_ids(g), held, WeightBasis::Capacity);
   auto c = lossless_step(g, pc, 0, on_members(pc, free), std::vector<Amount>(pc.members.size(), 0), 5);
   EXPECT_EQ(dense_input(g, pc, c.alloc), (std::vector<Amount>{3, 2}));
-  const auto pr = plan_of(g, FlowPlacement::Weighted, 0, {1}, all_ids(g), held, EdgePriority::Residual);
+  const auto pr = plan_of(g, FlowPlacement::Weighted, 0, {1}, all_ids(g), held, WeightBasis::ResidualSnapshot);
   auto first = first_step(g, pr, held, 5);
   // After the release V = W + own on the one member is its capacity 4.
   auto again = lossless_step(g, pr, first.total, on_members(pr, free), first.alloc, 5);
@@ -1340,7 +1332,7 @@ TEST(WeightedKernel, OnePlusFiveEqualsSix) {
   // Additivity on a fixed plan (place(1) then place(5) equals place(6)): weights 2 and 6 at the
   // source.
   auto g = make_graph(3, {{0, 1, 2, 1}, {0, 2, 6, 1}, {1, 2, 9, 1}});
-  const auto plan = plan_of(g, FlowPlacement::Weighted, 0, {2}, all_ids(g), caps(g), EdgePriority::Capacity);
+  const auto plan = plan_of(g, FlowPlacement::Weighted, 0, {2}, all_ids(g), caps(g), WeightBasis::Capacity);
   const auto vm = on_members(plan, caps(g));
   std::vector<Amount> zero(plan.members.size(), 0);
   auto a = lossless_step(g, plan, 0, vm, zero, 1);
@@ -1361,7 +1353,7 @@ TEST(LossyKernel, DiamondDropsAndInfiniteInjection) {
   // A Lossy diamond: source links 10/10, tails 1/10.
   auto g = make_graph(4, {{0, 1, 10, 1}, {0, 2, 10, 1}, {1, 3, 1, 1}, {2, 3, 10, 1}});
   for (auto kernel : {FlowPlacement::EqualBalanced, FlowPlacement::Weighted}) {
-    const auto plan = plan_of(g, kernel, 0, {3}, all_ids(g), caps(g), EdgePriority::Residual, Admission::Lossy);
+    const auto plan = plan_of(g, kernel, 0, {3}, all_ids(g), caps(g), WeightBasis::ResidualSnapshot, Admission::Lossy);
     auto w = on_members(plan, caps(g));
     auto s = lossy_step(plan, 10, w);
     EXPECT_EQ(s.offered, 10);
@@ -1378,7 +1370,7 @@ TEST(LossyKernel, DiamondDropsAndInfiniteInjection) {
   // Highest averages at every node for Lossy Weighted: Capacity weights [1, 3, 3] split 7 as
   // [1, 3, 3].
   auto g2 = make_graph(2, {{0, 1, 1, 1}, {0, 1, 3, 1}, {0, 1, 3, 1}});
-  const auto p2 = plan_of(g2, FlowPlacement::Weighted, 0, {1}, all_ids(g2), caps(g2), EdgePriority::Capacity,
+  const auto p2 = plan_of(g2, FlowPlacement::Weighted, 0, {1}, all_ids(g2), caps(g2), WeightBasis::Capacity,
                           Admission::Lossy);
   auto s2 = lossy_step(p2, 7, on_members(p2, caps(g2)));
   EXPECT_EQ(dense_input(g2, p2, s2.carried), (std::vector<Amount>{1, 3, 3}));
@@ -1387,7 +1379,7 @@ TEST(LossyKernel, DiamondDropsAndInfiniteInjection) {
   // dropped on it. Weighted gives it weight 0: the source has no member and injects nothing (the
   // offer is a source drop).
   auto g3 = make_graph(2, {{0, 1, 0, 1}});
-  const auto p3 = plan_of(g3, FlowPlacement::EqualBalanced, 0, {1}, all_ids(g3), caps(g3), EdgePriority::Residual,
+  const auto p3 = plan_of(g3, FlowPlacement::EqualBalanced, 0, {1}, all_ids(g3), caps(g3), WeightBasis::ResidualSnapshot,
                           Admission::Lossy);
   ASSERT_EQ(p3.members, (std::vector<EdgeId>{0}));
   auto s3 = lossy_step(p3, 5, on_members(p3, caps(g3)));
@@ -1396,7 +1388,7 @@ TEST(LossyKernel, DiamondDropsAndInfiniteInjection) {
   EXPECT_EQ(s3.delivered, 0);
   EXPECT_EQ(s3.carried, (std::vector<Amount>{0}));
   EXPECT_EQ(s3.drops, (std::vector<Amount>{5}));
-  const auto w3 = plan_of(g3, FlowPlacement::Weighted, 0, {1}, all_ids(g3), caps(g3), EdgePriority::Capacity,
+  const auto w3 = plan_of(g3, FlowPlacement::Weighted, 0, {1}, all_ids(g3), caps(g3), WeightBasis::Capacity,
                           Admission::Lossy);
   ASSERT_TRUE(w3.members.empty());
   auto s4 = lossy_step(w3, 5, {});
@@ -1428,7 +1420,7 @@ TEST(LossyKernel, RandomStepsEqualThePerNodeReference) {
     if (rng() % 3 == 0) dsts.insert(dsts.begin(), static_cast<NodeId>(1 + rng() % static_cast<std::uint32_t>(n - 2)));
     const bool weighted = trial % 2 == 1;
     const auto kernel = weighted ? FlowPlacement::Weighted : FlowPlacement::EqualBalanced;
-    const auto plan = plan_of(g, kernel, 0, dsts, all_ids(g), caps(g), EdgePriority::Capacity, Admission::Lossy);
+    const auto plan = plan_of(g, kernel, 0, dsts, all_ids(g), caps(g), WeightBasis::Capacity, Admission::Lossy);
     // The split graph: every edge for EqualBalanced (a zero-capacity member takes its share and
     // drops it), the edges of positive weight (capacity) for Weighted.
     std::vector<EdgeId> usable;

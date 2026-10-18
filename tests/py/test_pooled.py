@@ -18,6 +18,7 @@ import netgraph_core as ngc
 T = ngc.Termination
 EB = ngc.FlowPlacement.EQUAL_BALANCED
 W = ngc.FlowPlacement.WEIGHTED
+SNAPSHOT = ngc.WeightBasis.RESIDUAL_SNAPSHOT
 LOSSY = ngc.Admission.LOSSY
 LOSSLESS = ngc.Admission.LOSSLESS
 EDGES = ngc.OutputOptions(edge_flows=True)
@@ -35,12 +36,13 @@ ONE = [(0, 1, 10, 1)]
 RC = [(0, 1, 1, 1), (0, 1, 1, 1)]
 
 
-def cfg(placement=EB, admission=LOSSLESS, selection=None):
+def cfg(placement=EB, admission=LOSSLESS, selection=None, weights=None):
     return ngc.FlowPolicyConfig(
         routing=ngc.CostOnly(),
         placement=placement,
         admission=admission,
         selection=selection,
+        weights=weights,
     )
 
 
@@ -179,8 +181,9 @@ def test_residual_weights_on_the_common_view():
     # P14: weights read once, on the residual at the first positive call's entry: e2 2, e3 10;
     # router 2: H(12, [2, 10]) = (2, 10); RR(12) = (6, 6); each member attributed by highest
     # averages over what the sources still hold: e2 H(2, [6, 6]) = [1, 1], e3 H(10, [5, 5]).
-    pick = sel(prio=ngc.EdgePriority.RESIDUAL)
-    _, _, p = policy(SNAP, [0, 1], 3, cfg(W, selection=pick), residual=[10, 10, 2, 10])
+    _, _, p = policy(
+        SNAP, [0, 1], 3, cfg(W, weights=SNAPSHOT), residual=[10, 10, 2, 10]
+    )
     r = p.place(INF)
     assert (r.placed, [x.delivered for x in r.by_source]) == (12, [6, 6])
     assert records(p) == [
@@ -194,11 +197,10 @@ def test_weights_frozen_for_the_epoch():
     # after the owner leaves (weights read again would give [6, 6, 6, 6]).
     g = build(4, SNAP)
     ledger = ngc.FlowLedger(g)
-    pinned = ngc.FlowPolicyConfig(routing=ngc.Pinned([dag_of(g, [2])]), placement=EB)
-    other = ngc.FlowPolicy(ledger, 2, 3, pinned)
+    holder = ngc.FlowPolicyConfig(routing=ngc.Global(support=dag_of(g, [2])))
+    other = ngc.FlowPolicy(ledger, 2, 3, holder)
     assert other.place(8).placed == 8
-    pick = sel(prio=ngc.EdgePriority.RESIDUAL)
-    p = ngc.FlowPolicy(ledger, [0, 1], 3, cfg(W, selection=pick))
+    p = ngc.FlowPolicy(ledger, [0, 1], 3, cfg(W, weights=SNAPSHOT))
     assert p.place(2).placed == 2
     other.remove()
     r = p.place(10, EDGES)
@@ -331,12 +333,21 @@ def test_random_against_reference(seed):
     kernel = rng.choice(["EB", "W"])
     lossy = rng.random() < 0.5
     multipath = rng.random() < 0.7
+    # W's weights: the capacities, or the residual snapshot at preparation; the selection's
+    # priority (drawn independently) never changes them.
     priority = rng.choice(["CAPACITY", "RESIDUAL"]) if kernel == "W" else "CAPACITY"
     selection = sel(
-        prio=getattr(ngc.EdgePriority, priority),
+        prio=getattr(
+            ngc.EdgePriority, rng.choice(["CAPACITY", "RESIDUAL", "HEADROOM"])
+        ),
         mp=multipath,
     )
-    config = cfg(EB if kernel == "EB" else W, LOSSY if lossy else LOSSLESS, selection)
+    config = cfg(
+        EB if kernel == "EB" else W,
+        LOSSY if lossy else LOSSLESS,
+        selection,
+        weights=SNAPSHOT if priority == "RESIDUAL" else None,
+    )
     ledger = ngc.FlowLedger(g, residual)
     elig = g.eligibility(excluded_nodes=xn, excluded_edges=xe)
     p = ngc.FlowPolicy(ledger, sources, dests, config, elig)

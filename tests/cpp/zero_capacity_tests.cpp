@@ -79,7 +79,6 @@ using Drops = std::vector<std::pair<EdgeId, Amount>>;
 struct Placed {
   PlacementResult r;
   std::vector<FlowRecord> records;
-  std::int32_t usable {0};
 };
 Placed place_once(const std::shared_ptr<const Graph>& g, std::vector<NodeId> s, std::vector<NodeId> d,
                   const FlowPolicyConfig& c, std::optional<Amount> v, const Eligibility* elig = nullptr,
@@ -89,7 +88,6 @@ Placed place_once(const std::shared_ptr<const Graph>& g, std::vector<NodeId> s, 
   Placed x;
   x.r = p.place(v, out);
   x.records = p.records();
-  x.usable = p.usable_bundles();
   return x;
 }
 
@@ -364,48 +362,51 @@ TEST(ZeroCapacity, CapacityAwareRosterAndStretchBaseline) {
   EXPECT_EQ(stretched(1.2 + 1e-9).r.placed, 1);  // the ceiling just above 6 admits the cost-6 route
 }
 
-// Z-38 to Z-42: Pinned bundles over a zero-capacity link (E-zero-first, E-zero-last).
-TEST(ZeroCapacity, PinnedBundlesKeepTheirZeroLinks) {
+// Z-38 to Z-42: Pinned split routes over a zero-capacity link (E-zero-first, E-zero-last): each
+// route is its own split context, the head's share split over them by round robin. EqualBalanced
+// keeps the zero link as a member, so the first unit (route 0) blocks a Lossless total: 0 when the
+// zero route comes first, 1 when it comes last; Lossy offer 4 sends 2 down each route and loses
+// the zero route's 2 on its link. A Weighted route over the zero link has no member (weight 0), so
+// a share it receives has no route: Lossless 0 again. Global with the two links as its support (a
+// controller) carries 4.
+TEST(ZeroCapacity, PinnedRoutesKeepTheirZeroLinks) {
   const auto p0 = ordered(2, {{0, 1, 0, 1}, {0, 1, 4, 1}});
   const auto p1 = ordered(2, {{0, 1, 4, 1}, {0, 1, 0, 1}});
-  auto pinned = [](const std::shared_ptr<const Graph>& g, std::vector<std::vector<EdgeId>> routes) {
-    Pinned p;
-    for (auto& r : routes) p.bundles.push_back(dag_of(*g, r));
-    return p;
+  const auto two = [&](const std::shared_ptr<const Graph>& g, std::optional<FlowPlacement> k,
+                       Admission a = Admission::Lossless) {
+    return FlowPolicyConfig {.routing = pinned_dags(*g, 0, 1, {dag_of(*g, {0}), dag_of(*g, {1})}, k), .admission = a};
   };
-  const auto two = [&](const std::shared_ptr<const Graph>& g, FlowPlacement k, Admission a = Admission::Lossless) {
-    return cfg(pinned(g, {{0}, {1}}), k, a);
-  };
-  const auto first = place_once(p0, {0}, {1}, two(p0, FlowPlacement::EqualBalanced), std::nullopt);
+  const auto first = place_once(p0, {0}, {1}, two(p0, std::nullopt), std::nullopt);
   EXPECT_EQ(first.r.placed, 0);
-  EXPECT_EQ(first.usable, 2);
-  EXPECT_EQ(place_once(p1, {0}, {1}, two(p1, FlowPlacement::EqualBalanced), std::nullopt).r.placed, 1);
-  const auto lossy = place_once(p0, {0}, {1}, two(p0, FlowPlacement::EqualBalanced, Admission::Lossy), 4);
+  EXPECT_EQ(first.records.size(), 2U);
+  EXPECT_EQ(place_once(p1, {0}, {1}, two(p1, std::nullopt), std::nullopt).r.placed, 1);
+  const auto lossy = place_once(p0, {0}, {1}, two(p0, std::nullopt, Admission::Lossy), 4);
   EXPECT_EQ(lossy.r.placed, 2);
   EXPECT_EQ(lossy.r.call_drops, (Drops {{0, 2}}));
-  for (const auto k : {FlowPlacement::Weighted, FlowPlacement::MaxFlow}) {
-    const auto x = place_once(p0, {0}, {1}, two(p0, k), std::nullopt);
-    EXPECT_EQ(x.r.placed, 4);
-    EXPECT_EQ(x.usable, 2);
-  }
-  const auto alone = place_once(p0, {0}, {1}, cfg(pinned(p0, {{0}}), FlowPlacement::EqualBalanced), 3);
-  EXPECT_EQ(alone.usable, 1);
+  EXPECT_EQ(place_once(p0, {0}, {1}, two(p0, FlowPlacement::Weighted), std::nullopt).r.placed, 0);
+  const auto weighted_lossy = place_once(p0, {0}, {1}, two(p0, FlowPlacement::Weighted, Admission::Lossy), 4);
+  EXPECT_EQ(weighted_lossy.r.placed, 2);
+  EXPECT_EQ(weighted_lossy.r.call_source_loss, 2);
+  EXPECT_EQ(place_once(p0, {0}, {1}, FlowPolicyConfig {.routing = Global {dag_of(*p0, {0, 1})}}, std::nullopt).r.placed,
+            4);
+  const auto alone =
+      place_once(p0, {0}, {1}, FlowPolicyConfig {.routing = pinned_dags(*p0, 0, 1, {dag_of(*p0, {0})})}, 3);
   EXPECT_EQ(alone.r.placed, 0);
   EXPECT_EQ(alone.r.termination, Termination::Exhausted);
   ASSERT_EQ(alone.records.size(), 1U);
   EXPECT_EQ(alone.records[0].delivered, 0);
 }
 
-// Z-41, Z-50: the Pinned route plan of the Weighted kernel with capacity weights. A route
-// without a zero-capacity edge is its own member set (one pass); a route with one keeps only the
-// positive edges on the walks that remain (the second pass), its route and route cost unchanged.
-TEST(ZeroCapacity, PinnedWeightedPlansKeepOnlyPositiveEdges) {
+// Z-41, Z-50: the plan of a Weighted split route with capacity weights. A route without a
+// zero-capacity edge is its own member set; a route with one keeps only the positive edges on the
+// walks that remain, its route and route cost unchanged.
+TEST(ZeroCapacity, WeightedRoutePlansKeepOnlyPositiveEdges) {
   // 0: 0 -> 1 cap 0, 1: 0 -> 1 cap 4, 2: 0 -> 2 cap 3, 3: 1 -> 3 cap 5, 4: 2 -> 3 cap 0 (costs 1).
   const auto g = ordered(4, {{0, 1, 0, 1}, {0, 1, 4, 1}, {0, 2, 3, 1}, {1, 3, 5, 1}, {2, 3, 0, 1}});
   const NodeId dst[1] = {3};
   auto plan = [&](std::vector<EdgeId> edges, Cost& cost) {
-    return detail::make_route_plan(*g, FlowPlacement::Weighted, Admission::Lossless, EdgePriority::Capacity, 0, dst,
-                                   *dag_of(*g, std::move(edges)), nullptr, &cost);
+    return detail::make_plan(*g, FlowPlacement::Weighted, Admission::Lossless, detail::WeightSource {}, 0, dst,
+                             *dag_of(*g, std::move(edges)), &cost);
   };
   Cost cost = -1;
   const auto positive = plan({1, 3}, cost);  // no zero-capacity edge: route == members
@@ -449,9 +450,8 @@ TEST(ZeroCapacity, EvaluatorsCountZeroCapacityRoutesAndCandidates) {
   EXPECT_EQ(ca.baseline.placed, 10);
   EXPECT_EQ(entries(ca), (std::vector<std::pair<EdgeId, Amount>> {{0, 0}, {1, 10}}));
   const auto p0 = ordered(2, {{0, 1, 0, 1}, {0, 1, 4, 1}});
-  Pinned pin;
-  pin.bundles = {dag_of(*p0, {0}), dag_of(*p0, {1})};
-  const auto ps = sensitivity(*p0, v({0}), v({1}), QueryOptions {cfg(pin, FlowPlacement::EqualBalanced)}, 1);
+  const Pinned pin = pinned_dags(*p0, 0, 1, {dag_of(*p0, {0}), dag_of(*p0, {1})});
+  const auto ps = sensitivity(*p0, v({0}), v({1}), QueryOptions {{.routing = pin}}, 1);
   EXPECT_EQ(ps.baseline.placed, 0);
   EXPECT_EQ(entries(ps), (std::vector<std::pair<EdgeId, Amount>> {{0, -4}, {1, 0}}));
 }

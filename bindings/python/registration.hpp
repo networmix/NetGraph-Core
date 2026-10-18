@@ -25,9 +25,10 @@ void register_pred_dag(pybind11::module_& m);          // PredDAG
 void register_path(pybind11::module_& m);              // Path
 void register_flow_record(pybind11::module_& m);       // FlowRecord
 void register_flow_ledger(pybind11::module_& m);       // FlowLedger
+void register_program(pybind11::module_& m);           // TunnelStatus, Tunnel, Route, ForwardingProgram
 void register_routing(pybind11::module_& m);           // Absolute, Stretch, DiminishingReturns, the four routings
 void register_policy_config(pybind11::module_& m);     // FlowPolicyConfig, OutputOptions
-void register_placement_result(pybind11::module_& m);  // Termination, PlacementResult
+void register_placement_result(pybind11::module_& m);  // Termination, SourceFlow, TunnelFlow, PlacementResult
 void register_dag_cache(pybind11::module_& m);         // DagCacheStats, DagCacheMiss, DagCache
 void register_flow_policy(pybind11::module_& m);       // FlowPolicy
 void register_evaluators(pybind11::module_& m);        // capacity, batch_capacity, sensitivity and their types

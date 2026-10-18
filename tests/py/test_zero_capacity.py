@@ -166,11 +166,15 @@ def test_capacity_aware_roster_and_stretch_baseline():
 @pytest.mark.parametrize(
     ("caps", "bound"), [((0, 4), 0), ((4, 0), 1)], ids=["E-zero-first", "E-zero-last"]
 )
-def test_pinned_bundles_keep_their_zero_links(caps, bound):
+def test_pinned_routes_keep_their_zero_links(caps, bound):
+    # Two split routes, one over the zero link: the head's round robin gives the first unit to
+    # route 0, so a zero first route blocks every total and a zero last route admits 1.
     g = graph(2, [(0, 1, caps[0], 1), (0, 1, caps[1], 1)])
-    cfg = config(ngc.Pinned([dag_of(g, [0]), dag_of(g, [1])]))
-    r, p = place(g, 0, 1, cfg, math.inf)
-    assert (r.placed, p.usable_bundles()) == (bound, 2)
+    program = ngc.ForwardingProgram.from_routes(
+        g, 0, 1, [ngc.Route(0, dag_of(g, [0])), ngc.Route(0, dag_of(g, [1]))]
+    )
+    r, p = place(g, 0, 1, ngc.FlowPolicyConfig(routing=ngc.Pinned(program)), math.inf)
+    assert (r.placed, len(p.records())) == (bound, 2)
 
 
 def test_global_min_cut_lists_zero_capacity_links_leaving_the_closure():

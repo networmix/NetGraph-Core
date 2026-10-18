@@ -79,8 +79,17 @@ TEST(FlowPolicyConfig, EveryRejectedCombinationBeforeBinding) {
     EXPECT_TRUE(detail::LedgerAccess::bound_owners(fg).empty());
   };
   rejects(cfg(CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossy), "MAX_FLOW requires admission=LOSSLESS");
-  rejects(cfg(CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Headroom)),
+  // CapacityAware's Weighted flows read their weights from the priority (until its tunnel form):
+  // Headroom is rejected there; CostOnly's weights come from its weight basis.
+  rejects(cfg(CapacityAware {}, FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Headroom)),
           "the Weighted kernel is rejected with priority Headroom (weights are units)");
+  EXPECT_EQ(error_of([&] {
+              FlowPolicy p(fg, v({0}), v({3}),
+                           cfg(CostOnly {}, FlowPlacement::Weighted, Admission::Lossless,
+                               sel(EdgeTieBreak::Deterministic, EdgePriority::Headroom)));
+            }),
+            "");
+  fg.reset();
   rejects({.routing = Global {}, .placement = FlowPlacement::MaxFlow}, "Global does not accept placement");
   rejects({.routing = Global {}, .selection = PathSelection()}, "Global does not accept selection");
   rejects({.routing = Global {}, .admission = Admission::Lossy}, "MAX_FLOW requires admission=LOSSLESS");
@@ -121,29 +130,17 @@ TEST(FlowPolicyConfig, EveryRejectedCombinationBeforeBinding) {
     ca.diminishing = DiminishingReturns {1, f};
     rejects(cfg(ca, FlowPlacement::MaxFlow), std::string("diminishing fraction must be in (0, 1) (got ") + shown + ")");
   }
-  Pinned none;
-  rejects(cfg(none, FlowPlacement::MaxFlow), "Pinned: an empty bundle list is rejected");
-  // A null bundle, first or after a valid one: refused before it is read.
-  Pinned null_first;
-  null_first.bundles = {nullptr};
-  rejects(cfg(null_first, FlowPlacement::MaxFlow), "Pinned: bundle 0 is null");
-  Pinned null_second;
-  null_second.bundles = {dag_of(*g, {0, 2}), nullptr};
-  rejects(cfg(null_second, FlowPlacement::MaxFlow), "Pinned: bundle 1 is null");
-  Pinned dup;
-  dup.bundles = {dag_of(*g, {0, 2}), dag_of(*g, {0, 2})};
-  rejects(cfg(dup, FlowPlacement::MaxFlow), "Pinned: duplicate bundle 1 (equal to bundle 0 before pruning)");
-  Pinned malformed;
-  malformed.bundles = {dag_of(*g, {0, 3})};
-  rejects(cfg(malformed, FlowPlacement::MaxFlow), "Pinned: malformed bundle 0, no src -> dst walk (src 0, dst 3)");
-  Pinned ok;
-  ok.bundles = {dag_of(*g, {0, 2})};
-  rejects(cfg(ok, FlowPlacement::MaxFlow),
-          "Pinned routing requires single endpoints (bundles bind one source and one destination)", {0, 1}, {3});
+  // Pinned: a program of this graph whose endpoints are the policy's, and no field of a model that
+  // computes.
+  rejects({.routing = Pinned {}}, "Pinned requires a program");
+  const Pinned ok = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2})});
+  rejects({.routing = ok, .placement = FlowPlacement::MaxFlow}, "Pinned does not accept placement");
+  rejects({.routing = ok}, "program endpoints do not match policy endpoints", {0, 1}, {3});
   auto other = diamond(5, 5);
-  Pinned foreign;
-  foreign.bundles = {dag_of(*other, {0, 2})};
-  rejects(cfg(foreign, FlowPlacement::MaxFlow), "foreign PredDAG: bundle built for another graph");
+  rejects({.routing = pinned_dags(*other, 0, 3, {dag_of(*other, {0, 2})})}, "program belongs to another graph");
+  rejects({.routing = Pinned {ok.program, std::make_shared<const Eligibility>(other->eligibility({}, std::vector<EdgeId> {0}))}},
+          "black_holes belongs to another graph");
+  rejects({.routing = Global {dag_of(*other, {0, 2})}}, "support belongs to another graph");
   rejects(cfg(CostOnly {}, FlowPlacement::MaxFlow),
           "node 3 is in both endpoint sets: sources and destinations must not overlap", {0, 3}, {3});
   rejects(cfg(CostOnly {}, FlowPlacement::MaxFlow), "sources: the node set is empty", {}, {3});
@@ -210,8 +207,7 @@ TEST(FlowPolicyConfig, EnumValuesOutsideTheirEnumerationAreRejected) {
   tie_sel.tie_break = bad_tie;
   auto priority_sel = sel();
   priority_sel.priority = bad_priority;
-  Pinned pinned;
-  pinned.bundles = {dag_of(*g, {0, 2})};
+  const Pinned pinned = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2})});
   const std::vector<Routing> modes = {CostOnly {}, CapacityAware {}, Global {}, pinned};
   struct Bad {
     std::function<FlowPolicyConfig(const Routing&)> make;
@@ -250,12 +246,8 @@ TEST(FlowPolicyConfig, EnumValuesOutsideTheirEnumerationAreRejected) {
     }
   }
   // The kernel check, the search and the cache's key.
-  EXPECT_TRUE(contains(error_of([&] { detail::check_kernel(bad_placement, Admission::Lossless, EdgePriority::Capacity); }),
-                       "placement: 99"));
-  EXPECT_TRUE(contains(error_of([&] { detail::check_kernel(FlowPlacement::MaxFlow, bad_admission, EdgePriority::Capacity); }),
-                       "admission: 99"));
-  EXPECT_TRUE(contains(error_of([&] { detail::check_kernel(FlowPlacement::MaxFlow, Admission::Lossless, bad_priority); }),
-                       "priority: 99"));
+  EXPECT_TRUE(contains(error_of([&] { detail::check_kernel(bad_placement, Admission::Lossless); }), "placement: 99"));
+  EXPECT_TRUE(contains(error_of([&] { detail::check_kernel(FlowPlacement::MaxFlow, bad_admission); }), "admission: 99"));
   {
     SpfOptions o(Direction::Forward, sel());
     o.direction = bad_direction;
@@ -275,9 +267,9 @@ TEST(FlowPolicyConfig, EnumValuesOutsideTheirEnumerationAreRejected) {
 // The configuration with several defects at once: one error, the first in FlowPolicyConfig's
 // order: the enumeration values (placement, admission, origin, the selection's tie_break and
 // priority, assigned out of their enumerations), then the model's row of the matrix, its columns
-// left to right (placement, origin, admission, selection), then the DagCache, then CapacityAware's
-// parameters. Exact texts; the same first error at construction and at the evaluators; nothing is
-// bound.
+// left to right (placement, origin, admission, selection, weights with edge_weights), then the
+// DagCache, then CapacityAware's parameters, then edge_weights' length and entries. Exact texts;
+// the same first error at construction and at the evaluators; nothing is bound.
 TEST(FlowPolicyConfig, SeveralDefectsReportTheFirstInTheContractOrder) {
   auto g = diamond(5, 5);
   FlowLedger fg(g);
@@ -288,6 +280,9 @@ TEST(FlowPolicyConfig, SeveralDefectsReportTheFirstInTheContractOrder) {
   const auto bad_origin = static_cast<Origin>(95);
   CapacityAware zero;
   zero.flow_count = 0;
+  const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2})});
+  const auto weights2 = std::make_shared<const std::vector<Amount>>(std::vector<Amount> {1, 1});
+  const auto too_big = std::make_shared<const std::vector<Amount>>(std::vector<Amount> {1, 1, kDomainLimit, -1});
   struct Case {
     FlowPolicyConfig c;
     std::string error;
@@ -319,18 +314,40 @@ TEST(FlowPolicyConfig, SeveralDefectsReportTheFirstInTheContractOrder) {
       {{CostOnly {}, FlowPlacement::Weighted, Admission::Lossy, sel(), Origin::Optimized},
        "CostOnly with EQUAL_BALANCED or WEIGHTED requires origin=EQUAL"},
       {{CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossy, sel(), Origin::Equal}, kLossyKernelError},
-      {{CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Headroom)},
-       kHeadroomKernelError},
+      // The weights column (with edge_weights), after the selection.
+      {{CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossless, sel(), std::nullopt, WeightBasis::Capacity},
+       "weights require CostOnly placement=WEIGHTED"},
+      {{CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossless, sel(), std::nullopt, std::nullopt, weights2},
+       "edge_weights require weights=EXPLICIT"},
+      {{CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, sel(), std::nullopt, WeightBasis::Explicit},
+       "weights=EXPLICIT requires edge_weights"},
+      {{CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, sel(), std::nullopt, WeightBasis::ResidualSnapshot,
+        weights2},
+       "edge_weights require weights=EXPLICIT"},
+      {{CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, sel(), std::nullopt, WeightBasis::Explicit, weights2},
+       "edge_weights: expected 4 entries"},
+      {{CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, sel(), std::nullopt, WeightBasis::Explicit, too_big},
+       "edge_weights[2] must be an integer in [0, 2^62)"},
+      {{Global {}, std::nullopt, Admission::Lossless, std::nullopt, std::nullopt, WeightBasis::Capacity},
+       "Global does not accept weights"},
+      {{Global {}, std::nullopt, Admission::Lossless, std::nullopt, std::nullopt, std::nullopt, weights2},
+       "Global does not accept edge_weights"},
       {{zero, std::nullopt, Admission::Lossy, sel(), Origin::Optimized}, "CapacityAware requires placement"},
       {{zero, FlowPlacement::MaxFlow, Admission::Lossy, sel(), Origin::Optimized}, "T1 requires origin=EQUAL"},
       {{zero, FlowPlacement::MaxFlow, Admission::Lossy, sel(), Origin::Equal}, kLossyKernelError},
       {{zero, FlowPlacement::EqualBalanced, Admission::Lossy}, "CapacityAware requires admission=LOSSLESS"},
       {{zero, FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Headroom)},
        kHeadroomKernelError},
+      {{zero, FlowPlacement::EqualBalanced, Admission::Lossless, sel(), std::nullopt, WeightBasis::Capacity},
+       "T1 does not accept weights"},
       {{zero, FlowPlacement::EqualBalanced}, "CapacityAware flow_count must be >= 1 (got 0)"},
-      {{Pinned {}, std::nullopt, Admission::Lossy, std::nullopt, Origin::Equal}, "Pinned requires placement"},
-      {{Pinned {}, FlowPlacement::MaxFlow, Admission::Lossy, std::nullopt, Origin::Equal}, "Pinned does not accept origin"},
-      {{Pinned {}, FlowPlacement::MaxFlow, Admission::Lossy}, kLossyKernelError},
+      {{pin, FlowPlacement::MaxFlow, Admission::Lossy, sel(), Origin::Equal}, "Pinned does not accept placement"},
+      {{pin, std::nullopt, Admission::Lossy, sel(), Origin::Equal}, "Pinned does not accept origin"},
+      {{pin, std::nullopt, Admission::Lossy, sel()}, "Pinned does not accept selection"},
+      {{pin, std::nullopt, Admission::Lossy, std::nullopt, std::nullopt, WeightBasis::Capacity},
+       "Pinned does not accept weights"},
+      {{pin, std::nullopt, Admission::Lossy, std::nullopt, std::nullopt, std::nullopt, weights2},
+       "Pinned does not accept edge_weights"},
   };
   for (const auto& k : cases) {
     EXPECT_EQ(error_of([&] { FlowPolicy p(fg, v({0}), v({3}), k.c); }), k.error);
@@ -349,7 +366,7 @@ TEST(FlowPolicyConfig, SeveralDefectsReportTheFirstInTheContractOrder) {
       {global_config(), "Global does not use DagCache"},
       {{Global {}, FlowPlacement::MaxFlow}, "Global does not accept placement"},
       {{CapacityAware {}, FlowPlacement::EqualBalanced}, "T1 does not use DagCache"},
-      {{Pinned {}, FlowPlacement::EqualBalanced}, "Pinned does not use DagCache"},
+      {{.routing = pin}, "Pinned does not use DagCache"},
   };
   for (const auto& k : cached) {
     EXPECT_EQ(error_of([&] { FlowPolicy p(fg, v({0}), v({3}), k.c, nullptr, &cache); }), k.error);
@@ -388,9 +405,11 @@ TEST(FlowPolicyConfig, DefaultsResolveAtThePolicy) {
   EXPECT_FALSE(global.placement.has_value());
   EXPECT_EQ(snapshot({.routing = Global {}, .origin = Origin::Equal}).origin, Origin::Equal);
   EXPECT_EQ(snapshot({.routing = CapacityAware {}, .placement = FlowPlacement::EqualBalanced}).origin, Origin::Equal);
-  Pinned pin;
-  pin.bundles = {dag_of(*g, {0, 2})};
-  EXPECT_FALSE(snapshot({.routing = pin, .placement = FlowPlacement::EqualBalanced}).origin.has_value());
+  const auto pinned = snapshot({.routing = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2})})});
+  EXPECT_FALSE(pinned.origin.has_value() || pinned.selection.has_value() || pinned.weights.has_value());
+  // Weighted's absent weights resolve to Capacity; the other placements keep none.
+  EXPECT_EQ(snapshot({.routing = CostOnly {}, .placement = FlowPlacement::Weighted}).weights, WeightBasis::Capacity);
+  EXPECT_FALSE(eb.weights.has_value());
 }
 
 // config() is the copy taken at construction: every field as given, and a later change of the
@@ -426,69 +445,73 @@ TEST(FlowPolicyConfig, ConfigIsTheCopyTakenAtConstruction) {
   ASSERT_TRUE(r.diminishing.has_value());
   EXPECT_EQ(r.diminishing->window, 2);
   EXPECT_EQ(r.diminishing->fraction, 0.25);
-  // Pinned: the supplied bundles themselves, in supply order.
-  Pinned pin;
-  pin.bundles = {dag_of(*g, {1, 3}), dag_of(*g, {0, 2})};
+  // Pinned: the supplied program and black holes themselves (shared, never copied); explicit
+  // weights: the configuration's one array, shared by every policy built from it.
+  const auto dark = std::make_shared<const Eligibility>(g->eligibility({}, std::vector<EdgeId> {1}));
+  const Pinned pin {pinned_dags(*g, 0, 3, {dag_of(*g, {1, 3}), dag_of(*g, {0, 2})}).program, dark};
   FlowLedger fg2(g);
-  FlowPolicy q(fg2, v({0}), v({3}), cfg(pin, FlowPlacement::MaxFlow));
+  FlowPolicy q(fg2, v({0}), v({3}), {.routing = pin});
   ASSERT_TRUE(std::holds_alternative<Pinned>(q.config().routing));
-  const auto& kept = std::get<Pinned>(q.config().routing).bundles;
-  ASSERT_EQ(kept.size(), 2U);
-  EXPECT_EQ(kept[0].get(), pin.bundles[0].get());
-  EXPECT_EQ(kept[1].get(), pin.bundles[1].get());
+  EXPECT_EQ(std::get<Pinned>(q.config().routing).program.get(), pin.program.get());
+  EXPECT_EQ(std::get<Pinned>(q.config().routing).black_holes.get(), dark.get());
+  const FlowPolicyConfig explicit_weights {CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, std::nullopt,
+                                           std::nullopt, WeightBasis::Explicit,
+                                           std::make_shared<const std::vector<Amount>>(std::vector<Amount> {1, 2, 3, 4})};
+  FlowPolicy a(fg2, v({0}), v({3}), explicit_weights);
+  FlowPolicy b(fg2, v({0}), v({3}), explicit_weights);
+  EXPECT_EQ(a.config().edge_weights.get(), explicit_weights.edge_weights.get());
+  EXPECT_EQ(b.config().edge_weights.get(), explicit_weights.edge_weights.get());
 }
 
-// Global and Pinned read only the selection's priority, and only with the Weighted kernel (its
-// membership and weights): every other selection gives the same placement. Two parallel edges
-// 0 -> 1 of 4 units (EdgeIds 0 and 1), a third party holding 3 units of edge 0. Pinned Weighted
-// on both edges, request 5: with priority Capacity the weights are 4 : 4, so the flow is at most
-// 1 + 1 = 2 (edge 0 has 1 unit left); with priority Residual they are the residuals 1 : 4 at
-// creation, so it carries 1 + 4 = 5. Global (MaxFlow only), Pinned MaxFlow and Pinned
-// EqualBalanced place the same under every selection. Control: CostOnly reads the selection (a
-// single path, multipath = false, carries less than the two-edge DAG).
-TEST(FlowPolicyConfig, GlobalAndPinnedReadOnlyTheWeightedPriority) {
+// The selection's priority is no weight. Two parallel edges 0 -> 1 of 4 units (EdgeIds 0 and 1),
+// a third party holding 3 units of edge 0, request 5. CostOnly Weighted over both edges: its
+// weight basis decides (Capacity 4 : 4 carries at most 1 + 1 = 2, edge 0 having 1 unit left; a
+// residual snapshot 1 : 4 at preparation carries 1 + 4 = 5) under every tie break and priority
+// that keeps both edges. Global, Global on the two edges as its support, and Pinned over one split
+// route of both edges (EqualBalanced 2; Weighted with capacity weights 2, with the snapshot 5) take
+// no selection. Control: CostOnly reads the selection (a single path, multipath = false, carries
+// less than the two-edge DAG).
+TEST(FlowPolicyConfig, ThePriorityIsNoWeight) {
   auto g = shared(make_graph(2, {{0, 1, 4, 1}, {0, 1, 4, 1}}));
-  std::vector<PathSelection> all;
-  for (auto t : {EdgeTieBreak::Deterministic, EdgeTieBreak::PreferHigherPriority}) {
-    for (auto p : {EdgePriority::Residual, EdgePriority::Capacity, EdgePriority::Headroom}) {
-      for (bool mp : {true, false}) {
-        for (bool me : {true, false}) all.push_back(sel(t, p, mp, me));
-      }
-    }
-  }
   using Edges = std::vector<std::pair<EdgeId, Amount>>;
   // The placement of request 5 after the third party: (placed, the policy's records' edges).
-  auto run = [&](const Routing& routing, FlowPlacement k, const PathSelection& s) {
+  auto run = [&](const FlowPolicyConfig& c) {
     FlowLedger fg(g);
-    Pinned third;
-    third.bundles = {dag_of(*g, {0})};
-    FlowPolicy other(fg, v({0}), v({1}), cfg(third, FlowPlacement::MaxFlow));
+    FlowPolicy other(fg, v({0}), v({1}), FlowPolicyConfig {.routing = Global {dag_of(*g, {0})}});
     EXPECT_EQ(other.place(3).placed, 3);
-    FlowPolicy p(fg, v({0}), v({1}), cfg(routing, k, Admission::Lossless, s));
+    FlowPolicy p(fg, v({0}), v({1}), c);
     const auto r = p.place(5);
     std::vector<Edges> edges;
     for (const auto& rec : p.records()) edges.push_back(rec.edges);
     return std::pair {r.placed, edges};
   };
-  Pinned both;
-  both.bundles = {dag_of(*g, {0, 1})};
-  for (const auto& [name, routing, k] : std::vector<std::tuple<std::string, Routing, FlowPlacement>> {
-           {"Global", Global {}, FlowPlacement::MaxFlow},
-           {"Pinned MaxFlow", both, FlowPlacement::MaxFlow},
-           {"Pinned EqualBalanced", both, FlowPlacement::EqualBalanced}}) {
-    const auto want = run(routing, k, all.front());
-    EXPECT_EQ(want.first, k == FlowPlacement::EqualBalanced ? 2 : 5) << name;
-    for (const auto& s : all) EXPECT_EQ(run(routing, k, s), want) << name;
+  for (auto t : {EdgeTieBreak::Deterministic, EdgeTieBreak::PreferHigherPriority}) {
+    for (auto pr : {EdgePriority::Residual, EdgePriority::Capacity, EdgePriority::Headroom}) {
+      for (auto basis : {WeightBasis::Capacity, WeightBasis::ResidualSnapshot}) {
+        const bool snapshot = basis == WeightBasis::ResidualSnapshot;
+        const auto got = run({CostOnly {}, FlowPlacement::Weighted, Admission::Lossless, sel(t, pr), std::nullopt, basis});
+        EXPECT_EQ(got.first, snapshot ? 5 : 2);
+        EXPECT_EQ(got.second, (std::vector<Edges> {snapshot ? Edges {{0, 1}, {1, 4}} : Edges {{0, 1}, {1, 1}}}));
+      }
+    }
   }
-  for (const auto& s : all) {
-    if (s.priority == EdgePriority::Headroom) continue;  // rejected with Weighted
-    const bool residual = s.priority == EdgePriority::Residual;
-    const auto got = run(both, FlowPlacement::Weighted, s);
-    EXPECT_EQ(got.first, residual ? 5 : 2);
-    EXPECT_EQ(got.second, (std::vector<Edges> {residual ? Edges {{0, 1}, {1, 4}} : Edges {{0, 1}, {1, 1}}}));
-  }
-  EXPECT_EQ(run(CostOnly {}, FlowPlacement::MaxFlow, sel()).first, 5);
-  EXPECT_EQ(run(CostOnly {}, FlowPlacement::MaxFlow, sel(EdgeTieBreak::Deterministic, EdgePriority::Capacity, false)).first,
+  const auto both = dag_of(*g, {0, 1});
+  EXPECT_EQ(run({.routing = Global {}}).first, 5);
+  EXPECT_EQ(run({.routing = Global {both}}).first, 5);
+  EXPECT_EQ(run({.routing = pinned_dags(*g, 0, 1, {both})}).first, 2);
+  EXPECT_EQ(run({.routing = pinned_dags(*g, 0, 1, {both}, FlowPlacement::Weighted)}).first, 2);
+  RouteOptions snap;
+  snap.placement = FlowPlacement::Weighted;
+  snap.weights = WeightBasis::ResidualSnapshot;
+  snap.residual = std::vector<Amount> {1, 4};
+  const NodeId s0[1] = {0};
+  const NodeId d1[1] = {1};
+  const Route route[1] = {Route {0, both, 1}};
+  EXPECT_EQ(run({.routing = Pinned {ForwardingProgram::from_routes(*g, s0, d1, route, snap), nullptr}}).first, 5);
+  EXPECT_EQ(run(cfg(CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossless, sel())).first, 5);
+  EXPECT_EQ(run(cfg(CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossless,
+                    sel(EdgeTieBreak::Deterministic, EdgePriority::Capacity, false)))
+                .first,
             1);
 }
 
@@ -527,15 +550,15 @@ std::map<NodeId, Amount> delivered_by_source(const FlowPolicy& p) {
 // 2^127 case starts from a requested total set just below the limit.
 TEST(FlowPolicyRequests, RejectedRequestsLeaveThePolicyAndTheLedger) {
   auto g = diamond(5, 3, 2);
-  Pinned pinned;
-  pinned.bundles = {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})};
+  const Pinned pinned = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})});
   CapacityAware ca;
   ca.max_path_cost = Absolute {4};
   const std::vector<std::pair<const char*, FlowPolicyConfig>> configs = {
       {"CostOnly", cost_only_config()},
       {"CapacityAware", cfg(ca, FlowPlacement::EqualBalanced)},
       {"Global", global_config()},
-      {"Pinned", cfg(pinned, FlowPlacement::MaxFlow)},
+      {"Pinned", {.routing = pinned}},
+      {"Global support", {.routing = Global {dag_of(*g, {0, 2})}}},
       {"CostOnly Lossy", cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy)}};
   const std::string range_error = "offer must be an integer in [0, 2^62) or permitted +inf";
   const std::string after_inf = "finite placement after infinite placement requires a new epoch";
@@ -548,7 +571,7 @@ TEST(FlowPolicyRequests, RejectedRequestsLeaveThePolicyAndTheLedger) {
     EXPECT_EQ(error_of([&] { (void)p.place(kDomainLimit); }), range_error) << name;
     expect_same(state_of(p, fg), finite, name);
     // Just below 2^127: 5 more would reach it, 4 would not.
-    auto& requested = detail::PolicyAccess::engine(p).requested;
+    auto& requested = detail::PolicyAccess::engine(p).epoch.requested;
     const Counter128 saved = requested;
     requested = Counter128 {(std::uint64_t {1} << 63) - 1, std::numeric_limits<std::uint64_t>::max() - 4};
     const auto near_limit = state_of(p, fg);
@@ -653,7 +676,7 @@ TEST(FlowPolicyRequests, RoundRobinSharesFollowTheCumulativeRequest) {
   for (const auto& [offered, to] : {std::pair {Counter128 {1, 0}, NodeId {2}}, std::pair {Counter128 {1, 5}, NodeId {0}}}) {
     FlowLedger fg(g);
     FlowPolicy p(fg, sources(7), v({7}), cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy));
-    detail::PolicyAccess::engine(p).offered = offered;
+    detail::PolicyAccess::engine(p).epoch.offered = offered;
     EXPECT_EQ(p.place(1).placed, 1) << offered.lo;
     for (const auto& [s, x] : delivered_by_source(p)) EXPECT_EQ(x, s == to ? 1 : 0) << offered.lo << " source " << s;
     EXPECT_EQ(delivered_by_source(p).at(to), 1) << offered.lo;
@@ -664,8 +687,7 @@ TEST(FlowPolicyOutputs, OwnAllocationLedgerResidualBottleneckAndGlobalCut) {
   auto g = diamond(5, 3);
   FlowLedger fg(g);
   // A third party holds one unit of the first route.
-  Pinned third;
-  third.bundles = {dag_of(*g, {0, 2})};
+  const Global third {dag_of(*g, {0, 2})};
   FlowPolicy other(fg, v({0}), v({3}), cfg(third, FlowPlacement::MaxFlow));
   ASSERT_EQ(other.place(1).placed, 1);
   FlowPolicy p(fg, v({0}), v({3}), cost_only_config());
@@ -726,8 +748,7 @@ TEST(FlowPolicyOutputs, BottleneckIsTheLedgersForThePolicysSourcesAndEligibility
   const auto id = id_of_input(*g);
   const EdgeId a = id[0], x = id[1], y = id[2];
   FlowLedger fg(g);
-  Pinned third;
-  third.bundles = {dag_of(*g, {x, y})};
+  const Global third {dag_of(*g, {x, y})};
   FlowPolicy other(fg, v({0}), v({3}), cfg(third, FlowPlacement::MaxFlow));
   ASSERT_EQ(other.place(1).placed, 1);
   const auto el = g->eligibility({}, std::vector<EdgeId> {x});
@@ -770,8 +791,7 @@ TEST(FlowPolicyGlobal, EmptyRosterReportsAnEmptyCurveAndAnEmptyCut) {
 TEST(FlowPolicyGlobal, ARosterWithoutFlowIsExhausted) {
   auto g = shared(make_graph(2, {{0, 1, 2, 1}}));
   FlowLedger fg(g);
-  Pinned edge;
-  edge.bundles = {dag_of(*g, {0})};
+  const Global edge {dag_of(*g, {0})};
   auto third = std::make_unique<FlowPolicy>(fg, v({0}), v({1}), cfg(edge, FlowPlacement::MaxFlow));
   ASSERT_EQ(third->place(2).placed, 2);
   FlowPolicy p(fg, v({0}), v({1}), global_config());
@@ -808,13 +828,13 @@ TEST(FlowPolicyGlobal, ZeroCallReportsTheCumulativeCurve) {
   auto r = p.place(5);
   EXPECT_EQ(*r.cost_distribution, (Curve {{2, 4}, {7, 1}}));
   const auto allocated = fg.allocated();
-  const auto requested = detail::PolicyAccess::engine(p).requested;
+  const auto requested = detail::PolicyAccess::engine(p).epoch.requested;
   z = p.place(0, OutputOptions {true, true, true, true});
   EXPECT_EQ(z.placed, 0);
   EXPECT_EQ(*z.cost_distribution, *r.cost_distribution);
   EXPECT_FALSE(z.min_cut.has_value());
   EXPECT_EQ(fg.allocated(), allocated);
-  EXPECT_EQ(detail::PolicyAccess::engine(p).requested, requested);
+  EXPECT_EQ(detail::PolicyAccess::engine(p).epoch.requested, requested);
   r = p.place(1);  // cumulative 6: the solve's curve on V = W + own
   EXPECT_EQ(*r.cost_distribution, (Curve {{2, 4}, {7, 2}}));
   z = p.place(0);
@@ -1117,21 +1137,19 @@ TEST(FlowPolicyRecords, BundlesAreSharedOrPruned) {
   auto g = diamond(5, 5);
   FlowLedger fg(g);
   const auto whole = dag_of(*g, {0, 1, 2, 3});
-  Pinned pin;
-  pin.bundles = {whole};
-  FlowPolicy p(fg, v({0}), v({3}), cfg(pin, FlowPlacement::EqualBalanced));
+  const Pinned pin = pinned_dags(*g, 0, 3, {whole});
+  FlowPolicy p(fg, v({0}), v({3}), {.routing = pin});
   (void)p.place(2);
-  // An unchanged supplied bundle is shared by the record (no copy).
+  // An unchanged supplied split route is shared by the record (no copy).
   EXPECT_EQ(p.records().front().bundle.get(), whole.get());
-  // A pruned bundle is a new DAG of the usable route.
+  // A route pruned by the replay's mask is a new DAG of what remains.
   const auto el = g->eligibility({}, std::vector<EdgeId> {2});
   FlowLedger fg2(g);
-  FlowPolicy q(fg2, v({0}), v({3}), cfg(pin, FlowPlacement::EqualBalanced), &el);
+  FlowPolicy q(fg2, v({0}), v({3}), {.routing = pin}, &el);
   (void)q.place(2);
   const auto rec = q.records().front();
   EXPECT_NE(rec.bundle.get(), whole.get());
   EXPECT_EQ(ascending_edges(*rec.bundle), (std::vector<EdgeId> {1, 3}));
-  EXPECT_EQ(q.usable_bundles(), 1);
   // CostOnly: a source whose route is the whole cached support shares it.
   DagCache cache(*g);
   FlowLedger fg3(g);
@@ -1240,8 +1258,7 @@ TEST(FlowPolicyOutcomes, TheCallTakesTheHighestUnservedOutcome) {
     FlowLedger fg(g);
     std::optional<FlowPolicy> third;
     if (c.occupied) {
-      Pinned edge;
-      edge.bundles = {dag_of(*g, {0})};
+      const Global edge {dag_of(*g, {0})};
       third.emplace(fg, v({0}), v({2}), cfg(edge, FlowPlacement::MaxFlow));
       ASSERT_EQ(third->place(5).placed, 5) << c.name;
     }
@@ -1370,8 +1387,7 @@ TEST(CapacityAwareGates, StretchBaselineIsTheStaticShortestCost) {
       const std::string where = std::string(kernel == FlowPlacement::MaxFlow ? "MaxFlow" : "EqualBalanced") +
                                 " Stretch " + std::to_string(f);
       FlowLedger fg(g);
-      Pinned third;
-      third.bundles = {dag_of(*g, {inv[0], inv[1]})};
+      const Global third {dag_of(*g, {inv[0], inv[1]})};
       FlowPolicy other(fg, v({0}), v({4}), cfg(third, FlowPlacement::MaxFlow));
       ASSERT_EQ(other.place(2).placed, 2) << where;
       FlowPolicy p(fg, v({0}), v({4}), cfg(ceiling(Stretch {f}), kernel));
@@ -1512,39 +1528,39 @@ TEST(PredDAGStorage, ABundleCostsItsEntriesNotTheGraph) {
   EXPECT_EQ(off[static_cast<std::size_t>(n)], 2);
   EXPECT_TRUE(PredDAG::from_csr(*g, off, dag->parents(), dag->via_edges()) == *dag);
   FlowLedger fg(g);
-  Pinned pin;
-  pin.bundles = {dag};
-  FlowPolicy p(fg, v({n - 3}), v({n - 1}), cfg(pin, FlowPlacement::MaxFlow));
+  FlowPolicy p(fg, v({n - 3}), v({n - 1}), {.routing = pinned_dags(*g, n - 3, n - 1, {dag})});
   EXPECT_EQ(p.place(3).placed, 3);
   EXPECT_LT(detail::PredDAGBuilder::payload_bytes(*p.records().front().bundle), 128U);
-  // The record bundles the engine builds itself are sparse too: a supplied bundle pruned by an
-  // Eligibility (the bypass n - 3 -> n - 1 excluded), and the CostOnly and Global routes.
+  // The record bundles the engine builds itself are sparse too: a supplied split route pruned by
+  // the replay's mask (the bypass n - 3 -> n - 1 excluded), Global's used edges on a support, and
+  // the CostOnly and Global routes.
   auto h = shared(make_graph(n, {{n - 3, n - 2, 4, 1}, {n - 2, n - 1, 4, 1}, {n - 3, n - 1, 4, 5}}));
   const auto inv = id_of_input(*h);
-  Pinned all;
-  all.bundles = {dag_of(*h, {inv[0], inv[1], inv[2]})};
+  const auto three = dag_of(*h, {inv[0], inv[1], inv[2]});
   const auto el = h->eligibility({}, std::vector<EdgeId> {inv[2]});
   const std::vector<std::pair<const char*, FlowPolicyConfig>> built = {
-      {"pruned Pinned", cfg(all, FlowPlacement::MaxFlow)}, {"CostOnly", cost_only_config()}, {"Global", global_config()}};
+      {"pruned Pinned", {.routing = pinned_dags(*h, n - 3, n - 1, {three})}},
+      {"Global support", {.routing = Global {dag_of(*h, {inv[0], inv[1]})}}},
+      {"CostOnly", cost_only_config()},
+      {"Global", global_config()}};
   for (const auto& [name, c] : built) {
     FlowLedger fh(h);
     FlowPolicy q(fh, v({n - 3}), v({n - 1}), c, std::holds_alternative<Pinned>(c.routing) ? &el : nullptr);
     EXPECT_EQ(q.place(3).placed, 3) << name;
     const auto bundle = q.records().front().bundle;
-    EXPECT_NE(bundle.get(), all.bundles[0].get()) << name;
+    EXPECT_NE(bundle.get(), three.get()) << name;
     EXPECT_EQ(ascending_edges(*bundle), (std::vector<EdgeId> {inv[0], inv[1]})) << name;
     EXPECT_LT(detail::PredDAGBuilder::payload_bytes(*bundle), 128U) << name;
   }
 }
 
 TEST(Evaluators, CapacityIsPlaceInfOnAFreshLedger) {
-  // Every field of the result, in every routing model (Pinned's bundle joins the endpoints).
+  // Every field of the result, in every routing model (Pinned's program has the endpoints).
   auto g = diamond(5, 3, 2);
-  Pinned pin;
-  pin.bundles = {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})};
+  const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})});
   for (const auto& c : {global_config(), cost_only_config(),
                         cfg(CapacityAware {.flow_count = 2, .max_flow_count = 4}, FlowPlacement::MaxFlow),
-                        cfg(pin, FlowPlacement::EqualBalanced)}) {
+                        FlowPolicyConfig {.routing = pin}, FlowPolicyConfig {.routing = Global {dag_of(*g, {0, 2})}}}) {
     const auto r = capacity(*g, v({0}), v({3}), QueryOptions {c, nullptr, nullptr, OutputOptions {true, true, true}});
     FlowLedger fg(g);
     FlowPolicy p(fg, v({0}), v({3}), c);
@@ -1596,10 +1612,9 @@ TEST(Evaluators, BatchOrderIntersectionsExceptionsAndWorkers) {
   const auto foreign = other->eligibility({}, std::vector<EdgeId> {0});
   const std::vector<const Eligibility*> per_foreign = {nullptr, &foreign, nullptr, nullptr};
   EXPECT_TRUE(contains(error_of([&] { (void)batch_capacity(*g, pairs, opts, per_foreign, 1); }), "foreign"));
-  Pinned pin;
-  pin.bundles = {dag_of(*g, {0, 2})};
-  EXPECT_TRUE(contains(error_of([&] { (void)batch_capacity(*g, pairs, QueryOptions {cfg(pin, FlowPlacement::MaxFlow)}, {}, 1); }),
-                       "Pinned"));
+  const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2})});
+  EXPECT_EQ(error_of([&] { (void)batch_capacity(*g, pairs, QueryOptions {{.routing = pin}}, {}, 1); }),
+            "batch_capacity does not accept Pinned");
   EXPECT_TRUE(contains(error_of([&] { (void)batch_capacity(*g, pairs, opts, per, 0); }), "workers"));
   DagCache cache(*g);
   const QueryOptions with_cache {cost_only_config(), nullptr, &cache};
@@ -1610,13 +1625,11 @@ TEST(Evaluators, BatchOrderIntersectionsExceptionsAndWorkers) {
   EXPECT_EQ(cached[0].placed, 7);  // CostOnly EB over routes of 5 and 3: [4, 3] (odd unit to the lower id)
   // The argument checks in their documented order, all before the pairs: with every defect
   // present the first is reported, and with that one removed the next. Pinned also carries a
-  // configuration error (Lossy admission with the MaxFlow kernel); pair 2 has a destination out of
-  // range. The building cache is untouched: no lookup ran.
+  // configuration error (a placement); pair 2 has a destination out of range. The building cache
+  // is untouched: no lookup ran.
   DagCache foreign_cache(*other);
   DagCache building(*g);
-  Pinned lossy_pin;
-  lossy_pin.bundles = {dag_of(*g, {0, 2})};
-  const FlowPolicyConfig pinned_bad = cfg(lossy_pin, FlowPlacement::MaxFlow, Admission::Lossy);
+  const FlowPolicyConfig pinned_bad {.routing = pin, .placement = FlowPlacement::MaxFlow};
   const FlowPolicyConfig config_bad = cfg(CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossy);
   bad = pairs;
   bad[2].second = {9};
@@ -1632,8 +1645,7 @@ TEST(Evaluators, BatchOrderIntersectionsExceptionsAndWorkers) {
   EXPECT_EQ(first_error(pinned_bad, nullptr, &building, short_per, 2),
             "a supplied building DagCache has one writer: it is rejected unless workers == 1 (got workers = 2; a "
             "frozen cache may be shared by every worker)");
-  EXPECT_EQ(first_error(pinned_bad, nullptr, &building, short_per, 1),
-            "Pinned routing is rejected in batch_capacity (bundles bind their endpoints)");
+  EXPECT_EQ(first_error(pinned_bad, nullptr, &building, short_per, 1), "batch_capacity does not accept Pinned");
   EXPECT_EQ(first_error(config_bad, nullptr, &building, short_per, 1), kLossyKernelError);
   EXPECT_EQ(first_error(global_config(), nullptr, &building, short_per, 1), "Global does not use DagCache");
   EXPECT_EQ(first_error(cost_only_config(), nullptr, &building, short_per, 1), "per_pair_elig has 1 entries for 4 pairs");
@@ -1731,9 +1743,9 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
         detail::static_support(*g, std::vector<NodeId> {t0}, Direction::Reverse, nullptr));
     const auto paths = ksp(*g, 0, t0, KspOptions(2, sel()));
     if (paths.size() == 2) {
-      Pinned pin;
-      pin.bundles = {support, std::make_shared<const PredDAG>(paths[1].second.to_dag())};
-      trial_configs.push_back(cfg(pin, FlowPlacement::Weighted, Admission::Lossless, sel()));
+      trial_configs.push_back({.routing = pinned_dags(*g, 0, t0,
+                                                      {support, std::make_shared<const PredDAG>(paths[1].second.to_dag())},
+                                                      FlowPlacement::Weighted)});
       ++pinned_trials;
     }
     for (const auto& c : trial_configs) {
@@ -1867,12 +1879,11 @@ TEST(Evaluators, SensitivityCandidatesAndSignedLosses) {
 // request it carries none.
 TEST(Evaluators, SensitivityBaselineIsCapacityWithTheRequestedOutputs) {
   auto g = diamond(5, 3, 2);
-  Pinned pin;
-  pin.bundles = {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})};
+  const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})});
   const OutputOptions all {true, true, true};
   for (const auto& c : {global_config(), cost_only_config(),
                         cfg(CapacityAware {.flow_count = 2, .max_flow_count = 4}, FlowPlacement::MaxFlow),
-                        cfg(pin, FlowPlacement::EqualBalanced)}) {
+                        FlowPolicyConfig {.routing = pin}, FlowPolicyConfig {.routing = Global {dag_of(*g, {0, 2})}}}) {
     const auto s = sensitivity(*g, v({0}), v({3}), QueryOptions {c, nullptr, nullptr, all}, 1);
     const auto want = capacity(*g, v({0}), v({3}), QueryOptions {c, nullptr, nullptr, all});
     EXPECT_GT(want.placed, 0);
@@ -1952,14 +1963,13 @@ TEST(Evaluators, SensitivityChecksWorkersAndCachesAsTheBatchDoes) {
 // any lookup and count nothing; CostOnly's baseline raises the miss of an empty frozen cache.
 TEST(Evaluators, SensitivityReadsTheCacheOnlyUnderCostOnly) {
   auto g = diamond(5, 3, 2);
-  Pinned pin;
-  pin.bundles = {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})};
+  const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})});
   DagCache empty(*g);
   empty.freeze();
   for (const auto& [c, model] :
        {std::pair {global_config(), "Global"},
         std::pair {cfg(CapacityAware {.flow_count = 2, .max_flow_count = 4}, FlowPlacement::MaxFlow), "T1"},
-        std::pair {cfg(pin, FlowPlacement::EqualBalanced), "Pinned"}}) {
+        std::pair {FlowPolicyConfig {.routing = pin}, "Pinned"}}) {
     for (const std::int32_t workers : {1, 3}) {
       EXPECT_EQ(error_of([&] {
                   (void)sensitivity(*g, v({0}), v({3}), QueryOptions {c, nullptr, &empty}, workers);

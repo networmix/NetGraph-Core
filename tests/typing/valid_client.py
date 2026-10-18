@@ -57,7 +57,6 @@ assert_type(paths, list[ng.Path])
 for c, p in ng.ksp(g, 0, 3, ng.KspOptions(2, sel, max_path_cost=ng.Absolute(9))):
     assert_type(c, int)
     hops: list[list[int]] = p.hops()
-    pinned = ng.Pinned([p.to_dag()])
 same = ng.PredDAG.from_csr(
     g, dag.parent_offsets(), dag.parents(), np.asarray(dag.via_edges())
 )
@@ -100,6 +99,44 @@ for row in result.by_source:
     assert_type(row, ng.SourceFlow)
     assert_type(row.admitted, int)
     assert_type(row.offered, int | None)
+
+# Forwarding programs: built from routes (a Path or a PredDAG), exported by a policy, forwarded
+# by Pinned under a mask and with black holes; the full-offer calls return results too.
+route = ng.Route(0, ng.Path(g, [[0], [2]]), weight=np.int64(2))
+program = ng.ForwardingProgram.from_routes(
+    g, 0, [3], [ng.Route(0, full.dag), route], placement=ng.FlowPlacement.WEIGHTED
+)
+assert_type(program, ng.ForwardingProgram)
+assert_type(program.tunnels, tuple[ng.Tunnel, ...])
+assert_type(program.source_weights, tuple[tuple[int, int], ...] | None)
+for tunnel in program.tunnels:
+    assert_type(tunnel.edges, tuple[int, ...])
+pinned_cfg = ng.FlowPolicyConfig(
+    routing=ng.Pinned(program, black_holes=elig), admission=ng.Admission.LOSSY
+)
+replay = ng.FlowPolicy(ng.FlowLedger(g), 0, 3, pinned_cfg, g.eligibility())
+replaced = replay.replace(np.int64(4), outputs=None)
+assert_type(replaced, ng.PlacementResult)
+for tunnel_row in replaced.by_tunnel:
+    assert_type(tunnel_row, ng.TunnelFlow)
+    assert_type(tunnel_row.assigned, int)
+    assert_type(tunnel_row.status, ng.TunnelStatus)
+exported = ng.FlowPolicy(
+    ng.FlowLedger(g), 0, 3, ng.FlowPolicyConfig(routing=ng.Global())
+)
+assert_type(exported.evaluate(4).program, ng.ForwardingProgram | None)
+exported.replace(4)
+assert_type(exported.forward(float("inf"), black_holes=None), ng.PlacementResult)
+weighted = ng.FlowPolicyConfig(
+    routing=ng.CostOnly(),
+    placement=ng.FlowPlacement.WEIGHTED,
+    weights=ng.WeightBasis.EXPLICIT,
+    edge_weights=np.array([1, 2, 1, 1], dtype=np.int64),
+)
+assert_type(weighted.edge_weights, tuple[int, ...] | None)
+lossy_opts = ng.QueryOptions(pinned_cfg, offered=4)
+assert_type(lossy_opts.offered, int | float | None)
+assert_type(ng.capacity(g, 0, 3, lossy_opts).by_tunnel, tuple[ng.TunnelFlow, ...])
 
 # The evaluators, with optional arguments left out or None. Only CostOnly reads a cache; the
 # controllers' origin defaults to OPTIMIZED.

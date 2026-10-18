@@ -114,6 +114,9 @@ COSTONLY = config(ngc.CostOnly())
 _RESULTS = (
     ngc.PlacementResult,
     ngc.SourceFlow,
+    ngc.TunnelFlow,
+    ngc.ForwardingProgram,
+    ngc.Tunnel,
     ngc.SensitivityResult,
     ngc.SensitivityEntry,
     ngc.SpfResult,
@@ -121,17 +124,24 @@ _RESULTS = (
 
 
 def plain(value):
-    """A result as comparable data, with no object identities: a result object by every public
-    field, a PredDAG by its three arrays, a Path by its endpoints, hops and cost, containers
-    element by element, arrays as lists."""
+    """A result as comparable data, with no object identities: a result object (a program and its
+    tunnels included) by every public field, a PredDAG by its three arrays, a Path by its
+    endpoints, hops and cost, an Eligibility by its two masks, containers element by element,
+    arrays as lists."""
     if isinstance(value, _RESULTS):
-        fields = [f for f in dir(value) if not f.startswith("_")]
+        fields = [
+            f
+            for f in dir(value)
+            if not f.startswith("_") and not callable(getattr(value, f))
+        ]
         return {f: plain(getattr(value, f)) for f in fields}
     if isinstance(value, ngc.PredDAG):
         return [
             plain(a)
             for a in (value.parent_offsets(), value.parents(), value.via_edges())
         ]
+    if isinstance(value, ngc.Eligibility):
+        return [plain(value.node_allowed()), plain(value.edge_allowed())]
     if isinstance(value, ngc.Path):
         return [value.src(), value.dst(), plain(value.hops()), value.cost()]
     if isinstance(value, dict):
@@ -156,6 +166,7 @@ def ledger_state(ledger):
                 r.sources,
                 r.destinations,
                 r.admission,
+                r.entry,
                 [
                     r.bundle.parent_offsets().tolist(),
                     r.bundle.parents().tolist(),

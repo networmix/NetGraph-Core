@@ -30,6 +30,7 @@
 #include "netgraph/core/flow_record.hpp"
 #include "netgraph/core/graph.hpp"
 #include "netgraph/core/pred_dag.hpp"
+#include "netgraph/core/program.hpp"
 #include "test_int128.hpp"
 
 namespace netgraph::core::test {
@@ -191,6 +192,32 @@ inline std::vector<NodeId> allowed_nodes(std::vector<NodeId> set, const Eligibil
 
 // The bundle of every edge of g.
 inline std::shared_ptr<const PredDAG> all_edges(const Graph& g) { return dag_of(g, all_ids(g)); }
+
+// Pinned routing over a supplied program of split routes of one head, in order (weight 1 each;
+// placement absent: EqualBalanced).
+inline Pinned pinned_dags(const Graph& g, NodeId src, NodeId dst, const std::vector<std::shared_ptr<const PredDAG>>& dags,
+                          std::optional<FlowPlacement> placement = std::nullopt, Admission admission = Admission::Lossless) {
+  (void)admission;
+  std::vector<Route> routes;
+  for (const auto& d : dags) routes.push_back(Route {src, d, 1});
+  RouteOptions options;
+  options.placement = placement;
+  const NodeId s[1] = {src};
+  const NodeId t[1] = {dst};
+  return Pinned {ForwardingProgram::from_routes(g, s, t, routes, options), nullptr};
+}
+
+// Pinned routing over a supplied program of tunnels: (head, EdgeIds in path order, weight).
+inline Pinned pinned_paths(const Graph& g, const std::vector<NodeId>& sources, const std::vector<NodeId>& destinations,
+                           const std::vector<std::tuple<NodeId, std::vector<EdgeId>, Amount>>& tunnels) {
+  std::vector<Route> routes;
+  for (const auto& [head, edges, weight] : tunnels) {
+    std::vector<std::vector<EdgeId>> hops;
+    for (EdgeId e : edges) hops.push_back({e});
+    routes.push_back(Route {head, std::make_shared<const Path>(g, hops), weight});
+  }
+  return Pinned {ForwardingProgram::from_routes(g, sources, destinations, routes), nullptr};
+}
 
 // Every operation counter of two solves (the counter struct has no ==).
 inline bool same_counters(const detail::FlowCoreCounters& x, const detail::FlowCoreCounters& y) {
@@ -759,5 +786,102 @@ inline bool expect_conserved(const Graph& g, const FlowRecord& r, const std::str
   }
   return r.delivered > 0 || total_drops > 0;
 }
+
+// An independent reference of a tunnel program's forwarding (contract 8.1 and 8.3): equal
+// sources inject a total by round robin over the roster (the heads with a tunnel, ascending), each
+// head splits its share by highest averages over its tunnels' weights (ascending index), and the
+// lossless bound is the largest total whose loads fit the capacities with no share lost at a
+// source. Its own round robin and unit-by-unit highest averages: it calls none of the library's
+// apportionment helpers.
+namespace program_reference {
+
+struct RefTunnel {
+  NodeId head {0};
+  std::vector<EdgeId> edges {};
+  Amount weight {0};
+};
+
+// x over k slots: x / k each, the first x mod k one more.
+inline std::vector<Amount> round_robin(Amount x, std::size_t k) {
+  std::vector<Amount> out(k, 0);
+  for (Amount u = 0; u < x; ++u) ++out[static_cast<std::size_t>(u) % k];
+  return out;
+}
+
+// x units one at a time, each to the slot with the largest w / (a + 1) (ties: the lower slot);
+// slots of weight 0 get nothing (x must be 0 when every weight is 0).
+inline std::vector<Amount> highest_averages(Amount x, const std::vector<Amount>& w) {
+  std::vector<Amount> a(w.size(), 0);
+  for (Amount u = 0; u < x; ++u) {
+    std::size_t best = w.size();
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      if (w[i] <= 0) continue;
+      if (best == w.size() || Int128(w[i]) * (a[best] + 1) > Int128(w[best]) * (a[i] + 1)) best = i;
+    }
+    if (best == w.size()) return {};
+    ++a[best];
+  }
+  return a;
+}
+
+// The roster: the heads with a tunnel, ascending.
+inline std::vector<NodeId> roster(const std::vector<RefTunnel>& t) {
+  std::set<NodeId> heads;
+  for (const auto& x : t) heads.insert(x.head);
+  return {heads.begin(), heads.end()};
+}
+
+// Per tunnel its amount of the total x; nullopt when a positive head share has no tunnel of
+// positive weight (lost at the source).
+inline std::optional<std::vector<Amount>> tunnel_amounts(Amount x, const std::vector<RefTunnel>& t) {
+  const auto heads = roster(t);
+  const auto shares = round_robin(x, heads.size());
+  std::vector<Amount> out(t.size(), 0);
+  for (std::size_t h = 0; h < heads.size(); ++h) {
+    std::vector<std::size_t> ids;
+    std::vector<Amount> w;
+    for (std::size_t i = 0; i < t.size(); ++i) {
+      if (t[i].head == heads[h]) {
+        ids.push_back(i);
+        w.push_back(t[i].weight);
+      }
+    }
+    const auto split = highest_averages(shares[h], w);
+    if (split.empty() && shares[h] > 0) return std::nullopt;
+    for (std::size_t j = 0; j < split.size(); ++j) out[ids[j]] = split[j];
+  }
+  return out;
+}
+
+// The per-edge loads of per-tunnel amounts.
+inline std::vector<Amount> loads(const Graph& g, const std::vector<RefTunnel>& t, const std::vector<Amount>& amounts) {
+  std::vector<Amount> out(static_cast<std::size_t>(g.num_edges()), 0);
+  for (std::size_t i = 0; i < t.size(); ++i) {
+    for (EdgeId e : t[i].edges) out[static_cast<std::size_t>(e)] += amounts[i];
+  }
+  return out;
+}
+
+inline bool fits(const Graph& g, const std::vector<RefTunnel>& t, Amount x) {
+  const auto a = tunnel_amounts(x, t);
+  if (!a.has_value()) return false;
+  const auto l = loads(g, t, *a);
+  for (std::size_t e = 0; e < l.size(); ++e) {
+    if (l[e] > g.capacity_units()[e]) return false;
+  }
+  return true;
+}
+
+// The largest total that fits, scanning up from 0 (the loads only grow with the total); a total
+// above the sum of the capacities never fits.
+inline Amount lossless_bound(const Graph& g, const std::vector<RefTunnel>& t) {
+  Amount limit = 1;
+  for (Amount c : g.capacity_units()) limit += c;
+  Amount x = 0;
+  while (x < limit && fits(g, t, x + 1)) ++x;
+  return x;
+}
+
+} // namespace program_reference
 
 } // namespace netgraph::core::test

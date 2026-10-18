@@ -13,7 +13,9 @@
 #include "netgraph/core/dag_cache.hpp"
 #include "netgraph/core/eligibility.hpp"
 #include "netgraph/core/flow_ledger.hpp"
+#include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/flow_policy.hpp"
+#include "netgraph/core/program.hpp"
 #include "integers.hpp"
 #include "publication.hpp"
 #include "values.hpp"
@@ -35,24 +37,19 @@ namespace netgraph::core::bindings {
 
 namespace {
 
-// A request: an integer number of units in [0, 2^62) or +inf (float('inf')); nullopt is +inf.
-// Any other value (a bool, another float, a non-integer, an integer out of range) raises the one
-// ValueError; an exception of the object's own __index__ propagates as raised.
+// A request or a full offer: units in [0, 2^62) or +inf (float('inf')); nullopt is +inf.
 std::optional<Amount> request_units(const py::object& volume) {
-  const char* const text = "offer must be an integer in [0, 2^62) or permitted +inf";
-  if (py::isinstance<py::float_>(volume) || py::isinstance(volume, py::module_::import("numpy").attr("floating"))) {
-    const double x = PyFloat_AsDouble(volume.ptr());
-    if (x == -1.0 && PyErr_Occurred() != nullptr) throw py::error_already_set();
-    if (std::isinf(x) && x > 0) return std::nullopt;
-    throw py::value_error(text);
+  return units_or_inf(volume, "offer must be an integer in [0, 2^62) or permitted +inf");
+}
+
+// A black-hole set argument: an Eligibility or None (its graph is checked by the call).
+std::shared_ptr<Eligibility> eligibility_or_none(const py::object& obj, const char* name) {
+  if (obj.is_none()) return nullptr;
+  if (!py::isinstance<Eligibility>(obj)) {
+    throw py::type_error(std::string(name) + " must be an Eligibility or None (got " +
+                         std::string(py::str(py::type::of(obj).attr("__name__"))) + ")");
   }
-  if (is_bool(volume) || !PyIndex_Check(volume.ptr())) throw py::value_error(text);
-  const py::object idx = py::reinterpret_steal<py::object>(PyNumber_Index(volume.ptr()));
-  if (!idx) throw py::error_already_set();
-  int overflow = 0;
-  const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
-  if (overflow != 0 || v < 0 || v >= kDomainLimit) throw py::value_error(text);
-  return static_cast<Amount>(v);
+  return obj.cast<std::shared_ptr<Eligibility>>();
 }
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
@@ -67,13 +64,15 @@ py::dict state_obj(const FlowPolicy& policy) {
                 : std::holds_alternative<Global>(r)        ? "Global"
                                                            : "Pinned";
   out["roster"] = pe.roster;
-  out["requested"] = counter_int(pe.requested);
-  out["infinite"] = pe.infinite;
+  out["requested"] = counter_int(pe.epoch.requested);
+  out["infinite"] = pe.epoch.infinite;
   out["placed_demand"] = policy.placed_demand();
   py::dict cohorts;
-  for (std::size_t i = 0; i < pe.roster.size(); ++i) {
+  // Per roster source its flows (Pinned: per program entry, keyed by the entry identifier).
+  const bool pinned = std::holds_alternative<Pinned>(r);
+  for (std::size_t i = 0; i < pe.epoch.cohorts.size(); ++i) {
     py::list flows;
-    for (const auto& s : pe.cohorts[i]) {
+    for (const auto& s : pe.epoch.cohorts[i]) {
       const FlowRecord& rec = detail::LedgerAccess::live(pe.fg, s.id);
       py::dict f;
       f["flow_id"] = py::make_tuple(rec.flow_id.first, rec.flow_id.second);
@@ -90,10 +89,10 @@ py::dict state_obj(const FlowPolicy& policy) {
       f["T"] = rec.delivered;
       f["delivered"] = rec.delivered;
       f["alloc"] = pairs_list(rec.edges);
-      f["bundle_index"] = s.bundle_index < 0 ? py::object(py::none()) : py::object(py::int_(s.bundle_index));
+      f["entry"] = s.entry < 0 ? py::object(py::none()) : py::object(py::int_(s.entry));
       flows.append(f);
     }
-    cohorts[py::int_(pe.roster[i])] = flows;
+    cohorts[py::int_(pinned ? static_cast<std::int64_t>(i) : static_cast<std::int64_t>(pe.roster[i]))] = flows;
   }
   out["cohorts"] = cohorts;
   return out;
@@ -106,10 +105,11 @@ py::dict state_obj(const FlowPolicy& policy) {
 void register_flow_policy(py::module_& m) {
   [[maybe_unused]] auto flow_policy = py::class_<FlowPolicy>(
       m, "FlowPolicy",
-      "The placement engine for one demand, bound to its ledger at construction. place(volume, outputs)\n"
-      "is all-or-nothing: a failed call raises and leaves the ledger and the policy as they were (with\n"
-      "the two limits in the module docstring). remove() takes every flow of the policy back out and\n"
-      "starts a new epoch (the request total starts again from 0). A policy dropped without remove()\n"
+      "The placement engine for one demand, bound to its ledger at construction. Every call (place,\n"
+      "evaluate, replace, forward) is all-or-nothing: a failed call raises and leaves the ledger and the\n"
+      "policy as they were (with the two limits in the module docstring). remove() takes every flow of the\n"
+      "policy back out, clears its program and starts a new epoch (the request total starts again from 0);\n"
+      "replace and forward start one too. A policy dropped without remove()\n"
       "leaves its records in the ledger as orphans: readable, never changed again, cleared by\n"
       "FlowLedger.reset(). sources and destinations are one NodeId or a sequence; the two sets must not\n"
       "overlap. ValueError for invalid endpoints, configurations and requests (non-integer node ids and\n"
@@ -130,10 +130,15 @@ void register_flow_policy(py::module_& m) {
            py::arg("cache") = nullptr,
            "Bind a policy to ledger. elig (None: everything allowed) and cache (None: none; only CostOnly\n"
            "routing reads it, another model rejects it) belong to the ledger's graph; the policy keeps the\n"
-           "ledger, elig and cache alive. The roster (the sources that statically reach an allowed\n"
-           "destination, over allowed edges whatever their capacity) and, for Pinned, the usable bundles\n"
-           "are fixed here. Everything is validated before the policy binds, in this order: the endpoints,\n"
-           "elig's and cache's graph, the configuration (FlowPolicyConfig's order), Pinned's bundles.")
+           "ledger, elig and cache alive (a Pinned policy shares its program and black holes). The roster\n"
+           "(the sources that statically reach an allowed destination, over allowed edges whatever their\n"
+           "capacity; Pinned: the program's heads that reach an allowed destination over its basis under elig)\n"
+           "is fixed here. Everything is validated before the policy binds, in this order: the endpoints, the\n"
+           "graph of elig, the program, the support, the cache and the black holes (`foreign Eligibility:\n"
+           "built for another graph`, `program belongs to another graph`, `support belongs to another graph`,\n"
+           "`foreign DagCache: bound to another graph`, `black_holes belongs to another graph`), the\n"
+           "configuration (FlowPolicyConfig's order), then the pooled single-path rule and a Pinned program's\n"
+           "endpoints (`program endpoints do not match policy endpoints`).")
       .def(
           "place",
           [](FlowPolicy& p, const py::object& volume, const py::object& outputs) {
@@ -148,17 +153,22 @@ void register_flow_policy(py::module_& m) {
           },
           py::arg("volume"), py::arg("outputs") = py::none(),
           "Place volume (int units in [0, 2^62), or float('inf')) all or nothing -> PlacementResult.\n"
-          "Requests add up within an epoch (from construction or the last remove()); after float('inf') any\n"
-          "finite request is rejected, 0 included. A request of 0 places nothing and reports the current\n"
-          "state. CostOnly prepares its routes at the epoch's first positive request; LOSSLESS admits the\n"
-          "largest total in [admitted, admitted + volume] that the routes carry with no loss (a refused unit\n"
-          "is not offered again); LOSSY forwards the new round-robin injections (earlier drops are not\n"
-          "offered again). outputs (OutputOptions; None: none) requests edge_flows, residual, bottleneck and\n"
-          "min_cut. Everything is validated before any change; a failed call raises with the ledger and the\n"
-          "policy unchanged. A solve of the flow core (Global, CostOnly MAX_FLOW, or a MAX_FLOW flow) on a\n"
-          "network beyond its int32 numbering raises ValueError: more than INT32_MAX - 2 nodes, or more than\n"
-          "2^30 - 1 edges, sources and destinations together.")
-      .def("remove", &FlowPolicy::remove, "revert every flow of the policy, retire the ids, open a new epoch")
+          "Requests add up within an epoch (from construction, the last remove(), replace() or forward());\n"
+          "after float('inf') any finite request is rejected, 0 included. A request of 0 places nothing and\n"
+          "reports the current state. CostOnly prepares its program at the epoch's first positive request;\n"
+          "LOSSLESS admits the largest total in [admitted, admitted + volume] that the program carries with no\n"
+          "loss (a refused unit is not offered again); LOSSY forwards the new round-robin (or captured-weight)\n"
+          "injections, each head splitting its increment afresh (earlier drops are not offered again); a\n"
+          "controller re-solves admitted + volume. A LOSSY float('inf') is CostOnly's first-hop experiment;\n"
+          "Pinned raises `LOSSY forwarding requires a finite offer`. outputs (OutputOptions; None: none)\n"
+          "requests edge_flows, residual, bottleneck and min_cut. Everything is validated before any change; a\n"
+          "failed call raises with the ledger and the policy unchanged. A solve of the flow core (Global,\n"
+          "CostOnly MAX_FLOW, or a MAX_FLOW flow) on a network beyond its int32 numbering raises ValueError:\n"
+          "more than INT32_MAX - 2 nodes, or more than 2^30 - 1 edges, sources and destinations together. A\n"
+          "LOSSY forwarding whose losses wait on each other in a cycle raises ValueError when its rounds\n"
+          "alternate between two states or reach the round limit, RuntimeError when the result's check fails.")
+      .def("remove", &FlowPolicy::remove,
+           "revert every flow of the policy, retire the ids, clear the program, open a new epoch")
       .def("placed_demand", &FlowPolicy::placed_demand, "the sum of delivered over the policy's live records")
       .def("records", &FlowPolicy::records, "the policy's live records as snapshots in FlowId order")
       .def(
@@ -166,9 +176,61 @@ void register_flow_policy(py::module_& m) {
           py::arg("flow_id"),
           "one of the policy's live records by FlowId (ValueError for a FlowId of another ledger or policy, a\n"
           "retired or an unknown id)")
-      .def("usable_bundles", &FlowPolicy::usable_bundles,
-           "Pinned: the bundles with a src -> dst walk over eligible edges, whatever their capacity (0 for\n"
-           "the other modes)")
+      .def(
+          "evaluate",
+          [](const FlowPolicy& p, const py::object& offer, const py::object& outputs) {
+            const auto v = request_units(offer);
+            const auto o = outputs_of(outputs);
+            auto [obj, slot] = new_object<PlacementResult>();
+            *slot = p.evaluate(v, o);
+            return std::move(obj);
+          },
+          py::arg("offer"), py::kw_only(), py::arg("outputs") = py::none(),
+          "A full, independent computation and forwarding of offer (int units or float('inf')) from the\n"
+          "policy's own released view (the residual plus its own carried load), as replace would do it ->\n"
+          "PlacementResult (the computed program, the flags replace would set, the outputs of the evaluated\n"
+          "state); publishes nothing, creates no record and leaves the epoch as it was. LOSSY requires a\n"
+          "finite offer.")
+      .def(
+          "replace",
+          [](FlowPolicy& p, const py::object& offer, const py::object& outputs) {
+            const auto v = request_units(offer);
+            const auto o = outputs_of(outputs);
+            auto [obj, slot] = new_object<PlacementResult>();
+            *slot = p.replace(v, o);
+            return std::move(obj);
+          },
+          py::arg("offer"), py::kw_only(), py::arg("outputs") = py::none(),
+          "Recompute from the policy's own released view and forward the full offer, published atomically ->\n"
+          "PlacementResult: the old records are retired (their ids never live again), new ones created, and a\n"
+          "new epoch starts at this offer (delivery may go down: delivery_delta). CostOnly prepares its routes\n"
+          "again; a controller re-solves; Pinned forwards its program. LOSSY requires a finite offer.")
+      .def(
+          "forward",
+          [](FlowPolicy& p, const py::object& offer, const py::object& black_holes, const py::object& outputs) {
+            // The operation and the installed program come before the offer (the call's order).
+            detail::check_forward_operation(detail::PolicyAccess::engine(p));
+            const auto v = request_units(offer);
+            const auto bh = eligibility_or_none(black_holes, "black_holes");
+            const auto o = outputs_of(outputs);
+            auto [obj, slot] = new_object<PlacementResult>();
+            *slot = p.forward(v, bh.get(), o);
+            return std::move(obj);
+          },
+          py::arg("offer"), py::kw_only(), py::arg("black_holes") = py::none(), py::arg("outputs") = py::none(),
+          "Forward a full new offer over the installed program, with no route computation, on the released\n"
+          "view -> PlacementResult; a new epoch like replace, the program kept (no flag). LOSSLESS admits the\n"
+          "program's lossless bound up to the offer; LOSSY sends the offer. black_holes (an Eligibility of the\n"
+          "graph): the nodes and edges it excludes are black holes for this call (stale forwarding: traffic\n"
+          "reaching one is dropped there; a black-holed source loses its share). In this order: Pinned raises\n"
+          "`Pinned forwards with replace`; no installed program `forward requires an installed program`\n"
+          "(also CapacityAware); the offer; LOSSY +inf `LOSSY forwarding requires a finite offer`; black_holes\n"
+          "of another graph `black_holes belongs to another graph`.")
+      .def_property_readonly(
+          "program",
+          [](const FlowPolicy& p) { return optional_shared(p.program()); },
+          "the installed ForwardingProgram; None before the first preparation, after remove() and for\n"
+          "CapacityAware")
       .def_property_readonly("config", &FlowPolicy::config,
                              "the configuration as validated at construction, its absent origin and selection\n"
                              "resolved to the model's defaults");

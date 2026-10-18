@@ -8,12 +8,14 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/policy_engine.hpp"
+#include "netgraph/core/detail/program_data.hpp"
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/flow_policy.hpp"
 #include "test_utils.hpp"
@@ -51,7 +53,7 @@ inline LedgerState ledger_state(const FlowLedger& fg) {
 
 inline bool same_record(const FlowRecord& a, const FlowRecord& b) {
   return a.flow_id == b.flow_id && a.owner == b.owner && a.sources == b.sources && a.destinations == b.destinations &&
-         a.admission == b.admission && a.bundle && b.bundle && *a.bundle == *b.bundle &&
+         a.admission == b.admission && a.entry == b.entry && a.bundle && b.bundle && *a.bundle == *b.bundle &&
          a.route_cost == b.route_cost && a.offered == b.offered && a.delivered == b.delivered && a.edges == b.edges &&
          a.drops == b.drops;
 }
@@ -85,6 +87,36 @@ inline void expect_balanced(const FlowLedger& fg, const std::string& where) {
   }
 }
 
+// A program as the tests compare it: its endpoints, its tunnels, its source weights, and per split
+// context its plan's roots, members and weights (a recomputed program is a new value).
+struct ProgramSnapshot {
+  bool present {false};
+  std::vector<NodeId> sources;
+  std::vector<NodeId> destinations;
+  std::vector<Tunnel> tunnels;
+  std::optional<std::vector<std::pair<NodeId, Amount>>> source_weights;
+  std::vector<std::vector<EdgeId>> members;
+  std::vector<std::vector<Amount>> weights;
+  std::vector<std::vector<NodeId>> roots;
+  bool operator==(const ProgramSnapshot&) const = default;
+};
+
+inline ProgramSnapshot program_snapshot(const ForwardingProgram* p) {
+  ProgramSnapshot s;
+  if (p == nullptr) return s;
+  s.present = true;
+  s.sources.assign(p->sources().begin(), p->sources().end());
+  s.destinations.assign(p->destinations().begin(), p->destinations().end());
+  s.tunnels.assign(p->tunnels().begin(), p->tunnels().end());
+  s.source_weights = p->source_weights();
+  for (const auto& c : detail::ProgramAccess::data(*p).contexts) {
+    s.members.push_back(c.plan->members);
+    s.weights.push_back(c.plan->weights);
+    s.roots.emplace_back(c.plan->roots.begin(), c.plan->roots.end());
+  }
+  return s;
+}
+
 // Every field of a placement result.
 inline void expect_same(const PlacementResult& a, const PlacementResult& b, const std::string& where) {
   EXPECT_EQ(a.placed, b.placed) << where;
@@ -95,6 +127,7 @@ inline void expect_same(const PlacementResult& a, const PlacementResult& b, cons
   EXPECT_EQ(a.termination, b.termination) << where;
   EXPECT_EQ(a.routes_changed, b.routes_changed) << where;
   EXPECT_EQ(a.weights_changed, b.weights_changed) << where;
+  EXPECT_TRUE(program_snapshot(a.program.get()) == program_snapshot(b.program.get())) << where;
   EXPECT_EQ(a.requested, b.requested) << where;
   EXPECT_EQ(a.offered, b.offered) << where;
   EXPECT_EQ(a.admitted, b.admitted) << where;
@@ -103,6 +136,7 @@ inline void expect_same(const PlacementResult& a, const PlacementResult& b, cons
   EXPECT_EQ(a.source_loss, b.source_loss) << where;
   EXPECT_EQ(a.drops, b.drops) << where;
   EXPECT_TRUE(a.by_source == b.by_source) << where;
+  EXPECT_TRUE(a.by_tunnel == b.by_tunnel) << where;
   EXPECT_EQ(a.total_cost, b.total_cost) << where;
   EXPECT_EQ(a.cost_distribution, b.cost_distribution) << where;
   EXPECT_EQ(a.edge_flows, b.edge_flows) << where;
@@ -124,30 +158,35 @@ struct FlowSnapshot {
 };
 
 // A policy's epoch state: the call state (requested, offered, +inf, prepared, the placed
-// demand), Global's cumulative curve, CostOnly's program (its members, or the MaxFlow support)
-// and per roster source its flows.
+// demand), Global's cumulative curve, the installed program (its identity and its value), CostOnly
+// MaxFlow's support, a Pinned head's own losses, the by_tunnel rows and per cohort its flows.
 struct Epoch {
   Counter128 requested;
   Counter128 offered;
   bool infinite {false};
   bool prepared {false};
   Amount placed {0};
-  std::vector<std::pair<Cost, Amount>> curve;
-  std::vector<EdgeId> program;
+  std::optional<std::vector<std::pair<Cost, Amount>>> curve;
+  const ForwardingProgram* program_id {nullptr};
+  ProgramSnapshot program;
+  std::vector<EdgeId> support;
+  std::vector<Counter128> head_lost;
+  std::vector<TunnelFlow> by_tunnel;
   std::vector<std::vector<FlowSnapshot>> cohorts;
 };
 
 inline Epoch epoch(const FlowPolicy& p) {
   const auto& pe = detail::PolicyAccess::engine(p);
-  Epoch e {pe.requested, pe.offered, pe.infinite, pe.prepared, p.placed_demand(), pe.curve,
-           pe.program ? pe.program->members : pe.program_edges, {}};
-  for (const auto& c : pe.cohorts) {
+  const auto& ep = pe.epoch;
+  Epoch e {ep.requested, ep.offered, ep.infinite, ep.prepared, p.placed_demand(), ep.curve, ep.program.get(),
+           program_snapshot(ep.program.get()), ep.support, ep.head_lost, ep.by_tunnel, {}};
+  for (const auto& c : ep.cohorts) {
     auto& out = e.cohorts.emplace_back();
     for (const auto& f : c) {
       if (f.plan) {
         out.push_back({f.id, f.cost, f.plan->route, f.plan->members, f.plan->weights});
       } else {
-        const auto ids = ascending_edges(*f.bundle);
+        const auto ids = f.bundle ? ascending_edges(*f.bundle) : std::vector<EdgeId> {};
         out.push_back({f.id, f.cost, ids, ids, {}});
       }
     }
@@ -162,8 +201,17 @@ inline void expect_same(const Epoch& a, const Epoch& b, const std::string& where
   EXPECT_EQ(a.prepared, b.prepared) << where;
   EXPECT_EQ(a.placed, b.placed) << where;
   EXPECT_EQ(a.curve, b.curve) << where;
-  EXPECT_EQ(a.program, b.program) << where;
+  EXPECT_TRUE(a.program == b.program) << where;
+  EXPECT_EQ(a.support, b.support) << where;
+  EXPECT_EQ(a.head_lost, b.head_lost) << where;
+  EXPECT_TRUE(a.by_tunnel == b.by_tunnel) << where;
   EXPECT_TRUE(a.cohorts == b.cohorts) << where;
+}
+
+// The same state on the same policy: also the same program object (a failed call installs none).
+inline void expect_unchanged(const Epoch& a, const Epoch& b, const std::string& where) {
+  expect_same(a, b, where);
+  EXPECT_EQ(a.program_id, b.program_id) << where;
 }
 
 } // namespace netgraph::core::test

@@ -7,11 +7,13 @@ to this file (``py.typed`` marks the package as typed).
 - The graph on integer units: ``Graph``, ``Eligibility``, ``to_units``, ``as_float``.
 - Route structures: ``PredDAG``, ``Path``.
 - Route selection and placement settings: ``PathSelection``, ``EdgeTieBreak``,
-  ``EdgePriority``, ``FlowPlacement``, ``Admission``, ``Origin``.
+  ``EdgePriority``, ``FlowPlacement``, ``Admission``, ``Origin``, ``WeightBasis``.
 - The ledger of placed traffic: ``FlowLedger`` and its ``FlowRecord`` snapshots.
+- Forwarding programs: ``ForwardingProgram`` (with its ``Tunnel`` entries and
+  ``ForwardingProgram.from_routes`` over ``Route`` values), ``TunnelStatus``.
 - The policy engine: ``FlowPolicy``, ``FlowPolicyConfig``, the routings ``CostOnly``,
   ``CapacityAware``, ``Global``, ``Pinned``, and ``PlacementResult`` (with its ``SourceFlow``
-  rows), ``OutputOptions``, ``Termination``.
+  and ``TunnelFlow`` rows), ``OutputOptions``, ``Termination``.
 - The shortest-path cache: ``DagCache`` (building and frozen modes), ``DagCacheMiss``.
 - The evaluators: ``capacity``, ``batch_capacity``, ``sensitivity``.
 - The searches: ``spf`` (``Direction``, ``SpfOptions``, ``SpfResult``, ``UNREACHABLE``),
@@ -42,6 +44,7 @@ from _netgraph_core import (
     FlowPolicy,
     FlowPolicyConfig,
     FlowRecord,
+    ForwardingProgram,
     Global,
     Graph,
     KspOptions,
@@ -53,6 +56,7 @@ from _netgraph_core import (
     PlacementResult,
     PredDAG,
     QueryOptions,
+    Route,
     SensitivityEntry,
     SensitivityResult,
     SourceFlow,
@@ -60,6 +64,10 @@ from _netgraph_core import (
     SpfResult,
     Stretch,
     Termination,
+    Tunnel,
+    TunnelFlow,
+    TunnelStatus,
+    WeightBasis,
     as_float,
     batch_capacity,
     capacity,
@@ -86,8 +94,13 @@ __all__ = [
     "FlowPlacement",
     "Admission",
     "Origin",
+    "WeightBasis",
     "FlowLedger",
     "FlowRecord",
+    "TunnelStatus",
+    "Tunnel",
+    "Route",
+    "ForwardingProgram",
     "Absolute",
     "Stretch",
     "DiminishingReturns",
@@ -100,6 +113,7 @@ __all__ = [
     "Termination",
     "PlacementResult",
     "SourceFlow",
+    "TunnelFlow",
     "FlowPolicy",
     "MAX_FLOWS_PER_CALL",
     "DagCache",

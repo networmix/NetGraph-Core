@@ -907,6 +907,50 @@ inline std::vector<Row> rows() {
                  const std::vector<int> srcs = {1, 17, 33};
                  return Iter([g, srcs] { return abaapi::sensitivity_equal_global(*g, srcs, 50); });
                }});
+  // ---- forwarding programs (step 3): no older Core has them; they guard the later steps.
+  // One demand of eight source leaves to one leaf on a Clos 32x16 (links of 10..80): its optimized
+  // Global program (paths with solved amounts, captured source weights), solved for 2,000.
+  auto program_demand = [] {
+    std::vector<int> srcs;
+    for (int i = 0; i < 8; ++i) srcs.push_back(i);
+    return srcs;
+  };
+  r.push_back({"program.forward.global", "program",
+               "forward() of an installed optimized Global program, Clos 32x16, 8 sources to one leaf, 32 offers "
+               "of 100..3,200 (the injection by captured weights and the per-tunnel split, no solve)",
+               [=] {
+                 auto g = std::make_shared<Graph>(abaapi::build(gen_clos(32, 16, 25)));
+                 auto inst = std::make_shared<abaapi::Installed>(*g, program_demand(), 20, 2000.0);
+                 std::vector<double> offers;
+                 for (int i = 1; i <= 32; ++i) offers.push_back(100.0 * i);
+                 return Iter([g, inst, offers] { return inst->forward_all(offers); });
+               }});
+  auto failure_row = [=](bool stale) {
+    auto a = gen_clos(32, 16, 25);
+    auto g = std::make_shared<Graph>(abaapi::build(a));
+    auto prog = std::make_shared<abaapi::Program>(abaapi::global_program(*g, program_demand(), 20, 2000.0));
+    auto states = std::make_shared<abaapi::Masks>(abaapi::masks(*g, failure_states(a.num_edges() / 2, 32, 3, 26)));
+    return Iter([g, prog, states, stale] { return abaapi::pinned_failures(*g, *prog, *states, 2400.0, stale); });
+  };
+  r.push_back({"program.replay.lossy", "program",
+               "Pinned Lossy replace() of that Global program under 32 failure states (3 links) as the mask, each on a "
+               "fresh ledger: failed tunnels, the heads' shares over the survivors, the loss rule",
+               [=] { return failure_row(false); }});
+  r.push_back({"program.stale.lossy", "program",
+               "the same with the failure states as black holes (stale forwarding: the program unchanged, traffic "
+               "dropped at the failures)",
+               [=] { return failure_row(true); }});
+  r.push_back({"program.replace.costonly", "program",
+               "CostOnly EqualBalanced replace() of 8 source leaves to one leaf, Clos 32x16, under 16 changing loads of "
+               "an outside demand (re-preparation on the released view, the retiring commit)",
+               [=] {
+                 auto g = std::make_shared<Graph>(abaapi::build(gen_clos(32, 16, 25)));
+                 std::vector<double> loads;
+                 for (int i = 0; i < 16; ++i) loads.push_back(50.0 * (i % 8));
+                 return Iter([g, loads, srcs = program_demand()] {
+                   return abaapi::replace_under_load(*g, srcs, 20, {9, 10, 11, 12}, 21, loads, 800.0);
+                 });
+               }});
   // ---- cohort placement (TE_ECMP presets)
   auto cohort_row = [](int min_flows, int max_flows) {
     auto f = gen_fabric3(4, 8, 4, 8, 21);

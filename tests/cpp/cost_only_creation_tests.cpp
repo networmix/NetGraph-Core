@@ -43,8 +43,9 @@ void expect_same_plan(const KernelPlan& got, const KernelPlan& want, const std::
   EXPECT_EQ(plan_differences(got, want), std::vector<std::string> {}) << where;
 }
 
-// The policy's general CostOnly creation (flow_policy.cpp: cost_only_route, bundle_of, new_flow's
-// plan_on), taken wherever the one pass declines; where the one pass answers, it must equal this.
+// The policy's general CostOnly creation (flow_policy.cpp: cost_only_route, bundle_of and the
+// plan on the route, capacity weights), taken wherever the one pass declines; where the one pass
+// answers, it must equal this.
 struct GeneralPath {
   std::vector<EdgeId> route;
   std::shared_ptr<const PredDAG> bundle;
@@ -60,13 +61,9 @@ GeneralPath general_path(const Graph& g, const std::shared_ptr<const PredDAG>& s
   out.route = r.edges;
   Cost cost = !sel.multipath && !r.edges.empty() ? r.cost : kUnreachable;
   out.bundle = PredDAGBuilder::ascending(*support).size() == r.edges.size() ? support : dag_of(g, r.edges);
-  std::vector<Amount> creation;
-  if (placement == FlowPlacement::Weighted && sel.priority == EdgePriority::Residual) {
-    for (EdgeId e : PredDAGBuilder::ascending(*out.bundle)) creation.push_back(W[static_cast<std::size_t>(e)]);
-  }
+  (void)W;
   const bool computed = cost == kUnreachable;
-  out.plan = make_plan(g, placement, admission, sel.priority, src, dsts, *out.bundle, creation,
-                       computed ? &cost : nullptr);
+  out.plan = make_plan(g, placement, admission, WeightSource {}, src, dsts, *out.bundle, computed ? &cost : nullptr);
   out.cost = cost;
   return out;
 }
@@ -157,7 +154,6 @@ Tally compare_with_general_path(std::mt19937& rng, int trials, Cost factor) {
         const PriorityValues values {&g, sel.priority, W};
         const PriorityFn view = PriorityFn::of(values);
         for (const auto& k : kKernels) {
-          if (k.placement == FlowPlacement::Weighted && sel.priority == EdgePriority::Headroom) continue;
           const std::string where = "factor " + std::to_string(factor) + " trial " + std::to_string(trial) + " src " + std::to_string(src) + " kernel " +
                                     std::to_string(static_cast<int>(k.placement)) + "/" +
                                     std::to_string(static_cast<int>(k.admission)) + " sel " +
@@ -165,12 +161,13 @@ Tally compare_with_general_path(std::mt19937& rng, int trials, Cost factor) {
                                     std::to_string(static_cast<int>(sel.priority)) + std::to_string(sel.multipath) +
                                     std::to_string(sel.multi_edge);
           const auto want = general_path(g, support, src, dsts, sel, view, W, k.placement, k.admission);
-          const auto got = cost_only_creation(g, support, src, dsts, sel, view, k.placement, k.admission);
+          const auto got = cost_only_creation(g, support, src, dsts, sel, view, k.placement, k.admission, WeightSource {});
           // It answers exactly where the general path's members are its whole multipath route under a
           // kernel of static membership (on a valid support: every route that exists, except a
           // Weighted route with an edge of capacity 0, which has weight 0 and is no member).
-          const bool qualifies =
-              sel.multipath && !(k.placement == FlowPlacement::Weighted && sel.priority == EdgePriority::Residual);
+          // Capacity weights (CostOnly's default basis) are static whatever the priority: every
+          // multipath selection qualifies.
+          const bool qualifies = sel.multipath;
           const bool applies = qualifies && !want.route.empty() && want.plan.members == want.route;
           EXPECT_EQ(got.has_value(), applies) << where;
           if (got.has_value() != applies) return t;
@@ -300,7 +297,7 @@ TEST(CostOnlyCreation, ChainCostsBeyondInt32AreExact) {
                                   std::to_string(static_cast<int>(k.admission)) + " multi_edge " + std::to_string(me);
         const auto want = general_path(g, support, 0, dsts, sel, PriorityFn::of(values), W, k.placement, k.admission);
         const auto got =
-            cost_only_creation(g, support, 0, dsts, sel, PriorityFn::of(values), k.placement, k.admission);
+            cost_only_creation(g, support, 0, dsts, sel, PriorityFn::of(values), k.placement, k.admission, WeightSource {});
         ASSERT_TRUE(got.has_value()) << where;
         EXPECT_EQ(want.cost, c.cost) << where;
         EXPECT_EQ(got->cost, c.cost) << where;
@@ -357,7 +354,7 @@ TEST(CostOnlyCreation, LargerGraphsEqualTheGeneralPath) {
             const auto want = general_path(g, support, src, dsts, sel, PriorityFn::of(values), W, placement,
                                         Admission::Lossless);
             const auto got = cost_only_creation(g, support, src, dsts, sel, PriorityFn::of(values), placement,
-                                                Admission::Lossless);
+                                                Admission::Lossless, WeightSource {});
             ASSERT_EQ(got.has_value(), !want.route.empty());
             if (!got) continue;
             EXPECT_TRUE(*got->bundle == *want.bundle);
@@ -408,7 +405,7 @@ TEST(CostOnlyCreation, CraftedSupportsGiveNothingOrTheGeneralPath) {
       for (const auto& k : kKernels) {
         const auto want = general_path(g, support, src, dsts, sel, PriorityFn::of(values), W, k.placement, k.admission);
         const auto got =
-            cost_only_creation(g, support, src, dsts, sel, PriorityFn::of(values), k.placement, k.admission);
+            cost_only_creation(g, support, src, dsts, sel, PriorityFn::of(values), k.placement, k.admission, WeightSource {});
         const std::string where = "trial " + std::to_string(trial);
         if (!got.has_value()) {
           ++declined;
@@ -446,7 +443,7 @@ TEST(CostOnlyCreation, DeclinesEachBrokenPrecondition) {
     std::sort(edges.begin(), edges.end());
     const auto support = dag_of(g, edges);
     return std::make_pair(support, cost_only_creation(g, support, 0, dsts, sel, PriorityFn::of(values), placement,
-                                                      Admission::Lossless));
+                                                      Admission::Lossless, WeightSource {}));
   };
   {
     const auto [support, got] = run({0, 1, 2, 3}, FlowPlacement::EqualBalanced);
@@ -472,21 +469,21 @@ TEST(CostOnlyCreation, DeclinesEachBrokenPrecondition) {
                                  Admission::Lossless),
                  std::logic_error);
   }
-  // Not applicable: multipath = false, Weighted with Residual priority, no destination reached.
+  // Not applicable: multipath = false, Weighted with residual-snapshot weights, no destination reached.
   {
     std::vector<EdgeId> edges = {inv[0], inv[1], inv[2], inv[3]};
     std::sort(edges.begin(), edges.end());
     const auto support = dag_of(g, edges);
     const PathSelection single(EdgeTieBreak::Deterministic, EdgePriority::Capacity, false, true);
     EXPECT_FALSE(cost_only_creation(g, support, 0, dsts, single, PriorityFn::of(values), FlowPlacement::EqualBalanced,
-                                    Admission::Lossless)
+                                    Admission::Lossless, WeightSource {})
                      .has_value());
     const PathSelection residual(EdgeTieBreak::Deterministic, EdgePriority::Residual, true, true);
     EXPECT_FALSE(cost_only_creation(g, support, 0, dsts, residual, PriorityFn::of(values), FlowPlacement::Weighted,
-                                    Admission::Lossless)
+                                    Admission::Lossless, WeightSource {WeightBasis::ResidualSnapshot, {}})
                      .has_value());
     EXPECT_FALSE(cost_only_creation(g, support, 0, std::vector<NodeId> {5}, sel, PriorityFn::of(values),
-                                    FlowPlacement::EqualBalanced, Admission::Lossless)
+                                    FlowPlacement::EqualBalanced, Admission::Lossless, WeightSource {})
                      .has_value());
   }
 }
@@ -496,7 +493,7 @@ TEST(KernelPlanBlock, CopiesAndMovesKeepTheirOwnViews) {
   const auto dag = PredDAGBuilder::of_edges(g, all_ids(g));
   const std::vector<NodeId> dsts = {3};
   const KernelPlan original =
-      make_plan(g, FlowPlacement::Weighted, Admission::Lossless, EdgePriority::Capacity, 0, dsts, dag, {});
+      make_plan(g, FlowPlacement::Weighted, Admission::Lossless, WeightSource {}, 0, dsts, dag);
   ASSERT_EQ(original.topo.size(), 4U);
   ASSERT_EQ(original.head_pos.size(), 4U);
   ASSERT_EQ(vec(original.dsts), dsts);
@@ -522,8 +519,7 @@ TEST(KernelPlanBlock, CopiesAndMovesKeepTheirOwnViews) {
   assigned = copy;
   expect_same_plan(assigned, original, "copy assignment");
   EXPECT_TRUE(own_block(assigned, copy));
-  KernelPlan target = make_plan(g, FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Capacity, 1, dsts,
-                                dag, {});
+  KernelPlan target = make_plan(g, FlowPlacement::EqualBalanced, Admission::Lossless, WeightSource {}, 1, dsts, dag);
   target = std::move(moved);
   expect_same_plan(target, original, "move assignment");
   EXPECT_TRUE(moved.topo.empty() && moved.dsts.empty() && moved.head_pos.empty() && moved.terminal.empty() &&
@@ -548,8 +544,8 @@ TEST(KernelPlanBlock, ACopyOutlivesItsSource) {
   auto chain = [&](NodeId src, NodeId dst) {
     const std::vector<EdgeId> edges = src == 0 ? std::vector<EdgeId> {0, 1} : std::vector<EdgeId> {2, 3};
     const auto dag = PredDAGBuilder::of_edges(g, edges);
-    return make_plan(g, FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Capacity, src,
-                     std::vector<NodeId> {dst}, dag, {});
+    return make_plan(g, FlowPlacement::EqualBalanced, Admission::Lossless, WeightSource {}, src,
+                     std::vector<NodeId> {dst}, dag);
   };
   for (const bool assign : {false, true}) {
     std::optional<KernelPlan> owner(chain(0, 2));
@@ -581,7 +577,7 @@ TEST(TestHelpers, PlanDifferencesNameEveryField) {
   const auto dag = PredDAGBuilder::of_edges(g, all_ids(g));
   const std::vector<NodeId> dsts = {3};
   const KernelPlan plan =
-      make_plan(g, FlowPlacement::Weighted, Admission::Lossless, EdgePriority::Capacity, 0, dsts, dag, {});
+      make_plan(g, FlowPlacement::Weighted, Admission::Lossless, WeightSource {}, 0, dsts, dag);
   ASSERT_EQ(plan.weights.size(), 4U);
   EXPECT_EQ(plan_differences(plan, plan), std::vector<std::string> {});
   // The views' changed copies live here, as the plan's own views live in its block.

@@ -46,6 +46,12 @@ struct LedgerAccess {
   // before a publication step that cannot throw. Returns the FlowIds of the new records in
   // draft order. The drafts' vectors are moved from.
   static std::vector<FlowId> commit(FlowLedger& fg, std::int64_t owner, std::span<Draft> drafts);
+  // The exchange of replace() and forward(): every live record of the owner is retired (its
+  // allocation reverted, its id never live again) and `drafts` (new records only) are created, in
+  // one atomic step with commit's checks and guarantee. Returns the new FlowIds in draft order.
+  static std::vector<FlowId> exchange(FlowLedger& fg, std::int64_t owner, std::span<Draft> drafts);
+  // commit (retire false) and exchange (retire true).
+  static std::vector<FlowId> commit_drafts(FlowLedger& fg, std::int64_t owner, std::span<Draft> drafts, bool retire);
   // A live record by id (throws std::invalid_argument for an unknown or retired id).
   [[nodiscard]] static const FlowRecord& live(const FlowLedger& fg, std::int64_t id);
   // The working residual baseline - allocated into `out` (resized to E).

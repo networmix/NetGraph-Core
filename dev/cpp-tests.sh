@@ -23,8 +23,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # still run, three checks are weaker without them: the helper check_deletion
 # (flow_core_deletion_tests.cpp) checks each re-solve's final result, but observes each repair step
 # only through the probe hook (see that file's header); PolicyFixtures.EveryFixtureReplaysIdentically
-# compares no trace and replays only the 58 fixtures that keep the default creation cap, and
-# PolicyFixtures.ACorruptedExpectationFails corrupts only what that replay compares, in those 58
+# compares no trace and replays only the 54 fixtures that keep the default creation cap, and
+# PolicyFixtures.ACorruptedExpectationFails corrupts only what that replay compares, in those 54
 # fixtures (see flow_policy_fixture_tests.cpp's header).
 EXPECTED_OFF_SKIPS="
 FlowCoreDeletion.CheckpointsEqualTheIterativeUpdate

@@ -1,13 +1,17 @@
 // FlowPolicyConfig and OutputOptions: the configuration of a placement.
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/options.hpp"
+#include "integers.hpp"
 #include "registration.hpp"
 
 namespace py = pybind11;
@@ -35,31 +39,55 @@ void register_policy_config(py::module_& m) {
   py::class_<FlowPolicyConfig>(
       m, "FlowPolicyConfig",
       "One demand's settings: routing (CostOnly, CapacityAware, Global or Pinned), placement\n"
-      "(FlowPlacement: required for CostOnly, CapacityAware and Pinned; Global takes none), admission\n"
-      "(LOSSLESS by default), selection (PathSelection; None: PathSelection(); Global takes none) and\n"
-      "origin (Origin; None: the model's default, EQUAL for CostOnly EQUAL_BALANCED and WEIGHTED and for\n"
-      "CapacityAware, OPTIMIZED for CostOnly MAX_FLOW and Global; Pinned takes none). A field that does\n"
-      "not apply to the model must stay None. The combination is checked when a policy or an evaluator\n"
-      "uses the configuration (ValueError): the enumeration values, then the model's row (placement,\n"
-      "origin, admission, selection), then a DagCache (only CostOnly reads one), then CapacityAware's\n"
-      "parameters, then the pooled single-path rule (CostOnly with several input sources rejects\n"
-      "multipath=False with PREFER_HIGHER_PRIORITY).")
+      "(FlowPlacement: required for CostOnly and CapacityAware; Global and Pinned take none), admission\n"
+      "(LOSSLESS by default), selection (PathSelection; None: PathSelection(); Global and Pinned take\n"
+      "none), origin (Origin; None: the model's default, EQUAL for CostOnly EQUAL_BALANCED and WEIGHTED and\n"
+      "for CapacityAware, OPTIMIZED for CostOnly MAX_FLOW and Global; Pinned takes none, its program has\n"
+      "it), weights (WeightBasis, CostOnly WEIGHTED only; None: CAPACITY) and edge_weights (one integer per\n"
+      "edge, given exactly when weights=EXPLICIT; one array shared by every policy built from this\n"
+      "configuration). A field that does not apply to the model must stay None. The combination is checked\n"
+      "when a policy or an evaluator uses the configuration (ValueError): the enumeration values, then the\n"
+      "model's row (placement, origin, admission, selection, weights with edge_weights), then a DagCache\n"
+      "(only CostOnly reads one), then CapacityAware's parameters, then edge_weights' length and entries,\n"
+      "then the pooled single-path rule (CostOnly with several input sources rejects multipath=False with\n"
+      "PREFER_HIGHER_PRIORITY).")
       .def(py::init([](const py::object& routing, std::optional<FlowPlacement> placement, Admission admission,
-                       std::optional<PathSelection> selection, std::optional<Origin> origin) {
-             return FlowPolicyConfig {routing_of(routing), placement, admission, selection, origin};
+                       std::optional<PathSelection> selection, std::optional<Origin> origin,
+                       std::optional<WeightBasis> weights, const py::object& edge_weights) {
+             FlowPolicyConfig cfg {routing_of(routing), placement, admission, selection, origin, weights, {}};
+             if (!edge_weights.is_none()) {
+               // Converted once and shared: every policy copied from this configuration reads the same
+               // array. An entry beyond int64 is outside the domain here; the policy checks the rest.
+               (void)sequence_length(edge_weights, "edge_weights");
+               const auto w = wide_integers(edge_weights, "edge_weights");
+               for (std::size_t e = 0; e < w.size(); ++e) {
+                 if (w.sign(e) != 0) throw py::value_error("edge_weights[" + std::to_string(e) + "] must be an integer in [0, 2^62)");
+               }
+               cfg.edge_weights = std::make_shared<const std::vector<Amount>>(w.narrow<Amount>());
+             }
+             return cfg;
            }),
            py::kw_only(), py::arg("routing"), py::arg("placement") = py::none(),
            py::arg_v("admission", Admission::Lossless, "Admission.LOSSLESS"), py::arg("selection") = py::none(),
-           py::arg("origin") = py::none())
+           py::arg("origin") = py::none(), py::arg("weights") = py::none(), py::arg("edge_weights") = py::none())
       .def_property_readonly(
           "routing", [](const FlowPolicyConfig& c) { return routing_obj(c.routing); },
           "the routing mode: CostOnly, CapacityAware, Global or Pinned")
-      .def_readonly("placement", &FlowPolicyConfig::placement, "the FlowPlacement, or None (Global)")
+      .def_readonly("placement", &FlowPolicyConfig::placement, "the FlowPlacement, or None (Global, Pinned)")
       .def_readonly("admission", &FlowPolicyConfig::admission, "LOSSLESS or LOSSY")
       .def_readonly("selection", &FlowPolicyConfig::selection,
-                    "the PathSelection, or None (a policy's config: PathSelection() resolved; Global: None)")
+                    "the PathSelection, or None (a policy's config: PathSelection() resolved; Global, Pinned: None)")
       .def_readonly("origin", &FlowPolicyConfig::origin,
                     "the Origin, or None (a policy's config: the model's default resolved; Pinned: None)")
+      .def_readonly("weights", &FlowPolicyConfig::weights,
+                    "the WeightBasis, or None (a policy's config: CAPACITY resolved for CostOnly WEIGHTED)")
+      .def_property_readonly(
+          "edge_weights",
+          [](const FlowPolicyConfig& c) -> py::object {
+            if (!c.edge_weights) return py::none();
+            return py::tuple(py::cast(*c.edge_weights));
+          },
+          "the explicit weights (one per edge, a tuple), or None")
       .def("__repr__", [](const FlowPolicyConfig& c) {
         return "FlowPolicyConfig(routing=" + std::string(py::repr(routing_obj(c.routing))) + ")";
       });

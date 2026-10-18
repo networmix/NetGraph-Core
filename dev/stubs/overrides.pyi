@@ -228,18 +228,84 @@ class CapacityAware:
     @property
     def max_path_cost(self) -> Absolute | Stretch | None: ...
 
-class Pinned:
-    # reason: bundles is a sequence of PredDAG (a Path converts with to_dag())
-    # generated: def __init__(self, bundles: typing.Any) -> None:
-    def __init__(self, bundles: collections.abc.Sequence[PredDAG]) -> None: ...
-    # reason: a new list of the PredDAG bundles
-    # generated: def bundles(self) -> list:
+class Tunnel:
+    # reason: no constructor: a tunnel of ForwardingProgram.tunnels
+    # generated: (none)
+    def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
+    # reason: the path's EdgeIds in path order
+    # generated: def edges(self) -> tuple:
     @property
-    def bundles(self) -> list[PredDAG]: ...
+    def edges(self) -> tuple[int, ...]: ...
+
+class Route:
+    # reason: head and weight are integers (weight checked by from_routes); bundle a Path or a PredDAG (TypeError otherwise)
+    # generated: def __init__(self, head: typing.Any, bundle: typing.Any, *, weight: typing.Any = 1) -> None:
+    def __init__(
+        self,
+        head: typing.SupportsIndex,
+        bundle: Path | PredDAG,
+        *,
+        weight: typing.SupportsIndex = 1,
+    ) -> None: ...
+
+class ForwardingProgram:
+    # reason: no constructor: made by from_routes and returned by the policies
+    # generated: (none)
+    def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
+    # reason: sources and destinations are node sets; routes a sequence of Route; edge_weights and residual integers or None
+    # generated: def from_routes(graph: Graph, sources: typing.Any, destinations: typing.Any, routes: typing.Any, *, placement: FlowPlacement | None = None, weights: WeightBasis | None = None, edge_weights: typing.Any = None, residual: typing.Any = None) -> ForwardingProgram:
+    @staticmethod
+    def from_routes(
+        graph: Graph,
+        sources: typing.SupportsIndex
+        | collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer],
+        destinations: typing.SupportsIndex
+        | collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer],
+        routes: collections.abc.Sequence[Route],
+        *,
+        placement: FlowPlacement | None = None,
+        weights: WeightBasis | None = None,
+        edge_weights: collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer]
+        | None = None,
+        residual: collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer]
+        | None = None,
+    ) -> ForwardingProgram: ...
+    # reason: the destination set, ascending
+    # generated: def destinations(self) -> tuple:
+    @property
+    def destinations(self) -> tuple[int, ...]: ...
+    # reason: (source, weight) pairs, or None for equal sources
+    # generated: def source_weights(self) -> typing.Any:
+    @property
+    def source_weights(self) -> tuple[tuple[int, int], ...] | None: ...
+    # reason: the source set, ascending
+    # generated: def sources(self) -> tuple:
+    @property
+    def sources(self) -> tuple[int, ...]: ...
+    # reason: the program's tunnels, ascending index
+    # generated: def tunnels(self) -> tuple:
+    @property
+    def tunnels(self) -> tuple[Tunnel, ...]: ...
+
+class Global:
+    # reason: support is a PredDAG or None
+    # generated: def __init__(self, *, support: typing.Any = None) -> None:
+    def __init__(self, *, support: PredDAG | None = None) -> None: ...
+
+class Pinned:
+    # reason: black_holes may be None
+    # generated: def __init__(self, program: ForwardingProgram, *, black_holes: Eligibility = None) -> None:
+    def __init__(
+        self, program: ForwardingProgram, *, black_holes: Eligibility | None = None
+    ) -> None: ...
 
 class FlowPolicyConfig:
     # reason: routing is one of the four routing modes (TypeError otherwise)
-    # generated: def __init__(self, *, routing: typing.Any, placement: FlowPlacement | None = None, admission: Admission = ..., selection: PathSelection | None = None, origin: Origin | None = None) -> None:
+    # generated: def __init__(self, *, routing: typing.Any, placement: FlowPlacement | None = None, admission: Admission = ..., selection: PathSelection | None = None, origin: Origin | None = None, weights: WeightBasis | None = None, edge_weights: typing.Any = None) -> None:
     def __init__(
         self,
         *,
@@ -248,7 +314,15 @@ class FlowPolicyConfig:
         admission: Admission = ...,
         selection: PathSelection | None = None,
         origin: Origin | None = None,
+        weights: WeightBasis | None = None,
+        edge_weights: collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer]
+        | None = None,
     ) -> None: ...
+    # reason: the explicit weights, one int per edge, or None
+    # generated: def edge_weights(self) -> typing.Any:
+    @property
+    def edge_weights(self) -> tuple[int, ...] | None: ...
     # reason: the routing mode given at construction
     # generated: def routing(self) -> typing.Any:
     @property
@@ -275,6 +349,19 @@ class SourceFlow:
     @property
     def source_loss(self) -> int: ...
 
+class TunnelFlow:
+    # reason: no constructor: one row of PlacementResult.by_tunnel
+    # generated: (none)
+    def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
+    # reason: an exact int (a 128-bit counter)
+    # generated: def assigned(self) -> typing.Any:
+    @property
+    def assigned(self) -> int: ...
+    # reason: an exact int (a 128-bit counter)
+    # generated: def dropped(self) -> typing.Any:
+    @property
+    def dropped(self) -> int: ...
+
 class PlacementResult:
     # reason: no constructor: returned by FlowPolicy.place and the evaluators
     # generated: (none)
@@ -287,6 +374,10 @@ class PlacementResult:
     # generated: def by_source(self) -> tuple:
     @property
     def by_source(self) -> tuple[SourceFlow, ...]: ...
+    # reason: one TunnelFlow per program tunnel
+    # generated: def by_tunnel(self) -> tuple:
+    @property
+    def by_tunnel(self) -> tuple[TunnelFlow, ...]: ...
     # reason: a list of (EdgeId, units) pairs
     # generated: def call_drops(self) -> list:
     @property
@@ -356,6 +447,31 @@ class FlowPolicy:
         volume: typing.SupportsIndex | float | numpy.floating,
         outputs: OutputOptions | None = None,
     ) -> PlacementResult: ...
+    # reason: offer is integer units or float('inf'); outputs may be None; the result is a PlacementResult
+    # generated: def evaluate(self, offer: typing.Any, *, outputs: typing.Any = None) -> typing.Any:
+    def evaluate(
+        self,
+        offer: typing.SupportsIndex | float | numpy.floating,
+        *,
+        outputs: OutputOptions | None = None,
+    ) -> PlacementResult: ...
+    # reason: offer is integer units or float('inf'); black_holes and outputs may be None; the result is a PlacementResult
+    # generated: def forward(self, offer: typing.Any, *, black_holes: typing.Any = None, outputs: typing.Any = None) -> typing.Any:
+    def forward(
+        self,
+        offer: typing.SupportsIndex | float | numpy.floating,
+        *,
+        black_holes: Eligibility | None = None,
+        outputs: OutputOptions | None = None,
+    ) -> PlacementResult: ...
+    # reason: offer is integer units or float('inf'); outputs may be None; the result is a PlacementResult
+    # generated: def replace(self, offer: typing.Any, *, outputs: typing.Any = None) -> typing.Any:
+    def replace(
+        self,
+        offer: typing.SupportsIndex | float | numpy.floating,
+        *,
+        outputs: OutputOptions | None = None,
+    ) -> PlacementResult: ...
     # reason: a FlowId is a tuple (ledger uid, id) of integers
     # generated: def record(self, flow_id: typing.Any) -> FlowRecord:
     def record(
@@ -363,8 +479,8 @@ class FlowPolicy:
     ) -> FlowRecord: ...
 
 class QueryOptions:
-    # reason: elig, cache and outputs may be None
-    # generated: def __init__(self, config: FlowPolicyConfig, *, elig: Eligibility = None, cache: DagCache = None, outputs: typing.Any = None) -> None:
+    # reason: elig, cache, outputs and offered may be None; offered is integer units or float('inf')
+    # generated: def __init__(self, config: FlowPolicyConfig, *, elig: Eligibility = None, cache: DagCache = None, outputs: typing.Any = None, offered: typing.Any = None) -> None:
     def __init__(
         self,
         config: FlowPolicyConfig,
@@ -372,7 +488,12 @@ class QueryOptions:
         elig: Eligibility | None = None,
         cache: DagCache | None = None,
         outputs: OutputOptions | None = None,
+        offered: typing.SupportsIndex | float | numpy.floating | None = None,
     ) -> None: ...
+    # reason: the offer given, an int or float('inf'), or None
+    # generated: def offered(self) -> typing.Any:
+    @property
+    def offered(self) -> int | float | None: ...
     # reason: None when no cache was given
     # generated: def cache(self) -> DagCache:
     @property

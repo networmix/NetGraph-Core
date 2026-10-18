@@ -35,10 +35,11 @@ using CostCeiling = std::variant<Absolute, Stretch>;
 // first (multi_edge = false), then choose the walk among the remaining members.
 enum class EdgeTieBreak { Deterministic, PreferHigherPriority };
 
-// Per-edge priority for PreferHigherPriority and for Weighted membership and weights:
+// Per-edge priority for PreferHigherPriority (single-path and parallel-edge choices), and for
+// CapacityAware's Weighted membership and weights:
 // Residual is unused capacity in units on the search's view; Capacity is static capacity in
 // units; Headroom is the exact ratio residual / capacity, 0 on an edge of capacity 0 (rejected
-// with Weighted). Without a supplied residual, a search reads the static capacity as the unused
+// with CapacityAware's Weighted). Without a supplied residual, a search reads the static capacity as the unused
 // capacity: Residual and Capacity read the capacity, Headroom 1 (0 on an edge of capacity 0).
 enum class EdgePriority { Residual, Capacity, Headroom };
 
@@ -66,6 +67,15 @@ struct PathSelection {
 // EqualBalanced splits equally at each node, giving leftover units to edges in ascending
 // EdgeId order.
 enum class FlowPlacement { MaxFlow, Weighted, EqualBalanced };
+
+// Where the Weighted kernel's member weights come from (CostOnly Weighted and supplied split
+// routes): Capacity, each member's static capacity; Explicit, one integer per edge given with the
+// configuration (edge_weights; a positive weight on an edge of capacity 0 becomes 0);
+// ResidualSnapshot, each member's free capacity read once when the routes are prepared, against
+// one common view, and frozen for the epoch. A member of weight 0 is pruned, together with the
+// branches it leaves without a destination, inside the route only (no longer bypass is created).
+// The selection's priority never chooses weights.
+enum class WeightBasis { Capacity, Explicit, ResidualSnapshot };
 
 // Lossless admits only the largest total that the routes carry with no loss at all; Lossy
 // forwards the whole finite offer hop by hop and records where it is lost (EqualBalanced and

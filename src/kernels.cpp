@@ -5,8 +5,8 @@
   members (the graph's capacities sum below 2^62), each node's inflow by T, and each share by that
   inflow. Highest averages compares
   w_i/d_i and w_j/d_j through w_i*d_j and w_j*d_i (operands < 2^63, products < 2^126). The
-  lower quota floor(I*w/W) uses a 128-bit product, with inflow I, weight w and weight sum
-  W < 2^62.
+  lower quota floor(I*w/W) uses a 128-bit product, with inflow I, weight w < 2^62 and the exact
+  128-bit weight sum W (explicit weights are each below 2^62, not their sum).
 */
 #include "netgraph/core/detail/kernels.hpp"
 
@@ -41,9 +41,9 @@ bool before(std::uint64_t wi, std::uint64_t di, std::size_t i, std::uint64_t wj,
 
 void highest_averages(Amount total, std::span<const Amount> weights, std::span<Amount> out) {
   const std::size_t k = weights.size();
-  std::uint64_t wsum = 0;
-  for (Amount w : weights) wsum += static_cast<std::uint64_t>(w);
-  if (wsum == 0) {  // all-zero weights give nothing
+  U128 wsum {};
+  for (Amount w : weights) wsum = add(wsum, U128 {0, static_cast<std::uint64_t>(w)});
+  if (wsum == U128 {}) {  // all-zero weights give nothing
     std::fill(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(k), 0);
     return;
   }
@@ -89,20 +89,16 @@ void highest_averages(Amount total, std::span<const Amount> weights, std::span<A
 
 // ---------------------------------------------------------------- plans
 
-void check_kernel_combination(FlowPlacement placement, Admission admission, EdgePriority priority) {
+void check_kernel_combination(FlowPlacement placement, Admission admission) {
   if (admission == Admission::Lossy && placement == FlowPlacement::MaxFlow) {
     throw std::invalid_argument("MAX_FLOW requires admission=LOSSLESS");
   }
-  if (placement == FlowPlacement::Weighted && priority == EdgePriority::Headroom) {
-    throw std::invalid_argument("the Weighted kernel is rejected with priority Headroom (weights are units)");
-  }
 }
 
-void check_kernel(FlowPlacement placement, Admission admission, EdgePriority priority) {
+void check_kernel(FlowPlacement placement, Admission admission) {
   check_member(placement, "placement");
   check_member(admission, "admission");
-  check_member(priority, "priority");
-  check_kernel_combination(placement, admission, priority);
+  check_kernel_combination(placement, admission);
 }
 
 KernelPlan::Layout KernelPlan::point(std::size_t num_roots, std::size_t num_dsts, std::size_t positions,
@@ -407,9 +403,10 @@ void build_split(const Graph& g, const PredDAG& dag, std::span<const NodeId> roo
 
 } // namespace
 
-std::vector<EdgeId> prune(const Graph& g, const PredDAG& dag, NodeId src, std::span<const NodeId> dsts) {
+std::vector<EdgeId> prune(const Graph& g, const PredDAG& dag, NodeId src, std::span<const NodeId> dsts,
+                          const Eligibility* elig) {
   KernelPlan plan;
-  build_split(g, dag, {&src, 1}, dsts, [](EdgeId) { return true; }, &plan, nullptr);
+  build_split(g, dag, {&src, 1}, dsts, [&](EdgeId e) { return elig == nullptr || elig->edge_ok(e); }, &plan, nullptr);
   return std::move(plan.members);
 }
 
@@ -421,87 +418,115 @@ Cost route_cost(const Graph& g, const PredDAG& route, NodeId src, std::span<cons
 
 namespace {
 
-KernelPlan plan_of(const Graph& g, FlowPlacement placement, Admission admission, EdgePriority priority,
-                   std::span<const NodeId> roots, std::span<const NodeId> dsts, const PredDAG& route,
-                   std::span<const Amount> creation_view, Cost* cost) {
-  check_kernel(placement, admission, priority);
+KernelPlan plan_of(const Graph& g, FlowPlacement placement, Admission admission, const WeightSource& weights,
+                   std::span<const NodeId> roots, std::span<const NodeId> dsts, const PredDAG& route, Cost* cost) {
+  check_kernel(placement, admission);
   const auto edges = PredDAGBuilder::ascending(route);
-  const bool by_view = placement == FlowPlacement::Weighted && priority == EdgePriority::Residual;
-  if (by_view && creation_view.size() != edges.size()) {
+  const bool weighted = placement == FlowPlacement::Weighted;
+  const bool by_view = weighted && weights.basis == WeightBasis::ResidualSnapshot;
+  if (by_view && weights.values.size() != edges.size()) {
     throw std::logic_error("make_plan: the creation view is not route-aligned");
+  }
+  if (weighted && weights.basis == WeightBasis::Explicit &&
+      weights.values.size() != static_cast<std::size_t>(g.num_edges())) {
+    throw std::logic_error("make_plan: the explicit weights are not edge-aligned");
   }
   const auto capacity = g.capacity_units();
   KernelPlan plan;
   plan.placement = placement;
   plan.admission = admission;
   plan.route.assign(edges.begin(), edges.end());
-  // The creation view of a route edge (the route ascends: a binary search).
-  auto creation = [&](EdgeId e) {
-    return creation_view[static_cast<std::size_t>(std::lower_bound(edges.begin(), edges.end(), e) - edges.begin())];
+  // A route edge's Weighted weight: its static capacity, its explicit weight (0 on an edge of
+  // capacity 0) or its creation view (the route ascends: a binary search).
+  auto weight = [&](EdgeId e) -> Amount {
+    const auto ei = static_cast<std::size_t>(e);
+    switch (weights.basis) {
+      case WeightBasis::Capacity: return capacity[ei];
+      case WeightBasis::Explicit: return capacity[ei] >= 1 ? weights.values[ei] : 0;
+      case WeightBasis::ResidualSnapshot:
+        return weights.values[static_cast<std::size_t>(std::lower_bound(edges.begin(), edges.end(), e) - edges.begin())];
+    }
+    return 0;
   };
   // Membership: MaxFlow and EqualBalanced every route edge (an edge of capacity 0 is a member
-  // that carries nothing), Weighted the edges of positive weight: creation view >= 1 unit
-  // (Residual) or static capacity >= 1 unit (Capacity).
-  auto member = [&](EdgeId e) {
-    if (placement != FlowPlacement::Weighted) return true;
-    return (by_view ? creation(e) : capacity[static_cast<std::size_t>(e)]) >= 1;
-  };
+  // that carries nothing), Weighted the edges of positive weight.
+  auto member = [&](EdgeId e) { return !weighted || weight(e) >= 1; };
   build_split(g, route, roots, dsts, member, &plan, cost);
   // The route's cost is the members' only when every route edge is a member.
   if (cost != nullptr && plan.members.size() != plan.route.size()) *cost = route_cost(g, route, roots[0], dsts);
-  if (placement == FlowPlacement::Weighted) {
+  if (weighted) {
     plan.weights.reserve(plan.members.size());
-    for (EdgeId e : plan.members) plan.weights.push_back(by_view ? creation(e) : capacity[static_cast<std::size_t>(e)]);
+    for (EdgeId e : plan.members) plan.weights.push_back(weight(e));
   }
   return plan;
 }
 
 } // namespace
 
-KernelPlan make_plan(const Graph& g, FlowPlacement placement, Admission admission, EdgePriority priority,
-                     NodeId src, std::span<const NodeId> dsts, const PredDAG& route,
-                     std::span<const Amount> creation_view, Cost* cost) {
-  return plan_of(g, placement, admission, priority, {&src, 1}, dsts, route, creation_view, cost);
+KernelPlan make_plan(const Graph& g, FlowPlacement placement, Admission admission, const WeightSource& weights,
+                     NodeId src, std::span<const NodeId> dsts, const PredDAG& route, Cost* cost) {
+  return plan_of(g, placement, admission, weights, {&src, 1}, dsts, route, cost);
 }
 
-KernelPlan make_plan(const Graph& g, FlowPlacement placement, Admission admission, EdgePriority priority,
-                     std::span<const NodeId> roots, std::span<const NodeId> dsts, const PredDAG& route,
-                     std::span<const Amount> creation_view) {
-  return plan_of(g, placement, admission, priority, roots, dsts, route, creation_view, nullptr);
+KernelPlan make_plan(const Graph& g, FlowPlacement placement, Admission admission, const WeightSource& weights,
+                     std::span<const NodeId> roots, std::span<const NodeId> dsts, const PredDAG& route) {
+  return plan_of(g, placement, admission, weights, roots, dsts, route, nullptr);
 }
 
-KernelPlan make_route_plan(const Graph& g, FlowPlacement placement, Admission admission,
-                           EdgePriority priority, NodeId src, std::span<const NodeId> dsts, const PredDAG& bundle,
-                           const Eligibility* elig, Cost* cost) {
-  check_kernel(placement, admission, priority);
+KernelPlan make_route_plan(const Graph& g, FlowPlacement placement, WeightBasis basis, std::span<const Amount> edge_values,
+                           NodeId src, std::span<const NodeId> dsts, const PredDAG& dag, Cost* cost) {
+  check_kernel(placement, Admission::Lossless);
   const auto capacity = g.capacity_units();
   KernelPlan plan;
   plan.placement = placement;
-  plan.admission = admission;
-  auto allowed = [&](EdgeId e) { return elig == nullptr || elig->edge_ok(e); };
-  build_split(g, bundle, {&src, 1}, dsts, allowed, &plan, cost);
+  plan.admission = Admission::Lossless;
+  build_split(g, dag, {&src, 1}, dsts, [](EdgeId) { return true; }, &plan, cost);
   plan.route = plan.members;
-  if (placement != FlowPlacement::Weighted || priority != EdgePriority::Capacity) return plan;
-  // Weighted with capacity weights: the members are the route edges of positive capacity, on
-  // the walks that remain, weighted by their capacities. When every route edge has a positive
-  // capacity they are the route itself; otherwise a second pass over the bundle keeps them (the
-  // route and its cost stay).
-  const bool all_positive = std::all_of(plan.route.begin(), plan.route.end(),
-                                        [&](EdgeId e) { return capacity[static_cast<std::size_t>(e)] >= 1; });
-  if (all_positive) {
+  if (placement != FlowPlacement::Weighted) return plan;
+  auto weight = [&](EdgeId e) -> Amount {
+    const auto ei = static_cast<std::size_t>(e);
+    switch (basis) {
+      case WeightBasis::Capacity: return capacity[ei];
+      case WeightBasis::Explicit: return capacity[ei] >= 1 ? edge_values[ei] : 0;
+      case WeightBasis::ResidualSnapshot: return edge_values[ei];
+    }
+    return 0;
+  };
+  // When every route edge has a positive weight the members are the route itself; otherwise a
+  // second pass keeps the walks over the positive ones (the route and its cost stay).
+  if (std::all_of(plan.route.begin(), plan.route.end(), [&](EdgeId e) { return weight(e) >= 1; })) {
     plan.weights.reserve(plan.members.size());
-    for (EdgeId e : plan.members) plan.weights.push_back(capacity[static_cast<std::size_t>(e)]);
+    for (EdgeId e : plan.members) plan.weights.push_back(weight(e));
     return plan;
   }
   KernelPlan weighted;
-  build_split(g, bundle, {&src, 1}, dsts,
-              [&](EdgeId e) { return allowed(e) && capacity[static_cast<std::size_t>(e)] >= 1; }, &weighted, nullptr);
+  build_split(g, dag, {&src, 1}, dsts, [&](EdgeId e) { return weight(e) >= 1; }, &weighted, nullptr);
   weighted.placement = placement;
-  weighted.admission = admission;
+  weighted.admission = Admission::Lossless;
   weighted.route = std::move(plan.route);
   weighted.weights.reserve(weighted.members.size());
-  for (EdgeId e : weighted.members) weighted.weights.push_back(capacity[static_cast<std::size_t>(e)]);
+  for (EdgeId e : weighted.members) weighted.weights.push_back(weight(e));
   return weighted;
+}
+
+KernelPlan restrict_plan(const Graph& g, const KernelPlan& plan, std::span<const NodeId> roots,
+                         std::span<const NodeId> dsts, const Eligibility* elig) {
+  KernelPlan out;
+  out.placement = plan.placement;
+  out.admission = plan.admission;
+  const PredDAG members = PredDAGBuilder::of_edges(g, plan.members);
+  build_split(g, members, roots, dsts, [&](EdgeId e) { return elig == nullptr || elig->edge_ok(e); }, &out, nullptr);
+  out.route = plan.route;
+  if (plan.placement == FlowPlacement::Weighted) {
+    // The kept members' frozen weights (both member lists ascend).
+    out.weights.resize(out.members.size());
+    std::size_t k = 0;
+    for (std::size_t m = 0; m < out.members.size(); ++m) {
+      while (plan.members[k] != out.members[m]) ++k;
+      out.weights[m] = plan.weights[k];
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- CostOnly creation
@@ -605,17 +630,22 @@ std::size_t lower_bound_from(std::span<const EdgeId> a, std::size_t hint, EdgeId
 std::optional<CreationProducts> cost_only_creation(const Graph& g, const std::shared_ptr<const PredDAG>& support,
                                                    NodeId src, std::span<const NodeId> dsts,
                                                    const PathSelection& selection, PriorityFn view,
-                                                   FlowPlacement placement, Admission admission) {
-  const EdgePriority priority = selection.priority;
-  if (!selection.multipath || (placement == FlowPlacement::Weighted && priority == EdgePriority::Residual)) {
-    return std::nullopt;
-  }
-  check_kernel(placement, admission, priority);
+                                                   FlowPlacement placement, Admission admission,
+                                                   const WeightSource& weights) {
+  const bool weighted = placement == FlowPlacement::Weighted;
+  if (!selection.multipath || (weighted && weights.basis == WeightBasis::ResidualSnapshot)) return std::nullopt;
+  check_kernel(placement, admission);
+  // A Weighted route edge's weight (static membership: Capacity or Explicit).
+  auto weight = [&](EdgeId e) -> Amount {
+    const auto ei = static_cast<std::size_t>(e);
+    const Amount cap = g.capacity_units()[ei];
+    if (weights.basis == WeightBasis::Explicit) return cap >= 1 ? weights.values[ei] : 0;
+    return cap;
+  };
   const auto sup = PredDAGBuilder::ascending(*support);
   const auto row = g.row_offsets();
   const auto edst = g.edge_dst();
   const auto edge_cost = g.cost();
-  const auto capacity = g.capacity_units();
   CreationScratch& s = creation_scratch();
   s.begin(static_cast<std::size_t>(g.num_nodes()));
   for (NodeId d : dsts) s.touch(d).target = 1;
@@ -679,7 +709,7 @@ std::optional<CreationProducts> cost_only_creation(const Graph& g, const std::sh
           if (replaces(g, sup[static_cast<std::size_t>(j)], best, prefer, view)) best = sup[static_cast<std::size_t>(j)];
         }
       }
-      if (placement == FlowPlacement::Weighted && capacity[static_cast<std::size_t>(best)] < 1) return std::nullopt;
+      if (weighted && weight(best) < 1) return std::nullopt;
       s.route[w] = best;
       s.tail[w] = static_cast<std::int32_t>(i);
       ++w;
@@ -770,9 +800,9 @@ std::optional<CreationProducts> cost_only_creation(const Graph& g, const std::sh
   plan.admission = admission;
   plan.route.assign(route.begin(), route.end());
   plan.members.assign(route.begin(), route.end());
-  if (placement == FlowPlacement::Weighted) {
+  if (weighted) {
     plan.weights.resize(route.size());
-    for (std::size_t k = 0; k < route.size(); ++k) plan.weights[k] = capacity[static_cast<std::size_t>(route[k])];
+    for (std::size_t k = 0; k < route.size(); ++k) plan.weights[k] = weight(route[k]);
   }
   const KernelPlan::Layout lay = plan.layout({&src, 1}, dsts, r, route.size());
   lay.root_pos[0] = 0;  // src comes first in the order
@@ -1007,7 +1037,6 @@ TMax t_max(const KernelPlan& plan, std::span<const Amount> view_m) {
 LosslessStep lossless_step(const Graph& g, const KernelPlan& plan, Amount total,
                            std::span<const Amount> view_m, std::span<const Amount> own_m,
                            std::optional<Amount> request) {
-  if (plan.admission != Admission::Lossless) throw std::logic_error("lossless_step on a Lossy plan");
   LosslessStep out;
   if (plan.placement == FlowPlacement::MaxFlow) {
     // A fresh solve on the replacement view (own_m is part of view_m, so the flow's own

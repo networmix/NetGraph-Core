@@ -26,15 +26,15 @@ holds per fixture:
   build ranks the edges the same way);
 * ``ops`` in call order: ``ledger`` (graph, baseline in B' id order or null), ``copy``,
   ``reset``, ``policy`` (ledger, sources and destinations as given, the full configuration
-  with Pinned bundles as ascending B' edge lists, the Eligibility as excluded node and edge
-  ids, or ``error``), ``place`` (volume as an int or ``"inf"``, the outputs flags, the
+  with a Global support as an ascending B' edge list and a Weighted weight basis when given,
+  the Eligibility as excluded node and edge ids, or ``error``), ``place`` (volume as an int or ``"inf"``, the outputs flags, the
   creation cap ``cap``), ``remove`` and ``destroy``;
 * after every operation the prototype's expected values (``expect``): the call's result
   (``to_json``: placed, remaining, termination, local outcomes, flags, drops, the cost curve
   and the requested outputs), the ledger state (allocated and residual in id order, every
   record field with the bundle as an ascending edge list, next FlowId, bound and orphaned
-  owners), the policy state (roster, requested, +inf, placed demand, usable bundles, per
-  source the flows' id, route, T (null for Lossy: prototype 2 keeps none), delivered, alloc,
+  owners), the policy state (roster, requested, +inf, placed demand, per source the flows'
+  id, route, T (null for Lossy: prototype 2 keeps none), delivered, alloc,
   members and weights) and the normalised trace (prototype 2's keys; the probe counts
   ``evals``, the flow core's ``counters`` and ledger uids dropped; FlowIds as ids).
 
@@ -206,7 +206,6 @@ def policy_state(pol) -> dict:
         "requested": pol.requested,
         "infinite": pol.infinite,
         "placed_demand": pol.placed_demand(),
-        "usable": pol.usable_bundles(),
         "cohorts": cohorts,
     }
 
@@ -215,8 +214,8 @@ def config_json(cfg) -> dict:
     r = cfg.routing
     kind = type(r).__name__
     routing: dict = {"kind": kind}
-    if kind == "Pinned":
-        routing["bundles"] = [sorted(b) for b in r.bundles]
+    if kind == "Global" and r.support is not None:
+        routing["support"] = sorted(r.support)
     elif kind == "CapacityAware":
         routing.update(
             flow_count=r.flow_count,
@@ -236,7 +235,7 @@ def config_json(cfg) -> dict:
             else [r.diminishing.window, float(r.diminishing.fraction)],
         )
     sel = cfg.selection
-    return {
+    out = {
         "routing": routing,
         "placement": cfg.placement,
         "admission": cfg.admission,
@@ -249,6 +248,9 @@ def config_json(cfg) -> dict:
             "priority": sel.priority,
         },
     }
+    if cfg.weights is not None:
+        out["weights"] = cfg.weights
+    return out
 
 
 def elig_json(elig):

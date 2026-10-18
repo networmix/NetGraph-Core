@@ -6,15 +6,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
 
+#include "netgraph/core/detail/forwarding.hpp"
 #include "netgraph/core/detail/kernels.hpp"
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/flow_record.hpp"
 #include "netgraph/core/pred_dag.hpp"
+#include "netgraph/core/program.hpp"
 
 namespace netgraph::core::detail {
 
@@ -24,24 +27,37 @@ struct DeletionCapture;
 // cumulative T of a Lossless flow; edges; Lossy offered and drops); the plan is frozen at the
 // flow's creation (and replaced by an adopted reroute). The flows of CostOnly and Global are
 // one per roster source and have no plan of their own (CostOnly's sources share the epoch's
-// program).
+// program); a Pinned policy's are one per program entry (`entry`), without a plan.
 struct LiveFlow {
   std::int64_t id {-1};
   NodeId src {0};
   std::shared_ptr<const KernelPlan> plan {};
   std::shared_ptr<const PredDAG> bundle {};
   Cost cost {kUnreachable};
-  std::int32_t bundle_index {-1};  // Pinned: the supplied bundle
+  std::int32_t entry {-1};
 };
 
-// One supplied Pinned bundle prepared at construction: its usable route (static eligibility,
-// whatever the capacities, pruned to the src -> dst walks) as the plan of every
-// static-membership kernel, its cost, and the record bundle (the supplied DAG itself when nothing
-// was pruned).
-struct PreparedPinnedBundle {
-  std::shared_ptr<const KernelPlan> route_plan {};
-  Cost cost {kUnreachable};
-  std::shared_ptr<const PredDAG> route_dag {};
+// The state accumulated since construction or the last remove(), replace() or forward() (the
+// policy epoch): a value, so a full-offer call builds its own and publishes it whole.
+struct Epoch {
+  // The live flows: per roster index (CostOnly and Global: one per source; CapacityAware: its
+  // flows, in FlowId order), or per program entry (Pinned).
+  std::vector<std::vector<LiveFlow>> cohorts {};
+  // The installed program (null before the first preparation and for CapacityAware).
+  std::shared_ptr<const ForwardingProgram> program {};
+  // CostOnly MaxFlow: the union of the roster's routes, the controller's support (ascending).
+  std::vector<EdgeId> support {};
+  // Unrestricted Global with the optimized origin: the cumulative marginal curve of the last solve
+  // (absent before one, and after a forward).
+  std::optional<std::vector<std::pair<Cost, Amount>>> curve {};
+  // Pinned, Lossy: per view head, the shares it lost itself (black-holed, no surviving entry).
+  std::vector<Counter128> head_lost {};
+  // The by_tunnel rows of the state (a zero call reports them).
+  std::vector<TunnelFlow> by_tunnel {};
+  Counter128 requested {};
+  Counter128 offered {};  // Lossy: the traffic sent (with an empty roster: lost at the sources)
+  bool infinite {false};
+  bool prepared {false};  // the epoch's first positive call (or a full-offer call) has run
 };
 
 struct PolicyEngine {
@@ -49,9 +65,9 @@ struct PolicyEngine {
 
   FlowLedger& fg;
   std::shared_ptr<const Graph> graph {};
-  FlowPolicyConfig config;       // validated, origin and selection resolved
-  PathSelection selection {};    // *config.selection, or the default for Global (unread)
-  Origin origin {Origin::Equal};  // *config.origin, or Equal for Pinned (one source)
+  FlowPolicyConfig config;       // validated, origin, selection and weights resolved
+  PathSelection selection {};    // *config.selection, or the default for Global and Pinned (unread)
+  Origin origin {Origin::Equal};  // *config.origin, or Equal for Pinned (unread)
   const Eligibility* elig {nullptr};
   std::vector<NodeId> sources {};       // the normalised sets
   std::vector<NodeId> destinations {};
@@ -59,21 +75,19 @@ struct PolicyEngine {
   std::vector<NodeId> roster {};        // fixed at construction, ascending
   std::vector<Cost> baseline {};        // CapacityAware with a Stretch ceiling only: the static shortest
                                         // cost per roster source (empty otherwise)
-  std::shared_ptr<const PredDAG> support {};       // CostOnly: the full static support
-  std::vector<PreparedPinnedBundle> bundles {};    // Pinned
-  std::vector<std::int32_t> usable {};             // Pinned: indices of usable bundles
+  std::shared_ptr<const PredDAG> support {};  // CostOnly: the full static support
+  // Global with a support: the trimmed support (ascending), shared with its programs' replay basis.
+  std::shared_ptr<const std::vector<EdgeId>> global_support {};
+  // Unrestricted Global: the mask's excluded nodes and edges (ascending), its programs' replay basis.
+  std::vector<NodeId> excluded_nodes {};
+  std::vector<EdgeId> excluded_edges {};
+  // Pinned: its program as this policy forwards it (the replay under the mask, the black holes),
+  // and whether any head can place traffic (some head with a positive injection weight and a
+  // surviving entry of positive weight with a usable route).
+  ForwardingView view {};
+  bool active {false};
   std::int64_t owner {0};
-  // State accumulated since construction or the last remove() (the policy epoch).
-  std::vector<std::vector<LiveFlow>> cohorts {};  // per roster index, in FlowId order
-  // CostOnly: the epoch's pooled program over the roster (EqualBalanced and Weighted), or the
-  // union of the roster's routes (MaxFlow), prepared at the epoch's first positive call.
-  std::shared_ptr<const KernelPlan> program {};
-  std::vector<EdgeId> program_edges {};
-  std::vector<std::pair<Cost, Amount>> curve {};  // Global, optimized origin: the cumulative marginal curve
-  Counter128 requested {};
-  Counter128 offered {};  // Lossy: the traffic sent (with an empty roster: lost at the sources)
-  bool infinite {false};
-  bool prepared {false};  // the epoch's first positive call has run
+  Epoch epoch {};
   // Global: a capture request for the next solve's final state (the exact sensitivity model's
   // baseline); set and cleared by the evaluator.
   DeletionCapture* capture {nullptr};
@@ -95,15 +109,22 @@ struct PolicyAccess {
 
 // The configuration checks of FlowPolicy, shared with the evaluators' argument checks, in
 // FlowPolicyConfig's order (the enumeration values, the model's row, the DagCache: `cache` says
-// whether one is supplied, CapacityAware's parameters); returns its selection and origin with an
-// absent one resolved (nothing else is copied). Then, with the normalized endpoint counts, Pinned's
-// single endpoints and the pooled single-path rule (check_source_count: an absent selection is
-// PathSelection(), multipath, so it reads the configuration resolved or not alike).
+// whether one is supplied, CapacityAware's parameters, edge_weights' length and entries against
+// `num_edges`); returns its selection, origin and weights with an absent one resolved (nothing else
+// is copied). Then, with the normalized endpoint counts, the pooled single-path rule
+// (check_source_count: an absent selection is PathSelection(), multipath, so it reads the
+// configuration resolved or not alike).
 struct ResolvedAxes {
   std::optional<PathSelection> selection;
   std::optional<Origin> origin;
+  std::optional<WeightBasis> weights;
 };
-[[nodiscard]] ResolvedAxes resolve_config(const FlowPolicyConfig& cfg, bool cache);
+[[nodiscard]] ResolvedAxes resolve_config(const FlowPolicyConfig& cfg, bool cache, std::int32_t num_edges);
 void check_source_count(const FlowPolicyConfig& cfg, std::size_t num_sources, std::size_t num_destinations);
+// forward()'s first checks, before its offer is read (the binding runs them before converting
+// it): `Pinned forwards with replace`, then `forward requires an installed program`.
+void check_forward_operation(const PolicyEngine& pe);
+// The model's name in messages: CostOnly, Global, T1 (CapacityAware) or Pinned.
+[[nodiscard]] const char* model_name(const Routing& r) noexcept;
 
 } // namespace netgraph::core::detail

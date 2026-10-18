@@ -64,7 +64,9 @@ def test_configurations_are_structural_and_explicit():
     with pytest.raises(TypeError):
         ngc.FlowPolicyConfig(routing=ngc.CostOnly(), placement=1)
     with pytest.raises(TypeError):
-        ngc.FlowPolicyConfig(routing=ngc.Global(), weights=None)  # an unknown keyword
+        ngc.FlowPolicyConfig(routing=ngc.Global(), bundles=None)  # an unknown keyword
+    with pytest.raises(TypeError):
+        ngc.FlowPolicyConfig(routing=ngc.CostOnly(), weights="EXPLICIT")
     with pytest.raises(TypeError, match="incompatible"):
         ngc.CostOnly(flow_count=2)  # a field outside its routing variant: TypeError
     with pytest.raises(TypeError, match="incompatible"):
@@ -108,7 +110,7 @@ def test_configurations_are_structural_and_explicit():
         ),
     ):
         ngc.CapacityAware(min_flow_bandwidth=2**80)
-    with pytest.raises(TypeError, match="PredDAG"):
+    with pytest.raises(TypeError):
         ngc.Pinned([[0, 1]])
     cfg = config(ca)
     assert isinstance(cfg.routing, ngc.CapacityAware)
@@ -151,25 +153,21 @@ def test_configurations_are_structural_and_explicit():
             min_cut=flags[3],
         )
         assert (o.edge_flows, o.residual, o.bottleneck, o.min_cut) == flags
-    # Pinned keeps the bundles in supply order, copied from the given list: each read is a new
-    # list of the same PredDAG objects, and changing a list read changes nothing.
+    # Pinned keeps its program and black holes by reference (one shared, immutable value each).
     g = diamond()
     a, b = dag_of(g, ids(g, [0, 1])), dag_of(g, ids(g, [2, 3]))
-    given = [b, a]
-    pinned = ngc.Pinned(given)
-    given.append(a)
-    first = pinned.bundles
-    assert first == [b, a] and first[0] is b and first[1] is a
-    first.append(b)
-    second = pinned.bundles
-    assert second == [b, a] and second is not first
-    # A policy's config is the configuration it was built with, its absent origin and selection
-    # resolved to the model's defaults (Pinned takes no origin).
-    pol = ngc.FlowPolicy(
-        ngc.FlowLedger(g), 0, 3, config(pinned, ngc.FlowPlacement.MAX_FLOW)
+    program = ngc.ForwardingProgram.from_routes(
+        g, 0, 3, [ngc.Route(0, b), ngc.Route(0, a)]
     )
-    assert pol.config.placement == ngc.FlowPlacement.MAX_FLOW
-    assert pol.config.routing.bundles == [b, a]
+    dark = g.eligibility(excluded_edges=ids(g, [0]))
+    pinned = ngc.Pinned(program, black_holes=dark)
+    assert pinned.program is program and pinned.black_holes is dark
+    assert ngc.Pinned(program).black_holes is None
+    # A policy's config is the configuration it was built with, its absent origin and selection
+    # resolved to the model's defaults (Pinned takes none).
+    pol = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, ngc.FlowPolicyConfig(routing=pinned))
+    assert pol.config.placement is None and pol.config.selection is None
+    assert pol.config.routing.program is program
     assert pol.config.origin is None
     for routing, placement, origin in (
         (ngc.CostOnly(), ngc.FlowPlacement.EQUAL_BALANCED, ngc.Origin.EQUAL),
@@ -361,20 +359,17 @@ def test_validation_messages_before_binding():
         config(ngc.CapacityAware(diminishing=ngc.DiminishingReturns(1, 1.0))),
         "diminishing fraction must be in (0, 1) (got 1.000000)",
     )
-    rejects(config(ngc.Pinned([])), "Pinned: an empty bundle list is rejected")
     b = dag_of(g, ids(g, [0, 1]))
+    program = ngc.ForwardingProgram.from_routes(g, 0, 3, [ngc.Route(0, b)])
     rejects(
-        config(ngc.Pinned([b, b])),
-        "Pinned: duplicate bundle 1 (equal to bundle 0 before pruning)",
+        ngc.FlowPolicyConfig(
+            routing=ngc.Pinned(program), placement=ngc.FlowPlacement.MAX_FLOW
+        ),
+        "Pinned does not accept placement",
     )
     rejects(
-        config(ngc.Pinned([dag_of(g, ids(g, [0, 3]))])),
-        "Pinned: malformed bundle 0, no src -> dst walk (src 0, dst 3)",
-    )
-    rejects(
-        config(ngc.Pinned([b])),
-        "Pinned routing requires single endpoints (bundles bind one source and one "
-        "destination)",
+        ngc.FlowPolicyConfig(routing=ngc.Pinned(program)),
+        "program endpoints do not match policy endpoints",
         src=[0, 1],
     )
     rejects(
@@ -560,7 +555,8 @@ def test_placement_result_fields_and_outputs():
     r = pol.place(4)
     assert (r.placed, r.remaining, r.termination) == (4, 0, T.COMPLETE)
     assert not hasattr(r, "local_outcomes")
-    assert (r.routes_changed, r.weights_changed, r.call_drops) == (True, False, [])
+    # The epoch's first call installs the program: its routes and weights.
+    assert (r.routes_changed, r.weights_changed, r.call_drops) == (True, True, [])
     assert (r.delivery_delta, r.call_source_loss, r.drops, r.source_loss) == (
         4,
         0,
@@ -725,7 +721,7 @@ def test_stretch_baseline_is_the_static_shortest_cost(kernel, factor, placed, ro
         ledger,
         0,
         4,
-        config(ngc.Pinned([dag_of(g, ids(g, [0, 1]))]), ngc.FlowPlacement.MAX_FLOW),
+        ngc.FlowPolicyConfig(routing=ngc.Global(support=dag_of(g, ids(g, [0, 1])))),
     )
     assert third.place(2).placed == 2
     p = ngc.FlowPolicy(ledger, 0, 4, gated(kernel, ngc.Stretch(factor)))
@@ -815,19 +811,29 @@ def test_owner_hook_is_the_owner_of_the_records():
         assert [r.owner for r in p.records()] == [owner]
 
 
-def test_pinned_usable_bundles_and_records():
+def pinned_over(g, *dags):
+    """Pinned over a program of the split routes `dags` of head 0 to node 3."""
+    program = ngc.ForwardingProgram.from_routes(
+        g, 0, 3, [ngc.Route(0, d) for d in dags]
+    )
+    return ngc.FlowPolicyConfig(routing=ngc.Pinned(program))
+
+
+def test_pinned_records():
     g = diamond()
     fg = ngc.FlowLedger(g)
     r1, r2 = dag_of(g, ids(g, [0, 1])), dag_of(g, ids(g, [2, 3]))
     el = g.eligibility(excluded_edges=ids(g, [3]))
-    pol = ngc.FlowPolicy(fg, 0, 3, config(ngc.Pinned([r1, r2])), el)
-    assert pol.usable_bundles() == 1
+    # The replay fails the second route (its last edge excluded): the head's share goes to the
+    # first; one record per program entry, the failed one with an empty bundle.
+    pol = ngc.FlowPolicy(fg, 0, 3, pinned_over(g, r1, r2), el)
     r = pol.place(9)
     assert (r.placed, r.termination) == (5, T.EXHAUSTED)
-    rec = pol.records()[0]
+    rec, failed = pol.records()
     assert rec.bundle == r1 and pol.record(rec.flow_id).delivered == 5
+    assert (rec.entry, failed.entry, failed.route_cost) == (0, 1, None)
     # record() reads the policy's own records only, not another policy's on the same ledger.
-    other = ngc.FlowPolicy(fg, 0, 3, config(ngc.Pinned([r1])))
+    other = ngc.FlowPolicy(fg, 0, 3, pinned_over(g, r1))
     other.place(1)
     theirs = other.records()[0].flow_id
     with pytest.raises(
@@ -849,9 +855,8 @@ def test_pinned_usable_bundles_and_records():
     ):
         pol.record(rec.flow_id)
     all_down = ngc.FlowPolicy(
-        fg, 0, 3, config(ngc.Pinned([r2])), g.eligibility(excluded_edges=ids(g, [3]))
+        fg, 0, 3, pinned_over(g, r2), g.eligibility(excluded_edges=ids(g, [3]))
     )
-    assert all_down.usable_bundles() == 0
     r = all_down.place(1)
     assert (r.placed, r.termination, r.by_source[0].admitted) == (0, T.NO_ROUTE, 0)
 
@@ -918,11 +923,13 @@ def test_capacity_batch_and_workers(monkeypatch):
         ValueError, match=exact("per_pair_elig has 1 entries for 4 pairs")
     ):
         ngc.batch_capacity(g, pairs, ngc.QueryOptions(GLOBAL), [None])
-    with pytest.raises(ValueError, match="Pinned"):
+    with pytest.raises(
+        ValueError, match=exact("batch_capacity does not accept Pinned")
+    ):
         ngc.batch_capacity(
             g,
             pairs,
-            ngc.QueryOptions(config(ngc.Pinned([dag_of(g, ids(g, [0, 1]))]))),
+            ngc.QueryOptions(pinned_over(g, dag_of(g, ids(g, [0, 1])))),
         )
     cache = ngc.DagCache(g)
     eb = ngc.QueryOptions(COSTONLY, cache=cache)

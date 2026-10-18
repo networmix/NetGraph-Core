@@ -39,22 +39,27 @@ engine. It replaces the 0.11 API.
   `reset()` and `copy()` (both rejected while a policy is bound; `reset()` clears the records a
   destroyed policy left behind). `FlowRecord` carries the flow's endpoints as sets,
   admission, bundle (`PredDAG`), route cost, `offered` (Lossy only), delivery and
-  per-edge allocations and drops; counters are 128-bit (exact Python ints). Policies place and
+  per-edge allocations and drops, and `entry` (the program entry a Pinned record carries);
+  counters are 128-bit (exact Python ints). Policies place and
   remove flows; `reset()` replaces an unbound ledger's baseline and clears its records.
 - **Kernels**: `FlowPlacement` (`MAX_FLOW`, `WEIGHTED`, `EQUAL_BALANCED`) and `Admission`
   (`LOSSLESS`, `LOSSY`). `MAX_FLOW` re-solves the flow with the flow core on its route over the free
-  capacity plus its own allocation; `WEIGHTED` splits in proportion to weights fixed at creation
-  from `priority` (highest averages, D'Hondt, EdgeId ties); `EQUAL_BALANCED` splits equally by
+  capacity plus its own allocation; `WEIGHTED` splits in proportion to integer weights frozen when
+  the route is prepared, from a `WeightBasis` (`CAPACITY`, `EXPLICIT` with `edge_weights`,
+  `RESIDUAL_SNAPSHOT`; the selection's priority no longer chooses weights, so `WEIGHTED` with
+  `HEADROOM` is allowed for CostOnly) (highest averages, D'Hondt, EdgeId ties); `EQUAL_BALANCED` splits equally by
   round robin from the lowest EdgeId; Lossy splits each offer per call and records transit drops
   and what is lost at a source.
 - **Policies**: `FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)`
   is the one placement engine. `FlowPolicyConfig(*, routing, placement=None,
-  admission=LOSSLESS, selection=None, origin=None)` takes keywords only; the routing is
-  `CostOnly()`, `CapacityAware(...)` (flow count, an optional maximum, an `Absolute` or `Stretch`
-  cost ceiling, a minimum flow bandwidth in units, reoptimisation, `DiminishingReturns(window,
-  fraction)`), `Global()` or `Pinned(bundles)`; each routing accepts the combinations of one
-  table (placement required except for Global, which takes none; `Origin.EQUAL` or `OPTIMIZED`;
-  admission; selection) and any other raises `ValueError`, the first defect in a stated order.
+  admission=LOSSLESS, selection=None, origin=None, weights=None, edge_weights=None)` takes
+  keywords only; the routing is `CostOnly()`, `CapacityAware(...)` (flow count, an optional
+  maximum, an `Absolute` or `Stretch` cost ceiling, a minimum flow bandwidth in units,
+  reoptimisation, `DiminishingReturns(window, fraction)`), `Global(*, support=None)` (a support
+  restricts the controller to a DAG's edges) or `Pinned(program, *, black_holes=None)`; each
+  routing accepts the combinations of one table (placement required for CostOnly and
+  CapacityAware; `Origin.EQUAL` or `OPTIMIZED`; admission; selection; weights) and any other
+  raises `ValueError`, the first defect in a stated order.
   `place(volume, outputs=None)` forwards CostOnly's pooled program, re-solves the controllers
   (Global and CostOnly `MAX_FLOW`: the cumulative minimum-cost flow on the residual plus the
   policy's own allocation, under either origin), or runs CapacityAware's per-source transaction
@@ -63,10 +68,28 @@ engine. It replaces the 0.11 API.
   `call_drops`, `call_source_loss`, `termination` and flags; the demand's `requested`,
   `offered`, `admitted`, `delivered`, `unadmitted`, `source_loss`, `drops`, `by_source`
   (`SourceFlow` rows), `total_cost` and `cost_distribution`; and `edge_flows`, `residual`,
-  `bottleneck` and `min_cut` when requested through `OutputOptions`. A request of 0 is
-  validated like any other.
-  `remove()`, `records()`, `record(flow_id)` (the policy's own records), `placed_demand()` and
-  `usable_bundles()` complete the policy.
+  `bottleneck` and `min_cut` when requested through `OutputOptions`, `program` and `by_tunnel`
+  (`TunnelFlow` rows). A request of 0 is validated like any other.
+  `evaluate(offer)` (computes a whole new offer on the policy's released view and publishes
+  nothing), `replace(offer)` (the same, published: new records, a new epoch) and
+  `forward(offer, black_holes=None)` (a whole new offer over the installed program, no route
+  computation), `remove()`, `records()`, `record(flow_id)` (the policy's own records),
+  `placed_demand()` and `program` complete the policy.
+- **Forwarding programs**: `ForwardingProgram`, the routes and integer weights of one demand
+  (tunnels `Tunnel`, split routes) with its injection (equal sources, or the captured source
+  weights of an optimized controller). CostOnly and Global produce one (`policy.program`,
+  `result.program`; the controllers decompose their solved flow into paths, also with one
+  source); `ForwardingProgram.from_routes(graph, sources, destinations, routes, *, placement,
+  weights, edge_weights, residual)` builds one from `Route(head, Path or PredDAG, *, weight=1)`
+  (order and duplicates kept, every split route its own split context). `Pinned(program)`
+  forwards one: replayed under the policy's Eligibility (a tunnel touching an excluded element
+  is `FAILED`, its head splits over the survivors) and, with `black_holes`, stale (the program
+  unchanged, traffic reaching a black hole dropped there, `BLACKHOLED`; `TunnelStatus`). Lossy
+  forwarding divides a shared edge by nested highest averages (heads, then entries), evaluates
+  the program as a whole, and recalculates edges that wait on each other in a cycle in rounds
+  (a period-2 or round-limit `ValueError`; an independent check before publication). Pinned has
+  no endpoint-count limit, rejects `placement`, `selection`, `origin` and `weights`, and keeps
+  one record per entry.
 - **Failure guarantee**: every public call either completes or raises and changes nothing, also
   when memory runs out, a worker thread fails or the Python result cannot be built. Two limits:
   running out of memory inside pybind11's own object construction (outside the library's checked
@@ -104,10 +127,11 @@ engine. It replaces the 0.11 API.
     evaluator. A frozen lookup miss raises `DagCacheMiss`, an exception the evaluators pass on
     unchanged. `clear()` raises when frozen, and `thaw()` returns to building mode after the
     caller has joined every reader.
-- **Evaluators**: one options type, `QueryOptions(config, *, elig=None, cache=None, outputs=None)`;
+- **Evaluators**: one options type, `QueryOptions(config, *, elig=None, cache=None, outputs=None,
+  offered=None)` (`offered`: the finite offer Pinned Lossy capacity requires);
   `capacity(graph, sources, destinations, opts)` (with `Global()` the exact maximum flow, its
   marginal cost curve and its minimum cut), `batch_capacity(graph, pairs, opts, per_pair_elig=None,
-  workers=None)` (pair order; the lowest failing index raises) and `sensitivity(graph, sources,
+  workers=None)` (pair order; the lowest failing index raises; Pinned is rejected) and `sensitivity(graph, sources,
   destinations, opts, workers=None)` (every candidate edge and its signed unthresholded loss in
   units; a failed deletion fails the call). A supplied building cache needs `workers == 1`; a frozen
   cache is shared by every worker. With `workers=None` the count is 1 when a cache is supplied,
@@ -124,7 +148,8 @@ engine. It replaces the 0.11 API.
   together; graphs of every accepted size still build and can be searched.
 - **C++ headers** (under `netgraph/core/`): `types.hpp`, `graph.hpp` (`Graph`, `to_units`,
   `as_float`; it includes `eligibility.hpp`), `eligibility.hpp`, `options.hpp` (the selection
-  axes, `FlowPlacement`, `Admission`, `Origin`), `pred_dag.hpp`, `flow_record.hpp` (`FlowId`,
+  axes, `FlowPlacement`, `Admission`, `Origin`, `WeightBasis`), `pred_dag.hpp`, `program.hpp`
+  (`ForwardingProgram`, `Tunnel`, `TunnelStatus`, `Route`, `RouteOptions`), `flow_record.hpp` (`FlowId`,
   `Counter128`, `FlowRecord`), `flow_ledger.hpp`, `flow_policy.hpp`, `dag_cache.hpp`,
   `evaluators.hpp` and `search.hpp` (`spf`, `ksp`, `resolve_to_paths` and their options; the
   queue choice `SpfQueue { Auto, Heap }` is a C++-only trailing parameter of `spf`); each

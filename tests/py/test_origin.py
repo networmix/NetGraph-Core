@@ -50,6 +50,18 @@ Q12 = "CostOnly with multiple input sources rejects multipath=false with PREFER_
 PREFER_PATH = sel(tie=ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY, mp=False)
 
 
+def pinned_route(g, src, dst, edges, placement=None, admission=None, **fields):
+    """Pinned over a program of one split route (the edges' DAG) from src to dst."""
+    program = ngc.ForwardingProgram.from_routes(
+        g, src, dst, [ngc.Route(src, dag_of(g, edges))], placement=placement
+    )
+    return ngc.FlowPolicyConfig(
+        routing=ngc.Pinned(program),
+        admission=admission or ngc.Admission.LOSSLESS,
+        **fields,
+    )
+
+
 def graph(edges):
     return build(1 + max(max(u, v) for u, v, *_ in edges), edges)
 
@@ -105,9 +117,7 @@ def test_defaults_resolve():
             == ORIGIN.EQUAL
         )
     assert ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, glob()).config.selection is None
-    pinned = ngc.FlowPolicyConfig(
-        routing=ngc.Pinned([dag_of(g, [0])]), placement=P.MAX_FLOW
-    )
+    pinned = pinned_route(g, 0, 3, [0])
     assert ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, pinned).config.origin is None
 
 
@@ -116,7 +126,7 @@ def test_conversion_errors():
     with pytest.raises(TypeError):
         ngc.FlowPolicyConfig(ngc.CostOnly(), P.EQUAL_BALANCED)
     with pytest.raises(TypeError):
-        ngc.FlowPolicyConfig(routing=ngc.CostOnly(), weights=None)
+        ngc.FlowPolicyConfig(routing=ngc.CostOnly(), bundles=None)
     with pytest.raises(TypeError):
         ngc.FlowPolicyConfig(routing=ngc.Global(), origin="EQUAL")
 
@@ -208,22 +218,18 @@ def test_matrix_texts(config, message):
 
 
 def test_pinned_rows():
-    # C8, C10, C12 for Pinned (one source and one destination).
+    # C8, C10, C12 for Pinned: no placement and no origin (its program has the injection).
     g = graph(B1)
-    bundles = ngc.Pinned([dag_of(g, [0])])
     for config, message in (
         (
-            ngc.FlowPolicyConfig(
-                routing=bundles, placement=P.MAX_FLOW, origin=ORIGIN.EQUAL
-            ),
+            pinned_route(g, 0, 3, [0], origin=ORIGIN.EQUAL),
             "Pinned does not accept origin",
         ),
-        (ngc.FlowPolicyConfig(routing=bundles), "Pinned requires placement"),
         (
             ngc.FlowPolicyConfig(
-                routing=bundles, placement=P.MAX_FLOW, admission=A.LOSSY
+                routing=pinned_route(g, 0, 3, [0]).routing, placement=P.MAX_FLOW
             ),
-            "MAX_FLOW requires admission=LOSSLESS",
+            "Pinned does not accept placement",
         ),
     ):
         with pytest.raises(ValueError, match=exact(message)):
@@ -234,9 +240,7 @@ def test_cache_rule():
     # C11, C16: only CostOnly reads a DagCache; the table comes first.
     g = graph(B1)
     cache = ngc.DagCache(g)
-    pinned = ngc.FlowPolicyConfig(
-        routing=ngc.Pinned([dag_of(g, [0])]), placement=P.MAX_FLOW
-    )
+    pinned = pinned_route(g, 0, 3, [0])
     capacity_aware = ngc.FlowPolicyConfig(
         routing=ngc.CapacityAware(), placement=P.MAX_FLOW
     )
@@ -618,10 +622,10 @@ def test_result_accounting():
             ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, config).place(1).total_cost
             is None
         )
-    pinned = ngc.FlowPolicyConfig(
-        routing=ngc.Pinned([dag_of(g, [0])]), placement=P.MAX_FLOW
-    )
+    pinned = pinned_route(g, 0, 3, [0])
     assert ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, pinned).place(1).total_cost is None
+    support = ngc.FlowPolicyConfig(routing=ngc.Global(support=dag_of(g, [0])))
+    assert ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, support).place(1).total_cost == 1
 
 
 def test_capacity_aware_and_pinned_in_the_new_shape():
@@ -644,9 +648,7 @@ def test_capacity_aware_and_pinned_in_the_new_shape():
         (P.WEIGHTED, (0, T.NO_ACTIVE_WEIGHT, 2, [], (0, 2, 2, 0, 2, 0))),
         (P.EQUAL_BALANCED, (0, T.COMPLETE, 0, [(0, 2)], (0, 2, 2, 0, 0, 2))),  # S9
     ):
-        config = ngc.FlowPolicyConfig(
-            routing=ngc.Pinned([dag_of(g, [0])]), placement=placement, admission=A.LOSSY
-        )
+        config = pinned_route(g, 0, 1, [0], placement=placement, admission=A.LOSSY)
         r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, config).place(2)
         assert (
             r.placed,

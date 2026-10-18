@@ -23,5 +23,8 @@ def test_apportionment_entries():
     assert sum(a) == big
     with pytest.raises(ValueError, match=exact("weights[0] = 0 is outside [1, 2^62)")):
         ext._highest_averages(1, [0, 1])
-    with pytest.raises(ValueError, match=exact("the weights sum to 2^62 or more")):
-        ext._highest_averages(1, [1 << 61, 1 << 61])
+    # Legal weights whose sum reaches 2^64 are summed exactly. Eight of 2^61: one each. Two of
+    # 2^61 sharing 3: the lower quotas are 1 and 1; the unit left goes to the tie's first member
+    # (as 9/5 above).
+    assert ext._highest_averages(8, [1 << 61] * 8) == [1] * 8
+    assert ext._highest_averages(3, [1 << 61, 1 << 61]) == [2, 1]

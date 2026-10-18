@@ -1,6 +1,7 @@
 // The integer ledger FlowLedger: the baseline, snapshots, FlowIds, bottleneck, and
-// every row and transition of the lifetime table, driven through a FlowPolicy with Pinned
-// routing and one bundle (test::PinnedOne, pinned_one.hpp); the 128-bit counters of the records;
+// every row and transition of the lifetime table, driven through a policy on one route (Global
+// with the route as its support, or Pinned over it as a supplied split route: test::RoutePolicy,
+// route_policy.hpp); the 128-bit counters of the records;
 // and the commit rule itself (each edge published once, the multi-owner model, the fresh-record
 // path), driven through detail::LedgerAccess directly.
 //
@@ -29,7 +30,7 @@
 #include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/pred_dag_builder.hpp"
 #include "netgraph/core/flow_ledger.hpp"
-#include "pinned_one.hpp"
+#include "route_policy.hpp"
 #include "state_comparators.hpp"
 #include "test_utils.hpp"
 
@@ -98,7 +99,7 @@ TEST(FlowLedger, BaselineDefectsReportTheFirstInOrder) {
   }
   FlowLedger fg(g);
   {
-    PinnedOne q(fg, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Residual);
+    RoutePolicy q(fg, 0, 3, split_route(fg, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless));
     ASSERT_EQ(q.place(1).placed, 1);
     for (const auto& c : edge_amount_defects()) {
       EXPECT_EQ(error_of([&] { fg.reset(c.amounts); }), "FlowLedger.reset is rejected while a policy is bound (1 bound)");
@@ -126,7 +127,7 @@ TEST(FlowLedger, BaselineDefectsReportTheFirstInOrder) {
 TEST(FlowLedger, BoundNoFlowsRow) {
   auto g = shared(make_graph(2, {{0, 1, 5, 1}}));
   FlowLedger fg(g);
-  PinnedOne p(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy p(fg, 0, 1, split_route(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless));
   // place(0): a no-op that creates nothing.
   auto r = p.place(0);
   EXPECT_EQ(r.termination, Termination::Complete);
@@ -153,12 +154,12 @@ TEST(FlowLedger, BoundNoFlowsRow) {
 }
 
 TEST(FlowLedger, NoRouteCreatesNothing) {
-  // A bundle whose only walk is excluded by the Eligibility: usable_bundles() == 0.
+  // A support whose only walk is excluded by the Eligibility: the roster is empty.
   auto g = shared(make_graph(2, {{0, 1, 5, 1}}));
   FlowLedger fg(g);
   auto el = std::make_shared<const Eligibility>(g->eligibility({}, std::vector<EdgeId> {0}));
-  PinnedOne p(fg, 0, 1, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual, el);
-  EXPECT_EQ(p.usable_bundles(), 0);
+  RoutePolicy p(fg, 0, 1, on_support(all_edges(*g)), el);
+  EXPECT_TRUE(detail::PolicyAccess::engine(p.policy()).roster.empty());
   auto r = p.place(3);
   EXPECT_EQ(r.termination, Termination::NoRoute);
   EXPECT_EQ(r.placed, 0);
@@ -167,20 +168,23 @@ TEST(FlowLedger, NoRouteCreatesNothing) {
   EXPECT_FALSE(r.routes_changed);
   EXPECT_TRUE(fg.records().empty());
   EXPECT_EQ(LedgerAccess::next_flow_id(fg), 0);
-  // A bundle without any walk before pruning is malformed.
+  // A route without any walk: a supplied split route is rejected; as a support it leaves the
+  // roster empty.
   auto g2 = shared(make_graph(3, {{0, 1, 5, 1}, {2, 1, 5, 1}}));
   FlowLedger fg2(g2);
-  EXPECT_NE(error_of([&] {
-              PinnedOne bad(fg2, 0, 2, all_edges(*g2), FlowPlacement::MaxFlow, Admission::Lossless,
-                             EdgePriority::Residual);
-            }).find("malformed bundle"),
-            std::string::npos);
+  EXPECT_EQ(error_of([&] {
+              RoutePolicy bad(fg2, 0, 2, split_route(fg2, 0, 2, all_edges(*g2), FlowPlacement::EqualBalanced, Admission::Lossless));
+            }),
+            "routes[0]: no walk from head 0 to a destination");
+  RoutePolicy none(fg2, 0, 2, on_support(all_edges(*g2)));
+  EXPECT_TRUE(detail::PolicyAccess::engine(none.policy()).roster.empty());
+  EXPECT_EQ(none.place(1).termination, Termination::NoRoute);
 }
 
 TEST(FlowLedger, BoundWithFlowsRowAndEpochs) {
   auto g = shared(make_graph(2, {{0, 1, 5, 1}}));
   FlowLedger fg(g);
-  PinnedOne p(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy p(fg, 0, 1, split_route(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless));
   EXPECT_EQ(p.place(2).placed, 2);
   // Adds: the requested total grows within the epoch.
   auto r = p.place(std::nullopt);
@@ -234,10 +238,9 @@ TEST(FlowLedger, BoundWithFlowsRowAndEpochs) {
 TEST(FlowLedger, OrphanedRecordsResetAndCopy) {
   auto g = shared(make_graph(2, {{0, 1, 5, 1}}));
   FlowLedger fg(g);
-  auto p = std::make_unique<PinnedOne>(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless,
-                                        EdgePriority::Residual);
+  auto p = std::make_unique<RoutePolicy>(fg, 0, 1, split_route(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless));
   {
-    PinnedOne q(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Residual);
+    RoutePolicy q(fg, 0, 1, split_route(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless));
     EXPECT_EQ(q.place(2).placed, 2);
   }  // destroyed without remove(): the record stays as an orphan
   ASSERT_EQ(fg.records().size(), 1u);
@@ -262,7 +265,7 @@ TEST(FlowLedger, OrphanedRecordsResetAndCopy) {
   EXPECT_EQ(fg.residual(), (std::vector<Amount>{4}));
   EXPECT_TRUE(LedgerAccess::orphan_owners(fg).empty());
   EXPECT_EQ(LedgerAccess::next_flow_id(fg), 2);
-  PinnedOne r(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy r(fg, 0, 1, split_route(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless));
   EXPECT_EQ(r.place(9).placed, 4);
   EXPECT_EQ(r.flow_id()->second, 2);
   // The copy is independent of the original.
@@ -284,12 +287,12 @@ TEST(FlowLedger, CopyAndMoveCarryTheWholeLedger) {
   for (std::size_t i = 0; i < 4; ++i) baseline[static_cast<std::size_t>(inv[i])] = by_input[i];
   FlowLedger fg(g, baseline);
   {
-    PinnedOne lossy(fg, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy, EdgePriority::Residual);
+    RoutePolicy lossy(fg, 0, 3, split_route(fg, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy));
     (void)lossy.place(10);  // owner 0, FlowId 0: delivers 6, drops 4 on the 1 -> 3 edge
-    PinnedOne removed(fg, 0, 3, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+    RoutePolicy removed(fg, 0, 3, on_support(all_edges(*g)));
     (void)removed.place(1);  // owner 1, FlowId 1, retired by remove()
     removed.remove();
-    PinnedOne lossless(fg, 0, 3, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+    RoutePolicy lossless(fg, 0, 3, on_support(all_edges(*g)));
     (void)lossless.place(2);  // owner 2, FlowId 2
   }  // three orphaned owners, two records: a copy or a move needs a ledger without bound policies
   const LedgerState source = ledger_state(fg);
@@ -312,7 +315,7 @@ TEST(FlowLedger, CopyAndMoveCarryTheWholeLedger) {
   auto expect_whole = [&](FlowLedger& x, const std::string& what) {
     expect_same(ledger_state(x), source, what);
     EXPECT_EQ(vec(LedgerAccess::baseline(x)), source_baseline) << what;
-    PinnedOne next(x, 0, 3, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+    RoutePolicy next(x, 0, 3, on_support(all_edges(*g)));
     EXPECT_EQ(next.place(1).placed, 1) << what;
     ASSERT_TRUE(next.flow_id().has_value()) << what;
     EXPECT_EQ(next.flow_id()->second, source.next_id) << what;
@@ -361,7 +364,7 @@ TEST(FlowLedger, CopyAndMoveCarryTheWholeLedger) {
 TEST(FlowLedger, FlowIdsOfOtherLedgersAndUnknownIds) {
   auto g = shared(make_graph(2, {{0, 1, 5, 1}}));
   FlowLedger a(g), b(g);
-  PinnedOne p(a, 0, 1, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy p(a, 0, 1, on_support(all_edges(*g)));
   (void)p.place(1);
   const auto id = *p.flow_id();
   EXPECT_EQ(a.record(id).delivered, 1);
@@ -371,7 +374,7 @@ TEST(FlowLedger, FlowIdsOfOtherLedgersAndUnknownIds) {
             "FlowId (" + std::to_string(a.uid()) + ", 7) is retired or unknown");
   // A policy's record() reads its own records only: another policy's record of the same ledger is
   // refused, and the ledger's own checks come first.
-  PinnedOne q(a, 0, 1, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy q(a, 0, 1, on_support(all_edges(*g)));
   EXPECT_EQ(p.policy().record(id).delivered, 1);
   EXPECT_EQ(error_of([&] { (void)q.policy().record(id); }),
             "FlowId (" + std::to_string(a.uid()) + ", " + std::to_string(id.second) + ") is not a record of this policy");
@@ -386,7 +389,7 @@ TEST(FlowLedger, RecordsCarryTheContractFields) {
   auto g = shared(make_graph(4, {{0, 1, 10, 1}, {0, 2, 10, 1}, {1, 3, 1, 1}, {2, 3, 10, 1}}));
   const auto inv = id_of_input(*g);
   FlowLedger fg(g);
-  PinnedOne p(fg, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy, EdgePriority::Residual);
+  RoutePolicy p(fg, 0, 3, split_route(fg, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy));
   auto r = p.place(10);
   EXPECT_EQ(r.placed, 6);
   EXPECT_EQ(r.termination, Termination::Complete);
@@ -414,16 +417,18 @@ TEST(FlowLedger, RecordsCarryTheContractFields) {
   ASSERT_EQ(rec.drops.size(), 1u);
   EXPECT_EQ(rec.drops[0].first, inv[2]);
   EXPECT_EQ(rec.drops[0].second, (Counter128 {0, 5}));
-  // +inf on a fresh ledger: offered is the injection (20), delivered 11, drops 9.
+  // +inf on a fresh ledger (CostOnly's first-hop experiment over the same DAG): offered is the
+  // injection (20), delivered 11, drops 9.
   FlowLedger f2(g);
-  PinnedOne q(f2, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy, EdgePriority::Residual);
+  FlowPolicy q(f2, std::vector<NodeId> {0}, std::vector<NodeId> {3},
+               FlowPolicyConfig {CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy});
   r = q.place(std::nullopt);
   EXPECT_EQ(r.placed, 11);
   EXPECT_EQ(r.termination, Termination::Exhausted);
   EXPECT_EQ(*f2.records()[0].offered, (Counter128 {0, 20}));
   // Lossless records carry no offered.
   FlowLedger f3(g);
-  PinnedOne m(f3, 0, 3, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy m(f3, 0, 3, on_support(all_edges(*g)));
   (void)m.place(3);
   EXPECT_FALSE(f3.records()[0].offered.has_value());
   EXPECT_TRUE(f3.records()[0].drops.empty());
@@ -434,7 +439,7 @@ TEST(FlowLedger, CountersBeyondSixtyFourBits) {
   // every other unit dropped: offered and drops grow beyond 2^64.
   auto g = shared(make_graph(2, {{0, 1, 1, 1}}));
   FlowLedger fg(g);
-  PinnedOne p(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy, EdgePriority::Residual);
+  RoutePolicy p(fg, 0, 1, split_route(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy));
   const Amount big = kDomainLimit - 1;
   for (int i = 0; i < 9; ++i) (void)p.place(big);
   const auto rec = fg.records().at(0);
@@ -483,7 +488,7 @@ TEST(FlowLedger, Counter128CarriesAndFailsAt2To127) {
 TEST(FlowLedger, RequestDomainAndFailedCallsLeaveState) {
   auto g = shared(make_graph(2, {{0, 1, 5, 1}}));
   FlowLedger fg(g);
-  PinnedOne p(fg, 0, 1, all_edges(*g), FlowPlacement::Weighted, Admission::Lossless, EdgePriority::Capacity);
+  RoutePolicy p(fg, 0, 1, split_route(fg, 0, 1, all_edges(*g), FlowPlacement::Weighted, Admission::Lossless));
   (void)p.place(2);
   const LedgerState before = ledger_state(fg);
   const auto id = p.flow_id();
@@ -502,23 +507,22 @@ TEST(FlowLedger, RequestDomainAndFailedCallsLeaveState) {
   // Constructor validation.
   auto other = make_graph(2, {{0, 1, 5, 1}});
   EXPECT_EQ(error_of([&] {
-              PinnedOne x(fg, 0, 1, dag_of(other, {0}), FlowPlacement::MaxFlow, Admission::Lossless,
-                           EdgePriority::Residual);
+              RoutePolicy x(fg, 0, 1, on_support(dag_of(other, {0})));
             }),
-            "foreign PredDAG: bundle built for another graph");
+            "support belongs to another graph");
   EXPECT_EQ(error_of([&] {
-              PinnedOne x(fg, 0, 0, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+              RoutePolicy x(fg, 0, 1, split_route(fg, 0, 1, dag_of(other, {0}), FlowPlacement::EqualBalanced, Admission::Lossless));
+            }),
+            "routes[0]: bundle belongs to another graph");
+  EXPECT_EQ(error_of([&] {
+              RoutePolicy x(fg, 0, 0, on_support(all_edges(*g)));
             }),
             "node 0 is in both endpoint sets: sources and destinations must not overlap");
   EXPECT_EQ(error_of([&] {
-              PinnedOne x(fg, 0, 1, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossy, EdgePriority::Residual);
+              RoutePolicy x(fg, 0, 1, on_support(all_edges(*g), Admission::Lossy));
             }),
             kLossyKernelError);
-  EXPECT_EQ(error_of([&] {
-              PinnedOne x(fg, 0, 1, all_edges(*g), FlowPlacement::Weighted, Admission::Lossless, EdgePriority::Headroom);
-            }),
-            kHeadroomKernelError);
-  // A rejected construction binds nothing.
+  // A rejected construction binds nothing (the accepted one above was destroyed: an orphan owner).
   EXPECT_EQ(LedgerAccess::bound_owners(fg), (std::vector<std::int64_t>{0}));
 }
 
@@ -529,7 +533,7 @@ TEST(FlowLedger, BottleneckVersusMinCut) {
   auto g = shared(make_graph(4, {{0, 1, 1, 1}, {0, 2, 2, 3}, {1, 2, 1, 1}, {2, 3, 2, 1}}));
   const auto inv = id_of_input(*g);
   FlowLedger fg(g);
-  PinnedOne p(fg, 0, 3, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy p(fg, 0, 3, on_support(all_edges(*g)));
   EXPECT_EQ(p.place(std::nullopt).placed, 2);
   EXPECT_EQ(alloc_in(fg), (std::vector<Amount>{1, 1, 1, 2}));
   std::vector<EdgeId> want = {inv[0], inv[3]};
@@ -542,8 +546,8 @@ TEST(FlowLedger, BottleneckVersusMinCut) {
   auto g2 = shared(make_graph(5, {{0, 1, 1, 1}, {1, 2, 1, 1}, {0, 3, 1, 1}, {0, 4, 0, 1}}));
   const auto inv2 = id_of_input(*g2);
   FlowLedger f2(g2);
-  PinnedOne a(f2, 1, 2, dag_of(*g2, {inv2[1]}), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
-  PinnedOne b(f2, 0, 3, dag_of(*g2, {inv2[2]}), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy a(f2, 1, 2, on_support(dag_of(*g2, {inv2[1]})));
+  RoutePolicy b(f2, 0, 3, on_support(dag_of(*g2, {inv2[2]})));
   ASSERT_EQ(a.place(1).placed, 1);
   ASSERT_EQ(b.place(1).placed, 1);
   std::vector<EdgeId> want2 = {inv2[1], inv2[2]};
@@ -571,13 +575,12 @@ TEST(FlowLedger, TwoOwnersNeverCancelEachOther) {
   auto g = shared(make_graph(4, {{0, 1, 1, 1}, {1, 2, 1, 1}, {2, 3, 1, 1}, {0, 2, 1, 3}, {1, 3, 1, 3}}));
   const auto inv = id_of_input(*g);
   FlowLedger fg(g);
-  PinnedOne a(fg, 0, 3, dag_of(*g, {inv[0], inv[1], inv[2]}), FlowPlacement::MaxFlow, Admission::Lossless,
-               EdgePriority::Residual);
+  RoutePolicy a(fg, 0, 3, on_support(dag_of(*g, {inv[0], inv[1], inv[2]})));
   EXPECT_EQ(a.place(1).placed, 1);
-  PinnedOne b(fg, 0, 3, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy b(fg, 0, 3, on_support(all_edges(*g)));
   auto r = b.place(2);
   EXPECT_EQ(r.placed, 0);
-  EXPECT_TRUE(r.routes_changed);
+  EXPECT_FALSE(r.routes_changed);  // a controller program without a path: no program change
   EXPECT_EQ(r.termination, Termination::Exhausted);
   EXPECT_EQ(fg.record(*b.flow_id()).delivered, 0);
   EXPECT_EQ(alloc_in(fg), (std::vector<Amount>{1, 1, 1, 0, 0}));
@@ -609,13 +612,17 @@ TEST(FlowLedger, AggregatesEqualTheSumOfRecords) {
     }
     auto g = shared(make_graph(n, edges));
     FlowLedger fg(g);
-    std::vector<std::unique_ptr<PinnedOne>> pols;
-    const FlowPlacement kinds[3] = {FlowPlacement::MaxFlow, FlowPlacement::Weighted, FlowPlacement::EqualBalanced};
+    std::vector<std::unique_ptr<RoutePolicy>> pols;
     for (int k = 0; k < 4; ++k) {
-      const auto kind = kinds[rng() % 3];
-      const auto adm = kind != FlowPlacement::MaxFlow && rng() % 3 == 0 ? Admission::Lossy : Admission::Lossless;
+      // Global on the route, or Pinned over it as a split route (Weighted or EqualBalanced, either
+      // admission).
+      const int kind = static_cast<int>(rng() % 3);
+      const auto adm = kind != 0 && rng() % 3 == 0 ? Admission::Lossy : Admission::Lossless;
       try {
-        pols.push_back(std::make_unique<PinnedOne>(fg, 0, n - 1, all_edges(*g), kind, adm, EdgePriority::Capacity));
+        auto cfg = kind == 0 ? on_support(all_edges(*g))
+                             : split_route(fg, 0, n - 1, all_edges(*g),
+                                           kind == 1 ? FlowPlacement::Weighted : FlowPlacement::EqualBalanced, adm);
+        pols.push_back(std::make_unique<RoutePolicy>(fg, 0, n - 1, std::move(cfg)));
       } catch (const std::invalid_argument&) {
         break;  // no walk at all
       }
@@ -633,7 +640,9 @@ TEST(FlowLedger, AggregatesEqualTheSumOfRecords) {
         p.reset();
         orphaned += LedgerAccess::orphan_owners(fg).size() > orphans ? 1 : 0;
       } else if (!p->infinite()) {
-        delivering += p->place(op == 2 ? std::optional<Amount>() : std::optional<Amount>(rng() % 9)).placed > 0;
+        // +inf only Lossless (a Lossy forwarding of a program needs a finite offer).
+        const bool inf = op == 2 && !p->lossy();
+        delivering += p->place(inf ? std::optional<Amount>() : std::optional<Amount>(rng() % 9)).placed > 0;
       }
       recorded = recorded || !fg.records().empty();
       const std::string where = "trial " + std::to_string(trial) + " step " + std::to_string(step);
@@ -674,9 +683,9 @@ TEST(FlowLedger, TheRecordCheckReportsEachBrokenClause) {
   const auto inv = id_of_input(*g);
   FlowLedger f1(g);
   FlowLedger f2(g);
-  PinnedOne max_flow(f1, 0, 3, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy max_flow(f1, 0, 3, on_support(all_edges(*g)));
   ASSERT_EQ(max_flow.place(std::nullopt).placed, 11);
-  PinnedOne lossy(f2, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy, EdgePriority::Residual);
+  RoutePolicy lossy(f2, 0, 3, split_route(f2, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy));
   ASSERT_EQ(lossy.place(10).placed, 6);
   ASSERT_EQ(lossy.place(1).placed, 0);
   const FlowRecord lossless_record = f1.records().at(0);
@@ -773,14 +782,15 @@ TEST(FlowLedger, TheRecordCheckReportsEachBrokenClause) {
 }
 
 TEST(FlowLedger, NoRouteCallsRecordTheEpochState) {
-  // A positive request with no usable bundle creates nothing, but the epoch records it: after
+  // A positive request with an empty roster creates nothing, but the epoch records it: after
   // +inf a finite request (place(0) included) is rejected until remove() (the epoch state:
-  // the reading of the reference in tests/reference/policy/p2_transaction/).
+  // the reading of the reference in tests/reference/policy/p2_transaction/). Global on a
+  // support: Pinned keeps one record per program entry even when every entry is masked
+  // (below, and test_programs.py::test_all_failed_entries_still_have_records).
   auto g = shared(make_graph(2, {{0, 1, 5, 1}}));
   FlowLedger fg(g);
   auto el = std::make_shared<const Eligibility>(g->eligibility({}, std::vector<EdgeId> {0}));
-  PinnedOne p(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Residual,
-               el);
+  RoutePolicy p(fg, 0, 1, on_support(all_edges(*g)), el);
   EXPECT_EQ(p.place(3).termination, Termination::NoRoute);
   EXPECT_EQ(p.requested(), (Counter128 {0, 3}));
   auto r = p.place(std::nullopt);
@@ -797,17 +807,30 @@ TEST(FlowLedger, NoRouteCallsRecordTheEpochState) {
   EXPECT_EQ(p.place(1).termination, Termination::NoRoute);
   EXPECT_TRUE(fg.records().empty());
   EXPECT_EQ(LedgerAccess::next_flow_id(fg), 0);
+  // Pinned with its one entry masked: NoRoute, and the entry's record at zero.
+  FlowLedger fg2(g);
+  RoutePolicy q(fg2, 0, 1, split_route(fg2, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless),
+                el);
+  auto rq = q.place(3);
+  EXPECT_EQ(rq.termination, Termination::NoRoute);
+  EXPECT_EQ(rq.placed, 0);
+  const auto kept = fg2.records();
+  ASSERT_EQ(kept.size(), 1U);
+  EXPECT_EQ(kept[0].entry, std::optional<std::int32_t> {0});
+  EXPECT_EQ(kept[0].delivered, 0);
+  EXPECT_TRUE(kept[0].edges.empty());
+  EXPECT_EQ(kept[0].route_cost, kUnreachable);
 }
 
 TEST(FlowLedger, RouteCostIsTheBundlesMinimumWalk) {
-  // Weighted Residual on a route whose only edge another owner fills: the split graph is
-  // empty (record at zero delivery; no positive weight: NoActiveWeight), route_cost is still the
-  // bundle's walk cost 3.
+  // A split route weighted by its residual snapshot, made while another owner fills its only
+  // edge: no positive weight (record at zero delivery; NoActiveWeight), route_cost is still the
+  // route's walk cost 3.
   auto g = shared(make_graph(2, {{0, 1, 2, 3}}));
   FlowLedger fg(g);
-  PinnedOne holder(fg, 0, 1, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy holder(fg, 0, 1, on_support(all_edges(*g)));
   EXPECT_EQ(holder.place(2).placed, 2);
-  PinnedOne w(fg, 0, 1, all_edges(*g), FlowPlacement::Weighted, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy w(fg, 0, 1, split_route(fg, 0, 1, all_edges(*g), FlowPlacement::Weighted, Admission::Lossless, WeightBasis::ResidualSnapshot));
   auto r = w.place(1);
   EXPECT_EQ(r.placed, 0);
   EXPECT_EQ(r.termination, Termination::NoActiveWeight);
@@ -820,7 +843,7 @@ TEST(FlowLedger, RouteCostIsTheBundlesMinimumWalk) {
   // A mixed-cost bundle: the cheapest walk (1 + 1 + 1) is the route cost, not the cost-4 edge.
   auto g2 = shared(make_graph(4, {{0, 1, 1, 1}, {1, 2, 1, 1}, {2, 3, 1, 1}, {0, 3, 1, 4}}));
   FlowLedger f2(g2);
-  PinnedOne m(f2, 0, 3, all_edges(*g2), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy m(f2, 0, 3, on_support(all_edges(*g2)));
   (void)m.place(1);
   EXPECT_EQ(f2.records()[0].route_cost, 3);
 }
@@ -830,8 +853,8 @@ TEST(FlowLedger, RemovalRestoresTheBaselineAndLeavesOtherOwnersIntact) {
   // the capacity; another owner's allocation stays intact.
   auto g = shared(make_graph(2, {{0, 1, 10, 1}}));
   FlowLedger fg(g, std::vector<Amount> {5});
-  PinnedOne a(fg, 0, 1, all_edges(*g), FlowPlacement::MaxFlow, Admission::Lossless, EdgePriority::Residual);
-  PinnedOne b(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless, EdgePriority::Residual);
+  RoutePolicy a(fg, 0, 1, on_support(all_edges(*g)));
+  RoutePolicy b(fg, 0, 1, split_route(fg, 0, 1, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossless));
   EXPECT_EQ(a.place(3).placed, 3);
   EXPECT_EQ(b.place(1).placed, 1);
   EXPECT_EQ(fg.residual(), (std::vector<Amount>{1}));
@@ -849,8 +872,8 @@ TEST(FlowLedger, LossyOffersArePerCall) {
   // EdgeId first (both on the first branch) while one call of 2 splits [1, 1]: not additive.
   auto g = shared(make_graph(4, {{0, 1, 10, 1}, {0, 2, 10, 1}, {1, 3, 1, 1}, {2, 3, 10, 1}}));
   FlowLedger f1(g), f2(g);
-  PinnedOne p1(f1, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy, EdgePriority::Residual);
-  PinnedOne p2(f2, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy, EdgePriority::Residual);
+  RoutePolicy p1(f1, 0, 3, split_route(f1, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy));
+  RoutePolicy p2(f2, 0, 3, split_route(f2, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy));
   auto r = p1.place(1);
   EXPECT_EQ(r.placed, 1);
   r = p1.place(1);

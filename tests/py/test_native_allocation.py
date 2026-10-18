@@ -1,6 +1,7 @@
 """Native allocation failures in the staged result constructions and in FlowLedger.reset: the
-k-th C++ allocation of spf, ksp, resolve_to_paths, of the calls whose result objects are made
-before anything is published (place, capacity, batch_capacity, sensitivity) and of reset fails,
+k-th C++ allocation of spf, ksp, resolve_to_paths, ForwardingProgram.from_routes, of the calls
+whose result objects are made before anything is published (place, evaluate, replace, forward,
+capacity, batch_capacity, sensitivity) and of reset fails,
 for every k in turn (the private hook _fail_native_allocation). Every unabsorbed failure
 raises MemoryError, never aborts, leaves nothing it allocated behind and the observable state as
 it was. Standard-library optional buffers may absorb a failure; every successful call, including
@@ -113,6 +114,86 @@ def placement(cfg, traced, sources=0):
     return make
 
 
+def exported(g, cfg=None, sources=0):
+    """A model's program on g (a Global optimized one by default), for Pinned."""
+    return ngc.FlowPolicy(ngc.FlowLedger(g), sources, 4, cfg or GLOBAL).place(6).program
+
+
+def operation(cfg_of, method, sources=0, prepare="place", **kw):
+    """A call of `method` (offer 6, ALL_OUT, keywords kw of the graph) on a policy whose
+    configuration is cfg_of(g), after a `prepare(2)` in the same epoch; the snapshot adds the
+    installed program."""
+
+    def make():
+        g = graph()
+        ledger = ngc.FlowLedger(g)
+        policy = ngc.FlowPolicy(ledger, sources, 4, cfg_of(g))
+        getattr(policy, prepare)(2)
+        extra = {name: value(g) for name, value in kw.items()}
+
+        def call(offer):
+            return getattr(policy, method)(offer, outputs=ALL_OUT, **extra)
+
+        def snap():
+            records = [(r.flow_id[1], r.delivered) for r in policy.records()]
+            return [
+                full_ledger_state(ledger),
+                policy.placed_demand(),
+                records,
+                epoch_state(policy),
+                plain(policy.program),
+            ]
+
+        return call, (6,), snap
+
+    return make
+
+
+def pinned_cfg(program_of, admission=ngc.Admission.LOSSLESS, black_holes=None):
+    return lambda g: ngc.FlowPolicyConfig(
+        routing=ngc.Pinned(
+            program_of(g), black_holes=None if black_holes is None else black_holes(g)
+        ),
+        admission=admission,
+    )
+
+
+def split_route_args(g):
+    """from_routes' arguments for one WEIGHTED split route (a snapshot of half the capacity)
+    and one tunnel; the inputs are made before the swept call (a failed allocation inside
+    pybind11's registration of a new object escapes the hook: not this call's)."""
+    dag = ngc.spf(g, 0, spf_opts()).dag
+    tunnel = ngc.resolve_to_paths(g, dag, 0, 4, True)[0]
+
+    def call(*args):
+        return ngc.ForwardingProgram.from_routes(
+            *args,
+            placement=ngc.FlowPlacement.WEIGHTED,
+            weights=ngc.WeightBasis.RESIDUAL_SNAPSHOT,
+            residual=residual,
+        )
+
+    residual = half(g)
+    return call, (g, 0, 4, [ngc.Route(0, dag, weight=2), ngc.Route(0, tunnel)])
+
+
+def split_route(g):
+    call, args = split_route_args(g)
+    return call(*args)
+
+
+def getter(make_owner, read):
+    """A getter that wraps a shared value in a new Python object (no wrapper exists yet):
+    make_owner(g) builds the object that holds it, read(owner) reads it."""
+
+    def make():
+        g = graph()
+        owner = make_owner(g)
+        return read, (owner,), lambda: [caps(g)]
+
+    return make
+
+
 def frozen_cache_capacity():
     g = graph()
     cache = ngc.DagCache(g)
@@ -195,6 +276,69 @@ SCENARIOS = {
     ),
     "sensitivity.global": stateless(
         lambda g: (ngc.sensitivity, (g, 0, 4, ngc.QueryOptions(GLOBAL), 1))
+    ),
+    # Forwarding programs (step 3): building one, every operation over one, black holes, a
+    # support, and the evaluators over Pinned.
+    "from_routes": stateless(split_route_args),
+    "replace.pinned_tunnels_lossy": operation(
+        pinned_cfg(
+            exported, ngc.Admission.LOSSY, lambda g: g.eligibility(excluded_edges=[1])
+        ),
+        "replace",
+    ),
+    "place.pinned_split_route": operation(pinned_cfg(split_route), "place"),
+    "evaluate.global": operation(lambda g: GLOBAL, "evaluate"),
+    "replace.global_support": operation(
+        lambda g: ngc.FlowPolicyConfig(
+            routing=ngc.Global(support=ngc.spf(g, 0, spf_opts()).dag)
+        ),
+        "replace",
+    ),
+    "forward.costonly_pooled_lossy_black_holes": operation(
+        lambda g: POOLED_LOSSY,
+        "forward",
+        sources=[0, 1],
+        prepare="replace",
+        black_holes=lambda g: g.eligibility(excluded_edges=[0]),
+    ),
+    "capacity.pinned_lossy": stateless(
+        lambda g: (
+            ngc.capacity,
+            (
+                g,
+                0,
+                4,
+                ngc.QueryOptions(
+                    pinned_cfg(exported, ngc.Admission.LOSSY)(g),
+                    offered=6,
+                    outputs=ALL_OUT,
+                ),
+            ),
+        )
+    ),
+    # The getters of shared values (a failed wrapper registration once freed the value twice).
+    "PlacementResult.program": getter(
+        lambda g: ngc.FlowPolicy(ngc.FlowLedger(g), 0, 4, GLOBAL).place(6),
+        lambda r: r.program,
+    ),
+    "FlowRecord.bundle": getter(
+        lambda g: (lambda p: (p.place(6), p.records()[0])[1])(
+            ngc.FlowPolicy(ngc.FlowLedger(g), 0, 4, COSTONLY)
+        ),
+        lambda r: r.bundle,
+    ),
+    "Eligibility.intersect": getter(
+        lambda g: (
+            g.eligibility(excluded_edges=[0]),
+            g.eligibility(excluded_edges=[1]),
+        ),
+        lambda pair: ngc.Eligibility.intersect(*pair),
+    ),
+    "sensitivity.pinned": stateless(
+        lambda g: (
+            ngc.sensitivity,
+            (g, 0, 4, ngc.QueryOptions(pinned_cfg(exported)(g)), 1),
+        )
     ),
 }
 
@@ -428,8 +572,14 @@ if __name__ != "__main__":
     from private_hooks import needs_hooks
 
     # The scenarios with fewer than ten native allocations, and at least how many they make:
-    # reset converts the residual from Python, then builds the new baseline.
-    FEW = {"FlowLedger.reset": 3}
+    # reset converts the residual from Python, then builds the new baseline; a getter registers
+    # its new wrapper (intersect first makes the new value).
+    FEW = {
+        "FlowLedger.reset": 3,
+        "PlacementResult.program": 1,
+        "FlowRecord.bundle": 1,
+        "Eligibility.intersect": 4,
+    }
 
     def check(name, proc, rows, started):
         """The checks of one scenario's rows."""

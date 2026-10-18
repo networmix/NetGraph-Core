@@ -41,6 +41,15 @@ inline void check_member(Origin v, const char* field) {
   not_a_member(field, static_cast<int>(v), "Origin");
 }
 
+inline void check_member(WeightBasis v, const char* field) {
+  switch (v) {
+    case WeightBasis::Capacity:
+    case WeightBasis::Explicit:
+    case WeightBasis::ResidualSnapshot: return;
+  }
+  not_a_member(field, static_cast<int>(v), "WeightBasis");
+}
+
 inline void check_member(EdgeTieBreak v, const char* field) {
   switch (v) {
     case EdgeTieBreak::Deterministic:

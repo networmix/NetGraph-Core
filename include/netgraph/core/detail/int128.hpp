@@ -78,6 +78,18 @@ inline std::uint64_t div_u128(U128 n, std::uint64_t d) noexcept {
 
 #endif
 
+// a + b and a - b (a >= b), exactly; the caller keeps a + b below 2^128.
+inline U128 add(U128 a, U128 b) noexcept {
+  U128 r {a.hi + b.hi, a.lo + b.lo};
+  if (r.lo < a.lo) ++r.hi;
+  return r;
+}
+inline U128 sub(U128 a, U128 b) noexcept {
+  U128 r {a.hi - b.hi, a.lo - b.lo};
+  if (a.lo < b.lo) --r.hi;
+  return r;
+}
+
 // The number of significant bits of v (0 for 0).
 inline int bits(U128 v) noexcept { return v.hi != 0 ? 64 + std::bit_width(v.hi) : std::bit_width(v.lo); }
 
@@ -86,6 +98,22 @@ inline U128 shl(U128 v, int k) noexcept {
   if (k == 0) return v;
   if (k >= 64) return {v.lo << (k - 64), 0};
   return {(v.hi << k) | (v.lo >> (64 - k)), v.lo << k};
+}
+
+// floor(n / d) for d > 0 and a quotient below 2^64 (a lower quota floor(I*w/W) with w <= W: at
+// most I). A divisor below 2^64 takes div_u128 above; a larger one (a weight sum of 2^64 or more)
+// the long division, one quotient bit per step from the highest that can be set.
+inline std::uint64_t div_u128(U128 n, U128 d) noexcept {
+  if (d.hi == 0) return div_u128(n, d.lo);
+  std::uint64_t q = 0;
+  for (int s = bits(n) - bits(d); s >= 0; --s) {
+    const U128 ds = shl(d, s);
+    if (!(n < ds)) {
+      n = sub(n, ds);
+      q |= std::uint64_t {1} << s;
+    }
+  }
+  return q;
 }
 
 // A signed 128-bit integer in two's complement, value = hi * 2^64 + lo. The member order makes

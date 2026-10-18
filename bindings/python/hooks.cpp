@@ -195,13 +195,10 @@ void register_private_hooks(py::module_& m) {
         const auto t = integer_value(total, 0, kDomainLimit - 1, "total");
         const auto w = wide_integers(weights, "weights");
         if (w.size() == 0) throw py::value_error("highest averages over no member");
-        std::uint64_t sum = 0;
         for (std::size_t i = 0; i < w.size(); ++i) {
           if (!w.in(i, 1, kDomainLimit - 1)) {
             throw py::value_error("weights[" + std::to_string(i) + "] = " + w.text(i) + " is outside [1, 2^62)");
           }
-          sum += static_cast<std::uint64_t>(w.value[i]);
-          if (sum >= static_cast<std::uint64_t>(kDomainLimit)) throw py::value_error("the weights sum to 2^62 or more");
         }
         const auto wv = w.narrow<Amount>();
         std::vector<Amount> out(wv.size());

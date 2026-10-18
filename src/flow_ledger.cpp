@@ -314,9 +314,19 @@ std::vector<std::int64_t> LedgerAccess::detach(FlowLedger& fg, std::int64_t owne
 }
 
 std::vector<FlowId> LedgerAccess::commit(FlowLedger& fg, std::int64_t owner, std::span<Draft> drafts) {
+  return commit_drafts(fg, owner, drafts, false);
+}
+
+std::vector<FlowId> LedgerAccess::exchange(FlowLedger& fg, std::int64_t owner, std::span<Draft> drafts) {
+  return commit_drafts(fg, owner, drafts, true);
+}
+
+std::vector<FlowId> LedgerAccess::commit_drafts(FlowLedger& fg, std::int64_t owner, std::span<Draft> drafts,
+                                                bool retire) {
   fg.check_usable();
   if (!is_bound(fg.owners_, owner)) throw std::logic_error("ledger: commit by an unbound owner");
-  // The drafts carry exactly the owner's live records plus new ones.
+  // The drafts carry exactly the owner's live records plus new ones (retire: only new ones, every
+  // live record is retired).
   const auto owned = fg.owner_ids_.find(owner);
   const std::size_t num_current = owned == fg.owner_ids_.end() ? 0 : owned->second.size();
   if (owned == fg.owner_ids_.end() && drafts.size() == 1 && !drafts[0].id.has_value() &&
@@ -369,8 +379,9 @@ std::vector<FlowId> LedgerAccess::commit(FlowLedger& fg, std::int64_t owner, std
     }
   }
   std::sort(kept.begin(), kept.end());
-  if (kept.size() != num_current || (num_current != 0 && kept != owned->second)) {
-    throw std::logic_error("ledger: a commit must carry every live record of its policy");
+  if (retire ? !kept.empty() : (kept.size() != num_current || (num_current != 0 && kept != owned->second))) {
+    throw std::logic_error(retire ? "ledger: an exchange carries only new records"
+                                  : "ledger: a commit must carry every live record of its policy");
   }
 
   // 1. The new aggregate on every touched edge (old owner allocation out, new drafts in),
@@ -408,6 +419,13 @@ std::vector<FlowId> LedgerAccess::commit(FlowLedger& fg, std::int64_t owner, std
     live.reserve(kept.size() + num_new);
     live.assign(kept.begin(), kept.end());  // ascending; new ids are larger than every kept id
   }
+  // An exchange retires the owner's live records: their map nodes leave the map before the new
+  // ones are spliced in (an erase neither allocates nor throws).
+  std::vector<std::map<std::int64_t, FlowRecord>::iterator> retired;
+  if (retire && num_current != 0) {
+    retired.reserve(num_current);
+    for (std::int64_t id : owned->second) retired.push_back(fg.records_.find(id));
+  }
   std::vector<std::map<std::int64_t, FlowRecord>::iterator> targets;
   std::vector<FlowRecord> updated;
   targets.reserve(kept.size());
@@ -431,6 +449,7 @@ std::vector<FlowId> LedgerAccess::commit(FlowLedger& fg, std::int64_t owner, std
   // 3. Publication: nothing below allocates or throws (map nodes are spliced, not copied).
   for (EdgeId e : delta.touched()) fg.allocated_[static_cast<std::size_t>(e)] += delta.at(e);
   for (std::size_t i = 0; i < targets.size(); ++i) targets[i]->second = std::move(updated[i]);
+  for (const auto& it : retired) fg.records_.erase(it);
   fg.records_.merge(fresh);
   if (num_new != 0) {
     if (owned != fg.owner_ids_.end()) {
@@ -438,6 +457,8 @@ std::vector<FlowId> LedgerAccess::commit(FlowLedger& fg, std::int64_t owner, std
     } else {
       fg.owner_ids_.merge(index_node);
     }
+  } else if (retire && owned != fg.owner_ids_.end()) {
+    fg.owner_ids_.erase(owned);
   }
   fg.next_id_ = next_id;
   return created;

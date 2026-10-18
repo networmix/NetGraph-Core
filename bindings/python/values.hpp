@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -88,6 +89,25 @@ inline py::list pairs_list(const std::vector<std::pair<EdgeId, Amount>>& v) {
   py::list out;
   for (const auto& [e, x] : v) out.append(py::make_tuple(e, x));
   return out;
+}
+
+// An amount argument: an integer number of units in [0, 2^62) or +inf (float('inf')); nullopt is
+// +inf. Any other value (a bool, another float, a non-integer, an integer out of range) raises the
+// one ValueError `text`; an exception of the object's own __index__ propagates as raised.
+inline std::optional<Amount> units_or_inf(const py::object& volume, const char* text) {
+  if (py::isinstance<py::float_>(volume) || py::isinstance(volume, py::module_::import("numpy").attr("floating"))) {
+    const double x = PyFloat_AsDouble(volume.ptr());
+    if (x == -1.0 && PyErr_Occurred() != nullptr) throw py::error_already_set();
+    if (std::isinf(x) && x > 0) return std::nullopt;
+    throw py::value_error(text);
+  }
+  if (is_bool(volume) || !PyIndex_Check(volume.ptr())) throw py::value_error(text);
+  const py::object idx = py::reinterpret_steal<py::object>(PyNumber_Index(volume.ptr()));
+  if (!idx) throw py::error_already_set();
+  int overflow = 0;
+  const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
+  if (overflow != 0 || v < 0 || v >= kDomainLimit) throw py::value_error(text);
+  return static_cast<Amount>(v);
 }
 
 inline OutputOptions outputs_of(const py::object& obj) {

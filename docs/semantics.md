@@ -57,13 +57,24 @@ Contents:
 - **Highest averages `H(x, w)`.** `x` units over members with integer weights `w`, given one at a
   time to the member with the largest `w[i] / (assigned[i] + 1)`, ties to the earlier member; a
   zero weight gets nothing.
-- **Program.** The routes and splits a `CostOnly` policy prepares once per epoch and forwards
-  over.
+- **Program.** A `ForwardingProgram`: the routes and integer weights of one demand and the rule
+  that injects its traffic at the sources. CostOnly and Global produce one (CapacityAware has none
+  until its tunnels arrive); `Pinned`
+  forwards a given one without computing anything ([section 7](#forwarding-programs)).
+- **Entry.** One route of a program: a **tunnel** (one path, one edge per hop) or a **split
+  route** (a DAG whose routers split by fixed rules). Each entry has an integer identifier, its
+  `index`, and a weight: its share among its head's entries.
+- **Head.** A roster source, as the start of its entries.
+- **Split context.** The traffic a split route's routers split: only that route's own share. A
+  `CostOnly` program is one context pooled over its sources; every supplied split route is its
+  own.
+- **Black hole.** A node or edge that fails silently: forwarding goes on unchanged and traffic
+  that reaches it disappears there (stale forwarding).
 - **Controller.** A routing that solves a flow problem for the whole demand: `Global`, and
   `CostOnly` with `MAX_FLOW`.
 - **Offer.** The part of a request that a call asks one source to place.
-- **Epoch.** The period from a policy's construction, or a `remove()`, to the next `remove()`;
-  requests add up within it.
+- **Epoch.** The period from a policy's construction, a `remove()`, a `replace()` or a `forward()`
+  to the next of these; the requests of `place` add up within it.
 - **Lossless / Lossy.** Admission control: Lossless places only what fits end to end; Lossy
   forwards hop by hop and drops what does not fit on each edge.
 - **Static.** Depending only on the graph, the costs and the Eligibility, not on traffic already
@@ -73,7 +84,7 @@ Contents:
   `multi_edge=False`.
 - **Kernel.** The rule that spreads one flow over its route: `MAX_FLOW`, `WEIGHTED` or
   `EQUAL_BALANCED`.
-- **Bundle.** The route of one flow, as a `PredDAG`.
+- **Bundle.** The route of one record, as a `PredDAG`.
 - **View.** The capacity a solve may use: the free capacity plus the flow's (or the `Global`
   policy's) own allocation.
 - **Minimum cut.** A set of edges whose removal separates the sources from the destinations,
@@ -98,7 +109,8 @@ PREFER = ngc.PathSelection(ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY, ngc.EdgePrio
 
 def config(routing, placement=ngc.FlowPlacement.EQUAL_BALANCED,
            admission=ngc.Admission.LOSSLESS, selection=DET):
-    """A configuration with a kernel (every routing but Global, which takes none)."""
+    """A configuration with a kernel and a selection (CostOnly and CapacityAware; Global and
+    Pinned take neither)."""
     return ngc.FlowPolicyConfig(routing=routing, placement=placement,
                                 admission=admission, selection=selection)
 ```
@@ -294,16 +306,17 @@ supplied residual filters edges by capacity.
 
 ### Options shared by the searches
 
-- **`PathSelection(tie_break, priority, multipath=True, multi_edge=True)`.** `tie_break` and
-  `priority` have no default.
+- **`PathSelection(tie_break=DETERMINISTIC, priority=CAPACITY, multipath=True,
+  multi_edge=True)`.** Every field has its default.
   - `multipath=True` returns the DAG of every equal-cost walk; `False` the one canonical path.
   - `multi_edge=True` keeps every eligible parallel member of a `(u, v)` pair; `False` keeps
     one per pair (the member rule below).
   - `tie_break`: `DETERMINISTIC` never compares priority values; ties fall to the lowest
     EdgeId. `PREFER_HIGHER_PRIORITY` prefers the higher priority value first, then the lowest
     EdgeId.
-  - `priority`: the per-edge value that `PREFER_HIGHER_PRIORITY` reads (and that the Weighted
-    kernel uses for membership and weights): `RESIDUAL` (residual units), `CAPACITY` (static
+  - `priority`: the per-edge value that `PREFER_HIGHER_PRIORITY` reads. CostOnly and supplied
+    split routes read WeightBasis; only CapacityAware still reads selection priority (for its
+    Weighted flows' membership and weights). The values: `RESIDUAL` (residual units), `CAPACITY` (static
     capacity units) or `HEADROOM` (residual divided by capacity, compared exactly as a
     fraction; 0 on an edge of capacity 0). A search without a residual array reads the static
     capacity as the residual: `RESIDUAL` and `CAPACITY` read the capacity, `HEADROOM` reads 1 on
@@ -450,10 +463,8 @@ drops on each edge what does not fit.
   `EQUAL_BALANCED` uses every edge of the route, an edge of capacity 0 included: a router splits
   over every next hop it has, so that edge receives its round-robin share and carries none of it
   (Lossless can then admit nothing on that branch; Lossy drops the share on that edge);
-  `WEIGHTED` uses the edges of positive weight, by its `priority` the edges with positive residual
-  when the flow was created (`RESIDUAL`) or with at least 1 unit of static capacity
-  (`CAPACITY`), and drops a branch left without such an edge (never taking a route outside its
-  own). `WEIGHTED` with `HEADROOM` is rejected. Lossy keeps its kernel's membership.
+  `WEIGHTED` uses the edges of positive weight (below) and drops a branch left without such an
+  edge (never taking a route outside its own). Lossy keeps its kernel's membership.
 - **`MAX_FLOW`** solves the minimum-cost flow of the flow's cumulative amount on its route, over
   the free capacity plus the flow's own current allocation. It may move the flow's own earlier
   allocation (that is what lets it reach the maximum); it never moves another flow's. It fills
@@ -462,10 +473,18 @@ drops on each edge what does not fit.
   sources' routes ([section 7](#routing-modes)). `MAX_FLOW` is Lossless only: a controller never
   drops. A flow beyond the flow core's
   size limit raises `ValueError` ([section 2](#2-the-graph), Size).
-- **`WEIGHTED`** splits at every node by highest averages over weights frozen when the flow is
-  created: the members' priority values at that moment (residual units under `RESIDUAL`, static
-  capacity units under `CAPACITY`). Weights are never renormalised; a member whose residual later
-  shrinks limits the flow.
+- **`WEIGHTED`** splits at every node by highest averages over integer weights frozen when the
+  route is prepared. The **weight basis** (`WeightBasis`) says where they come from: `CAPACITY`
+  (the default) the member's static capacity; `EXPLICIT` one integer per edge given as
+  `edge_weights`, each in `[0, 2^62)` (a positive weight on an edge of capacity 0 becomes 0);
+  `RESIDUAL_SNAPSHOT` the member's free capacity, read once when the route is prepared (a policy:
+  its view at that call's entry, the ledger's residual plus, for `evaluate` and `replace`, the
+  policy's own released traffic; `from_routes`: the `residual` it is given). The
+  selection's `priority` never chooses weights; it acts only in single-path and parallel-member
+  choices, so `WEIGHTED` with `HEADROOM` is allowed. Weights are never renormalised; a member
+  whose residual later shrinks limits the flow. `CapacityAware` keeps its own rule: its
+  `WEIGHTED` flows read their weights from the priority values when each flow is created
+  (`HEADROOM` is rejected there).
 - **`EQUAL_BALANCED`** splits at every node by round robin over its members, which are frozen
   when the flow is created.
 - **Lossless filling** (`WEIGHTED`, `EQUAL_BALANCED`). On a fixed route and plan, a flow's delivered
@@ -474,11 +493,13 @@ drops on each edge what does not fit.
   budget and `T_max`, the largest amount whose allocation fits every member edge (found by exact
   binary search). At `T_max` at least one member edge is exactly full; there is no safety margin.
   Because the split rules are monotone, raising `T` never takes units away from an edge.
-- **Lossy forwarding** (`WEIGHTED` or `EQUAL_BALANCED`, and only with `CostOnly` or `Pinned`
-  routing). Each call's offer is split at every node by the kernel's rule; each edge carries the
-  smaller of its share and its residual, and the rest is dropped on that edge. The delivery is
-  what reaches the destination set. An infinite offer injects into each first edge exactly its
-  residual. A share that has no edge to go on (a `WEIGHTED` node whose members all have weight 0)
+- **Lossy forwarding** (`CostOnly` with `WEIGHTED` or `EQUAL_BALANCED`, and `Pinned`). Each
+  call's offer is split at every node by the kernel's rule; each edge carries the smaller of what
+  reaches it and its residual, and the rest is dropped on that edge (where several routes of one
+  program meet on an edge, [the loss rule](#losses-inside-one-program) divides what it carries). The delivery is
+  what reaches the destination set. Only CostOnly.place(+inf) uses the first-hop experiment;
+  Pinned and full-offer LOSSY calls require finite offers (in the experiment each first edge
+  receives exactly its residual). A share that has no edge to go on (a `WEIGHTED` node whose members all have weight 0)
   is lost where it is: at a source it is `source_loss`. Records keep `offered`, `delivered` and
   per-edge `drops`. Lossy calls are independent: nothing is re-offered and two calls are not
   equivalent to one.
@@ -512,7 +533,7 @@ record 10 7 [(1, 3)]
 ```
 
 The Lossy call is `COMPLETE` although 3 units were dropped: the whole offer of 10 was forwarded,
-and what did not fit is accounted as drops, not as a shortfall ([section 7](#outcomes)).
+and what did not fit is accounted as drops, not as a shortfall ([section 7](#termination)).
 
 An edge of capacity 0 on the only shortest route is still that route. Equal splitting sends it
 the whole offer: Lossless places nothing, Lossy drops all of it there. Weighted splitting gives
@@ -565,7 +586,9 @@ records hold.
   in FlowId order; `record(flow_id)` reads one. A FlowId is the pair `(ledger uid, id)`; ids are
   never reused. A FlowId of another ledger, or a retired or unknown id, raises `ValueError`.
 - **`FlowRecord`** fields: `flow_id`; `owner` (the policy's id); `sources` and `destinations`
-  (node sets); `admission`; `bundle` (the flow's route as a `PredDAG`);
+  (node sets); `admission`; `entry` (a `Pinned` record: the identifier of the program entry it
+  carries; `None` for the records kept per roster source or per flow); `bundle` (the flow's route
+  as a `PredDAG`);
   `route_cost` (the cheapest walk of the bundle, cached; `None` for an empty bundle); `offered`
   (Lossy records only, else `None`); `delivered`; `edges` (`[(EdgeId, units)]`, ascending) and
   `drops` (`[(EdgeId, units)]`, cumulative, ascending).
@@ -590,48 +613,57 @@ A policy destroyed without `remove()` leaves its records and allocations in the 
 **In plain words.** A `FlowPolicy` is the routing model of one demand between a set of sources
 and a set of destinations. `place(volume)` asks it to carry more; it routes, fills and possibly
 grows its flows, commits everything at once, and reports how much was placed, what stopped it,
-where traffic was lost and how much each source carried. `remove()` takes all of its traffic
-back out. A demand with several sources is one demand, not several: how its traffic enters at
+where traffic was lost and how much each source carried. `evaluate`, `replace` and `forward` ask
+for a whole new offer instead (only computed, published, or forwarded over the routes already
+installed). `remove()` takes all of its traffic back out. A demand with several sources is one demand, not several: how its traffic enters at
 the sources is its **origin**, and where the routes of its sources meet, their traffic is added
 and split once.
 
 ### Configuration
 
 `FlowPolicyConfig(*, routing, placement=None, admission=Admission.LOSSLESS, selection=None,
-origin=None)` takes keywords only. The routing is one of:
+origin=None, weights=None, edge_weights=None)` takes keywords only. The routing is one of:
 
 | Routing | Models | Fields (defaults) |
 | --- | --- | --- |
 | `CostOnly()` | IGP forwarding (as OSPF or IS-IS routers do): static shortest paths, never refreshed; with `MAX_FLOW`, a controller restricted to those paths | none |
 | `CapacityAware(...)` | distributed CSPF tunnels (constrained shortest path first: each tunnel head picks a shortest path with enough free capacity) | `flow_count=1`, `max_flow_count=None`, `max_path_cost=None`, `min_flow_bandwidth=0`, `reoptimize=False`, `diminishing=None` |
-| `Global()` | an ideal controller that sees the whole network | none |
-| `Pinned(bundles)` | explicit routes given by the caller | a list of `PredDAG` (a `Path` converts with `to_dag()`); copied when the policy is built |
+| `Global(*, support=None)` | an ideal controller that sees the whole network, or only the edges of `support` | `support`: a `PredDAG` of the graph, or `None` for every eligible edge |
+| `Pinned(program, *, black_holes=None)` | forwarding over a given program, computing nothing | `program`: a `ForwardingProgram`; `black_holes`: an `Eligibility` whose excluded nodes and edges are black holes, or `None` |
 
 Each routing accepts exactly the combinations of this table; any other raises `ValueError` before
 any work, a request of 0 included. A field marked "none" must be left `None`:
 
-| Routing | `placement` | `origin` default / allowed | `admission` | `selection` |
-| --- | --- | --- | --- | --- |
-| `CostOnly` | `EQUAL_BALANCED` (ECMP) or `WEIGHTED` (WCMP) | `EQUAL` / `EQUAL` | `LOSSLESS`, `LOSSY` | all four fields |
-| `CostOnly` | `MAX_FLOW` | `OPTIMIZED` / both | `LOSSLESS` | all four fields |
-| `Global` | none | `OPTIMIZED` / both | `LOSSLESS` | none |
-| `CapacityAware` | any kernel (required) | `EQUAL` / `EQUAL` | `LOSSLESS` | all four fields |
-| `Pinned` | any kernel (required) | none | `LOSSLESS`, `LOSSY` (not with `MAX_FLOW`) | only `priority`, with `WEIGHTED` |
+| Routing | `placement` | `origin` default / allowed | `admission` | `selection` | `weights` |
+| --- | --- | --- | --- | --- | --- |
+| `CostOnly` | `EQUAL_BALANCED` (ECMP) | `EQUAL` / `EQUAL` | `LOSSLESS`, `LOSSY` | all four fields | none |
+| `CostOnly` | `WEIGHTED` (WCMP) | `EQUAL` / `EQUAL` | `LOSSLESS`, `LOSSY` | all four fields | `CAPACITY` (default), `EXPLICIT`, `RESIDUAL_SNAPSHOT` |
+| `CostOnly` | `MAX_FLOW` | `OPTIMIZED` / both | `LOSSLESS` | all four fields | none |
+| `Global` | none | `OPTIMIZED` / both | `LOSSLESS` | none | none |
+| `CapacityAware` | any kernel (required) | `EQUAL` / `EQUAL` | `LOSSLESS` | all four fields | none |
+| `Pinned` | none | none (the program has its injection) | `LOSSLESS`, `LOSSY` | none | none |
 
 `selection=None` means `PathSelection()` (`DETERMINISTIC`, `CAPACITY`, `multipath=True`,
-`multi_edge=True`) for the routings that read it, and `origin=None` means the routing's default.
-A policy's `config()` returns the configuration with both filled in (`selection` stays `None` for
-`Global` and `origin` for `Pinned`). Further rules:
+`multi_edge=True`) for the routings that read it, `origin=None` the routing's default and
+`weights=None` `CAPACITY` for `CostOnly` `WEIGHTED`. A policy's `config()` returns the
+configuration with these filled in (`selection` stays `None` for `Global` and `Pinned`, `origin`
+for `Pinned`). Further rules:
 
-- `WEIGHTED` with priority `HEADROOM` is rejected.
+- `edge_weights` (one integer per edge in EdgeId order, each in `[0, 2^62)`) is given exactly when
+  `weights=EXPLICIT`: `weights=EXPLICIT requires edge_weights`, `edge_weights require
+  weights=EXPLICIT`, `edge_weights: expected <E> entries`, `edge_weights[<i>] must be an integer in
+  [0, 2^62)`. The configuration keeps the array by reference: every policy built from it reads the
+  same one.
+- `CapacityAware` `WEIGHTED` with priority `HEADROOM` is rejected (its weights come from the
+  priority values).
 - `flow_count >= 1`; `max_flow_count` is `None` (no ceiling) or at least `flow_count`;
   `min_flow_bandwidth` is in [0, 2^62) units; `max_path_cost` is `None`, `Absolute(c)` with
   `c >= 0` or `Stretch(f)` with `f` finite and at least 1 (as for `ksp`); `diminishing` is `None`
   (off) or `DiminishingReturns(window, fraction)` with `window >= 1` and `fraction` strictly
   between 0 and 1.
 - Only `CostOnly` reads a `DagCache`; any other routing given one is rejected.
-- `Pinned`: one source and one destination; at least one bundle; no duplicate bundles; every
-  bundle runs from the policy's source to its destination and has at least one walk.
+- `Pinned`: the program's sources and destinations must be the policy's (`program endpoints do not
+  match policy endpoints`); any number of each.
 - **The pooled single-path rule.** `CostOnly` with more than one source (counted after removing
   repeats, before any Eligibility) rejects `multipath=False` together with
   `PREFER_HIGHER_PRIORITY`: the bottleneck choice could then differ per source at a router the
@@ -642,10 +674,12 @@ its ledger. `sources` and `destinations` are one node id or a sequence; the two 
 overlap. Construction validates everything before the policy binds (a field that a routing does
 not have is a `TypeError`; every other defect a `ValueError`), and when several defects meet, the
 first in this order is reported: the endpoint sets (empty, out of range, the lowest node in both);
-a foreign `Eligibility` or `DagCache`; enum values outside their enumeration; the table above,
+the graph of each object the policy is given: the `Eligibility`, the program (`program belongs to
+another graph`), the support (`support belongs to another graph`), the `DagCache`, the black holes
+(`black_holes belongs to another graph`); enum values outside their enumeration; the table above,
 its row (routing, then placement) and then its columns left to right (placement, origin,
-admission, selection); the cache rule; `CapacityAware`'s own fields; the endpoint counts
-(`Pinned`'s single endpoints, the pooled single-path rule); `Pinned`'s bundles.
+admission, selection, weights); the cache rule; `CapacityAware`'s own fields; `edge_weights`; the
+pooled single-path rule; `Pinned`'s endpoints.
 
 ### The origin
 
@@ -669,10 +703,14 @@ The roster is fixed when the policy is built. For `CostOnly`, `CapacityAware` an
 the allowed sources that have a static walk to an allowed destination over allowed edges, whatever
 their capacity, in ascending node id: a source whose only routes cross an edge of capacity 0 is in
 the roster, receives its share and cannot place it (a failure is expressed with an Eligibility,
-which removes the source). For `Pinned` it is the single source when at least one bundle is
-usable. The roster decides which sources receive shares and which records exist; `by_source`
+which removes the source); `Global` with a support counts only walks inside the support. For
+`Pinned` it is the program's heads that still reach a destination under the policy's Eligibility
+([replay](#replay-under-a-failure)). The roster decides which sources receive shares; for the
+computing models it also decides which records exist, while `Pinned` keeps one record per configured
+program entry even when no head survives the replay (such a record stays at zero). `by_source`
 reports every input source, a source outside the roster with a zero row. A positive request with
-an empty roster creates nothing and ends `NO_ROUTE`.
+an empty roster ends `NO_ROUTE`: a computing model creates nothing, and `Pinned` creates or keeps its
+per-entry records at zero.
 
 ### Routing modes
 
@@ -681,13 +719,15 @@ an empty roster creates nothing and ends `NO_ROUTE`.
   each roster source's route is its static shortest-path DAG toward the destination set (with
   `multipath=False`, its canonical path), read from the [DAG cache](#9-the-dag-cache), with the
   selection applied on the ledger's residual at that call's entry (priorities read from that
-  residual for `RESIDUAL` and `HEADROOM`, from the static capacities for `CAPACITY`; `WEIGHTED`
-  freezes its weights there). The program is the union of these routes: at a router several
+  residual for `RESIDUAL` and `HEADROOM`, from the static capacities for `CAPACITY`); `WEIGHTED`
+  freezes its weights from its weight basis there ([section 5](#5-placement-kernels-and-admission)). The program is the union of these routes: at a router several
   sources pass, their traffic for the demand is added (with the router's own injection when it
   is a source) and split once over its members, by round robin (`EQUAL_BALANCED`) or by highest
   averages over the weights (`WEIGHTED`). Every source that passes a router has the same
   continuation there, so the union lends no source a link outside its own route. The program is
-  never refreshed, grown or reoptimised within the epoch.
+  never refreshed, grown or reoptimised within the epoch. It is the policy's `program`: one split
+  context pooled over the roster, one split route per roster source (entry index = roster
+  position, weight 1), equal sources; it lists no tunnel.
 - **`CostOnly` with `MAX_FLOW`** is a controller restricted to shortest paths: it solves like
   `Global` (below), but only over the union of the roster sources' routes prepared as above,
   edges of capacity 0 included (so a zero-capacity shortest route is never bypassed).
@@ -716,16 +756,28 @@ an empty roster creates nothing and ends `NO_ROUTE`.
   reaches it), and that total is solved once more from zero, so the result does not depend on the
   search. A positive call on a network beyond the flow core's size limit raises `ValueError`
   ([section 2](#2-the-graph), Size).
+- **`Global(support=dag)`** is the same controller restricted to the edges of `dag`, trimmed to
+  the walks from the sources to the allowed destinations inside it (an edge that leads nowhere
+  inside the support is never used; a mask removes its edges as usual). It reports `total_cost`
+  but neither `cost_distribution` nor `min_cut`, and `sensitivity` solves each deletion afresh.
+- **The controllers' programs.** After every positive call a controller decomposes its solved
+  flow into paths, each roster source's share in a canonical order, one tunnel per path with its
+  solved amount as weight (indices in decomposition order), also with a single source. With the
+  `OPTIMIZED` origin the program keeps the solved supplies as **captured source weights**
+  (`source_weights`: every roster source, a zero supply included); with `EQUAL` it injects by
+  round robin. Forwarded on the same view, the program reproduces the solve exactly.
 - **Records of the controllers** (`Global`, `CostOnly` with `MAX_FLOW`): one record per roster
   source, holding that source's share of the solved flow (its edges and its delivery), extracted
   in a canonical order. A `Global` record's bundle is the set of edges that carry the share,
   rebuilt on every positive call under the same FlowId; a source with no share has an empty
   bundle and `route_cost` `None`. A `CostOnly` `MAX_FLOW` record's bundle is its source's
   prepared route, and the share stays inside it.
-- **`Pinned`** creates one flow per usable bundle, in the order given. A bundle is usable when at
-  least one of its walks survives the Eligibility, whatever the capacities of its edges; its
-  `route_cost` is the cheapest such walk. Bundles that become equal after that pruning keep separate flows. When no bundle is
-  usable, `usable_bundles()` is 0 and a positive request ends `NO_ROUTE`.
+- **`Pinned`** forwards its program as given, computing nothing: injection, entries, weights and
+  split tables are the program's, replayed under the policy's Eligibility and with its black
+  holes ([forwarding programs](#forwarding-programs)). It keeps one record per program entry
+  (`entry` is the entry's identifier), created at the epoch's first positive call, a record of
+  weight 0 or of a `FAILED` tunnel included (that one with an empty bundle and `route_cost`
+  `None`). A positive request with an empty replay roster ends `NO_ROUTE`.
 
 ### Several sources and destinations
 
@@ -748,7 +800,7 @@ an empty roster creates nothing and ends `NO_ROUTE`.
   Sources are placed one after another, in ascending node id, on the shared free capacity; what
   one source cannot place is not passed to another. A split request is therefore not equivalent
   to one large request.
-- **`Pinned`** has a single source and a single destination.
+- **`Pinned`** follows its program: its injection over the replay roster, then each head's entries.
 
 Two sources with one unit each meet at node 2, whose two members lead to the destination. Pooled,
 node 2 splits the two units once, one per member, and gives one member to each source; split
@@ -802,6 +854,203 @@ LOSSY 5 [(0, 5)] [(0, 5), (1, 0)]
 source 0 excluded 10
 ```
 
+### Forwarding programs
+
+**In plain words.** A program is what a routing decided, written down: which routes each source
+uses and in which integer proportions. CostOnly and Global produce one (`policy.program`,
+`result.program`; CapacityAware has none until its tunnels arrive). `Pinned(program)` forwards a program without computing anything: to replay a
+solution on another ledger, to study a failure (the routers drop the failed routes and split over
+the survivors) or to study the moment before anyone reacts (the failed elements swallow what
+reaches them). `ForwardingProgram.from_routes` builds a program from routes you give.
+
+**Exact rules.**
+
+- **The value.** A `ForwardingProgram` is immutable and shared by reference: `sources` and
+  `destinations` (the normalised sets), `tunnels` (the tunnel entries in ascending `index`; split
+  routes are not listed) and `source_weights` (`None` for equal sources). A `Tunnel` has `index`,
+  `head`, `local_index` (its position among its head's entries of both kinds), `destination`,
+  `edges` (in path order), `route_cost` and `weight`. It has no public constructor.
+- **Injection.** A total `x` enters at the roster either by round robin (**equal sources**) or by
+  highest averages over the captured source weights; each head then splits its share by highest
+  averages over its entries' weights (equal weights give round robin). A head whose entries all
+  have weight 0 loses its share at the source. Identical routes are never merged: each entry
+  takes its own share.
+- **Entry identifiers.** Controller paths are numbered in decomposition order; a `CostOnly` split
+  program numbers its routes by roster position; supplied routes keep their position in the list
+  (a split route uses its position too, so tunnel indices can skip it). Records (`entry`) and
+  `by_tunnel` rows (`index`) use the same identifier.
+- **Split contexts.** A split route's routers split only that route's share, even where another
+  split route reaches the same router with the same members. Only a `CostOnly` program pools its
+  per-source routes into one context.
+- **`ForwardingProgram.from_routes(graph, sources, destinations, routes, *, placement=None,
+  weights=None, edge_weights=None, residual=None)`** with `Route(head, bundle, *, weight=1)`
+  (`bundle` a `Path` with one edge per hop, a tunnel, or a `PredDAG`, a split route). Order and
+  duplicates are kept; the roster is the sources with a route. `placement` is the interior split
+  of the `PredDAG` routes, `EQUAL_BALANCED` (`None`) or `WEIGHTED`, whose weights `weights`,
+  `edge_weights` and `residual` choose as in [section 5](#5-placement-kernels-and-admission)
+  (`residual` is the free capacity `RESIDUAL_SNAPSHOT` reads; it has no default). A split route
+  keeps the edges of its DAG on the walks from its head to a destination. The first failure, in
+  this order, raises `ValueError`: the endpoint sets; `routes must not be empty`; when no route is
+  a `PredDAG`, any option given (`<placement, weights, edge_weights or residual> applies only to
+  PredDAG routes`); `MAX_FLOW` (`from_routes placement must be EQUAL_BALANCED or WEIGHTED`); the
+  weights' combination (as for a configuration, `weights require placement=WEIGHTED` and
+  `residual requires weights=RESIDUAL_SNAPSHOT` included); `edge_weights`' length and entries,
+  `residual`'s (the ledger's baseline messages); then each route in list order:
+  `routes[<i>]: bundle belongs to another graph`, `routes[<i>]: head <h> is not a source`, for a
+  `Path` `routes[<i>]: a tunnel has one edge per hop`, `routes[<i>]: the path starts at <v>, not at
+  head <h>`, `routes[<i>]: the path ends at <v>, not at a destination`, `routes[<i>]: the path
+  meets destination <v> before its end`, for a `PredDAG` `routes[<i>]: no walk from head <h> to a
+  destination`, then `routes[<i>]: weight must be an integer in [0, 2^62)`. A route of weight 0 is
+  validated in full and carries nothing.
+- **The lossless bound.** A Lossless call forwards each entry's share without drops, adds the
+  loads per edge and admits the largest total that leaves no share without a route and puts no
+  edge above its free capacity (exact bisection: the totals that fit form a prefix).
+
+#### Replay under a failure
+
+A `Pinned` policy's Eligibility is the failure being studied (local repair):
+
+- A tunnel that touches an excluded node or edge is `FAILED` and gets nothing; replay never
+  computes a replacement path.
+- A split route loses its excluded members and the branches left without a destination; members
+  of capacity 0 stay (`EQUAL_BALANCED` still sends them their share).
+- The roster is rebuilt from the program's **basis**, ignoring capacities and weights: for an
+  unrestricted controller the topology under the producing policy's exclusions, for `CostOnly`,
+  a supported `Global` and supplied routes the original routes, each together with the policy's
+  exclusions. A head that no longer reaches a destination leaves the pool (equal sources: its
+  share moves to the others); a head that still reaches one but has no surviving entry keeps its
+  share and loses it. Captured source weights keep the remaining heads' saved weights; when all of
+  them are 0, the whole offer is lost at the sources (`NO_ACTIVE_WEIGHT`).
+- An edge whose capacity is now 0 is not a failure: its traffic is lost on that edge, the tunnel
+  stays `UP`. Weights stay as the program froze them.
+
+#### Stale forwarding: black holes
+
+`Pinned(program, black_holes=e)` and `forward(offer, black_holes=e)` forward the program unchanged
+while the nodes and edges `e` excludes swallow what reaches them (`None`, or an all-allowed value,
+means none). Nothing is pruned, re-split or reweighted: every router keeps its members and
+weights and applies the program's whole-unit rule to the traffic that actually arrives. A
+black-holed edge carries nothing (all that arrives is dropped there); a black-holed node acts the
+same on every edge entering it; a black-holed source loses its own share as `source_loss`. Lossy
+runs the loss rule below with those edges serving 0; Lossless admits only totals that put nothing
+on a black hole. A tunnel that is up but whose path reaches a black hole is `BLACKHOLED` in
+`by_tunnel`, its traffic dropped at the first black hole on its path. The policy's Eligibility
+applies first: an element both excluded and black-holed is excluded.
+
+```python
+# Two parallel edges of 4 and 8: the duplicate tunnel takes its own share.
+g = graph(2, [(0, 1, 4, 1), (0, 1, 8, 1)])
+def tunnel(g, head, edges, weight=1):
+    return ngc.Route(head, ngc.Path(g, [[e] for e in edges]), weight=weight)
+def pinned(program, admission=ngc.Admission.LOSSLESS, black_holes=None):
+    return ngc.FlowPolicyConfig(routing=ngc.Pinned(program, black_holes=black_holes),
+                                admission=admission)
+for routes in ([tunnel(g, 0, [0]), tunnel(g, 0, [1]), tunnel(g, 0, [1])],
+               [tunnel(g, 0, [0]), tunnel(g, 0, [1])]):
+    prog = ngc.ForwardingProgram.from_routes(g, 0, 1, routes)
+    r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, pinned(prog)).place(float("inf"))
+    print(r.placed, [(t.index, t.assigned) for t in r.by_tunnel])
+
+# Two tunnels 0 -> 1 -> 3 and 0 -> 2 -> 3, every edge 10: node 2 fails.
+g = graph(4, [(0, 1, 10, 1), (0, 2, 10, 1), (1, 3, 10, 1), (2, 3, 10, 1)])
+prog = ngc.ForwardingProgram.from_routes(g, 0, 3, [tunnel(g, 0, [0, 2]), tunnel(g, 0, [1, 3])])
+down = g.eligibility(excluded_nodes=[2])
+lossy = pinned(prog, ngc.Admission.LOSSY)
+r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, lossy, down).replace(10)
+print("repair", r.placed, [(t.status.name, t.assigned) for t in r.by_tunnel])
+r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, pinned(prog, ngc.Admission.LOSSY, down)).replace(10)
+print("stale", r.placed, r.call_drops, [(t.status.name, t.assigned) for t in r.by_tunnel])
+print("stale lossless", ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, pinned(prog, black_holes=down))
+      .place(float("inf")).placed)
+```
+
+```text
+12 [(0, 4), (1, 4), (2, 4)]
+8 [(0, 4), (1, 4)]
+repair 10 [('UP', 10), ('FAILED', 0)]
+stale 5 [(1, 5)] [('UP', 5), ('BLACKHOLED', 5)]
+stale lossless 1
+```
+
+The repaired head sends all 10 over its surviving tunnel. Stale, node 0 still splits 5 and 5 and
+the second tunnel's 5 are dropped on edge 1, the edge entering node 2; Lossless admits 1 unit (2
+units would put one on the black hole).
+
+A program of a controller replays its solve; under a mask its failed tunnel's share moves to the
+head's surviving tunnel:
+
+```python
+g = graph(4, [(0, 1, 2, 1), (0, 2, 10, 1), (1, 3, 2, 1), (2, 3, 10, 1)])
+solved = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, ngc.FlowPolicyConfig(routing=ngc.Global()))
+prog = solved.replace(12).program
+print([(t.index, list(t.edges), t.weight) for t in prog.tunnels], prog.source_weights)
+r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, pinned(prog, ngc.Admission.LOSSY),
+                   g.eligibility(excluded_edges=[2])).replace(12)
+print(r.placed, r.call_drops, [(t.status.name, t.assigned, t.delivered) for t in r.by_tunnel])
+```
+
+```text
+[(0, [0, 2], 2), (1, [1, 3], 10)] ((0, 12),)
+10 [(1, 2)] [('FAILED', 0, 0), ('UP', 12, 10)]
+```
+
+The first tunnel is `FAILED`; the head's 12 go to its other tunnel by its weight 10 alone, which
+carries 10 and drops 2 on edge 1.
+
+### Losses inside one program
+
+Where several entries of one program meet on an edge that cannot carry them all (Lossy), the
+edge carries `T = min(free capacity, sum of arrivals)` and divides it by highest averages: first
+over the heads by what each head's traffic brings, then within a head over its entries by their
+arrivals. Each part continues with its share; the rest is dropped on that edge. The whole program
+is evaluated at once: forwarded first without drops, an edge whose load fits can never drop and
+waits for nothing; every other shared edge waits for all its possible arrivals, and the edges are
+evaluated in dependency order (the order of independent edges does not change the result).
+Splitting an edge into two in series with the same capacity changes nothing.
+
+When edges wait on each other in a cycle (one tunnel meets edge X before Y, another Y before X,
+and both can drop), only that group is recalculated, round by round, from nothing carried, until
+a round gives back exactly what went in; the answer is checked independently against the rule
+before anything is published. A group that alternates between two states raises
+`ValueError("lossy forwarding iteration entered a period-2 cycle")`; one that does not settle
+within 64 rounds per waiting edge raises `ValueError("lossy forwarding iteration did not reach a
+fixed point within the round limit")`; a failed check, an implementation fault, raises
+`RuntimeError("lossy forwarding fixed-point verification failed")`. Each error publishes nothing
+and does not claim that no answer exists.
+
+```python
+# Two tunnels of one head share the second edge of 2 on tunnel 0 only.
+g = graph(4, [(0, 1, 10, 1), (0, 2, 10, 1), (1, 3, 2, 1), (2, 3, 10, 1)])
+prog = ngc.ForwardingProgram.from_routes(g, 0, 3, [tunnel(g, 0, [0, 2]), tunnel(g, 0, [1, 3])])
+r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, pinned(prog, ngc.Admission.LOSSY)).place(12)
+print(r.placed, r.call_drops, [(t.assigned, t.delivered, t.dropped) for t in r.by_tunnel])
+
+# One edge of 9 shared by two tunnels of weights 2 and 1: the offer splits 8 and 4, the edge 6 and 3.
+g = graph(2, [(0, 1, 9, 1)])
+prog = ngc.ForwardingProgram.from_routes(g, 0, 1, [tunnel(g, 0, [0], 2), tunnel(g, 0, [0], 1)])
+r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, pinned(prog, ngc.Admission.LOSSY)).place(12)
+print(r.placed, [(t.assigned, t.delivered, t.dropped) for t in r.by_tunnel])
+
+# Two tunnels cross edges X (e0, 1 unit) and Y (e3, 2 units) in opposite orders, weights 1 and 2.
+g = graph(6, [(0, 1, 1, 1), (1, 2, 1000, 1), (1, 5, 1000, 1), (2, 3, 2, 1), (3, 0, 1000, 1),
+              (3, 5, 1000, 1), (4, 0, 1000, 1), (4, 2, 1000, 1)])
+prog = ngc.ForwardingProgram.from_routes(
+    g, 4, 5, [tunnel(g, 4, [6, 0, 1, 3, 5], 1), tunnel(g, 4, [7, 3, 4, 0, 2], 2)])
+try:
+    ngc.FlowPolicy(ngc.FlowLedger(g), 4, 5, pinned(prog, ngc.Admission.LOSSY)).place(3)
+except ValueError as error:
+    print(error)
+```
+
+```text
+8 [(2, 4)] [(6, 2, 4), (6, 6, 0)]
+9 [(8, 6, 2), (4, 3, 1)]
+lossy forwarding iteration entered a period-2 cycle
+```
+
+In the first program the second edge of 2 on tunnel 0 drops 4 of its 6. In the cycle, the rounds
+from zero alternate between two states, so the call raises and publishes nothing.
+
 ### The placement call
 
 `place(volume, outputs=None)` takes a request in units (an `int`) or `float('inf')`.
@@ -810,21 +1059,22 @@ source 0 excluded 10
    infinite one is rejected (the cumulative request would be undefined), `place(0)` included.
 2. **A request of 0** is `COMPLETE` and does nothing: it creates no flow and prepares nothing. It
    reports the demand's state, with both flags false.
-3. **`CostOnly` split routing** prepares the program at the epoch's first positive call (one
-   record per roster source, also at zero delivery). Lossless then admits the largest total `a`
+3. **`CostOnly` split routing and `Pinned`.** `CostOnly` prepares the program at the epoch's first
+   positive call (one record per roster source, also at zero delivery); `Pinned` creates its
+   records, one per entry, there. Lossless then admits the largest total `a`
    between what it already delivers and that plus the request whose forwarding of `RR(a)` from
    zero fits the free capacity plus the policy's own allocation with no drop and gives no share to
    a source without a member (exact binary search: the totals that fit form a prefix). Lossy
-   injects at the sources this call's increase of the round robin, `RR(offered + v) -
-   RR(offered)`, and forwards it hop by hop on the free capacity: each edge carries the smaller of
-   what reaches it and its residual and drops the rest. An infinite Lossy request is the
-   **first-hop experiment**: each source injects on each of its first edges exactly that edge's
+   injects at the sources this call's increase of the injection, `RR(offered + v) - RR(offered)`
+   (or the difference of the highest averages over captured source weights), and forwards it hop
+   by hop on the free capacity: each edge carries the smaller of what reaches it and its residual
+   and drops the rest. An infinite Lossy request is rejected for `Pinned` (`LOSSY forwarding
+   requires a finite offer`); for `CostOnly` it is the **first-hop experiment**: each source injects on each of its first edges exactly that edge's
    residual, on top of the traffic other sources send through it, and forwarding runs as usual.
 4. **The controllers** re-solve as described above.
-5. **`CapacityAware` and `Pinned`** run, per source and on one shared working copy of the free
-   capacity: creation (while the source has no flows), reoptimisation (`CapacityAware` with
-   `reoptimize`), filling (each flow, or each equal-share cohort, raised toward its maximum),
-   growth (`CapacityAware`).
+5. **`CapacityAware`** runs, per source and on one shared working copy of the free capacity:
+   creation (while the source has no flows), reoptimisation (with `reoptimize`), filling (each
+   flow, or each equal-share cohort, raised toward its maximum), growth.
 6. **Commit.** All changes to the ledger and the policy are committed together at the end, or
    none are ([section 8](#8-failures-threads-and-lifetimes)).
 
@@ -833,7 +1083,7 @@ What the call guarantees:
 - `placed` is the increase in delivery made by this call, and `0 <= placed <= volume`. For Lossy
   it is this call's delivery. `remaining = volume - placed` (`float('inf')` for an infinite
   request; for Lossy it includes what was lost).
-- A call never reduces `placed_demand()`, the sum of `delivered` over the policy's records. The
+- A `place` call never reduces `placed_demand()`, the sum of `delivered` over the policy's records. The
   total of an equal-share cohort never decreases; one tunnel's amount can decrease when growth
   re-splits a larger total over more tunnels (`[3, 3]` plus a new tunnel can become
   `[3, 2, 2]`).
@@ -842,16 +1092,17 @@ What the call guarantees:
   record keeps its FlowId for the rest of the epoch and can fill on a later call.
 - **Additivity.** With the rest of the network unchanged between the calls, `place(a); place(b)`
   equals `place(a + b)` exactly for Lossless `CostOnly` split routing, the controllers (value,
-  allocation and cost curve) and a single Lossless `Pinned` flow or cohort. Lossy calls are not
+  allocation and cost curve) and Lossless `Pinned`. Lossy calls are not
   additive: each forwards its own injection on the free capacity the earlier calls left, and
   nothing is offered again. `CapacityAware` sources are not additive.
 
 ### Epochs
 
 `remove()` takes every flow of the policy out of the ledger (allocations reverted, records gone,
-ids retired) and starts a new epoch: the cumulative request, the round-robin position of the
-source split, the finite-or-infinite state and the prepared program are reset. The next positive
-request prepares again and creates new flows with new ids; ids are never reused.
+ids retired), clears the installed program and starts a new epoch: the cumulative request, the
+round-robin position of the source split and the finite-or-infinite state are reset. The next
+positive request prepares again and creates new flows with new ids; ids are never reused.
+`replace` and `forward` also start a new epoch (below).
 
 ```python
 g = graph(4, [(0, 1, 10, 1), (1, 3, 10, 1), (0, 2, 2, 1), (2, 3, 2, 1)])
@@ -876,15 +1127,59 @@ The first unit goes to source 0 and the second to source 1 (round robin of the c
 request); the first call creates both records, source 1's at zero delivery. After `remove()` the
 split starts again at source 0, under new ids.
 
+### Operations: evaluate, replace and forward
+
+Besides `place`, a policy has three full-offer calls. Each starts from the policy's own **released
+view**: the ledger's residual with the policy's own traffic given back.
+
+| Call | What it does | Routings |
+| --- | --- | --- |
+| `evaluate(offer, *, outputs=None)` | computes and forwards `offer` from the released view as a fresh epoch would, and reports it; publishes nothing and creates no record | all |
+| `replace(offer, *, outputs=None)` | the same computation, then published at once: the old records are retired, new ones created, the new program installed, a new epoch begun with `requested = offer`; delivery may go down | all |
+| `forward(offer, *, black_holes=None, outputs=None)` | forwards a full new offer over the installed program with no route computation (weights stay frozen, a controller does not re-solve), on the released view, then publishes like `replace`; `black_holes` forwards it stale for this call | `CostOnly` and `Global` with an installed program; `Pinned` uses `replace` |
+
+- `placed` of a full-offer call is its whole new delivery and `delivery_delta` the new delivery
+  minus the old (it may be negative). A later `place` continues the epoch a `replace` or a
+  `forward` began (its records keep their ids).
+- With other owners fixed, identical full inputs give identical results, except fresh record ids.
+- `forward`'s checks, in order: `Pinned forwards with replace`; `forward requires an installed
+  program` (also after `remove()`, and always for `CapacityAware`); the offer; a Lossy `+inf`
+  (`LOSSY forwarding requires a finite offer`, as for `evaluate` and `replace` and Lossy
+  `Pinned`); the black holes' graph (`black_holes belongs to another graph`).
+- `CapacityAware` has no program: its `evaluate` and `replace` run `place(offer)` on a fresh
+  epoch over the released view.
+
+```python
+g = graph(2, [(0, 1, 10, 1), (0, 1, 10, 1)])
+ledger = ngc.FlowLedger(g)
+pol = ngc.FlowPolicy(ledger, 0, 1, config(ngc.CostOnly()))
+r = pol.replace(6)
+print(r.placed, [x.flow_id[1] for x in pol.records()])
+r = pol.evaluate(12)
+print(r.placed, r.delivery_delta, ledger.allocated().tolist())
+r = pol.replace(4)
+print(r.placed, r.delivery_delta, [x.flow_id[1] for x in pol.records()])
+r = pol.forward(7)
+print(r.placed, r.routes_changed, r.weights_changed, ledger.allocated().tolist())
+```
+
+```text
+6 [0]
+12 6 [3, 3]
+4 -2 [1]
+7 False False [4, 3]
+```
+
 ### Termination
 
-The call's `termination` is the first row that applies (an invalid call raises instead):
+The call's `termination` (of `place` and of the full-offer calls alike) is the first row that
+applies (an invalid call raises instead):
 
 | Termination | When |
 | --- | --- |
 | `COMPLETE` | the request is 0 |
-| `NO_ROUTE` | the request is positive and the roster is empty (`Pinned`: no usable bundle) |
-| `NO_ACTIVE_WEIGHT` | routes exist, but none has an edge it may use: every `WEIGHTED` member has weight 0, so the program sends nothing anywhere |
+| `NO_ROUTE` | the request is positive and the roster is empty (`Pinned`: the replay roster) |
+| `NO_ACTIVE_WEIGHT` | routes exist, but nothing can be sent anywhere: every `WEIGHTED` member has weight 0, or no head with a positive injection weight has a surviving entry of positive weight |
 | `COMPLETE` | Lossy with a finite request: the whole request was forwarded, and delivery and losses account for all of it (it does not mean nothing was lost) |
 | `COMPLETE` | Lossless: the whole request was admitted |
 | `EXHAUSTED` | otherwise: Lossless below the request, any infinite request (the first-hop experiment included), a controller whose maximum is 0 over existing routes |
@@ -918,11 +1213,11 @@ pol = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 4,
                             selection=tunnel))
 show(pol.place(10))
 
-# Weighted splitting by residual where another demand holds the only edge: no positive weight.
+# Weights from the residual where another demand holds the only edge: no positive weight.
 ledger = ngc.FlowLedger(g)
 ngc.FlowPolicy(ledger, 1, 4, config(ngc.CostOnly())).place(1)
-weighted = config(ngc.CostOnly(), ngc.FlowPlacement.WEIGHTED,
-                  selection=ngc.PathSelection(priority=ngc.EdgePriority.RESIDUAL))
+weighted = ngc.FlowPolicyConfig(routing=ngc.CostOnly(), placement=ngc.FlowPlacement.WEIGHTED,
+                                weights=ngc.WeightBasis.RESIDUAL_SNAPSHOT, selection=DET)
 show(ngc.FlowPolicy(ledger, 1, 4, weighted).place(1))
 ```
 
@@ -934,18 +1229,24 @@ show(ngc.FlowPolicy(ledger, 1, 4, weighted).place(1))
 ### Flags
 
 `routes_changed` and `weights_changed` start false in every call and record only changes that
-were committed. Once set in a call, a flag stays set; a call with no committed structural change
-ends with both false, even when it places nothing.
+were committed; a call that raises publishes nothing. For the routings with a program they
+compare the installed program before and after the call (no program counts as an empty one):
+`routes_changed` the ordered heads, each entry's kind and route (a tunnel's path, a split route's
+members), duplicates included; `weights_changed` the injection (equal or the captured weights, by
+value) and every entry and split-table weight. Hence:
 
 | Committed change | `routes_changed` | `weights_changed` |
 | --- | --- | --- |
-| records are created, in any routing mode, also at zero delivery and in a new epoch after `remove()` (`CapacityAware` only with a route, possibly on a later call) | true | unchanged |
-| a retained flow is moved to a new route (`reoptimize`) | true | true when a `WEIGHTED` flow's weights were captured again (also when the call places nothing) |
-| growth adds a flow (also on a route equal to an existing flow's: routes belong to flows) | true | unchanged |
-| a `Global` call changes the edges some source's share uses, also with `placed == 0` | true | a controller never sets it |
-| nothing of the above: a request of 0, rejected candidates only, `Global` with every source's edges unchanged | unchanged | unchanged |
+| the epoch's first nonempty program (`CostOnly` and the controllers' first positive call, a `replace`, `replace(0)` included) | true | true |
+| an empty program over no program or an empty one (a call with an empty roster, `replace(0)` included) | false | false |
+| a controller's re-solve that moves a source's share to other edges, also with `placed == 0` | true | true unless the entries keep their number and amounts |
+| a controller's re-solve that changes only a path's amount (`Global` `place(5)` then `place(5)` on one path) | false | true |
+| an offer-only call over an unchanged program: `forward`, `Pinned`, `CostOnly` increments, an identical `replace` (new ids) | false | false |
+| `CapacityAware`: records are created (also at zero delivery, possibly on a later call), growth adds a flow (routes belong to flows) | true | unchanged |
+| `CapacityAware`: a retained flow moves to a new route (`reoptimize`) | true | true when a `WEIGHTED` flow's weights were captured again (also when the call places nothing) |
+| nothing of the above: `place(0)` (a request of 0, which prepares and installs nothing, unlike a full zero offer such as `replace(0)`, which follows the rows above), rejected candidates only | unchanged | unchanged |
 
-A candidate route equal to the flow's current route is not a change.
+A `CapacityAware` candidate route equal to the flow's current route is not a change.
 
 ```python
 # A first request on a route whose only unit another demand holds.
@@ -954,16 +1255,17 @@ ledger = ngc.FlowLedger(g)
 ngc.FlowPolicy(ledger, 1, 4, config(ngc.CostOnly())).place(1)
 pol = ngc.FlowPolicy(ledger, 1, 4, config(ngc.CostOnly()))
 r = pol.place(1)
-print(r.placed, r.termination.name, r.routes_changed, [x.delivered for x in pol.records()])
+print(r.placed, r.termination.name, r.routes_changed, r.weights_changed,
+      [x.delivered for x in pol.records()])
 ```
 
 ```text
-0 EXHAUSTED True [0]
+0 EXHAUSTED True True [0]
 ```
 
 ### The result
 
-`place` returns a `PlacementResult`. Its fields describe either this call or the demand's state
+`place`, `evaluate`, `replace` and `forward` return a `PlacementResult`. Its fields describe either this call or the demand's state
 after it (totals over the epoch); a per-call loss field carries the `call_` prefix, a state field
 does not, so the two are never confused.
 
@@ -971,9 +1273,11 @@ does not, so the two are never confused.
   above; `delivery_delta`, the change of the delivery (for `place` it equals `placed`);
   `call_drops`, this call's drops per edge as `[(EdgeId, units)]`; `call_source_loss`, the units
   this call lost at sources.
-- **The demand's state**: `requested` (the sum of the requests, `float('inf')` after an infinite
-  one), `offered`, `admitted`, `delivered`, `unadmitted`, `source_loss`, `drops` (per edge, as
-  `[(EdgeId, units)]`), `by_source` and `total_cost`. Every amount is an exact Python integer and
+- **The demand's state**: `program` (the installed `ForwardingProgram`, `evaluate`'s computed one;
+  `None` before the epoch's first preparation, after `remove()` and for `CapacityAware`),
+  `requested` (the sum of the requests, `float('inf')` after an infinite one), `offered`,
+  `admitted`, `delivered`, `unadmitted`, `source_loss`, `drops` (per edge, as
+  `[(EdgeId, units)]`), `by_source`, `by_tunnel` and `total_cost`. Every amount is an exact Python integer and
   may exceed 64 bits.
 - **Accounting.** Lossless: `offered` is `None`, `source_loss` 0, no drops, `admitted = delivered`,
   and `requested = unadmitted + delivered` for a finite request (`unadmitted` is `None` after an
@@ -986,22 +1290,26 @@ does not, so the two are never confused.
   `admitted`, `delivered`, `source_loss` and `dropped` (its share of `drops`). The rows sum to the
   totals, with one exception: a Lossy positive request with an empty roster reports `offered =
   requested` and all of it as `source_loss`, lost before entering, while every row stays zero.
+- **`by_tunnel`** is a tuple of `TunnelFlow` rows, one per program tunnel in ascending `index`
+  (empty without tunnels): `index`, `head`, `status` (`UP`, `FAILED`, `BLACKHOLED`), `assigned`
+  (its injected share), `delivered` and `dropped`. It is another view of the same traffic as
+  `by_source`, never added to it.
 - **`total_cost`**: the controllers only, the exact `sum(cost[e] * flow[e])` of the policy's
   allocation; `None` otherwise.
-- **`cost_distribution`**: `Global` with `OPTIMIZED` origin only, the marginal cost curve of the
+- **`cost_distribution`**: unrestricted `Global` with `OPTIMIZED` origin only, the marginal cost curve of the
   policy's cumulative flow (a request of 0 reports it unchanged; `None` before the epoch's first
   positive call). `None` for every other mode, `EQUAL` origin included: the marginal costs of an
   equal flow need not increase. For other modes, the sum of `(route_cost, delivered)` over the
   records is a histogram of delivery by each record's cheapest walk cost: the cost every unit
   travels at for `CostOnly` split routing and `CapacityAware`, whose routes have one cost, but not
-  for a `Pinned` bundle whose walks differ in cost.
+  for a split route whose walks differ in cost.
 - **Optional outputs**, `None` unless requested through `OutputOptions(edge_flows=False,
   residual=False, bottleneck=False, min_cut=False)`: `edge_flows` is the policy's own allocation
   per edge after the call (the ledger's total is `allocated()`); `residual` and `bottleneck` are
   the ledger's after the call; `min_cut` is described below.
 - **`bottleneck` and `min_cut` are different things.** `bottleneck` is the saturation report of
-  [section 6](#6-the-ledger), available in every mode. `min_cut` exists only for `Global` with
-  `OPTIMIZED` origin: the edges of a minimum cut of the policy's view, the one on the sources' side:
+  [section 6](#6-the-ledger), available in every mode. `min_cut` exists only for unrestricted
+  `Global` with `OPTIMIZED` origin: the edges of a minimum cut of the policy's view, the one on the sources' side:
   the allowed edges that leave the nodes the sources can still reach once the flow is maximal
   (counting the option to undo flow on an edge), in ascending EdgeId, an edge with nothing free in
   the view (capacity 0, or held by other policies) included: it adds 0 to the cut's value and is
@@ -1051,8 +1359,11 @@ threads; ledgers, policies and building caches have one writer at a time.
   `Graph.eligibility`, `SensitivityResult.baseline`, `FlowPolicy.records()`) use pybind11's own
   allocation paths, which do not all check for failure. A memory failure at exactly that point
   may crash the process instead of raising. Library state is never left half-changed by it. The
-  results of `spf`, `ksp`, `resolve_to_paths`, `FlowPolicy.place`, `capacity`, `batch_capacity`
-  and `sensitivity` are built through a checked path and stay inside the guarantee.
+  results of `spf`, `ksp`, `resolve_to_paths`, `ForwardingProgram.from_routes`, `FlowPolicy.place`,
+  `evaluate`, `replace` and `forward`, `capacity`, `batch_capacity` and `sensitivity` are built
+  through a checked path and stay inside the guarantee, and so are the shared values and rows the
+  result objects hand out (`program`, `by_source`, `by_tunnel`, `tunnels`, a record's `bundle`,
+  `FlowLedger.graph`, `Eligibility.intersect`).
 - **Limit 2: a `DagCache` passed to the call.** A building cache is a memo: when a call fails
   after some cache lookups succeeded (a policy constructor failing after its lookup, an evaluator
   failing midway), the cache keeps those complete entries and their statistics. It never holds a
@@ -1173,12 +1484,19 @@ answers can differ from placing into a ledger that other demands already occupy.
 
 **Exact rules.**
 
-- **`QueryOptions(config, *, elig=None, cache=None, outputs=None)`** is the one options type of
-  the three evaluators: the configuration, the static Eligibility (`None`: everything allowed),
-  the DagCache (`None`: a private cache per worker) and the optional outputs of each result
-  (`sensitivity`: of its baseline).
+- **`QueryOptions(config, *, elig=None, cache=None, outputs=None, offered=None)`** is the one
+  options type of the three evaluators: the configuration, the static Eligibility (`None`:
+  everything allowed), the DagCache (`None`: a private cache per worker), the optional outputs of
+  each result (`sensitivity`: of its baseline) and the Lossy offer (`offered`: an integer in
+  `[0, 2^62)` or `float('inf')`, else `offered must be an integer in [0, 2^62) or permitted
+  +inf`).
 - **`capacity(graph, sources, destinations, opts)`** is `place(float('inf'))` of a `FlowPolicy`
-  with `opts.config` on a fresh ledger of the graph, and returns its `PlacementResult`. The exact maximum flow is the configuration
+  with `opts.config` on a fresh ledger of the graph, and returns its `PlacementResult`; `Pinned`
+  Lossy places `place(offered)` instead. The offer rules, checked with the arguments: `Pinned`
+  Lossy requires a finite `offered` (`Pinned LOSSY capacity requires finite offered`); `CostOnly`
+  Lossy is the first-hop experiment and takes none (`CostOnly LOSSY capacity uses first-hop
+  injection`); every Lossless configuration takes none (`<model> LOSSLESS capacity does not accept
+  offered`, the model `CostOnly`, `Global`, `Pinned` or `T1` for `CapacityAware`). The exact maximum flow is the configuration
   `Global()` (its default origin is `OPTIMIZED`): its result carries the marginal cost curve and,
   with `OutputOptions(min_cut=True)`, the minimum cut. With `EQUAL` origin it is the largest total
   whose equal shares all fit.
@@ -1187,7 +1505,8 @@ answers can differ from placing into a ledger that other demands already occupy.
   `opts.elig` intersected with `per_pair_elig[i]` (entries may be `None`; a given list has one
   entry per pair). Everything is validated before any worker starts: first the arguments (the
   worker count, the graph of `opts.elig` and of the cache, the cache rule, `Pinned`, which is
-  rejected because its bundles fix the endpoints, the configuration, then the length of
+  rejected because a program fixes its endpoints (`batch_capacity does not accept Pinned`), the
+  configuration, then the length of
   `per_pair_elig`), then each pair completely (its endpoint sets, their overlap, its
   Eligibility's graph, the pooled single-path rule of [section 7](#configuration) for its
   sources) in pair order, so the error of the lowest failing pair is the one raised.
@@ -1195,17 +1514,19 @@ answers can differ from placing into a ledger that other demands already occupy.
 - **`sensitivity(graph, sources, destinations, opts, workers=None)`** returns a `SensitivityResult`: `baseline` (the result of
   `capacity`, with the requested outputs) and `entries`, one `SensitivityEntry(edge, loss)` per
   candidate edge, in ascending EdgeId.
-  - **Candidates.** With `Global` and `OPTIMIZED` origin: the edges that carry flow in the
-    baseline (removing an edge without flow cannot lower a maximum flow). With every other
+  - **Candidates.** With unrestricted `Global` and `OPTIMIZED` origin: the edges that carry flow
+    in the baseline (removing an edge without flow cannot lower a maximum flow). With every other
     configuration, `EQUAL` origin included: every allowed edge, whatever its capacity (an edge of
     capacity 0 can carry a route and keep a source in the roster, so deleting it can change the
     result either way). An edge without an entry has loss 0.
   - **Loss** is `baseline.placed` minus the `placed` of `capacity` with that edge also excluded,
     in units, signed and never rounded or thresholded. A negative loss means the model carries
     more without the edge (for example, equal splitting no longer sends a share down a thin
-    path, or a source behind it no longer holds the equal origin back). `Global` with `OPTIMIZED`
-    origin computes each deletion by repairing a copy of the baseline's solve, which gives exactly
-    the value of a fresh solve; with `EQUAL` origin each deletion is solved afresh. `CostOnly`
+    path, or a source behind it no longer holds the equal origin back). Unrestricted `Global` with
+    `OPTIMIZED` origin computes each deletion by repairing a copy of the baseline's solve, which
+    gives exactly the value of a fresh solve; with `EQUAL` origin or a support each deletion is
+    solved afresh. `Pinned` replays the same program under each deletion (a fixed-route failure
+    question, not a new optimum): deleting an edge of a tunnel fails that tunnel. `CostOnly`
     gives loss 0 without recomputation to an edge outside the static shortest-path support
     reachable from the roster sources (no route can use it); these are equivalent forms of the
     same definition.
@@ -1257,11 +1578,12 @@ self-contained:
 | `netgraph/core/graph.hpp` | `Graph`, `to_units`, `as_float` |
 | `netgraph/core/eligibility.hpp` | `Eligibility` |
 | `netgraph/core/pred_dag.hpp` | `PredDAG`, `Path` |
-| `netgraph/core/options.hpp` | `Direction`, `Absolute`, `Stretch`, `EdgeTieBreak`, `EdgePriority`, `PathSelection`, `FlowPlacement`, `Admission`, `Origin` |
+| `netgraph/core/options.hpp` | `Direction`, `Absolute`, `Stretch`, `EdgeTieBreak`, `EdgePriority`, `PathSelection`, `FlowPlacement`, `Admission`, `Origin`, `WeightBasis` |
+| `netgraph/core/program.hpp` | `ForwardingProgram`, `Tunnel`, `TunnelStatus`, `Route`, `RouteOptions` (the options of `from_routes`) |
 | `netgraph/core/search.hpp` | `spf`, `ksp`, `resolve_to_paths`, `SpfOptions`, `SpfResult`, `KspOptions`, `SpfQueue` |
 | `netgraph/core/flow_record.hpp` | `FlowId`, `Counter128` (the 128-bit cumulative counter), `FlowRecord` |
 | `netgraph/core/flow_ledger.hpp` | `FlowLedger` |
-| `netgraph/core/flow_policy.hpp` | `FlowPolicy`, its configuration and result types (`SourceFlow` among them), `Termination`, `kMaxFlowsPerCall` |
+| `netgraph/core/flow_policy.hpp` | `FlowPolicy`, its configuration and result types (`SourceFlow` and `TunnelFlow` among them), `Termination`, `kMaxFlowsPerCall` |
 | `netgraph/core/dag_cache.hpp` | `DagCache`, `DagCacheMiss` |
 | `netgraph/core/evaluators.hpp` | `capacity`, `batch_capacity`, `sensitivity` and their option and result types |
 
@@ -1271,8 +1593,10 @@ Spelling differences: Python enum members and constants are upper case
 `kUnreachable`). Where Python returns `None` for an unreachable cost (`target_cost`, `route_cost`),
 C++ returns `kUnreachable`; an infinite request is an empty `std::optional` volume, and its
 `remaining` and `requested` are empty too. An optional field that Python reports as `None`
-(`placement`, `selection` and `origin` of a configuration, `offered`, `unadmitted`, `total_cost`,
-`cost_distribution`, the optional outputs) is an empty `std::optional` in C++; the epoch's amounts
+(`placement`, `selection`, `origin` and `weights` of a configuration, `offered`, `unadmitted`,
+`total_cost`, `cost_distribution`, `FlowRecord.entry`, the optional outputs) is an empty
+`std::optional` in C++, and a `None` program, support or black holes a null `std::shared_ptr`
+(`edge_weights` is a shared array, `std::shared_ptr<const std::vector<Amount>>`); the epoch's amounts
 are `Counter128` values. A Python `ValueError` is a `std::invalid_argument` in C++. `spf` takes a
 trailing C++-only `SpfQueue` argument that chooses the search's internal queue; the results never
 depend on it.

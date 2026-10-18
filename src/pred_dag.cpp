@@ -158,36 +158,41 @@ PredDAG PredDAGBuilder::of_edges(const Graph& g, std::span<const EdgeId> edges) 
   out.num_nodes_ = g.num_nodes();
   std::vector<EdgeId> sorted(edges.begin(), edges.end());
   if (!std::is_sorted(sorted.begin(), sorted.end())) std::sort(sorted.begin(), sorted.end());
-  // Entries grouped by child (ascending NodeId), ascending via within a child: a small set by
-  // sorting (child, via) pairs, a larger one by a stable counting sort of the ascending edges by
-  // their child over an N + 1 temporary.
-  std::vector<EdgeId> by_child(sorted.size());
+  // The entries' via edges grouped by child (ascending NodeId), ascending within a child, built in
+  // place: a small set by sorting on (child, via), a larger one by a stable counting sort of the
+  // ascending edges by their child over an N + 1 temporary.
+  auto& via = out.via_;
   if (sorted.size() * 8 < static_cast<std::size_t>(out.num_nodes_)) {
     std::vector<std::pair<NodeId, EdgeId>> keyed(sorted.size());
     for (std::size_t k = 0; k < sorted.size(); ++k) keyed[k] = {edge_dst[static_cast<std::size_t>(sorted[k])], sorted[k]};
     std::sort(keyed.begin(), keyed.end());
-    for (std::size_t k = 0; k < keyed.size(); ++k) by_child[k] = keyed[k].second;
+    via.resize(keyed.size());
+    for (std::size_t k = 0; k < keyed.size(); ++k) via[k] = keyed[k].second;
   } else {
+    via.resize(sorted.size());
     std::vector<std::int32_t> slot(static_cast<std::size_t>(out.num_nodes_) + 1, 0);
     for (EdgeId e : sorted) ++slot[static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)]) + 1];
     for (std::size_t v = 1; v < slot.size(); ++v) slot[v] += slot[v - 1];
-    for (EdgeId e : sorted) {
-      by_child[static_cast<std::size_t>(slot[static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)])]++)] = e;
-    }
+    for (EdgeId e : sorted) via[static_cast<std::size_t>(slot[static_cast<std::size_t>(edge_dst[static_cast<std::size_t>(e)])]++)] = e;
   }
-  out.parents_.resize(by_child.size());
-  out.via_.resize(by_child.size());
-  for (std::size_t k = 0; k < by_child.size(); ++k) {
-    const auto ei = static_cast<std::size_t>(by_child[k]);
+  // The member nodes counted first, so their lists are sized once.
+  std::size_t members = 0;
+  for (std::size_t k = 0; k < via.size(); ++k) {
+    if (k == 0 || edge_dst[static_cast<std::size_t>(via[k])] != edge_dst[static_cast<std::size_t>(via[k - 1])]) ++members;
+  }
+  out.nodes_.reserve(members);
+  out.node_offsets_.reserve(members + 1);
+  out.parents_.resize(via.size());
+  for (std::size_t k = 0; k < via.size(); ++k) {
+    const auto ei = static_cast<std::size_t>(via[k]);
     const NodeId child = edge_dst[ei];
     if (out.nodes_.empty() || out.nodes_.back() != child) {
       if (!out.nodes_.empty()) out.node_offsets_.push_back(static_cast<std::int32_t>(k));
       out.nodes_.push_back(child);
     }
     out.parents_[k] = edge_src[ei];
-    out.via_[k] = by_child[k];
   }
-  if (!out.nodes_.empty()) out.node_offsets_.push_back(static_cast<std::int32_t>(by_child.size()));
+  if (!out.nodes_.empty()) out.node_offsets_.push_back(static_cast<std::int32_t>(via.size()));
   out.edges_ = std::move(sorted);
   return out;
 }
