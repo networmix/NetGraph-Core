@@ -268,4 +268,11 @@ struct SubsetFlow {
                                       std::span<const NodeId> destinations, std::optional<Amount> cap,
                                       std::span<const Amount> source_caps = {});
 
+// The value of solve_subset's flow with every arc's cost taken as 0: one search, then blocking
+// flows over every arc with residual capacity, a maximum flow under `cap` with no cost order (T2's
+// feasibility tests of a size). The same inputs, limits and errors as solve_subset.
+[[nodiscard]] Amount max_flow_subset(const Graph& g, std::span<const EdgeId> edges, std::span<const Amount> caps,
+                                     std::span<const NodeId> sources, std::span<const NodeId> destinations, Amount cap,
+                                     std::span<const Amount> source_caps = {});
+
 } // namespace netgraph::core::detail

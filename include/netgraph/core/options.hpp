@@ -41,7 +41,8 @@ enum class EdgeTieBreak { Deterministic, PreferHigherPriority };
 // units; Headroom is the exact ratio residual / capacity, 0 on an edge of capacity 0. Without a
 // supplied residual, a search reads the static capacity as the unused capacity: Residual and
 // Capacity read the capacity, Headroom 1 (0 on an edge of capacity 0). T1's CSPF reads the
-// unreserved view U: Residual U, Headroom U / C, Capacity C.
+// unreserved view U: Residual U, Headroom U / C, Capacity C. It is a search and T1 comparison
+// only and never enables a controller objective (T2's is Global::prefer_headroom).
 enum class EdgePriority { Residual, Capacity, Headroom };
 
 // `multipath`: absent (the default) is the model's natural shape, all equal-cost walks as a

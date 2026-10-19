@@ -121,6 +121,42 @@ inline Arrays gen_random(int n, int degree, unsigned seed, std::int64_t max_cost
   return a;
 }
 
+// T2's mesh: a bidirectional ring over n nodes plus directed chords up to 4n distinct links in
+// ascending (u, v), full capacities of 2^14, 2^15, 2^16 or 2^17 units (physical at kResolution),
+// each with 5/8 to 8/8 of it free, costs 1..10; heads 0..h-1 toward node n - 1. `free` is in input order, in units.
+struct T2Mesh {
+  Arrays a;
+  std::vector<std::int64_t> free;
+  std::vector<int> heads;
+};
+inline T2Mesh gen_t2_mesh(int n, int h, unsigned seed) {
+  std::mt19937 rng(seed);
+  std::set<std::pair<int, int>> links;
+  for (int i = 0; i < n; ++i) {
+    links.insert({i, (i + 1) % n});
+    links.insert({(i + 1) % n, i});
+  }
+  while (static_cast<int>(links.size()) < 4 * n) {
+    const int u = int(rng() % unsigned(n));  // one draw per statement: the draw order is fixed
+    const int v = int(rng() % unsigned(n));
+    if (u != v) links.insert({u, v});
+  }
+  T2Mesh m;
+  m.a.n = n;
+  for (auto [u, v] : links) {
+    const std::int64_t full = std::int64_t {1} << (14 + rng() % 4);
+    const std::int64_t eighths = 5 + std::int64_t(rng() % 4);
+    const std::int64_t cost = 1 + std::int64_t(rng() % 10);
+    m.a.src.push_back(u);
+    m.a.dst.push_back(v);
+    m.a.cost.push_back(cost);
+    m.a.cap.push_back(double(full) * abaapi::kResolution);
+    m.free.push_back(full * eighths / 8);
+  }
+  for (int i = 0; i < h; ++i) m.heads.push_back(i);
+  return m;
+}
+
 // Bidirectional link: input edges 2l (u -> v) and 2l + 1 (v -> u), same cost and capacity.
 inline void add_link(Arrays& a, int u, int v, std::int64_t cost, double cap) {
   a.src.push_back(u); a.dst.push_back(v); a.cost.push_back(cost); a.cap.push_back(cap);
@@ -975,6 +1011,35 @@ inline std::vector<Row> rows() {
                  std::vector<double> offers;
                  for (int i = 0; i < 32; ++i) offers.push_back(40.0 + 10.0 * i);
                  return Iter([g, fabric, offers] { return abaapi::t1_forward(*fabric, offers); });
+               }});
+  // ---- T2 tunnels (the same fabric and demands; and a mesh: a bidirectional ring plus directed
+  // chords, 4n links, full capacities 2^14..2^17 units, 5/8 to 8/8 of each free, costs 1..10, heads
+  // 0..h-1, destination n-1)
+  auto t2_row = [=](int count, bool up_to, bool headroom) {
+    auto f = gen_fabric3(4, 8, 4, 8, 21);
+    auto g = std::make_shared<Graph>(abaapi::build(f.a));
+    return Iter([g, pairs = t1_pairs(f), count, up_to, headroom] {
+      return abaapi::t2_fabric(*g, pairs, 120.0, count, up_to, headroom);
+    });
+  };
+  r.push_back({"t2.exact16.headroom", "t2",
+               "T2 Global(tunnels=Tunnels(16), prefer_headroom=True), replace(120, design 120) per demand, fabric 4 pods, 12 demands "
+               "on one ledger: sizing, the canonical augmentation with Phi, the lossless bound, Lossless forwarding",
+               [=] { return t2_row(16, false, true); }});
+  r.push_back({"t2.exact16.cost", "t2",
+               "the same without prefer_headroom: sizing and the canonical augmentation without Phi",
+               [=] { return t2_row(16, false, false); }});
+  r.push_back({"t2.upto256.headroom", "t2",
+               "T2 Global(tunnels=Tunnels(256, up_to=True), prefer_headroom=True), the same demands: count selection over 1..256 with "
+               "the proved bounds, then the chosen count's layout",
+               [=] { return t2_row(256, true, true); }});
+  r.push_back({"t2.size.mesh", "t2",
+               "T2 Tunnels(16) without prefer_headroom, replace(+inf) of 10 heads on a 500-node mesh (2000 links, 5/8 to 8/8 free): "
+               "sizing-dominated",
+               [] {
+                 auto m = gen_t2_mesh(500, 10, 1744);
+                 auto g = std::make_shared<Graph>(abaapi::build(m.a));
+                 return Iter([g, m] { return abaapi::t2_mesh(*g, m.free, m.heads, 499, 16, false, false); });
                }});
   // ---- MSD loop
   r.push_back({"msd.loop", "msd",

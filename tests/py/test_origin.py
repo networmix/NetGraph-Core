@@ -174,7 +174,8 @@ def test_path_selection_defaults():
             ),
             "T1 does not accept placement",
         ),
-        # The row, then the columns placement, origin, admission, selection.
+        # The row, then the columns placement, origin, admission, selection;
+        # Global rejects any selection before its row.
         (
             ngc.FlowPolicyConfig(
                 routing=ngc.Global(),
@@ -182,14 +183,17 @@ def test_path_selection_defaults():
                 admission=A.LOSSY,
                 selection=ngc.PathSelection(),
             ),
+            "Global does not accept selection",
+        ),
+        (
+            ngc.FlowPolicyConfig(
+                routing=ngc.Global(), placement=P.MAX_FLOW, admission=A.LOSSY
+            ),
             "Global does not accept placement",
         ),
         (
             ngc.FlowPolicyConfig(
-                routing=ngc.Global(),
-                origin=ORIGIN.EQUAL,
-                admission=A.LOSSY,
-                selection=ngc.PathSelection(),
+                routing=ngc.Global(), origin=ORIGIN.EQUAL, admission=A.LOSSY
             ),
             "MAX_FLOW requires admission=LOSSLESS",
         ),

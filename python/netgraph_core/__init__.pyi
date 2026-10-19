@@ -13,9 +13,9 @@ to this file (``py.typed`` marks the package as typed).
 - Forwarding programs: ``ForwardingProgram`` (with its ``Tunnel`` entries and
   ``ForwardingProgram.from_routes`` over ``Route`` values), ``TunnelStatus``.
 - The policy engine: ``FlowPolicy``, ``FlowPolicyConfig``, the routings ``CostOnly``,
-  ``CapacityAware`` (T1, with ``Tunnels``), ``Global``, ``Pinned``, and ``PlacementResult``
-  (with its ``SourceFlow`` and ``TunnelFlow`` rows and its ``TunnelPlan``), ``OutputOptions``,
-  ``Termination``.
+  ``CapacityAware`` (T1, with ``Tunnels``), ``Global`` (with ``tunnels``: T2), ``Pinned``, and
+  ``PlacementResult`` (with its ``SourceFlow`` and ``TunnelFlow`` rows and its ``TunnelPlan``),
+  ``OutputOptions``, ``Termination``.
 - The shortest-path cache: ``DagCache`` (building and frozen modes), ``DagCacheMiss``.
 - The evaluators: ``capacity``, ``batch_capacity``, ``sensitivity``.
 - The searches: ``spf`` (``Direction``, ``SpfOptions``, ``SpfResult``, ``UNREACHABLE``),
@@ -26,6 +26,7 @@ to this file (``py.typed`` marks the package as typed).
 from __future__ import annotations
 
 import collections.abc
+import fractions
 import typing
 
 import numpy
@@ -311,7 +312,8 @@ class EdgePriority:
     compared exactly as a fraction, 0 on an edge of capacity 0). A search without a residual reads
     the static capacity as the residual: RESIDUAL and CAPACITY read the capacity, HEADROOM 1 (0 on
     an edge of capacity 0). T1's CSPF reads its unreserved view U instead (RESIDUAL U, HEADROOM
-    U / capacity).
+    U / capacity). A search and T1 comparison only: it never enables a controller objective
+    (T2's is Global(prefer_headroom)) and never chooses weights (WeightBasis does).
 
     Members:
 
@@ -696,7 +698,7 @@ class Path:
 class FlowRecord:
     """
     One flow of a ledger, as a snapshot: flow_id (ledger uid, id), owner (the policy's id),
-    sources, destinations, admission, entry (a T1 or Pinned policy's program entry, else None), bundle
+    sources, destinations, admission, entry (a T1, T2 or Pinned policy's program entry, else None), bundle
     (PredDAG: the flow's route),
     route_cost (its minimum walk cost; None when empty), offered (Lossy only, else None),
     delivered, edges [(EdgeId, units)] (carried load) and drops [(EdgeId, units)] (cumulative,
@@ -746,7 +748,7 @@ class FlowRecord:
     @property
     def entry(self) -> int | None:
         """
-        the program entry the record carries (T1 and Pinned: the entry identifier); None for the
+        the program entry the record carries (T1, T2 and Pinned: the entry identifier); None for the
         records kept per roster source (CostOnly, Global)
         """
 
@@ -956,15 +958,16 @@ class TunnelStatus:
 
 class Tunnel:
     """
-    One tunnel (a path entry) of a ForwardingProgram, read-only. index: the entry identifier (T1:
-    j*H + i for round j and roster position i; Global and CostOnly MAX_FLOW: the path's position in
-    the decomposition order; supplied routes: the route's position in the list), never a position in
-    program.tunnels; head; local_index: its position among the head's entries of both kinds;
+    One tunnel (a path entry) of a ForwardingProgram, read-only. index: the entry identifier (T1 and
+    T2: j*H + i for round j and roster position i, T2's dead heads leaving holes; Global and CostOnly
+    MAX_FLOW: the path's position in the decomposition order; supplied routes: the route's position in
+    the list), never a position in program.tunnels; head; local_index: its position among the head's entries of both kinds;
     destination: where its path ends; edges: its EdgeIds in path order; route_cost: the sum of their
     costs (all three None for a tunnel that is down); status: UP, NO_BANDWIDTH or COST_CEILING;
     requested and reserved: T1's strict bandwidth (its request, and what it holds on every link of
-    its path: the request when UP, else 0; 0 for the other models); weight: its integer share among
-    the head's entries (T1: 1 up, 0 down; a controller path: its solved amount).
+    its path: the request when UP, else 0; 0 for the other models); planned: T2's planned bandwidth
+    u (metadata, never held; 0 for the other models); weight: its integer share among the head's
+    entries (T1: 1 up, 0 down; T2: 1; a controller path: its solved amount).
     """
 
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
@@ -983,6 +986,8 @@ class Tunnel:
     def index(self) -> int: ...
     @property
     def local_index(self) -> int: ...
+    @property
+    def planned(self) -> int: ...
     @property
     def requested(self) -> int: ...
     @property
@@ -1039,8 +1044,8 @@ class ForwardingProgram:
     captured source supplies ((source, weight) for every roster source, ascending) of the optimized
     controllers, None for equal sources (round robin over the roster). Each head splits its share by
     highest averages over its entries' weights; identical routes are never merged. CostOnly and Global
-    produce one (FlowPolicy.program, PlacementResult.program), and so does T1 (its tunnels); from_routes builds
-    one from given routes; Pinned forwards one. No public constructor.
+    produce one (FlowPolicy.program, PlacementResult.program), and so do T1 and T2 (their tunnels);
+    from_routes builds one from given routes; Pinned forwards one. No public constructor.
     """
 
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
@@ -1241,10 +1246,10 @@ class CapacityAware:
 
 class Global:
     """
-    Routing: an ideal central controller that sees the whole network. Every positive call re-solves
-    the minimum-cost flow of what the policy already delivers plus this call's request
-    (placed_demand() + volume; what an earlier call could not place is not requested again) over
-    the eligible graph, or exactly over `support` (a PredDAG of the policy's graph, trimmed to the
+    Routing: an ideal central controller that sees the whole network (with `tunnels`: T2, below).
+    Every positive call re-solves the minimum-cost flow of what the policy already delivers plus this
+    call's request (placed_demand() + volume; what an earlier call could not place is not requested
+    again) over the eligible graph, or exactly over `support` (a PredDAG of the policy's graph, trimmed to the
     walks from the sources to the allowed destinations under the Eligibility; every other edge
     carries nothing), on the free capacity plus its own allocation (it may move its own traffic,
     never another's). It takes no placement and no selection. Origin OPTIMIZED (the default): the
@@ -1252,19 +1257,50 @@ class Global:
     round-robin share of the largest total whose shares all fit. Its program is the solve cut into
     paths per source, each a tunnel weighted by its amount. A positive call on a network beyond the
     flow core's int32 numbering raises ValueError (see FlowPolicy.place).
+    T2, Global(tunnels=Tunnels(N)) (support must be None; no selection either): a controller (like
+    a PCE) lays out, for every live head (one reaching a destination over links with free capacity
+    >= 1; the other heads are dead and lose their share), N single-path tunnels with one common
+    whole-unit planned bandwidth: first as large as possible (U), then for a finite design no larger
+    than needed (u), then the cheapest routes, then with prefer_headroom=True the routes that leave
+    the most spare capacity, then one fixed unit-by-unit tie. Tunnels(L, up_to=True): the smallest
+    common count k <= L whose program carries the design (else the best, then the smallest).
+    Traffic splits equally over the heads and over each head's tunnels; planned bandwidth is never
+    held.
     """
 
-    def __init__(self, *, support: PredDAG | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        support: PredDAG | None = None,
+        tunnels: Tunnels | None = None,
+        prefer_headroom: bool = False,
+    ) -> None:
         """
-        Global(*, support=None): support a PredDAG of the policy's graph (checked when a policy is built
-        with it: `support belongs to another graph`) or None for every eligible edge
+        Global(*, support=None, tunnels=None, prefer_headroom=False): support a PredDAG of the policy's
+        graph (checked when a policy is built with it: `support belongs to another graph`) or None for
+        every eligible edge; tunnels a Tunnels (T2; checked when a policy is built with it: the count in
+        [1, 10000], and `Global support and tunnels are mutually exclusive`) or None; prefer_headroom
+        (T2 only; True without tunnels raises `prefer_headroom requires tunnels` when a policy is built
+        with it): the headroom penalty as T2's objective after route cost
         """
 
     def __repr__(self) -> str: ...
     @property
+    def prefer_headroom(self) -> bool:
+        """
+        True: T2 minimizes the headroom penalty after route cost (T2 only)
+        """
+
+    @property
     def support(self) -> PredDAG | None:
         """
         the supplied support (a PredDAG), or None
+        """
+
+    @property
+    def tunnels(self) -> Tunnels | None:
+        """
+        T2's tunnel count per head (a Tunnels), or None
         """
 
 class Pinned:
@@ -1301,21 +1337,23 @@ class Pinned:
 
 class FlowPolicyConfig:
     """
-    One demand's settings: routing (CostOnly, CapacityAware (T1), Global or Pinned), placement
-    (FlowPlacement: required for CostOnly; the other models take none), admission (LOSSLESS by
-    default; LOSSY for CostOnly EQUAL_BALANCED and WEIGHTED, T1 and Pinned), selection (PathSelection;
-    None: PathSelection(); Global and Pinned take none; T1 reads tie_break, priority and multi_edge and
-    rejects multipath=True), origin (Origin; None: the model's default, EQUAL for CostOnly EQUAL_BALANCED
-    and WEIGHTED and for T1, OPTIMIZED for CostOnly MAX_FLOW and Global; Pinned takes none, its program
-    has it), weights (WeightBasis, CostOnly WEIGHTED only; None: CAPACITY) and edge_weights (one integer
-    per edge, given exactly when weights=EXPLICIT; one array shared by every policy built from this
-    configuration). A field that does not apply to the model must stay None. The combination is checked
+    One demand's settings: routing (CostOnly, CapacityAware (T1), Global, Global(tunnels=...) (T2) or
+    Pinned), placement (FlowPlacement: required for CostOnly; the other models take none), admission
+    (LOSSLESS by default; LOSSY for CostOnly EQUAL_BALANCED and WEIGHTED, T1, T2 and Pinned), selection
+    (PathSelection; None: PathSelection(); Global, T2 included, and Pinned take none; T1 reads tie_break,
+    priority and multi_edge and rejects multipath=True), origin (Origin; None: the model's default, EQUAL for CostOnly EQUAL_BALANCED and WEIGHTED, T1 and T2,
+    OPTIMIZED for CostOnly MAX_FLOW and Global; T2 takes OPTIMIZED with one input source only, the same
+    calculation; Pinned takes none, its program has it), weights (WeightBasis, CostOnly WEIGHTED only;
+    None: CAPACITY) and edge_weights (one integer per edge, given exactly when weights=EXPLICIT; one
+    array shared by every policy built from this configuration). A field that does not apply to the model must stay None. The combination is checked
     when a policy or an evaluator uses the configuration (ValueError): the enumeration values, then the
-    model's row (T1: an up_to count first; then placement, origin, admission, selection, weights with
-    edge_weights), then a DagCache (only CostOnly reads one), then T1's parameters (the tunnel count in
-    [1, 10000], max_path_cost, min_unreserved_bandwidth), then edge_weights' length and entries, then the
-    roster and count rules (CostOnly with several input sources rejects multipath=False with
-    PREFER_HIGHER_PRIORITY; T1's roster heads times its tunnel count at most 2^30 - 1).
+    model's row (Global: a selection first, then support and tunnels together, then prefer_headroom
+    without tunnels; T1: an up_to count; then placement, origin,
+    admission, selection, weights with edge_weights), then a DagCache (only CostOnly reads one), then
+    the tunnel models' parameters (the tunnel count in [1, 10000]; T1's max_path_cost and
+    min_unreserved_bandwidth), then edge_weights' length and entries, then the roster and count rules
+    (CostOnly with several input sources rejects multipath=False with PREFER_HIGHER_PRIORITY; T2 with
+    several input sources rejects OPTIMIZED; roster heads times the tunnel count at most 2^30 - 1).
     """
 
     def __init__(
@@ -1572,18 +1610,29 @@ class TunnelFlow:
 
 class TunnelPlan:
     """
-    The tunnel models' setup summary (read-only): count (the tunnels per head), design_demand
-    (the design volume D in units), head_design ((head, RR(D, H, i)) for every roster head in
-    ascending NodeId) and reserved_total (T1's strict holds, counted once per up tunnel: the sum
-    of their requests). Exact ints.
+    The tunnel models' setup summary (read-only): count (the tunnels per head; T2 up to: the
+    chosen count), design_demand (the design volume D in units), head_design ((head, RR(D, H, i))
+    for every roster head in ascending NodeId) and reserved_total (T1's strict holds, counted once
+    per up tunnel: the sum of their requests; 0 for T2). T2 only (None for T1): live_heads,
+    insufficient_resolution (live heads exist but no whole unit per tunnel fits, U == 0: the
+    program has no tunnels), fluid_share (the exact fluid optimum s*, a Fraction), common_share
+    (U), planned_per_tunnel (u), planned_total (K*u), route_cost (the route-cost sum, can exceed
+    2^64), headroom_penalty (with prefer_headroom only) and forwarding_bound (the program's
+    lossless maximum; a dead head's share blocks it). Exact ints.
     """
 
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
     def __repr__(self) -> str: ...
     @property
+    def common_share(self) -> int | None:
+        """
+        T2: U, the largest common whole-unit size
+        """
+
+    @property
     def count(self) -> int:
         """
-        the tunnels per head
+        the tunnels per head (T2 up to: the chosen count)
         """
 
     @property
@@ -1593,15 +1642,64 @@ class TunnelPlan:
         """
 
     @property
+    def fluid_share(self) -> fractions.Fraction | None:
+        """
+        T2: the exact fluid optimum s* (a fractions.Fraction; 0 without a live head); None for T1
+        """
+
+    @property
+    def forwarding_bound(self) -> int | None:
+        """
+        T2: F, the program's lossless maximum on the call's view (a dead head's share blocks it)
+        """
+
+    @property
     def head_design(self) -> tuple[tuple[int, int], ...]:
         """
         ((head, share), ...): every roster head's share RR(D, H, i), ascending NodeId
         """
 
     @property
+    def headroom_penalty(self) -> int | None:
+        """
+        T2 with prefer_headroom: the sum over the links' tunnel slots j of floor(2^32 (B - V + j*u) / B)
+        (B: static capacity; V: free capacity); None without prefer_headroom and for T1
+        """
+
+    @property
+    def insufficient_resolution(self) -> bool | None:
+        """
+        T2: True when live heads exist but no whole unit per tunnel fits (common_share 0, no tunnels)
+        """
+
+    @property
+    def live_heads(self) -> tuple[int, ...] | None:
+        """
+        T2: the heads that reach a destination over links with free capacity >= 1 (ascending); None for T1
+        """
+
+    @property
+    def planned_per_tunnel(self) -> int | None:
+        """
+        T2: u, every tunnel's planned bandwidth
+        """
+
+    @property
+    def planned_total(self) -> int | None:
+        """
+        T2: K*u over the K tunnels
+        """
+
+    @property
     def reserved_total(self) -> int:
         """
         the strict holds of the up tunnels, each tunnel's request counted once
+        """
+
+    @property
+    def route_cost(self) -> int | None:
+        """
+        T2: the sum of cost * tunnel count over the links (exact; can exceed 2^64)
         """
 
 class PlacementResult:
@@ -1611,8 +1709,8 @@ class PlacementResult:
     request), delivery_delta (new minus old delivery, may be negative), call_drops [(EdgeId, units)],
     call_source_loss, termination, routes_changed, weights_changed and reservations_changed. The
     demand's state after the call (totals of the epoch): program (the installed ForwardingProgram;
-    evaluate: the computed one; None before the first preparation), plan (a TunnelPlan for T1; None for
-    every other model), requested (float('inf') after an infinite request), offered (LOSSY: the traffic sent; None when LOSSLESS), admitted, delivered, unadmitted
+    evaluate: the computed one; None before the first preparation), plan (a TunnelPlan for T1 and T2;
+    None for every other model), requested (float('inf') after an infinite request), offered (LOSSY: the traffic sent; None when LOSSLESS), admitted, delivered, unadmitted
     (LOSSLESS: requested - delivered, None after an infinite request; LOSSY: 0), source_loss, drops
     [(EdgeId, units)], by_source (one SourceFlow per normalized input source, ascending NodeId),
     by_tunnel (one TunnelFlow per program tunnel, ascending index; an alternative view, never added to
@@ -1726,8 +1824,8 @@ class PlacementResult:
     @property
     def plan(self) -> TunnelPlan | None:
         """
-        T1: the TunnelPlan of the program after the call; None for every other model (Pinned over a T1
-        program too)
+        T1 and T2: the TunnelPlan of the program after the call; None for every other model (Pinned over
+        a tunnel program too)
         """
 
     @property
@@ -1794,7 +1892,7 @@ class PlacementResult:
     def total_cost(self) -> int | None:
         """
         controllers (Global, CostOnly MAX_FLOW): the exact sum of cost * flow over the policy's
-        allocation; None for the other models (T1, Pinned)
+        allocation; None for the other models (T1, T2, Pinned)
         """
 
     @property
@@ -1935,14 +2033,15 @@ class FlowPolicy:
         routing reads it, another model rejects it) belong to the ledger's graph; the policy keeps the
         ledger, elig and cache alive (a Pinned policy shares its program and black holes). The roster
         (the sources that statically reach an allowed destination, over allowed edges whatever their
-        capacity, T1's heads; Pinned: the program's heads that reach an allowed destination over its basis
+        capacity, the tunnel models' heads; Pinned: the program's heads that reach an allowed destination over its basis
         under elig) is fixed here. Everything is validated before the policy binds, in this order: the endpoints, the
         graph of elig, the program, the support, the cache and the black holes (`foreign Eligibility:
         built for another graph`, `program belongs to another graph`, `support belongs to another graph`,
         `foreign DagCache: bound to another graph`, `black_holes belongs to another graph`), the
-        configuration (FlowPolicyConfig's order), then the pooled single-path rule, T1's tunnel limit
-        (`tunnel limit exceeded: <H> heads x <N> tunnels > 1073741823`) and a Pinned program's endpoints
-        (`program endpoints do not match policy endpoints`).
+        configuration (FlowPolicyConfig's order), then the pooled single-path rule, T2's several-sources
+        rule (`T2 with several sources requires origin=EQUAL`), the tunnel limit (`tunnel limit exceeded:
+        <H> heads x <N> tunnels > 1073741823`) and a Pinned program's endpoints (`program endpoints do not
+        match policy endpoints`).
         """
 
     def evaluate(
@@ -1955,7 +2054,7 @@ class FlowPolicy:
         """
         A full, independent computation and forwarding of offer (int units or float('inf')) from the
         policy's own released view (the residual plus its own carried load; T1 sets up on the unreserved
-        capacity with its own holds released), as replace would do it -> PlacementResult (the computed
+        capacity with its own holds released; T2 lays out on the released residual), as replace would do it -> PlacementResult (the computed
         program and plan, the flags replace would set, the outputs of the evaluated state); publishes
         nothing, creates no record, books no hold and leaves the epoch as it was. design_demand as for
         replace. LOSSY requires a finite offer.
@@ -1970,8 +2069,8 @@ class FlowPolicy:
     ) -> PlacementResult:
         """
         Forward a full new offer over the installed program, with no route computation and no setup, on the
-        released view -> PlacementResult; a new epoch like replace, the program and T1's holds kept (no
-        flag; T1's records are recreated with the same reserved_edges). LOSSLESS admits the
+        released view -> PlacementResult; a new epoch like replace, the program, its plan and T1's holds
+        kept (no flag; T1's records are recreated with the same reserved_edges). LOSSLESS admits the
         program's lossless bound up to the offer; LOSSY sends the offer. black_holes (an Eligibility of the
         graph): the nodes and edges it excludes are black holes for this call (stale forwarding: traffic
         reaching one is dropped there; a black-holed source loses its share). In this order: Pinned raises
@@ -1986,8 +2085,8 @@ class FlowPolicy:
         outputs: OutputOptions | None = None,
     ) -> PlacementResult:
         """
-        Place volume (int units in [0, 2^62), or float('inf')) all or nothing -> PlacementResult. T1 raises
-        `T1 does not support incremental placement` (also for 0).
+        Place volume (int units in [0, 2^62), or float('inf')) all or nothing -> PlacementResult. T1 and T2
+        raise `<T1 or T2> does not support incremental placement` (also for 0).
         Requests add up within an epoch (from construction, the last remove(), replace() or forward());
         after float('inf') any finite request is rejected, 0 included. A request of 0 places nothing and
         reports the current state. CostOnly prepares its program at the epoch's first positive request;
@@ -2040,10 +2139,12 @@ class FlowPolicy:
         PlacementResult: the old records and holds are retired (their ids never live again), new ones
         created, and a new epoch starts at this offer (delivery may go down: delivery_delta). CostOnly
         prepares its routes again; a controller re-solves; T1 sets its tunnels up again for the design and
-        books their holds; Pinned forwards its program. design_demand (T1 only: int units, or
-        float('inf'), which T1 rejects; None: equal to the offer): T1 needs a finite design (`T1 requires a
-        finite design demand`); every other model raises `<model> does not accept design_demand`. In this
-        order: the offer, LOSSY's finite offer, then the design demand (the model, its domain, finiteness).
+        books their holds; T2 lays its tunnels out again for the design (planned bandwidth, never held);
+        Pinned forwards its program. design_demand (T1 and T2: int units, or float('inf'); None: equal to
+        the offer): T1 needs a finite design (`T1 requires a finite design demand`), T2 takes an unlimited
+        one (its largest common size); every other model raises `<model> does not accept design_demand`.
+        In this order: the offer, LOSSY's finite offer, then the design demand (the model, its domain,
+        finiteness).
         """
 
     @property
@@ -2065,12 +2166,13 @@ class QueryOptions:
     the static Eligibility (None: all allowed), the DagCache (None: private per worker), the
     optional outputs of each result (sensitivity: of its baseline), design_demand (int units or
     float('inf'); None: absent): T1's design, always required and finite (`T1 capacity requires
-    design_demand`, `T1 requires a finite design demand`), rejected by every other model
-    (`<model> does not accept design_demand`), and offered (int units or float('inf'); None:
-    absent), the offer of a T1 or Pinned LOSSY evaluation: required and finite there (`<T1 or
-    Pinned> LOSSY capacity requires finite offered`); a LOSSLESS model rejects it (`<model>
-    LOSSLESS capacity does not accept offered`), CostOnly LOSSY too (`CostOnly LOSSY capacity
-    uses first-hop injection`).
+    design_demand`, `T1 requires a finite design demand`); T2's design (None: unlimited when
+    LOSSLESS, the offered amount when LOSSY); rejected by every other model (`<model> does not
+    accept design_demand`); and offered (int units or float('inf'); None: absent), the offer of a
+    T1, T2 or Pinned LOSSY evaluation: required and finite there (`<T1 or T2 or Pinned> LOSSY
+    capacity requires finite offered`; T2 takes a finite design instead when offered is None); a
+    LOSSLESS model rejects it (`<model> LOSSLESS capacity does not accept offered`), CostOnly LOSSY
+    too (`CostOnly LOSSY capacity uses first-hop injection`).
     """
 
     def __init__(
@@ -2098,7 +2200,7 @@ class QueryOptions:
     @property
     def design_demand(self) -> int | float | None:
         """
-        T1's design volume (int units, or float('inf')); None: absent
+        the tunnel models' design volume (int units, or float('inf')); None: absent
         """
 
     @property
@@ -2110,7 +2212,7 @@ class QueryOptions:
     @property
     def offered(self) -> int | float | None:
         """
-        the offer of a T1 or Pinned LOSSY evaluation (int units, or float('inf')); None: absent
+        the offer of a T1, T2 or Pinned LOSSY evaluation (int units, or float('inf')); None: absent
         """
 
     @property
@@ -2373,7 +2475,9 @@ def capacity(
     """
     place(+inf) of a FlowPolicy with opts.config on a fresh ledger of the graph (Pinned LOSSY:
     place(opts.offered); T1: evaluate(+inf or opts.offered, design_demand=opts.design_demand), the
-    lossless bound of the tunnels set up for the design, or what they deliver of offered) -> PlacementResult.
+    lossless bound of the tunnels set up for the design, or what they deliver of offered; T2: the same
+    with an unlimited design when LOSSLESS and none is given, and the design as the offer when LOSSY
+    without offered) -> PlacementResult.
     The exact maximum flow is Global() (the optimized origin); with origin=EQUAL, the largest total whose
     round-robin source shares are all carried. A supplied frozen cache raises DagCacheMiss for an absent
     key, unchanged.

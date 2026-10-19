@@ -1,10 +1,14 @@
 """An independent reference for T1 (CapacityAware(Tunnels(N)), contract 6.2 to 6.5, 8.3,
-8.4), the property tests of test_tunnels_t1.py. It restates the contract in plain Python and calls
-nothing of the library: the requests in round order, every attempt a brute force over the simple
-paths (a path stops at the first destination) with the bandwidth filter, the collapse of parallel
-members and the single-path order, the cost ceilings with the pool baseline c0, the forwarding
-(round robin over the heads, then over a head's up tunnels), the lossless bound, the replay under
-a mask and the records per entry.
+8.4) and T2 (Global(tunnels=Tunnels(N)), 7.2 to 7.8), the property tests of test_tunnels_t1.py and
+test_tunnels_t2.py. It restates the contract in plain Python and calls nothing of the library: for
+T1 the requests in round order, every attempt a brute force over the simple paths (a path stops at
+the first destination) with the bandwidth filter, the collapse of parallel members and the
+single-path order, the cost ceilings with the pool baseline c0; for T2 the live heads by simple
+paths, the quota flow by augmenting paths (Edmonds-Karp), U by bisection over the integer sizes,
+s* by trying every candidate fraction V[e] / j, the objectives by enumerating the count vectors of
+path multisets, the canonical augmentation with Bellman-Ford, the cut into unit walks, and "up to"
+over every count without pruning; for both the forwarding (round robin over the heads, then over a
+head's up tunnels), the lossless bound, the replay under a mask and the records per entry.
 
 The Lossy loss rule is program_oracle.lossy (the synchronous rounds from zero, the nested
 split at each link): the tunnels' paths here are drawn over small graphs, and the property tests
@@ -15,7 +19,8 @@ excluded edges); an edge is allowed when neither it nor an endpoint is excluded.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import itertools
+from dataclasses import dataclass, field
 from fractions import Fraction
 
 import program_oracle
@@ -93,6 +98,7 @@ class Tunnel:
     status: str
     path: list | None = None
     cost: int | None = None
+    planned: int = 0
 
     @property
     def up(self):
@@ -374,3 +380,376 @@ def termination(offer, roster, tunnels, alive, lossy_admission, admitted):
     if lossy_admission:
         return "COMPLETE"
     return "COMPLETE" if admitted == offer else "EXHAUSTED"
+
+
+# ---------------------------------------------------------------- T2 (7.2 to 7.8)
+
+SCALE = 2**32
+
+
+def t2_live(edges, roster, dests, V, mask=None):
+    """The live heads: those with a simple path whose every link has V >= 1 (7.2)."""
+    ok = allowed(edges, mask)
+    xn = set(mask[0]) if mask else set()
+    live_dests = [d for d in dests if d not in xn]
+    return [
+        h
+        for h in roster
+        if any(
+            all(V[e] >= 1 for e in p) for p in simple_paths(edges, ok, h, live_dests)
+        )
+    ]
+
+
+def _max_flow(n, arcs, s, t):
+    """Edmonds-Karp on (u, v, capacity) arcs; exact integers."""
+    cap = {}
+    adj = [set() for _ in range(n)]
+    for u, v, c in arcs:
+        cap[(u, v)] = cap.get((u, v), 0) + c
+        cap.setdefault((v, u), 0)
+        adj[u].add(v)
+        adj[v].add(u)
+    flow = 0
+    while True:
+        prev = {s: None}
+        queue = [s]
+        for u in queue:
+            for v in sorted(adj[u]):
+                if v not in prev and cap[(u, v)] > 0:
+                    prev[v] = u
+                    queue.append(v)
+        if t not in prev:
+            return flow
+        step, v = None, t
+        while prev[v] is not None:
+            step = cap[(prev[v], v)] if step is None else min(step, cap[(prev[v], v)])
+            v = prev[v]
+        v = t
+        while prev[v] is not None:
+            cap[(prev[v], v)] -= step
+            cap[(v, prev[v])] += step
+            v = prev[v]
+        flow += step
+
+
+def t2_fits(edges, ok, roster, live, dests, k, size, V):
+    """Do k tunnels of the common size `size` fit at every live head? The quota flow of 7.2: link
+    capacity min(K, floor(V / size)), an arc of k from a root to each live head, K from each
+    destination to a sink; links leaving a destination are not in it."""
+    heads = live
+    K = len(heads) * k
+    n = 1 + max(max(u, v) for u, v, _, _ in edges)
+    root, sink = n, n + 1
+    arcs = [
+        (u, v, min(K, int(Fraction(V[e]) / size)))
+        for e, (u, v, _, _) in enumerate(edges)
+        if ok[e] and u not in dests
+    ]
+    arcs += [(root, h, k) for h in heads]
+    arcs += [(d, sink, K) for d in dests]
+    return _max_flow(n + 2, arcs, root, sink) == K
+
+
+def t2_common(edges, ok, roster, live, dests, k, V):
+    """U: the largest integer size that fits (feasibility decreases in the size: bisection over
+    [1, max V]); 0 when none."""
+    lo, hi = 0, max(V, default=0) + 1  # lo fits (0 by convention), hi does not
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if t2_fits(edges, ok, roster, live, dests, k, Fraction(mid), V):
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def t2_fluid(edges, ok, roster, live, dests, k, V):
+    """s*: the largest fraction V[e] / j (j <= K) that fits (7.2)."""
+    K = len(live) * k
+    candidates = sorted(
+        {Fraction(v, j) for v in V if v for j in range(1, K + 1)}, reverse=True
+    )
+    for c in candidates:
+        if t2_fits(edges, ok, roster, live, dests, k, c, V):
+            return c
+    return Fraction(0)
+
+
+def t2_working(U, roster, live, k, D):
+    """u (7.2): for a finite design, min(U, max(1, max over live heads of ceil(RR(D, H, i) / k))),
+    the shares over the whole roster; unlimited: U."""
+    if D is None:
+        return U
+    H = len(roster)
+    need = max(-(-rr(D, H, roster.index(h)) // k) for h in live)
+    return min(U, max(1, need))
+
+
+def slot_price(B, V, j, u):
+    """The headroom price of slot j of an edge (7.3)."""
+    return SCALE * (B - V + j * u) // B
+
+
+def t2_objectives(edges, x, V, u, headroom):
+    J = sum(edges[e][3] * x[e] for e in range(len(edges)))
+    phi = (
+        sum(
+            slot_price(edges[e][2], V[e], j, u)
+            for e in range(len(edges))
+            if edges[e][2] > 0
+            for j in range(1, x[e] + 1)
+        )
+        if headroom
+        else 0
+    )
+    return J, phi
+
+
+def t2_best_objectives(edges, ok, live, dests, k, u, V, headroom):
+    """The minimum (J, Phi) over every count vector of k simple paths per live head with x[e] <=
+    min(K, floor(V[e] / u)), by enumerating the path multisets (small graphs only)."""
+    K = len(live) * k
+    bound = [min(K, v // u) for v in V]
+    choices = []
+    for h in live:
+        paths = simple_paths(edges, ok, h, dests)
+        choices.append(list(itertools.combinations_with_replacement(paths, k)))
+    best = None
+    for pick in itertools.product(*choices):
+        x = [0] * len(edges)
+        for multiset in pick:
+            for p in multiset:
+                for e in p:
+                    x[e] += 1
+        if any(a > b for a, b in zip(x, bound, strict=True)):
+            continue
+        value = t2_objectives(edges, x, V, u, headroom)
+        best = value if best is None or value < best else best
+    return best
+
+
+def t2_canonical(edges, ok, live, dests, k, u, V, headroom):
+    """The canonical unit augmentation (7.3): K single units from zero, each on the residual path
+    from the root to the sink of minimum (J, Phi) price, then the fewest arcs, then the smallest
+    sequence of arc keys: (0, EdgeId, direction) for links, (1, head, direction) for root arcs,
+    (2, destination, direction) for sink arcs (forward 0, reverse 1). Bellman-Ford distances."""
+    n = 1 + max(max(a, b) for a, b, _, _ in edges)
+    root, sink = n, n + 1
+    K = len(live) * k
+    bound = [min(K, v // u) for v in V]
+    x = [0] * len(edges)
+    rootf = {h: 0 for h in live}
+    sinkf = {d: 0 for d in dests}
+
+    def price(e, j):
+        B = edges[e][2]
+        return slot_price(B, V[e], j, u) if headroom and B > 0 else 0
+
+    for _ in range(K):
+        arcs = []  # (tail, head, price, key, action)
+        for e, (a, b, _, c) in enumerate(edges):
+            if not ok[e] or a in dests:
+                continue
+            cj = c
+            if x[e] < bound[e]:
+                arcs.append((a, b, (cj, price(e, x[e] + 1)), (0, e, 0), ("x", e, 1)))
+            if x[e] > 0:
+                arcs.append((b, a, (-cj, -price(e, x[e])), (0, e, 1), ("x", e, -1)))
+        for h in live:
+            if rootf[h] < k:
+                arcs.append((root, h, (0, 0), (1, h, 0), ("r", h, 1)))
+            if rootf[h] > 0:
+                arcs.append((h, root, (0, 0), (1, h, 1), ("r", h, -1)))
+        for d in dests:
+            if sinkf[d] < K:
+                arcs.append((d, sink, (0, 0), (2, d, 0), ("s", d, 1)))
+            if sinkf[d] > 0:
+                arcs.append((sink, d, (0, 0), (2, d, 1), ("s", d, -1)))
+        dist = {root: (0, 0)}
+        for _round in range(n + 3):
+            changed = False
+            for a, b, p, _, _ in arcs:
+                if a in dist:
+                    cand = (dist[a][0] + p[0], dist[a][1] + p[1])
+                    if b not in dist or cand < dist[b]:
+                        dist[b], changed = cand, True
+            if not changed:
+                break
+        assert not changed and sink in dist, "a negative cycle or no path"
+
+        on = [
+            (a, b, p, key, act)
+            for a, b, p, key, act in arcs
+            if a in dist
+            and b in dist
+            and (dist[a][0] + p[0], dist[a][1] + p[1]) == dist[b]
+        ]
+        hop = {sink: 0}
+        frontier = [sink]
+        while frontier:
+            nxt = []
+            for v in frontier:
+                for arc in on:
+                    if arc[1] == v and arc[0] not in hop:
+                        hop[arc[0]] = hop[v] + 1
+                        nxt.append(arc[0])
+            frontier = nxt
+        v = root
+        while v != sink:
+            arc = min(
+                (a for a in on if a[0] == v and hop.get(a[1]) == hop[v] - 1),
+                key=lambda a: a[3],
+            )
+            kind, ident, step = arc[4]
+            if kind == "x":
+                x[ident] += step
+            elif kind == "r":
+                rootf[ident] += step
+            else:
+                sinkf[ident] += step
+            v = arc[1]
+    return x
+
+
+def t2_program(edges, roster, live, dests, k, x, u):
+    """The tunnels (7.3): x cut, live head by live head in ascending NodeId, into unit walks along
+    the smallest positive EdgeId to a destination; each head's walks sorted by EdgeId sequence;
+    in round order (local index j, then roster position i), index j * H + i."""
+    rem = list(x)
+    H = len(roster)
+    per_head = {}
+    for h in live:
+        walks = []
+        for _ in range(k):
+            cur, walk = h, []
+            while cur not in dests:
+                e = next(
+                    e for e, (a, _, _, _) in enumerate(edges) if a == cur and rem[e] > 0
+                )
+                rem[e] -= 1
+                walk.append(e)
+                cur = edges[e][1]
+            walks.append(walk)
+        per_head[h] = sorted(walks)
+    assert not any(rem), "the walks do not cover x"
+    tunnels = []
+    for j in range(k):
+        for i, h in enumerate(roster):
+            if h not in per_head:
+                continue
+            path = per_head[h][j]
+            index = j * H + i
+            t = Tunnel(index, h, i, j, 0, UP, path, cost_of(edges, path), u)
+            tunnels.append(t)
+    return tunnels
+
+
+@dataclass
+class T2Plan:
+    roster: list
+    live: list
+    count: int
+    U: int = 0
+    fluid: Fraction = Fraction(0)
+    u: int = 0
+    x: list = field(default_factory=list)
+    tunnels: list = field(default_factory=list)
+    J: int = 0
+    phi: int = 0
+    F: int = 0
+    scores: list = field(default_factory=list)
+
+    @property
+    def insufficient(self):
+        return bool(self.live) and self.U == 0
+
+
+def t2_bound(edges, plan, V):
+    """F (7.6): the program's 8.3 lossless maximum: every roster head's share counts, a dead head's
+    included (it blocks every total that gives it a unit)."""
+    if not plan.roster:
+        return 0
+    return lossless_bound(edges, plan.roster, plan.tunnels, V)
+
+
+def t2_at(edges, ok, roster, live, dests, k, V, D, headroom, U=None):
+    """The T2 program at count k for the design D (None: unlimited)."""
+    plan = T2Plan(roster, live, k)
+    if not live:
+        return plan
+    plan.U = U if U is not None else t2_common(edges, ok, roster, live, dests, k, V)
+    plan.fluid = t2_fluid(edges, ok, roster, live, dests, k, V)
+    if plan.U == 0:
+        return plan  # no tunnels; program_roster keeps the roster
+    plan.u = t2_working(plan.U, roster, live, k, D)
+    plan.x = t2_canonical(edges, ok, live, dests, k, plan.u, V, headroom)
+    plan.tunnels = t2_program(edges, roster, live, dests, k, plan.x, plan.u)
+    plan.J, plan.phi = t2_objectives(edges, plan.x, V, plan.u, headroom)
+    return plan
+
+
+def live_share(roster, live, z):
+    """G(z): the live heads' part of the round-robin total z."""
+    H = len(roster)
+    return sum(rr(z, H, i) for i, h in enumerate(roster) if h in live)
+
+
+def live_budget(edges, plan, V):
+    """F'(k) (7.7): the largest total whose live shares fit on the program (dead shares
+    ignored)."""
+    roster = plan.roster
+
+    def fits(z):
+        amounts, _ = entry_shares(z, roster, plan.tunnels)
+        return all(
+            a <= c for a, c in zip(loads(edges, plan.tunnels, amounts), V, strict=True)
+        )
+
+    M = len(roster) * plan.count
+    lo, hi = 0, M * (plan.U + 1)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (mid, hi) if fits(mid) else (lo, mid)
+    return lo
+
+
+def t2(
+    edges, sources, dests, N, D=None, *, up_to=False, V=None, mask=None, headroom=False
+):
+    """T2 for Tunnels(N) or Tunnels(N, up_to=True) on the free capacity V (default: the
+    capacities). Returns the T2Plan with its forwarding bound, and for "up to" the per-count
+    scores."""
+    V = list(V) if V is not None else [c for _, _, c, _ in edges]
+    ok = allowed(edges, mask)
+    xn = set(mask[0]) if mask else set()
+    live_dests = [d for d in dests if d not in xn]
+    roster = roster_of(edges, sources, dests, mask)
+    live = t2_live(edges, roster, dests, V, mask)
+    scores = []
+    if up_to:
+        target = live_share(roster, live, D) if D is not None else None
+        for k in range(1, N + 1):
+            at = t2_at(edges, ok, roster, live, live_dests, k, V, None, headroom)
+            budget = live_budget(edges, at, V) if at.tunnels else 0
+            z = budget if D is None else min(D, budget)
+            scores.append(live_share(roster, live, z) if at.U else 0)
+        hit = [
+            k for k in range(1, N + 1) if target is not None and scores[k - 1] == target
+        ]
+        chosen = (
+            hit[0] if hit else min(range(1, N + 1), key=lambda k: (-scores[k - 1], k))
+        )
+    else:
+        chosen = N
+    plan = t2_at(edges, ok, roster, live, live_dests, chosen, V, D, headroom)
+    if not live:
+        plan.count = 1 if up_to else N
+    plan.F = t2_bound(edges, plan, V)
+    plan.scores = scores
+    return plan
+
+
+def program_roster(plan):
+    """The roster a T2 program installs (7.8): the policy's whole roster, also without tunnels."""
+    return plan.roster

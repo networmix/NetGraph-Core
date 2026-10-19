@@ -66,7 +66,7 @@ struct ProgramData {
   std::span<const NodeId> destinations {};  // ascending
   std::vector<Tunnel> tunnels {};
   std::optional<std::vector<std::pair<NodeId, Amount>>> source_weights {};
-  // The injection: the roster (the heads with an entry, ascending; T1: the policy's roster), its
+  // The injection: the roster (the heads with an entry, ascending; T1, T2: the policy's roster), its
   // captured weights (empty: equal sources), every entry in ascending index, per roster slot its
   // entries (ascending index).
   std::span<const NodeId> roster {};
@@ -145,6 +145,23 @@ struct ControllerPath {
   Amount amount {0};
 };
 
+// A flow cut into paths (4.1), source by source in ascending NodeId: while a source has supply
+// left (its net outflow), take the smallest EdgeId sequence with positive remaining flow, stopping
+// at the first destination; assign min(supply left, smallest remaining edge flow on that walk),
+// subtract it, record the walk as one path (`slot`: the source's position in `roster`). `edges`
+// (ascending) are the flow's edges and `rem` is aligned with them, or `edges` is empty and `rem`
+// has one entry per EdgeId. Per source also its share (the edges and amounts its paths use,
+// ascending) and its supply. A unit flow cut this way gives the unit walks of T2's program (each
+// path repeated `amount` times). std::logic_error when the flow is not conserved, has a positive
+// cycle or is not covered by the walks.
+struct Decomposition {
+  std::vector<ControllerPath> paths {};
+  std::vector<std::vector<std::pair<EdgeId, Amount>>> shares {};
+  std::vector<Amount> supplies {};
+};
+[[nodiscard]] Decomposition decompose(const Graph& g, std::span<const EdgeId> edges, std::vector<Amount> rem,
+                                      std::span<const NodeId> roster, std::span<const NodeId> dests);
+
 // A controller program's replay basis: the topology under the producer's exclusions (its excluded
 // nodes and edges, ascending), per roster source its route, or one edge set for every source
 // (both shared, not copied).
@@ -172,8 +189,8 @@ struct ControllerBasis {
     const Graph& g, std::span<const NodeId> sources, std::span<const NodeId> destinations,
     std::span<const NodeId> roster, std::shared_ptr<const KernelPlan> plan, std::vector<ProgramEntry> entries);
 
-// A T1 tunnel as setup leaves it: its roster slot and round, request, status and (up) its path in
-// walk order with its cost.
+// A T1 or T2 tunnel as its computation leaves it: its roster slot and round, T1's request, its
+// status and (up) its path in walk order with its cost, T2's planned bandwidth (0 for T1).
 struct SetupTunnel {
   std::int32_t slot {0};
   std::int32_t round {0};
@@ -181,12 +198,14 @@ struct SetupTunnel {
   TunnelStatus status {TunnelStatus::Up};
   std::vector<EdgeId> edges {};
   Cost cost {0};
+  Amount planned {0};
 };
 
-// The program of T1: the policy's roster (every head, an entry or not), its tunnels in round
-// order (`tunnels`: round-major, heads in roster order, so index = round * H + slot), weight 1 up
-// and 0 down, reserved = requested up and 0 down; equal sources; the replay basis the topology
-// under the policy's exclusions (ascending).
+// The program of T1 or T2: the policy's roster (every head, an entry or not: T2's dead heads have
+// none), its tunnels in round order (`tunnels`: round-major, heads in roster order, so index =
+// round * H + slot, a dead head's positions left as holes), weight 1 up and 0 down, reserved =
+// requested up and 0 down, planned as given; equal sources; the replay basis the topology under
+// the policy's exclusions (ascending).
 [[nodiscard]] std::shared_ptr<const ForwardingProgram> tunnel_program(
     const Graph& g, std::span<const NodeId> sources, std::span<const NodeId> destinations,
     std::span<const NodeId> roster, std::vector<SetupTunnel> tunnels, std::span<const NodeId> excluded_nodes,

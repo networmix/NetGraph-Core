@@ -73,9 +73,10 @@ struct Mode {
   FlowPolicyConfig cfg;
   std::vector<NodeId> sources;
   std::vector<NodeId> destinations;
-  // The evaluators' offer (a T1 or Pinned Lossy evaluation requires a finite one).
+  // The evaluators' offer (a T1 or Pinned Lossy evaluation requires a finite one; T2's takes a
+  // finite design instead).
   std::optional<std::optional<Amount>> offered {};
-  // T1's design: the evaluators' design_demand and the design of its calls.
+  // The tunnel models' design: the evaluators' design_demand and the design of their calls.
   std::optional<std::optional<Amount>> design {};
 };
 
@@ -170,6 +171,20 @@ std::vector<Mode> t1_modes() {
                  {.routing = CapacityAware {Tunnels {3}, Stretch {2.0}, 1},
                   .admission = Admission::Lossy,
                   .selection = PathSelection(EdgeTieBreak::PreferHigherPriority, EdgePriority::Residual, false, false)},
+                 S, D, Amount {6}, Amount {9}});
+  return out;
+}
+
+// T2's modes: no place either. Exact with prefer_headroom, Lossless (sizing, s*, the augmentation with
+// Phi, the decomposition, the lossless bound F); "up to" Lossy (every count's sizing, objectives
+// and budget, then the chosen count's layout).
+std::vector<Mode> t2_modes() {
+  const std::vector<NodeId> S = {0, 1};
+  const std::vector<NodeId> D = {5, 6};
+  std::vector<Mode> out;
+  out.push_back({"t2 exact headroom", {.routing = Global {.tunnels = Tunnels {2}, .prefer_headroom = true}}, S, D,
+                 std::nullopt, Amount {8}});
+  out.push_back({"t2 up to lossy", {.routing = Global {.tunnels = Tunnels {2, true}}, .admission = Admission::Lossy},
                  S, D, Amount {6}, Amount {9}});
   return out;
 }
@@ -1547,5 +1562,176 @@ TEST(PolicyFaults, T1HoldScratchGrowthFailureLeavesNothingHalfGrown) {
                                     from_small, prior);
       if (::testing::Test::HasFailure()) return;
     }
+  }
+}
+
+// ---------------------------------------------------------------- T2
+
+// T2's calls (replace, evaluate, replace(0), an unlimited design, forward with and without black
+// holes) with a third party's load and a T1 owner's holds on the ledger (T2 reads the residual):
+// every allocation of the call (the quota flows, the fluid search, the augmentation's arrays and
+// heap, the decomposition, "up to"'s per-count programs, the program, the bound, the forwarding)
+// fails once through the shared placement sweep: a failure changes neither the ledger nor the
+// epoch and leaves no allocation live.
+TEST(PolicyFaults, T2CallsFailAtomically) {
+  const auto g = graph();
+  const auto inv = id_of_input(*g);
+  const EdgeId dark_edges[] = {inv[4], inv[6]};
+  const Eligibility dark = g->eligibility({}, dark_edges);
+  const OutputOptions all {.edge_flows = true, .residual = true, .bottleneck = true, .reservation_edge_flows = true};
+  const std::optional<std::optional<Amount>> unlimited {std::in_place, std::nullopt};
+  struct Op {
+    std::string name;
+    std::function<PlacementResult(FlowPolicy&)> call;
+  };
+  for (const auto& m : t2_modes()) {
+    const bool lossy = m.cfg.admission == Admission::Lossy;
+    const auto design = *m.design;
+    std::vector<Op> ops = {{"evaluate", [&](FlowPolicy& p) { return p.evaluate(6, design, all); }},
+                           {"replace", [&](FlowPolicy& p) { return p.replace(6, design, all); }},
+                           {"replace to zero", [&](FlowPolicy& p) { return p.replace(0, design); }},
+                           {"replace unlimited design", [&](FlowPolicy& p) { return p.replace(7, unlimited); }},
+                           {"forward", [](FlowPolicy& p) { return p.forward(6, nullptr, {true, true, true}); }},
+                           {"forward black holes", [&](FlowPolicy& p) { return p.forward(6, &dark); }}};
+    if (!lossy) ops.push_back({"replace +inf", [&](FlowPolicy& p) { return p.replace(std::nullopt, design); }});
+    for (const auto& op : ops) {
+      const std::string where = m.name + " / " + op.name;
+      const auto setup = [&](FlowLedger& fg) {
+        auto third = std::shared_ptr<FlowPolicy>(third_party(fg, *g));
+        auto holder = std::make_shared<FlowPolicy>(fg, std::vector<NodeId> {1}, std::vector<NodeId> {6},
+                                                   FlowPolicyConfig {.routing = CapacityAware {Tunnels {1}}});
+        (void)holder->replace(0, 2);
+        auto p = std::make_shared<FlowPolicy>(fg, m.sources, m.destinations, m.cfg);
+        (void)p->replace(3, design);
+        FlowPolicy* policy = p.get();
+        auto keep = std::make_shared<std::vector<std::shared_ptr<FlowPolicy>>>(
+            std::vector<std::shared_ptr<FlowPolicy>> {std::move(third), std::move(holder), std::move(p)});
+        return Staged {keep, policy};
+      };
+      const long injected = sweep_placement(g, where, setup, op.call);
+      if (::testing::Test::HasFailure()) return;
+      EXPECT_GT(injected, 0) << where;  // not vacuous
+    }
+  }
+}
+
+// A T2 policy's construction fails at every allocation without binding; a clean construction then
+// lays out like the reference.
+TEST(PolicyFaults, T2ConstructionFailsWithoutBinding) {
+  const auto g = graph();
+  const Eligibility no_bypass = without_bypass(*g);
+  for (const auto& m : t2_modes()) {
+    for (const Eligibility* elig : {static_cast<const Eligibility*>(nullptr), &no_bypass}) {
+      const std::string variant = m.name + (elig != nullptr ? " eligibility" : "");
+      FlowLedger rf(g);
+      FlowPolicy pr(rf, m.sources, m.destinations, m.cfg, elig);
+      const PlacementResult want = pr.replace(2, *m.design);
+      const LedgerState placed = ledger_state(rf);
+      long injected = 0;
+      for (long at = 0;; ++at) {
+        const std::string w = variant + " construction allocation " + std::to_string(at);
+        const long live = g_live.load();
+        {
+          FlowLedger fg(g);
+          const LedgerState before = ledger_state(fg);
+          std::optional<FlowPolicy> p;
+          if (!fails_at(at, [&] { p.emplace(fg, m.sources, m.destinations, m.cfg, elig); })) {
+            EXPECT_EQ(LedgerAccess::bound_owners(fg).size(), 1U);
+            break;
+          }
+          ++injected;
+          EXPECT_FALSE(p.has_value()) << w;
+          expect_same(ledger_state(fg), before, w);
+          p.emplace(fg, m.sources, m.destinations, m.cfg, elig);
+          expect_same(p->replace(2, *m.design), want, w);
+          expect_same(ledger_state(fg), placed, w);
+          expect_balanced(fg, w);
+        }
+        EXPECT_EQ(g_live.load(), live) << w << ": a leak";
+        if (::testing::Test::HasFailure()) return;
+      }
+      EXPECT_GT(injected, 0) << variant;
+    }
+  }
+}
+
+// T2's evaluators (capacity on a fresh ledger; batch_capacity; sensitivity: sizing, count
+// selection and objectives redone under every deletion) under the shared evaluator sweeps: capacity
+// and batch_capacity exhaustively; sensitivity, whose deletions each repeat the layout that
+// capacity's sweep already covers allocation by allocation, at every fifth allocation with one
+// worker and every seventh with several (a whole sweep would take minutes per mode). Three tests per
+// mode (capacity and batch_capacity; sensitivity without, then with an Eligibility), each within the
+// test timeout under the sanitizers. `part`: 0, 1 or 2 in that order.
+void sweep_t2_evaluators(const Mode& m, int part) {
+  const auto g = graph();
+  const Eligibility no_bypass = without_bypass(*g);
+  const Eligibility no_cross = without_cross(*g);
+  const std::int32_t one[] = {1};
+  const std::int32_t several[] = {2, 3};
+  long attempts = 0;
+  {
+    for (const auto& o : option_sets(no_bypass, no_cross)) {
+      if (o.cache) continue;  // T2 rejects a cache
+      if (part > 0) {
+        if ((part == 2) != (o.elig != nullptr)) continue;
+        attempts += sweep_sensitivity(m, *g, one, 5, o) + sweep_sensitivity(m, *g, several, 7, o);
+        if (::testing::Test::HasFailure()) return;
+        continue;
+      }
+      const std::string name = m.name + " capacity" + o.name;
+      const auto want = capacity(*g, m.sources, m.destinations, query_of(m, o.elig, nullptr, {true, true, true}));
+      long injected = 0;
+      for (long at = 0;; ++at) {
+        const long live = g_live.load();
+        bool failed = false;
+        {
+          PlacementResult got;
+          failed = fails_at(at, [&] { got = capacity(*g, m.sources, m.destinations, query_of(m, o.elig, nullptr, {true, true, true})); });
+          if (failed) {
+            ++injected;
+            expect_same(capacity(*g, m.sources, m.destinations, query_of(m, o.elig, nullptr, {true, true, true})), want,
+                        name + " retry");
+          } else {
+            expect_same(got, want, name);
+          }
+        }
+        EXPECT_EQ(g_live.load(), live) << name << " allocation " << at << ": a leak";
+        if (!failed || ::testing::Test::HasFailure()) break;
+      }
+      EXPECT_GT(injected, 0) << name;
+      attempts += injected + sweep_batch(m, *g, one, 1, o);
+      if (::testing::Test::HasFailure()) return;
+    }
+  }
+  ::testing::Test::RecordProperty("allocation_attempts", std::to_string(attempts));
+}
+
+TEST(PolicyFaults, T2ExactEvaluatorsLeaveNoPoisonedScratch) { sweep_t2_evaluators(t2_modes()[0], 0); }
+TEST(PolicyFaults, T2ExactSensitivityLeavesNoPoisonedScratch) { sweep_t2_evaluators(t2_modes()[0], 1); }
+TEST(PolicyFaults, T2ExactMaskedSensitivityLeavesNoPoisonedScratch) { sweep_t2_evaluators(t2_modes()[0], 2); }
+TEST(PolicyFaults, T2UpToEvaluatorsLeaveNoPoisonedScratch) { sweep_t2_evaluators(t2_modes()[1], 0); }
+TEST(PolicyFaults, T2UpToSensitivityLeavesNoPoisonedScratch) { sweep_t2_evaluators(t2_modes()[1], 1); }
+TEST(PolicyFaults, T2UpToMaskedSensitivityLeavesNoPoisonedScratch) { sweep_t2_evaluators(t2_modes()[1], 2); }
+
+// remove() and the destruction of a T2 policy allocate nothing: remove() takes the records away;
+// the destruction leaves them as orphans (a plan books no hold) and the policy no longer bound.
+TEST(PolicyFaults, T2RemovalAndReleaseNeverAllocate) {
+  const auto g = graph();
+  for (const auto& m : t2_modes()) {
+    FlowLedger fg(g);
+    auto p = std::make_unique<FlowPolicy>(fg, m.sources, m.destinations, m.cfg);
+    (void)p->replace(4, *m.design);
+    ASSERT_FALSE(fg.records().empty()) << m.name;
+    EXPECT_FALSE(fails_at(0, [&] { p->remove(); })) << m.name;
+    EXPECT_TRUE(fg.records().empty()) << m.name;
+    (void)p->replace(2, *m.design);
+    const LedgerState held = ledger_state(fg);
+    ASSERT_FALSE(held.records.empty()) << m.name;
+    EXPECT_FALSE(fails_at(0, [&] { p.reset(); })) << m.name;
+    const LedgerState orphaned = ledger_state(fg);
+    EXPECT_EQ(orphaned.allocated, held.allocated) << m.name;
+    EXPECT_EQ(orphaned.reserved, std::vector<Amount>(orphaned.reserved.size(), 0)) << m.name;
+    EXPECT_EQ(orphaned.records.size(), held.records.size()) << m.name;
+    EXPECT_TRUE(orphaned.bound.empty()) << m.name;
   }
 }

@@ -903,9 +903,12 @@ FlowCoreResult place_global_units(const Graph& g,
   return out;
 }
 
-SubsetFlow solve_subset(const Graph& g, std::span<const EdgeId> edges, std::span<const Amount> caps,
-                        std::span<const NodeId> sources, std::span<const NodeId> destinations,
-                        std::optional<Amount> cap, std::span<const Amount> source_caps) {
+namespace {
+
+// solve_subset's body; `by_cost` false takes every arc's cost as 0 (max_flow_subset).
+SubsetFlow subset_flow(const Graph& g, std::span<const EdgeId> edges, std::span<const Amount> caps,
+                       std::span<const NodeId> sources, std::span<const NodeId> destinations, std::optional<Amount> cap,
+                       std::span<const Amount> source_caps, bool by_cost) {
   SubsetFlow out;
   out.flows.assign(edges.size(), 0);
   if (cap.has_value() && *cap == 0) return out;
@@ -930,7 +933,7 @@ SubsetFlow solve_subset(const Graph& g, std::span<const EdgeId> edges, std::span
     const auto ei = static_cast<std::size_t>(e);
     in.tail.push_back(map.add(edge_src[ei]));
     in.head.push_back(map.add(edge_dst[ei]));
-    in.cost.push_back(cost[ei]);
+    in.cost.push_back(by_cost ? cost[ei] : 0);
   }
   for (NodeId v : sources) in.sources.push_back(map.add(v));
   in.src_cap.assign(source_caps.begin(), source_caps.end());
@@ -943,6 +946,20 @@ SubsetFlow solve_subset(const Graph& g, std::span<const EdgeId> edges, std::span
   out.flows = std::move(r.flows);
   out.cost_distribution = std::move(r.cost_distribution);
   return out;
+}
+
+} // namespace
+
+SubsetFlow solve_subset(const Graph& g, std::span<const EdgeId> edges, std::span<const Amount> caps,
+                        std::span<const NodeId> sources, std::span<const NodeId> destinations,
+                        std::optional<Amount> cap, std::span<const Amount> source_caps) {
+  return subset_flow(g, edges, caps, sources, destinations, cap, source_caps, true);
+}
+
+Amount max_flow_subset(const Graph& g, std::span<const EdgeId> edges, std::span<const Amount> caps,
+                       std::span<const NodeId> sources, std::span<const NodeId> destinations, Amount cap,
+                       std::span<const Amount> source_caps) {
+  return subset_flow(g, edges, caps, sources, destinations, cap, source_caps, false).placed;
 }
 
 } // namespace netgraph::core::detail

@@ -38,21 +38,23 @@ py::object routing_obj(const Routing& r) {
 void register_policy_config(py::module_& m) {
   py::class_<FlowPolicyConfig>(
       m, "FlowPolicyConfig",
-      "One demand's settings: routing (CostOnly, CapacityAware (T1), Global or Pinned), placement\n"
-      "(FlowPlacement: required for CostOnly; the other models take none), admission (LOSSLESS by\n"
-      "default; LOSSY for CostOnly EQUAL_BALANCED and WEIGHTED, T1 and Pinned), selection (PathSelection;\n"
-      "None: PathSelection(); Global and Pinned take none; T1 reads tie_break, priority and multi_edge and\n"
-      "rejects multipath=True), origin (Origin; None: the model's default, EQUAL for CostOnly EQUAL_BALANCED\n"
-      "and WEIGHTED and for T1, OPTIMIZED for CostOnly MAX_FLOW and Global; Pinned takes none, its program\n"
-      "has it), weights (WeightBasis, CostOnly WEIGHTED only; None: CAPACITY) and edge_weights (one integer\n"
-      "per edge, given exactly when weights=EXPLICIT; one array shared by every policy built from this\n"
-      "configuration). A field that does not apply to the model must stay None. The combination is checked\n"
+      "One demand's settings: routing (CostOnly, CapacityAware (T1), Global, Global(tunnels=...) (T2) or\n"
+      "Pinned), placement (FlowPlacement: required for CostOnly; the other models take none), admission\n"
+      "(LOSSLESS by default; LOSSY for CostOnly EQUAL_BALANCED and WEIGHTED, T1, T2 and Pinned), selection\n"
+      "(PathSelection; None: PathSelection(); Global, T2 included, and Pinned take none; T1 reads tie_break,\n"
+      "priority and multi_edge and rejects multipath=True), origin (Origin; None: the model's default, EQUAL for CostOnly EQUAL_BALANCED and WEIGHTED, T1 and T2,\n"
+      "OPTIMIZED for CostOnly MAX_FLOW and Global; T2 takes OPTIMIZED with one input source only, the same\n"
+      "calculation; Pinned takes none, its program has it), weights (WeightBasis, CostOnly WEIGHTED only;\n"
+      "None: CAPACITY) and edge_weights (one integer per edge, given exactly when weights=EXPLICIT; one\n"
+      "array shared by every policy built from this configuration). A field that does not apply to the model must stay None. The combination is checked\n"
       "when a policy or an evaluator uses the configuration (ValueError): the enumeration values, then the\n"
-      "model's row (T1: an up_to count first; then placement, origin, admission, selection, weights with\n"
-      "edge_weights), then a DagCache (only CostOnly reads one), then T1's parameters (the tunnel count in\n"
-      "[1, 10000], max_path_cost, min_unreserved_bandwidth), then edge_weights' length and entries, then the\n"
-      "roster and count rules (CostOnly with several input sources rejects multipath=False with\n"
-      "PREFER_HIGHER_PRIORITY; T1's roster heads times its tunnel count at most 2^30 - 1).")
+      "model's row (Global: a selection first, then support and tunnels together, then prefer_headroom\n"
+      "without tunnels; T1: an up_to count; then placement, origin,\n"
+      "admission, selection, weights with edge_weights), then a DagCache (only CostOnly reads one), then\n"
+      "the tunnel models' parameters (the tunnel count in [1, 10000]; T1's max_path_cost and\n"
+      "min_unreserved_bandwidth), then edge_weights' length and entries, then the roster and count rules\n"
+      "(CostOnly with several input sources rejects multipath=False with PREFER_HIGHER_PRIORITY; T2 with\n"
+      "several input sources rejects OPTIMIZED; roster heads times the tunnel count at most 2^30 - 1).")
       .def(py::init([](const py::object& routing, std::optional<FlowPlacement> placement, Admission admission,
                        std::optional<PathSelection> selection, std::optional<Origin> origin,
                        std::optional<WeightBasis> weights, const py::object& edge_weights) {

@@ -29,8 +29,13 @@
     program the same way, with records per roster source.
   * T1 (place_t1): replace and evaluate set up the tunnels (tunnels_t1.cpp) on the unreserved view
     with the policy's own holds released, build the program of 8.1 and forward it like a Pinned
-    program, one record per entry, each up tunnel's record holding its request on its path;
-    forward() forwards the installed program the same way and keeps the holds.
+    program, one record per entry, each up tunnel's record holding its request on its path.
+  * T2 (place_t2): replace and evaluate lay out the tunnels (tunnels_t2.cpp) on the residual with
+    the policy's own traffic released, build the program of 8.1 (dead heads keep their roster
+    place), take its lossless bound as the plan's forwarding bound and forward it the same way; a
+    plan books nothing.
+  * The tunnel models' forward() (forward_tunnels) forwards the installed program the same way,
+    keeping its plan and T1's holds.
 
   Work on copies and publish all changes together; an exception leaves ledger and policy intact.
   Store only changes to ledger residual in per-thread slots. Unrestricted Global reads a dense
@@ -417,14 +422,25 @@ std::span<const FlowRecord* const> draft_records(const std::vector<Draft>& draft
   return out;
 }
 
-// Global (with or without a support), or CostOnly MaxFlow: a controller.
+// T2: Global with a tunnel count.
+bool is_t2(const Routing& r) noexcept {
+  const auto* gl = std::get_if<Global>(&r);
+  return gl != nullptr && gl->tunnels.has_value();
+}
+bool t2(const PolicyEngine& pe) noexcept { return is_t2(pe.config.routing); }
+
+// The tunnel models: T1 and T2 (one record per program entry; a full-offer call is their only
+// computation).
+bool tunnel_model(const PolicyEngine& pe) noexcept { return is<CapacityAware>(pe) || t2(pe); }
+
+// Global without tunnels (with or without a support), or CostOnly MaxFlow: a controller.
 bool controller(const PolicyEngine& pe) noexcept {
-  return is<Global>(pe) || (is<CostOnly>(pe) && *pe.config.placement == FlowPlacement::MaxFlow);
+  return (is<Global>(pe) && !t2(pe)) || (is<CostOnly>(pe) && *pe.config.placement == FlowPlacement::MaxFlow);
 }
 
 // Unrestricted Global: the controller over every eligible edge (dense arrays, the curve, the cut).
 bool dense_global(const PolicyEngine& pe) noexcept {
-  return is<Global>(pe) && !std::get<Global>(pe.config.routing).support;
+  return controller(pe) && is<Global>(pe) && !std::get<Global>(pe.config.routing).support;
 }
 
 // ================================================================ the transaction
@@ -490,19 +506,8 @@ Termination forwarding_termination(bool active, bool has_path, bool lossy, std::
 
 // ---------------------------------------------------------------- the controllers' paths
 
-// The flow cut into paths (4.1), source by source in ascending NodeId: while a source has supply
-// left, take the smallest EdgeId sequence with positive remaining flow, stopping at the first
-// destination; assign min(supply left, smallest remaining edge flow on that walk), subtract it
-// from the walk, record the walk as one path. Each node's out-edge cursor only advances:
-// remaining flow never increases. `edges` (ascending) are the flows' edges (empty: every edge, the
-// flows per EdgeId); `rem` is aligned with them. Per source also its share (the edges and amounts
-// its paths use, ascending).
-struct Decomposition {
-  std::vector<ControllerPath> paths {};
-  std::vector<std::vector<std::pair<EdgeId, Amount>>> shares {};
-  std::vector<Amount> supplies {};
-};
-
+// decompose() (program_data.hpp): each node's out-edge cursor only advances, remaining flow never
+// increasing.
 // decompose()'s per-thread scratch: per node its cursor and its range's end (the positions of its
 // positive out-edges; cursor -1: none), the destination marks, its roster slot (-1: none), the
 // nodes whose cursor is set, the walk and a source's path pieces. A call resets what it set (also when it throws), so it costs O(the nodes
@@ -516,6 +521,8 @@ struct DecomposeScratch {
   std::vector<std::size_t> walk;
   std::vector<std::pair<EdgeId, Amount>> acc;
 };
+
+} // namespace
 
 Decomposition decompose(const Graph& g, std::span<const EdgeId> edges, std::vector<Amount> rem,
                         std::span<const NodeId> roster, std::span<const NodeId> dests) {
@@ -641,6 +648,8 @@ Decomposition decompose(const Graph& g, std::span<const EdgeId> edges, std::vect
   }
   return out;
 }
+
+namespace {
 
 // ---------------------------------------------------------------- CostOnly preparation
 
@@ -1321,7 +1330,7 @@ bool view_active(const ForwardingView& v) {
 // result's and the epoch's.
 Staged forward_entries(const PolicyEngine& pe, const Epoch& cur, Working& W, const Request& rq,
                        const ForwardingProgram* before_program, const ForwardingView& view, bool active, bool holds,
-                       const std::optional<TunnelPlan>& plan) {
+                       std::shared_ptr<const TunnelPlan> plan) {
   const auto& g = *pe.graph;
   const auto v = rq.v;
   const ProgramData& p = *view.data;
@@ -1447,11 +1456,11 @@ Staged forward_entries(const PolicyEngine& pe, const Epoch& cur, Working& W, con
   out.termination = k == 0 ? Termination::NoRoute : forwarding_termination(active, p.has_path(), lossy, v, placed);
   set_flags(out, before_program, view.program.get(), is<CapacityAware>(pe));
   out.program = view.program;
-  out.plan = plan;
+  if (plan) out.plan = *plan;
   out.by_tunnel = tunnel_rows(view, assigned, delivered, dropped);
   fill_state(pe, draft_records(s.drafts), requested, cur.infinite || !v.has_value(), offered, out, lost);
   s.next.program = view.program;
-  s.next.plan = plan;
+  s.next.plan = std::move(plan);
   s.next.by_tunnel = out.by_tunnel;
   s.next.requested = requested;
   s.next.offered = offered;
@@ -1463,7 +1472,7 @@ Staged forward_entries(const PolicyEngine& pe, const Epoch& cur, Working& W, con
 // Pinned: forwarding its program as the policy replays it (place, evaluate, replace); no holds.
 Staged place_pinned(const PolicyEngine& pe, const Epoch& cur, Working& W, const Request& rq,
                     const ForwardingProgram* before_program) {
-  return forward_entries(pe, cur, W, rq, before_program, pe.view, pe.active, false, std::nullopt);
+  return forward_entries(pe, cur, W, rq, before_program, pe.view, pe.active, false, nullptr);
 }
 
 // T1's setup view U: the reservation baseline minus every hold, this policy's own holds released
@@ -1481,8 +1490,9 @@ std::vector<Amount> reservation_view(const PolicyEngine& pe) {
   return U;
 }
 
-// T1's design volume of a call: the explicit design, or the offer (finite: checked by check_call).
-Amount t1_design(const Request& rq) noexcept { return rq.design.has_value() ? **rq.design : *rq.v; }
+// The design volume of a tunnel model's call: the explicit design, or the offer (nullopt:
+// unlimited; T1's is finite, checked by check_call).
+std::optional<Amount> design_of(const Request& rq) noexcept { return rq.design.has_value() ? *rq.design : rq.v; }
 
 // The plan of a T1 setup for the design D: the tunnel count, D, the heads' shares and the holds
 // of the up tunnels counted once each.
@@ -1497,23 +1507,65 @@ TunnelPlan t1_plan(const PolicyEngine& pe, Amount D, const ForwardingProgram* pr
   return plan;
 }
 
+// The tunnel models' forward(): the installed program forwarded with its plan (and the call's
+// black holes), records per program entry, T1's holds kept.
+Staged forward_tunnels(const PolicyEngine& pe, const Epoch& cur, Working& W, const Request& rq,
+                       const ForwardingProgram* before_program) {
+  const ForwardingView view = make_view(*pe.graph, pe.epoch.program, nullptr, pe.dests_ok, rq.dark, true);
+  return forward_entries(pe, cur, W, rq, before_program, view, view_active(view), is<CapacityAware>(pe), pe.epoch.plan);
+}
+
 // T1: replace and evaluate set up the tunnels for the design on the unreserved view and forward
-// the new program; forward() forwards the installed program with its holds (and the call's black
-// holes). Records per program entry in both.
+// the new program, one record per entry.
 Staged place_t1(const PolicyEngine& pe, const Epoch& cur, Working& W, const Request& rq,
                 const ForwardingProgram* before_program) {
   const auto& g = *pe.graph;
-  if (rq.op == Op::Forward) {
-    const ForwardingView view = make_view(g, pe.epoch.program, nullptr, pe.dests_ok, rq.dark, true);
-    return forward_entries(pe, cur, W, rq, before_program, view, view_active(view), true, pe.epoch.plan);
-  }
-  const Amount D = t1_design(rq);
+  const Amount D = *design_of(rq);
   const auto& ca = std::get<CapacityAware>(pe.config.routing);
   auto tunnels = t1_setup(g, pe.elig, pe.roster, pe.dests_ok, pe.selection, ca, pe.c0, D, reservation_view(pe));
   const auto program = tunnel_program(g, pe.sources, pe.destinations, pe.roster, std::move(tunnels),
                                       pe.excluded_nodes, pe.excluded_edges);
   const ForwardingView view = make_view(g, program, nullptr, pe.dests_ok, nullptr, true);
-  return forward_entries(pe, cur, W, rq, before_program, view, view_active(view), true, t1_plan(pe, D, program.get()));
+  return forward_entries(pe, cur, W, rq, before_program, view, view_active(view), true,
+                         std::make_shared<const TunnelPlan>(t1_plan(pe, D, program.get())));
+}
+
+// The plan of a T2 layout (zeros without a tunnel) for the design D (nullopt: unlimited), with its
+// K tunnels and its program's forwarding bound F.
+TunnelPlan t2_plan(const PolicyEngine& pe, std::optional<Amount> D, const T2Layout& lay, std::size_t K, Amount F) {
+  TunnelPlan plan;
+  plan.count = lay.count;
+  plan.design_demand = D;
+  if (D.has_value()) plan.head_design = head_design(pe.roster, *D);
+  plan.live_heads = lay.live;
+  plan.insufficient_resolution = !lay.live.empty() && lay.common == 0;
+  plan.fluid_share = std::pair<Amount, Amount> {lay.fluid_num, lay.fluid_den};
+  plan.common_share = lay.common;
+  plan.planned_per_tunnel = lay.planned;
+  plan.planned_total = static_cast<Amount>(K) * lay.planned;
+  plan.route_cost = lay.route_cost;
+  if (std::get<Global>(pe.config.routing).prefer_headroom) plan.headroom_penalty = lay.headroom_penalty;
+  plan.forwarding_bound = F;
+  return plan;
+}
+
+// T2: replace and evaluate lay out the tunnels for the design on the released residual and
+// forward the new program, one record per entry; the plan's forwarding bound is the program's
+// lossless maximum on that view.
+Staged place_t2(const PolicyEngine& pe, const Epoch& cur, Working& W, const Request& rq,
+                const ForwardingProgram* before_program) {
+  const auto& g = *pe.graph;
+  const std::optional<Amount> D = design_of(rq);
+  std::vector<Amount> V;
+  W.dense(V);
+  const auto& gl = std::get<Global>(pe.config.routing);
+  auto lay = t2_layout(g, pe.elig, pe.roster, pe.dests_ok, *gl.tunnels, gl.prefer_headroom, D, V);
+  const auto program = tunnel_program(g, pe.sources, pe.destinations, pe.roster, std::move(lay.tunnels),
+                                      pe.excluded_nodes, pe.excluded_edges);
+  const ForwardingView view = make_view(g, program, nullptr, pe.dests_ok, nullptr, true);
+  const Amount F = detail::lossless(g, view, free_of(W), 0, std::nullopt).total;
+  return forward_entries(pe, cur, W, rq, before_program, view, view_active(view), false,
+                         std::make_shared<const TunnelPlan>(t2_plan(pe, D, lay, program->tunnels().size(), F)));
 }
 
 // forward(): a computing model's installed program forwarded with no route computation, on the
@@ -1616,6 +1668,7 @@ Staged forward_installed(const PolicyEngine& pe, Working& W, const Request& rq) 
 
 const char* model_name(const Routing& r) noexcept {
   if (std::holds_alternative<CostOnly>(r)) return "CostOnly";
+  if (is_t2(r)) return "T2";
   if (std::holds_alternative<Global>(r)) return "Global";
   if (std::holds_alternative<CapacityAware>(r)) return "T1";
   return "Pinned";
@@ -1630,13 +1683,21 @@ ResolvedAxes resolve_config(const FlowPolicyConfig& cfg, bool cache, std::int32_
   if (cfg.origin.has_value()) check_member(*cfg.origin, "origin");
   if (cfg.selection.has_value()) check_selection(*cfg.selection);
   if (cfg.weights.has_value()) check_member(*cfg.weights, "weights");
-  // The model's row (T1: an "up to" count is not T1's row), its columns left to right:
-  // placement, origin, admission, selection, weights (with edge_weights).
+  // The model's row (Global: no selection, then support and tunnels together decide it, then
+  // prefer_headroom needs tunnels; T1: an "up to" count is not T1's row), its columns left to
+  // right: placement, origin, admission, selection, weights (with edge_weights).
   ResolvedAxes out {cfg.selection, cfg.origin, cfg.weights};
   const bool cost_only = std::holds_alternative<CostOnly>(r);
-  const bool global = std::holds_alternative<Global>(r);
+  const auto* gl = std::get_if<Global>(&r);
   const auto* t1 = std::get_if<CapacityAware>(&r);
   const bool pinned = std::holds_alternative<Pinned>(r);
+  if (gl != nullptr) {
+    if (cfg.selection.has_value()) invalid("Global does not accept selection");
+    if (gl->support && gl->tunnels.has_value()) invalid("Global support and tunnels are mutually exclusive");
+    if (gl->prefer_headroom && !gl->tunnels.has_value()) invalid("prefer_headroom requires tunnels");
+  }
+  const bool t2 = is_t2(r);
+  const bool global = gl != nullptr && !t2;
   const std::string model = model_name(r);
   if (t1 != nullptr && t1->tunnels.up_to) invalid("T1 requires an exact tunnel count");
   if (!cost_only) {
@@ -1651,12 +1712,12 @@ ResolvedAxes resolve_config(const FlowPolicyConfig& cfg, bool cache, std::int32_
   if (t1 != nullptr && cfg.origin == Origin::Optimized) invalid("T1 requires origin=EQUAL");
   if (pinned && cfg.origin.has_value()) invalid("Pinned does not accept origin");
   if (!cfg.origin.has_value() && !pinned) {
-    out.origin = (cost_only && !max_flow) || t1 != nullptr ? Origin::Equal : Origin::Optimized;
+    out.origin = (cost_only && !max_flow) || t1 != nullptr || t2 ? Origin::Equal : Origin::Optimized;
   }
   if (cfg.admission == Admission::Lossy && max_flow) invalid("MAX_FLOW requires admission=LOSSLESS");
-  if (global || pinned) {
-    if (cfg.selection.has_value()) invalid(model + " does not accept selection");
-  } else {
+  if (pinned) {
+    if (cfg.selection.has_value()) invalid("Pinned does not accept selection");
+  } else if (gl == nullptr) {
     if (!cfg.selection.has_value()) out.selection = PathSelection();
     if (t1 != nullptr) {
       // A tunnel is one path: T1 reads tie_break, priority and multi_edge.
@@ -1680,7 +1741,8 @@ ResolvedAxes resolve_config(const FlowPolicyConfig& cfg, bool cache, std::int32_
     if (cfg.edge_weights) invalid(model + " does not accept edge_weights");
   }
   if (cache && !cost_only) invalid(model + " does not use DagCache");
-  // T1's parameters: the tunnel count, the cost ceiling, the search minimum.
+  // The tunnel models' parameters: the tunnel count; T1's cost ceiling and search minimum.
+  if (t2 && (gl->tunnels->count < 1 || gl->tunnels->count > kMaxTunnelCount)) invalid("tunnel count must be in [1, 10000]");
   if (t1 != nullptr) {
     if (t1->tunnels.count < 1 || t1->tunnels.count > kMaxTunnelCount) invalid("tunnel count must be in [1, 10000]");
     check_ceiling(t1->max_path_cost);
@@ -1707,16 +1769,21 @@ void check_source_count(const FlowPolicyConfig& cfg, std::size_t num_sources, st
       cfg.selection->single_path() && cfg.selection->tie_break == EdgeTieBreak::PreferHigherPriority) {
     invalid("CostOnly with multiple input sources rejects multipath=false with PREFER_HIGHER_PRIORITY");
   }
+  // T2 optimized is the equal calculation with one source; with several it would be another
+  // (strongly NP-hard) problem.
+  if (is_t2(r) && num_sources > 1 && cfg.origin == Origin::Optimized) invalid("T2 with several sources requires origin=EQUAL");
 }
 
 void check_tunnel_limit(const FlowPolicyConfig& cfg, std::size_t num_heads) {
   const auto* t1 = std::get_if<CapacityAware>(&cfg.routing);
-  if (t1 == nullptr) return;
-  // The count is in [1, 10000] (resolve_config) and H < 2^31: the product fits 64 bits.
+  const auto* gl = std::get_if<Global>(&cfg.routing);
+  if (t1 == nullptr && (gl == nullptr || !gl->tunnels.has_value())) return;
+  // The count (the largest for "up to") is in [1, 10000] (resolve_config) and H < 2^31: the
+  // product fits 64 bits.
+  const std::int64_t count = t1 != nullptr ? t1->tunnels.count : gl->tunnels->count;
   const auto heads = static_cast<std::int64_t>(num_heads);
-  if (heads * t1->tunnels.count > kMaxTunnels) {
-    invalid("tunnel limit exceeded: " + str(heads) + " heads x " + str(t1->tunnels.count) + " tunnels > " +
-            str(kMaxTunnels));
+  if (heads * count > kMaxTunnels) {
+    invalid("tunnel limit exceeded: " + str(heads) + " heads x " + str(count) + " tunnels > " + str(kMaxTunnels));
   }
 }
 
@@ -1816,8 +1883,8 @@ std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const No
     trimmed.erase(std::unique(trimmed.begin(), trimmed.end()), trimmed.end());
     pe->global_support = std::make_shared<const std::vector<EdgeId>>(std::move(trimmed));
   } else {
-    // The static costs fix the roster (unrestricted Global and T1); T1's Stretch baseline c0 is
-    // their minimum over the roster heads (zero-capacity edges included, before any filter).
+    // The static costs fix the roster (unrestricted Global, T1 and T2); T1's Stretch baseline c0
+    // is their minimum over the roster heads (zero-capacity edges included, before any filter).
     const auto dist = detail::static_costs(g, elig, pe->dests_ok, pe->sources);
     pe->c0 = kUnreachable;
     for (std::size_t i = 0; i < pe->sources.size(); ++i) {
@@ -1837,8 +1904,8 @@ std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const No
       }
     }
   }
-  // T1's cohorts are per program entry, sized by its first call.
-  if (!detail::is<CapacityAware>(*pe)) pe->epoch.cohorts.resize(pe->roster.size());
+  // The tunnel models' cohorts are per program entry, sized by their first call.
+  if (!detail::tunnel_model(*pe)) pe->epoch.cohorts.resize(pe->roster.size());
   pe->owner = LedgerAccess::bind(ledger);  // last: nothing is bound when construction fails
   return pe;
 }
@@ -1906,8 +1973,16 @@ Staged empty_roster(const PolicyEngine& pe, const Epoch& cur, const Request& rq,
   s.next.prepared = true;
   s.next.infinite = cur.infinite || !v.has_value();
   s.next.program = cur.program ? cur.program : empty_roster_program(pe);
-  // T1: forward keeps the installed plan; a setup plans no head.
-  if (is<CapacityAware>(pe)) s.next.plan = rq.op == Op::Forward ? cur.plan : t1_plan(pe, t1_design(rq), nullptr);
+  // The tunnel models: forward keeps the installed plan; a setup plans no head.
+  if (rq.op == Op::Forward) {
+    s.next.plan = cur.plan;
+  } else if (is<CapacityAware>(pe)) {
+    s.next.plan = std::make_shared<const TunnelPlan>(t1_plan(pe, *design_of(rq), nullptr));
+  } else if (t2(pe)) {
+    T2Layout none;
+    none.count = std::get<Global>(pe.config.routing).tunnels->up_to ? 1 : std::get<Global>(pe.config.routing).tunnels->count;
+    s.next.plan = std::make_shared<const TunnelPlan>(t2_plan(pe, design_of(rq), none, 0, 0));
+  }
   PlacementResult& out = s.out;
   out.remaining = v;
   out.delivery_delta = 0;
@@ -1915,7 +1990,7 @@ Staged empty_roster(const PolicyEngine& pe, const Epoch& cur, const Request& rq,
   if (lossy && v.has_value()) out.call_source_loss = *v;
   set_flags(out, before, s.next.program.get(), is<CapacityAware>(pe));
   out.program = s.next.program;
-  out.plan = s.next.plan;
+  if (s.next.plan) out.plan = *s.next.plan;
   fill_state(pe, {}, s.next.requested, s.next.infinite, s.next.offered, out);
   if (controller(pe)) out.total_cost = Counter128 {};
   if (optimized_global) {
@@ -1937,22 +2012,24 @@ void check_forward_operation(const PolicyEngine& pe) {
 namespace {
 
 // The call's validation (before any change, also before the zero shortcut), in this order: the
-// operation for the model (T1's place) and an installed program (forward), the offer, a Lossy full
-// offer's finiteness, the design demand (the model, its domain, T1's finiteness), a finite place
-// after +inf, the requested total's limit, the black holes' graph.
+// operation for the model (T1's and T2's place) and an installed program (forward), the offer, a
+// Lossy full offer's finiteness, the design demand (the model, its domain, T1's finiteness), a
+// finite place after +inf, the requested total's limit, the black holes' graph.
 void check_call(const PolicyEngine& pe, const Request& rq) {
   const bool lossy = pe.config.admission == Admission::Lossy;
   const bool t1 = is<CapacityAware>(pe);
-  if (rq.op == Op::Place && t1) invalid("T1 does not support incremental placement");
+  if (rq.op == Op::Place && tunnel_model(pe)) {
+    invalid(std::string(model_name(pe.config.routing)) + " does not support incremental placement");
+  }
   if (rq.op == Op::Forward) check_forward_operation(pe);
   if (rq.v.has_value() && (*rq.v < 0 || *rq.v >= kDomainLimit)) {
     invalid("offer must be an integer in [0, 2^62) or permitted +inf");
   }
   // A Lossy full offer is finite; CostOnly's place(+inf) is its first-hop experiment.
   if (lossy && !rq.v.has_value() && (rq.full() || is<Pinned>(pe))) invalid("LOSSY forwarding requires a finite offer");
-  // The design demand: T1's alone, in its domain, finite (absent: the offer).
+  // The design demand: the tunnel models' alone, in its domain, T1's finite (absent: the offer).
   if (rq.design.has_value()) {
-    if (!t1) invalid(std::string(model_name(pe.config.routing)) + " does not accept design_demand");
+    if (!tunnel_model(pe)) invalid(std::string(model_name(pe.config.routing)) + " does not accept design_demand");
     if (rq.design->has_value() && (**rq.design < 0 || **rq.design >= kDomainLimit)) {
       invalid("design_demand must be an integer in [0, 2^62) or permitted +inf");
     }
@@ -1988,8 +2065,12 @@ Staged compute(const PolicyEngine& pe, const Request& rq) {
     // No roster source (a computing model): nothing is computed. A Pinned policy whose heads all
     // fail keeps its per-entry records and forwards nothing (place_pinned).
     s = empty_roster(pe, cur, rq, before);
+  } else if (tunnel_model(pe) && rq.op == Op::Forward) {
+    s = forward_tunnels(pe, cur, W, rq, before);
   } else if (is<CapacityAware>(pe)) {
     s = place_t1(pe, cur, W, rq, before);
+  } else if (t2(pe)) {
+    s = place_t2(pe, cur, W, rq, before);
   } else if (rq.op == Op::Forward) {
     s = forward_installed(pe, W, rq);
   } else if (is<Pinned>(pe)) {

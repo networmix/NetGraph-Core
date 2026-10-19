@@ -12,9 +12,9 @@ to this file (``py.typed`` marks the package as typed).
 - Forwarding programs: ``ForwardingProgram`` (with its ``Tunnel`` entries and
   ``ForwardingProgram.from_routes`` over ``Route`` values), ``TunnelStatus``.
 - The policy engine: ``FlowPolicy``, ``FlowPolicyConfig``, the routings ``CostOnly``,
-  ``CapacityAware`` (T1, with ``Tunnels``), ``Global``, ``Pinned``, and ``PlacementResult``
-  (with its ``SourceFlow`` and ``TunnelFlow`` rows and its ``TunnelPlan``), ``OutputOptions``,
-  ``Termination``.
+  ``CapacityAware`` (T1, with ``Tunnels``), ``Global`` (with ``tunnels``: T2), ``Pinned``, and
+  ``PlacementResult`` (with its ``SourceFlow`` and ``TunnelFlow`` rows and its ``TunnelPlan``),
+  ``OutputOptions``, ``Termination``.
 - The shortest-path cache: ``DagCache`` (building and frozen modes), ``DagCacheMiss``.
 - The evaluators: ``capacity``, ``batch_capacity``, ``sensitivity``.
 - The searches: ``spf`` (``Direction``, ``SpfOptions``, ``SpfResult``, ``UNREACHABLE``),

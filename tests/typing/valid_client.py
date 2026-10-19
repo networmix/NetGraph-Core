@@ -5,6 +5,7 @@ built from the sdist (zero diagnostics expected), then runs it. assert_type pins
 types of the generated stub: a wrong dtype, a lost Optional or a widened result fails here.
 """
 
+from fractions import Fraction
 from typing import assert_type
 
 import numpy as np
@@ -88,6 +89,27 @@ if plan is not None:
 assert_type(
     result.program.tunnels[0].edges if result.program else None, tuple[int, ...] | None
 )
+# T2: the controller's tunnels; the plan's exact fields (a Fraction, ints above 2^64).
+te16 = ng.FlowPolicy(
+    ng.FlowLedger(g),
+    0,
+    3,
+    ng.FlowPolicyConfig(
+        routing=ng.Global(tunnels=ng.Tunnels(2, up_to=True), prefer_headroom=True),
+        admission=ng.Admission.LOSSY,
+    ),
+)
+t2 = te16.replace(4, design_demand=4).plan
+if t2 is not None:
+    assert_type(t2.fluid_share, Fraction | None)
+    assert_type(t2.live_heads, tuple[int, ...] | None)
+    assert_type(t2.route_cost, int | None)
+    assert_type(t2.headroom_penalty, int | None)
+    assert_type(t2.forwarding_bound, int | None)
+    assert_type(t2.insufficient_resolution, bool | None)
+assert_type(ng.Global(tunnels=ng.Tunnels(16)).tunnels, ng.Tunnels | None)
+assert_type(ng.Global(tunnels=ng.Tunnels(16)).prefer_headroom, bool)
+assert_type(result.program.tunnels[0].planned if result.program else 0, int)
 held = result.reservation_edge_flows
 if held is not None:
     assert_type(held, npt.NDArray[np.int64])

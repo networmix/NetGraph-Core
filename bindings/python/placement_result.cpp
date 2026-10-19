@@ -1,5 +1,6 @@
 // Termination, SourceFlow, TunnelFlow, TunnelPlan and PlacementResult: the outcome of one policy call.
 #include <pybind11/pybind11.h>
+#include <pybind11/gil_safe_call_once.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
@@ -34,9 +35,17 @@ py::list counter_pairs(const std::vector<std::pair<EdgeId, Counter128>>& v) {
   return out;
 }
 
+// fractions.Fraction, imported once when the module is registered: TunnelPlan.fluid_share only
+// calls it (an import inside a getter can absorb a failed allocation and still succeed).
+py::gil_safe_call_once_and_store<py::object>& fraction_class() {
+  PYBIND11_CONSTINIT static py::gil_safe_call_once_and_store<py::object> storage;
+  return storage;
+}
+
 } // namespace
 
 void register_placement_result(py::module_& m) {
+  fraction_class().call_once_and_store_result([] { return py::module_::import("fractions").attr("Fraction"); });
   py::enum_<Termination>(m, "Termination",
                          "How a call ended, the first that applies: COMPLETE for a zero request; NO_ROUTE for a positive\n"
                          "request with an empty roster (no eligible source statically reaches an allowed destination);\n"
@@ -98,11 +107,16 @@ void register_placement_result(py::module_& m) {
       });
 
   py::class_<TunnelPlan>(m, "TunnelPlan",
-                         "The tunnel models' setup summary (read-only): count (the tunnels per head), design_demand\n"
-                         "(the design volume D in units), head_design ((head, RR(D, H, i)) for every roster head in\n"
-                         "ascending NodeId) and reserved_total (T1's strict holds, counted once per up tunnel: the sum\n"
-                         "of their requests). Exact ints.")
-      .def_readonly("count", &TunnelPlan::count, "the tunnels per head")
+                         "The tunnel models' setup summary (read-only): count (the tunnels per head; T2 up to: the\n"
+                         "chosen count), design_demand (the design volume D in units), head_design ((head, RR(D, H, i))\n"
+                         "for every roster head in ascending NodeId) and reserved_total (T1's strict holds, counted once\n"
+                         "per up tunnel: the sum of their requests; 0 for T2). T2 only (None for T1): live_heads,\n"
+                         "insufficient_resolution (live heads exist but no whole unit per tunnel fits, U == 0: the\n"
+                         "program has no tunnels), fluid_share (the exact fluid optimum s*, a Fraction), common_share\n"
+                         "(U), planned_per_tunnel (u), planned_total (K*u), route_cost (the route-cost sum, can exceed\n"
+                         "2^64), headroom_penalty (with prefer_headroom only) and forwarding_bound (the program's\n"
+                         "lossless maximum; a dead head's share blocks it). Exact ints.")
+      .def_readonly("count", &TunnelPlan::count, "the tunnels per head (T2 up to: the chosen count)")
       .def_property_readonly(
           "design_demand", [](const TunnelPlan& p) { return inf_or(p.design_demand); },
           "the design volume D in units; float('inf') when unlimited")
@@ -111,6 +125,37 @@ void register_placement_result(py::module_& m) {
           "((head, share), ...): every roster head's share RR(D, H, i), ascending NodeId")
       .def_readonly("reserved_total", &TunnelPlan::reserved_total,
                     "the strict holds of the up tunnels, each tunnel's request counted once")
+      .def_property_readonly(
+          "live_heads",
+          [](const TunnelPlan& p) -> py::object {
+            return p.live_heads.has_value() ? py::object(ints_tuple(*p.live_heads)) : py::object(py::none());
+          },
+          "T2: the heads that reach a destination over links with free capacity >= 1 (ascending); None for T1")
+      .def_readonly("insufficient_resolution", &TunnelPlan::insufficient_resolution,
+                    "T2: True when live heads exist but no whole unit per tunnel fits (common_share 0, no tunnels)")
+      .def_property_readonly(
+          "fluid_share",
+          [](const TunnelPlan& p) -> py::object {
+            if (!p.fluid_share.has_value()) return py::none();
+            return fraction_class().get_stored()(p.fluid_share->first, p.fluid_share->second);
+          },
+          "T2: the exact fluid optimum s* (a fractions.Fraction; 0 without a live head); None for T1")
+      .def_readonly("common_share", &TunnelPlan::common_share, "T2: U, the largest common whole-unit size")
+      .def_readonly("planned_per_tunnel", &TunnelPlan::planned_per_tunnel, "T2: u, every tunnel's planned bandwidth")
+      .def_readonly("planned_total", &TunnelPlan::planned_total, "T2: K*u over the K tunnels")
+      .def_property_readonly(
+          "route_cost",
+          [](const TunnelPlan& p) -> py::object { return p.route_cost.has_value() ? counter_int(*p.route_cost) : py::none(); },
+          "T2: the sum of cost * tunnel count over the links (exact; can exceed 2^64)")
+      .def_property_readonly(
+          "headroom_penalty",
+          [](const TunnelPlan& p) -> py::object {
+            return p.headroom_penalty.has_value() ? counter_int(*p.headroom_penalty) : py::none();
+          },
+          "T2 with prefer_headroom: the sum over the links' tunnel slots j of floor(2^32 (B - V + j*u) / B)\n"
+          "(B: static capacity; V: free capacity); None without prefer_headroom and for T1")
+      .def_readonly("forwarding_bound", &TunnelPlan::forwarding_bound,
+                    "T2: F, the program's lossless maximum on the call's view (a dead head's share blocks it)")
       .def("__repr__", [](const TunnelPlan& p) {
         return "TunnelPlan(count=" + std::to_string(p.count) + ", reserved_total=" + std::to_string(p.reserved_total) + ")";
       });
@@ -122,8 +167,8 @@ void register_placement_result(py::module_& m) {
       "request), delivery_delta (new minus old delivery, may be negative), call_drops [(EdgeId, units)],\n"
       "call_source_loss, termination, routes_changed, weights_changed and reservations_changed. The\n"
       "demand's state after the call (totals of the epoch): program (the installed ForwardingProgram;\n"
-      "evaluate: the computed one; None before the first preparation), plan (a TunnelPlan for T1; None for\n"
-      "every other model), requested (float('inf') after an infinite request), offered (LOSSY: the traffic sent; None when LOSSLESS), admitted, delivered, unadmitted\n"
+      "evaluate: the computed one; None before the first preparation), plan (a TunnelPlan for T1 and T2;\n"
+      "None for every other model), requested (float('inf') after an infinite request), offered (LOSSY: the traffic sent; None when LOSSLESS), admitted, delivered, unadmitted\n"
       "(LOSSLESS: requested - delivered, None after an infinite request; LOSSY: 0), source_loss, drops\n"
       "[(EdgeId, units)], by_source (one SourceFlow per normalized input source, ascending NodeId),\n"
       "by_tunnel (one TunnelFlow per program tunnel, ascending index; an alternative view, never added to\n"
@@ -165,8 +210,8 @@ void register_placement_result(py::module_& m) {
           "preparation")
       .def_property_readonly(
           "plan", [](const PlacementResult& r) { return optional_of(r.plan); },
-          "T1: the TunnelPlan of the program after the call; None for every other model (Pinned over a T1\n"
-          "program too)")
+          "T1 and T2: the TunnelPlan of the program after the call; None for every other model (Pinned over\n"
+          "a tunnel program too)")
       .def_property_readonly(
           "requested",
           [](const PlacementResult& r) -> py::object {
@@ -200,7 +245,7 @@ void register_placement_result(py::module_& m) {
       .def_property_readonly(
           "total_cost", [](const PlacementResult& r) { return counter_or_none(r.total_cost); },
           "controllers (Global, CostOnly MAX_FLOW): the exact sum of cost * flow over the policy's\n"
-          "allocation; None for the other models (T1, Pinned)")
+          "allocation; None for the other models (T1, T2, Pinned)")
       .def_readonly("cost_distribution", &PlacementResult::cost_distribution,
                     "unrestricted Global with the optimized origin: the marginal cost curve [(cost, units)] of the policy's\n"
                     "cumulative flow (a zero call reports it unchanged; None before the epoch's first positive\n"

@@ -34,11 +34,6 @@ py::typing::Union<Path, PredDAG> bundle_obj(const Route& r) {
   return py::reinterpret_steal<py::typing::Union<Path, PredDAG>>(out.release());
 }
 
-py::tuple ids_tuple(std::span<const std::int32_t> v) {
-  py::tuple out(v.size());
-  for (std::size_t i = 0; i < v.size(); ++i) out[i] = py::int_(v[i]);
-  return out;
-}
 
 // A per-edge integer argument of from_routes read without narrowing (its type defects raise
 // here); its values are checked later, in the order of the call's validation.
@@ -65,15 +60,16 @@ void register_program(py::module_& m) {
       .value("BLACKHOLED", TunnelStatus::Blackholed);
 
   py::class_<Tunnel>(m, "Tunnel",
-                     "One tunnel (a path entry) of a ForwardingProgram, read-only. index: the entry identifier (T1:\n"
-                     "j*H + i for round j and roster position i; Global and CostOnly MAX_FLOW: the path's position in\n"
-                     "the decomposition order; supplied routes: the route's position in the list), never a position in\n"
-                     "program.tunnels; head; local_index: its position among the head's entries of both kinds;\n"
+                     "One tunnel (a path entry) of a ForwardingProgram, read-only. index: the entry identifier (T1 and\n"
+                     "T2: j*H + i for round j and roster position i, T2's dead heads leaving holes; Global and CostOnly\n"
+                     "MAX_FLOW: the path's position in the decomposition order; supplied routes: the route's position in\n"
+                     "the list), never a position in program.tunnels; head; local_index: its position among the head's entries of both kinds;\n"
                      "destination: where its path ends; edges: its EdgeIds in path order; route_cost: the sum of their\n"
                      "costs (all three None for a tunnel that is down); status: UP, NO_BANDWIDTH or COST_CEILING;\n"
                      "requested and reserved: T1's strict bandwidth (its request, and what it holds on every link of\n"
-                     "its path: the request when UP, else 0; 0 for the other models); weight: its integer share among\n"
-                     "the head's entries (T1: 1 up, 0 down; a controller path: its solved amount).")
+                     "its path: the request when UP, else 0; 0 for the other models); planned: T2's planned bandwidth\n"
+                     "u (metadata, never held; 0 for the other models); weight: its integer share among the head's\n"
+                     "entries (T1: 1 up, 0 down; T2: 1; a controller path: its solved amount).")
       .def_readonly("index", &Tunnel::index)
       .def_readonly("head", &Tunnel::head)
       .def_readonly("local_index", &Tunnel::local_index)
@@ -88,6 +84,7 @@ void register_program(py::module_& m) {
       .def_property_readonly("status", [](const Tunnel& t) { return typed_object(t.status); })
       .def_readonly("requested", &Tunnel::requested)
       .def_readonly("reserved", &Tunnel::reserved)
+      .def_readonly("planned", &Tunnel::planned)
       .def_readonly("weight", &Tunnel::weight)
       .def("__repr__", [](const Tunnel& t) {
         return "Tunnel(index=" + std::to_string(t.index) + ", head=" + std::to_string(t.head) +
@@ -131,12 +128,12 @@ void register_program(py::module_& m) {
       "captured source supplies ((source, weight) for every roster source, ascending) of the optimized\n"
       "controllers, None for equal sources (round robin over the roster). Each head splits its share by\n"
       "highest averages over its entries' weights; identical routes are never merged. CostOnly and Global\n"
-      "produce one (FlowPolicy.program, PlacementResult.program), and so does T1 (its tunnels); from_routes builds\n"
-      "one from given routes; Pinned forwards one. No public constructor.")
+      "produce one (FlowPolicy.program, PlacementResult.program), and so do T1 and T2 (their tunnels);\n"
+      "from_routes builds one from given routes; Pinned forwards one. No public constructor.")
       .def_property_readonly(
-          "sources", [](const ForwardingProgram& p) { return ids_tuple(p.sources()); }, "the source set, ascending")
+          "sources", [](const ForwardingProgram& p) { return ints_tuple(p.sources()); }, "the source set, ascending")
       .def_property_readonly(
-          "destinations", [](const ForwardingProgram& p) { return ids_tuple(p.destinations()); },
+          "destinations", [](const ForwardingProgram& p) { return ints_tuple(p.destinations()); },
           "the destination set, ascending")
       .def_property_readonly(
           "tunnels",

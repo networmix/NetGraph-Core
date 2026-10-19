@@ -44,9 +44,9 @@ engine. It replaces the 0.11 API.
   while a policy is bound; `reset()` clears the records and holds a destroyed policy left behind;
   a copy keeps the holds). `FlowRecord` carries the flow's endpoints as sets, admission, bundle
   (`PredDAG`), route cost, `offered` (Lossy only), delivery, per-edge allocations, drops and
-  `reserved_edges` (an up T1 tunnel's holds), and `entry` (the program entry a T1 or Pinned record
-  carries); counters are 128-bit (exact Python ints). Policies place, hold and remove; holds never
-  police traffic.
+  `reserved_edges` (an up T1 tunnel's holds), and `entry` (the program entry a T1, T2 or Pinned
+  record carries); counters are 128-bit (exact Python ints). Policies place, hold and remove; holds
+  never police traffic.
 - **Kernels**: `FlowPlacement` (`MAX_FLOW`, `WEIGHTED`, `EQUAL_BALANCED`) and `Admission`
   (`LOSSLESS`, `LOSSY`). `MAX_FLOW` re-solves the flow with the flow core on its route over the free
   capacity plus its own allocation; `WEIGHTED` splits in proportion to integer weights frozen when
@@ -59,27 +59,30 @@ engine. It replaces the 0.11 API.
   is the one placement engine. `FlowPolicyConfig(*, routing, placement=None,
   admission=LOSSLESS, selection=None, origin=None, weights=None, edge_weights=None)` takes
   keywords only; the routing is `CostOnly()`, `CapacityAware(Tunnels(N), *, max_path_cost=None,
-  min_unreserved_bandwidth=0)` (T1, below), `Global(*, support=None)` (a support restricts the
-  controller to a DAG's edges) or `Pinned(program, *, black_holes=None)`; each routing accepts the
+  min_unreserved_bandwidth=0)` (T1, below), `Global(*, support=None, tunnels=None)` (a support
+  restricts the controller to a DAG's edges; `tunnels` makes it T2, below) or `Pinned(program, *,
+  black_holes=None)`; each routing accepts the
   combinations of one table (placement required for CostOnly and accepted by no other routing;
   `Origin.EQUAL` or `OPTIMIZED`; admission; selection; weights) and any other raises
   `ValueError`, the first defect in a stated order.
   `place(volume, outputs=None)` forwards CostOnly's pooled program or re-solves the controllers
   (Global and CostOnly `MAX_FLOW`: the cumulative minimum-cost flow on the residual plus the
-  policy's own allocation, under either origin); T1 has no `place` (`T1 does not support
-  incremental placement`). Every call returns `PlacementResult`: this call's `placed`,
+  policy's own allocation, under either origin); T1 and T2 have no `place` (`<T1 or T2> does not
+  support incremental placement`). Every call returns `PlacementResult`: this call's `placed`,
   `remaining`, `delivery_delta`, `call_drops`, `call_source_loss`, `termination` and the flags
   `routes_changed`, `weights_changed` and `reservations_changed`; the demand's `requested`,
   `offered`, `admitted`, `delivered`, `unadmitted`, `source_loss`, `drops`, `by_source`
-  (`SourceFlow` rows), `total_cost` and `cost_distribution`, `program`, `plan` (T1's
-  `TunnelPlan`: `count`, `design_demand`, `head_design`, `reserved_total`) and `by_tunnel`
+  (`SourceFlow` rows), `total_cost` and `cost_distribution`, `program`, `plan` (the tunnel
+  models' `TunnelPlan`: `count`, `design_demand`, `head_design`, `reserved_total`, and T2's
+  `live_heads`, `insufficient_resolution`, `fluid_share`, `common_share`, `planned_per_tunnel`,
+  `planned_total`, `route_cost`, `headroom_penalty`, `forwarding_bound`) and `by_tunnel`
   (`TunnelFlow` rows); and `edge_flows`, `residual`, `bottleneck`, `reservation_edge_flows` and
   `min_cut` when requested through `OutputOptions`. A request of 0 is validated like any other.
   `evaluate(offer, *, design_demand=None)` (computes a whole new offer on the policy's released
   view and publishes nothing), `replace(offer, *, design_demand=None)` (the same, published: new
-  records, a new epoch; `design_demand` is T1's design, `None` meaning the offer, rejected by the
-  other routings) and `forward(offer, black_holes=None)` (a whole new offer over the installed
-  program, no route computation, T1's holds kept), `remove()`, `records()`, `record(flow_id)`
+  records, a new epoch; `design_demand` is the tunnel models' design, `None` meaning the offer,
+  rejected by the other routings) and `forward(offer, black_holes=None)` (a whole new offer over
+  the installed program, no route computation, T1's holds and T2's plan kept), `remove()`, `records()`, `record(flow_id)`
   (the policy's own records), `placed_demand()` and `program` complete the policy.
 - **T1 tunnels**: `CapacityAware(Tunnels(N))` models distributed RSVP-TE head ends, with no
   controller. A design volume D is split by round robin over the roster heads and each head's
@@ -102,9 +105,31 @@ engine. It replaces the 0.11 API.
   2^62)`, `tunnel limit exceeded: <H> heads x <N> tunnels > 1073741823`, `T1 requires a finite
   design demand`, `<model> does not accept design_demand` and `T1 capacity requires
   design_demand`.
+- **T2 tunnels**: `Global(tunnels=Tunnels(N))` models a central controller: every live head
+  (one reaching a destination over links with free capacity of at least one unit; the others are
+  dead, keep their roster position and lose their share) gets N single-path tunnels with one
+  common whole-unit planned bandwidth. The largest common size U comes from quota flows (K = live
+  heads times N path units, a maximum flow per tested size), with the exact fluid optimum as a
+  `Fraction`; a finite design lowers it to the largest live design share per tunnel; then, among
+  the count vectors at that size, the smallest route-cost sum, then with `prefer_headroom=True` the
+  smallest headroom penalty (each tunnel on a link pays `floor(2^32 (B - V + j u) / B)` for its
+  slot j), then one canonical unit-by-unit augmentation (fewest arcs, smallest arc keys, reverse
+  arcs allowed); tunnels in round order with index `j * H + i` (dead heads leave holes), weight 1,
+  `Tunnel.planned` = u, never held. `Tunnels(L, up_to=True)` chooses the smallest common count up
+  to L whose program carries the live part of the design (else the best, then the smallest),
+  skipping a count only by two proved bounds. No live head, or no whole unit per tunnel
+  (`insufficient_resolution`), installs a program without tunnels that keeps the roster. Origin
+  `EQUAL`, or `OPTIMIZED` with one input source; admission Lossless or Lossy; `design_demand`
+  (`None`: the offer; `float('inf')`: unlimited). Evaluators take an unlimited design when none is
+  given (Lossless) or the offered amount (Lossy: finite; without one, the design if finite).
+  `Global(prefer_headroom=True)` (False by default) switches the headroom objective on; every
+  `Global`, with or without tunnels, rejects a selection (`Global does not accept selection`,
+  first), and a selection's `priority` never enables a controller objective. Validation: `Global does not accept selection`, `Global support and tunnels are
+  mutually exclusive`, `prefer_headroom requires tunnels`, `T2 with several sources requires
+  origin=EQUAL`, `T2 LOSSY capacity requires finite offered`.
 - **Forwarding programs**: `ForwardingProgram`, the routes and integer weights of one demand
   (tunnels `Tunnel`, split routes) with its injection (equal sources, or the captured source
-  weights of an optimized controller). CostOnly, Global and T1 produce one (`policy.program`,
+  weights of an optimized controller). CostOnly, Global, T1 and T2 produce one (`policy.program`,
   `result.program`; the controllers decompose their solved flow into paths, also with one
   source); `ForwardingProgram.from_routes(graph, sources, destinations, routes, *, placement,
   weights, edge_weights, residual)` builds one from `Route(head, Path or PredDAG, *, weight=1)`
@@ -155,8 +180,9 @@ engine. It replaces the 0.11 API.
     unchanged. `clear()` raises when frozen, and `thaw()` returns to building mode after the
     caller has joined every reader.
 - **Evaluators**: one options type, `QueryOptions(config, *, elig=None, cache=None, outputs=None,
-  design_demand=None, offered=None)` (`design_demand`: T1's design, required and finite;
-  `offered`: the finite offer T1 and Pinned Lossy capacity require);
+  design_demand=None, offered=None)` (`design_demand`: T1's design, required and finite, or T2's;
+  `offered`: the finite offer T1, T2 and Pinned Lossy capacity require, T2 taking a finite design
+  instead);
   `capacity(graph, sources, destinations, opts)` (with `Global()` the exact maximum flow, its
   marginal cost curve and its minimum cut), `batch_capacity(graph, pairs, opts, per_pair_elig=None,
   workers=None)` (pair order; the lowest failing index raises; Pinned is rejected) and `sensitivity(graph, sources,
@@ -167,7 +193,8 @@ engine. It replaces the 0.11 API.
   4096]; 1 when unset or invalid).
 - **Flow core**: one exact integer minimum-cost flow solver (successive shortest paths with
   potentials, then Dinic phases for each cost level; each edge is its own arc, visited in
-  ascending EdgeId) serves Global routing, the `MAX_FLOW` kernel and the evaluators (sensitivity
+  ascending EdgeId) serves Global routing, the `MAX_FLOW` kernel, T2's sizing (every cost taken as
+  0: a maximum flow) and the evaluators (sensitivity
   repairs the baseline's solution for each removed edge instead of solving again); the private
   entry `_netgraph_core._place_global_units` returns the value, the marginal cost curve, the edge
   flows, the minimum cut, the potentials and six operation counters. The solver numbers its

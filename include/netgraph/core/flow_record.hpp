@@ -39,7 +39,7 @@ struct Counter128 {
 // A snapshot of one ledger flow, returned by records() or record(id). `bundle` is its route
 // structure; `route_cost` is the minimum walk cost from its sources to its destinations over
 // that bundle, or kUnreachable if none exists. `entry` is the program entry the record carries
-// (T1 and Pinned: one record per entry, the entry identifier of its program); absent for the
+// (T1, T2 and Pinned: one record per entry, the entry identifier of its program); absent for the
 // records kept per roster source (CostOnly, Global). Lossy records alone have `offered`: the
 // cumulative amount submitted to this flow before any drops. `edges` (carried load), `drops` and
 // `reserved_edges` (the strict holds of an up T1 tunnel: its request on every link of its path)

@@ -27,8 +27,8 @@ class FrozenTally;
 } // namespace detail
 
 // The tunnel count of the tunnel models, per head: `count` in [1, 10000] (checked where a policy
-// or an evaluator uses it); `up_to` (T2 only; T1 rejects it): the smallest sufficient count up to
-// `count`.
+// or an evaluator uses it); `up_to` (T2 only; T1 rejects it): one common count k in 1..count for
+// every head, the smallest sufficient one.
 struct Tunnels {
   std::int64_t count {1};
   bool up_to {false};
@@ -61,6 +61,20 @@ struct Tunnels {
 //   call's request (placed_demand() + volume: what an earlier call could not place is not
 //   requested again). Its program: the solved flow cut into paths per source, each path a tunnel
 //   weighted by its amount.
+// Global with `tunnels` (T2; `support` must then be absent): a controller lays out, for every live
+//   roster head (one reaching an allowed destination over links with free capacity V >= 1, V the
+//   residual with this policy's own traffic released; the other heads are dead: they keep their
+//   roster position and lose their share), k single-path tunnels with one common whole-unit planned
+//   bandwidth: first the largest common size U (quota flows of K = a k path units, a live heads),
+//   then for a finite design D the working size u = min(U, max(1, max live ceil(RR(D, H, i) / k)))
+//   (unlimited: U), then the cheapest routes (the route-cost sum J), then with prefer_headroom
+//   the smallest headroom penalty (each tunnel on a link pays floor(2^32 (B - V + j u) / B) for its
+//   slot j, B the static capacity), then one fixed unit-by-unit augmentation (fewest arcs, then the
+//   smallest arc keys). k = tunnels.count, or with up_to the smallest count in 1..count whose
+//   program carries the live part of D (else the best, then the smallest count). U = 0 with live
+//   heads, or no live head, gives a program without tunnels that keeps the roster. Forwarding is
+//   the program's: round robin over the heads, then over a head's tunnels. Its program: the
+//   tunnels (index j * H + i, weight 1, planned u); the plan names U, u, s* and the objectives.
 // Pinned: forwarding over a given program, computing nothing; the program's endpoints are the
 //   policy's. Its Eligibility repairs failures (a tunnel touching an excluded element is Failed, a
 //   split route loses its excluded members, the roster is rebuilt from the program's basis); the
@@ -74,6 +88,8 @@ struct CapacityAware {
 };
 struct Global {
   std::shared_ptr<const PredDAG> support {};
+  std::optional<Tunnels> tunnels {};
+  bool prefer_headroom {false};
 };
 struct Pinned {
   std::shared_ptr<const ForwardingProgram> program {};
@@ -84,10 +100,13 @@ using Routing = std::variant<CostOnly, CapacityAware, Global, Pinned>;
 // One demand's settings. A field that does not apply to the routing mode stays absent; a policy
 // or an evaluator checks the combination when it uses the configuration (the fields remain
 // assignable), in this order: the enumeration values, then the model's row of the matrix below
-// (T1: an "up to" count first, it is not T1's row), its columns left to right (placement, origin,
-// admission, selection, weights with edge_weights), then the DagCache, then T1's own parameters
-// (the tunnel count, max_path_cost, min_unreserved_bandwidth), then edge_weights' length and
-// entries, then the roster and count rules (the pooled single-path rule, T1's tunnel limit).
+// (Global: any selection first, then support and tunnels together, they decide the row, then
+// prefer_headroom without tunnels; T1: an "up to" count, it is not T1's row), its columns left to
+// right (placement, origin, admission, selection, weights with
+// edge_weights), then the DagCache, then the tunnel models' own parameters (the tunnel count; T1's
+// max_path_cost and min_unreserved_bandwidth), then edge_weights' length and entries, then the
+// roster and count rules (the pooled single-path rule, T2's several-sources rule, the tunnel
+// limit).
 //
 // | routing           | placement            | origin (default / allowed) | admission       | selection                          | weights |
 // | CostOnly          | EqualBalanced        | Equal / Equal              | Lossless, Lossy | all four fields                    | none |
@@ -95,6 +114,7 @@ using Routing = std::variant<CostOnly, CapacityAware, Global, Pinned>;
 // | CostOnly          | MaxFlow              | Optimized / both           | Lossless        | all four fields                    | none |
 // | Global            | none                 | Optimized / both           | Lossless        | none                               | none |
 // | T1: CapacityAware | none                 | Equal / Equal              | Lossless, Lossy | tie_break, priority, multi_edge    | none |
+// | T2: Global tunnels| none                 | Equal / Equal; Optimized with one source | Lossless, Lossy | none          | none |
 // | Pinned            | none                 | none (the program has it)  | Lossless, Lossy | none                               | none |
 //
 // An absent origin resolves to the default and an absent selection to PathSelection() in the
@@ -102,10 +122,15 @@ using Routing = std::variant<CostOnly, CapacityAware, Global, Pinned>;
 // CostOnly reads a DagCache; another model rejects one. edge_weights (one integer per edge in
 // [0, 2^62), shared by every configuration copied from this one) is given exactly when weights is
 // Explicit. T1 rejects multipath = true (a tunnel is one path; absent and false are accepted).
+// Every Global, with or without tunnels, rejects any selection: T2's headroom objective is the
+// model's prefer_headroom (true needs tunnels), and a selection's priority never enables a
+// controller objective.
 // Pooled single-path rule: CostOnly with more than one input source (normalized, before any
 // Eligibility) rejects multipath = false together with PreferHigherPriority, whose bottleneck
-// choice would differ per source at a shared router. T1's tunnel limit: roster heads times the
-// tunnel count at most 2^30 - 1.
+// choice would differ per source at a shared router. T2 with the optimized origin takes one input
+// source (normalized, before any Eligibility): it is the same calculation as the equal origin. The
+// tunnel limit (T1, T2): roster heads times the tunnel count (the largest count for up_to) at
+// most 2^30 - 1.
 struct FlowPolicyConfig {
   Routing routing {CostOnly {}};
   std::optional<FlowPlacement> placement {};
@@ -169,15 +194,30 @@ struct TunnelFlow {
   friend bool operator==(const TunnelFlow&, const TunnelFlow&) = default;
 };
 
-// The tunnel models' setup summary (PlacementResult::plan): count (the tunnels per head),
-// design_demand (nullopt: unlimited), head_design ((head, RR(D, H, i)) for every roster head in
-// ascending NodeId; empty for an unlimited design) and reserved_total (T1's strict holds, counted
-// once per up tunnel: the sum of their requests).
+// The tunnel models' setup summary (PlacementResult::plan): count (the tunnels per head; T2 up
+// to: the chosen count), design_demand (nullopt: unlimited), head_design ((head, RR(D, H, i)) for
+// every roster head in ascending NodeId; empty for an unlimited design) and reserved_total (T1's
+// strict holds, counted once per up tunnel: the sum of their requests; 0 for T2). T2 only (nullopt
+// for T1): live_heads (ascending), insufficient_resolution (live heads exist but U = 0: the program
+// has no tunnels), fluid_share (the exact fluid optimum s* as a reduced fraction (numerator,
+// denominator); 0 / 1 without a live head), common_share (U), planned_per_tunnel (u),
+// planned_total (K u), route_cost (J, below 2^92), headroom_penalty (Phi, below 2^94; with
+// prefer_headroom only) and forwarding_bound (F: the program's lossless maximum on the call's view, a
+// dead head's share blocking).
 struct TunnelPlan {
   std::int64_t count {0};
   std::optional<Amount> design_demand {};
   std::vector<std::pair<NodeId, Amount>> head_design {};
   Amount reserved_total {0};
+  std::optional<std::vector<NodeId>> live_heads {};
+  std::optional<bool> insufficient_resolution {};
+  std::optional<std::pair<Amount, Amount>> fluid_share {};
+  std::optional<Amount> common_share {};
+  std::optional<Amount> planned_per_tunnel {};
+  std::optional<Amount> planned_total {};
+  std::optional<Counter128> route_cost {};
+  std::optional<Counter128> headroom_penalty {};
+  std::optional<Amount> forwarding_bound {};
   friend bool operator==(const TunnelPlan&, const TunnelPlan&) = default;
 };
 
@@ -191,12 +231,13 @@ struct TunnelPlan {
 // an entry are equal): routes_changed the ordered heads, paths, split tables and duplicates;
 // weights_changed the injection (the source weights) and every entry and split-table weight (an
 // absent entry weighs 0); reservations_changed every tunnel's requested and reserved amounts by
-// index (an absent tunnel holds (0, 0); only T1 sets it). An offer-only change to a program that
+// index (an absent tunnel holds (0, 0); only T1 sets it: T2's planned bandwidth is no
+// reservation). An offer-only change to a program that
 // is not recomputed (forward, Pinned, CostOnly increments) sets none of them; a controller's
 // re-solve that changes a path's amount is a weight change; an identical replace sets none.
 // State: program (the installed program after the call; evaluate: the computed one; null before
-// the epoch's first preparation), plan (T1: the setup of that program; nullopt for every other
-// model, Pinned over a T1 program too), requested (the sum of the requests;
+// the epoch's first preparation), plan (T1 and T2: the setup of that program; nullopt for every
+// other model, Pinned over a tunnel program too), requested (the sum of the requests;
 // nullopt after +inf), offered (Lossy only: the traffic actually sent; the first-hop injection of a
 // Lossy +inf), admitted (Lossless: the total carried; Lossy: offered), delivered, unadmitted
 // (Lossless: requested - delivered, nullopt after +inf; Lossy: 0), source_loss and drops (per
@@ -263,17 +304,18 @@ struct PlacementResult {
 // the largest total whose round-robin supplies are all carried. Pinned forwards its program the
 // same way (Lossless: the largest total in [admitted, admitted + volume]; Lossy: the round-robin
 // or captured-weight increments of the injection, each head splitting its increment afresh).
-// T1 has no place (rejected, also for 0).
+// T1 and T2 have no place (rejected, also for 0).
 // evaluate(offer, design_demand) is a full, independent computation and forwarding of the offer
 // from the policy's own released view (the residual plus its own carried load; T1 sets up on the
 // unreserved capacity with its own holds released): it publishes nothing, creates no record and
 // leaves the epoch as it was. replace(offer, design_demand) is the same, published atomically: the
 // old records and holds are retired, new ones created, and a new epoch starts at this offer
-// (delivery may go down). design_demand (T1 only; every other model rejects it): absent means D =
-// offer, an inner nullopt +inf; T1 needs a finite D. forward(offer, black_holes) forwards a full
+// (delivery may go down). design_demand (T1 and T2; every other model rejects it): absent means D
+// = offer, an inner nullopt +inf; T1 needs a finite D, T2 takes an unlimited one (u = U). T2 lays
+// out its tunnels on the residual with its own traffic released. forward(offer, black_holes) forwards a full
 // new offer over the installed program with no route computation and no setup (Lossless: the
 // fixed program's lossless bound; Lossy: the offer's injections) on the released view, starts a
-// new epoch like replace, and keeps the program and T1's holds; with black_holes, the nodes and
+// new epoch like replace, and keeps the program, its plan and T1's holds; with black_holes, the nodes and
 // edges it excludes are black holes for that call. A Lossy replace, forward or evaluate needs a
 // finite offer; a Lossy +inf is CostOnly place's first-hop experiment only. remove() releases
 // every policy flow and hold, retires their ids, clears the program and starts a new epoch: the
@@ -284,11 +326,11 @@ struct PlacementResult {
 // Validation (std::invalid_argument, before anything binds), in this order: the endpoint sets
 // (non-empty, ids in range, disjoint), the ownership of the Eligibility, the program, the support,
 // the DagCache and the black holes by the ledger's graph, the configuration (FlowPolicyConfig's
-// order), then the roster and count rules (the pooled single-path rule; T1's tunnel limit; a
-// Pinned program's endpoints equal to the policy's). A call validates the operation for the model
-// (T1's place), an installed program (forward), the request ([0, 2^62) units or +inf), a Lossy
-// full offer's finiteness, the design demand (the model accepts one, [0, 2^62) or +inf, T1
-// finite), a finite place after +inf in the epoch (rejected, also 0) and the black holes' graph
+// order), then the roster and count rules (the pooled single-path rule; T2's several-sources
+// rule; the tunnel limit; a Pinned program's endpoints equal to the policy's). A call validates the
+// operation for the model (T1's and T2's place), an installed program (forward), the request ([0,
+// 2^62) units or +inf), a Lossy full offer's finiteness, the design demand (the model accepts one,
+// [0, 2^62) or +inf, T1 finite), a finite place after +inf in the epoch (rejected, also 0) and the black holes' graph
 // (forward) before any change. A solve of the flow core (Global, CostOnly MaxFlow, a MaxFlow flow) whose
 // network exceeds the core's int32 numbering throws std::invalid_argument, and the call changes
 // nothing: more than INT32_MAX - 2 nodes, or more than 2^30 - 1 edges, sources and destinations
@@ -299,7 +341,7 @@ struct PlacementResult {
 // Lifetime: the ledger, the Eligibility and the DagCache outlive the policy (the policy holds
 // pointers to them); a Pinned policy shares its program and black holes. The roster (the eligible
 // sources that statically reach an allowed destination, over allowed edges whatever their
-// capacity, T1's heads; Pinned: the program's roster heads that reach an allowed destination over
+// capacity, the tunnel models' heads; Pinned: the program's roster heads that reach an allowed destination over
 // its basis under the Eligibility) is fixed at construction.
 class FlowPolicy {
 public:

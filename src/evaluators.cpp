@@ -1,13 +1,14 @@
 /*
-  capacity() is place(+inf) on a fresh ledger (Pinned Lossy: place(offered); T1: evaluate of its
-  design, with +inf or the offered amount). batch_capacity()
+  capacity() is place(+inf) on a fresh ledger (Pinned Lossy: place(offered); T1 and T2: evaluate
+  of the design, with +inf or the offered amount). batch_capacity()
   runs it per pair and sensitivity() per candidate deletion on `workers` threads; results follow
   input order and the lowest failing index supplies the exception. Unrestricted Global with the
   optimized origin repairs the baseline flow after each deletion. CostOnly skips an edge that no
   roster source's reachable part of the static shortest-path support contains: removing it
   changes no route or amount. Other deletions (the equal origin of Global among them: a deletion
-  can raise its maximum; Global with a support; Pinned, which replays its program under each
-  deletion) use fresh ledgers. Only CostOnly reads a DagCache.
+  can raise its maximum; Global with a support; T1 and T2, which set up or lay out again; Pinned,
+  which replays its program under each deletion) use fresh ledgers. Only CostOnly reads a
+  DagCache.
 */
 #include "netgraph/core/evaluators.hpp"
 
@@ -39,11 +40,11 @@ std::shared_ptr<const Graph> borrowed(const Graph& g) {
   return std::shared_ptr<const Graph>(std::shared_ptr<const void> {}, &g);
 }
 
-// The call an evaluator makes on its fresh policy (12.1): place(offer), or for T1 evaluate(offer,
-// design) (`full`).
+// The call an evaluator makes on its fresh policy (12.1): place(offer), or for T1 and T2
+// evaluate(offer, design) (`full`; design absent: the offer).
 struct EvaluatorCall {
-  std::optional<Amount> offer {};
-  std::optional<Amount> design {};
+  std::optional<Amount> offer {};   // nullopt: +inf
+  std::optional<Amount> design {};  // the tunnel models' design D (nullopt: unlimited)
   bool full {false};
 };
 
@@ -60,23 +61,35 @@ EvaluatorCall evaluator_call(const FlowPolicyConfig& cfg, const std::optional<st
   if (outside(design)) throw std::invalid_argument("design_demand must be an integer in [0, 2^62) or permitted +inf");
   const std::string model = detail::model_name(r);
   const bool t1 = std::holds_alternative<CapacityAware>(r);
+  const auto* gl = std::get_if<Global>(&r);
+  const bool t2 = gl != nullptr && gl->tunnels.has_value();
   EvaluatorCall call;
-  if (design.has_value() && !t1) throw std::invalid_argument(model + " does not accept design_demand");
+  if (design.has_value() && !t1 && !t2) throw std::invalid_argument(model + " does not accept design_demand");
   if (t1) {
     if (!design.has_value()) throw std::invalid_argument("T1 capacity requires design_demand");
     if (!design->has_value()) throw std::invalid_argument("T1 requires a finite design demand");
-    call.design = *design;
+  }
+  // T2: the design as given; absent, unlimited (Lossless) or the offer (Lossy).
+  if (t1 || t2) {
+    call.design = design.has_value() ? *design : std::optional<Amount> {};
     call.full = true;
   }
   if (cfg.admission == Admission::Lossless) {
     if (offered.has_value()) throw std::invalid_argument(model + " LOSSLESS capacity does not accept offered");
     return call;
   }
-  if (t1 || std::holds_alternative<Pinned>(r)) {
+  if (t2 && !offered.has_value()) {
+    // No offered: the design if finite (an explicit +inf is rejected below).
+    if (!call.design.has_value()) throw std::invalid_argument("T2 LOSSY capacity requires finite offered");
+    call.offer = call.design;
+    return call;
+  }
+  if (t1 || t2 || std::holds_alternative<Pinned>(r)) {
     if (!offered.has_value() || !offered->has_value()) {
       throw std::invalid_argument(model + " LOSSY capacity requires finite offered");
     }
     call.offer = *offered;
+    if (t2 && !design.has_value()) call.design = call.offer;
     return call;
   }
   if (offered.has_value()) throw std::invalid_argument("CostOnly LOSSY capacity uses first-hop injection");
@@ -85,7 +98,7 @@ EvaluatorCall evaluator_call(const FlowPolicyConfig& cfg, const std::optional<st
 
 // The evaluation of a fresh policy.
 PlacementResult run(FlowPolicy& policy, const EvaluatorCall& call, const OutputOptions& outputs) {
-  if (call.full) return policy.evaluate(call.offer, call.design, outputs);
+  if (call.full) return policy.evaluate(call.offer, std::optional<std::optional<Amount>>(std::in_place, call.design), outputs);
   return policy.place(call.offer, outputs);
 }
 
@@ -286,9 +299,10 @@ SensitivityResult sensitivity_in_call(const Graph& g, std::span<const NodeId> so
                                       std::int32_t workers, FrozenTally& tally) {
   check_common(g, opts.elig, opts.cache, workers);
   // Unrestricted Global with the optimized origin (its default) repairs its baseline; the equal
-  // origin and a support cannot (every allowed deletion is solved afresh).
+  // origin, a support and T2 cannot (every allowed deletion is solved afresh).
   const auto* global_routing = std::get_if<Global>(&opts.config.routing);
-  const bool global = global_routing != nullptr && !global_routing->support && opts.config.origin != Origin::Equal;
+  const bool global = global_routing != nullptr && !global_routing->support && !global_routing->tunnels.has_value() &&
+                      opts.config.origin != Origin::Equal;
   const bool cost_only = std::holds_alternative<CostOnly>(opts.config.routing);
   SensitivityResult out;
   std::vector<std::uint8_t> on_route;  // CostOnly: the baseline's reachable support

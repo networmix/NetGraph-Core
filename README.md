@@ -108,28 +108,36 @@ specified in [docs/semantics.md](docs/semantics.md).
   - `Global(support=None)`: an ideal controller: the minimum-cost flow from all the policy's
     sources to its destinations, on the free capacity plus its own allocation, optionally only
     over the edges of a support DAG;
+  - `Global(tunnels=Tunnels(N))` (T2): a central controller (as a PCE) lays out, for every head
+    that reaches a destination over free capacity, N single-path tunnels with one common
+    whole-unit planned bandwidth: as large as possible, then (for a finite design) no larger than
+    needed, then the cheapest routes, then with `prefer_headroom=True` the routes that leave the most
+    spare capacity, then one fixed tie; `Tunnels(L, up_to=True)` chooses the smallest common count
+    up to L that carries the design. The planned bandwidth is never held. NetGraph's TE presets
+    map onto it: `TE_ECMP_16_LSP` is `Global(tunnels=Tunnels(16))` and `TE_ECMP_UP_TO_256_LSP`
+    `Global(tunnels=Tunnels(256, up_to=True))`, both with `prefer_headroom=True`;
   - `Pinned(program, black_holes=None)`: forwarding over a given `ForwardingProgram`, computing
     nothing; the policy's Eligibility fails the tunnels it touches (their heads split over the
     survivors) and `black_holes` makes failed elements swallow what reaches them (stale
     forwarding).
-- **`ForwardingProgram`**: the routes and integer weights of one demand. CostOnly, Global and T1
-  produce one (`policy.program`, `result.program`); `ForwardingProgram.from_routes(graph,
+- **`ForwardingProgram`**: the routes and integer weights of one demand. CostOnly, Global, T1
+  and T2 produce one (`policy.program`, `result.program`); `ForwardingProgram.from_routes(graph,
   sources, destinations, routes)` builds one from `Route(head, Path or PredDAG, weight=1)`
   entries.
 - **`place(volume, outputs=None)`** adds `volume` to the policy's request as one all-or-nothing
   step (CostOnly forwards over the program it prepares once per epoch; the controllers re-solve
-  what they already deliver plus this request; T1 has no `place`) and returns
+  what they already deliver plus this request; T1 and T2 have no `place`) and returns
   a `PlacementResult`: this call's `placed`, `remaining`, `delivery_delta`, `call_drops`,
   `call_source_loss`, `termination` and flags; the demand's `requested`, `offered`, `admitted`,
   `delivered`, `unadmitted`, `source_loss`, `drops`, per-source rows `by_source`, `total_cost`
-  (controllers), `cost_distribution` (optimized Global), the `program`, T1's `plan` and
+  (controllers), `cost_distribution` (optimized Global), the `program`, the tunnel models' `plan` and
   `reservations_changed`, and per-tunnel rows `by_tunnel`; and, when requested through
   `OutputOptions`, `edge_flows`, `residual`, `bottleneck`, `reservation_edge_flows` and `min_cut`
   (optimized Global).
   `evaluate(offer, design_demand=None)` computes a whole new offer without publishing it,
-  `replace(offer, design_demand=None)` publishes it (T1 sets its tunnels up for the design,
-  `None` meaning the offer), `forward(offer, black_holes=None)` sends it over the installed
-  program (T1 keeps its tunnels and holds); `remove()` reverts the policy's flows and holds; `records()`, `record(flow_id)`, `placed_demand()` and `program` read its
+  `replace(offer, design_demand=None)` publishes it (T1 sets its tunnels up and T2 lays them out
+  for the design, `None` meaning the offer), `forward(offer, black_holes=None)` sends it over the
+  installed program (T1 keeps its tunnels and holds, T2 its tunnels and plan); `remove()` reverts the policy's flows and holds; `records()`, `record(flow_id)`, `placed_demand()` and `program` read its
   state.
 - **Failure guarantee**: every public call either completes or raises one exception and leaves
   every ledger, policy, cache and scratch buffer as it was, whatever fails (validation, memory, a
@@ -183,7 +191,8 @@ values.
 All three take one options type, `QueryOptions(config, *, elig=None, cache=None,
 outputs=None, design_demand=None, offered=None)`. `capacity(graph, sources, destinations, opts)` is `place(+inf)` of a policy on a fresh ledger
 (a Lossy Pinned policy places the finite `offered` instead; T1 evaluates the tunnels it sets up
-for the required finite `design_demand`, forwarding `+inf` or, Lossy, the finite `offered`); `Global()` gives the
+for the required finite `design_demand`, forwarding `+inf` or, Lossy, the finite `offered`; T2
+the same for its layout, an absent design meaning unlimited when Lossless); `Global()` gives the
 exact maximum flow with its marginal cost curve, and its minimum cut with
 `outputs=OutputOptions(min_cut=True)`. `batch_capacity(graph, pairs,
 opts, per_pair_elig=None, workers=None)` evaluates pairs in pair order (the lowest failing
@@ -193,9 +202,10 @@ it comes from `NGRAPH_CORE_BATCH_THREADS` and `NGRAPH_CORE_SENSITIVITY_THREADS`.
 
 ### Flow core
 
-One native integer minimum-cost flow core serves Global routing, the MAX_FLOW kernel and the
-evaluators: the largest flow up to a cap from a source set to a destination set over the eligible
-edges, sent at the lowest total cost, starting from zero flow. For sensitivity it repairs the
+One native integer minimum-cost flow core serves Global routing, the MAX_FLOW kernel, the
+evaluators and T2's sizing (there with every cost taken as 0: a maximum flow): the largest flow
+up to a cap from a source set to a destination set over the eligible edges, sent at the lowest
+total cost, starting from zero flow. For sensitivity it repairs the
 baseline's solution for each removed edge instead of solving again. Its private Python entry
 `_netgraph_core._place_global_units(graph, view, sources, destinations, elig, cap)` returns the
 payload `{placed, cost_distribution, edge_flows, min_cut, potentials, counters}` for the
@@ -224,6 +234,11 @@ r = policy.replace(ngc.to_units(12.0, q), design_demand=ngc.to_units(12.0, q))
 print([t.status.name for t in r.program.tunnels])  # ['UP', 'NO_BANDWIDTH']
 print(ngc.as_float(r.placed, q))                    # 10.0
 print(ngc.as_float(r.plan.reserved_total, q))       # 6.0
+
+# T2: 16 tunnels of one common size, 11 on the 10-unit path and 5 on the 5-unit one.
+te16 = ngc.FlowPolicyConfig(routing=ngc.Global(tunnels=ngc.Tunnels(16), prefer_headroom=True))
+r = ngc.FlowPolicy(ngc.FlowLedger(graph), 0, 3, te16).replace(float("inf"))
+print(r.plan.fluid_share, r.plan.common_share, r.placed)  # 40960/11 3723 59575
 ```
 
 ## Installation

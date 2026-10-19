@@ -102,6 +102,16 @@ tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[
 tests/py/test_tunnels_t1.py::test_t1_results_survive_python_allocation_failures[evaluate]
 tests/py/test_tunnels_t1.py::test_t1_results_survive_python_allocation_failures[forward]
 tests/py/test_tunnels_t1.py::test_t1_results_survive_python_allocation_failures[replace]
+tests/py/test_tunnels_t2.py::test_t2_getters_survive_python_allocation_failures[gl.tunnels]
+tests/py/test_tunnels_t2.py::test_t2_getters_survive_python_allocation_failures[r.plan.fluid_share]
+tests/py/test_tunnels_t2.py::test_t2_getters_survive_python_allocation_failures[r.plan.headroom_penalty]
+tests/py/test_tunnels_t2.py::test_t2_getters_survive_python_allocation_failures[r.plan.live_heads]
+tests/py/test_tunnels_t2.py::test_t2_getters_survive_python_allocation_failures[r.plan.route_cost]
+tests/py/test_tunnels_t2.py::test_t2_getters_survive_python_allocation_failures[r.plan]
+tests/py/test_tunnels_t2.py::test_t2_getters_survive_python_allocation_failures[r.program.tunnels]
+tests/py/test_tunnels_t2.py::test_t2_results_survive_python_allocation_failures[evaluate]
+tests/py/test_tunnels_t2.py::test_t2_results_survive_python_allocation_failures[forward]
+tests/py/test_tunnels_t2.py::test_t2_results_survive_python_allocation_failures[replace]
 "
 EXPECTED_OFF_SKIPPED_PREFIX='tests/py/test_flow_policy_fixtures.py::test_fixture['
 

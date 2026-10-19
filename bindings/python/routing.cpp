@@ -190,35 +190,69 @@ void register_routing(py::module_& m) {
       });
 
   py::class_<Global>(m, "Global",
-                     "Routing: an ideal central controller that sees the whole network. Every positive call re-solves\n"
-                     "the minimum-cost flow of what the policy already delivers plus this call's request\n"
-                     "(placed_demand() + volume; what an earlier call could not place is not requested again) over\n"
-                     "the eligible graph, or exactly over `support` (a PredDAG of the policy's graph, trimmed to the\n"
+                     "Routing: an ideal central controller that sees the whole network (with `tunnels`: T2, below).\n"
+                     "Every positive call re-solves the minimum-cost flow of what the policy already delivers plus this\n"
+                     "call's request (placed_demand() + volume; what an earlier call could not place is not requested\n"
+                     "again) over the eligible graph, or exactly over `support` (a PredDAG of the policy's graph, trimmed to the\n"
                      "walks from the sources to the allowed destinations under the Eligibility; every other edge\n"
                      "carries nothing), on the free capacity plus its own allocation (it may move its own traffic,\n"
                      "never another's). It takes no placement and no selection. Origin OPTIMIZED (the default): the\n"
                      "controller chooses how much enters at each source; EQUAL: every roster source sends its\n"
                      "round-robin share of the largest total whose shares all fit. Its program is the solve cut into\n"
                      "paths per source, each a tunnel weighted by its amount. A positive call on a network beyond the\n"
-                     "flow core's int32 numbering raises ValueError (see FlowPolicy.place).")
-      .def(py::init([](const py::object& support) {
+                     "flow core's int32 numbering raises ValueError (see FlowPolicy.place).\n"
+                     "T2, Global(tunnels=Tunnels(N)) (support must be None; no selection either): a controller (like\n"
+                     "a PCE) lays out, for every live head (one reaching a destination over links with free capacity\n"
+                     ">= 1; the other heads are dead and lose their share), N single-path tunnels with one common\n"
+                     "whole-unit planned bandwidth: first as large as possible (U), then for a finite design no larger\n"
+                     "than needed (u), then the cheapest routes, then with prefer_headroom=True the routes that leave\n"
+                     "the most spare capacity, then one fixed unit-by-unit tie. Tunnels(L, up_to=True): the smallest\n"
+                     "common count k <= L whose program carries the design (else the best, then the smallest).\n"
+                     "Traffic splits equally over the heads and over each head's tunnels; planned bandwidth is never\n"
+                     "held.")
+      .def(py::init([](const py::object& support, const py::object& tunnels, bool prefer_headroom) {
              Global gl;
+             gl.prefer_headroom = prefer_headroom;
              if (!support.is_none()) {
                if (!py::isinstance<PredDAG>(support)) throw py::type_error("Global support must be a PredDAG or None");
                gl.support = support.cast<std::shared_ptr<PredDAG>>();
              }
+             if (!tunnels.is_none()) {
+               if (!py::isinstance<Tunnels>(tunnels)) throw py::type_error("Global tunnels must be a Tunnels or None");
+               gl.tunnels = tunnels.cast<Tunnels>();
+             }
              return gl;
            }),
-           py::kw_only(), py::arg("support") = py::none(),
-           "Global(*, support=None): support a PredDAG of the policy's graph (checked when a policy is built\n"
-           "with it: `support belongs to another graph`) or None for every eligible edge")
+           py::kw_only(), py::arg("support") = py::none(), py::arg("tunnels") = py::none(),
+           py::arg("prefer_headroom") = false,
+           "Global(*, support=None, tunnels=None, prefer_headroom=False): support a PredDAG of the policy's\n"
+           "graph (checked when a policy is built with it: `support belongs to another graph`) or None for\n"
+           "every eligible edge; tunnels a Tunnels (T2; checked when a policy is built with it: the count in\n"
+           "[1, 10000], and `Global support and tunnels are mutually exclusive`) or None; prefer_headroom\n"
+           "(T2 only; True without tunnels raises `prefer_headroom requires tunnels` when a policy is built\n"
+           "with it): the headroom penalty as T2's objective after route cost")
       .def_property_readonly(
           "support",
           [](const Global& gl) {
             return optional_shared(gl.support);
           },
           "the supplied support (a PredDAG), or None")
-      .def("__repr__", [](const Global& gl) { return std::string(gl.support ? "Global(support=...)" : "Global()"); });
+      .def_property_readonly(
+          "tunnels", [](const Global& gl) { return optional_of(gl.tunnels); },
+          "T2's tunnel count per head (a Tunnels), or None")
+      .def_readonly("prefer_headroom", &Global::prefer_headroom,
+                    "True: T2 minimizes the headroom penalty after route cost (T2 only)")
+      .def("__repr__", [](const Global& gl) {
+        // Every field that is set, the invalid support-and-tunnels combination included.
+        std::string out;
+        const auto add = [&](const std::string& part) { out += (out.empty() ? "" : ", ") + part; };
+        if (gl.support) add("support=...");
+        if (gl.tunnels.has_value()) {
+          add("tunnels=Tunnels(" + std::to_string(gl.tunnels->count) + (gl.tunnels->up_to ? ", up_to=True)" : ")"));
+        }
+        if (gl.prefer_headroom) add("prefer_headroom=True");
+        return "Global(" + out + ")";
+      });
 
   py::class_<Pinned>(m, "Pinned",
                      "Routing: forwarding over a given program, computing nothing (the program's endpoints must be\n"

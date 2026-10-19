@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <memory>
 #include <optional>
 #include <random>
@@ -1145,5 +1146,133 @@ inline Amount lossless_bound(std::size_t H, const std::vector<RefTunnel>& tunnel
 }
 
 } // namespace t1_reference
+
+// An independent reference of T2 (contract 7.2, 7.3, 7.7) for small graphs: every multiset of k
+// simple paths per live head (a count vector x) by brute force; U = the largest
+// min over used edges of floor(V / x), s* = the largest min of V / x (an exact fraction), and the
+// minimum (J, Phi) over the vectors with x u <= V. It calls none of the library's flow, search or
+// apportionment code (its own path enumeration, Int128 arithmetic).
+namespace t2_reference {
+
+// Every simple path from `src` that ends at the first destination it meets, over the allowed edges
+// that do not leave a destination.
+inline std::vector<std::vector<EdgeId>> paths(const Graph& g, const Eligibility* elig, NodeId src,
+                                              const std::vector<char>& is_dst) {
+  const auto n = static_cast<std::size_t>(g.num_nodes());
+  std::vector<std::vector<EdgeId>> found;
+  std::vector<EdgeId> walk;
+  std::vector<char> on(n, 0);
+  std::function<void(NodeId)> dfs = [&](NodeId u) {
+    on[static_cast<std::size_t>(u)] = 1;
+    for (EdgeId e = 0; e < g.num_edges(); ++e) {
+      const auto ei = static_cast<std::size_t>(e);
+      if (g.edge_src()[ei] != u) continue;
+      const NodeId w = g.edge_dst()[ei];
+      if (elig != nullptr && (!elig->edge_ok(e) || !elig->node_ok(u) || !elig->node_ok(w))) continue;
+      if (on[static_cast<std::size_t>(w)] != 0) continue;
+      walk.push_back(e);
+      if (is_dst[static_cast<std::size_t>(w)] != 0) {
+        found.push_back(walk);
+      } else {
+        dfs(w);
+      }
+      walk.pop_back();
+    }
+    on[static_cast<std::size_t>(u)] = 0;
+  };
+  if (is_dst[static_cast<std::size_t>(src)] == 0) dfs(src);
+  return found;
+}
+
+struct Result {
+  std::vector<NodeId> live {};
+  Amount U {0};
+  std::pair<Amount, Amount> fluid {0, 1};  // reduced
+  std::optional<std::pair<Int128, Int128>> best {};  // the minimum (J, Phi) at u
+};
+
+// floor(2^32 (B - V + j u) / B).
+inline Int128 slot_price(Amount B, Amount V, Amount j, Amount u) {
+  return (Int128(B - V + j * u) * Int128(std::int64_t {1} << 32)) / Int128(B);
+}
+
+// T2 at count k for the roster `heads` (ascending) on V; `u_of(U)` gives the working size at U.
+inline Result solve(const Graph& g, const Eligibility* elig, const std::vector<NodeId>& heads,
+                    const std::vector<NodeId>& dests, std::int64_t k, const std::vector<Amount>& V,
+                    const std::function<Amount(Amount)>& u_of, bool headroom) {
+  std::vector<char> is_dst(static_cast<std::size_t>(g.num_nodes()), 0);
+  for (NodeId d : dests) {
+    if (elig == nullptr || elig->node_ok(d)) is_dst[static_cast<std::size_t>(d)] = 1;
+  }
+  Result out;
+  std::vector<std::vector<std::vector<EdgeId>>> per;
+  for (NodeId h : heads) {
+    auto ps = paths(g, elig, h, is_dst);
+    const bool live = std::any_of(ps.begin(), ps.end(), [&](const auto& p) {
+      return std::all_of(p.begin(), p.end(), [&](EdgeId e) { return V[static_cast<std::size_t>(e)] >= 1; });
+    });
+    if (!live) continue;
+    out.live.push_back(h);
+    per.push_back(std::move(ps));
+  }
+  if (out.live.empty()) return out;
+  // Every count vector: per live head a nondecreasing choice of k path indices.
+  std::vector<std::vector<Amount>> xs;
+  std::vector<Amount> x(static_cast<std::size_t>(g.num_edges()), 0);
+  std::function<void(std::size_t, std::int64_t, std::size_t)> pick = [&](std::size_t h, std::int64_t left,
+                                                                         std::size_t from) {
+    if (h == per.size()) {
+      xs.push_back(x);
+      return;
+    }
+    if (left == 0) {
+      pick(h + 1, k, 0);
+      return;
+    }
+    for (std::size_t i = from; i < per[h].size(); ++i) {
+      for (EdgeId e : per[h][i]) ++x[static_cast<std::size_t>(e)];
+      pick(h, left - 1, i);
+      for (EdgeId e : per[h][i]) --x[static_cast<std::size_t>(e)];
+    }
+  };
+  pick(0, k, 0);
+  // U and s*: the largest common size over the vectors (fractions compared exactly).
+  bool have = false;
+  for (const auto& c : xs) {
+    Amount size = std::numeric_limits<Amount>::max();
+    std::pair<Amount, Amount> frac {1, 0};  // +inf
+    for (std::size_t e = 0; e < c.size(); ++e) {
+      if (c[e] == 0) continue;
+      size = std::min(size, V[e] / c[e]);
+      if (frac.second == 0 || Int128(V[e]) * frac.second < Int128(frac.first) * c[e]) frac = {V[e], c[e]};
+    }
+    out.U = std::max(out.U, size);
+    if (!have || Int128(frac.first) * out.fluid.second > Int128(out.fluid.first) * frac.second) {
+      out.fluid = frac;
+      have = true;
+    }
+  }
+  const Amount d = std::gcd(out.fluid.first, out.fluid.second);
+  out.fluid = {out.fluid.first / d, out.fluid.second / d};
+  if (out.U == 0) return out;
+  const Amount u = u_of(out.U);
+  for (const auto& c : xs) {
+    bool fits = true;
+    Int128 J = 0;
+    Int128 phi = 0;
+    for (std::size_t e = 0; e < c.size(); ++e) {
+      if (c[e] == 0) continue;
+      fits = fits && c[e] * u <= V[e];
+      J = J + Int128(g.cost()[e]) * c[e];
+      const Amount B = g.capacity_units()[e];
+      for (Amount j = 1; headroom && B > 0 && j <= c[e]; ++j) phi = phi + slot_price(B, V[e], j, u);
+    }
+    if (!fits) continue;
+    if (!out.best.has_value() || std::pair {J, phi} < *out.best) out.best = std::pair {J, phi};
+  }
+  return out;
+}
+
+} // namespace t2_reference
 
 } // namespace netgraph::core::test

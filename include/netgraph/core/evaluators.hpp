@@ -1,5 +1,5 @@
-/* The evaluators: capacity (a FlowPolicy placement of +inf on a fresh ledger, T1's evaluate of
-   its design; the exact maximum flow is capacity() with routing Global and the optimized origin),
+/* The evaluators: capacity (a FlowPolicy placement of +inf on a fresh ledger, the tunnel models'
+   evaluate of their design; the exact maximum flow is capacity() with routing Global and the optimized origin),
    batch_capacity (capacity per pair) and sensitivity (the loss of deleting each candidate edge). */
 #pragma once
 
@@ -18,13 +18,14 @@ namespace netgraph::core {
 
 // The options of every evaluator: the configuration, the static Eligibility, the DagCache, the
 // optional outputs of each result (sensitivity: of its baseline), `design_demand` (T1's design,
-// required and finite; every other model rejects one) and `offered`, the offer of a T1 or Pinned
-// Lossy evaluation (both absent: none; an inner nullopt is +inf). The Eligibility and the cache
-// outlive the call.
+// required and finite; T2's, absent meaning unlimited (Lossless) or the offer (Lossy); every other
+// model rejects one) and `offered`, the offer of a T1, T2 or Pinned Lossy evaluation (both absent:
+// none; an inner nullopt is +inf). The Eligibility and the cache outlive the call.
 // | model                           | Lossless                                         | Lossy |
 // | CostOnly EqualBalanced/Weighted | the uncapped bound (no offered)                  | the first-hop experiment (no offered) |
 // | CostOnly MaxFlow, Global        | the uncapped optimum (no offered)                | rejected |
 // | T1                              | the lossless bound of the tunnels set up for the design (no offered) | the design's tunnels forward offered (required and finite) |
+// | T2                              | the lossless bound of the layout for the design (absent: unlimited; no offered) | offered finite; absent: the design if finite |
 // | Pinned                          | the fixed-program bound (no offered)             | offered required and finite |
 struct QueryOptions {
   FlowPolicyConfig config;
@@ -52,14 +53,15 @@ struct SensitivityResult {
 // DagCacheMiss.
 
 // place(+inf) of a FlowPolicy with opts.config on a fresh ledger of g (its capacities); Pinned
-// Lossy: place(offered); T1: evaluate(+inf, design) Lossless, evaluate(offered, design) Lossy.
-// The amounts are checked after the policy's construction, in this order: `offered` and
-// `design_demand` each an amount in [0, 2^62) or +inf; a design only for T1 (`<model> does not
-// accept design_demand`), required (`T1 capacity requires design_demand`) and finite (`T1
-// requires a finite design demand`); then `offered`: a Lossless model rejects it (`<model>
-// LOSSLESS capacity does not accept offered`), CostOnly Lossy too (`CostOnly LOSSY capacity uses
-// first-hop injection`), and T1 and Pinned Lossy require it finite (`<T1 or Pinned> LOSSY
-// capacity requires finite offered`).
+// Lossy: place(offered); T1: evaluate(+inf, design) Lossless, evaluate(offered, design) Lossy;
+// T2: evaluate(+inf, design or unlimited) Lossless, evaluate(offered or the design, design or
+// offered) Lossy. The amounts are checked after the policy's construction, in this order:
+// `offered` and `design_demand` each an amount in [0, 2^62) or +inf; a design only for T1 and T2
+// (`<model> does not accept design_demand`), T1's required (`T1 capacity requires design_demand`)
+// and finite (`T1 requires a finite design demand`); then `offered`: a Lossless model rejects it
+// (`<model> LOSSLESS capacity does not accept offered`), CostOnly Lossy too (`CostOnly LOSSY
+// capacity uses first-hop injection`), and T1, T2 (without a finite design) and Pinned Lossy
+// require it finite (`<T1 or T2 or Pinned> LOSSY capacity requires finite offered`).
 [[nodiscard]] PlacementResult capacity(const Graph& g, std::span<const NodeId> sources,
                                        std::span<const NodeId> destinations, const QueryOptions& opts);
 
@@ -91,7 +93,8 @@ struct SensitivityResult {
 // same config, offered and cache. Unrestricted optimized Global starts from the baseline solve's
 // final state and repairs it after deleting the edge, using one state copy per worker. The result
 // is the exact maximum flow at minimum cost. Global with a support solves every deletion afresh;
-// T1 sets up again for the same design under each deletion; Pinned replays the same program under
+// T1 sets up again for the same design under each deletion, T2 redoes its sizing, count selection
+// and objectives; Pinned replays the same program under
 // each deletion (a fixed-route failure question).
 // CostOnly skips a deletion when no roster source's reachable part of the static shortest-path
 // support contains the edge: no route uses it, so loss is 0. All other deletions use a fresh

@@ -67,7 +67,8 @@ void register_axes(py::module_& m) {
                           "compared exactly as a fraction, 0 on an edge of capacity 0). A search without a residual reads\n"
                           "the static capacity as the residual: RESIDUAL and CAPACITY read the capacity, HEADROOM 1 (0 on\n"
                           "an edge of capacity 0). T1's CSPF reads its unreserved view U instead (RESIDUAL U, HEADROOM\n"
-                          "U / capacity).")
+                          "U / capacity). A search and T1 comparison only: it never enables a controller objective\n"
+                          "(T2's is Global(prefer_headroom)) and never chooses weights (WeightBasis does).")
       .value("RESIDUAL", EdgePriority::Residual)
       .value("CAPACITY", EdgePriority::Capacity)
       .value("HEADROOM", EdgePriority::Headroom);

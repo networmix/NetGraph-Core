@@ -57,7 +57,7 @@ Contents:
   time to the member with the largest `w[i] / (assigned[i] + 1)`, ties to the earlier member; a
   zero weight gets nothing.
 - **Program.** A `ForwardingProgram`: the routes and integer weights of one demand and the rule
-  that injects its traffic at the sources. CostOnly, Global and T1 (`CapacityAware`) produce one;
+  that injects its traffic at the sources. CostOnly, Global, T1 (`CapacityAware`) and T2 produce one;
   `Pinned` forwards a given one without computing anything ([section 7](#forwarding-programs)).
 - **Entry.** One route of a program: a **tunnel** (one path, one edge per hop) or a **split
   route** (a DAG whose routers split by fixed rules). Each entry has an integer identifier, its
@@ -66,11 +66,14 @@ Contents:
 - **T1.** `CapacityAware(Tunnels(N))`: every head sets up its own N strict-bandwidth tunnels by
   CSPF (constrained shortest path first: a shortest path among the links with enough unreserved
   bandwidth), with no controller ([section 7](#t1-tunnels-set-up-by-their-heads)).
+- **T2.** `Global(tunnels=Tunnels(N))`: a central controller lays out N single-path tunnels for
+  every live head with one common whole-unit planned bandwidth
+  ([section 7](#t2-the-controllers-equal-tunnels)).
 - **Hold.** Bandwidth an up T1 tunnel reserves on every link of its path. Holds are the ledger's
   second projection (`reserved`, `unreserved`), kept apart from the carried traffic (`allocated`,
   `residual`); they never police or queue traffic.
-- **Design demand.** The volume T1 sizes its tunnels for (`design_demand`), separately from the
-  offer it forwards.
+- **Design demand.** The volume T1 and T2 size their tunnels for (`design_demand`), separately
+  from the offer they forward. T2's planned bandwidth is metadata, never a hold.
 - **Split context.** The traffic a split route's routers split: only that route's own share. A
   `CostOnly` program is one context pooled over its sources; every supplied split route is its
   own.
@@ -315,8 +318,8 @@ supplied residual filters edges by capacity.
 - **`PathSelection(tie_break=DETERMINISTIC, priority=CAPACITY, multipath=None,
   multi_edge=True)`.** Every field has its default.
   - `multipath=None` (the default) is the model's natural shape: the DAG of every equal-cost walk
-    for the searches and `CostOnly`, one path for T1. `True` is the DAG (T1 rejects it), `False`
-    the one canonical path.
+    for the searches and `CostOnly`, one path for T1 (T2 takes no selection). `True` is the DAG
+    (T1 rejects it), `False` the one canonical path.
   - `multi_edge=True` keeps every eligible parallel member of a `(u, v)` pair; `False` keeps
     one per pair (the member rule below).
   - `tie_break`: `DETERMINISTIC` never compares priority values; ties fall to the lowest
@@ -499,7 +502,7 @@ drops on each edge what does not fit.
   budget and `T_max`, the largest amount whose allocation fits every member edge (found by exact
   binary search). At `T_max` at least one member edge is exactly full; there is no safety margin.
   Because the split rules are monotone, raising `T` never takes units away from an edge.
-- **Lossy forwarding** (`CostOnly` with `WEIGHTED` or `EQUAL_BALANCED`, T1 and `Pinned`). Each
+- **Lossy forwarding** (`CostOnly` with `WEIGHTED` or `EQUAL_BALANCED`, T1, T2 and `Pinned`). Each
   call's offer is split at every node by the kernel's rule; each edge carries the smaller of what
   reaches it and its residual, and the rest is dropped on that edge (where several routes of one
   program meet on an edge, [the loss rule](#losses-inside-one-program) divides what it carries). The delivery is
@@ -596,13 +599,13 @@ records.
   `B - L`; `reserved()` S is the exact sum of every record's `reserved_edges` and `unreserved()`
   is `R0 - S`; all four are `int64[E]` copies. Each projection keeps its own bound on every edge
   (`0 <= L <= B`, `0 <= S <= R0`); L and S are never added, and `max(L, S)` is no occupancy. T1's
-  setup reads `unreserved` (other owners' holds included); every forwarding and every `Global`
-  solve reads `residual`. `capacity_units()` is the graph's view. `graph()` returns the graph.
+  setup reads `unreserved` (other owners' holds included); every forwarding, every `Global` solve
+  and T2's layout read `residual` (a T2 plan books no hold). `capacity_units()` is the graph's view. `graph()` returns the graph.
 - **Records.** `records()` lists the live records (of bound policies and orphans) as snapshots
   in FlowId order; `record(flow_id)` reads one. A FlowId is the pair `(ledger uid, id)`; ids are
   never reused. A FlowId of another ledger, or a retired or unknown id, raises `ValueError`.
 - **`FlowRecord`** fields: `flow_id`; `owner` (the policy's id); `sources` and `destinations`
-  (node sets); `admission`; `entry` (a T1 or `Pinned` record: the identifier of the program entry
+  (node sets); `admission`; `entry` (a T1, T2 or `Pinned` record: the identifier of the program entry
   it carries; `None` for the records kept per roster source); `bundle` (the flow's route as a
   `PredDAG`);
   `route_cost` (the cheapest walk of the bundle, cached; `None` for an empty bundle); `offered`
@@ -649,8 +652,8 @@ print(ngc.FlowPolicy(ledger, 0, 1, config(ngc.CostOnly())).place(10).placed)
 **In plain words.** A `FlowPolicy` is the routing model of one demand between a set of sources
 and a set of destinations. `place(volume)` asks it to carry more; it routes and fills its flows,
 commits everything at once, and reports how much was placed, what stopped it, where traffic was
-lost and how much each source carried (T1, whose tunnels are sized for a design volume, takes
-whole offers only). `evaluate`, `replace` and `forward` ask
+lost and how much each source carried (T1 and T2, whose tunnels are sized for a design volume,
+take whole offers only). `evaluate`, `replace` and `forward` ask
 for a whole new offer instead (only computed, published, or forwarded over the routes already
 installed). `remove()` takes all of its traffic back out. A demand with several sources is one demand, not several: how its traffic enters at
 the sources is its **origin**, and where the routes of its sources meet, their traffic is added
@@ -665,7 +668,7 @@ origin=None, weights=None, edge_weights=None)` takes keywords only. The routing 
 | --- | --- | --- |
 | `CostOnly()` | IGP forwarding (as OSPF or IS-IS routers do): static shortest paths, never refreshed; with `MAX_FLOW`, a controller restricted to those paths | none |
 | `CapacityAware(tunnels, *, max_path_cost=None, min_unreserved_bandwidth=0)` (T1) | distributed strict-bandwidth tunnels, as RSVP-TE head ends set them up: every head runs CSPF for its own tunnels, no controller ([T1](#t1-tunnels-set-up-by-their-heads)) | `tunnels`: a `Tunnels(count)` (`count` tunnels per head); `max_path_cost`: `None`, `Absolute(c)` or `Stretch(f)`; `min_unreserved_bandwidth`: a search minimum in units |
-| `Global(*, support=None)` | an ideal controller that sees the whole network, or only the edges of `support` | `support`: a `PredDAG` of the graph, or `None` for every eligible edge |
+| `Global(*, support=None, tunnels=None, prefer_headroom=False)` | an ideal controller that sees the whole network, or only the edges of `support`; with `tunnels`, T2: the controller lays out equal tunnels for every head ([T2](#t2-the-controllers-equal-tunnels)) | `support`: a `PredDAG` of the graph, or `None` for every eligible edge; `tunnels`: a `Tunnels(count)` or `Tunnels(L, up_to=True)` (T2), or `None`; `prefer_headroom`: T2's headroom objective after route cost (T2 only) |
 | `Pinned(program, *, black_holes=None)` | forwarding over a given program, computing nothing | `program`: a `ForwardingProgram`; `black_holes`: an `Eligibility` whose excluded nodes and edges are black holes, or `None` |
 
 Each routing accepts exactly the combinations of this table; any other raises `ValueError` before
@@ -678,13 +681,20 @@ any work, a request of 0 included. A field marked "none" must be left `None`:
 | `CostOnly` | `MAX_FLOW` | `OPTIMIZED` / both | `LOSSLESS` | all four fields | none |
 | `Global` | none | `OPTIMIZED` / both | `LOSSLESS` | none | none |
 | `CapacityAware` (T1) | none | `EQUAL` / `EQUAL` | `LOSSLESS`, `LOSSY` | `tie_break`, `priority`, `multi_edge` (`multipath=True` rejected) | none |
+| `Global(tunnels=...)` (T2) | none | `EQUAL` / `EQUAL`; `OPTIMIZED` with one source | `LOSSLESS`, `LOSSY` | none (`prefer_headroom` on the routing) | none |
 | `Pinned` | none | none (the program has its injection) | `LOSSLESS`, `LOSSY` | none | none |
 
 `selection=None` means `PathSelection()` (`DETERMINISTIC`, `CAPACITY`, `multipath=None`,
 `multi_edge=True`) for the routings that read it, `origin=None` the routing's default and
 `weights=None` `CAPACITY` for `CostOnly` `WEIGHTED`. A policy's `config()` returns the
-configuration with these filled in (`selection` stays `None` for `Global` and `Pinned`, `origin`
-for `Pinned`). Further rules:
+configuration with these filled in (`selection` stays `None` for `Global`, T2 included, and
+`Pinned`, `origin` for `Pinned`). Further rules:
+
+- `Global`, with or without tunnels, takes no selection: any `selection`, even `PathSelection()`,
+  raises `Global does not accept selection`, before every other check of its row.
+  `prefer_headroom=True` without `tunnels` raises `prefer_headroom requires tunnels`, right after
+  `Global support and tunnels are mutually exclusive`. A selection's `priority` (`HEADROOM`
+  included) is a search and T1 comparison and never enables a controller objective.
 
 - `edge_weights` (one integer per edge in EdgeId order, each in `[0, 2^62)`) is given exactly when
   `weights=EXPLICIT`: `weights=EXPLICIT requires edge_weights`, `edge_weights require
@@ -699,7 +709,13 @@ for `Pinned`). Further rules:
   `Absolute(c)` with `c >= 0` or `Stretch(f)` with `f` finite and at least 1 (as for `ksp`);
   `min_unreserved_bandwidth` in `[0, 2^62)` units (`min_unreserved_bandwidth must be an integer in
   [0, 2^62)`).
-- **T1's tunnel limit.** The roster's heads times the tunnel count is at most 2^30 - 1:
+- T2's row ([T2](#t2-the-controllers-equal-tunnels)): after the `Global` checks above (which
+  decide the row), `T2 does not accept placement`; `T2 with several sources requires
+  origin=EQUAL` (OPTIMIZED with more than one input source, counted before any Eligibility, with
+  the roster rules below); `T2 does not accept weights`; the tunnel count in `[1, 10000]`, the
+  largest count for "up to".
+- **The tunnel limit** (T1, T2). The roster's heads times the tunnel count (T2 "up to": the
+  largest count) is at most 2^30 - 1:
   `tunnel limit exceeded: <H> heads x <N> tunnels > 1073741823` (no tunnel is made at
   construction).
 - Only `CostOnly` reads a `DagCache`; any other routing given one is rejected.
@@ -719,9 +735,10 @@ the graph of each object the policy is given: the `Eligibility`, the program (`p
 another graph`), the support (`support belongs to another graph`), the `DagCache`, the black holes
 (`black_holes belongs to another graph`); enum values outside their enumeration; the table above,
 its row (routing, then placement) and then its columns left to right (placement, origin,
-admission, selection, weights; T1's "up to" first); the cache rule; T1's own fields (the tunnel
-count, `max_path_cost`, `min_unreserved_bandwidth`); `edge_weights`; the pooled single-path rule;
-T1's tunnel limit; `Pinned`'s endpoints.
+admission, selection, weights; `Global`'s support and tunnels together first, T1's "up to" first);
+the cache rule; the tunnel models' own fields (the tunnel count; T1's `max_path_cost`,
+`min_unreserved_bandwidth`); `edge_weights`; the pooled single-path rule; T2's several-sources rule;
+the tunnel limit; `Pinned`'s endpoints.
 
 ### The origin
 
@@ -741,14 +758,14 @@ There is no weighted origin; sources with fixed or uneven amounts are separate d
 
 ### The source roster
 
-The roster is fixed when the policy is built. For `CostOnly`, T1 and `Global` it is
+The roster is fixed when the policy is built. For `CostOnly`, T1, T2 and `Global` it is
 the allowed sources that have a static walk to an allowed destination over allowed edges, whatever
 their capacity, in ascending node id: a source whose only routes cross an edge of capacity 0 is in
 the roster, receives its share and cannot place it (a failure is expressed with an Eligibility,
 which removes the source); `Global` with a support counts only walks inside the support. For
 `Pinned` it is the program's heads that still reach a destination under the policy's Eligibility
 ([replay](#replay-under-a-failure)). The roster decides which sources receive shares; for the
-computing models it also decides which records exist (T1: its heads' entries), while `Pinned`
+computing models it also decides which records exist (T1 and T2: its heads' entries), while `Pinned`
 keeps one record per configured program entry even when no head survives the replay (such a
 record stays at zero). `by_source`
 reports every input source, a source outside the roster with a zero row. A positive request with
@@ -777,6 +794,10 @@ per-entry records at zero.
 - **`CapacityAware` (T1)** sets up its tunnels for a design volume on every `replace` and
   `evaluate` and forwards them as its program; it has no incremental `place`
   ([T1](#t1-tunnels-set-up-by-their-heads)).
+- **`Global(tunnels=...)` (T2)** lays out its tunnels for a design volume on every `replace` and
+  `evaluate` and forwards them as its program; it has no incremental `place`
+  ([T2](#t2-the-controllers-equal-tunnels)). The controller rules below are `Global`'s without
+  tunnels.
 - **`Global`** re-solves, on every positive call, the minimum-cost flow of the amount the
   policy already delivers plus this call's request (`placed_demand()` plus the request; what an
   earlier call could not place is not requested again) from its roster to its whole
@@ -828,9 +849,9 @@ per-entry records at zero.
   source's record uses only edges of its own route.
 - **The controllers** (`Global`, `CostOnly` with `MAX_FLOW`) optimise the whole roster and
   destination set together; `Global` may use a costlier destination to carry more.
-- **T1 heads** share the design and the offer by round robin over the roster in ascending node
-  id; a head's share goes only to its own tunnels, and what one head cannot carry is lost at that
-  head, never moved to another.
+- **T1 and T2 heads** share the design and the offer by round robin over the roster in ascending
+  node id; a head's share goes only to its own tunnels, and what one head cannot carry is lost at
+  that head, never moved to another.
 - **`Pinned`** follows its program: its injection over the replay roster, then each head's entries.
 
 Two sources with one unit each meet at node 2, whose two members lead to the destination. Pooled,
@@ -888,7 +909,7 @@ source 0 excluded 10
 ### Forwarding programs
 
 **In plain words.** A program is what a routing decided, written down: which routes each source
-uses and in which integer proportions. CostOnly, Global and T1 produce one (`policy.program`,
+uses and in which integer proportions. CostOnly, Global, T1 and T2 produce one (`policy.program`,
 `result.program`). `Pinned(program)` forwards a program without computing anything: to replay a
 solution on another ledger, to study a failure (the routers drop the failed routes and split over
 the survivors) or to study the moment before anyone reacts (the failed elements swallow what
@@ -903,15 +924,16 @@ reaches them). `ForwardingProgram.from_routes` builds a program from routes you 
   `edges` (in path order), `route_cost` (these three `None` for a tunnel T1's setup left down),
   `status` (`UP`, or a down tunnel's `NO_BANDWIDTH` or `COST_CEILING`), `requested` and
   `reserved` (T1's request and what it holds on every edge of its path: the request when up, else
-  0; 0 for the other producers) and `weight`. It has no public constructor.
-- **Injection.** A total `x` enters at the roster (the heads with an entry; for T1 the policy's
-  roster, a head without an up tunnel included) either by round robin (**equal sources**) or by
+  0; 0 for the other producers), `planned` (T2's planned bandwidth u, never held; 0 for the other
+  producers) and `weight`. It has no public constructor.
+- **Injection.** A total `x` enters at the roster (the heads with an entry; for T1 and T2 the
+  policy's roster, a head without an up tunnel or without any tunnel included) either by round robin (**equal sources**) or by
   highest averages over the captured source weights; each head then splits its share by highest
   averages over its entries' weights (equal weights give round robin). A head whose entries all
   have weight 0 loses its share at the source. Identical routes are never merged: each entry
   takes its own share.
-- **Entry identifiers.** T1 tunnels are numbered `j * H + i` (round `j`, roster position `i`, `H`
-  heads); controller paths are numbered in decomposition order; a `CostOnly` split
+- **Entry identifiers.** T1 and T2 tunnels are numbered `j * H + i` (round `j`, roster position
+  `i`, `H` heads; T2's dead heads leave holes); controller paths are numbered in decomposition order; a `CostOnly` split
   program numbers its routes by roster position; supplied routes keep their position in the list
   (a split route uses its position too, so tunnel indices can skip it). Records (`entry`) and
   `by_tunnel` rows (`index`) use the same identifier.
@@ -952,7 +974,7 @@ A `Pinned` policy's Eligibility is the failure being studied (local repair):
 - A split route loses its excluded members and the branches left without a destination; members
   of capacity 0 stay (`EQUAL_BALANCED` still sends them their share).
 - The roster is rebuilt from the program's **basis**, ignoring capacities and weights: for an
-  unrestricted controller and T1 the topology under the producing policy's exclusions, for `CostOnly`,
+  unrestricted controller, T1 and T2 the topology under the producing policy's exclusions, for `CostOnly`,
   a supported `Global` and supplied routes the original routes, each together with the policy's
   exclusions. A head that no longer reaches a destination leaves the pool (equal sources: its
   share moves to the others); a head that still reaches one but has no surviving entry keeps its
@@ -1186,6 +1208,175 @@ its tunnels are down. Head 1's two tunnels come up on edge 1 and hold 6 of its 1
 enters as 6 and 6: head 0 loses its 6, head 1's tunnels carry 3 and 3. `forward(8)` keeps the
 tunnels and the holds; head 0 still loses its share, now 4.
 
+### T2: the controller's equal tunnels
+
+**In plain words.** `Global(tunnels=Tunnels(N))` models a central controller (a PCE or an SDN
+controller) that programs, for every head, the same number of single-path tunnels, all planned
+with one common whole-unit bandwidth. It first makes that common bandwidth as large as possible,
+then (for a finite design volume) no larger than needed, then picks the cheapest routes, then
+(with `prefer_headroom=True`) the routes that leave the most spare capacity, and finally breaks any
+remaining tie by one fixed unit-by-unit procedure. Real traffic then splits equally over the heads
+and over each head's tunnels; whole-unit remainders may use room beyond the plan. A planned
+bandwidth is metadata: the ledger holds nothing for it. `Tunnels(L, up_to=True)` gives every head
+one common count `k <= L`, the smallest that carries the design. A head that cannot reach a
+destination over free capacity is dead: it keeps its share and loses it; a weak but live head
+limits the common size of every tunnel, by design (heads that must not limit each other are
+separate demands).
+
+**Exact rules.**
+
+- **Heads.** The roster (`H` heads in ascending node id) is topological, as for T1. A head is
+  **live** if it reaches an allowed destination over allowed links with free capacity `V >= 1`,
+  `V` the residual with this policy's own traffic released (`plan.live_heads`); the others are
+  **dead**: they keep their roster position and their share, get no tunnel and lose the share. `a`
+  live heads, `k` tunnels each (`N`, or the chosen count), `K = a * k` tunnels.
+- **Sizing.** Tunnels of a common size `s > 0` exist exactly when `K` path units flow from a
+  virtual root (an arc of capacity `k` to every live head) to the destinations with link
+  capacities `min(K, floor(V / s))` (paths stop at the first destination). `common_share` U is the
+  largest integer size that passes (0 when none does); `fluid_share` is the exact fluid optimum
+  `s*` (a `Fraction` `V[e] / j` with `j <= K`; `U = floor(s*)`).
+- **Working size.** For a finite design D, `planned_per_tunnel` u is `min(U, max(1, max over live
+  heads of ceil(RR(D, H, i) / k)))`, the shares taken over the whole roster, dead heads included;
+  an unlimited design uses `u = U`. Every tunnel is planned at u; `planned_total` is `K * u`.
+- **Routes.** At u, among the count vectors `x` (the tunnels on each link) that route `k` tunnels
+  per live head with `x[e] <= min(K, floor(V[e] / u))`: first the smallest `route_cost` `J = sum of
+  cost[e] * x[e]` (idle tunnels count); then, with `prefer_headroom=True`, the smallest
+  `headroom_penalty`: each link with static capacity `B > 0` charges its `j`-th tunnel `floor(2^32 *
+  (B - V + j * u) / B)` (the occupied fraction of the link, rounded down to 2^-32); then the
+  canonical augmentation: `K` single units from zero, each on the residual path from the root to
+  the sink of the smallest `(J, Phi)` price, then the fewest arcs, then the smallest sequence of
+  arc keys (`(0, EdgeId, direction)` for links, `(1, head, direction)` for root arcs, `(2,
+  destination, direction)` for sink arcs; forward 0, reverse 1); a reverse arc undoes an earlier
+  unit. Without `prefer_headroom` the second price is 0. `J` and `Phi` are exact Python integers and can
+  exceed 64 bits.
+- **The program.** `x` is cut, live head by live head in ascending node id, into unit walks along
+  the smallest positive EdgeId to a destination; each head's `k` walks are sorted by EdgeId
+  sequence (duplicates are separate tunnels). The tunnels are in round order: local index `j`,
+  then roster position `i`, with the entry index `j * H + i` (`H` counts dead heads too, so a dead
+  head leaves holes). Every tunnel is `UP` with weight 1, `planned = u` and `requested = reserved =
+  0`; a plan books no hold.
+- **Up to L.** For each `k` in `1..L` the program at `U(k)` scores `G(min(D, F'(k)))`: `G(z)` is
+  the part of a round-robin total `z` that the live heads receive, `F'(k)` the largest total whose
+  live shares fit on that program (dead shares ignored); an unlimited design scores `G(F'(k))`.
+  The smallest `k` whose score is the live part of D wins; if none, the largest score, then the
+  smallest `k`; the chosen `k` is then laid out at its own u (`plan.count`). Delivery is not
+  monotone in `k`, so only two proved bounds skip a `k`: with `M = H * k` roster positions the
+  score lies between `G(min(D, M * U(k)))` and `G(min(D, M * (U(k) + 1) - 1))`, and `U(k)` never
+  grows with `k` (once it is 0, every later count scores 0).
+- **Outcomes.** An empty roster gives an empty program (`NO_ROUTE` for a positive offer). No live
+  head, or live heads with `U = 0` (`insufficient_resolution` True, `common_share` 0,
+  `fluid_share` positive), give a program **without tunnels that keeps the roster**:
+  `policy.program` is set, `forward` works and every head's share is lost at its head (Lossy
+  `COMPLETE`, Lossless `EXHAUSTED` for a positive offer). No partial program is made for one head.
+- **Forwarding** is the program's: a total `x` enters as `RR(x, H, i)` over the whole roster,
+  then round robin over the head's `k` tunnels in local order; a dead head's share is lost.
+  `forwarding_bound` F is the program's lossless maximum on the call's view (a dead head's share
+  blocks every total that gives it a unit: F is then 0 or a few remainder units). With `u = U` and
+  every head live, `0 <= F - K * U < K`.
+- **Configuration.** `prefer_headroom` (`False` by default) switches the headroom objective on;
+  T2 takes no `selection` (`Global does not accept selection`), always keeps every parallel link,
+  uses single-path tunnels and the canonical final tie. Origin `EQUAL` (the default); `OPTIMIZED` only with one input source (`T2 with several
+  sources requires origin=EQUAL`, counted before any Eligibility), the same calculation. `support`
+  and `tunnels` together raise `Global support and tunnels are mutually exclusive`. Admission
+  `LOSSLESS` or `LOSSY`. No path-cost ceiling. The tunnel count and the tunnel limit as for T1
+  (`L` counts for "up to").
+- **Operations.** No `place` (`T2 does not support incremental placement`, `place(0)` too).
+  `replace(offer, design_demand=D)` releases the policy's own traffic, lays the tunnels out again
+  for D and forwards; `design_demand=None` means `D = offer`, and `float('inf')` (or an infinite
+  Lossless offer) is an unlimited design. `evaluate` computes the same and publishes nothing;
+  `forward(offer)` forwards the installed program and keeps its plan. A planned size change over
+  the same routes sets no flag. T2 reports no `total_cost`, `min_cut` or `cost_distribution`.
+- **Records and rows.** One record per tunnel in index order (a dead head has no entry and no
+  record).
+- **The plan.** `count`, `design_demand`, `head_design` (empty for an unlimited design) and
+  `reserved_total` (0), then T2's own fields: `live_heads`, `insufficient_resolution`,
+  `fluid_share`, `common_share`, `planned_per_tunnel`, `planned_total`, `route_cost`,
+  `headroom_penalty` (`None` without `prefer_headroom`) and `forwarding_bound`. With no live head every
+  amount is 0 (`count` is N, or 1 for "up to").
+
+A T2 call: two branches from node 0 to node 3 of 2 and 10 (at q = 2^-12: 8192 and 40960 units),
+16 tunnels, `prefer_headroom=True`, then the same program replayed with the 2-unit branch's second
+link down:
+
+```python
+q = 2.0 ** -12
+g = ngc.Graph(4, src=[0, 0, 1, 2], dst=[1, 2, 3, 3], capacity_units=ngc.to_units([2, 10, 2, 10], q),
+              cost=[1, 1, 1, 1], resolution=q)
+te16 = ngc.FlowPolicyConfig(routing=ngc.Global(tunnels=ngc.Tunnels(16), prefer_headroom=True),
+                            admission=ngc.Admission.LOSSY)
+pol = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, te16)
+r = pol.replace(49152)
+p = r.plan
+print(p.common_share, p.planned_per_tunnel, p.fluid_share, p.forwarding_bound, r.placed)
+print(p.planned_total, p.route_cost, p.headroom_penalty, p.live_heads, p.insufficient_resolution)
+print([t.edges for t in r.program.tunnels][:3], [t.planned for t in r.program.tunnels][:3])
+fail = g.eligibility(excluded_edges=[2])
+replay = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3,
+                        ngc.FlowPolicyConfig(routing=ngc.Pinned(pol.program), admission=ngc.Admission.LOSSY),
+                        elig=fail)
+s = replay.replace(49152)
+print([t.status.name for t in s.by_tunnel][:3], s.placed)
+```
+
+```text
+2925 2925 20480/7 46812 47104
+46800 32 73610035200 (0,) False
+[(0, 2), (0, 2), (1, 3)] [2925, 2925, 2925]
+['FAILED', 'FAILED', 'UP'] 40960
+```
+
+The fluid optimum is 20480/7 (a size that fills both branches exactly), so the common whole-unit
+size is 2925: 2 tunnels fit the 8192-unit branch and 14 the 40960-unit one. The plan carries 46800;
+forwarding the whole offer delivers 47104 because remainder units use the room left on the wide
+branch. In the replay the two tunnels on the failed branch are `FAILED` and the head splits its
+whole share over the other 14.
+
+A dead head, a head too weak for one unit per tunnel, and "up to":
+
+```python
+lossy_t2 = lambda tunnels: ngc.FlowPolicyConfig(routing=ngc.Global(tunnels=tunnels), admission=ngc.Admission.LOSSY)
+dead = graph(3, [(0, 2, 0, 1), (1, 2, 10, 1)])
+r = ngc.FlowPolicy(ngc.FlowLedger(dead), [0, 1], 2, lossy_t2(ngc.Tunnels(2))).replace(10)
+print(r.plan.live_heads, [t.index for t in r.program.tunnels], r.plan.planned_per_tunnel, r.placed, r.call_source_loss)
+tiny = graph(3, [(0, 2, 1, 1), (1, 2, 100, 1)])
+r = ngc.FlowPolicy(ngc.FlowLedger(tiny), [0, 1], 2, lossy_t2(ngc.Tunnels(16))).replace(200)
+print(r.plan.insufficient_resolution, r.plan.fluid_share, r.program.tunnels, r.call_source_loss)
+r = ngc.FlowPolicy(ngc.FlowLedger(tiny), [0, 1], 2, lossy_t2(ngc.Tunnels(3, up_to=True))).replace(200)
+print(r.plan.count, [t.edges for t in r.program.tunnels], r.placed)
+```
+
+```text
+(1,) [1, 3] 3 5 5
+True 1/16 () 200
+1 [(0,), (1,)] 101
+```
+
+Head 0's only link has no free capacity: it is dead, keeps its share of 5 and loses it, and its
+positions 0 and 2 are holes. Behind links of 1 and 100, 16 tunnels per head fit no whole unit
+(`s*` = 1/16): the program has no tunnels and the whole offer is lost at the heads. Up to 3, one
+tunnel per head fits a unit; it carries 1 of head 0's 100 and all of head 1's.
+
+The headroom objective on two equal-cost parallel links of 10, two tunnels for a design of 2:
+
+```python
+par = graph(2, [(0, 1, 10, 1), (0, 1, 10, 1)])
+for on in (False, True):
+    cfg = ngc.FlowPolicyConfig(routing=ngc.Global(tunnels=ngc.Tunnels(2), prefer_headroom=on),
+                               admission=ngc.Admission.LOSSY)
+    r = ngc.FlowPolicy(ngc.FlowLedger(par), 0, 1, cfg).replace(12, design_demand=2)
+    print(on, [t.edges for t in r.program.tunnels], r.plan.headroom_penalty, r.plan.forwarding_bound, r.placed)
+```
+
+```text
+False [(0,), (0,)] None 10 10
+True [(0,), (1,)] 858993458 20 12
+```
+
+Both plans size the tunnels at 1 unit (U = 10). Without the objective the cost tie goes to the
+smallest keys: both tunnels on link 0, which then bounds forwarding at 10. With it, a second slot
+on link 0 would pay `floor(2^32 * 2 / 10)` against `floor(2^32 / 10)` on link 1, so the tunnels
+spread and the program forwards 20.
+
 ### The placement call
 
 `place(volume, outputs=None)` takes a request in units (an `int`) or `float('inf')`.
@@ -1207,8 +1398,9 @@ tunnels and the holds; head 0 still loses its share, now 4.
    requires a finite offer`); for `CostOnly` it is the **first-hop experiment**: each source injects on each of its first edges exactly that edge's
    residual, on top of the traffic other sources send through it, and forwarding runs as usual.
 4. **The controllers** re-solve as described above.
-5. **T1** has no `place`: every call raises `T1 does not support incremental placement`, before
-   anything else (a request of 0 too); its calls are `replace`, `evaluate` and `forward`.
+5. **T1 and T2** have no `place`: every call raises `<T1 or T2> does not support incremental
+   placement`, before anything else (a request of 0 too); their calls are `replace`, `evaluate`
+   and `forward`.
 6. **Commit.** All changes to the ledger and the policy are committed together at the end, or
    none are ([section 8](#8-failures-threads-and-lifetimes)).
 
@@ -1267,7 +1459,7 @@ view**: the ledger's residual with the policy's own traffic given back.
 | --- | --- | --- |
 | `evaluate(offer, *, design_demand=None, outputs=None)` | computes and forwards `offer` from the released view as a fresh epoch would (T1: sets up on its unreserved view with its own holds released), and reports it; publishes nothing, creates no record and books no hold | all |
 | `replace(offer, *, design_demand=None, outputs=None)` | the same computation, then published at once: the old records and holds are retired, new ones created, the new program installed, a new epoch begun with `requested = offer`; delivery may go down | all |
-| `forward(offer, *, black_holes=None, outputs=None)` | forwards a full new offer over the installed program with no route computation and no setup (weights stay frozen, a controller does not re-solve, T1 keeps its tunnels and holds), on the released view, then publishes like `replace`; `black_holes` forwards it stale for this call | `CostOnly`, `Global` and T1 with an installed program; `Pinned` uses `replace` |
+| `forward(offer, *, black_holes=None, outputs=None)` | forwards a full new offer over the installed program with no route computation and no setup (weights stay frozen, a controller does not re-solve, T1 keeps its tunnels and holds, T2 its tunnels and plan), on the released view, then publishes like `replace`; `black_holes` forwards it stale for this call | `CostOnly`, `Global`, T1 and T2 with an installed program; `Pinned` uses `replace` |
 
 - `placed` of a full-offer call is its whole new delivery and `delivery_delta` the new delivery
   minus the old (it may be negative). A later `place` continues the epoch a `replace` or a
@@ -1277,11 +1469,11 @@ view**: the ledger's residual with the policy's own traffic given back.
   program` (also after `remove()`); the offer; a Lossy `+inf` (`LOSSY forwarding requires a finite
   offer`, as for `evaluate` and `replace` and Lossy `Pinned`); the black holes' graph
   (`black_holes belongs to another graph`).
-- **`design_demand`** belongs to T1 alone (every other routing raises `<model> does not accept
-  design_demand`, the model `CostOnly`, `Global` or `Pinned`): an integer in `[0, 2^62)` or
+- **`design_demand`** belongs to T1 and T2 alone (every other routing raises `<model> does not
+  accept design_demand`, the model `CostOnly`, `Global` or `Pinned`): an integer in `[0, 2^62)` or
   `float('inf')` (else `design_demand must be an integer in [0, 2^62) or permitted +inf`); `None`
   means equal to the offer; T1 needs it finite (`T1 requires a finite design demand`, also for an
-  infinite offer without a design). It never accumulates. `evaluate` and `replace` check the
+  infinite offer without a design); T2 takes an unlimited one (its largest common size). It never accumulates. `evaluate` and `replace` check the
   offer, then a Lossy `+inf`, then the design (the routing, its domain, finiteness).
 
 ```python
@@ -1314,7 +1506,7 @@ applies (an invalid call raises instead):
 | --- | --- |
 | `COMPLETE` | the request is 0 |
 | `NO_ROUTE` | the request is positive and the roster is empty (`Pinned`: the replay roster) |
-| `NO_ACTIVE_WEIGHT` | the program has an entry with a path (an up tunnel, a controller path or a split route), but nothing can be sent anywhere: every `WEIGHTED` member has weight 0, or no head with a positive injection weight has a surviving entry of positive weight (routes of weight 0, every up tunnel failed). A program whose tunnels are all down (T1) is not this case: it goes on to the rows below, every share lost at its head |
+| `NO_ACTIVE_WEIGHT` | the program has an entry with a path (an up tunnel, a controller path or a split route), but nothing can be sent anywhere: every `WEIGHTED` member has weight 0, or no head with a positive injection weight has a surviving entry of positive weight (routes of weight 0, every up tunnel failed). A program whose tunnels are all down (T1) or that has no tunnels (T2 with every head dead, or U = 0) is not this case: it goes on to the rows below, every share lost at its head |
 | `COMPLETE` | Lossy with a finite request: the whole request was forwarded, and delivery and losses account for all of it (it does not mean nothing was lost) |
 | `COMPLETE` | Lossless: the whole request was admitted |
 | `EXHAUSTED` | otherwise: Lossless below the request, any infinite request (the first-hop experiment included), a controller whose maximum is 0 over existing routes |
@@ -1364,7 +1556,9 @@ program counts as an empty one): `routes_changed` the ordered heads, each entry'
 (a tunnel's path, a split route's members), duplicates included; `weights_changed` the injection
 (equal or the captured weights, by value) and every entry and split-table weight, an entry absent
 from one program counting as weight 0; `reservations_changed` every tunnel's `requested` and
-`reserved` amounts by index, an absent tunnel counting as 0 (only T1 sets it). Hence:
+`reserved` amounts by index, an absent tunnel counting as 0 (only T1 sets it: T2's planned
+bandwidth is no reservation, and a T2 layout over the same routes at another planned size sets
+no flag). Hence:
 
 | Committed change | `routes_changed` | `weights_changed` |
 | --- | --- | --- |
@@ -1406,8 +1600,9 @@ does not, so the two are never confused.
   `call_drops`, this call's drops per edge as `[(EdgeId, units)]`; `call_source_loss`, the units
   this call lost at sources.
 - **The demand's state**: `program` (the installed `ForwardingProgram`, `evaluate`'s computed one;
-  `None` before the epoch's first preparation and after `remove()`), `plan` (T1: the `TunnelPlan`
-  of that program, [T1](#t1-tunnels-set-up-by-their-heads); `None` for every other routing),
+  `None` before the epoch's first preparation and after `remove()`), `plan` (T1 and T2: the
+  `TunnelPlan` of that program, [T1](#t1-tunnels-set-up-by-their-heads),
+  [T2](#t2-the-controllers-equal-tunnels); `None` for every other routing, `Pinned` included),
   `requested` (the sum of the requests, `float('inf')` after an infinite one), `offered`,
   `admitted`, `delivered`, `unadmitted`, `source_loss`, `drops` (per edge, as
   `[(EdgeId, units)]`), `by_source`, `by_tunnel` and `total_cost`. Every amount is an exact Python integer and
@@ -1429,13 +1624,13 @@ does not, so the two are never confused.
   (its injected share), `delivered` and `dropped`. It is another view of the same traffic as
   `by_source`, never added to it.
 - **`total_cost`**: the controllers only, the exact `sum(cost[e] * flow[e])` of the policy's
-  allocation; `None` otherwise (T1 and `Pinned` included).
+  allocation; `None` otherwise (T1, T2 and `Pinned` included).
 - **`cost_distribution`**: unrestricted `Global` with `OPTIMIZED` origin only, the marginal cost curve of the
   policy's cumulative flow (a request of 0 reports it unchanged; `None` before the epoch's first
   positive call). `None` for every other mode, `EQUAL` origin included: the marginal costs of an
   equal flow need not increase. For other modes, the sum of `(route_cost, delivered)` over the
   records is a histogram of delivery by each record's cheapest walk cost: the cost every unit
-  travels at for `CostOnly` split routing and T1, whose routes have one cost, but not
+  travels at for `CostOnly` split routing, T1 and T2, whose routes have one cost, but not
   for a split route whose walks differ in cost.
 - **Optional outputs**, `None` unless requested through `OutputOptions(edge_flows=False,
   residual=False, bottleneck=False, reservation_edge_flows=False, min_cut=False)`: `edge_flows` is
@@ -1627,7 +1822,8 @@ answers can differ from placing into a ledger that other demands already occupy.
 - **`QueryOptions(config, *, elig=None, cache=None, outputs=None, design_demand=None,
   offered=None)`** is the one options type of the three evaluators: the configuration, the static
   Eligibility (`None`: everything allowed), the DagCache (`None`: a private cache per worker), the
-  optional outputs of each result (`sensitivity`: of its baseline), T1's design (`design_demand`)
+  optional outputs of each result (`sensitivity`: of its baseline), the tunnel models' design
+  (`design_demand`)
   and the Lossy offer (`offered`), each an integer in `[0, 2^62)` or `float('inf')` (else
   `<design_demand or offered> must be an integer in [0, 2^62) or permitted +inf`).
 - **`capacity(graph, sources, destinations, opts)`** is `place(float('inf'))` of a `FlowPolicy`
@@ -1636,12 +1832,17 @@ answers can differ from placing into a ledger that other demands already occupy.
   Lossy requires a finite `offered` (`Pinned LOSSY capacity requires finite offered`); `CostOnly`
   Lossy is the first-hop experiment and takes none (`CostOnly LOSSY capacity uses first-hop
   injection`); every Lossless configuration takes none (`<model> LOSSLESS capacity does not accept
-  offered`, the model `CostOnly`, `Global`, `Pinned` or `T1`). **T1** evaluates its design
+  offered`, the model `CostOnly`, `Global`, `Pinned`, `T1` or `T2`). **T1** evaluates its design
   instead: `evaluate(float('inf'), design_demand=D)` Lossless (the lossless bound of the tunnels set
   up for D), `evaluate(offered, design_demand=D)` Lossy. Its design is always required (`T1 capacity
   requires design_demand`) and finite (`T1 requires a finite design demand`), in both admissions
   (the scalar rule "`None` means the offer" does not apply here); Lossy also requires a finite
-  `offered` (`T1 LOSSY capacity requires finite offered`). Every other routing rejects a design
+  `offered` (`T1 LOSSY capacity requires finite offered`). **T2** evaluates its design too:
+  Lossless `evaluate(float('inf'), design_demand=D)`, the lossless bound of the layout for D, an
+  absent design meaning unlimited; Lossy `evaluate(offered, design_demand=D)`, an absent design
+  meaning the offered amount and an absent `offered` the design when it is finite (`T2 LOSSY
+  capacity requires finite offered` when neither is, and for an explicit `offered=float('inf')`
+  whatever the design). Every other routing rejects a design
   (`<model> does not accept design_demand`). The order: `offered`'s domain, the design's domain,
   the routing accepts a design, T1's design given, finite, then the offer rules above. The exact maximum flow is the configuration
   `Global()` (its default origin is `OPTIMIZED`): its result carries the marginal cost curve and,
@@ -1673,9 +1874,9 @@ answers can differ from placing into a ledger that other demands already occupy.
     path, or a source behind it no longer holds the equal origin back). Unrestricted `Global` with
     `OPTIMIZED` origin computes each deletion by repairing a copy of the baseline's solve, which
     gives exactly the value of a fresh solve; with `EQUAL` origin or a support each deletion is
-    solved afresh. T1 sets up again for the same design under each deletion (every allowed edge is
-    a candidate; deleting an edge of capacity 0 can take a head out of the roster and raise the
-    total). `Pinned` replays the same program under each deletion (a fixed-route failure
+    solved afresh. T1 sets up again for the same design under each deletion, T2 redoes its
+    sizing, count selection and objectives (every allowed edge is a candidate; deleting an edge of
+    capacity 0 can take a head out of the roster and raise the total). `Pinned` replays the same program under each deletion (a fixed-route failure
     question, not a new optimum): deleting an edge of a tunnel fails that tunnel. `CostOnly`
     gives loss 0 without recomputation to an edge outside the static shortest-path support
     reachable from the roster sources (no route can use it); these are equivalent forms of the
@@ -1733,7 +1934,7 @@ self-contained:
 | `netgraph/core/search.hpp` | `spf`, `ksp`, `resolve_to_paths`, `SpfOptions`, `SpfResult`, `KspOptions`, `SpfQueue` |
 | `netgraph/core/flow_record.hpp` | `FlowId`, `Counter128` (the 128-bit cumulative counter), `FlowRecord` |
 | `netgraph/core/flow_ledger.hpp` | `FlowLedger` |
-| `netgraph/core/flow_policy.hpp` | `FlowPolicy`, its configuration (`CapacityAware`, `Tunnels` among them) and result types (`SourceFlow`, `TunnelFlow` and `TunnelPlan` among them), `Termination` |
+| `netgraph/core/flow_policy.hpp` | `FlowPolicy`, its configuration (`CapacityAware`, `Global`, `Tunnels` among them) and result types (`SourceFlow`, `TunnelFlow` and `TunnelPlan` among them), `Termination` |
 | `netgraph/core/dag_cache.hpp` | `DagCache`, `DagCacheMiss` |
 | `netgraph/core/evaluators.hpp` | `capacity`, `batch_capacity`, `sensitivity` and their option and result types |
 
@@ -1743,9 +1944,10 @@ Spelling differences: Python enum members and constants are upper case
 C++ returns `kUnreachable`; an infinite request is an empty `std::optional` volume, and its
 `remaining` and `requested` are empty too. An optional field that Python reports as `None`
 (`placement`, `selection`, `origin` and `weights` of a configuration, `PathSelection.multipath`,
-`offered`, `unadmitted`, `total_cost`, `cost_distribution`, `plan`, `FlowRecord.entry`, a down
-tunnel's `destination`, `edges` and `route_cost`, the optional outputs) is an empty
-`std::optional` in C++; a `design_demand` (of `evaluate`, `replace` and `QueryOptions`) is a
+`offered`, `unadmitted`, `total_cost`, `cost_distribution`, `plan` and T2's fields of a
+`TunnelPlan`, `Global.tunnels`, `FlowRecord.entry`, a down tunnel's `destination`, `edges` and
+`route_cost`, the optional outputs) is an empty `std::optional` in C++; `fluid_share` is a
+reduced `(numerator, denominator)` pair, `route_cost` and `headroom_penalty` are `Counter128`; a `design_demand` (of `evaluate`, `replace` and `QueryOptions`) is a
 `std::optional<std::optional<Amount>>`, absent for `None` and an empty inner value for
 `float('inf')`; and a `None` program, support or black holes a null `std::shared_ptr`
 (`edge_weights` is a shared array, `std::shared_ptr<const std::vector<Amount>>`); the epoch's amounts

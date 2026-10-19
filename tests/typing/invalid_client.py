@@ -44,6 +44,8 @@ ng.spf(g, 0, ng.KspOptions(1, sel))  # expect: reportArgumentType
 ng.capacity(g, 0, 1, cfg)  # expect: reportArgumentType
 guard = ng.Tunnels(2)
 ng.CapacityAware(guard, max_path_cost=guard)  # expect: reportArgumentType
+ng.Global(tunnels=2)  # expect: reportArgumentType
+ng.Global(prefer_headroom="yes")  # expect: reportArgumentType
 ng.to_units("1.5", 1.0)  # expect: reportCallIssue, reportArgumentType
 # FlowPolicyConfig takes keywords only.
 ng.FlowPolicyConfig(ng.Global())  # expect: reportCallIssue

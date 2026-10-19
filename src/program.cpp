@@ -245,6 +245,7 @@ std::shared_ptr<const ForwardingProgram> tunnel_program(
     t.status = s.status;
     t.requested = s.requested;
     t.reserved = up ? s.requested : 0;
+    t.planned = s.planned;
     t.weight = up ? 1 : 0;
     ProgramEntry entry;
     entry.index = t.index;

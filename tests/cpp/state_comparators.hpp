@@ -194,7 +194,8 @@ inline Epoch epoch(const FlowPolicy& p) {
   const auto& pe = detail::PolicyAccess::engine(p);
   const auto& ep = pe.epoch;
   Epoch e {ep.requested, ep.offered, ep.infinite, ep.prepared, p.placed_demand(), ep.curve, ep.program.get(),
-           program_snapshot(ep.program.get()), ep.plan, ep.support, ep.head_lost, ep.by_tunnel, {}};
+           program_snapshot(ep.program.get()), ep.plan ? std::optional<TunnelPlan>(*ep.plan) : std::nullopt, ep.support,
+           ep.head_lost, ep.by_tunnel, {}};
   for (const auto& c : ep.cohorts) {
     auto& out = e.cohorts.emplace_back();
     for (const auto& f : c) out.push_back({f.id, f.cost, f.bundle ? ascending_edges(*f.bundle) : std::vector<EdgeId> {}, f.entry});

@@ -292,10 +292,10 @@ TEST(FlowPolicyConfig, SeveralDefectsReportTheFirstInTheContractOrder) {
        "selection.tie_break: 97 is not a value of EdgeTieBreak"},
       {{zero, FlowPlacement::MaxFlow, Admission::Lossy, bad_sel(std::nullopt, bad_priority), Origin::Optimized},
        "selection.priority: 96 is not a value of EdgePriority"},
-      // The rows, column by column.
-      {{Global {}, FlowPlacement::MaxFlow, Admission::Lossy, sel(), Origin::Equal}, "Global does not accept placement"},
-      {{Global {}, std::nullopt, Admission::Lossy, sel(), Origin::Equal}, "MAX_FLOW requires admission=LOSSLESS"},
-      {{Global {}, std::nullopt, Admission::Lossless, sel(), Origin::Equal}, "Global does not accept selection"},
+      // The rows, column by column; Global rejects a selection before its row.
+      {{Global {}, FlowPlacement::MaxFlow, Admission::Lossy, sel(), Origin::Equal}, "Global does not accept selection"},
+      {{Global {}, FlowPlacement::MaxFlow, Admission::Lossy, std::nullopt, Origin::Equal}, "Global does not accept placement"},
+      {{Global {}, std::nullopt, Admission::Lossy, std::nullopt, Origin::Equal}, "MAX_FLOW requires admission=LOSSLESS"},
       {{CostOnly {}, std::nullopt, Admission::Lossy, sel(), Origin::Optimized}, "CostOnly requires placement"},
       {{CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy, sel(), Origin::Optimized},
        "CostOnly with EQUAL_BALANCED or WEIGHTED requires origin=EQUAL"},

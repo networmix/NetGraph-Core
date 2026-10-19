@@ -630,6 +630,58 @@ inline std::uint64_t t1_forward(T1Fabric& f, const std::vector<double>& offers) 
   return d.h;
 }
 
+// T2: a Global(tunnels=Tunnels(count, up_to), prefer_headroom=headroom) configuration, Lossless.
+inline nc::FlowPolicyConfig t2_config(int count, bool up_to, bool headroom) {
+  return {.routing = nc::Global {.tunnels = nc::Tunnels {count, up_to}, .prefer_headroom = headroom}};
+}
+
+// The digest of a T2 call: its delivery, the chosen count, U, u, F, the route cost and the
+// tunnels.
+inline void add_t2(Digest& d, const nc::PlacementResult& r) {
+  d.add_i(r.placed);
+  d.add_i(r.plan->count);
+  d.add_i(*r.plan->common_share);
+  d.add_i(*r.plan->planned_per_tunnel);
+  d.add_i(*r.plan->forwarding_bound);
+  d.add(r.plan->route_cost->lo);
+  d.add_i(static_cast<std::int64_t>(r.program->tunnels().size()));
+}
+
+// t2.exact16.*, t2.upto256.headroom: one T2 policy per pair on one shared ledger, in pair order,
+// each replace(to_units(volume), design = the same) on the residual the earlier pairs left: live
+// heads, sizing (the quota flows), s*, the canonical augmentation (with Phi under Headroom), the
+// cut into tunnels, the lossless bound and the forwarding.
+inline std::uint64_t t2_fabric(const Graph& g, const std::vector<std::pair<int, int>>& pairs, double volume, int count,
+                               bool up_to, bool headroom) {
+  nc::FlowLedger fg(g.g);
+  const auto cfg = t2_config(count, up_to, headroom);
+  std::vector<std::unique_ptr<nc::FlowPolicy>> policies;
+  Digest d;
+  const auto units = nc::to_units(volume, kResolution);
+  for (auto [s, t] : pairs) {
+    const nc::NodeId sv[1] = {s};
+    const nc::NodeId tv[1] = {t};
+    policies.push_back(std::make_unique<nc::FlowPolicy>(fg, sv, tv, cfg));
+    add_t2(d, policies.back()->replace(units, units));
+  }
+  return d.h;
+}
+
+// t2.size.mesh: one T2 policy of the heads to the destination on a ledger whose residual is
+// `free` (input order, units), replace(+inf): an unlimited design, u = U.
+inline std::uint64_t t2_mesh(const Graph& g, const std::vector<std::int64_t>& free, const std::vector<int>& heads,
+                             int destination, int count, bool up_to, bool headroom) {
+  std::vector<nc::Amount> residual(free.size());
+  for (std::size_t i = 0; i < free.size(); ++i) residual[static_cast<std::size_t>(g.edge_of_input[i])] = free[i];
+  nc::FlowLedger fg(g.g, residual);
+  std::vector<nc::NodeId> sv(heads.begin(), heads.end());
+  const nc::NodeId tv[1] = {destination};
+  nc::FlowPolicy p(fg, sv, tv, t2_config(count, up_to, headroom));
+  Digest d;
+  add_t2(d, p.replace(std::nullopt));
+  return d.h;
+}
+
 // One series of CostOnly EqualBalanced placements with one DagCache per series (the support of
 // each destination set under the series Eligibility; NetGraph's hop-by-hop engine).
 struct CostOnlySeries {

@@ -50,10 +50,30 @@ inline int resolution_exponent(double resolution) {
   return std::ilogb(resolution);
 }
 
+// A new reference from the C API, or the pending Python error raised (pybind11's own int and
+// tuple constructors fail on a failed allocation with an unchecked internal error instead).
+inline py::object checked(PyObject* o) {
+  if (o == nullptr) throw py::error_already_set();
+  return py::reinterpret_steal<py::object>(o);
+}
+
+// hi * 2^64 + lo as an exact Python int.
 inline py::object counter_int(const Counter128& c) {
-  py::int_ hi(c.hi);
-  py::int_ lo(c.lo);
-  return hi.attr("__lshift__")(py::int_(64)).attr("__or__")(lo);
+  py::object lo = checked(PyLong_FromUnsignedLongLong(c.lo));
+  if (c.hi == 0) return lo;
+  py::object hi = checked(PyLong_FromUnsignedLongLong(c.hi));
+  py::object shift = checked(PyLong_FromLong(64));
+  py::object high = checked(PyNumber_Lshift(hi.ptr(), shift.ptr()));
+  return checked(PyNumber_Or(high.ptr(), lo.ptr()));
+}
+
+// Integers as a tuple of Python ints.
+inline py::tuple ints_tuple(std::span<const std::int32_t> v) {
+  auto out = py::reinterpret_steal<py::tuple>(checked(PyTuple_New(static_cast<Py_ssize_t>(v.size()))).release());
+  for (std::size_t i = 0; i < v.size(); ++i) {
+    PyTuple_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), checked(PyLong_FromLong(v[i])).release().ptr());
+  }
+  return out;
 }
 
 inline py::array_t<std::int64_t> int64_array(const std::vector<std::int64_t>& v) {

@@ -25,7 +25,7 @@ struct DeletionCapture;
 
 // A live flow of the policy between calls. Its amounts are its ledger record (delivered; edges;
 // Lossy offered and drops; T1's holds). The flows of CostOnly and Global are one per roster
-// source (CostOnly's sources share the epoch's program); a T1 or Pinned policy's are one per
+// source (CostOnly's sources share the epoch's program); a T1, T2 or Pinned policy's are one per
 // program entry (`entry`).
 struct LiveFlow {
   std::int64_t id {-1};
@@ -39,11 +39,12 @@ struct LiveFlow {
 // policy epoch): a value, so a full-offer call builds its own and publishes it whole.
 struct Epoch {
   // The live flows: per roster index (CostOnly and Global: one per source), or per program entry
-  // (T1, Pinned).
+  // (T1, T2, Pinned).
   std::vector<std::vector<LiveFlow>> cohorts {};
-  // The installed program (null before the first preparation) and, for T1, its setup summary.
+  // The installed program (null before the first preparation) and, for T1 and T2, its setup summary
+  // (shared, never changed: a policy without tunnels carries a null pointer, not a TunnelPlan).
   std::shared_ptr<const ForwardingProgram> program {};
-  std::optional<TunnelPlan> plan {};
+  std::shared_ptr<const TunnelPlan> plan {};
   // CostOnly MaxFlow: the union of the roster's routes, the controller's support (ascending).
   std::vector<EdgeId> support {};
   // Unrestricted Global with the optimized origin: the cumulative marginal curve of the last solve
@@ -77,7 +78,7 @@ struct PolicyEngine {
   std::shared_ptr<const PredDAG> support {};  // CostOnly: the full static support
   // Global with a support: the trimmed support (ascending), shared with its programs' replay basis.
   std::shared_ptr<const std::vector<EdgeId>> global_support {};
-  // Unrestricted Global and T1: the mask's excluded nodes and edges (ascending), their programs'
+  // Unrestricted Global, T1 and T2: the mask's excluded nodes and edges (ascending), their programs'
   // replay basis.
   std::vector<NodeId> excluded_nodes {};
   std::vector<EdgeId> excluded_edges {};
@@ -109,11 +110,13 @@ struct PolicyAccess {
 
 // The configuration checks of FlowPolicy, shared with the evaluators' argument checks, in
 // FlowPolicyConfig's order (the enumeration values, the model's row, the DagCache: `cache` says
-// whether one is supplied, T1's parameters, edge_weights' length and entries against `num_edges`);
+// whether one is supplied, the tunnel models' parameters, edge_weights' length and entries against
+// `num_edges`);
 // returns its selection, origin and weights with an absent one resolved (nothing else is copied).
 // Then, with the normalized endpoint counts, the pooled single-path rule (check_source_count: an
 // absent selection is PathSelection(), multipath absent, so it reads the configuration resolved or
-// not alike), and with the roster size T1's tunnel limit (check_tunnel_limit).
+// not alike) and T2's several-sources rule, and with the roster size the tunnel limit
+// (check_tunnel_limit).
 struct ResolvedAxes {
   std::optional<PathSelection> selection;
   std::optional<Origin> origin;
@@ -125,7 +128,8 @@ void check_tunnel_limit(const FlowPolicyConfig& cfg, std::size_t num_heads);
 // forward()'s first checks, before its offer is read (the binding runs them before converting
 // it): `Pinned forwards with replace`, then `forward requires an installed program`.
 void check_forward_operation(const PolicyEngine& pe);
-// The model's name in messages: CostOnly, Global, T1 (CapacityAware) or Pinned.
+// The model's name in messages: CostOnly, Global, T1 (CapacityAware), T2 (Global with tunnels) or
+// Pinned.
 [[nodiscard]] const char* model_name(const Routing& r) noexcept;
 
 } // namespace netgraph::core::detail

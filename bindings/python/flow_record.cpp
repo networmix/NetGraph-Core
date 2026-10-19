@@ -26,7 +26,7 @@ void register_flow_record(py::module_& m) {
   py::class_<FlowRecord>(
       m, "FlowRecord",
       "One flow of a ledger, as a snapshot: flow_id (ledger uid, id), owner (the policy's id),\n"
-      "sources, destinations, admission, entry (a T1 or Pinned policy's program entry, else None), bundle\n"
+      "sources, destinations, admission, entry (a T1, T2 or Pinned policy's program entry, else None), bundle\n"
       "(PredDAG: the flow's route),\n"
       "route_cost (its minimum walk cost; None when empty), offered (Lossy only, else None),\n"
       "delivered, edges [(EdgeId, units)] (carried load) and drops [(EdgeId, units)] (cumulative,\n"
@@ -40,7 +40,7 @@ void register_flow_record(py::module_& m) {
       .def_readonly("destinations", &FlowRecord::destinations, "the flow's destination node ids, ascending")
       .def_readonly("admission", &FlowRecord::admission, "LOSSLESS or LOSSY")
       .def_readonly("entry", &FlowRecord::entry,
-                    "the program entry the record carries (T1 and Pinned: the entry identifier); None for the\n"
+                    "the program entry the record carries (T1, T2 and Pinned: the entry identifier); None for the\n"
                     "records kept per roster source (CostOnly, Global)")
       .def_property_readonly(
           "bundle", [](const FlowRecord& r) { return typed_shared(r.bundle); },

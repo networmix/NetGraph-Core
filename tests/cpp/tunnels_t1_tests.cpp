@@ -770,8 +770,9 @@ TEST(T1Operations, DesignValidationAndTerminations) {
   }
 }
 
-// No certificate for T1 (total_cost, min_cut, cost_distribution absent), and plan
-// only for T1 (absent for the other models, Pinned over a T1 program too).
+// No certificate for T1 (total_cost, min_cut, cost_distribution absent), and a plan only for
+// the tunnel models (T1 here, T2 in tunnels_t2_tests.cpp; absent for the other models, Pinned
+// over a T1 program too).
 TEST(T1Operations, NoCertificatesAndPlanOnlyForT1) {
   const auto g = twoh(2, 10);
   auto p = make(g, {0, 1}, {2}, t1(2));

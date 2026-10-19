@@ -393,15 +393,24 @@ def T1():
     [
         # The rows of the matrix, their columns left to right: placement, origin, admission,
         # selection (contract 3.2, 14.3, 14.4).
+        # Global rejects any selection before its row.
         (
             ngc.Global,
             P.MAX_FLOW,
             A.LOSSY,
             True,
             ORIGIN.EQUAL,
+            "Global does not accept selection",
+        ),
+        (
+            ngc.Global,
+            P.MAX_FLOW,
+            A.LOSSY,
+            False,
+            ORIGIN.EQUAL,
             "Global does not accept placement",
         ),
-        (ngc.Global, None, A.LOSSY, True, ORIGIN.EQUAL, LOSSY_KERNEL),
+        (ngc.Global, None, A.LOSSY, False, ORIGIN.EQUAL, LOSSY_KERNEL),
         (
             ngc.Global,
             None,

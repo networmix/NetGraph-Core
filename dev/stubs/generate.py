@@ -52,6 +52,7 @@ HEADER = "# Generated from the compiled module; do not edit.\n"
 IMPORTS = """from __future__ import annotations
 
 import collections.abc
+import fractions
 import typing
 
 import numpy

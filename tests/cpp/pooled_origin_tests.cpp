@@ -186,14 +186,16 @@ TEST(ConfigOrigin, MatrixTexts) {
   EXPECT_EQ(cache.stats().misses + cache.stats().hits, 0);
 }
 
-// The row, then the columns placement, origin, admission, selection; the table
-// before the cache check.
+// The row, then the columns placement, origin, admission, selection (Global rejects any
+// selection before its row); the table before the cache check.
 TEST(ConfigOrigin, MatrixOrder) {
   EXPECT_EQ(construct_error(kB1, {0, 1}, {3},
                             FlowPolicyConfig {Global {}, FlowPlacement::MaxFlow, Admission::Lossy, PathSelection()}),
+            "Global does not accept selection");
+  EXPECT_EQ(construct_error(kB1, {0, 1}, {3}, FlowPolicyConfig {Global {}, FlowPlacement::MaxFlow, Admission::Lossy}),
             "Global does not accept placement");
   EXPECT_EQ(construct_error(kB1, {0, 1}, {3},
-                            FlowPolicyConfig {Global {}, std::nullopt, Admission::Lossy, PathSelection(), Origin::Equal}),
+                            FlowPolicyConfig {Global {}, std::nullopt, Admission::Lossy, std::nullopt, Origin::Equal}),
             "MAX_FLOW requires admission=LOSSLESS");
   EXPECT_EQ(construct_error(kPool, {0, 1}, {3},
                             cost_only(FlowPlacement::EqualBalanced, Admission::Lossless, kPreferPath, Origin::Optimized)),

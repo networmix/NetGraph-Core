@@ -29,6 +29,7 @@
 # ruff: noqa: F821
 
 import collections.abc
+import fractions
 import typing
 
 import numpy
@@ -297,9 +298,15 @@ class ForwardingProgram:
     def tunnels(self) -> tuple[Tunnel, ...]: ...
 
 class Global:
-    # reason: support is a PredDAG or None
-    # generated: def __init__(self, *, support: typing.Any = None) -> None:
-    def __init__(self, *, support: PredDAG | None = None) -> None: ...
+    # reason: support is a PredDAG or None; tunnels (T2) a Tunnels or None
+    # generated: def __init__(self, *, support: typing.Any = None, tunnels: typing.Any = None, prefer_headroom: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        support: PredDAG | None = None,
+        tunnels: Tunnels | None = None,
+        prefer_headroom: bool = False,
+    ) -> None: ...
 
 class Pinned:
     # reason: black_holes may be None
@@ -429,17 +436,33 @@ class PlacementResult:
     def reservation_edge_flows(self) -> numpy.typing.NDArray[numpy.int64] | None: ...
 
 class TunnelPlan:
-    # reason: no constructor: the plan of a T1 result
+    # reason: no constructor: the plan of a T1 or T2 result
     # generated: (none)
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
     # reason: an int, or float('inf') for an unlimited design
     # generated: def design_demand(self) -> typing.Any:
     @property
     def design_demand(self) -> int | float: ...
+    # reason: an exact Fraction (T2), or None for T1
+    # generated: def fluid_share(self) -> typing.Any:
+    @property
+    def fluid_share(self) -> fractions.Fraction | None: ...
     # reason: (head, share) pairs
     # generated: def head_design(self) -> tuple:
     @property
     def head_design(self) -> tuple[tuple[int, int], ...]: ...
+    # reason: an exact int, possibly above 2^64 (T2 with prefer_headroom), or None
+    # generated: def headroom_penalty(self) -> typing.Any:
+    @property
+    def headroom_penalty(self) -> int | None: ...
+    # reason: the live heads, ascending (T2), or None for T1
+    # generated: def live_heads(self) -> typing.Any:
+    @property
+    def live_heads(self) -> tuple[int, ...] | None: ...
+    # reason: an exact int, possibly above 2^64 (T2), or None for T1
+    # generated: def route_cost(self) -> typing.Any:
+    @property
+    def route_cost(self) -> int | None: ...
 
 class DagCacheStats:
     # reason: no constructor: returned by DagCache.stats

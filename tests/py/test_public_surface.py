@@ -524,3 +524,29 @@ def test_a_wrong_argument_is_refused_with_its_message(call, error, message):
     with pytest.raises(error, match=exact(message)) as info:
         call(s)
     assert type(info.value) is error
+
+
+def test_t2_members():
+    # Global.tunnels, Global.prefer_headroom, Tunnel.planned and the T2 fields of TunnelPlan,
+    # read-only.
+    gl = ngc.Global(tunnels=ngc.Tunnels(16), prefer_headroom=True)
+    assert (gl.tunnels, gl.prefer_headroom) == (ngc.Tunnels(16), True)
+    assert (ngc.Global().tunnels, ngc.Global().prefer_headroom) == (None, False)
+    with pytest.raises(AttributeError):
+        gl.tunnels = ngc.Tunnels(2)
+    with pytest.raises(AttributeError):
+        gl.prefer_headroom = False
+    for name in (
+        "live_heads",
+        "insufficient_resolution",
+        "fluid_share",
+        "common_share",
+        "planned_per_tunnel",
+        "planned_total",
+        "route_cost",
+        "headroom_penalty",
+        "forwarding_bound",
+    ):
+        assert isinstance(getattr(ngc.TunnelPlan, name), property), name
+        assert getattr(ngc.TunnelPlan, name).fset is None, name
+    assert isinstance(ngc.Tunnel.planned, property) and ngc.Tunnel.planned.fset is None

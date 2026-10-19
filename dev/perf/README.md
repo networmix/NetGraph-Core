@@ -321,6 +321,7 @@ failed.
 | `global` | `global.equal.random` | equal-origin Global capacity, 2 demands of 4 sources |
 | `program` | `program.forward.global`, `program.replay.lossy`, `program.stale.lossy`, `program.replace.costonly` | forwarding programs: a Global program forwarded, replayed under failures (Lossy), stale under black holes, CostOnly re-prepared by replace |
 | `t1` | `t1.setup.fabric`, `t1.forward.fabric` | T1 with 16 tunnels per head, 12 demands on one ledger: the setup with its holds; the installed programs forwarded under 32 offers |
+| `t2` | `t2.exact16.headroom`, `t2.exact16.cost`, `t2.upto256.headroom`, `t2.size.mesh` | T2 on the same fabric and demands: 16 tunnels per head with and without `prefer_headroom`, up to 256 with it; 16 tunnels for 10 heads on a 500-node mesh (2000 links, 5/8 to 8/8 free), sizing-dominated |
 | `msd` | `msd.loop` | the maximum-supported-demand bracket and bisection with a per-series DAG cache |
 | `ksp` | `ksp.fabric3_k8` | k = 8 shortest paths for 8 pairs |
 | `cache` | `cache.cold`, `cache.warm` | DagCache series from a cleared / prepopulated cache |
