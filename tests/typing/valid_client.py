@@ -71,14 +71,27 @@ policy = ng.FlowPolicy(
     0,
     [3],
     ng.FlowPolicyConfig(
-        routing=ng.CapacityAware(flow_count=2, max_path_cost=ng.Stretch(1.5)),
-        placement=ng.FlowPlacement.EQUAL_BALANCED,
+        routing=ng.CapacityAware(ng.Tunnels(2), max_path_cost=ng.Stretch(1.5)),
         admission=ng.Admission.LOSSLESS,
-        selection=sel,
     ),
 )
-result = policy.place(float("inf"), ng.OutputOptions(residual=True))
+result = policy.replace(
+    10,
+    design_demand=8,
+    outputs=ng.OutputOptions(residual=True, reservation_edge_flows=True),
+)
 assert_type(result, ng.PlacementResult)
+plan = result.plan
+if plan is not None:
+    assert_type(plan.design_demand, int | float)
+    assert_type(plan.head_design, tuple[tuple[int, int], ...])
+assert_type(
+    result.program.tunnels[0].edges if result.program else None, tuple[int, ...] | None
+)
+held = result.reservation_edge_flows
+if held is not None:
+    assert_type(held, npt.NDArray[np.int64])
+assert_type(ledger.reserved(), npt.NDArray[np.int64])
 assert_type(result.remaining, int | float)
 residual = result.residual
 if residual is not None:
@@ -110,7 +123,7 @@ assert_type(program, ng.ForwardingProgram)
 assert_type(program.tunnels, tuple[ng.Tunnel, ...])
 assert_type(program.source_weights, tuple[tuple[int, int], ...] | None)
 for tunnel in program.tunnels:
-    assert_type(tunnel.edges, tuple[int, ...])
+    assert_type(tunnel.edges, tuple[int, ...] | None)
 pinned_cfg = ng.FlowPolicyConfig(
     routing=ng.Pinned(program, black_holes=elig), admission=ng.Admission.LOSSY
 )

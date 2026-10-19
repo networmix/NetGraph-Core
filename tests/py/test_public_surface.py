@@ -5,6 +5,8 @@ the retired spellings and the retired search entry points, which exist nowhere, 
 aliases; and the argument checks of the bindings, each with its exception class and whole
 message."""
 
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import _netgraph_core
@@ -32,7 +34,7 @@ PUBLIC = {
     "FlowRecord",
     "Absolute",
     "Stretch",
-    "DiminishingReturns",
+    "Tunnels",
     "CostOnly",
     "CapacityAware",
     "Global",
@@ -43,13 +45,13 @@ PUBLIC = {
     "Route",
     "ForwardingProgram",
     "TunnelFlow",
+    "TunnelPlan",
     "FlowPolicyConfig",
     "OutputOptions",
     "Termination",
     "PlacementResult",
     "SourceFlow",
     "FlowPolicy",
-    "MAX_FLOWS_PER_CALL",
     "DagCache",
     "DagCacheMiss",
     "DagCacheStats",
@@ -75,7 +77,6 @@ PRIVATE = {"_place_global_units"}
 # The private hooks (NETGRAPH_CORE_PRIVATE_HOOKS: the development build only): module functions
 # and class members.
 HOOK_FUNCTIONS = {
-    "_max_flows_per_call",
     "_fail_python_allocation",
     "_fail_native_allocation",
     "_round_robin",
@@ -98,7 +99,80 @@ def test_public_surface():
     for name in PUBLIC:
         assert getattr(ngc, name) is getattr(_netgraph_core, name), name
     assert isinstance(ngc.__version__, str)
-    assert ngc.MAX_FLOWS_PER_CALL == 10000
+    # 52 entries with __version__ (DiminishingReturns and MAX_FLOWS_PER_CALL are gone, Tunnels
+    # and TunnelPlan are new).
+    assert len(ngc.__all__) == 52
+
+
+def test_enum_values_are_pinned():
+    # The integer values of the public enumerations (contract 14.1, 14.2).
+    assert {m.name: int(m) for m in ngc.TunnelStatus.__members__.values()} == {
+        "UP": 0,
+        "NO_BANDWIDTH": 1,
+        "COST_CEILING": 2,
+        "FAILED": 3,
+        "BLACKHOLED": 4,
+    }
+    assert {m.name: int(m) for m in ngc.Termination.__members__.values()} == {
+        "COMPLETE": 0,
+        "NO_ROUTE": 1,
+        "EXHAUSTED": 2,
+        "NO_ACTIVE_WEIGHT": 3,
+    }
+
+
+def test_path_selection_defaults():
+    # multipath None is the model's natural shape (contract 3.3).
+    s = ngc.PathSelection()
+    assert (s.tie_break, s.priority, s.multipath, s.multi_edge) == (
+        ngc.EdgeTieBreak.DETERMINISTIC,
+        ngc.EdgePriority.CAPACITY,
+        None,
+        True,
+    )
+    assert repr(s) == (
+        "PathSelection(tie_break=DETERMINISTIC, priority=CAPACITY, multipath=None, multi_edge=True)"
+    )
+    assert repr(ngc.PathSelection(multipath=False)).count("multipath=False") == 1
+    assert hash(ngc.PathSelection()) == hash(ngc.PathSelection(multipath=None))
+    assert ngc.PathSelection(multipath=None) != ngc.PathSelection(multipath=True)
+
+
+def test_tunnel_values_read_only():
+    # The T1 configuration values have read-only fields and no T0 keyword.
+    t = ngc.Tunnels(2)
+    ca = ngc.CapacityAware(t, max_path_cost=ngc.Absolute(3))
+    with pytest.raises(AttributeError):
+        t.count = 3
+    with pytest.raises(AttributeError):
+        t.up_to = True
+    with pytest.raises(AttributeError):
+        ca.tunnels = ngc.Tunnels(3)
+    with pytest.raises(AttributeError):
+        ca.min_unreserved_bandwidth = 1
+    with pytest.raises(TypeError):
+        ngc.CapacityAware(flow_count=2)
+    assert (
+        repr(t) == "Tunnels(2)"
+        and repr(ngc.Tunnels(4, up_to=True)) == "Tunnels(4, up_to=True)"
+    )
+    assert (
+        repr(ca)
+        == "CapacityAware(Tunnels(2), max_path_cost=Absolute(3), min_unreserved_bandwidth=0)"
+    )
+    assert "max_path_cost=None," in repr(ngc.CapacityAware(t))
+    assert repr(
+        ngc.CapacityAware(
+            ngc.Tunnels(3), max_path_cost=ngc.Stretch(2.0), min_unreserved_bandwidth=5
+        )
+    ) == (
+        "CapacityAware(Tunnels(3), max_path_cost=Stretch(2.0), min_unreserved_bandwidth=5)"
+    )
+    assert (
+        t == ngc.Tunnels(2)
+        and hash(t) == hash(ngc.Tunnels(2))
+        and t != ngc.Tunnels(2, up_to=True)
+    )
 
 
 def test_extension_surface_is_exactly_the_public_and_private_sets():
@@ -146,7 +220,10 @@ RETIRED = {
     "FlowGraph",
     "Outputs",
     "Diminishing",
+    "DiminishingReturns",
+    "MAX_FLOWS_PER_CALL",
     "kMaxFlowsPerCall",
+    "_max_flows_per_call",
     "CapacityOptions",
     "SensitivityOptions",
 }
@@ -168,13 +245,48 @@ RETIRED_SEARCH = {
 # Retired members: PlacementResult's per-source termination list (the result reports one
 # termination and per-source rows in by_source), FlowRecord's kernel (only ever written),
 # FlowPolicy's usable-bundle count and Pinned's bundle list (Pinned forwards a ForwardingProgram;
-# FlowPolicy.program and PlacementResult.by_tunnel report what is forwarded).
+# FlowPolicy.program and PlacementResult.by_tunnel report what is forwarded), the growth
+# computation's CapacityAware fields and terminations (T1 sets up its tunnels once per call).
 RETIRED_MEMBERS = {
     "PlacementResult": {"local_outcomes"},
     "FlowRecord": {"placement"},
     "FlowPolicy": {"usable_bundles"},
     "Pinned": {"bundles"},
+    "CapacityAware": {
+        "flow_count",
+        "max_flow_count",
+        "min_flow_bandwidth",
+        "reoptimize",
+        "diminishing",
+    },
+    "Termination": {"LIMIT_FLOWS", "LIMIT_DIMINISHING"},
 }
+
+
+# The files that tell a hooks build from a shipped one by probing one private hook.
+HOOK_PROBES = (
+    ".github/workflows/tests.yml",
+    ".github/workflows/release.yml",
+    "dev/run-checks.sh",
+    "dev/stubs/generate.py",
+    "tests/py/private_hooks.py",
+)
+
+
+def test_hook_probes_name_a_bound_hook():
+    # A probe of a deleted hook makes a hooks build look like a shipped one: CI then refuses a
+    # correct editable build, and the release check that a wheel has no hooks can never fail.
+    root = Path(__file__).resolve().parents[2]
+    if not all((root / rel).is_file() for rel in HOOK_PROBES):
+        pytest.skip("needs a git checkout: the sdist leaves out .github/ and dev/")
+    names = {}
+    for rel in HOOK_PROBES:
+        found = re.findall(r"hasattr\(\w+, ['\"](\w+)['\"]\)", (root / rel).read_text())
+        assert found, rel
+        for name in found:
+            names.setdefault(name, []).append(rel)
+    assert set(names) == {"_fail_native_allocation"}, names
+    assert not HOOKS or all(hasattr(_netgraph_core, name) for name in names)
 
 
 def test_retired_spellings_are_absent():
@@ -190,7 +302,6 @@ def test_retired_spellings_are_absent():
     assert ngc.Graph.__name__ == "Graph"
     assert ngc.FlowLedger.__name__ == "FlowLedger"
     assert ngc.OutputOptions.__name__ == "OutputOptions"
-    assert ngc.DiminishingReturns.__name__ == "DiminishingReturns"
     # PredDAG and Path carry no resolver or alternative constructors.
     for name in ("resolve_to_paths", "from_edges", "from_hops"):
         assert not hasattr(ngc.PredDAG, name), name
@@ -341,20 +452,25 @@ REFUSALS = {
         TypeError,
         ROUTING.format("NoneType"),
     ),
-    "CapacityAware-flow_count-None": (
-        lambda s: ngc.CapacityAware(flow_count=None),
+    "Tunnels-count-None": (
+        lambda s: ngc.Tunnels(None),
         ValueError,
-        "flow_count must be an integer (got None)",
+        "tunnel count must be an integer (got None)",
+    ),
+    "Tunnels-count-bool": (
+        lambda s: ngc.Tunnels(True),
+        ValueError,
+        "tunnel count must be an integer (got bool)",
+    ),
+    "CapacityAware-min_unreserved_bandwidth-None": (
+        lambda s: ngc.CapacityAware(ngc.Tunnels(1), min_unreserved_bandwidth=None),
+        ValueError,
+        "min_unreserved_bandwidth must be an integer (got None)",
     ),
     "Absolute-cost-None": (
         lambda s: ngc.Absolute(None),
         ValueError,
         "Absolute cost must be an integer (got None)",
-    ),
-    "DiminishingReturns-window-None": (
-        lambda s: ngc.DiminishingReturns(None, 0.5),
-        ValueError,
-        "diminishing window must be an integer (got None)",
     ),
     "Stretch-factor-str": (
         lambda s: ngc.Stretch("1.5"),
@@ -365,11 +481,6 @@ REFUSALS = {
         lambda s: ngc.Stretch(True),
         ValueError,
         "Stretch factor must be a number (got bool)",
-    ),
-    "DiminishingReturns-fraction-str": (
-        lambda s: ngc.DiminishingReturns(1, "0.5"),
-        ValueError,
-        "diminishing fraction must be a number (got str)",
     ),
     "Pinned-program-None": (
         lambda s: ngc.Pinned(None),

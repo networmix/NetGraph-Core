@@ -18,7 +18,6 @@ UNREACHABLE = INT64_MAX  # path-cost sentinel (None in Python accessors)
 NEVER_REACHED = -1  # potential sentinel of the private flow-core payload (2.2)
 INTERNAL_CAP_MAX = (1 << 63) - 2  # internal flow-core cap domain [0, 2^63 - 2]
 COUNTER_LIMIT = 1 << 127  # signed 128-bit cumulative counters (offered, drops)
-K_MAX_FLOWS_PER_CALL = 10000  # engine constant (9.2)
 INF = math.inf  # the only non-integer request: +inf
 
 

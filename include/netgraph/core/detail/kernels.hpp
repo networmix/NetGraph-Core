@@ -37,15 +37,18 @@ namespace netgraph::core::detail {
 // Visit only the n positive shares (n = min(total, k)); later entries stay 0 in a zeroed output.
 // The callback form computes the split once and calls share(i, x) in index order for i in
 // [0, n). Stop if it returns false; return the accepted count: n, or that rejected index i.
-// The span form writes out[0 .. n), where k = out.size(), and returns n.
+// The span form writes out[0 .. n), where k = out.size(), and returns n. round_robin_share is the
+// rule itself: the share of recipient i in [0, k) (T1's head designs and tunnel requests use it).
+constexpr Amount round_robin_share(Amount total, Amount k, Amount i) noexcept {
+  return total / k + (i < total % k ? 1 : 0);
+}
+
 template <class Share>
 inline std::size_t round_robin(Amount total, std::size_t k, Share&& share) {
   const auto kk = static_cast<Amount>(k);
-  const Amount base = total / kk;
-  const auto extra = static_cast<std::size_t>(total % kk);
-  const std::size_t n = base == 0 ? extra : k;
+  const std::size_t n = total / kk == 0 ? static_cast<std::size_t>(total % kk) : k;
   for (std::size_t i = 0; i < n; ++i) {
-    if (!share(i, base + (i < extra ? 1 : 0))) return i;
+    if (!share(i, round_robin_share(total, kk, static_cast<Amount>(i)))) return i;
   }
   return n;
 }

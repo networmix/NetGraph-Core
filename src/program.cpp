@@ -180,8 +180,9 @@ std::shared_ptr<const ForwardingProgram> controller_program(
     t.index = static_cast<std::int32_t>(i);
     t.head = roster[static_cast<std::size_t>(path.slot)];
     t.destination = edge_dst[static_cast<std::size_t>(path.edges.back())];
-    t.route_cost = 0;
-    for (EdgeId e : path.edges) t.route_cost += cost[static_cast<std::size_t>(e)];
+    Cost route_cost = 0;
+    for (EdgeId e : path.edges) route_cost += cost[static_cast<std::size_t>(e)];
+    t.route_cost = route_cost;
     t.weight = path.amount;
     ProgramEntry entry;
     entry.index = t.index;
@@ -189,7 +190,7 @@ std::shared_ptr<const ForwardingProgram> controller_program(
     entry.slot = path.slot;
     entry.weight = path.amount;
     entry.tunnel = static_cast<std::int32_t>(i);
-    entry.cost = t.route_cost;
+    entry.cost = route_cost;
     t.edges = std::move(path.edges);
     p->tunnels.push_back(std::move(t));
     p->entries.push_back(std::move(entry));
@@ -221,6 +222,47 @@ std::shared_ptr<const ForwardingProgram> cost_only_program(
   p->contexts.push_back(std::move(ctx));
   p->pooled = true;
   p->lay_out(sources, destinations, roster);
+  return ProgramAccess::make(std::move(data));
+}
+
+std::shared_ptr<const ForwardingProgram> tunnel_program(
+    const Graph& g, std::span<const NodeId> sources, std::span<const NodeId> destinations,
+    std::span<const NodeId> roster, std::vector<SetupTunnel> tunnels, std::span<const NodeId> excluded_nodes,
+    std::span<const EdgeId> excluded_edges) {
+  ProgramData data;
+  ProgramData* p = &data;
+  p->graph_uid = g.uid();
+  const auto edge_dst = g.edge_dst();
+  const auto H = static_cast<std::int32_t>(roster.size());
+  p->tunnels.reserve(tunnels.size());
+  p->entries.reserve(tunnels.size());
+  for (std::size_t i = 0; i < tunnels.size(); ++i) {
+    auto& s = tunnels[i];
+    const bool up = s.status == TunnelStatus::Up;
+    Tunnel t;
+    t.index = s.round * H + s.slot;
+    t.head = roster[static_cast<std::size_t>(s.slot)];
+    t.status = s.status;
+    t.requested = s.requested;
+    t.reserved = up ? s.requested : 0;
+    t.weight = up ? 1 : 0;
+    ProgramEntry entry;
+    entry.index = t.index;
+    entry.head = t.head;
+    entry.slot = s.slot;
+    entry.weight = t.weight;
+    entry.tunnel = static_cast<std::int32_t>(i);
+    entry.cost = up ? s.cost : kUnreachable;
+    if (up) {
+      t.destination = edge_dst[static_cast<std::size_t>(s.edges.back())];
+      t.route_cost = s.cost;
+      t.edges = std::move(s.edges);
+    }
+    p->tunnels.push_back(std::move(t));
+    p->entries.push_back(std::move(entry));
+  }
+  p->topology = true;
+  p->lay_out(sources, destinations, roster, excluded_nodes, excluded_edges);
   return ProgramAccess::make(std::move(data));
 }
 
@@ -256,14 +298,15 @@ void ProgramData::basis_parts(std::size_t slot, std::vector<std::pair<std::span<
   for (std::int32_t e : entries_of(slot)) {
     const auto& entry = entries[static_cast<std::size_t>(e)];
     if (entry.tunnel >= 0) {
-      out.emplace_back(tunnels[static_cast<std::size_t>(entry.tunnel)].edges, false);
+      out.emplace_back(path_of(tunnels[static_cast<std::size_t>(entry.tunnel)]), false);
     } else {
       out.emplace_back(PredDAGBuilder::ascending(*entry.bundle), true);
     }
   }
 }
 
-ProgramChange compare_programs(const ForwardingProgram* before, const ForwardingProgram* after) noexcept {
+ProgramChange compare_programs(const ForwardingProgram* before, const ForwardingProgram* after,
+                               bool reservations) noexcept {
   static const ProgramData kNone {};
   const ProgramData& a = before != nullptr ? ProgramAccess::data(*before) : kNone;
   const ProgramData& b = after != nullptr ? ProgramAccess::data(*after) : kNone;
@@ -287,12 +330,36 @@ ProgramChange compare_programs(const ForwardingProgram* before, const Forwarding
   for (std::size_t c = 0; !out.routes && c < a.contexts.size(); ++c) {
     out.routes = !same_plan_structure(*a.contexts[c].plan, *b.contexts[c].plan);
   }
-  // Weights: the injection (equal or the captured weights) and every entry and split-table weight.
+  // Weights: the injection (equal or the captured weights) and every entry and split-table weight,
+  // an entry absent from one program counting as weight 0 there.
   out.weights = a.source_weights.has_value() != b.source_weights.has_value() || a.head_weight != b.head_weight ||
-                a.entries.size() != b.entries.size() || a.contexts.size() != b.contexts.size();
-  for (std::size_t i = 0; !out.weights && i < a.entries.size(); ++i) out.weights = a.entries[i].weight != b.entries[i].weight;
+                a.contexts.size() != b.contexts.size();
+  const std::size_t n = std::max(a.entries.size(), b.entries.size());
+  auto weight = [](const ProgramData& p, std::size_t i) { return i < p.entries.size() ? p.entries[i].weight : Amount {0}; };
+  for (std::size_t i = 0; !out.weights && i < n; ++i) out.weights = weight(a, i) != weight(b, i);
   for (std::size_t c = 0; !out.weights && c < a.contexts.size(); ++c) {
     out.weights = a.contexts[c].plan->weights != b.contexts[c].plan->weights;
+  }
+  // Reservations: every tunnel's (requested, reserved) by index (both lists ascend), a tunnel
+  // absent from one program counting as (0, 0) there (only T1 tunnels have them).
+  if (!reservations) return out;
+  auto held = [](const Tunnel& t) { return t.requested != 0 || t.reserved != 0; };
+  std::size_t i = 0;
+  std::size_t j = 0;
+  while (!out.reservations && (i < a.tunnels.size() || j < b.tunnels.size())) {
+    const Tunnel* x = i < a.tunnels.size() ? &a.tunnels[i] : nullptr;
+    const Tunnel* y = j < b.tunnels.size() ? &b.tunnels[j] : nullptr;
+    if (x != nullptr && (y == nullptr || x->index < y->index)) {
+      out.reservations = held(*x);
+      ++i;
+    } else if (y != nullptr && (x == nullptr || y->index < x->index)) {
+      out.reservations = held(*y);
+      ++j;
+    } else {
+      out.reservations = x->requested != y->requested || x->reserved != y->reserved;
+      ++i;
+      ++j;
+    }
   }
   return out;
 }
@@ -389,10 +456,11 @@ std::shared_ptr<const ForwardingProgram> ForwardingProgram::from_routes(const Gr
       t.destination = (*path)->dst();
       t.route_cost = (*path)->cost();
       t.weight = r.weight;
-      t.edges.reserve(hops.size());
-      for (const auto& hop : hops) t.edges.push_back(hop.front());
+      auto& edges = t.edges.emplace();
+      edges.reserve(hops.size());
+      for (const auto& hop : hops) edges.push_back(hop.front());
       entry.tunnel = static_cast<std::int32_t>(p->tunnels.size());
-      entry.cost = t.route_cost;
+      entry.cost = (*path)->cost();
       p->tunnels.push_back(std::move(t));
     } else {
       // The plan in one pass: its route (the DAG's edges on the walks from the head to a

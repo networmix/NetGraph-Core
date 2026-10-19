@@ -11,6 +11,7 @@
 #include <pybind11/typing.h>
 
 #include <memory>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -146,6 +147,29 @@ public:
   Typed(py::handle h, py::object::borrowed_t) : py::object(h, py::object::borrowed_t {}) {}
   static bool check_(py::handle h) { return py::isinstance<T>(h); }
 };
+
+// object_of(value) as a T; a list of object_of each row (as tuple_of); object_of of a present
+// value or None. pybind11's cast of a bound value, a vector or an optional of them allocates the
+// object unchecked.
+template <class T>
+Typed<T> typed_object(T value) {
+  return py::reinterpret_steal<Typed<T>>(object_of<T>(std::move(value)).release());
+}
+template <class T>
+py::typing::List<T> list_of(const std::vector<T>& rows) {
+  PyObject* raw = PyList_New(static_cast<Py_ssize_t>(rows.size()));
+  if (raw == nullptr) throw py::error_already_set();
+  auto out = py::reinterpret_steal<py::typing::List<T>>(raw);
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), object_of<T>(rows[i]).release().ptr());
+  }
+  return out;
+}
+template <class T>
+py::typing::Optional<T> optional_of(const std::optional<T>& value) {
+  return py::reinterpret_steal<py::typing::Optional<T>>(value.has_value() ? object_of<T>(*value).release()
+                                                                          : py::none().release());
+}
 
 // shared_object(holder) as a T (holder not null) or as T | None.
 template <class T>

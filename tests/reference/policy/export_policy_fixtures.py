@@ -1,4 +1,4 @@
-"""Export prototype 2's 59 fixtures as replay data for the Core tests (sub-PR 1c).
+"""Export prototype 2's fixtures as replay data for the Core tests (sub-PR 1c).
 
     venv/bin/python -I tests/reference/policy/export_policy_fixtures.py [--check] [--out PATH]
 
@@ -17,26 +17,25 @@ byte (a later change of that string is a deliberate data change, not a rename).
 Every fixture of ``prototypes/p2_transaction/fixtures.py`` runs on the PROTOTYPE (the
 reference; never the build) with a recording shim installed before ``fixtures`` is
 imported: ``ledger.FlowGraph`` and ``policy.FlowPolicy`` are replaced by subclasses that log
-every construction and call, and ``policy.MAX_FLOWS_PER_CALL`` (the fixtures' test hook) is
-read at every placement. The output ``tests/data/policy_fixtures.json`` (compact, deterministic)
+every construction and call. The output ``tests/data/policy_fixtures.json`` (compact, deterministic)
 holds per fixture:
 
 * ``graphs``: ``n``, ``q`` (the resolution), the edges in input coordinates
   ``[u, v, capacity units, cost]`` and the B' ``input_index`` (the replay checks that the
   build ranks the edges the same way);
-* ``ops`` in call order: ``ledger`` (graph, baseline in B' id order or null), ``copy``,
-  ``reset``, ``policy`` (ledger, sources and destinations as given, the full configuration
-  with a Global support as an ascending B' edge list and a Weighted weight basis when given,
-  the Eligibility as excluded node and edge ids, or ``error``), ``place`` (volume as an int or ``"inf"``, the outputs flags, the
-  creation cap ``cap``), ``remove`` and ``destroy``;
+* ``ops`` in call order: ``ledger`` (graph, baseline in B' id order or null), ``policy``
+  (ledger, sources and destinations as given, the full configuration with a Global support as
+  an ascending B' edge list and a Weighted weight basis when given, the Eligibility as
+  excluded node and edge ids, or ``error``), ``place`` (volume as an int or ``"inf"``, the
+  outputs flags) and ``remove`` (a ledger's copy and reset and a policy's destruction are not
+  recorded: no fixture has one since T0 was deleted);
 * after every operation the prototype's expected values (``expect``): the call's result
-  (``to_json``: placed, remaining, termination, local outcomes, flags, drops, the cost curve
-  and the requested outputs), the ledger state (allocated and residual in id order, every
-  record field with the bundle as an ascending edge list, next FlowId, bound and orphaned
-  owners), the policy state (roster, requested, +inf, placed demand, per source the flows'
-  id, route, T (null for Lossy: prototype 2 keeps none), delivered, alloc,
-  members and weights) and the normalised trace (prototype 2's keys; the probe counts
-  ``evals``, the flow core's ``counters`` and ledger uids dropped; FlowIds as ids).
+  (``to_json``: placed, remaining, termination, flags, drops, the cost curve and the
+  requested outputs), the ledger state (allocated and residual in id order, every record
+  field with the bundle as an ascending edge list, next FlowId, bound and orphaned owners),
+  the policy state (roster, requested, +inf, placed demand, per source the flows' id, route,
+  T (null for Lossy: prototype 2 keeps none), delivered and alloc) and the normalised trace
+  (prototype 2's keys; the flow core's ``counters`` and ledger uids dropped; FlowIds as ids).
 
 An operation the prototype rejects is recorded with ``"error": true`` (the build must raise
 too; the messages differ) and the ledger state after it (unchanged). ``--check`` recomputes
@@ -133,11 +132,11 @@ REC: Recorder | None = None
 
 
 def norm(x):
-    """Drop process-dependent and probe-count fields; FlowIds to their id."""
+    """Drop process-dependent and operation-count fields; FlowIds to their id."""
     if isinstance(x, dict):
         out = {}
         for k, v in x.items():
-            if k in ("evals", "ledger_uid", "counters", "evaluations"):
+            if k in ("ledger_uid", "counters"):
                 continue
             if k in ("flow_id", "flow") and isinstance(v, list) and len(v) == 2:
                 out[k] = v[1]
@@ -186,7 +185,6 @@ def policy_state(pol) -> dict:
             continue
         out = []
         for f in flows:
-            w = f.plan.weights
             out.append(
                 {
                     "id": f.flow_id[1],
@@ -194,10 +192,6 @@ def policy_state(pol) -> dict:
                     "T": None if lossy else f.T,
                     "delivered": f.delivered,
                     "alloc": [[e, x] for e, x in sorted(f.alloc.items()) if x],
-                    "members": list(f.plan.members),
-                    "weights": None
-                    if w is None
-                    else [[e, x] for e, x in sorted(w.items())],
                 }
             )
         cohorts.append([s, out])
@@ -216,24 +210,6 @@ def config_json(cfg) -> dict:
     routing: dict = {"kind": kind}
     if kind == "Global" and r.support is not None:
         routing["support"] = sorted(r.support)
-    elif kind == "CapacityAware":
-        routing.update(
-            flow_count=r.flow_count,
-            max_flow_count=r.max_flow_count,
-            max_path_cost=None
-            if r.max_path_cost is None
-            else [
-                r.max_path_cost[0],
-                float(r.max_path_cost[1])
-                if r.max_path_cost[0] == "Stretch"
-                else r.max_path_cost[1],
-            ],
-            min_flow_bandwidth=r.min_flow_bandwidth,
-            reoptimize=r.reoptimize,
-            diminishing=None
-            if r.diminishing is None
-            else [r.diminishing.window, float(r.diminishing.fraction)],
-        )
     sel = cfg.selection
     out = {
         "routing": routing,
@@ -279,41 +255,6 @@ class RecFlowGraph(BaseFlowGraph):
             raise
         REC.ledgers.append(self)
         REC.ops.append({**op, "id": len(REC.ledgers) - 1, "error": False})
-
-    def copy(self):
-        op = {"op": "copy", "ledger": REC.ledger_id(self)}
-        try:
-            other = super().copy()
-        except ContractError:
-            REC.ops.append(
-                {**op, "error": True, "expect": {"ledger": ledger_state(self)}}
-            )
-            raise
-        REC.ledgers.append(other)
-        REC.ops.append(
-            {
-                **op,
-                "id": len(REC.ledgers) - 1,
-                "error": False,
-                "expect": {"ledger": ledger_state(other)},
-            }
-        )
-        return other
-
-    def reset(self, residual=None) -> None:
-        op = {
-            "op": "reset",
-            "ledger": REC.ledger_id(self),
-            "baseline": None if residual is None else list(residual),
-        }
-        try:
-            super().reset(residual)
-        except ContractError:
-            REC.ops.append(
-                {**op, "error": True, "expect": {"ledger": ledger_state(self)}}
-            )
-            raise
-        REC.ops.append({**op, "error": False, "expect": {"ledger": ledger_state(self)}})
 
 
 def make_rec_policy(P):
@@ -361,7 +302,6 @@ def make_rec_policy(P):
                     outputs.bottleneck,
                     outputs.min_cut,
                 ],
-                "cap": P.MAX_FLOWS_PER_CALL,
             }
             try:
                 r = super().place(volume, outputs)
@@ -395,17 +335,6 @@ def make_rec_policy(P):
                         "ledger": ledger_state(self.fg),
                         "policy": policy_state(self),
                     },
-                }
-            )
-
-        def destroy(self) -> None:
-            super().destroy()
-            REC.ops.append(
-                {
-                    "op": "destroy",
-                    "policy": REC.policy_id(self),
-                    "error": False,
-                    "expect": {"ledger": ledger_state(self.fg)},
                 }
             )
 

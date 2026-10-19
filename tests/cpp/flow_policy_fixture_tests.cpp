@@ -1,4 +1,4 @@
-// The 55 fixtures of the independent reference replayed through FlowPolicy.
+// The 31 fixtures of the independent reference replayed through FlowPolicy.
 //
 // tests/data/policy_fixtures.json was exported from the independent reference (its
 // frozen copy, the exporter, the regeneration check and the meaning of the data's historical
@@ -9,14 +9,12 @@
 // its trace (the reference's keys),
 // the ledger after it (allocations, residuals, every record field, next FlowId, owners) and the
 // policy state (roster, requested, +inf, placed demand, per source the flows'
-// ids, routes, T, deliveries, allocations, members and weights). An operation the reference
-// rejects must throw std::invalid_argument here too (the messages differ); any other exception
-// is a failure. Normalised on both sides: the T_max probe
-// counts, the flow core's operation counters and ledger uids. The trace and the creation cap need
-// the private hooks (NETGRAPH_CORE_PRIVATE_HOOKS): without them, in the shipped configuration, the
-// replay compares everything but the trace on the 54 fixtures that keep the default cap, and the
-// corruption test corrupts what that replay compares: every section but the trace, in those 54
-// fixtures.
+// ids, routes, T, deliveries and allocations). An operation the reference rejects must throw
+// std::invalid_argument here too (the messages differ); any other exception is a failure.
+// Normalised on both sides: the flow core's operation counters and ledger uids. The trace needs
+// the private hooks (NETGRAPH_CORE_PRIVATE_HOOKS): without them, in the shipped configuration,
+// the replay compares everything but the trace, and the corruption test corrupts what that
+// replay compares: every section but the trace.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -285,7 +283,7 @@ const J& data() {
 TEST(PolicyFixtures, TheDataHoldsEveryReferenceFixture) {
   const J& d = data();
   EXPECT_EQ(d.at("format").s, "p2-fixtures/1");
-  EXPECT_EQ(d.at("fixtures").a.size(), 55U);
+  EXPECT_EQ(d.at("fixtures").a.size(), 31U);
 }
 
 namespace {
@@ -407,8 +405,6 @@ Int128 wide(const Counter128& c) {
 const char* outcome_name(Termination t) {
   switch (t) {
     case Termination::Complete: return "complete";
-    case Termination::LimitFlows: return "limit_flows";
-    case Termination::LimitDiminishing: return "limit_diminishing";
     case Termination::NoRoute: return "no_route";
     case Termination::Exhausted: return "exhausted";
     case Termination::NoActiveWeight: return "no_active_weight";
@@ -513,35 +509,14 @@ J policy_json(const FlowPolicy& policy) {
     J flows = J::arr();
     for (const auto& s : pe.epoch.cohorts[i]) {
       const FlowRecord& rec = LedgerAccess::live(pe.fg, s.id);
-      std::vector<EdgeId> route;
-      std::vector<EdgeId> members;
-      if (s.plan) {
-        route = s.plan->route;
-        members = s.plan->members;
-      } else {
-        const auto e = detail::PredDAGBuilder::ascending(*s.bundle);
-        route.assign(e.begin(), e.end());
-        members = route;
-      }
+      const auto e = detail::PredDAGBuilder::ascending(*s.bundle);
+      const std::vector<EdgeId> route(e.begin(), e.end());
       J f = J::obj();
       f.set("id", J::integer(s.id));
       f.set("route", ints(route));
       f.set("T", lossy ? J::null() : J::integer(rec.delivered));
       f.set("delivered", J::integer(rec.delivered));
       f.set("alloc", pairs(rec.edges));
-      f.set("members", ints(members));
-      if (s.plan && s.plan->placement == FlowPlacement::Weighted) {
-        J w = J::arr();
-        for (std::size_t m = 0; m < s.plan->members.size(); ++m) {
-          J p = J::arr();
-          p.push(J::integer(s.plan->members[m]));
-          p.push(J::integer(s.plan->weights[m]));
-          w.push(std::move(p));
-        }
-        f.set("weights", std::move(w));
-      } else {
-        f.set("weights", J::null());
-      }
       flows.push(std::move(f));
     }
     J entry = J::arr();
@@ -570,7 +545,7 @@ J trace_json(const detail::Trace& t) {
     case K::Map: {
       J j = J::obj();
       for (const auto& [key, x] : t.fields) {
-        if (key == "evals" || key == "ledger_uid" || key == "counters" || key == "evaluations") continue;
+        if (key == "ledger_uid" || key == "counters") continue;
         if ((key == "flow" || key == "flow_id") && x.kind == K::List && x.items.size() == 2) {
           j.set(key, J::integer(x.items[1].i));
           continue;
@@ -625,28 +600,6 @@ FlowPolicyConfig config_of(const Graph& g, const J& c) {
     Global gl;
     if (const J* support = r.get("support")) gl.support = test::dag_of(g, int32s(*support));
     routing = gl;
-  } else if (kind == "CapacityAware") {
-    CapacityAware ca;
-    ca.flow_count = static_cast<std::int32_t>(r.at("flow_count").int64());
-    if (!r.at("max_flow_count").is_null()) ca.max_flow_count = static_cast<std::int32_t>(r.at("max_flow_count").int64());
-    if (!r.at("max_path_cost").is_null()) {
-      const J& mc = r.at("max_path_cost");
-      if (mc.a[0].s == "Absolute") {
-        ca.max_path_cost = Absolute {mc.a[1].int64()};
-      } else if (mc.a[0].s == "Stretch") {
-        ca.max_path_cost = Stretch {mc.a[1].k == J::K::Dbl ? mc.a[1].d : static_cast<double>(mc.a[1].int64())};
-      } else {
-        throw UnknownName("the data names an unknown cost ceiling (" + mc.a[0].s + ")");
-      }
-    }
-    ca.min_flow_bandwidth = r.at("min_flow_bandwidth").int64();
-    ca.reoptimize = r.at("reoptimize").b;
-    if (!r.at("diminishing").is_null()) {
-      const J& d = r.at("diminishing");
-      ca.diminishing = DiminishingReturns {static_cast<std::int32_t>(d.a[0].int64()),
-                                    d.a[1].k == J::K::Dbl ? d.a[1].d : static_cast<double>(d.a[1].int64())};
-    }
-    routing = ca;
   } else if (kind != "CostOnly") {
     throw UnknownName("the data names an unknown routing (" + kind + ")");
   }
@@ -678,29 +631,12 @@ FlowPolicyConfig config_of(const Graph& g, const J& c) {
   return out;
 }
 
-#if NETGRAPH_CORE_PRIVATE_HOOKS
-// Restores the creation cap whatever happens.
-struct CapGuard {
-  std::int64_t old {detail::max_flows_per_call().load()};
-  ~CapGuard() { detail::max_flows_per_call().store(old); }
-};
-#endif
-
-// Whether every call of the fixture keeps the default creation cap (without the hooks the cap
-// cannot be lowered, so a fixture that lowers it replays only with them).
-bool default_cap(const J& fx) {
-  return std::all_of(fx.at("ops").a.begin(), fx.at("ops").a.end(), [](const J& op) {
-    const J* cap = op.get("cap");
-    return cap == nullptr || cap->int64() == kMaxFlowsPerCall;
-  });
-}
-
 // Replays one fixture; returns the failures (empty when every value matches). `compared`, when
 // given, counts the expectations compared. `after_rejected_call`, when given, runs with the
 // operation's index and its policy right after each call the reference rejects, before the policy
 // is compared with its state before the call (the negative control of that comparison changes the
 // policy there). `inside_call`, when given, runs with the operation's index inside the guarded
-// part of every ledger, copy, reset, policy and placement operation, before the engine's call (the
+// part of every ledger, policy and placement operation, before the engine's call (the
 // negative control of the rejection rule throws there). The engine rejects an operation with
 // std::invalid_argument only; any other exception (an internal invariant's std::logic_error,
 // std::bad_alloc, a reader of the data) is a failure, also where the reference rejects.
@@ -709,9 +645,6 @@ std::vector<std::string> replay(const J& fx, std::size_t* compared = nullptr,
                                 const std::function<void(std::size_t)>& inside_call = {}) {
   std::vector<std::string> fails;
   const std::string name = fx.at("name").s;
-#if NETGRAPH_CORE_PRIVATE_HOOKS
-  CapGuard guard;
-#endif
   std::vector<std::shared_ptr<const Graph>> graphs;
   for (const auto& spec : fx.at("graphs").a) {
     std::vector<test::InEdge> edges;
@@ -775,32 +708,6 @@ std::vector<std::string> replay(const J& fx, std::size_t* compared = nullptr,
       }
       continue;
     }
-    if (kind == "copy" || kind == "reset") {
-      FlowLedger& fg = *ledger_of_id[static_cast<std::size_t>(op.at("ledger").int64())];
-      bool threw = false;
-      try {
-        planted(n);
-        if (kind == "copy") {
-          ledgers.emplace_back(fg);
-          ledger_of_id.push_back(&ledgers.back());
-        } else if (op.at("baseline").is_null()) {
-          fg.reset();
-        } else {
-          fg.reset(amounts(op.at("baseline")));
-        }
-      } catch (const std::invalid_argument&) {
-        threw = true;
-      } catch (const std::exception& e) {
-        return not_a_rejection(where, e);
-      }
-      if (threw != error) {
-        fails.push_back(name + " " + where + (error ? ": accepted, the reference rejects it" : ": throws"));
-        return fails;
-      }
-      const FlowLedger& shown = (kind == "copy" && !error) ? ledgers.back() : fg;
-      check(where, "ledger", expect->at("ledger"), ledger_json(shown));
-      continue;
-    }
     if (kind == "policy") {
       FlowLedger& fg = *ledger_of_id[static_cast<std::size_t>(op.at("ledger").int64())];
       const auto& g = *fg.graph();
@@ -838,15 +745,10 @@ std::vector<std::string> replay(const J& fx, std::size_t* compared = nullptr,
     }
     const auto pi = static_cast<std::size_t>(op.at("policy").int64());
     const FlowLedger& fg = *policy_ledger[pi];
-    if ((kind == "destroy" || kind == "remove") && error) {
-      // Neither can fail here, so a reference that rejects one is a difference.
+    if (kind == "remove" && error) {
+      // It cannot fail here, so a reference that rejects one is a difference.
       fails.push_back(name + " " + where + ": accepted, the reference rejects it");
       return fails;
-    }
-    if (kind == "destroy") {
-      policies[pi] = nullptr;  // the destruction law: the records stay as orphans
-      check(where, "ledger", expect->at("ledger"), ledger_json(fg));
-      continue;
     }
     FlowPolicy& pol = *policies[pi];
     if (kind == "remove") {
@@ -875,9 +777,6 @@ std::vector<std::string> replay(const J& fx, std::size_t* compared = nullptr,
       const auto& o = op.at("outputs").a;
       outputs = OutputOptions {o[0].b, o[1].b, o[2].b, o[3].b};
     }
-#if NETGRAPH_CORE_PRIVATE_HOOKS
-    detail::max_flows_per_call().store(op.at("cap").int64());
-#endif
     const J policy_before = error ? policy_json(pol) : J::null();
     detail::Trace trace;
     PlacementResult r;
@@ -925,7 +824,6 @@ TEST(PolicyFixtures, EveryFixtureReplaysIdentically) {
   std::size_t compared = 0;  // the expectations the replay compared
   std::size_t replayed = 0;
   for (const auto& fx : d.at("fixtures").a) {
-    if (!detail::kTraced && !default_cap(fx)) continue;
     ++replayed;
     for (const auto& op : fx.at("ops").a) {
       if (const J* expect = op.get("expect"); expect != nullptr) {
@@ -935,9 +833,8 @@ TEST(PolicyFixtures, EveryFixtureReplaysIdentically) {
     const auto fails = replay(fx, &compared);
     for (const auto& f : fails) ADD_FAILURE() << f;
   }
-  // With the hooks every fixture; without them all but the one that lowers the creation cap.
-  EXPECT_EQ(replayed, detail::kTraced ? 55U : 54U);
-  EXPECT_EQ(sections, detail::kTraced ? 1096U : 864U);  // the data's count, not vacuous
+  EXPECT_EQ(replayed, 31U);
+  EXPECT_EQ(sections, detail::kTraced ? 693U : 548U);  // the data's count, not vacuous
   EXPECT_EQ(compared, sections);  // every expectation was compared, none skipped
 }
 
@@ -987,21 +884,18 @@ bool reported(const J& fx, const std::string& prefix) {
 }
 
 // The replay's other failure clauses, each reported at the operation it concerns: the first leaf
-// of every section of every other operation's expectations (failed placements, policies, copies,
-// resets, removals, destructions); the error flag of the first operation of every kind and
+// of every section of every other operation's expectations (failed placements, policies,
+// removals); the error flag of the first operation of every kind and
 // outcome in each fixture; the input order of the first graph; an unknown operation; a ledger the
 // data accepts and the engine rejects; an unknown and a non-integer volume; the curve a Global
 // zero call reports, against the remembered one; a policy changed by a call the data rejects;
 // an exception other than a rejection; and a configuration name the replay does not know.
-// Without the hooks the fixture that lowers the creation cap is left out, as in the replay test;
-// it holds no operation kind or outcome the others lack, so the expected sets are the same.
 void expect_every_other_clause_reported() {
   const J& d = data();
   std::set<std::string> sections;  // "kind error key" combinations corrupted
   std::set<std::string> flags;     // "kind error" combinations flipped
   std::size_t exercised = 0;       // fixtures whose clauses were exercised
   for (const auto& fx : d.at("fixtures").a) {
-    if (!detail::kTraced && !default_cap(fx)) continue;
     ++exercised;
     const std::string name = fx.at("name").s;
     ASSERT_TRUE(replay(fx).empty()) << name;
@@ -1036,13 +930,12 @@ void expect_every_other_clause_reported() {
     corrupt(*first);
     EXPECT_TRUE(reported(reordered, name + ": the engine ranks the edges differently")) << name;
   }
-  EXPECT_EQ(exercised, detail::kTraced ? 55U : 54U);
+  EXPECT_EQ(exercised, 31U);
   // Every section of every other operation kind and outcome in the data, and every flag.
-  EXPECT_EQ(sections, (std::set<std::string> {"copy failed ledger", "destroy ok ledger", "place failed ledger",
-                                              "policy ok policy", "remove ok ledger", "remove ok policy",
-                                              "reset failed ledger", "reset ok ledger"}));
-  EXPECT_EQ(flags, (std::set<std::string> {"copy failed", "destroy ok", "ledger ok", "place failed", "place ok",
-                                           "policy failed", "policy ok", "remove ok", "reset failed", "reset ok"}));
+  EXPECT_EQ(sections, (std::set<std::string> {"place failed ledger", "policy ok policy", "remove ok ledger",
+                                              "remove ok policy"}));
+  EXPECT_EQ(flags, (std::set<std::string> {"ledger ok", "place failed", "place ok", "policy failed", "policy ok",
+                                           "remove ok"}));
   // Op 3 of global_epochs renamed: an unknown operation.
   const auto& fixtures = d.at("fixtures").a;
   const auto& epochs = *std::find_if(fixtures.begin(), fixtures.end(),
@@ -1095,12 +988,12 @@ void expect_every_other_clause_reported() {
       EXPECT_TRUE(test::has_failure(fails, at + ": the rejected call changed the policy")) << at;
     }
   }
-  EXPECT_EQ(rejected_calls, 4U);
+  EXPECT_EQ(rejected_calls, 3U);
   // An exception other than std::invalid_argument (an internal invariant's std::logic_error)
   // thrown inside the first operation of each kind, the first one the data rejects where there
   // is one: a failure at that operation, never taken for the expected rejection.
   std::set<std::string> planted;
-  for (const std::string kind : {"ledger", "copy", "reset", "policy", "place"}) {
+  for (const std::string kind : {"ledger", "policy", "place"}) {
     const J* chosen = nullptr;
     std::size_t at = 0;
     for (const auto& fx : fixtures) {
@@ -1122,11 +1015,9 @@ void expect_every_other_clause_reported() {
     const std::string where = chosen->at("name").s + " op " + std::to_string(at) + " (" + kind + ")";
     EXPECT_TRUE(test::has_failure(fails, where + ": throws an exception other than a rejection: planted")) << where;
   }
-  EXPECT_EQ(planted,
-            (std::set<std::string> {"copy failed", "ledger ok", "place failed", "policy failed", "reset failed"}));
+  EXPECT_EQ(planted, (std::set<std::string> {"ledger ok", "place failed", "policy failed"}));
   // A name the replay does not know, in the configuration of eb_unequal_1_10's CostOnly policy
-  // (op 1) and, for the cost ceiling, of creation_fewer_routes' CapacityAware policy (op 1): a
-  // failure of the replay, never taken for the engine rejecting the policy.
+  // (op 1): a failure of the replay, never taken for the engine rejecting the policy.
   const auto& unequal = *std::find_if(fixtures.begin(), fixtures.end(),
                                       [](const J& fx) { return fx.at("name").s == "eb_unequal_1_10"; });
   ASSERT_EQ(unequal.at("ops").a[1].at("op").s, "policy");
@@ -1142,17 +1033,6 @@ void expect_every_other_clause_reported() {
     member(*config, key) = J::str("Unknown");
     EXPECT_TRUE(reported(copy, "eb_unequal_1_10 op 1 (policy): the data names an unknown ")) << path;
   }
-  const auto& fewer = *std::find_if(fixtures.begin(), fixtures.end(),
-                                    [](const J& fx) { return fx.at("name").s == "creation_fewer_routes"; });
-  J ceiling = fewer;
-  auto& routing = member(member(member(ceiling, "ops").a[1], "config"), "routing");
-  ASSERT_EQ(routing.at("kind").s, "CapacityAware");
-  J bound = J::arr();
-  bound.push(J::str("Unknown"));
-  bound.push(J::integer(5));
-  member(routing, "max_path_cost") = std::move(bound);
-  EXPECT_TRUE(
-      reported(ceiling, "creation_fewer_routes op 1 (policy): the data names an unknown cost ceiling (Unknown)"));
 }
 
 // The comparison's structural clauses, which the leaf corruptions above never reach: equal
@@ -1178,9 +1058,8 @@ void expect_the_comparison_reports_shape_differences() {
 // section it changes. In the first successful placement of every fixture, each section (result,
 // trace, ledger, policy) gets several single corruptions: its first and last integer, boolean
 // and string leaves, and one leaf drawn at random. Then the replay's other clauses and the
-// comparison's structural clauses (above). Without the hooks the replay compares no trace and
-// leaves out the fixture that lowers the creation cap, so neither is corrupted; the counts below
-// are those of each configuration (the random draws come from std::mt19937_64, whose sequence the
+// comparison's structural clauses (above). Without the hooks the replay compares no trace, so it
+// is not corrupted; the counts below are those of each configuration (the random draws come from std::mt19937_64, whose sequence the
 // standard fixes, so they are the same with every standard library).
 TEST(PolicyFixtures, ACorruptedExpectationFails) {
   const J& d = data();
@@ -1190,7 +1069,6 @@ TEST(PolicyFixtures, ACorruptedExpectationFails) {
   std::size_t fixtures = 0;  // fixtures whose first successful placement was corrupted
   std::size_t kinds[4] = {0, 0, 0, 0};  // integers, booleans, strings, others
   for (const auto& fx : d.at("fixtures").a) {
-    if (!detail::kTraced && !default_cap(fx)) continue;
     for (std::size_t n = 0; n < fx.at("ops").a.size(); ++n) {
       const J& op = fx.at("ops").a[n];
       if (op.at("op").s != "place" || op.at("error").b) continue;
@@ -1262,8 +1140,8 @@ TEST(PolicyFixtures, ACorruptedExpectationFails) {
     }
   }
   RecordProperty("corruptions", static_cast<int>(corrupted));
-  EXPECT_EQ(fixtures, detail::kTraced ? 55U : 54U);
-  EXPECT_EQ(corrupted, detail::kTraced ? 975U : 753U);
+  EXPECT_EQ(fixtures, 31U);
+  EXPECT_EQ(corrupted, detail::kTraced ? 518U : 429U);
   EXPECT_GT(kinds[0], 200U);
   EXPECT_GT(kinds[1], 50U);
   EXPECT_GT(kinds[2], 50U);

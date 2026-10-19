@@ -1083,15 +1083,10 @@ std::optional<SearchRoute> route_search(const Graph& g, const Gate& gate, const 
   prune(ws, em, dests, dstar);
   SearchRoute out;
   out.cost = dstar;
-  if (selection.multipath) {
-    out.edges = ws.pruned;
-  } else {
-    const bool prefer = selection.tie_break == EdgeTieBreak::PreferHigherPriority;
-    auto walk = extract(ws, g, [&](NodeId v) { return ws.dist[static_cast<std::size_t>(v)]; }, dstar,
-                        prefer ? &prio : nullptr, nullptr);
-    out.edges = std::move(walk.edges);
-  }
-  std::sort(out.edges.begin(), out.edges.end());
+  const bool prefer = selection.tie_break == EdgeTieBreak::PreferHigherPriority;
+  auto walk = extract(ws, g, [&](NodeId v) { return ws.dist[static_cast<std::size_t>(v)]; }, dstar,
+                      prefer ? &prio : nullptr, nullptr);
+  out.edges = std::move(walk.edges);
   return out;
 }
 
@@ -1159,7 +1154,7 @@ SearchRoute support_route(const Graph& g, std::span<const EdgeId> support, NodeI
     route.resize(w);
   }
   out.cost = total;
-  if (selection.multipath) {
+  if (!selection.single_path()) {
     out.edges = route;
     return out;
   }
@@ -1222,7 +1217,8 @@ void check_ceiling(const std::optional<CostCeiling>& ceiling) {
 namespace netgraph::core {
 
 // The selection of a search (options.hpp): its two enum-typed fields inside their enumerations.
-PathSelection::PathSelection(EdgeTieBreak tie_break_, EdgePriority priority_, bool multipath_, bool multi_edge_)
+PathSelection::PathSelection(EdgeTieBreak tie_break_, EdgePriority priority_, std::optional<bool> multipath_,
+                             bool multi_edge_)
     : tie_break(tie_break_), priority(priority_), multipath(multipath_), multi_edge(multi_edge_) {
   detail::check_member(tie_break, "tie_break");
   detail::check_member(priority, "priority");
@@ -1242,7 +1238,7 @@ SpfResult spf(const Graph& g, std::span<const NodeId> roots, const SpfOptions& o
   if (opts.targets.has_value()) {
     target_set = node_set(*opts.targets, g.num_nodes(), "targets");
     check_disjoint(root_set, target_set, "roots", "targets");
-  } else if (!opts.selection.multipath) {
+  } else if (opts.selection.single_path()) {
     throw std::invalid_argument("multipath = false requires targets (the single path joins a root to a target)");
   }
   const std::span<const Amount> residual = opts.residual.value_or(std::span<const Amount> {});
@@ -1284,7 +1280,7 @@ SpfResult spf(const Graph& g, std::span<const NodeId> roots, const SpfOptions& o
   const Cost dstar = run(ws, in);
   if (dstar == kInf) return SpfResult {std::nullopt, PredDAGBuilder::empty(g), kUnreachable};
   prune(ws, em, live_targets, dstar);
-  if (opts.selection.multipath) return SpfResult {std::nullopt, PredDAGBuilder::of_edges(g, ws.pruned), dstar};
+  if (!opts.selection.single_path()) return SpfResult {std::nullopt, PredDAGBuilder::of_edges(g, ws.pruned), dstar};
   // The walks run from the walk starts (Forward: the roots; Reverse: the targets) to the ends;
   // the potential is the forward distance from the starts (Reverse: d* - the distance to the roots).
   const bool prefer = opts.selection.tie_break == EdgeTieBreak::PreferHigherPriority;
@@ -1320,7 +1316,7 @@ std::vector<std::pair<Cost, Path>> ksp(const Graph& g, NodeId src, NodeId dst, c
   std::vector<std::pair<Cost, Path>> out;
   if (opts.elig != nullptr && (!opts.elig->node_ok(src) || !opts.elig->node_ok(dst))) return out;
   // The ceiling: Absolute(c), or Stretch(f) times the static shortest cost of the member graph
-  // under the Eligibility (residual ignored, as for the CapacityAware ceiling); no static route
+  // under the Eligibility (residual ignored, as for T1's ceiling); no static route
   // gives [].
   const auto* absolute = opts.max_path_cost.has_value() ? std::get_if<Absolute>(&*opts.max_path_cost) : nullptr;
   const auto* stretch = opts.max_path_cost.has_value() ? std::get_if<Stretch>(&*opts.max_path_cost) : nullptr;

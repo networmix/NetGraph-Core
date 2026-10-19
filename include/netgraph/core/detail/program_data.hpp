@@ -19,6 +19,11 @@
 
 namespace netgraph::core::detail {
 
+// A tunnel's path in walk order (empty for a tunnel that is down).
+[[nodiscard]] inline std::span<const EdgeId> path_of(const Tunnel& t) noexcept {
+  return t.edges.has_value() ? std::span<const EdgeId>(*t.edges) : std::span<const EdgeId> {};
+}
+
 // One entry: a tunnel (tunnels()[tunnel]) or a split route (a root of contexts[context]). `slot`
 // is the head's position in the roster; `bundle` the entry's route as a DAG (a split route's
 // edges before weight pruning; null for a tunnel, whose path the record's bundle is made from when a
@@ -61,8 +66,9 @@ struct ProgramData {
   std::span<const NodeId> destinations {};  // ascending
   std::vector<Tunnel> tunnels {};
   std::optional<std::vector<std::pair<NodeId, Amount>>> source_weights {};
-  // The injection: the roster (the heads with an entry, ascending), its captured weights (empty:
-  // equal sources), every entry in ascending index, per roster slot its entries (ascending index).
+  // The injection: the roster (the heads with an entry, ascending; T1: the policy's roster), its
+  // captured weights (empty: equal sources), every entry in ascending index, per roster slot its
+  // entries (ascending index).
   std::span<const NodeId> roster {};
   std::vector<Amount> head_weight {};
   std::vector<ProgramEntry> entries {};
@@ -106,6 +112,14 @@ struct ProgramData {
                std::span<const EdgeId> excluded_edges = {});
   // The block the lists view (the ownership tests).
   [[nodiscard]] std::span<const std::int32_t> block() const noexcept { return store_; }
+  // Some entry has a path: an up tunnel or a split route (the condition of termination rule (3);
+  // a program of down tunnels only, or without entries, has none).
+  [[nodiscard]] bool has_path() const noexcept {
+    for (const auto& entry : entries) {
+      if (entry.tunnel < 0 || tunnels[static_cast<std::size_t>(entry.tunnel)].edges.has_value()) return true;
+    }
+    return false;
+  }
 
 private:
   std::vector<std::int32_t> store_ {};
@@ -158,6 +172,26 @@ struct ControllerBasis {
     const Graph& g, std::span<const NodeId> sources, std::span<const NodeId> destinations,
     std::span<const NodeId> roster, std::shared_ptr<const KernelPlan> plan, std::vector<ProgramEntry> entries);
 
+// A T1 tunnel as setup leaves it: its roster slot and round, request, status and (up) its path in
+// walk order with its cost.
+struct SetupTunnel {
+  std::int32_t slot {0};
+  std::int32_t round {0};
+  Amount requested {0};
+  TunnelStatus status {TunnelStatus::Up};
+  std::vector<EdgeId> edges {};
+  Cost cost {0};
+};
+
+// The program of T1: the policy's roster (every head, an entry or not), its tunnels in round
+// order (`tunnels`: round-major, heads in roster order, so index = round * H + slot), weight 1 up
+// and 0 down, reserved = requested up and 0 down; equal sources; the replay basis the topology
+// under the policy's exclusions (ascending).
+[[nodiscard]] std::shared_ptr<const ForwardingProgram> tunnel_program(
+    const Graph& g, std::span<const NodeId> sources, std::span<const NodeId> destinations,
+    std::span<const NodeId> roster, std::vector<SetupTunnel> tunnels, std::span<const NodeId> excluded_nodes,
+    std::span<const EdgeId> excluded_edges);
+
 // The empty program of an empty roster (no entry).
 [[nodiscard]] std::shared_ptr<const ForwardingProgram> empty_program(std::uint64_t graph_uid,
                                                                     std::span<const NodeId> sources,
@@ -165,13 +199,18 @@ struct ControllerBasis {
                                                                     bool captured);
 
 // The change flags of 10.4 between an old program (null: none) and a new one: routes (the ordered
-// heads, the entries' kinds and routes, split tables, duplicates) and weights (the injection, every
-// entry and split-table weight). Two programs without an entry are equal.
+// heads, the entries' kinds and routes, split tables, duplicates), weights (the injection, every
+// entry and split-table weight, an absent entry counting as weight 0) and reservations (every
+// tunnel's requested and reserved amounts by index, an absent tunnel counting as (0, 0)). Two
+// programs without an entry are equal. With `reservations` false (a call that books no holds) the
+// reservation comparison is skipped and reported as no change.
 struct ProgramChange {
   bool routes {false};
   bool weights {false};
+  bool reservations {false};
 };
-[[nodiscard]] ProgramChange compare_programs(const ForwardingProgram* before, const ForwardingProgram* after) noexcept;
+[[nodiscard]] ProgramChange compare_programs(const ForwardingProgram* before, const ForwardingProgram* after,
+                                             bool reservations = true) noexcept;
 
 // Validation of from_routes' options before any route is read (steps 3 to 5 of the order: options
 // on a list of paths only, the placement, the weights' combination), shared with the binding,

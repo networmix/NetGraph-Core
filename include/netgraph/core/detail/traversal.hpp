@@ -105,15 +105,17 @@ struct Gate {
   Amount min_residual {1};
 };
 
-// A policy's route: the edges in ascending EdgeId and the cost of its walks.
+// A policy's route and the cost of its walks: its edges in ascending EdgeId (support_route), or
+// a single path's in walk order (route_search).
 struct SearchRoute {
   std::vector<EdgeId> edges {};
   Cost cost {kUnreachable};
 };
 
-// CapacityAware's search: forward from `src` toward the destination set (allowed
-// ones; disjoint from src) over the candidates of `gate`, Collapse and the staged single path by
-// `selection` with the priority values on `gate.residual`; nullopt when no destination is reached.
+// T1's CSPF: forward from `src` toward the destination set (allowed ones; disjoint from src) over
+// the candidates of `gate` (min_residual 0: no bandwidth filter), Collapse and the staged single
+// path by `selection` (its multipath is not read) with the priority values on `gate.residual`;
+// the path's edges in walk order, nullopt when no destination is reached.
 [[nodiscard]] std::optional<SearchRoute> route_search(const Graph& g, const Gate& gate, const PathSelection& selection,
                                                       NodeId src, std::span<const NodeId> dests);
 
@@ -136,11 +138,11 @@ struct SearchRoute {
 // The static cost from each of `sources` to the nearest of `dests` (in range, ascending, no
 // duplicates, possibly empty; allowed ones) over the statically eligible edges, whatever their
 // capacity, kUnreachable where there is no walk, and everywhere when no destination is allowed
-// (the CapacityAware and Global rosters and the Stretch baselines).
+// (the T1 and Global rosters and T1's Stretch baseline).
 [[nodiscard]] std::vector<Cost> static_costs(const Graph& g, const Eligibility* elig, std::span<const NodeId> dests,
                                              std::span<const NodeId> sources);
 
-// The validation of a cost ceiling (KSP and CapacityAware): Absolute's cost >= 0,
+// The validation of a cost ceiling (KSP and T1): Absolute's cost >= 0,
 // Stretch's factor finite and in [1, inf); std::invalid_argument naming max_path_cost.
 void check_ceiling(const std::optional<CostCeiling>& ceiling);
 

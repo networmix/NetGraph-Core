@@ -2,8 +2,7 @@
 configuration's defaults and table with its error texts and their order, the pooled single-path
 rule, the controllers (Global and CostOnly MAX_FLOW) under both origins, min_cut as its own
 output, zero calls before and after preparation, the result's accounting and per-source rows,
-the terminations and the evaluators. The values are derived by hand (dev/design step-2 LEDGER
-rows C, Q, M, G, S, T, I5, I6 and V); the random tests compare the controllers with the
+the terminations and the evaluators. The values are derived by hand; the random tests compare the controllers with the
 independent equal-origin and optimized references of ``origin_oracle.py``."""
 
 from __future__ import annotations
@@ -46,7 +45,7 @@ ROWS = [(0, 3, 5, 1), (1, 2, 5, 1), (4, 3, 5, 1)]  # {0, 1, 4} -> 3, node 4 mask
 WIT = [(0, 1, 1, 1), (0, 2, 1, 1), (1, 0, 1, 1)]  # 0 -> 2
 PRIV = [(0, 2, 4, 1), (1, 2, 6, 1)]  # {0, 1} -> 2
 
-Q12 = "CostOnly with multiple input sources rejects multipath=false with PREFER_HIGHER_PRIORITY"
+POOLED_PHP = "CostOnly with multiple input sources rejects multipath=false with PREFER_HIGHER_PRIORITY"
 PREFER_PATH = sel(tie=ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY, mp=False)
 
 
@@ -100,7 +99,7 @@ def fresh(edges, sources, dests, config, elig=None, residual=None):
 
 
 def test_defaults_resolve():
-    # C1, C2: the defaults are None on the value and resolve at the policy.
+    # The defaults are None on the value and resolve at the policy.
     c = ngc.FlowPolicyConfig(routing=ngc.CostOnly(), placement=P.EQUAL_BALANCED)
     assert (c.origin, c.admission, c.selection) == (None, A.LOSSLESS, None)
     g = graph(B1)
@@ -122,7 +121,7 @@ def test_defaults_resolve():
 
 
 def test_conversion_errors():
-    # C3: conversion first: positional arguments, an unknown keyword, a string origin.
+    # Conversion first: positional arguments, an unknown keyword, a string origin.
     with pytest.raises(TypeError):
         ngc.FlowPolicyConfig(ngc.CostOnly(), P.EQUAL_BALANCED)
     with pytest.raises(TypeError):
@@ -132,16 +131,15 @@ def test_conversion_errors():
 
 
 def test_path_selection_defaults():
-    # C17.
+    # multipath None is the model's natural shape (contract 3.3).
     assert ngc.PathSelection() == ngc.PathSelection(
-        ngc.EdgeTieBreak.DETERMINISTIC, ngc.EdgePriority.CAPACITY, True, True
+        ngc.EdgeTieBreak.DETERMINISTIC, ngc.EdgePriority.CAPACITY, None, True
     )
 
 
 @pytest.mark.parametrize(
     ("config", "message"),
     [
-        # C4 to C12.
         (ngc.FlowPolicyConfig(routing=ngc.CostOnly()), "CostOnly requires placement"),
         (
             ngc.FlowPolicyConfig(routing=ngc.Global(), placement=P.MAX_FLOW),
@@ -166,25 +164,17 @@ def test_path_selection_defaults():
         ),
         (
             ngc.FlowPolicyConfig(
-                routing=ngc.CapacityAware(),
-                placement=P.MAX_FLOW,
-                origin=ORIGIN.OPTIMIZED,
+                routing=ngc.CapacityAware(ngc.Tunnels(1)), origin=ORIGIN.OPTIMIZED
             ),
             "T1 requires origin=EQUAL",
         ),
         (
-            ngc.FlowPolicyConfig(routing=ngc.CapacityAware()),
-            "CapacityAware requires placement",
-        ),
-        (
             ngc.FlowPolicyConfig(
-                routing=ngc.CapacityAware(),
-                placement=P.EQUAL_BALANCED,
-                admission=A.LOSSY,
+                routing=ngc.CapacityAware(ngc.Tunnels(1)), placement=P.MAX_FLOW
             ),
-            "CapacityAware requires admission=LOSSLESS",
+            "T1 does not accept placement",
         ),
-        # C13, C14, Q6: the row, then the columns placement, origin, admission, selection.
+        # The row, then the columns placement, origin, admission, selection.
         (
             ngc.FlowPolicyConfig(
                 routing=ngc.Global(),
@@ -218,7 +208,7 @@ def test_matrix_texts(config, message):
 
 
 def test_pinned_rows():
-    # C8, C10, C12 for Pinned: no placement and no origin (its program has the injection).
+    # Pinned: no placement and no origin (its program has the injection).
     g = graph(B1)
     for config, message in (
         (
@@ -237,13 +227,11 @@ def test_pinned_rows():
 
 
 def test_cache_rule():
-    # C11, C16: only CostOnly reads a DagCache; the table comes first.
+    # Only CostOnly reads a DagCache; the table comes first.
     g = graph(B1)
     cache = ngc.DagCache(g)
     pinned = pinned_route(g, 0, 3, [0])
-    capacity_aware = ngc.FlowPolicyConfig(
-        routing=ngc.CapacityAware(), placement=P.MAX_FLOW
-    )
+    capacity_aware = ngc.FlowPolicyConfig(routing=ngc.CapacityAware(ngc.Tunnels(1)))
     for config, sources, message in (
         (glob(), [0, 1], "Global does not use DagCache"),
         (capacity_aware, [0, 1], "T1 does not use DagCache"),
@@ -264,7 +252,6 @@ def test_cache_rule():
 
 
 def test_endpoints_before_ownership():
-    # C15.
     g = graph(B1)
     foreign = graph(B1).eligibility(excluded_nodes=[0])
     with pytest.raises(ValueError, match="sources") as e:
@@ -273,7 +260,6 @@ def test_endpoints_before_ownership():
 
 
 def test_amount_texts():
-    # C18, C19.
     _, _, p = fresh(ONE, 0, 1, cost_only())
     for bad in (-1, 2**62, float("nan"), 1.5, -INF, True):
         with pytest.raises(
@@ -294,20 +280,20 @@ def test_amount_texts():
     assert p.place(1).placed == 1
 
 
-# -- the pooled single-path rule (Q12) ------------------------------------------------------
+# -- the pooled single-path rule -------------------------------------------------------------
 
 
-def test_q12():
+def test_pooled_single_path_rule():
     g = graph(POOL)
     for placement in (P.EQUAL_BALANCED, P.WEIGHTED, P.MAX_FLOW):
         config = cost_only(placement, selection=PREFER_PATH)
-        # Q1, Q3: two input sources, also when the mask leaves one.
+        # Two input sources, also when the mask leaves one.
         for elig in (None, g.eligibility(excluded_nodes=[1])):
-            with pytest.raises(ValueError, match=exact(Q12)):
+            with pytest.raises(ValueError, match=exact(POOLED_PHP)):
                 ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, config, elig)
-            with pytest.raises(ValueError, match=exact(Q12)):
+            with pytest.raises(ValueError, match=exact(POOLED_PHP)):
                 ngc.capacity(g, [0, 1], 3, ngc.QueryOptions(config, elig=elig))
-        # Q2: one source; Q4: multipath.
+        # One source; multipath.
         assert ngc.FlowPolicy(ngc.FlowLedger(g), [0, 0], 3, config).place(1).placed == 1
         multipath = cost_only(
             placement, selection=sel(tie=ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY)
@@ -315,9 +301,9 @@ def test_q12():
         assert (
             ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, multipath).place(2).placed == 2
         )
-    # Q7: batch_capacity checks each pair; pair 1 is the lowest failing.
+    # batch_capacity checks each pair; pair 1 is the lowest failing.
     opts = ngc.QueryOptions(cost_only(selection=PREFER_PATH))
-    with pytest.raises(ValueError, match=exact(Q12)):
+    with pytest.raises(ValueError, match=exact(POOLED_PHP)):
         ngc.batch_capacity(g, [([0], 3), ([0, 1], 3)], opts)
     assert [r.placed for r in ngc.batch_capacity(g, [([0], 3), ([1], 3)], opts)] == [
         1,
@@ -326,7 +312,7 @@ def test_q12():
 
 
 def test_deterministic_single_paths_pool():
-    # Q5: canonical paths 0: [e0, e2], 1: [e1, e2] (equal cost and hops, lower EdgeId e2).
+    # Canonical paths 0: [e0, e2], 1: [e1, e2] (equal cost and hops, lower EdgeId e2).
     det = sel(mp=False)
     _, _, p = fresh(POOL, [0, 1], 3, cost_only(selection=det))
     r = p.place(INF)
@@ -345,16 +331,40 @@ def test_deterministic_single_paths_pool():
 @pytest.mark.parametrize(
     ("edges", "sources", "dest", "origin", "placed", "cost", "flows"),
     [
-        (B1, [0, 1], 3, ORIGIN.EQUAL, 4, 8, [2, 2, 2]),  # G1 B1-equal
-        (B1, [0, 1], 3, ORIGIN.OPTIMIZED, 12, 32, [2, 10, 10]),  # G2 B1-optimized
-        (B2, [0, 1], 2, ORIGIN.EQUAL, 12, 16, [4, 2, 10]),  # G3 B2-equal-global
-        (B2, [0, 1], 2, ORIGIN.OPTIMIZED, 12, 12, [0, 2, 10]),  # G4 B2-optimized
-        (B2S, [0, 1], 2, ORIGIN.EQUAL, 4, 4, [2, 2]),  # G5 B2-shortest
-        (B2S, [0, 1], 2, ORIGIN.OPTIMIZED, 12, 12, [2, 10]),  # G5 T2-OPT-global
-        (B3Z, [0, 1], 2, ORIGIN.EQUAL, 0, 0, [0, 0]),  # G6 B3-zero-first
-        (B3P, [0, 1], 2, ORIGIN.EQUAL, 1, 1, [1, 0]),  # G6 B3-positive-first
-        (B3Z, [0, 1], 2, ORIGIN.OPTIMIZED, 10, 10, [0, 10]),  # G6
-        (ES, 0, 3, ORIGIN.OPTIMIZED, 12, 34, [2, 10, 2, 10]),  # G7 E-support
+        (B1, [0, 1], 3, ORIGIN.EQUAL, 4, 8, [2, 2, 2]),  # B1, equal
+        (B1, [0, 1], 3, ORIGIN.OPTIMIZED, 12, 32, [2, 10, 10]),  # B1, optimized
+        (B2, [0, 1], 2, ORIGIN.EQUAL, 12, 16, [4, 2, 10]),  # B2, equal
+        (B2, [0, 1], 2, ORIGIN.OPTIMIZED, 12, 12, [0, 2, 10]),  # B2, optimized
+        (
+            B2S,
+            [0, 1],
+            2,
+            ORIGIN.EQUAL,
+            4,
+            4,
+            [2, 2],
+        ),  # B2 on its shortest routes, equal
+        (
+            B2S,
+            [0, 1],
+            2,
+            ORIGIN.OPTIMIZED,
+            12,
+            12,
+            [2, 10],
+        ),  # B2 on its shortest routes, optimized
+        (B3Z, [0, 1], 2, ORIGIN.EQUAL, 0, 0, [0, 0]),  # a zero-capacity first source
+        (B3P, [0, 1], 2, ORIGIN.EQUAL, 1, 1, [1, 0]),  # a positive first source
+        (
+            B3Z,
+            [0, 1],
+            2,
+            ORIGIN.OPTIMIZED,
+            10,
+            10,
+            [0, 10],
+        ),  # a zero-capacity first source, optimized
+        (ES, 0, 3, ORIGIN.OPTIMIZED, 12, 34, [2, 10, 2, 10]),  # a support
     ],
 )
 def test_global_examples(edges, sources, dest, origin, placed, cost, flows):
@@ -372,7 +382,7 @@ def test_global_examples(edges, sources, dest, origin, placed, cost, flows):
 
 
 def test_global_records_and_masks():
-    # G1 rows; G3 records: source 0's 6 is 2 direct and 4 through node 1.
+    # The rows; the records: source 0's 6 is 2 direct and 4 through node 1.
     _, _, p = fresh(B1, [0, 1], 3, glob(ORIGIN.EQUAL))
     assert rows(p.place(12)) == [(0, None, 2, 2, 0, 0), (1, None, 2, 2, 0, 0)]
     _, _, p = fresh(B2, [0, 1], 2, glob(ORIGIN.EQUAL))
@@ -381,19 +391,19 @@ def test_global_records_and_masks():
         ([(0, 4), (1, 2), (2, 4)], 6),
         ([(2, 6)], 6),
     ]
-    # G6 B3-delete-zero: the masked source leaves the roster.
+    # The masked zero-capacity source leaves the roster.
     _, _, p = fresh(
         B3Z, [0, 1], 2, glob(ORIGIN.EQUAL), lambda g: g.eligibility(excluded_nodes=[0])
     )
     assert p.place(10).placed == 10
-    # G11 R3-residual-optimal.
+    # The optimum on the residual.
     _, _, p = fresh(WIT, 0, 2, glob())
     r = p.place(1, ngc.OutputOptions(edge_flows=True))
     assert (r.edge_flows.tolist(), r.total_cost) == ([0, 1, 0], 1)
 
 
 def test_global_increments():
-    # G8 R4-lossless-equal: 3 (RR(3) = (2, 1) fits), then the target 6 admits 4 (RR(5) puts
+    # Lossless with the equal origin: 3 (RR(3) = (2, 1) fits), then the target 6 admits 4 (RR(5) puts
     # 3 on e0 of 2): allocation (2, 2), cost 2 * 9 + 2 * 1.
     _, _, p = fresh(R4, [0, 1], 2, glob(ORIGIN.EQUAL))
     a = p.place(3)
@@ -410,7 +420,7 @@ def test_global_increments():
         6,
         2,
     )
-    # G9 R4-refusal: refused units are not offered again.
+    # Refused units are not offered again.
     g = graph(ONE)
     ledger = ngc.FlowLedger(g)
     other = ngc.FlowPolicy(ledger, 0, 1, cost_only())
@@ -420,7 +430,7 @@ def test_global_increments():
     other.remove()
     other.place(5)
     assert p.place(1).placed == 1
-    # G10: equal increments end where one call does (the final total solved from zero).
+    # Equal increments end where one call does (the final total solved from zero).
     _, _, one = fresh(B2, [0, 1], 2, glob(ORIGIN.EQUAL))
     whole = one.place(12, ngc.OutputOptions(edge_flows=True))
     _, _, two = fresh(B2, [0, 1], 2, glob(ORIGIN.EQUAL))
@@ -436,13 +446,13 @@ def test_global_increments():
 @pytest.mark.parametrize(
     ("edges", "sources", "dest", "origin", "placed", "cost", "records"),
     [
-        # M1, M2: one controller on the union of the sources' routes.
+        # One controller on the union of the sources' routes.
         (B1, [0, 1], 3, ORIGIN.OPTIMIZED, 12, 32, [[(0, 2)], [(1, 10), (2, 10)]]),
         (B1, [0, 1], 3, ORIGIN.EQUAL, 4, 8, [[(0, 2)], [(1, 2), (2, 2)]]),
-        # M3: the support leaves out e0 (0 -> 1 -> 2 costs 2).
+        # The support leaves out e0 (0 -> 1 -> 2 costs 2).
         (B2, [0, 1], 2, ORIGIN.EQUAL, 4, 4, [[(1, 2)], [(2, 2)]]),
         (B2, [0, 1], 2, ORIGIN.OPTIMIZED, 12, 12, [[(1, 2)], [(2, 10)]]),
-        # M4 E-support-shortest; M5: the support is the zero edge alone, never bypassed.
+        # A support on the shortest routes; a support that is the zero edge alone, never bypassed.
         (ES, 0, 3, ORIGIN.OPTIMIZED, 2, 4, [[(0, 2), (2, 2)]]),
         (SPF, 0, 1, ORIGIN.OPTIMIZED, 0, 0, [[]]),
     ],
@@ -454,27 +464,26 @@ def test_cost_only_max_flow(edges, sources, dest, origin, placed, cost, records)
     term = T.COMPLETE if placed == request else T.EXHAUSTED
     assert (r.placed, r.termination, r.total_cost) == (placed, term, cost)
     assert [rec.edges for rec in p.records()] == records
-    # M7: no curve and no cut.
+    # No curve and no cut.
     assert (r.cost_distribution, r.min_cut) == (None, None)
 
 
 def test_cost_only_max_flow_increments():
-    # M6.
     _, _, p = fresh(R4, [0, 1], 2, cost_only(P.MAX_FLOW, origin=ORIGIN.EQUAL))
     assert [p.place(3).placed, p.place(3).placed] == [3, 1]
     assert p.place(0).total_cost == 20
 
 
 def test_min_cut_flag():
-    # G13 MINCUT-B1 and MINCUT-zero-edge.
+    # The minimum cut of B1 and of a zero-capacity edge.
     for edges, dest in ((B1, 3), (B3Z, 2)):
         _, _, p = fresh(edges, [0, 1], dest, glob())
         assert p.place(INF, CUT).min_cut == [0, 1]
-    # G12: a zero maximum over existing routes is EXHAUSTED; its cut is the zero edge.
+    # A zero maximum over existing routes is EXHAUSTED; its cut is the zero edge.
     _, _, p = fresh(ZERO, 0, 1, glob())
     r = p.place(5, CUT)
     assert (r.placed, r.termination, r.min_cut) == (0, T.EXHAUSTED, [0])
-    # G14: bottleneck alone, the equal origin, a request below the maximum, a zero call.
+    # Bottleneck alone, the equal origin, a request below the maximum, a zero call.
     _, _, p = fresh(B1, [0, 1], 3, glob())
     assert p.place(INF, ngc.OutputOptions(bottleneck=True)).min_cut is None
     _, _, p = fresh(B1, [0, 1], 3, glob(ORIGIN.EQUAL))
@@ -482,7 +491,7 @@ def test_min_cut_flag():
     _, _, p = fresh(B1, [0, 1], 3, glob())
     assert p.place(5, CUT).min_cut is None
     assert p.place(0, CUT).min_cut is None
-    # G15: an empty roster.
+    # An empty roster.
     _, _, p = fresh([(1, 0, 5, 1)], 0, 1, glob())
     r = p.place(5, CUT)
     assert (r.termination, r.min_cut, r.cost_distribution, r.total_cost) == (
@@ -540,7 +549,7 @@ def test_total_cost_beyond_64_bits(edges, sources, dest, optimized, equal):
 
 @pytest.mark.parametrize("routing", ["costonly", "global"])
 def test_zero_unprepared(routing):
-    # I5 RC02-zero-unprepared; I6: after a positive call and after remove().
+    # A zero call before the preparation; after a positive call and after remove().
     config = cost_only() if routing == "costonly" else glob()
     g, ledger, p = fresh(PAR, 0, 1, config, residual=[4, 6])
 
@@ -579,7 +588,7 @@ def test_zero_unprepared(routing):
 
 
 def test_result_accounting():
-    # S2: G1 Lossless.
+    # B1, equal origin, Lossless.
     _, _, p = fresh(B1, [0, 1], 3, glob(ORIGIN.EQUAL))
     r = p.place(12)
     assert (r.requested, r.offered, r.admitted, r.delivered, r.unadmitted) == (
@@ -602,7 +611,7 @@ def test_result_accounting():
         0,
         4,
     )
-    # S5: a row for every input source: 4 is masked, 1 has no route.
+    # A row for every input source: 4 is masked, 1 has no route.
     _, _, p = fresh(
         ROWS, [0, 1, 4], 3, cost_only(), lambda g: g.eligibility(excluded_nodes=[4])
     )
@@ -611,42 +620,29 @@ def test_result_accounting():
         (1, None, 0, 0, 0, 0),
         (4, None, 0, 0, 0, 0),
     ]
-    # S6: total_cost only for the controllers.
+    # total_cost only for the controllers.
     g = graph(B1)
-    for config in (
-        cost_only(),
-        cost_only(P.WEIGHTED),
-        ngc.FlowPolicyConfig(routing=ngc.CapacityAware(), placement=P.EQUAL_BALANCED),
-    ):
+    for config in (cost_only(), cost_only(P.WEIGHTED)):
         assert (
             ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, config).place(1).total_cost
             is None
         )
+    t1 = ngc.FlowPolicyConfig(routing=ngc.CapacityAware(ngc.Tunnels(1)))
+    assert (
+        ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, t1).replace(1).total_cost is None
+    )
     pinned = pinned_route(g, 0, 3, [0])
     assert ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, pinned).place(1).total_cost is None
     support = ngc.FlowPolicyConfig(routing=ngc.Global(support=dag_of(g, [0])))
     assert ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, support).place(1).total_cost == 1
 
 
-def test_capacity_aware_and_pinned_in_the_new_shape():
-    # S7: CapacityAware keeps its per-source computation: offers 6 and 6.
-    config = ngc.FlowPolicyConfig(
-        routing=ngc.CapacityAware(), placement=P.EQUAL_BALANCED
-    )
-    _, _, p = fresh(B1, [0, 1], 3, config)
-    r = p.place(12)
-    assert (r.placed, r.termination, r.requested, r.unadmitted) == (
-        8,
-        T.EXHAUSTED,
-        12,
-        4,
-    )
-    assert rows(r) == [(0, None, 2, 2, 0, 0), (1, None, 6, 6, 0, 0)]
-    # S8: Weighted over the zero edge has no member: its offer is lost at the source.
+def test_pinned_in_the_new_shape():
+    # Weighted over the zero edge has no member: its offer is lost at the source.
     g = graph(ZERO)
     for placement, want in (
         (P.WEIGHTED, (0, T.NO_ACTIVE_WEIGHT, 2, [], (0, 2, 2, 0, 2, 0))),
-        (P.EQUAL_BALANCED, (0, T.COMPLETE, 0, [(0, 2)], (0, 2, 2, 0, 0, 2))),  # S9
+        (P.EQUAL_BALANCED, (0, T.COMPLETE, 0, [(0, 2)], (0, 2, 2, 0, 0, 2))),
     ):
         config = pinned_route(g, 0, 1, [0], placement=placement, admission=A.LOSSY)
         r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, config).place(2)
@@ -661,26 +657,26 @@ def test_capacity_aware_and_pinned_in_the_new_shape():
 
 
 def test_terminations():
-    # T1, T2: an empty roster (no edge reaches 1 from 0).
+    # An empty roster (no edge reaches 1 from 0).
     for config in (glob(), cost_only(), cost_only(admission=A.LOSSY)):
         _, _, p = fresh([(1, 0, 5, 1)], 0, 1, config)
         assert p.place(0).termination == T.COMPLETE
         r = p.place(5)
         assert (r.placed, r.termination) == (0, T.NO_ROUTE)
         if config.admission == A.LOSSY:
-            # O2: nothing enters: the offer is all source loss and the row stays zero.
+            # Nothing enters: the offer is all source loss and the row stays zero.
             assert (r.offered, r.source_loss, r.call_source_loss) == (5, 5, 5)
             assert rows(r) == [(0, 0, 0, 0, 0, 0)]
         else:
             assert (r.offered, r.unadmitted) == (None, 5)
-    # T3: weighted splitting over the zero edge: no positive weight.
+    # Weighted splitting over the zero edge: no positive weight.
     _, _, p = fresh(ZERO, 0, 1, cost_only(P.WEIGHTED, A.LOSSY))
     r = p.place(2)
     assert (r.termination, r.call_source_loss, r.offered) == (T.NO_ACTIVE_WEIGHT, 2, 2)
     _, _, p = fresh(ZERO, 0, 1, cost_only(P.WEIGHTED))
     r = p.place(2)
     assert (r.termination, r.unadmitted) == (T.NO_ACTIVE_WEIGHT, 2)
-    # T6: a controller at zero over existing routes.
+    # A controller at zero over existing routes.
     for config in (glob(), cost_only(P.MAX_FLOW)):
         _, _, p = fresh(
             SPF if config.routing.__class__ is ngc.CostOnly else ZERO, 0, 1, config
@@ -689,7 +685,6 @@ def test_terminations():
 
 
 def test_result_objects():
-    # S11.
     _, _, p = fresh(B1, [0, 1], 3, glob(ORIGIN.EQUAL))
     r = p.place(INF)
     assert isinstance(r.by_source, tuple) and all(
@@ -709,7 +704,6 @@ def test_result_objects():
 
 def test_evaluators():
     g = graph(B1)
-    # V1, V2.
     for config, placed in (
         (glob(ORIGIN.EQUAL), 4),
         (glob(), 12),
@@ -718,7 +712,6 @@ def test_evaluators():
         (cost_only(), 4),
     ):
         assert ngc.capacity(g, [0, 1], 3, ngc.QueryOptions(config)).placed == placed
-    # V3, V4.
     assert (
         ngc.capacity(graph(POOL), [0, 1], 3, ngc.QueryOptions(cost_only())).placed == 2
     )
@@ -731,11 +724,11 @@ def test_evaluators():
         INF,
         T.EXHAUSTED,
     )
-    # V5.
     pairs = [([0, 1], 3), (0, 3), (1, 3)]
     got = ngc.batch_capacity(g, pairs, ngc.QueryOptions(glob(ORIGIN.EQUAL)))
     assert [x.placed for x in got] == [4, 2, 10]
-    # V6 B3-delete-zero: every allowed edge is a candidate under the equal origin.
+    # Deleting the zero-capacity edge e0 takes source 0 out of the roster: every allowed edge is a
+    # candidate under the equal origin.
     for workers in (1, 2):
         s = ngc.sensitivity(
             graph(B3Z), [0, 1], 2, ngc.QueryOptions(glob(ORIGIN.EQUAL)), workers
@@ -744,7 +737,7 @@ def test_evaluators():
             0,
             [(0, -10), (1, 0)],
         )
-    # V7: pooled CostOnly: deleting e0 takes source 0 out of the roster.
+    # Pooled CostOnly: deleting e0 takes source 0 out of the roster.
     s = ngc.sensitivity(g, [0, 1], 3, ngc.QueryOptions(cost_only()))
     assert (s.baseline.placed, [(e.edge, e.loss) for e in s.entries]) == (
         4,
@@ -775,7 +768,7 @@ def random_controller_case(rng):
 
 @pytest.mark.parametrize("seed", range(300))
 def test_controllers_random(seed):
-    # G16, M8: Global and CostOnly MAX_FLOW under both origins on random graphs with masks and
+    # Global and CostOnly MAX_FLOW under both origins on random graphs with masks and
     # nonuniform costs: the delivery, the minimum cost and (equal) the supplies RR(T) equal the
     # references; increments re-solve the admitted total plus the request.
     rng = random.Random(seed)

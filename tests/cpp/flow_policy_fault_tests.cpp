@@ -31,6 +31,7 @@
 #include <exception>
 #include <functional>
 #include <memory>
+#include <numeric>
 #include <new>
 #include <optional>
 #include <span>
@@ -72,14 +73,16 @@ struct Mode {
   FlowPolicyConfig cfg;
   std::vector<NodeId> sources;
   std::vector<NodeId> destinations;
-  // The evaluators' offer (a Pinned Lossy evaluation requires a finite one).
+  // The evaluators' offer (a T1 or Pinned Lossy evaluation requires a finite one).
   std::optional<std::optional<Amount>> offered {};
+  // T1's design: the evaluators' design_demand and the design of its calls.
+  std::optional<std::optional<Amount>> design {};
 };
 
 // The evaluators' options of a mode.
 QueryOptions query_of(const Mode& m, const Eligibility* elig = nullptr, DagCache* cache = nullptr,
                       OutputOptions outputs = {}) {
-  return QueryOptions {m.cfg, elig, cache, outputs, m.offered};
+  return QueryOptions {m.cfg, elig, cache, outputs, m.design, m.offered};
 }
 
 // A Pinned Lossy forwarding needs a finite offer (no first-hop experiment).
@@ -91,7 +94,6 @@ std::vector<Mode> modes(const Graph& g) {
   std::vector<Mode> out;
   const auto det = PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Capacity);
   const auto res = PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Residual);
-  const auto tunnel = PathSelection(EdgeTieBreak::PreferHigherPriority, EdgePriority::Residual, false, false);
   const std::vector<NodeId> S = {0, 1};
   const std::vector<NodeId> D = {5, 6};
   out.push_back({"costonly maxflow", {CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossless, det}, S, D});
@@ -106,20 +108,6 @@ std::vector<Mode> modes(const Graph& g) {
                  {CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossless,
                   PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Residual, false, false)},
                  S, D});
-  CapacityAware grow;
-  grow.flow_count = 1;
-  grow.max_flow_count = 4;
-  out.push_back({"capacityaware eb growth", {grow, FlowPlacement::EqualBalanced, Admission::Lossless, tunnel}, S, D});
-  CapacityAware reopt;
-  reopt.flow_count = 2;
-  reopt.reoptimize = true;
-  reopt.max_path_cost = Stretch {2.0};
-  out.push_back({"capacityaware maxflow reopt", {reopt, FlowPlacement::MaxFlow, Admission::Lossless, det}, S, D});
-  CapacityAware dim;
-  dim.flow_count = 1;
-  dim.diminishing = DiminishingReturns {1, 0.5};
-  dim.min_flow_bandwidth = 1;
-  out.push_back({"capacityaware weighted diminishing", {dim, FlowPlacement::Weighted, Admission::Lossless, res}, S, D});
   out.push_back({"global", global_config(), S, D});
   // The equal origin of the controllers: the bisection's probe solves and the final solve.
   out.push_back({"global equal", {.routing = Global {}, .origin = Origin::Equal}, S, D});
@@ -167,6 +155,22 @@ std::vector<Mode> modes(const Graph& g) {
                  {CostOnly {}, FlowPlacement::Weighted, Admission::Lossy, det, std::nullopt, WeightBasis::Explicit,
                   std::make_shared<const std::vector<Amount>>(std::vector<Amount> {3, 1, 2, 2, 1, 4, 2, 1, 1, 5, 2, 7, 3})},
                  S, D});
+  return out;
+}
+
+// T1's modes: they take no place, so their sweeps are their own (T1 below). Lossless with two
+// tunnels per head; Lossy with three, PreferHigherPriority on the unreserved view without parallel
+// links, a Stretch ceiling and a search minimum.
+std::vector<Mode> t1_modes() {
+  const std::vector<NodeId> S = {0, 1};
+  const std::vector<NodeId> D = {5, 6};
+  std::vector<Mode> out;
+  out.push_back({"t1 lossless", {.routing = CapacityAware {Tunnels {2}}}, S, D, std::nullopt, Amount {8}});
+  out.push_back({"t1 lossy",
+                 {.routing = CapacityAware {Tunnels {3}, Stretch {2.0}, 1},
+                  .admission = Admission::Lossy,
+                  .selection = PathSelection(EdgeTieBreak::PreferHigherPriority, EdgePriority::Residual, false, false)},
+                 S, D, Amount {6}, Amount {9}});
   return out;
 }
 
@@ -285,12 +289,11 @@ TEST(PolicyFaults, EveryFullOfferCallFailsAtomically) {
   for (const auto& m : modes(*g)) {
     const bool lossy = m.cfg.admission == Admission::Lossy;
     const bool pinned = std::holds_alternative<Pinned>(m.cfg.routing);
-    const bool program = !std::holds_alternative<CapacityAware>(m.cfg.routing);
-    std::vector<Op> ops = {{"evaluate", [](FlowPolicy& p) { return p.evaluate(6, {true, true, true}); }},
-                           {"replace", [](FlowPolicy& p) { return p.replace(6, {true, true, true}); }},
+    std::vector<Op> ops = {{"evaluate", [](FlowPolicy& p) { return p.evaluate(6, std::nullopt, {true, true, true}); }},
+                           {"replace", [](FlowPolicy& p) { return p.replace(6, std::nullopt, {true, true, true}); }},
                            {"replace to zero", [](FlowPolicy& p) { return p.replace(0); }}};
     if (!lossy) ops.push_back({"replace +inf", [](FlowPolicy& p) { return p.replace(std::nullopt); }});
-    if (program && !pinned) {
+    if (!pinned) {
       ops.push_back({"forward", [](FlowPolicy& p) { return p.forward(6, nullptr, {true, true, true}); }});
       ops.push_back({"forward black holes", [&](FlowPolicy& p) { return p.forward(6, &dark); }});
     }
@@ -779,8 +782,8 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
   const Eligibility no_bypass = without_bypass(*g);
   const Eligibility no_cross = without_cross(*g);
   const std::int32_t one[] = {1};
-  const std::vector<std::string> exhaustive_sensitivity = {"costonly eb", "capacityaware weighted diminishing", "global",
-                                                           "pinned eb split routes", "pinned tunnels lossy"};
+  const std::vector<std::string> exhaustive_sensitivity = {"costonly eb", "global", "pinned eb split routes",
+                                                           "pinned tunnels lossy"};
   int swept_sensitivity = 0;
   long attempts = 0;
   for (const auto& m : modes(*g)) {
@@ -851,7 +854,7 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
     }
   }
   RecordProperty("allocation_attempts", std::to_string(attempts));
-  EXPECT_EQ(swept_sensitivity, 4 * 2 + 3);  // four modes with two option sets, CostOnly's with three
+  EXPECT_EQ(swept_sensitivity, 3 * 2 + 3);  // three modes with two option sets, CostOnly's with three
 }
 
 TEST(PolicyFaults, BatchWorkersFailWithoutTerminating) {
@@ -1297,4 +1300,252 @@ TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
   EXPECT_THROW((void)sensitivity(*g, git->sources, git->destinations, QueryOptions {git->cfg, nullptr, &cache}, 2),
                std::invalid_argument);
   EXPECT_EQ(cache.stats().entries, entries);
+}
+
+// ---------------------------------------------------------------- T1
+
+// T1's calls (replace, evaluate, replace(0), replace(+inf), forward with and without black holes,
+// and two whose holds change: a replace with a new design and the first replace of a policy)
+// with a third party's load and another T1 owner's holds on the ledger: every allocation of the
+// call fails once, through the shared placement sweep, which compares both projections and every
+// record field (reserved_edges included): a failure changes neither the ledger nor the epoch and
+// leaves no allocation live; the completing call, the retry and remove() leave the ledger as the
+// reference's do.
+TEST(PolicyFaults, T1CallsFailAtomically) {
+  const auto g = graph();
+  const auto inv = id_of_input(*g);
+  const EdgeId dark_edges[] = {inv[4], inv[6]};
+  const Eligibility dark = g->eligibility({}, dark_edges);
+  const OutputOptions all {.edge_flows = true, .residual = true, .bottleneck = true, .reservation_edge_flows = true};
+  struct Op {
+    std::string name;
+    std::function<PlacementResult(FlowPolicy&)> call;
+    bool fresh {false};  // on a policy without a call: every hold is new
+  };
+  for (const auto& m : t1_modes()) {
+    const bool lossy = m.cfg.admission == Admission::Lossy;
+    const auto design = *m.design;
+    std::vector<Op> ops = {{"evaluate", [&](FlowPolicy& p) { return p.evaluate(6, design, all); }},
+                           {"replace", [&](FlowPolicy& p) { return p.replace(6, design, all); }},
+                           {"replace to zero", [&](FlowPolicy& p) { return p.replace(0, design); }},
+                           {"forward", [](FlowPolicy& p) { return p.forward(6, nullptr, {true, true, true}); }},
+                           {"forward black holes", [&](FlowPolicy& p) { return p.forward(6, &dark); }},
+                           // The holds change: a failed commit must leave the old ones.
+                           {"replace with a new design",
+                            [&](FlowPolicy& p) { return p.replace(6, std::optional<Amount> {*design + 2}, all); }},
+                           {"first replace", [&](FlowPolicy& p) { return p.replace(6, design, all); }, true}};
+    if (!lossy) ops.push_back({"replace +inf", [&](FlowPolicy& p) { return p.replace(std::nullopt, design); }});
+    for (const auto& op : ops) {
+      const std::string where = m.name + " / " + op.name;
+      const auto setup = [&](FlowLedger& fg) {
+        auto third = std::shared_ptr<FlowPolicy>(third_party(fg, *g));
+        auto holder = std::make_shared<FlowPolicy>(fg, std::vector<NodeId> {1}, std::vector<NodeId> {6},
+                                                   FlowPolicyConfig {.routing = CapacityAware {Tunnels {1}}});
+        (void)holder->replace(0, 2);
+        auto p = std::make_shared<FlowPolicy>(fg, m.sources, m.destinations, m.cfg);
+        if (!op.fresh) (void)p->replace(3, design);
+        FlowPolicy* policy = p.get();
+        auto keep = std::make_shared<std::vector<std::shared_ptr<FlowPolicy>>>(
+            std::vector<std::shared_ptr<FlowPolicy>> {std::move(third), std::move(holder), std::move(p)});
+        return Staged {keep, policy};
+      };
+      const long injected = sweep_placement(g, where, setup, op.call);
+      if (::testing::Test::HasFailure()) return;
+      EXPECT_GT(injected, 0) << where;  // not vacuous
+    }
+  }
+}
+
+// A T1 policy's construction (the roster, the pool baseline, the replay basis of its exclusions)
+// fails at every allocation without binding; a clean construction then sets up like the
+// reference.
+TEST(PolicyFaults, T1ConstructionFailsWithoutBinding) {
+  const auto g = graph();
+  const Eligibility no_bypass = without_bypass(*g);
+  for (const auto& m : t1_modes()) {
+    for (const Eligibility* elig : {static_cast<const Eligibility*>(nullptr), &no_bypass}) {
+      const std::string variant = m.name + (elig != nullptr ? " eligibility" : "");
+      FlowLedger rf(g);
+      FlowPolicy pr(rf, m.sources, m.destinations, m.cfg, elig);
+      const PlacementResult want = pr.replace(2, *m.design);
+      const LedgerState placed = ledger_state(rf);
+      long injected = 0;
+      for (long at = 0;; ++at) {
+        const std::string w = variant + " construction allocation " + std::to_string(at);
+        const long live = g_live.load();
+        {
+          FlowLedger fg(g);
+          const LedgerState before = ledger_state(fg);
+          std::optional<FlowPolicy> p;
+          if (!fails_at(at, [&] { p.emplace(fg, m.sources, m.destinations, m.cfg, elig); })) {
+            EXPECT_EQ(LedgerAccess::bound_owners(fg).size(), 1U);
+            break;
+          }
+          ++injected;
+          EXPECT_FALSE(p.has_value()) << w;
+          expect_same(ledger_state(fg), before, w);
+          p.emplace(fg, m.sources, m.destinations, m.cfg, elig);
+          expect_same(p->replace(2, *m.design), want, w);
+          expect_same(ledger_state(fg), placed, w);
+          expect_balanced(fg, w);
+        }
+        EXPECT_EQ(g_live.load(), live) << w << ": a leak";
+        if (::testing::Test::HasFailure()) return;
+      }
+      EXPECT_GT(injected, 0) << variant;
+    }
+  }
+}
+
+// T1's evaluators (capacity: setup and forwarding on a fresh ledger; batch_capacity; sensitivity:
+// setup redone under every deletion) under the shared evaluator sweeps, one worker exhaustively
+// and several workers in their threads.
+TEST(PolicyFaults, T1EvaluatorsLeaveNoPoisonedScratch) {
+  const auto g = graph();
+  const Eligibility no_bypass = without_bypass(*g);
+  const Eligibility no_cross = without_cross(*g);
+  const std::int32_t one[] = {1};
+  const std::int32_t several[] = {2, 3};
+  long attempts = 0;
+  for (const auto& m : t1_modes()) {
+    for (const auto& o : option_sets(no_bypass, no_cross)) {
+      if (o.cache) continue;  // T1 rejects a cache
+      const std::string name = m.name + " capacity" + o.name;
+      const auto want = capacity(*g, m.sources, m.destinations, query_of(m, o.elig, nullptr, {true, true, true}));
+      long injected = 0;
+      for (long at = 0;; ++at) {
+        const long live = g_live.load();
+        bool failed = false;
+        {
+          PlacementResult got;
+          failed = fails_at(at, [&] { got = capacity(*g, m.sources, m.destinations, query_of(m, o.elig, nullptr, {true, true, true})); });
+          if (failed) {
+            ++injected;
+            expect_same(capacity(*g, m.sources, m.destinations, query_of(m, o.elig, nullptr, {true, true, true})), want,
+                        name + " retry");
+          } else {
+            expect_same(got, want, name);
+          }
+        }
+        EXPECT_EQ(g_live.load(), live) << name << " allocation " << at << ": a leak";
+        if (!failed || ::testing::Test::HasFailure()) break;
+      }
+      EXPECT_GT(injected, 0) << name;
+      attempts += injected + sweep_batch(m, *g, one, 1, o) + sweep_sensitivity(m, *g, one, 1, o);
+      attempts += sweep_sensitivity(m, *g, several, 7, o);
+      if (::testing::Test::HasFailure()) return;
+    }
+  }
+  RecordProperty("allocation_attempts", std::to_string(attempts));
+}
+
+// remove() and the destruction of a T1 policy allocate nothing: remove() takes the records and the
+// holds away; the destruction leaves both projections as orphans and the policy no longer bound.
+TEST(PolicyFaults, T1RemovalAndReleaseNeverAllocate) {
+  const auto g = graph();
+  for (const auto& m : t1_modes()) {
+    FlowLedger fg(g);
+    auto p = std::make_unique<FlowPolicy>(fg, m.sources, m.destinations, m.cfg);
+    (void)p->replace(4, *m.design);
+    ASSERT_FALSE(fg.records().empty()) << m.name;
+    EXPECT_FALSE(fails_at(0, [&] { p->remove(); })) << m.name;
+    EXPECT_TRUE(fg.records().empty()) << m.name;
+    EXPECT_EQ(fg.reserved(), std::vector<Amount>(fg.reserved().size(), 0)) << m.name;
+    (void)p->replace(2, *m.design);
+    const LedgerState held = ledger_state(fg);
+    ASSERT_GT(std::accumulate(held.reserved.begin(), held.reserved.end(), Amount {0}), 0) << m.name;
+    EXPECT_FALSE(fails_at(0, [&] { p.reset(); })) << m.name;
+    const LedgerState orphaned = ledger_state(fg);
+    EXPECT_EQ(orphaned.allocated, held.allocated) << m.name;
+    EXPECT_EQ(orphaned.reserved, held.reserved) << m.name;
+    EXPECT_EQ(orphaned.records.size(), held.records.size()) << m.name;
+    EXPECT_TRUE(orphaned.bound.empty()) << m.name;
+  }
+}
+
+// T1's commit books the holds through the reservation projection's own per-thread scratch, so the
+// shared placement sweep (whose reference call has already grown this thread's scratch) does not
+// reach its growth. Here each attempt runs on a new thread whose scratch is cold, or has first
+// served a T1 replace on a 3-node chain (small to large); the swept replace on a 3000-node chain
+// fails at its at-th allocation and changes neither projection, no record and not the epoch, and a
+// retry on the same thread gives the reference's result, ledger and epoch. With `prior`, the policy
+// already holds an earlier design (set up on another thread, so the attempt's scratch stays as it
+// was) and the swept call replaces those holds. The same call on a thread whose scratch has grown to
+// the large chain allocates less: the sweep reached the growth.
+void expect_t1_hold_scratch_growth(const std::string& name, bool from_small, bool prior) {
+  SCOPED_TRACE(name);
+  const auto small = chain_graph(3, 5);
+  const auto large = chain_graph(3000, 5);
+  const NodeId last = large->num_nodes() - 1;
+  const FlowPolicyConfig cfg {.routing = CapacityAware {Tunnels {2}}};
+  const auto make = [&](FlowLedger& fg) {
+    auto p = std::make_unique<FlowPolicy>(fg, std::vector<NodeId> {0}, std::vector<NodeId> {last}, cfg);
+    if (prior) std::thread([&] { (void)p->replace(2, 2); }).join();
+    return p;
+  };
+  const OutputOptions holds {.reservation_edge_flows = true};
+  const auto call = [&](FlowPolicy& p) { return p.replace(4, 4, holds); };
+  PlacementResult want;
+  LedgerState want_state;
+  Epoch want_epoch;
+  {
+    FlowLedger fg(large);
+    auto p = make(fg);
+    want = call(*p);
+    want_state = ledger_state(fg);
+    want_epoch = epoch(*p);
+  }
+  // Both tunnels up, each holding 2 on every link: the comparison is not of zeros.
+  ASSERT_EQ(want_state.reserved, std::vector<Amount>(want_state.reserved.size(), 4));
+  ASSERT_EQ(want.placed, 4);
+  sweep_scratch_growth(
+      name,
+      [&] {
+        if (!from_small) return;
+        FlowLedger fg(small);
+        FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {2}, cfg);
+        EXPECT_EQ(p.replace(4, 4).placed, 4);
+      },
+      [&](long at, const std::string& w) {
+        FlowLedger fg(large);
+        auto p = make(fg);
+        const LedgerState before = ledger_state(fg);
+        const Epoch before_epoch = epoch(*p);
+        PlacementResult got;
+        const bool failed = fails_at(at, [&] { got = call(*p); });
+        if (failed) {
+          expect_same(ledger_state(fg), before, w + " (failed call)");
+          expect_same(epoch(*p), before_epoch, w + " (failed call)");
+          expect_balanced(fg, w + " (failed call)");
+          got = call(*p);
+        }
+        expect_same(got, want, w);
+        expect_same(ledger_state(fg), want_state, w);
+        expect_same(epoch(*p), want_epoch, w);
+        expect_balanced(fg, w);
+        return failed;
+      },
+      [&] {
+        {
+          FlowLedger fg(large);
+          auto p = make(fg);
+          (void)call(*p);  // the scratch grows to the large chain
+        }
+        for (long warm = 0;; ++warm) {
+          FlowLedger fg(large);
+          auto p = make(fg);
+          if (!fails_at(warm, [&] { (void)call(*p); })) return warm;
+        }
+      });
+}
+
+TEST(PolicyFaults, T1HoldScratchGrowthFailureLeavesNothingHalfGrown) {
+  for (const bool prior : {false, true}) {
+    for (const bool from_small : {false, true}) {
+      expect_t1_hold_scratch_growth(std::string(prior ? "new design" : "first replace") +
+                                        (from_small ? " from small" : " from cold"),
+                                    from_small, prior);
+      if (::testing::Test::HasFailure()) return;
+    }
+  }
 }

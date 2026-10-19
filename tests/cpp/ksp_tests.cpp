@@ -262,7 +262,7 @@ TEST(Ksp, ZeroCapacityEdgesAreSearchedAndOnlyAResidualFiltersThem) {
 }
 
 TEST(Ksp, ZeroEdgeExamplesOfTheContract) {
-  // KSP-zero-edge and KSP-zero-edge-residual (ids 0: 0->1 cap 0, 1: 0->2 cap 5, 2: 2->1 cap 5,
+  // KSP over the zero edge, with and without a residual (ids 0: 0->1 cap 0, 1: 0->2 cap 5, 2: 2->1 cap 5,
   // costs 1): k = 2 lists [0] (cost 1) and [1, 2] (cost 2); the residual (0, 5, 5) leaves [1, 2].
   auto g = bgraph(3, {{0, 1, 0, 1}, {0, 2, 5, 1}, {2, 1, 5, 1}});
   auto r = run(g, 0, 1, 2, sel());
@@ -275,7 +275,7 @@ TEST(Ksp, ZeroEdgeExamplesOfTheContract) {
   ASSERT_EQ(gated.size(), 1U);
   EXPECT_EQ(costs_of(gated), (std::vector<Cost>{2}));
   EXPECT_EQ(walk_of(gated[0].second), (std::vector<EdgeId>{1, 2}));
-  // A-X8-Stretch-exact's ceiling: ids 0: 0->1 cap 0 cost 5, 1: 0->1 cap 1 cost 6. The static
+  // The ceiling Stretch(1.2): ids 0: 0->1 cap 0 cost 5, 1: 0->1 cap 1 cost 6. The static
   // baseline counts the zero-capacity edge: 5; the double 1.2 is 5404319552844595 / 2^52, so
   // 1.2 * 5 is just below 6 and only the cost-5 walk fits.
   auto h = bgraph(2, {{0, 1, 0, 5}, {0, 1, 1, 6}});

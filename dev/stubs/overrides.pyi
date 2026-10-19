@@ -144,6 +144,10 @@ class FlowRecord:
     # generated: def edges(self) -> list:
     @property
     def edges(self) -> list[tuple[int, int]]: ...
+    # reason: a list of (EdgeId, units) pairs
+    # generated: def reserved_edges(self) -> list:
+    @property
+    def reserved_edges(self) -> list[tuple[int, int]]: ...
     # reason: an exact Python int for a Lossy flow, None otherwise
     # generated: def offered(self) -> typing.Any:
     @property
@@ -154,12 +158,16 @@ class FlowRecord:
     def route_cost(self) -> int | None: ...
 
 class FlowLedger:
-    # reason: the baseline residual is integers, or None for the capacities
-    # generated: def __init__(self, graph: Graph, residual: typing.Any = None) -> None:
+    # reason: the service and reservation baselines are integers, or None for the capacities
+    # generated: def __init__(self, graph: Graph, residual: typing.Any = None, *, unreserved: typing.Any = None) -> None:
     def __init__(
         self,
         graph: Graph,
         residual: collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer]
+        | None = None,
+        *,
+        unreserved: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer]
         | None = None,
     ) -> None: ...
@@ -180,11 +188,15 @@ class FlowLedger:
     def record(
         self, flow_id: tuple[typing.SupportsIndex, typing.SupportsIndex]
     ) -> FlowRecord: ...
-    # reason: the new baseline is integers, or None for the capacities
-    # generated: def reset(self, residual: typing.Any = None) -> None:
+    # reason: the new baselines are integers, or None for the capacities
+    # generated: def reset(self, residual: typing.Any = None, *, unreserved: typing.Any = None) -> None:
     def reset(
         self,
         residual: collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer]
+        | None = None,
+        *,
+        unreserved: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer]
         | None = None,
     ) -> None: ...
@@ -201,27 +213,20 @@ class Stretch:
         self, factor: float | numpy.floating | typing.SupportsIndex
     ) -> None: ...
 
-class DiminishingReturns:
-    # reason: window is an integer, fraction a number
-    # generated: def __init__(self, window: typing.Any, fraction: typing.Any) -> None:
-    def __init__(
-        self,
-        window: typing.SupportsIndex,
-        fraction: float | numpy.floating | typing.SupportsIndex,
-    ) -> None: ...
+class Tunnels:
+    # reason: count is an integer
+    # generated: def __init__(self, count: typing.Any, *, up_to: bool = False) -> None:
+    def __init__(self, count: typing.SupportsIndex, *, up_to: bool = False) -> None: ...
 
 class CapacityAware:
-    # reason: the counts and the bandwidth are integers (max_flow_count may be None); the ceiling is Absolute, Stretch or None; diminishing is DiminishingReturns or None
-    # generated: def __init__(self, *, flow_count: typing.Any = 1, max_flow_count: typing.Any = None, max_path_cost: typing.Any = None, min_flow_bandwidth: typing.Any = 0, reoptimize: bool = False, diminishing: typing.Any = None) -> None:
+    # reason: the ceiling is Absolute, Stretch or None; the search minimum is an integer
+    # generated: def __init__(self, tunnels: Tunnels, *, max_path_cost: typing.Any = None, min_unreserved_bandwidth: typing.Any = 0) -> None:
     def __init__(
         self,
+        tunnels: Tunnels,
         *,
-        flow_count: typing.SupportsIndex = 1,
-        max_flow_count: typing.SupportsIndex | None = None,
         max_path_cost: Absolute | Stretch | None = None,
-        min_flow_bandwidth: typing.SupportsIndex = 0,
-        reoptimize: bool = False,
-        diminishing: DiminishingReturns | None = None,
+        min_unreserved_bandwidth: typing.SupportsIndex = 0,
     ) -> None: ...
     # reason: the ceiling given at construction: Absolute, Stretch or None
     # generated: def max_path_cost(self) -> typing.Any:
@@ -232,10 +237,10 @@ class Tunnel:
     # reason: no constructor: a tunnel of ForwardingProgram.tunnels
     # generated: (none)
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
-    # reason: the path's EdgeIds in path order
-    # generated: def edges(self) -> tuple:
+    # reason: the path's EdgeIds in path order, None for a tunnel that is down
+    # generated: def edges(self) -> typing.Any:
     @property
-    def edges(self) -> tuple[int, ...]: ...
+    def edges(self) -> tuple[int, ...] | None: ...
 
 class Route:
     # reason: head and weight are integers (weight checked by from_routes); bundle a Path or a PredDAG (TypeError otherwise)
@@ -418,6 +423,23 @@ class PlacementResult:
     # generated: def residual(self) -> typing.Any:
     @property
     def residual(self) -> numpy.typing.NDArray[numpy.int64] | None: ...
+    # reason: an int64 array when requested, else None
+    # generated: def reservation_edge_flows(self) -> typing.Any:
+    @property
+    def reservation_edge_flows(self) -> numpy.typing.NDArray[numpy.int64] | None: ...
+
+class TunnelPlan:
+    # reason: no constructor: the plan of a T1 result
+    # generated: (none)
+    def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
+    # reason: an int, or float('inf') for an unlimited design
+    # generated: def design_demand(self) -> typing.Any:
+    @property
+    def design_demand(self) -> int | float: ...
+    # reason: (head, share) pairs
+    # generated: def head_design(self) -> tuple:
+    @property
+    def head_design(self) -> tuple[tuple[int, int], ...]: ...
 
 class DagCacheStats:
     # reason: no constructor: returned by DagCache.stats
@@ -447,12 +469,13 @@ class FlowPolicy:
         volume: typing.SupportsIndex | float | numpy.floating,
         outputs: OutputOptions | None = None,
     ) -> PlacementResult: ...
-    # reason: offer is integer units or float('inf'); outputs may be None; the result is a PlacementResult
-    # generated: def evaluate(self, offer: typing.Any, *, outputs: typing.Any = None) -> typing.Any:
+    # reason: offer and design_demand are integer units or float('inf') (design_demand may be None); outputs may be None; the result is a PlacementResult
+    # generated: def evaluate(self, offer: typing.Any, *, design_demand: typing.Any = None, outputs: typing.Any = None) -> typing.Any:
     def evaluate(
         self,
         offer: typing.SupportsIndex | float | numpy.floating,
         *,
+        design_demand: typing.SupportsIndex | float | numpy.floating | None = None,
         outputs: OutputOptions | None = None,
     ) -> PlacementResult: ...
     # reason: offer is integer units or float('inf'); black_holes and outputs may be None; the result is a PlacementResult
@@ -464,12 +487,13 @@ class FlowPolicy:
         black_holes: Eligibility | None = None,
         outputs: OutputOptions | None = None,
     ) -> PlacementResult: ...
-    # reason: offer is integer units or float('inf'); outputs may be None; the result is a PlacementResult
-    # generated: def replace(self, offer: typing.Any, *, outputs: typing.Any = None) -> typing.Any:
+    # reason: offer and design_demand are integer units or float('inf') (design_demand may be None); outputs may be None; the result is a PlacementResult
+    # generated: def replace(self, offer: typing.Any, *, design_demand: typing.Any = None, outputs: typing.Any = None) -> typing.Any:
     def replace(
         self,
         offer: typing.SupportsIndex | float | numpy.floating,
         *,
+        design_demand: typing.SupportsIndex | float | numpy.floating | None = None,
         outputs: OutputOptions | None = None,
     ) -> PlacementResult: ...
     # reason: a FlowId is a tuple (ledger uid, id) of integers
@@ -479,8 +503,8 @@ class FlowPolicy:
     ) -> FlowRecord: ...
 
 class QueryOptions:
-    # reason: elig, cache, outputs and offered may be None; offered is integer units or float('inf')
-    # generated: def __init__(self, config: FlowPolicyConfig, *, elig: Eligibility = None, cache: DagCache = None, outputs: typing.Any = None, offered: typing.Any = None) -> None:
+    # reason: elig, cache, outputs, design_demand and offered may be None; design_demand and offered are integer units or float('inf')
+    # generated: def __init__(self, config: FlowPolicyConfig, *, elig: Eligibility = None, cache: DagCache = None, outputs: typing.Any = None, design_demand: typing.Any = None, offered: typing.Any = None) -> None:
     def __init__(
         self,
         config: FlowPolicyConfig,
@@ -488,8 +512,13 @@ class QueryOptions:
         elig: Eligibility | None = None,
         cache: DagCache | None = None,
         outputs: OutputOptions | None = None,
+        design_demand: typing.SupportsIndex | float | numpy.floating | None = None,
         offered: typing.SupportsIndex | float | numpy.floating | None = None,
     ) -> None: ...
+    # reason: the design given, an int or float('inf'), or None
+    # generated: def design_demand(self) -> typing.Any:
+    @property
+    def design_demand(self) -> int | float | None: ...
     # reason: the offer given, an int or float('inf'), or None
     # generated: def offered(self) -> typing.Any:
     @property

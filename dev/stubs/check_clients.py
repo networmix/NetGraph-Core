@@ -59,7 +59,7 @@ REQUIRED = [
     "ng.FlowLedger(g, residual=np.zeros(1, dtype=np.float64))",
     "ng.spf(g, 0, ng.KspOptions(1, sel))",
     "ng.capacity(g, 0, 1, cfg)",
-    "ng.CapacityAware(max_path_cost=guard)",
+    "ng.CapacityAware(guard, max_path_cost=guard)",
     'ng.to_units("1.5", 1.0)',
     "ng.FlowPolicyConfig(ng.Global())",
     "ng.Path(g, np.zeros((1, 1), dtype=np.float64))",

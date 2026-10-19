@@ -59,8 +59,9 @@ struct ForwardingView {
   std::vector<Amount> weights_ {};
   std::vector<std::uint8_t> dark_head_ {};
   // Per program entry: Failed (excluded by the mask, or a head outside the replay roster),
-  // Blackholed (a tunnel whose path reaches a black hole) or Up; its route under the mask (the
-  // record's bundle; an empty DAG when it failed) and that route's cost.
+  // Blackholed (a tunnel whose path reaches a black hole), a down tunnel's setup status
+  // (NoBandwidth, CostCeiling) or Up; its route under the mask (the record's bundle; an empty DAG
+  // when it failed or is down) and that route's cost.
   std::vector<TunnelStatus> status_ {};
   std::vector<std::shared_ptr<const PredDAG>> bundles_ {};
   std::vector<Cost> costs_ {};
@@ -86,7 +87,12 @@ struct ForwardingView {
     return borrowed ? std::span<const Amount>(data->head_weight) : std::span<const Amount>(weights_);
   }
   [[nodiscard]] bool dark_head(std::size_t h) const noexcept { return !dark_head_.empty() && dark_head_[h] != 0; }
-  [[nodiscard]] TunnelStatus status(std::size_t e) const noexcept { return borrowed ? TunnelStatus::Up : status_[e]; }
+  // Entry e's status: a borrowed view's are the program's own (Up, or a down tunnel's setup status).
+  [[nodiscard]] TunnelStatus status(std::size_t e) const noexcept {
+    if (!borrowed) return status_[e];
+    const auto t = data->entries[e].tunnel;
+    return t < 0 ? TunnelStatus::Up : data->tunnels[static_cast<std::size_t>(t)].status;
+  }
   [[nodiscard]] const std::shared_ptr<const PredDAG>& bundle(std::size_t e) const noexcept {
     return borrowed ? data->entries[e].bundle : bundles_[e];
   }

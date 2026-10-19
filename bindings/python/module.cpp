@@ -20,7 +20,7 @@
     core's payload as a dict of Python ints and lists.
   - Amounts and counters cross as Python ints (exact, also beyond 64 bits); per-edge arrays as
     int64 NumPy arrays in EdgeId order; +inf is accepted only as a request (float('inf')).
-  - Python spells constants in UPPER_SNAKE_CASE: MAX_FLOWS_PER_CALL is the C++ kMaxFlowsPerCall.
+  - Python spells constants in UPPER_SNAKE_CASE: UNREACHABLE is the C++ kUnreachable.
 */
 #include <pybind11/pybind11.h>
 
@@ -35,10 +35,10 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       "programs, the policy engine FlowPolicy, the DagCache, the evaluators (capacity, batch_capacity,\n"
       "sensitivity) and the searches (spf, ksp, resolve_to_paths).\n"
       "Every public call either completes or raises and leaves Core state as it was, with two limits:\n"
-      "(1) pybind11 does not check every allocation when it constructs a bound object from Python, or\n"
-      "converts an attribute or a returned value into a new Python object outside the library's checked\n"
-      "result construction; running out of memory exactly there may crash the process, with Core state\n"
-      "unchanged. (2) A DagCache passed to the call: a building one keeps the complete entries and\n"
+      "(1) pybind11 does not check every allocation when it constructs a bound object from Python, parses\n"
+      "the arguments of a call that passes keywords, or converts an attribute or a returned value into a\n"
+      "new Python object outside the library's checked result construction; running out of memory exactly\n"
+      "there may crash the process, with Core state unchanged. (2) A DagCache passed to the call: a building one keeps the complete entries and\n"
       "statistics of the lookups that succeeded before the call failed; a frozen one counts one miss\n"
       "when the call raised DagCacheMiss.";
 

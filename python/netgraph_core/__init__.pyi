@@ -13,8 +13,9 @@ to this file (``py.typed`` marks the package as typed).
 - Forwarding programs: ``ForwardingProgram`` (with its ``Tunnel`` entries and
   ``ForwardingProgram.from_routes`` over ``Route`` values), ``TunnelStatus``.
 - The policy engine: ``FlowPolicy``, ``FlowPolicyConfig``, the routings ``CostOnly``,
-  ``CapacityAware``, ``Global``, ``Pinned``, and ``PlacementResult`` (with its ``SourceFlow``
-  and ``TunnelFlow`` rows), ``OutputOptions``, ``Termination``.
+  ``CapacityAware`` (T1, with ``Tunnels``), ``Global``, ``Pinned``, and ``PlacementResult``
+  (with its ``SourceFlow`` and ``TunnelFlow`` rows and its ``TunnelPlan``), ``OutputOptions``,
+  ``Termination``.
 - The shortest-path cache: ``DagCache`` (building and frozen modes), ``DagCacheMiss``.
 - The evaluators: ``capacity``, ``batch_capacity``, ``sensitivity``.
 - The searches: ``spf`` (``Direction``, ``SpfOptions``, ``SpfResult``, ``UNREACHABLE``),
@@ -53,7 +54,7 @@ __all__: list[str] = [
     "ForwardingProgram",
     "Absolute",
     "Stretch",
-    "DiminishingReturns",
+    "Tunnels",
     "CostOnly",
     "CapacityAware",
     "Global",
@@ -64,8 +65,8 @@ __all__: list[str] = [
     "PlacementResult",
     "SourceFlow",
     "TunnelFlow",
+    "TunnelPlan",
     "FlowPolicy",
-    "MAX_FLOWS_PER_CALL",
     "DagCache",
     "DagCacheMiss",
     "DagCacheStats",
@@ -88,8 +89,8 @@ __version__: str
 
 class FlowPlacement:
     """
-    How traffic spreads over the routes (CostOnly's kernel; CapacityAware's flows; the interior split
-    of supplied PredDAG routes, EQUAL_BALANCED or WEIGHTED).
+    How traffic spreads over the routes (CostOnly's kernel; the interior split of supplied PredDAG
+    routes, EQUAL_BALANCED or WEIGHTED).
     MAX_FLOW: the minimum-cost flow core over the routes (a controller restricted to them), re-solved
     over the free capacity plus the policy's own allocation (it may move its own earlier placement,
     never another's). WEIGHTED (WCMP, weighted-cost multipath): every node splits in proportion to
@@ -305,12 +306,12 @@ class EdgeTieBreak:
 
 class EdgePriority:
     """
-    The per-edge value PREFER_HIGHER_PRIORITY reads (single-path and parallel-member choices) and,
-    for CapacityAware's WEIGHTED flows, the value that decides which edges a flow uses and their
-    weights: RESIDUAL (residual units), CAPACITY (static capacity units), HEADROOM (residual /
-    capacity, compared exactly as a fraction, 0 on an edge of capacity 0; rejected with
-    CapacityAware's WEIGHTED). A search without a residual reads the static capacity as the residual:
-    RESIDUAL and CAPACITY read the capacity, HEADROOM 1 (0 on an edge of capacity 0).
+    The per-edge value PREFER_HIGHER_PRIORITY reads (single-path and parallel-member choices):
+    RESIDUAL (residual units), CAPACITY (static capacity units), HEADROOM (residual / capacity,
+    compared exactly as a fraction, 0 on an edge of capacity 0). A search without a residual reads
+    the static capacity as the residual: RESIDUAL and CAPACITY read the capacity, HEADROOM 1 (0 on
+    an edge of capacity 0). T1's CSPF reads its unreserved view U instead (RESIDUAL U, HEADROOM
+    U / capacity).
 
     Members:
 
@@ -392,9 +393,11 @@ class Direction:
 class PathSelection:
     """
     The selection of a search or a policy: tie_break (DETERMINISTIC by default), priority
-    (CAPACITY by default); multipath = True keeps every equal-cost walk (the DAG), False the one
-    canonical single path; multi_edge = True keeps every eligible parallel member, False one per
-    (u, v) pair. A tie_break or priority outside its enumeration raises ValueError.
+    (CAPACITY by default); multipath None (the default) is the model's natural shape (every
+    equal-cost walk for searches and CostOnly, one path for a tunnel model), True every equal-cost
+    walk (the DAG; tunnel models reject it), False the one canonical single path; multi_edge = True
+    keeps every eligible parallel member, False one per (u, v) pair. A tie_break or priority
+    outside its enumeration raises ValueError.
     """
 
     def __eq__(self, arg0: typing.Any) -> bool: ...
@@ -403,7 +406,7 @@ class PathSelection:
         self,
         tie_break: EdgeTieBreak = ...,
         priority: EdgePriority = ...,
-        multipath: bool = True,
+        multipath: bool | None = None,
         multi_edge: bool = True,
     ) -> None: ...
     def __repr__(self) -> str: ...
@@ -414,9 +417,10 @@ class PathSelection:
         """
 
     @property
-    def multipath(self) -> bool:
+    def multipath(self) -> bool | None:
         """
-        True: every equal-cost walk (a DAG); False: the canonical single path
+        None: the model's natural shape; True: every equal-cost walk (a DAG); False: the canonical
+        single path
         """
 
     @property
@@ -692,11 +696,12 @@ class Path:
 class FlowRecord:
     """
     One flow of a ledger, as a snapshot: flow_id (ledger uid, id), owner (the policy's id),
-    sources, destinations, admission, entry (a Pinned policy's program entry, else None), bundle
+    sources, destinations, admission, entry (a T1 or Pinned policy's program entry, else None), bundle
     (PredDAG: the flow's route),
     route_cost (its minimum walk cost; None when empty), offered (Lossy only, else None),
-    delivered, edges [(EdgeId, units)] and drops [(EdgeId, units)] (cumulative, ascending
-    EdgeId). offered and the drops units are exact Python ints (they may exceed 64 bits).
+    delivered, edges [(EdgeId, units)] (carried load) and drops [(EdgeId, units)] (cumulative,
+    ascending EdgeId), reserved_edges [(EdgeId, units)] (T1's strict holds, ascending EdgeId). offered
+    and the drops units are exact Python ints (they may exceed 64 bits).
     """
 
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
@@ -741,8 +746,8 @@ class FlowRecord:
     @property
     def entry(self) -> int | None:
         """
-        the program entry the record carries (a Pinned policy: the entry identifier); None for the
-        records kept per roster source (CostOnly, Global) or per flow (CapacityAware)
+        the program entry the record carries (T1 and Pinned: the entry identifier); None for the
+        records kept per roster source (CostOnly, Global)
         """
 
     @property
@@ -765,6 +770,13 @@ class FlowRecord:
         """
 
     @property
+    def reserved_edges(self) -> list[tuple[int, int]]:
+        """
+        T1: the strict holds of an up tunnel [(EdgeId, units)], its request on every link of its path,
+        ascending EdgeId; empty for every other record (holds never police traffic)
+        """
+
+    @property
     def route_cost(self) -> int | None:
         """
         the cost of the cheapest walk of the bundle from the sources to the destinations; None when
@@ -779,11 +791,14 @@ class FlowRecord:
 
 class FlowLedger:
     """
-    The integer ledger of one graph: a baseline residual in units (replaced only by reset()) and the
-    records of the flows placed on it by policies (the ledger has no public placement or removal).
-    allocated() is the sum of every record's edges and residual() = baseline - allocated(), both
-    int64[E] snapshots. reset() and copy() are rejected while a policy is bound (a FlowPolicy built
-    on this ledger still exists).
+    The integer ledger of one graph, in two projections that are never added: carried traffic (the
+    service baseline; allocated() is the sum of every record's edges and residual() = baseline -
+    allocated()) and the strict holds of T1 tunnels (the reservation baseline; reserved() is the sum of
+    every record's reserved_edges and unreserved() = reservation baseline - reserved()), all int64[E]
+    snapshots. Traffic may use bandwidth that is held: holds never police. The baselines are replaced
+    only by reset(); the records are the flows placed on it by policies (the ledger has no public
+    placement, removal or reservation). reset() and copy() are rejected while a policy is bound (a
+    FlowPolicy built on this ledger still exists).
     """
 
     def __copy__(self) -> FlowLedger: ...
@@ -794,10 +809,15 @@ class FlowLedger:
         residual: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer]
         | None = None,
+        *,
+        unreserved: collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer]
+        | None = None,
     ) -> None:
         """
-        residual: the baseline as integer units, one entry per edge in [0, capacity_units[e]] (a
-        physical baseline goes through to_units first); None: the capacities. ValueError otherwise.
+        residual and unreserved: the service and reservation baselines as integer units, one entry per
+        edge in [0, capacity_units[e]] (a physical baseline goes through to_units first; residual checked
+        first); None: the capacities. ValueError otherwise.
         """
 
     def allocated(self) -> numpy.typing.NDArray[numpy.int64]:
@@ -825,7 +845,7 @@ class FlowLedger:
 
     def copy(self) -> FlowLedger:
         """
-        a new ledger (new uid) with the same baseline and records, ids kept under the new uid;
+        a new ledger (new uid) with the same baselines, records and holds, ids kept under the new uid;
         ValueError while a policy is bound
         """
 
@@ -847,15 +867,24 @@ class FlowLedger:
         policy destroyed without remove())
         """
 
+    def reserved(self) -> numpy.typing.NDArray[numpy.int64]:
+        """
+        int64[E] snapshot: strict holds per edge (T1), the sum of every record's reserved_edges
+        """
+
     def reset(
         self,
         residual: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer]
         | None = None,
+        *,
+        unreserved: collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer]
+        | None = None,
     ) -> None:
         """
-        A new baseline (None: the capacities); orphaned records and their allocations are cleared
-        and their ids retired (ids are never reused). ValueError while a policy is bound.
+        New baselines (None: the capacities); orphaned records with their allocations and holds are
+        cleared and their ids retired (ids are never reused). ValueError while a policy is bound.
         """
 
     def residual(self) -> numpy.typing.NDArray[numpy.int64]:
@@ -868,16 +897,27 @@ class FlowLedger:
         process-unique ledger uid (the first half of every FlowId)
         """
 
+    def unreserved(self) -> numpy.typing.NDArray[numpy.int64]:
+        """
+        int64[E] snapshot: reservation baseline minus strict holds, per edge
+        """
+
 class TunnelStatus:
     """
-    A tunnel's state in one forwarding (a by_tunnel row). UP; FAILED: its path touches a node or
-    an edge the forwarding policy's Eligibility excludes, so it gets nothing and its head splits over
-    its other entries (replay); BLACKHOLED: up, but its path reaches a black hole of stale
-    forwarding, where its traffic is dropped. A program's own tunnels are all up.
+    A tunnel's state. UP; NO_BANDWIDTH and COST_CEILING: T1's setup left it down (no path passes
+    the bandwidth filter, or the cheapest exceeds the cost ceiling): no path, weight 0, and it
+    stays down in every forwarding of its program; and in one forwarding only (a by_tunnel row)
+    FAILED: its path touches a node or an edge the forwarding policy's Eligibility excludes, so it
+    gets nothing and its head splits over its other entries (replay), and BLACKHOLED: up, but its
+    path reaches a black hole of stale forwarding, where its traffic is dropped.
 
     Members:
 
       UP
+
+      NO_BANDWIDTH
+
+      COST_CEILING
 
       FAILED
 
@@ -885,7 +925,9 @@ class TunnelStatus:
     """
 
     BLACKHOLED: typing.ClassVar[TunnelStatus]
+    COST_CEILING: typing.ClassVar[TunnelStatus]
     FAILED: typing.ClassVar[TunnelStatus]
+    NO_BANDWIDTH: typing.ClassVar[TunnelStatus]
     UP: typing.ClassVar[TunnelStatus]
     __members__: typing.ClassVar[dict[str, TunnelStatus]]
 
@@ -914,22 +956,25 @@ class TunnelStatus:
 
 class Tunnel:
     """
-    One tunnel (a path entry) of a ForwardingProgram, read-only. index: the entry identifier
-    (Global and CostOnly MAX_FLOW: the path's position in the decomposition order; supplied routes:
-    the route's position in the list), never a position in program.tunnels; head; local_index: its
-    position among the head's entries of both kinds; destination: where its path ends; edges: its
-    EdgeIds in path order; route_cost: the sum of their costs; weight: its integer share among the
-    head's entries (a controller path: its solved amount).
+    One tunnel (a path entry) of a ForwardingProgram, read-only. index: the entry identifier (T1:
+    j*H + i for round j and roster position i; Global and CostOnly MAX_FLOW: the path's position in
+    the decomposition order; supplied routes: the route's position in the list), never a position in
+    program.tunnels; head; local_index: its position among the head's entries of both kinds;
+    destination: where its path ends; edges: its EdgeIds in path order; route_cost: the sum of their
+    costs (all three None for a tunnel that is down); status: UP, NO_BANDWIDTH or COST_CEILING;
+    requested and reserved: T1's strict bandwidth (its request, and what it holds on every link of
+    its path: the request when UP, else 0; 0 for the other models); weight: its integer share among
+    the head's entries (T1: 1 up, 0 down; a controller path: its solved amount).
     """
 
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
     def __repr__(self) -> str: ...
     @property
-    def destination(self) -> int: ...
+    def destination(self) -> int | None: ...
     @property
-    def edges(self) -> tuple[int, ...]:
+    def edges(self) -> tuple[int, ...] | None:
         """
-        the path's EdgeIds in path order
+        the path's EdgeIds in path order; None for a tunnel that is down
         """
 
     @property
@@ -939,7 +984,13 @@ class Tunnel:
     @property
     def local_index(self) -> int: ...
     @property
-    def route_cost(self) -> int: ...
+    def requested(self) -> int: ...
+    @property
+    def reserved(self) -> int: ...
+    @property
+    def route_cost(self) -> int | None: ...
+    @property
+    def status(self) -> TunnelStatus: ...
     @property
     def weight(self) -> int: ...
 
@@ -988,7 +1039,7 @@ class ForwardingProgram:
     captured source supplies ((source, weight) for every roster source, ascending) of the optimized
     controllers, None for equal sources (round robin over the roster). Each head splits its share by
     highest averages over its entries' weights; identical routes are never merged. CostOnly and Global
-    produce one (FlowPolicy.program, PlacementResult.program; CapacityAware has none); from_routes builds
+    produce one (FlowPolicy.program, PlacementResult.program), and so does T1 (its tunnels); from_routes builds
     one from given routes; Pinned forwards one. No public constructor.
     """
 
@@ -1092,46 +1143,43 @@ class Stretch:
         the factor as a float
         """
 
-class DiminishingReturns:
+class Tunnels:
     """
-    The diminishing-returns guard of CapacityAware growth: stop once at least `window`
-    growth steps were accepted in the call and the last `window` gains sum below
-    `fraction` times the source's (finite) offer. window >= 1, fraction in (0, 1).
+    The tunnel count of T1 (CapacityAware) and T2, per head: count in [1, 10000] (checked when a
+    policy or an evaluator uses it). up_to=True (T2 only; T1 rejects it): one common count k in
+    1..count for every head, the smallest that delivers the design.
     """
 
-    def __init__(
-        self,
-        window: typing.SupportsIndex,
-        fraction: float | numpy.floating | typing.SupportsIndex,
-    ) -> None:
+    def __eq__(self, arg0: typing.Any) -> bool: ...
+    def __hash__(self) -> int: ...
+    def __init__(self, count: typing.SupportsIndex, *, up_to: bool = False) -> None:
         """
-        DiminishingReturns(window, fraction): a 32-bit integer and a number, checked (window >= 1,
-        fraction in (0, 1)) when a policy is built with them. Here, a window outside 32 bits or a fraction
-        that is an integer beyond the largest finite float raises ValueError.
+        Tunnels(count, *, up_to=False): a 64-bit integer count (a bool, a float or an integer outside 64 bits
+        raises ValueError here; [1, 10000] is checked where it is used) and a bool
         """
 
     def __repr__(self) -> str: ...
     @property
-    def fraction(self) -> float:
+    def count(self) -> int:
         """
-        the share of the source's offer those steps must gain together to continue
+        the tunnels per head (the largest count for up_to)
         """
 
     @property
-    def window(self) -> int:
+    def up_to(self) -> bool:
         """
-        the number of recent accepted growth steps compared
+        True: the smallest sufficient count up to `count` (T2 only)
         """
 
 class CostOnly:
     """
     Routing like IGP forwarding (OSPF, IS-IS routers) on each roster source's static shortest-path
     DAG (read from the DagCache; the selection is applied at the epoch's first positive call),
-    never refreshed, grown or reoptimised; one record per roster source. EQUAL_BALANCED and
-    WEIGHTED pool the sources (origin EQUAL): where their routes meet, a router splits their traffic
-    once. MAX_FLOW is a controller on the union of those routes (origin OPTIMIZED or EQUAL). An edge
-    of capacity 0 stays in the DAG: EQUAL_BALANCED still sends it its share, which it cannot
-    carry, and WEIGHTED gives it weight 0.
+    fixed for the epoch; one record per roster source. EQUAL_BALANCED and WEIGHTED pool the sources
+    (origin EQUAL): where their routes meet, a router splits their traffic once. MAX_FLOW is a
+    controller on the union of those routes (origin OPTIMIZED or EQUAL). An edge of capacity 0
+    stays in the DAG: EQUAL_BALANCED still sends it its share, which it cannot carry, and WEIGHTED
+    gives it weight 0.
     """
 
     def __init__(self) -> None:
@@ -1143,52 +1191,35 @@ class CostOnly:
 
 class CapacityAware:
     """
-    Routing like distributed CSPF tunnels (each tunnel head picks its own shortest path among edges
-    with enough free capacity). Each source creates flow_count flows, one search at a time, on edges
-    with residual >= max(1, min_flow_bandwidth) units and within max_path_cost; while its offer is
-    unmet it adds flows up to max_flow_count (None: no ceiling). With reoptimize, a flow moves to a
-    new route only when it keeps its whole amount there. `diminishing` (None: off) stops adding flows
-    once the recent ones gain too little.
+    T1: every head sets up its own strict tunnels by CSPF, no controller (like RSVP-TE head ends).
+    The design volume D is split equally over the roster heads and each head's share equally over its
+    tunnels.count tunnels; in round order (round j, heads ascending: tunnel index j*H + i) each tunnel
+    keeps the allowed links whose unreserved capacity (the ledger's, minus the holds of every other
+    owner and of this setup's earlier tunnels) is at least max(request, min_unreserved_bandwidth) (a
+    request of 0 with a minimum of 0 has no filter) and takes the shortest path in the selection's
+    single-path order; it comes up holding exactly its request on every link (UP), or stays down
+    holding nothing: NO_BANDWIDTH (no path passes the filter) or COST_CEILING (the cheapest exceeds
+    max_path_cost: Absolute is inclusive; Stretch(f) is f times the smallest static shortest cost over
+    all roster heads). Traffic enters equally at the heads and splits equally over each head's up
+    tunnels; a head with no tunnel up loses its share. Holds never police traffic.
     """
 
     def __init__(
         self,
+        tunnels: Tunnels,
         *,
-        flow_count: typing.SupportsIndex = 1,
-        max_flow_count: typing.SupportsIndex | None = None,
         max_path_cost: Absolute | Stretch | None = None,
-        min_flow_bandwidth: typing.SupportsIndex = 0,
-        reoptimize: bool = False,
-        diminishing: DiminishingReturns | None = None,
+        min_unreserved_bandwidth: typing.SupportsIndex = 0,
     ) -> None:
         """
-        The fields are checked when a policy is built with them (flow_count >= 1, max_flow_count >=
-        flow_count, min_flow_bandwidth in [0, 2^62) units, the ceiling, the guard). Here, an integer field
-        of the wrong type or outside its integer type (32-bit flow_count and max_flow_count, 64-bit
-        min_flow_bandwidth) raises ValueError; a ceiling or guard of the wrong class, a reoptimize that is
-        not a bool, a number or None (a number or None counts by its truth value), and an unknown keyword
-        raise TypeError.
+        CapacityAware(tunnels, *, max_path_cost=None, min_unreserved_bandwidth=0): the fields are checked
+        when a policy is built with them (the count in [1, 10000] and exact, the ceiling,
+        min_unreserved_bandwidth in [0, 2^62) units). Here, a min_unreserved_bandwidth of the wrong type or
+        outside 64 bits raises ValueError; tunnels that is not a Tunnels, a ceiling of the wrong class and
+        an unknown keyword raise TypeError.
         """
 
     def __repr__(self) -> str: ...
-    @property
-    def diminishing(self) -> DiminishingReturns | None:
-        """
-        the growth guard; None: off
-        """
-
-    @property
-    def flow_count(self) -> int:
-        """
-        the flows a source creates on its first positive request
-        """
-
-    @property
-    def max_flow_count(self) -> int | None:
-        """
-        the most flows growth may reach per source; None: no ceiling
-        """
-
     @property
     def max_path_cost(self) -> Absolute | Stretch | None:
         """
@@ -1196,15 +1227,16 @@ class CapacityAware:
         """
 
     @property
-    def min_flow_bandwidth(self) -> int:
+    def min_unreserved_bandwidth(self) -> int:
         """
-        units in [0, 2^62): every search keeps only edges with at least max(1, this) residual units
+        units in [0, 2^62): a search minimum only (each attempt keeps the links with at least
+        max(request, this) unreserved units), never a reservation
         """
 
     @property
-    def reoptimize(self) -> bool:
+    def tunnels(self) -> Tunnels:
         """
-        True: a retained flow moves to a newly found route when it keeps its whole amount there
+        the tunnel count per head (a Tunnels)
         """
 
 class Global:
@@ -1269,19 +1301,21 @@ class Pinned:
 
 class FlowPolicyConfig:
     """
-    One demand's settings: routing (CostOnly, CapacityAware, Global or Pinned), placement
-    (FlowPlacement: required for CostOnly and CapacityAware; Global and Pinned take none), admission
-    (LOSSLESS by default), selection (PathSelection; None: PathSelection(); Global and Pinned take
-    none), origin (Origin; None: the model's default, EQUAL for CostOnly EQUAL_BALANCED and WEIGHTED and
-    for CapacityAware, OPTIMIZED for CostOnly MAX_FLOW and Global; Pinned takes none, its program has
-    it), weights (WeightBasis, CostOnly WEIGHTED only; None: CAPACITY) and edge_weights (one integer per
-    edge, given exactly when weights=EXPLICIT; one array shared by every policy built from this
+    One demand's settings: routing (CostOnly, CapacityAware (T1), Global or Pinned), placement
+    (FlowPlacement: required for CostOnly; the other models take none), admission (LOSSLESS by
+    default; LOSSY for CostOnly EQUAL_BALANCED and WEIGHTED, T1 and Pinned), selection (PathSelection;
+    None: PathSelection(); Global and Pinned take none; T1 reads tie_break, priority and multi_edge and
+    rejects multipath=True), origin (Origin; None: the model's default, EQUAL for CostOnly EQUAL_BALANCED
+    and WEIGHTED and for T1, OPTIMIZED for CostOnly MAX_FLOW and Global; Pinned takes none, its program
+    has it), weights (WeightBasis, CostOnly WEIGHTED only; None: CAPACITY) and edge_weights (one integer
+    per edge, given exactly when weights=EXPLICIT; one array shared by every policy built from this
     configuration). A field that does not apply to the model must stay None. The combination is checked
     when a policy or an evaluator uses the configuration (ValueError): the enumeration values, then the
-    model's row (placement, origin, admission, selection, weights with edge_weights), then a DagCache
-    (only CostOnly reads one), then CapacityAware's parameters, then edge_weights' length and entries,
-    then the pooled single-path rule (CostOnly with several input sources rejects multipath=False with
-    PREFER_HIGHER_PRIORITY).
+    model's row (T1: an up_to count first; then placement, origin, admission, selection, weights with
+    edge_weights), then a DagCache (only CostOnly reads one), then T1's parameters (the tunnel count in
+    [1, 10000], max_path_cost, min_unreserved_bandwidth), then edge_weights' length and entries, then the
+    roster and count rules (CostOnly with several input sources rejects multipath=False with
+    PREFER_HIGHER_PRIORITY; T1's roster heads times its tunnel count at most 2^30 - 1).
     """
 
     def __init__(
@@ -1344,8 +1378,10 @@ class OutputOptions:
     """
     Optional outputs of a placement (all false by default; absent outputs are None):
     edge_flows (the policy's own allocation per edge after the call), residual and
-    bottleneck (the ledger's after the call), and min_cut (Global with the optimized origin,
-    when its solve reached the maximum flow; None for every other model, origin or call).
+    bottleneck (the ledger's after the call), reservation_edge_flows (the policy's own strict
+    holds per edge after the call; zeros for a model without holds), and min_cut (Global with
+    the optimized origin, when its solve reached the maximum flow; None for every other
+    model, origin or call).
     """
 
     def __init__(
@@ -1354,6 +1390,7 @@ class OutputOptions:
         edge_flows: bool = False,
         residual: bool = False,
         bottleneck: bool = False,
+        reservation_edge_flows: bool = False,
         min_cut: bool = False,
     ) -> None: ...
     @property
@@ -1375,6 +1412,12 @@ class OutputOptions:
         """
 
     @property
+    def reservation_edge_flows(self) -> bool:
+        """
+        request PlacementResult.reservation_edge_flows
+        """
+
+    @property
     def residual(self) -> bool:
         """
         request PlacementResult.residual
@@ -1384,24 +1427,17 @@ class Termination:
     """
     How a call ended, the first that applies: COMPLETE for a zero request; NO_ROUTE for a positive
     request with an empty roster (no eligible source statically reaches an allowed destination);
-    NO_ACTIVE_WEIGHT when routes exist but none has a positive weight (WEIGHTED over edges of
-    capacity 0 only); a LOSSY finite request: COMPLETE (delivery and losses account for the whole
-    offer, which does not mean nothing was lost); otherwise COMPLETE when the whole request was
-    delivered, else EXHAUSTED (an infinite request is EXHAUSTED). A controller whose maximum is 0
-    over existing routes is EXHAUSTED, not NO_ROUTE.
-    CapacityAware alone reduces per-source outcomes: a source is served when its offer is 0 or
-    delivered; an unserved source's outcome is LIMIT_FLOWS (creating or adding flows was stopped by
-    MAX_FLOWS_PER_CALL, or adding flows by a max_flow_count above flow_count), else
-    LIMIT_DIMINISHING (the diminishing guard), else NO_ROUTE (no flows), else EXHAUSTED; the call
-    takes the highest unserved outcome in that order, COMPLETE when every source is served.
+    NO_ACTIVE_WEIGHT when the program has an entry with a path (an up tunnel, a controller path or
+    a split route) but no head can use one (no positive weight: WEIGHTED over edges of capacity 0
+    only, routes of weight 0, every up tunnel failed); a program whose tunnels are all down is not
+    this case; a LOSSY finite request: COMPLETE (delivery and losses account for the whole offer,
+    which does not mean nothing was lost); otherwise COMPLETE when the whole request was delivered,
+    else EXHAUSTED (an infinite request is EXHAUSTED). A controller whose maximum is 0 over existing
+    routes is EXHAUSTED, not NO_ROUTE.
 
     Members:
 
       COMPLETE
-
-      LIMIT_FLOWS
-
-      LIMIT_DIMINISHING
 
       NO_ROUTE
 
@@ -1412,8 +1448,6 @@ class Termination:
 
     COMPLETE: typing.ClassVar[Termination]
     EXHAUSTED: typing.ClassVar[Termination]
-    LIMIT_DIMINISHING: typing.ClassVar[Termination]
-    LIMIT_FLOWS: typing.ClassVar[Termination]
     NO_ACTIVE_WEIGHT: typing.ClassVar[Termination]
     NO_ROUTE: typing.ClassVar[Termination]
     __members__: typing.ClassVar[dict[str, Termination]]
@@ -1491,9 +1525,10 @@ class SourceFlow:
 class TunnelFlow:
     """
     One program tunnel's forwarding in the epoch (read-only): index (its entry identifier) and
-    head, status (UP, FAILED, BLACKHOLED: TunnelStatus), assigned (its share of the injections:
-    LOSSY the shares sent to it, LOSSLESS what it carries), delivered and dropped (its losses on
-    links). Exact ints (assigned and dropped may exceed 64 bits).
+    head, status (TunnelStatus: UP; NO_BANDWIDTH or COST_CEILING for a tunnel T1's setup left
+    down; FAILED, BLACKHOLED in this forwarding), assigned (its share of the injections: LOSSY the
+    shares sent to it, LOSSLESS what it carries), delivered and dropped (its losses on links).
+    Exact ints (assigned and dropped may exceed 64 bits).
     """
 
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
@@ -1531,7 +1566,42 @@ class TunnelFlow:
     @property
     def status(self) -> TunnelStatus:
         """
-        UP, FAILED or BLACKHOLED in this forwarding
+        UP, a down tunnel's setup status (NO_BANDWIDTH, COST_CEILING), FAILED or BLACKHOLED in this
+        forwarding
+        """
+
+class TunnelPlan:
+    """
+    The tunnel models' setup summary (read-only): count (the tunnels per head), design_demand
+    (the design volume D in units), head_design ((head, RR(D, H, i)) for every roster head in
+    ascending NodeId) and reserved_total (T1's strict holds, counted once per up tunnel: the sum
+    of their requests). Exact ints.
+    """
+
+    def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
+    def __repr__(self) -> str: ...
+    @property
+    def count(self) -> int:
+        """
+        the tunnels per head
+        """
+
+    @property
+    def design_demand(self) -> int | float:
+        """
+        the design volume D in units; float('inf') when unlimited
+        """
+
+    @property
+    def head_design(self) -> tuple[tuple[int, int], ...]:
+        """
+        ((head, share), ...): every roster head's share RR(D, H, i), ascending NodeId
+        """
+
+    @property
+    def reserved_total(self) -> int:
+        """
+        the strict holds of the up tunnels, each tunnel's request counted once
         """
 
 class PlacementResult:
@@ -1539,10 +1609,10 @@ class PlacementResult:
     The result of one call. This call: placed (units delivered by the call; replace, forward and
     evaluate: the full new delivery), remaining (request - placed; float('inf') for an infinite
     request), delivery_delta (new minus old delivery, may be negative), call_drops [(EdgeId, units)],
-    call_source_loss, termination, routes_changed and weights_changed. The demand's state after the call
-    (totals of the epoch): program (the installed ForwardingProgram; evaluate: the computed one; None
-    before the first preparation and for CapacityAware), requested (float('inf') after an infinite
-    request), offered (LOSSY: the traffic sent; None when LOSSLESS), admitted, delivered, unadmitted
+    call_source_loss, termination, routes_changed, weights_changed and reservations_changed. The
+    demand's state after the call (totals of the epoch): program (the installed ForwardingProgram;
+    evaluate: the computed one; None before the first preparation), plan (a TunnelPlan for T1; None for
+    every other model), requested (float('inf') after an infinite request), offered (LOSSY: the traffic sent; None when LOSSLESS), admitted, delivered, unadmitted
     (LOSSLESS: requested - delivered, None after an infinite request; LOSSY: 0), source_loss, drops
     [(EdgeId, units)], by_source (one SourceFlow per normalized input source, ascending NodeId),
     by_tunnel (one TunnelFlow per program tunnel, ascending index; an alternative view, never added to
@@ -1550,8 +1620,8 @@ class PlacementResult:
     (unrestricted Global with the optimized origin only). LOSSY: offered = source_loss + sum(drops) +
     delivered. The rows sum to the totals, except for LOSSY with an empty roster, where the whole offer
     is the demand's source loss and every row is zero. Optional outputs, None unless requested:
-    edge_flows and residual (int64[E]), bottleneck, min_cut (they describe the same state; evaluate: the
-    evaluated one). Amounts that accumulate are exact ints (they may exceed 64 bits).
+    edge_flows, residual and reservation_edge_flows (int64[E]), bottleneck, min_cut (they describe the same
+    state; evaluate: the evaluated one). Amounts that accumulate are exact ints (they may exceed 64 bits).
     """
 
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
@@ -1654,10 +1724,17 @@ class PlacementResult:
         """
 
     @property
+    def plan(self) -> TunnelPlan | None:
+        """
+        T1: the TunnelPlan of the program after the call; None for every other model (Pinned over a T1
+        program too)
+        """
+
+    @property
     def program(self) -> ForwardingProgram | None:
         """
         the installed ForwardingProgram after the call (evaluate: the computed one); None before the first
-        preparation and for CapacityAware
+        preparation
         """
 
     @property
@@ -1673,6 +1750,20 @@ class PlacementResult:
         """
 
     @property
+    def reservation_edge_flows(self) -> numpy.typing.NDArray[numpy.int64] | None:
+        """
+        if requested: the policy's own strict holds per edge after the call (int64[E], EdgeId order; zeros
+        for a model without holds), else None
+        """
+
+    @property
+    def reservations_changed(self) -> bool:
+        """
+        True when a tunnel's requested or reserved amount differs from the installed program's, by
+        index (an absent tunnel holds 0): only T1 sets it; forward and Pinned never do
+        """
+
+    @property
     def residual(self) -> numpy.typing.NDArray[numpy.int64] | None:
         """
         if requested: the ledger's residual after the call (int64[E], EdgeId order), else None
@@ -1683,9 +1774,8 @@ class PlacementResult:
         """
         True when the call's program differs from the installed one in its ordered heads, paths, split
         tables or duplicates (no program counts as the empty program; two programs without an entry
-        are equal); CapacityAware (no program): a flow was created (also at zero delivery), rerouted or
-        added. An offer-only change (forward, Pinned, CostOnly increments) and an identical replace set
-        nothing
+        are equal). An offer-only change (forward, Pinned, CostOnly increments) and an identical
+        replace set nothing
         """
 
     @property
@@ -1704,7 +1794,7 @@ class PlacementResult:
     def total_cost(self) -> int | None:
         """
         controllers (Global, CostOnly MAX_FLOW): the exact sum of cost * flow over the policy's
-        allocation; None for the other models
+        allocation; None for the other models (T1, Pinned)
         """
 
     @property
@@ -1717,8 +1807,8 @@ class PlacementResult:
     def weights_changed(self) -> bool:
         """
         True when the call's program differs from the installed one in its injection (source weights)
-        or any entry or split-table weight (a controller's re-solve that changes a path's amount);
-        CapacityAware: a rerouted WEIGHTED flow captured new weights
+        or any entry or split-table weight (a controller's re-solve that changes a path's amount; an
+        absent entry weighs 0)
         """
 
 class DagCacheStats:
@@ -1845,27 +1935,30 @@ class FlowPolicy:
         routing reads it, another model rejects it) belong to the ledger's graph; the policy keeps the
         ledger, elig and cache alive (a Pinned policy shares its program and black holes). The roster
         (the sources that statically reach an allowed destination, over allowed edges whatever their
-        capacity; Pinned: the program's heads that reach an allowed destination over its basis under elig)
-        is fixed here. Everything is validated before the policy binds, in this order: the endpoints, the
+        capacity, T1's heads; Pinned: the program's heads that reach an allowed destination over its basis
+        under elig) is fixed here. Everything is validated before the policy binds, in this order: the endpoints, the
         graph of elig, the program, the support, the cache and the black holes (`foreign Eligibility:
         built for another graph`, `program belongs to another graph`, `support belongs to another graph`,
         `foreign DagCache: bound to another graph`, `black_holes belongs to another graph`), the
-        configuration (FlowPolicyConfig's order), then the pooled single-path rule and a Pinned program's
-        endpoints (`program endpoints do not match policy endpoints`).
+        configuration (FlowPolicyConfig's order), then the pooled single-path rule, T1's tunnel limit
+        (`tunnel limit exceeded: <H> heads x <N> tunnels > 1073741823`) and a Pinned program's endpoints
+        (`program endpoints do not match policy endpoints`).
         """
 
     def evaluate(
         self,
         offer: typing.SupportsIndex | float | numpy.floating,
         *,
+        design_demand: typing.SupportsIndex | float | numpy.floating | None = None,
         outputs: OutputOptions | None = None,
     ) -> PlacementResult:
         """
         A full, independent computation and forwarding of offer (int units or float('inf')) from the
-        policy's own released view (the residual plus its own carried load), as replace would do it ->
-        PlacementResult (the computed program, the flags replace would set, the outputs of the evaluated
-        state); publishes nothing, creates no record and leaves the epoch as it was. LOSSY requires a
-        finite offer.
+        policy's own released view (the residual plus its own carried load; T1 sets up on the unreserved
+        capacity with its own holds released), as replace would do it -> PlacementResult (the computed
+        program and plan, the flags replace would set, the outputs of the evaluated state); publishes
+        nothing, creates no record, books no hold and leaves the epoch as it was. design_demand as for
+        replace. LOSSY requires a finite offer.
         """
 
     def forward(
@@ -1876,13 +1969,14 @@ class FlowPolicy:
         outputs: OutputOptions | None = None,
     ) -> PlacementResult:
         """
-        Forward a full new offer over the installed program, with no route computation, on the released
-        view -> PlacementResult; a new epoch like replace, the program kept (no flag). LOSSLESS admits the
+        Forward a full new offer over the installed program, with no route computation and no setup, on the
+        released view -> PlacementResult; a new epoch like replace, the program and T1's holds kept (no
+        flag; T1's records are recreated with the same reserved_edges). LOSSLESS admits the
         program's lossless bound up to the offer; LOSSY sends the offer. black_holes (an Eligibility of the
         graph): the nodes and edges it excludes are black holes for this call (stale forwarding: traffic
         reaching one is dropped there; a black-holed source loses its share). In this order: Pinned raises
-        `Pinned forwards with replace`; no installed program `forward requires an installed program`
-        (also CapacityAware); the offer; LOSSY +inf `LOSSY forwarding requires a finite offer`; black_holes
+        `Pinned forwards with replace`; no installed program `forward requires an installed program`;
+        the offer; LOSSY +inf `LOSSY forwarding requires a finite offer`; black_holes
         of another graph `black_holes belongs to another graph`.
         """
 
@@ -1892,7 +1986,8 @@ class FlowPolicy:
         outputs: OutputOptions | None = None,
     ) -> PlacementResult:
         """
-        Place volume (int units in [0, 2^62), or float('inf')) all or nothing -> PlacementResult.
+        Place volume (int units in [0, 2^62), or float('inf')) all or nothing -> PlacementResult. T1 raises
+        `T1 does not support incremental placement` (also for 0).
         Requests add up within an epoch (from construction, the last remove(), replace() or forward());
         after float('inf') any finite request is rejected, 0 included. A request of 0 places nothing and
         reports the current state. CostOnly prepares its program at the epoch's first positive request;
@@ -1901,7 +1996,8 @@ class FlowPolicy:
         injections, each head splitting its increment afresh (earlier drops are not offered again); a
         controller re-solves admitted + volume. A LOSSY float('inf') is CostOnly's first-hop experiment;
         Pinned raises `LOSSY forwarding requires a finite offer`. outputs (OutputOptions; None: none)
-        requests edge_flows, residual, bottleneck and min_cut. Everything is validated before any change; a
+        requests edge_flows, residual, bottleneck, reservation_edge_flows and min_cut. Everything is
+        validated before any change; a
         failed call raises with the ledger and the policy unchanged. A solve of the flow core (Global,
         CostOnly MAX_FLOW, or a MAX_FLOW flow) on a network beyond its int32 numbering raises ValueError:
         more than INT32_MAX - 2 nodes, or more than 2^30 - 1 edges, sources and destinations together. A
@@ -1929,20 +2025,25 @@ class FlowPolicy:
 
     def remove(self) -> None:
         """
-        revert every flow of the policy, retire the ids, clear the program, open a new epoch
+        revert every flow and hold of the policy, retire the ids, clear the program, open a new epoch
         """
 
     def replace(
         self,
         offer: typing.SupportsIndex | float | numpy.floating,
         *,
+        design_demand: typing.SupportsIndex | float | numpy.floating | None = None,
         outputs: OutputOptions | None = None,
     ) -> PlacementResult:
         """
         Recompute from the policy's own released view and forward the full offer, published atomically ->
-        PlacementResult: the old records are retired (their ids never live again), new ones created, and a
-        new epoch starts at this offer (delivery may go down: delivery_delta). CostOnly prepares its routes
-        again; a controller re-solves; Pinned forwards its program. LOSSY requires a finite offer.
+        PlacementResult: the old records and holds are retired (their ids never live again), new ones
+        created, and a new epoch starts at this offer (delivery may go down: delivery_delta). CostOnly
+        prepares its routes again; a controller re-solves; T1 sets its tunnels up again for the design and
+        books their holds; Pinned forwards its program. design_demand (T1 only: int units, or
+        float('inf'), which T1 rejects; None: equal to the offer): T1 needs a finite design (`T1 requires a
+        finite design demand`); every other model raises `<model> does not accept design_demand`. In this
+        order: the offer, LOSSY's finite offer, then the design demand (the model, its domain, finiteness).
         """
 
     @property
@@ -1955,18 +2056,21 @@ class FlowPolicy:
     @property
     def program(self) -> ForwardingProgram | None:
         """
-        the installed ForwardingProgram; None before the first preparation, after remove() and for
-        CapacityAware
+        the installed ForwardingProgram; None before the first preparation and after remove()
         """
 
 class QueryOptions:
     """
     The options of every evaluator (capacity, batch_capacity, sensitivity): the configuration,
     the static Eligibility (None: all allowed), the DagCache (None: private per worker), the
-    optional outputs of each result (sensitivity: of its baseline) and offered (int units or
-    float('inf'); None: absent), the offer of a Pinned LOSSY evaluation: required and finite
-    there; a LOSSLESS model rejects it (`<model> LOSSLESS capacity does not accept offered`),
-    CostOnly LOSSY too (`CostOnly LOSSY capacity uses first-hop injection`).
+    optional outputs of each result (sensitivity: of its baseline), design_demand (int units or
+    float('inf'); None: absent): T1's design, always required and finite (`T1 capacity requires
+    design_demand`, `T1 requires a finite design demand`), rejected by every other model
+    (`<model> does not accept design_demand`), and offered (int units or float('inf'); None:
+    absent), the offer of a T1 or Pinned LOSSY evaluation: required and finite there (`<T1 or
+    Pinned> LOSSY capacity requires finite offered`); a LOSSLESS model rejects it (`<model>
+    LOSSLESS capacity does not accept offered`), CostOnly LOSSY too (`CostOnly LOSSY capacity
+    uses first-hop injection`).
     """
 
     def __init__(
@@ -1976,6 +2080,7 @@ class QueryOptions:
         elig: Eligibility | None = None,
         cache: DagCache | None = None,
         outputs: OutputOptions | None = None,
+        design_demand: typing.SupportsIndex | float | numpy.floating | None = None,
         offered: typing.SupportsIndex | float | numpy.floating | None = None,
     ) -> None: ...
     @property
@@ -1991,6 +2096,12 @@ class QueryOptions:
         """
 
     @property
+    def design_demand(self) -> int | float | None:
+        """
+        T1's design volume (int units, or float('inf')); None: absent
+        """
+
+    @property
     def elig(self) -> Eligibility | None:
         """
         the static Eligibility; None: everything allowed
@@ -1999,7 +2110,7 @@ class QueryOptions:
     @property
     def offered(self) -> int | float | None:
         """
-        the offer of a Pinned LOSSY evaluation (int units, or float('inf')); None: absent
+        the offer of a T1 or Pinned LOSSY evaluation (int units, or float('inf')); None: absent
         """
 
     @property
@@ -2261,7 +2372,8 @@ def capacity(
 ) -> PlacementResult:
     """
     place(+inf) of a FlowPolicy with opts.config on a fresh ledger of the graph (Pinned LOSSY:
-    place(opts.offered)) -> PlacementResult.
+    place(opts.offered); T1: evaluate(+inf or opts.offered, design_demand=opts.design_demand), the
+    lossless bound of the tunnels set up for the design, or what they deliver of offered) -> PlacementResult.
     The exact maximum flow is Global() (the optimized origin); with origin=EQUAL, the largest total whose
     round-robin source shares are all carried. A supplied frozen cache raises DagCacheMiss for an absent
     key, unchanged.
@@ -2371,5 +2483,4 @@ def to_units(
     resolution: typing.SupportsFloat | typing.SupportsIndex,
 ) -> numpy.typing.NDArray[numpy.int64]: ...
 
-MAX_FLOWS_PER_CALL: int = 10000
 UNREACHABLE: int = 9223372036854775807

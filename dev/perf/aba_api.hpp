@@ -164,9 +164,9 @@ inline std::uint64_t eligibility_build_intersect(const Graph& g, const std::vect
   return d.h;
 }
 
-// Search selection, spelled in target terms.
+// Search selection, spelled in target terms (multipath absent: the DAG of every equal-cost walk).
 struct Sel {
-  bool multipath = true;
+  std::optional<bool> multipath {};
   bool multi_edge = true;
   bool prefer_priority = false;
 };
@@ -427,7 +427,7 @@ inline std::uint64_t pooled_place(const Graph& g, const std::vector<std::pair<st
   return d.h;
 }
 
-// ---- forwarding programs (step 3)
+// ---- forwarding programs
 
 // One demand's program: the optimized Global solve of `volume` from `srcs` to `dst` on a fresh
 // ledger (its paths with their solved amounts, the captured source weights).
@@ -455,6 +455,19 @@ inline Masks masks(const Graph& g, const std::vector<std::vector<int>>& states) 
   return out;
 }
 
+// A status as a fixed code, so a digest does not move when the enum gains or reorders values:
+// Up 0, Failed 1, Blackholed 2 (the codes of every older Core), NoBandwidth 3, CostCeiling 4.
+inline std::int64_t status_code(nc::TunnelStatus s) {
+  switch (s) {
+    case nc::TunnelStatus::Up: return 0;
+    case nc::TunnelStatus::Failed: return 1;
+    case nc::TunnelStatus::Blackholed: return 2;
+    case nc::TunnelStatus::NoBandwidth: return 3;
+    case nc::TunnelStatus::CostCeiling: return 4;
+  }
+  return -1;
+}
+
 inline void add_rows(Digest& d, const nc::PlacementResult& r) {
   d.add_i(r.placed);
   d.add(r.source_loss.lo);
@@ -462,7 +475,7 @@ inline void add_rows(Digest& d, const nc::PlacementResult& r) {
   for (const auto& [e, x] : r.call_drops) drops += x;
   d.add_i(drops);
   for (const auto& t : r.by_tunnel) {
-    d.add_i(static_cast<std::int64_t>(t.status));
+    d.add_i(status_code(t.status));
     d.add(t.assigned.lo);
     d.add_i(t.delivered);
   }
@@ -561,29 +574,58 @@ inline std::uint64_t sensitivity_equal_global(const Graph& g, const std::vector<
   return fold_sensitivity(nc::sensitivity(g.ref(), sv, tv, nc::QueryOptions {global_equal_config()}, 1));
 }
 
-// Cohort placement: one TE_ECMP CapacityAware policy per pair on one shared ledger (NetGraph
-// presets TE_ECMP_16_LSP: 16 single-path EB tunnels; TE_ECMP_UP_TO_256_LSP: 1..256),
-// reoptimised, place(to_units(volume)).
-inline std::uint64_t cohort_place(const Graph& g, const std::vector<std::pair<int, int>>& pairs, double volume,
-                                  int min_flows, int max_flows) {
-  nc::CapacityAware ca;
-  ca.flow_count = min_flows;
-  ca.max_flow_count = max_flows;
-  ca.reoptimize = true;
-  const nc::FlowPolicyConfig cfg {
-      ca, nc::FlowPlacement::EqualBalanced, nc::Admission::Lossless,
-      nc::PathSelection(nc::EdgeTieBreak::PreferHigherPriority, nc::EdgePriority::Residual, false, false)};
-  nc::FlowLedger fg(g.g);
+// T1: one CapacityAware(Tunnels(tunnels)) policy per pair on one shared ledger, Lossless, each head
+// setting up its tunnels by CSPF on the unreserved view (the earlier pairs' holds count).
+struct T1Fabric {
+  nc::FlowLedger fg;
   std::vector<std::unique_ptr<nc::FlowPolicy>> policies;
+  T1Fabric(const Graph& g, const std::vector<std::pair<int, int>>& pairs, int tunnels, nc::Admission admission)
+      : fg(g.g) {
+    const nc::FlowPolicyConfig cfg {.routing = nc::CapacityAware {nc::Tunnels {tunnels}}, .admission = admission};
+    for (auto [s, t] : pairs) {
+      const nc::NodeId sv[1] = {s};
+      const nc::NodeId tv[1] = {t};
+      policies.push_back(std::make_unique<nc::FlowPolicy>(fg, sv, tv, cfg));
+    }
+  }
+};
+
+// The digest of a T1 call: its delivery, its up tunnels and its holds in all.
+inline void add_t1(Digest& d, const nc::PlacementResult& r) {
+  d.add_i(r.placed);
+  std::int64_t up = 0;
+  for (const auto& t : r.program->tunnels()) up += t.status == nc::TunnelStatus::Up ? 1 : 0;
+  d.add_i(up);
+  d.add_i(r.plan->reserved_total);
+}
+
+// t1.setup.fabric: every pair's replace(to_units(volume), design = the same) on a fresh ledger, in
+// pair order: CSPF setup, the holds' commit and the Lossless forwarding.
+inline std::uint64_t t1_setup(const Graph& g, const std::vector<std::pair<int, int>>& pairs, double volume, int tunnels) {
+  T1Fabric f(g, pairs, tunnels, nc::Admission::Lossless);
   Digest d;
   const auto units = nc::to_units(volume, kResolution);
-  for (auto [s, t] : pairs) {
-    const nc::NodeId sv[1] = {s};
-    const nc::NodeId tv[1] = {t};
-    policies.push_back(std::make_unique<nc::FlowPolicy>(fg, sv, tv, cfg));
-    const auto r = policies.back()->place(units);
-    d.add_d(nc::as_float(r.placed, kResolution));
-    d.add_i(static_cast<std::int64_t>(policies.back()->records().size()));
+  for (auto& p : f.policies) add_t1(d, p->replace(units, units));
+  return d.h;
+}
+
+// The fabric of t1.forward.fabric: Lossy, every pair set up once by replace(to_units(volume),
+// design = the same), outside the timed iterations.
+inline std::shared_ptr<T1Fabric> t1_installed(const Graph& g, const std::vector<std::pair<int, int>>& pairs, double volume,
+                                              int tunnels) {
+  auto f = std::make_shared<T1Fabric>(g, pairs, tunnels, nc::Admission::Lossy);
+  const auto units = nc::to_units(volume, kResolution);
+  for (auto& p : f->policies) (void)p->replace(units, units);
+  return f;
+}
+
+// t1.forward.fabric: the installed Lossy programs of every pair forwarded under each offer (no
+// setup: forward keeps the tunnels and the holds).
+inline std::uint64_t t1_forward(T1Fabric& f, const std::vector<double>& offers) {
+  Digest d;
+  for (double offer : offers) {
+    const auto units = nc::to_units(offer, kResolution);
+    for (auto& p : f.policies) add_t1(d, p->forward(units));
   }
   return d.h;
 }

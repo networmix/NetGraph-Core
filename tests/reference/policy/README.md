@@ -2,7 +2,7 @@
 
 ## In plain words
 
-`tests/data/policy_fixtures.json` holds 55 small scenarios (graphs, ledgers, policies and their
+`tests/data/policy_fixtures.json` holds 31 small scenarios (graphs, ledgers, policies and their
 calls) together with the result every call must produce. Both replay tests read it:
 `tests/cpp/flow_policy_fixture_tests.cpp` runs the scenarios on the C++ engine and
 `tests/py/test_flow_policy_fixtures.py` runs them through the Python binding; each compares
@@ -18,9 +18,11 @@ the library and without the untracked design tree the code came from.
 
 The data is frozen: it is never regenerated from the build. The command below proves that it
 still equals what the reference computes; a change of the data is a deliberate data change,
-reviewed as such. Two such changes have been made: when edges of capacity 0 became ordinary
-routing edges ("Zero-capacity links stay in routing" below), and when the sources of one
-demand were pooled and the origin arrived ("Pooled sources and the origin" below).
+reviewed as such. Four such changes have been made: when edges of capacity 0 became ordinary
+routing edges ("Zero-capacity links stay in routing" below), when the sources of one demand
+were pooled and the origin arrived ("Pooled sources and the origin" below), when `Pinned`
+began to forward programs ("Forwarding programs" below), and when T1 replaced the per-source
+`CapacityAware` ("T1 replaces CapacityAware" below).
 
 ## The historical `source` string inside the data
 
@@ -52,8 +54,8 @@ that every module of the reference was imported from this directory (an installe
 the same name, such as `graph` or `units`, would otherwise shadow it) and that no module of the
 library (`netgraph_core`, `_netgraph_core`) was imported.
 
-The data file: 651,786 bytes, sha256
-`47e332040c3a65719036e8dc59dc5995037be5bc8920a8153dba2ced751a7257` (55 fixtures, 533
+The data file: 189,030 bytes, sha256
+`e55ddf23a7630802fa2f8e4c410b282a2f3ca53d8b06c01875c5fdca56e5aa2e` (31 fixtures, 329
 operations).
 
 This directory is excluded from the source distribution (`sdist.exclude` in `pyproject.toml`);
@@ -63,7 +65,7 @@ the wheel holds only the `netgraph_core` package. No test imports it.
 
 The copies are the complete set of modules the exporter imports, found by running it and
 listing the imported modules (lazy imports inside functions included: every fixture runs).
-Their bodies are unchanged except for the two rule changes at the end of this file; they
+Their bodies are unchanged except for the rule changes at the end of this file; they
 cite the design contract's sections and notes, which are not in the repository. `p2_transaction/_p1.py` appends the sibling `p1_amount/` to `sys.path`, so
 the two directory names are part of the layout. `run_fixtures.py` is used only for its
 `run_one`; its own `main` would write snapshots beside it and is not used.
@@ -73,21 +75,21 @@ the copies were taken on 2026-10-09.
 
 | Copy (this directory) | Original | sha256 of the original | sha256 of the copy |
 | --- | --- | --- | --- |
-| `export_policy_fixtures.py` | `equivalence/export_policy_fixtures.py` | `0aea76a050b2d83e7398559af6a7d484a5a82a48b35bac9a3686f5fdf73211d2` | `e538ae31cab50370a8058003a52d7a2f3d0e25eb2de8cd7c22970255b0875e77` (relocated; pooled sources; programs, below) |
+| `export_policy_fixtures.py` | `equivalence/export_policy_fixtures.py` | `0aea76a050b2d83e7398559af6a7d484a5a82a48b35bac9a3686f5fdf73211d2` | `bf5764501039121ad55c6bcaeac4cce0b4b7cbeaeb95ff401cd01b608e6ef2b1` (relocated; pooled sources; programs; T1, below) |
 | `p2_transaction/_p1.py` | `prototypes/p2_transaction/_p1.py` | `3ec5468e1ee8357faa9d85e6d748c718de63baee22e064c204324e42de42ec98` | same |
-| `p2_transaction/fixtures.py` | `prototypes/p2_transaction/fixtures.py` | `ea05c85ce851fd7b7c6ff34b6a9eedbfd7b280187d0bf7e7965e626e4fe52071` | `60e61213de983cad3f3c70943e3d6afa8dbffe001595d3d245087e0a7e67ecdf` (zero capacity; pooled sources; programs, below) |
-| `p2_transaction/policy.py` | `prototypes/p2_transaction/policy.py` | `b367b71c6052cb70c9b107ec7fdd15f491349cfd6fdfcb12a18f24ab69a4d27b` | `d1c773d670f6b5cf6f0cf4fdf4a69779ef85a656ffcbcec4e52f16795e8bf0f7` (zero capacity; pooled sources; programs, below) |
+| `p2_transaction/fixtures.py` | `prototypes/p2_transaction/fixtures.py` | `ea05c85ce851fd7b7c6ff34b6a9eedbfd7b280187d0bf7e7965e626e4fe52071` | `255039ac5eaab9205168f9aeb8855ea2742b33a655db08717c761f05a71b0760` (zero capacity; pooled sources; programs; T1, below) |
+| `p2_transaction/policy.py` | `prototypes/p2_transaction/policy.py` | `b367b71c6052cb70c9b107ec7fdd15f491349cfd6fdfcb12a18f24ab69a4d27b` | `cb5f553ee86fe3275132231065f5fda7e39d5d3100a432d9b012eb77b402930a` (zero capacity; pooled sources; programs; T1, below) |
 | `p2_transaction/recorder.py` | `prototypes/p2_transaction/recorder.py` | `fb4a8f20ccc6ecef4bc6d934226df33d84ee4dbf70c59aad9f33a097b9d0eb8a` | same |
 | `p2_transaction/run_fixtures.py` | `prototypes/p2_transaction/run_fixtures.py` | `c20d655a2324c42201e9b743c51ef16bb47942dda56782e2d16b135a9c4db2fa` | same |
 | `p1_amount/apportion.py` | `prototypes/p1_amount/apportion.py` | `c1e2f5082a99db1d0e7de5cf4e713ad5790aca3d85060583d536f5bc7fdcd4b1` | same |
 | `p1_amount/certify.py` | `prototypes/p1_amount/certify.py` | `e4f0cce8a68fd512026e6e1c84c558b370d0741564b8191b8893de5cf173ad95` | `8d27afb711fd54f7063e75fe60137a5e37dbeea7dafb01d5788f6922d7f9c5b7` (zero capacity, below) |
 | `p1_amount/flowcore.py` | `prototypes/p1_amount/flowcore.py` | `72b3d8c91a077017cf759d4c834576b1babd513024e9e227650d273d8b08da2c` | `63a6cf7047cb2fe91d5992f23e5d9bada1b89e70a4cff595be0a24ddabb681df` (zero capacity, below) |
 | `p1_amount/graph.py` | `prototypes/p1_amount/graph.py` | `44051d4a496a423c73ed473b6d4da045c32e30b40701bec0ecb19b8d9e5822a8` | same |
-| `p1_amount/kernels.py` | `prototypes/p1_amount/kernels.py` | `6e8db4d6de8c275d0335a9fddad28b7f84daa7af04d3ab872e4078cc4f709729` | `b01f6f24846e39679308fa80ea0c95804fcb653f0aea7c999662423dfab0afc5` (zero capacity, below) |
+| `p1_amount/kernels.py` | `prototypes/p1_amount/kernels.py` | `6e8db4d6de8c275d0335a9fddad28b7f84daa7af04d3ab872e4078cc4f709729` | `799aef2bd6735b6e5d26365ecb578448ae641da2bf1e6b47c4d34c9dcafd1094` (zero capacity; T1, below) |
 | `p1_amount/ledger.py` | `prototypes/p1_amount/ledger.py` | `19a8ab41f7ae26ece8b8a0f151c55a287f0cdf22a779d8c6d2f9d8e5dc43fcf6` | `fb55b11fa7c416024dd8c6faef63f08f831f77bf20585e78f3847b515aa3a6c2` (pooled sources, below) |
-| `p1_amount/search.py` | `prototypes/p1_amount/search.py` | `3ab124b99fa68e25d467cfbb22a4e9900ade86e10001269df84f3c99ad31e04a` | `c79bfdc6d2a11197364f9bf7f3f41c8594843c72742f3285cbf685a4c117560c` (zero capacity, below) |
+| `p1_amount/search.py` | `prototypes/p1_amount/search.py` | `3ab124b99fa68e25d467cfbb22a4e9900ade86e10001269df84f3c99ad31e04a` | `2553786c44644f41990f6e4b0e03a8806dd0fccf9e344f8a0acef8663749e15a` (zero capacity; T1, below) |
 | `p1_amount/snap.py` | `prototypes/p1_amount/snap.py` | `0d62ff46d3c804bdbc80fae3c2c59a25aa0b34c013a086e7e81b7f722bdc0552` | same |
-| `p1_amount/units.py` | `prototypes/p1_amount/units.py` | `38b37a22ae56f592a63554683e860b44036cce678a7080f406a69c281a620cfe` | same |
+| `p1_amount/units.py` | `prototypes/p1_amount/units.py` | `38b37a22ae56f592a63554683e860b44036cce678a7080f406a69c281a620cfe` | `7332c631289bd3916357fe68c1c8906476d94918fd5d6fc4b3ad8fd113ab4486` (T1, below) |
 
 The rest of the two prototype directories (their notes, tests, snapshots, the MSD study
 `msd.py` and the historical grid prototypes) is not part of the reference and was not copied.
@@ -231,7 +233,7 @@ after a call. The reference was changed in exactly these places, by hand from th
    | the Pinned halves of `four_calls_MaxFlow`, `_W`, `_EB`, `_Lossy` (12 operations each) | four calls of 1 on two pinned routes | `PinnedProgram.Increments` (L9 to L11), `Operations.PlaceContinuesTheEpoch`, `Operations.ControllerWeights` (a supported or unrestricted controller's increments) |
    | the Pinned cohort of `eb_1_plus_2_vs_3` (7 operations) | `place(1); place(2)` equals `place(3)` | `test_programs.py::test_pinned_facts_of_the_retired_reference_fixtures` (Lossless Pinned is additive) |
    | the Pinned part of `admission_zero_and_no_route` (3 operations) | every bundle excluded: `NO_ROUTE` | the same test (every tunnel failed: `NO_ROUTE`), `Replay.TunnelFailedByNode` |
-   | the Pinned policy of `limits_kmaxflowspercall` (3 operations) | the creation cap does not count Pinned flows | `test_programs.py::test_the_creation_cap_does_not_limit_pinned_records` |
+   | the Pinned policy of `limits_kmaxflowspercall` (3 operations) | the creation cap does not count Pinned flows | none: the cap was deleted with T0 ("T1 replaces CapacityAware" below), and with it its test `test_the_creation_cap_does_not_limit_pinned_records` |
    | the Pinned half of `flag_zero_delivery_creation` (6 operations) | a zero-delivery creation and its flags | `test_programs.py::test_pinned_facts_of_the_retired_reference_fixtures` (both flags on the first program, none on the next zero call), `Operations.OfferOnly` |
    | the rejected Pinned source set of `sources_limits_and_validation` (1 operation) | Pinned required single endpoints | `PinnedProgram.SeveralEndpoints` (accepted now) |
 
@@ -242,3 +244,69 @@ configurations and record bundles; `support` and `weights` in the configurations
 state lost its `usable` key (332 keys); and the flags of the first program of each epoch
 (`weights_changed` true) and of two CostOnly `MaxFlow` re-solves whose paths change
 (`routes_changed` true).
+
+## T1 replaces CapacityAware
+
+The library's rule changed again (the contract's section 6): `CapacityAware` is T1, every head
+setting up its own strict tunnels by CSPF and forwarding over them; the per-source transaction
+(creation, reoptimisation, amounts and growth, the diminishing guard, the call-wide creation cap,
+the local outcomes and their reduction, `LIMIT_FLOWS` and `LIMIT_DIMINISHING`) is gone, and T1
+is checked by the library's own tests (no reference is derived for it here). The reference was
+changed in exactly these places:
+
+1. `p2_transaction/policy.py`: `CapacityAware`, `Diminishing`, the per-source stages and their
+   state (`SourceState`, `_search`, the per-flow amounts, `_offers`, `_place_flows`,
+   `_local_outcome`, `_run_source`, `_stage1` to `_stage4`), the outcome ranks, the creation
+   cap `MAX_FLOWS_PER_CALL` and the per-source Stretch baselines are removed; validation keeps
+   CostOnly's and Global's rules.
+2. `p1_amount/kernels.py`: the per-flow kernels only the stages used (`make_plan`, `alloc`,
+   `fits`, `t_max`, the per-flow `maxflow`, `lossy`) and `check_kernel`'s priority rule (a
+   Weighted flow's weights from the Headroom priority) are removed; `p1_amount/search.py`: the
+   cost ceilings (`check_ceiling`, `stretch_le`, `within_ceiling`, `static_shortest`), which only
+   those stages read; `p1_amount/units.py`: `K_MAX_FLOWS_PER_CALL`.
+3. `export_policy_fixtures.py`: a configuration has no `CapacityAware` fields, a placement no
+   creation cap `cap`, and a policy's flow no `members` and `weights` (outside the per-source
+   transaction they were always the route and null); the trace normalisation no longer drops
+   the stages' probe counts (`evals`, `evaluations`), which no other code emits; the shim no
+   longer records a ledger's `copy` and `reset` or a policy's `destroy`, which no fixture has
+   now (the replay never read them either).
+4. `p2_transaction/fixtures.py`: every `CapacityAware` policy is removed with every later
+   operation on its ledger (their expected values read its records, ids and owners); a fixture
+   left with nothing of its own is removed whole. Removed whole (24): `creation_fewer_routes`,
+   `creation_retry_after_release`, `ten_versus_five`, `eight_versus_ten_capacity`,
+   `eight_versus_ten_residual`, `eight_versus_ten_headroom`, `request_12_on_5_5`,
+   `growth_request_6`, `growth_256_request_1278`, `harmful_growth_10_1`,
+   `hidden_beneficial_route`, `retention_third_party_removal`, `shared_capacity_view`,
+   `reopt_double_spend`, `retention_same_structure`, `limits_kmaxflowspercall`,
+   `limits_diminishing`, `lifetime_remove_orphan_reset`, `flag_table`,
+   `eb_two_flows_per_source_reservation`, `eb_resplit_3_3_to_3_2_2`,
+   `eb_growth_equal_route_stop`, `capacityaware_blocked_inf_remove_place`,
+   `eb_growth_single_path_repeat`. Partly kept (3): `inf_every_kernel` loses its two
+   `CapacityAware` ledgers (6 operations), `admission_zero_and_no_route` its two `CapacityAware`
+   policies (the zero request, the rejected `src == dst` construction and the zero-residual
+   ledger: 6 operations), and `termination_reduction`, renamed
+   `termination_complete_and_no_route`, its four `CapacityAware` ledgers (12 operations); the
+   helpers `tunnel`, `ca`, `routes` and `Ctx.shares` go with them.
+
+   | Removed | What it showed | Covering test |
+   | --- | --- | --- |
+   | creation and growth (`creation_fewer_routes`, the `growth_*` fixtures, `harmful_growth_10_1`, `hidden_beneficial_route`, `eb_growth_*`, `eb_resplit_3_3_to_3_2_2`, the `CapacityAware` part of `inf_every_kernel`) | per-source creation of flows and growth | deleted by the contract (T1 has no growth, 6.4) |
+   | reoptimisation (`retention_third_party_removal`, `shared_capacity_view`, `reopt_double_spend`, `retention_same_structure`) | reroutes of retained flows | deleted by the contract |
+   | the creation cap and the diminishing guard (`limits_kmaxflowspercall`, `limits_diminishing`) | `LIMIT_FLOWS`, `LIMIT_DIMINISHING` | deleted by the contract (14.2 has neither) |
+   | the local outcomes and their reduction (`termination_reduction`'s four `CapacityAware` cases) | per-source terminations | deleted by the contract; T1's terminations: `T1Operations.Terminations`, `T1Forwarding.AllDown` (every tunnel down) |
+   | per-source reservation targets (`ten_versus_five`, `eight_versus_ten_*`, `request_12_on_5_5`, `eb_two_flows_per_source_reservation`) | requests split per source, the priority read on the residual | T1's requests and attempts: `T1Setup.RoundOrder` (the requests in round order), `T1Setup.ContractExamples` (the contract's examples of a last tunnel down and of two heads on a shared link), `T1Setup.PriorityTies`, `T1Setup.PriorityReadsUnreserved` |
+   | a call blocked by another owner, then served after its removal (`creation_retry_after_release`, `capacityaware_blocked_inf_remove_place`) | the view other owners leave | `T1Setup.OtherOwnersHolds`; the epoch rules of +inf, `remove()` and a finite place after +inf: `FlowPolicyRequests.RejectedRequestsLeaveThePolicyAndTheLedger` |
+   | the lifetime law (`lifetime_remove_orphan_reset`) | reset and copy rejected while bound, `remove()` reverts and retires ids, orphans until `reset()`, ids never reused | `FlowLedger.BoundWithFlowsRowAndEpochs`, `FlowLedger.OrphanedRecordsResetAndCopy`, `test_flow_ledger.py::test_lifetime_bound_rows_and_epochs`, `test_flow_ledger.py::test_orphans_from_destruction_reset_and_copy`; with holds: `LedgerProjections.RemoveReleasesBoth`, `LedgerProjections.OrphansAndReset`, `LedgerProjections.Copy` |
+   | the flag table (`flag_table`) | flags as committed events of the per-source transaction | deleted by the contract (flags compare programs, 10.4): `Operations.FirstProgramFlags`, `test_programs.py::test_change_flags_of_empty_programs_and_place_zero`; T1: `T1Operations.Flags`, `T1Operations.FirstFlags` |
+   | `admission_zero_and_no_route`'s `CapacityAware` cases | a zero request creates nothing; `src == dst` rejected; no route on a zero residual | T1 rejects `place` (`TunnelOperations.NoIncrements`); zero offers: `TunnelZero.T1`; endpoints: `FlowPolicyConfig.EveryRejectedCombinationBeforeBinding`; a zero reservation baseline: `LedgerProjections.Baselines` |
+
+   No fixture is left with a copy, a reset or a destruction of a ledger or policy (all were in
+   `lifetime_remove_orphan_reset`), so the data holds only the operations `ledger`, `policy`,
+   `place` and `remove`, and the exporter records only those (item 3). A future fixture with one
+   of the others adds its recording back with the replay of it.
+
+The data changed in exactly these ways: 24 fixtures and 204 operations fewer; in the three
+partly kept fixtures the graph, ledger and policy ids are renumbered and one fixture is renamed;
+every placement lost its `cap` key and every flow of a policy state its `members` and `weights`
+keys. Every other byte of every kept operation is unchanged (checked operation by operation
+against the earlier file).

@@ -1,7 +1,6 @@
-/* The evaluators: capacity (a FlowPolicy placement of +inf on
-   a fresh ledger; the exact maximum flow is capacity() with routing Global and the optimized
-   origin), batch_capacity (capacity per pair) and sensitivity (the loss of deleting each
-   candidate edge). */
+/* The evaluators: capacity (a FlowPolicy placement of +inf on a fresh ledger, T1's evaluate of
+   its design; the exact maximum flow is capacity() with routing Global and the optimized origin),
+   batch_capacity (capacity per pair) and sensitivity (the loss of deleting each candidate edge). */
 #pragma once
 
 #include <cstdint>
@@ -18,19 +17,21 @@
 namespace netgraph::core {
 
 // The options of every evaluator: the configuration, the static Eligibility, the DagCache, the
-// optional outputs of each result (sensitivity: of its baseline) and `offered`, the offer of a
-// Pinned Lossy evaluation (absent: none; the inner nullopt is +inf, which its rule rejects). The
-// Eligibility and the cache outlive the call.
-// | model                         | Lossless                         | Lossy |
-// | CostOnly EqualBalanced/Weighted | the uncapped bound (no offered) | the first-hop experiment (no offered) |
-// | CostOnly MaxFlow, Global       | the uncapped optimum (no offered) | rejected |
-// | CapacityAware                  | the uncapped placement (no offered) | rejected |
-// | Pinned                         | the fixed-program bound (no offered) | offered required and finite |
+// optional outputs of each result (sensitivity: of its baseline), `design_demand` (T1's design,
+// required and finite; every other model rejects one) and `offered`, the offer of a T1 or Pinned
+// Lossy evaluation (both absent: none; an inner nullopt is +inf). The Eligibility and the cache
+// outlive the call.
+// | model                           | Lossless                                         | Lossy |
+// | CostOnly EqualBalanced/Weighted | the uncapped bound (no offered)                  | the first-hop experiment (no offered) |
+// | CostOnly MaxFlow, Global        | the uncapped optimum (no offered)                | rejected |
+// | T1                              | the lossless bound of the tunnels set up for the design (no offered) | the design's tunnels forward offered (required and finite) |
+// | Pinned                          | the fixed-program bound (no offered)             | offered required and finite |
 struct QueryOptions {
   FlowPolicyConfig config;
   const Eligibility* elig {nullptr};
   DagCache* cache {nullptr};
   OutputOptions outputs {};
+  std::optional<std::optional<Amount>> design_demand {};
   std::optional<std::optional<Amount>> offered {};
 };
 
@@ -51,10 +52,14 @@ struct SensitivityResult {
 // DagCacheMiss.
 
 // place(+inf) of a FlowPolicy with opts.config on a fresh ledger of g (its capacities); Pinned
-// Lossy: place(offered). `offered` is checked after the policy's construction: an amount in [0,
-// 2^62) or +inf; a Lossless model rejects it (`<model> LOSSLESS capacity does not accept
-// offered`), CostOnly Lossy too (`CostOnly LOSSY capacity uses first-hop injection`), and Pinned
-// Lossy requires it finite (`Pinned LOSSY capacity requires finite offered`).
+// Lossy: place(offered); T1: evaluate(+inf, design) Lossless, evaluate(offered, design) Lossy.
+// The amounts are checked after the policy's construction, in this order: `offered` and
+// `design_demand` each an amount in [0, 2^62) or +inf; a design only for T1 (`<model> does not
+// accept design_demand`), required (`T1 capacity requires design_demand`) and finite (`T1
+// requires a finite design demand`); then `offered`: a Lossless model rejects it (`<model>
+// LOSSLESS capacity does not accept offered`), CostOnly Lossy too (`CostOnly LOSSY capacity uses
+// first-hop injection`), and T1 and Pinned Lossy require it finite (`<T1 or Pinned> LOSSY
+// capacity requires finite offered`).
 [[nodiscard]] PlacementResult capacity(const Graph& g, std::span<const NodeId> sources,
                                        std::span<const NodeId> destinations, const QueryOptions& opts);
 
@@ -63,7 +68,7 @@ struct SensitivityResult {
 // The Python binding checks the length of every supplied sequence.
 // Before starting workers, validate in order: workers >= 1; opts.elig's and the cache's graph;
 // a supplied building cache with workers > 1; Pinned (rejected: a program has fixed endpoints);
-// the configuration; offered (the rule of capacity); and per_pair_elig's length. Then validate each pair completely in index
+// the configuration; design_demand and offered (the rules of capacity); and per_pair_elig's length. Then validate each pair completely in index
 // order: endpoint sets, overlap, Eligibility's graph, the pooled single-path rule for its sources.
 // This reports the lowest failing pair index.
 // A supplied building cache requires workers == 1 because it allows one writer. Workers share
@@ -86,7 +91,8 @@ struct SensitivityResult {
 // same config, offered and cache. Unrestricted optimized Global starts from the baseline solve's
 // final state and repairs it after deleting the edge, using one state copy per worker. The result
 // is the exact maximum flow at minimum cost. Global with a support solves every deletion afresh;
-// Pinned replays the same program under each deletion (a fixed-route failure question).
+// T1 sets up again for the same design under each deletion; Pinned replays the same program under
+// each deletion (a fixed-route failure question).
 // CostOnly skips a deletion when no roster source's reachable part of the static shortest-path
 // support contains the edge: no route uses it, so loss is 0. All other deletions use a fresh
 // ledger. A failed deletion fails the call (no partial result), raising the exception of the

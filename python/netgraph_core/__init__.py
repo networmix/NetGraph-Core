@@ -12,8 +12,9 @@ to this file (``py.typed`` marks the package as typed).
 - Forwarding programs: ``ForwardingProgram`` (with its ``Tunnel`` entries and
   ``ForwardingProgram.from_routes`` over ``Route`` values), ``TunnelStatus``.
 - The policy engine: ``FlowPolicy``, ``FlowPolicyConfig``, the routings ``CostOnly``,
-  ``CapacityAware``, ``Global``, ``Pinned``, and ``PlacementResult`` (with its ``SourceFlow``
-  and ``TunnelFlow`` rows), ``OutputOptions``, ``Termination``.
+  ``CapacityAware`` (T1, with ``Tunnels``), ``Global``, ``Pinned``, and ``PlacementResult``
+  (with its ``SourceFlow`` and ``TunnelFlow`` rows and its ``TunnelPlan``), ``OutputOptions``,
+  ``Termination``.
 - The shortest-path cache: ``DagCache`` (building and frozen modes), ``DagCacheMiss``.
 - The evaluators: ``capacity``, ``batch_capacity``, ``sensitivity``.
 - The searches: ``spf`` (``Direction``, ``SpfOptions``, ``SpfResult``, ``UNREACHABLE``),
@@ -25,7 +26,6 @@ to this file (``py.typed`` marks the package as typed).
 from importlib.metadata import version as _version
 
 from _netgraph_core import (
-    MAX_FLOWS_PER_CALL,
     UNREACHABLE,
     Absolute,
     Admission,
@@ -34,7 +34,6 @@ from _netgraph_core import (
     DagCache,
     DagCacheMiss,
     DagCacheStats,
-    DiminishingReturns,
     Direction,
     EdgePriority,
     EdgeTieBreak,
@@ -66,6 +65,8 @@ from _netgraph_core import (
     Termination,
     Tunnel,
     TunnelFlow,
+    TunnelPlan,
+    Tunnels,
     TunnelStatus,
     WeightBasis,
     as_float,
@@ -103,7 +104,7 @@ __all__ = [
     "ForwardingProgram",
     "Absolute",
     "Stretch",
-    "DiminishingReturns",
+    "Tunnels",
     "CostOnly",
     "CapacityAware",
     "Global",
@@ -114,8 +115,8 @@ __all__ = [
     "PlacementResult",
     "SourceFlow",
     "TunnelFlow",
+    "TunnelPlan",
     "FlowPolicy",
-    "MAX_FLOWS_PER_CALL",
     "DagCache",
     "DagCacheMiss",
     "DagCacheStats",

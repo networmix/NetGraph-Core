@@ -3,9 +3,9 @@
 // still gives a zero-capacity member its round-robin share (dropped under Lossy, blocking under
 // Lossless), a Weighted split gives it weight 0 and never routes around it, sensitivity lists it,
 // and Global's minimum cut lists it when it leaves the sources' residual closure. Each test checks
-// the hand-derived values of the expected-result rows (Z-nn) of the change's ledger on small
-// graphs whose EdgeIds equal their input positions (asserted). The graphs: S (the contract's search
-// example and the owner page's G8): 0: 0 -> 1 cap 0, 1: 0 -> 2 cap 5, 2: 2 -> 1 cap 5, costs 1;
+// hand-derived values on small graphs whose EdgeIds equal their input positions (asserted). The
+// graphs: S (the contract's search example, whose only shortest route crosses the zero edge): 0:
+// 0 -> 1 cap 0, 1: 0 -> 2 cap 5, 2: 2 -> 1 cap 5, costs 1;
 // B (two sources): 0: 0 -> 2 cap 0, 1: 1 -> 2 cap 10.
 #include <gtest/gtest.h>
 
@@ -91,6 +91,20 @@ Placed place_once(const std::shared_ptr<const Graph>& g, std::vector<NodeId> s, 
   return x;
 }
 
+// T1 with N tunnels per head: one replace(offer, design) on a fresh ledger of g.
+FlowPolicyConfig t1(std::int64_t n, Admission a = Admission::Lossless, std::optional<CostCeiling> ceiling = std::nullopt) {
+  return FlowPolicyConfig {.routing = CapacityAware {Tunnels {n}, ceiling}, .admission = a};
+}
+Placed replace_once(const std::shared_ptr<const Graph>& g, std::vector<NodeId> s, std::vector<NodeId> d,
+                    const FlowPolicyConfig& c, Amount offer, Amount design) {
+  FlowLedger fg(g);
+  FlowPolicy p(fg, s, d, c);
+  Placed x;
+  x.r = p.replace(offer, design);
+  x.records = p.records();
+  return x;
+}
+
 std::vector<std::pair<EdgeId, Amount>> entries(const SensitivityResult& s) {
   std::vector<std::pair<EdgeId, Amount>> out;
   for (const auto& e : s.entries) out.emplace_back(e.edge, e.loss);
@@ -99,13 +113,13 @@ std::vector<std::pair<EdgeId, Amount>> entries(const SensitivityResult& s) {
 
 } // namespace
 
-// Z-01 to Z-05, Z-13: SPF-zero-edge and its variants on S.
+// SPF over the zero edge and its variants on S.
 TEST(ZeroCapacity, SpfSearchesTheZeroEdgeAndOnlyAResidualFiltersIt) {
   const auto g = graph_s();
   const auto t = search(*g, {0}, Direction::Forward, std::vector<NodeId> {1});
   EXPECT_EQ(t.target_cost, 1);
   EXPECT_EQ(dag_edges(t.dag), (std::vector<EdgeId>{0}));
-  const std::vector<Amount> res = {0, 5, 5};  // SPF-zero-edge-residual
+  const std::vector<Amount> res = {0, 5, 5};  // a residual that filters the zero edge
   const auto gated = search(*g, {0}, Direction::Forward, std::vector<NodeId> {1}, sel(), &res);
   EXPECT_EQ(gated.target_cost, 2);
   EXPECT_EQ(dag_edges(gated.dag), (std::vector<EdgeId>{1, 2}));
@@ -125,7 +139,7 @@ TEST(ZeroCapacity, SpfSearchesTheZeroEdgeAndOnlyAResidualFiltersIt) {
   EXPECT_EQ(dag_edges(masked.dag), (std::vector<EdgeId>{1, 2}));
 }
 
-// Z-06, Z-07 (KSP-zero-edge and -residual) through ksp; Z-08 in ksp_tests.cpp.
+// KSP over the zero edge, with and without a residual (the Stretch case is in ksp_tests.cpp).
 TEST(ZeroCapacity, KspListsTheZeroEdgeWalk) {
   const auto g = graph_s();
   auto r = ksp(*g, 0, 1, KspOptions(2, sel()));
@@ -138,7 +152,7 @@ TEST(ZeroCapacity, KspListsTheZeroEdgeWalk) {
   EXPECT_EQ(walks(ksp(*g, 0, 1, o)), (std::vector<std::vector<EdgeId>>{{1, 2}}));
 }
 
-// Z-09 to Z-12: the parallel-member rule and the priorities without a residual.
+// The parallel-member rule and the priorities without a residual.
 TEST(ZeroCapacity, CollapseAndPrioritiesWithoutAResidual) {
   const auto pair = ordered(2, {{0, 1, 0, 1}, {0, 1, 3, 1}});
   auto collapse = [&](EdgeTieBreak t, EdgePriority p) {
@@ -148,7 +162,7 @@ TEST(ZeroCapacity, CollapseAndPrioritiesWithoutAResidual) {
   EXPECT_EQ(collapse(EdgeTieBreak::PreferHigherPriority, EdgePriority::Capacity), (std::vector<EdgeId>{1}));
   EXPECT_EQ(collapse(EdgeTieBreak::PreferHigherPriority, EdgePriority::Headroom), (std::vector<EdgeId>{1}));
   EXPECT_EQ(collapse(EdgeTieBreak::PreferHigherPriority, EdgePriority::Residual), (std::vector<EdgeId>{1}));
-  // Z-10, Z-12: on positive capacities 1 and 5, Headroom reads 1 everywhere (EdgeId order
+  // On positive capacities 1 and 5, Headroom reads 1 everywhere (EdgeId order
   // decides); Capacity and Residual read the capacities.
   const auto d = ordered(4, {{0, 1, 1, 1}, {0, 2, 5, 1}, {1, 3, 1, 1}, {2, 3, 5, 1}});
   auto path = [&](const std::shared_ptr<const Graph>& h, EdgeTieBreak t, EdgePriority p) {
@@ -157,7 +171,7 @@ TEST(ZeroCapacity, CollapseAndPrioritiesWithoutAResidual) {
   EXPECT_EQ(path(d, EdgeTieBreak::PreferHigherPriority, EdgePriority::Headroom), (std::vector<EdgeId>{0, 2}));
   EXPECT_EQ(path(d, EdgeTieBreak::PreferHigherPriority, EdgePriority::Capacity), (std::vector<EdgeId>{1, 3}));
   EXPECT_EQ(path(d, EdgeTieBreak::PreferHigherPriority, EdgePriority::Residual), (std::vector<EdgeId>{1, 3}));
-  // Z-11: Headroom 0 on the zero-capacity edge, 1 elsewhere.
+  // Headroom 0 on the zero-capacity edge, 1 elsewhere.
   const auto z = ordered(4, {{0, 1, 0, 1}, {0, 2, 5, 1}, {1, 3, 5, 1}, {2, 3, 5, 1}});
   EXPECT_EQ(path(z, EdgeTieBreak::PreferHigherPriority, EdgePriority::Headroom), (std::vector<EdgeId>{1, 3}));
   EXPECT_EQ(path(z, EdgeTieBreak::Deterministic, EdgePriority::Headroom), (std::vector<EdgeId>{0, 2}));
@@ -165,7 +179,7 @@ TEST(ZeroCapacity, CollapseAndPrioritiesWithoutAResidual) {
   EXPECT_EQ(walks(ksp(*z, 0, 3, o)), (std::vector<std::vector<EdgeId>>{{1, 3}, {0, 2}}));
 }
 
-// Z-14, Z-15: the cached support is capacity-blind, and a policy reading it places 0 on S.
+// The cached support is capacity-blind, and a policy reading it places 0 on S.
 TEST(ZeroCapacity, DagCacheValuesAndTheirConsumers) {
   const auto g = graph_s();
   DagCache cache(*g);
@@ -181,7 +195,7 @@ TEST(ZeroCapacity, DagCacheValuesAndTheirConsumers) {
   EXPECT_EQ(capacity(*g, v({0}), v({1}), QueryOptions {cost_only_config(), nullptr, &cache}).placed, 0);
 }
 
-// Z-16 to Z-21: G8 under every model.
+// S under every model: its only shortest route crosses the zero edge.
 TEST(ZeroCapacity, G8ForEveryModel) {
   const auto g = graph_s();
   const auto eb = place_once(g, {0}, {1}, cost_only_config(), 5);
@@ -222,10 +236,14 @@ TEST(ZeroCapacity, G8ForEveryModel) {
                                   sel(EdgeTieBreak::Deterministic, EdgePriority::Capacity, false)), 5);
   EXPECT_EQ(single.r.placed, 0);
   EXPECT_EQ(place_once(g, {0}, {1}, global_config(), 5).r.placed, 5);
-  EXPECT_EQ(place_once(g, {0}, {1}, cfg(CapacityAware {.flow_count = 1}, FlowPlacement::EqualBalanced), 5).r.placed, 5);
+  // T1: the request of 5 filters the zero link out (6.4): the tunnel comes up over 0 -> 2 -> 1.
+  const auto tunnel = replace_once(g, {0}, {1}, t1(1), 5, 5);
+  EXPECT_EQ(tunnel.r.placed, 5);
+  ASSERT_EQ(tunnel.r.program->tunnels().size(), 1U);
+  EXPECT_EQ(tunnel.r.program->tunnels()[0].edges, (std::optional<std::vector<EdgeId>> {{1, 2}}));
 }
 
-// Z-22 to Z-25: a zero-capacity member first, last and deeper, and the parallel-member choice.
+// A zero-capacity member first, last and deeper, and the parallel-member choice.
 TEST(ZeroCapacity, EqualSplitsKeepTheZeroMemberWeightedSplitsPruneIt) {
   struct Want {
     Amount eb_lossless, eb_lossy;
@@ -252,7 +270,7 @@ TEST(ZeroCapacity, EqualSplitsKeepTheZeroMemberWeightedSplitsPruneIt) {
   const auto w = place_once(deep, {0}, {3}, cfg(CostOnly {}, FlowPlacement::Weighted), 10);
   ASSERT_EQ(w.records.size(), 1U);
   EXPECT_EQ(w.records[0].edges, (std::vector<std::pair<EdgeId, Amount>> {{0, 10}, {2, 10}}));
-  // Z-25: one member per pair; Headroom reads the working residual, 0/0 on the zero link being 0
+  // One member per pair; Headroom reads the working residual, 0/0 on the zero link being 0
   // (were it compared equal to every value, the lower EdgeId 0 would stay).
   auto collapsed = [&](EdgeTieBreak t, EdgePriority p) {
     return place_once(first, {0}, {1},
@@ -269,8 +287,8 @@ TEST(ZeroCapacity, EqualSplitsKeepTheZeroMemberWeightedSplitsPruneIt) {
   EXPECT_EQ(head.r.placed, 10);  // the canonical single path by bottleneck: Headroom 1 over 0
 }
 
-// Z-26 to Z-29: the first-hop experiment, STALE-wcmp-zero-capacity, STALE-all-zero-weight and
-// D-zero-service.
+// The first-hop experiment, a stale WCMP member of capacity 0, all weights zero and a link of
+// service 0.
 TEST(ZeroCapacity, LossyInjectionAndAllZeroWeights) {
   const auto lossy_eb = cfg(CostOnly {}, FlowPlacement::EqualBalanced, Admission::Lossy);
   const auto first = ordered(2, {{0, 1, 0, 1}, {0, 1, 10, 1}});
@@ -298,7 +316,7 @@ TEST(ZeroCapacity, LossyInjectionAndAllZeroWeights) {
   EXPECT_EQ(d.r.termination, Termination::Complete);
 }
 
-// Z-30 to Z-35: B3-zero-first, B3-positive-first and B3-delete-zero under the equal origin: a
+// A zero-capacity first or second source, and its deletion, under the equal origin: a
 // source behind a zero-capacity link stays in the roster and receives its share, which Lossless
 // admits only when it is 0 (0 when it is the first source, 1 when the second) and Lossy loses.
 TEST(ZeroCapacity, ZeroCapacitySourcesStayInTheRoster) {
@@ -322,14 +340,14 @@ TEST(ZeroCapacity, ZeroCapacitySourcesStayInTheRoster) {
   const auto py = place_once(bp, {0, 1}, {2}, lossy_eb, 10);
   EXPECT_EQ(py.r.placed, 5);
   EXPECT_EQ(py.r.call_drops, (Drops {{1, 5}}));
-  // Z-33: the source or its link excluded: the roster is [1].
+  // The source or its link excluded: the roster is [1].
   const auto no_node = b->eligibility(std::vector<NodeId> {0}, {});
   const auto no_link = b->eligibility({}, std::vector<EdgeId> {0});
   for (const Eligibility* el : {&no_node, &no_link}) {
     EXPECT_EQ(place_once(b, {0, 1}, {2}, cost_only_config(), 10, el).r.placed, 10);
     EXPECT_EQ(place_once(b, {0, 1}, {2}, global_config(), 10, el).r.placed, 10);
   }
-  // Z-34: Global keeps a zero-delivery record of source 0 with an empty bundle.
+  // Global keeps a zero-delivery record of source 0 with an empty bundle.
   const auto gl = place_once(b, {0, 1}, {2}, global_config(), 10);
   EXPECT_EQ(gl.r.placed, 10);
   EXPECT_EQ(gl.r.termination, Termination::Complete);
@@ -337,32 +355,46 @@ TEST(ZeroCapacity, ZeroCapacitySourcesStayInTheRoster) {
   EXPECT_EQ(gl.records[0].delivered, 0);
   EXPECT_TRUE(dag_edges(*gl.records[0].bundle).empty());
   EXPECT_EQ(gl.records[0].route_cost, kUnreachable);
-  // Z-35: CapacityAware: source 0 finds no route with free capacity, its share is lost.
-  const auto ca = place_once(b, {0, 1}, {2}, cfg(CapacityAware {.flow_count = 1}, FlowPlacement::EqualBalanced), 10);
-  EXPECT_EQ(ca.r.placed, 5);
-  EXPECT_EQ(ca.r.termination, Termination::NoRoute);
-  EXPECT_EQ(ca.records.size(), 1U);
+  // T1 (one tunnel per head, design 10: requests 5 and 5): head 0's link has no unreserved
+  // capacity, so its tunnel is down (NoBandwidth) and the head stays in the roster with its share
+  // (3.4): Lossless admits only totals that give it nothing, 0 as it is the first head; Lossy
+  // delivers head 1's 5 and loses head 0's 5 at the head. One record per entry, the down one too.
+  const auto ll_t1 = replace_once(b, {0, 1}, {2}, t1(1), 10, 10);
+  EXPECT_EQ(ll_t1.r.placed, 0);
+  EXPECT_EQ(ll_t1.r.termination, Termination::Exhausted);
+  ASSERT_EQ(ll_t1.records.size(), 2U);
+  EXPECT_EQ(ll_t1.records[0].entry, std::optional<std::int32_t> {0});
+  EXPECT_EQ(ll_t1.r.by_tunnel[0].status, TunnelStatus::NoBandwidth);
+  const auto ly_t1 = replace_once(b, {0, 1}, {2}, t1(1, Admission::Lossy), 10, 10);
+  EXPECT_EQ(ly_t1.r.placed, 5);
+  EXPECT_EQ(ly_t1.r.call_source_loss, 5);
+  EXPECT_EQ(ly_t1.r.termination, Termination::Complete);
 }
 
-// Z-36, Z-37: A-X8's delivery and A-X8-Stretch-exact's baseline in today's CapacityAware.
-TEST(ZeroCapacity, CapacityAwareRosterAndStretchBaseline) {
+// T1's setup on X8 and the pool baseline of Stretch(1.2) (6.4).
+TEST(ZeroCapacity, T1RosterAndStretchBaseline) {
+  // X8: D = 4, N = 1: head 0's link has capacity 0 (NoBandwidth), head 1's is up; Lossy delivers
+  // head 1's 2 and loses head 0's 2.
   const auto x8 = ordered(3, {{0, 2, 0, 1}, {1, 2, 8, 3}});
-  const auto r = place_once(x8, {0, 1}, {2}, cfg(CapacityAware {.flow_count = 1}, FlowPlacement::EqualBalanced), 4);
+  const auto r = replace_once(x8, {0, 1}, {2}, t1(1, Admission::Lossy), 4, 4);
   EXPECT_EQ(r.r.placed, 2);
-  EXPECT_EQ(r.r.termination, Termination::NoRoute);
+  EXPECT_EQ(r.r.call_source_loss, 2);
+  EXPECT_EQ(r.r.by_tunnel[0].status, TunnelStatus::NoBandwidth);
+  EXPECT_EQ(r.r.by_tunnel[1].status, TunnelStatus::Up);
+  // Stretch(1.2): c0 = 5 (the zero-capacity link counts); the stored 1.2 times 5 is just
+  // below 6, so the only feasible path (cost 6) exceeds the ceiling: CostCeiling, nothing
+  // delivered; a factor just above 1.2 admits it.
   const auto h = ordered(2, {{0, 1, 0, 5}, {0, 1, 1, 6}});
-  const auto stretched = [&](double f) {
-    return place_once(h, {0}, {1}, cfg(CapacityAware {.flow_count = 1, .max_path_cost = Stretch {f}},
-                                       FlowPlacement::EqualBalanced), 1);
-  };
-  const auto exact = stretched(1.2);  // baseline 5 (the zero link counts); 1.2 * 5 is below 6
+  const auto stretched = [&](double f) { return replace_once(h, {0}, {1}, t1(1, Admission::Lossy, Stretch {f}), 1, 1); };
+  const auto exact = stretched(1.2);
   EXPECT_EQ(exact.r.placed, 0);
-  EXPECT_EQ(exact.r.termination, Termination::NoRoute);
-  EXPECT_TRUE(exact.records.empty());
-  EXPECT_EQ(stretched(1.2 + 1e-9).r.placed, 1);  // the ceiling just above 6 admits the cost-6 route
+  EXPECT_EQ(exact.r.by_tunnel[0].status, TunnelStatus::CostCeiling);
+  EXPECT_EQ(exact.r.termination, Termination::Complete);  // every tunnel down: not rule (3)
+  EXPECT_EQ(exact.records.size(), 1U);
+  EXPECT_EQ(stretched(1.2 + 1e-9).r.placed, 1);
 }
 
-// Z-38 to Z-42: Pinned split routes over a zero-capacity link (E-zero-first, E-zero-last): each
+// Pinned split routes over a zero-capacity link (first or last): each
 // route is its own split context, the head's share split over them by round robin. EqualBalanced
 // keeps the zero link as a member, so the first unit (route 0) blocks a Lossless total: 0 when the
 // zero route comes first, 1 when it comes last; Lossy offer 4 sends 2 down each route and loses
@@ -397,7 +429,7 @@ TEST(ZeroCapacity, PinnedRoutesKeepTheirZeroLinks) {
   EXPECT_EQ(alone.records[0].delivered, 0);
 }
 
-// Z-41, Z-50: the plan of a Weighted split route with capacity weights. A route without a
+// The plan of a Weighted split route with capacity weights. A route without a
 // zero-capacity edge is its own member set; a route with one keeps only the positive edges on the
 // walks that remain, its route and route cost unchanged.
 TEST(ZeroCapacity, WeightedRoutePlansKeepOnlyPositiveEdges) {
@@ -426,7 +458,7 @@ TEST(ZeroCapacity, WeightedRoutePlansKeepOnlyPositiveEdges) {
   EXPECT_EQ(cost, 2);
 }
 
-// Z-43 to Z-48: the evaluators.
+// The evaluators.
 TEST(ZeroCapacity, EvaluatorsCountZeroCapacityRoutesAndCandidates) {
   const auto s = graph_s();
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {{{0}, {1}}, {{2}, {1}}};
@@ -434,21 +466,25 @@ TEST(ZeroCapacity, EvaluatorsCountZeroCapacityRoutesAndCandidates) {
   ASSERT_EQ(batch.size(), 2U);
   EXPECT_EQ(batch[0].placed, 0);
   EXPECT_EQ(batch[1].placed, 5);
-  // Z-44 (CostOnly, a negative loss) is in flow_policy_tests.cpp; Z-45: Global keeps its
+  // CostOnly's negative loss is in flow_policy_tests.cpp; Global keeps its
   // positive-flow candidates.
   EXPECT_EQ(entries(sensitivity(*s, v({0}), v({1}), QueryOptions {global_config()}, 1)),
             (std::vector<std::pair<EdgeId, Amount>> {{1, 5}, {2, 5}}));
   const auto b = graph_b(0, 10);
-  // CostOnly EB under the equal origin (B3-zero-first): the baseline is 0; deleting the zero link
+  // CostOnly EB under the equal origin (the zero-capacity source first): the baseline is 0; deleting the zero link
   // takes source 0 out of the roster and raises the total to 10 (loss -10); deleting link 1 leaves
   // source 0 alone (0).
   const auto eb = sensitivity(*b, v({0, 1}), v({2}), QueryOptions {cost_only_config()}, 1);
   EXPECT_EQ(eb.baseline.placed, 0);
   EXPECT_EQ(entries(eb), (std::vector<std::pair<EdgeId, Amount>> {{0, -10}, {1, 0}}));
-  const auto ca = sensitivity(*b, v({0, 1}), v({2}),
-                              QueryOptions {cfg(CapacityAware {.flow_count = 1}, FlowPlacement::EqualBalanced)}, 2);
-  EXPECT_EQ(ca.baseline.placed, 10);
-  EXPECT_EQ(entries(ca), (std::vector<std::pair<EdgeId, Amount>> {{0, 0}, {1, 10}}));
+  // T1 with the design 10 (X8's shape): head 0 is down and first, so the
+  // baseline admits 0; deleting the zero link takes head 0 out of the roster and head 1's one
+  // tunnel carries 10 (loss -10); deleting link 1 leaves head 0 alone, down (0).
+  QueryOptions tq {t1(1)};
+  tq.design_demand = Amount {10};
+  const auto ca = sensitivity(*b, v({0, 1}), v({2}), tq, 2);
+  EXPECT_EQ(ca.baseline.placed, 0);
+  EXPECT_EQ(entries(ca), (std::vector<std::pair<EdgeId, Amount>> {{0, -10}, {1, 0}}));
   const auto p0 = ordered(2, {{0, 1, 0, 1}, {0, 1, 4, 1}});
   const Pinned pin = pinned_dags(*p0, 0, 1, {dag_of(*p0, {0}), dag_of(*p0, {1})});
   const auto ps = sensitivity(*p0, v({0}), v({1}), QueryOptions {{.routing = pin}}, 1);
@@ -456,7 +492,7 @@ TEST(ZeroCapacity, EvaluatorsCountZeroCapacityRoutesAndCandidates) {
   EXPECT_EQ(entries(ps), (std::vector<std::pair<EdgeId, Amount>> {{0, -4}, {1, 0}}));
 }
 
-// Z-56: Global's minimum cut lists the zero-capacity link leaving the closure (value unchanged);
+// Global's minimum cut lists the zero-capacity link leaving the closure (value unchanged);
 // an excluded link is never listed.
 TEST(ZeroCapacity, GlobalMinCutListsZeroCapacityLinksLeavingTheClosure) {
   const OutputOptions want {false, false, true, true};

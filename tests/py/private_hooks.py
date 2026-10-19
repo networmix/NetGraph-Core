@@ -13,7 +13,7 @@ and test_flow_policy.py's test_lifetimes_keep_alive_and_orphans."""
 import _netgraph_core
 import pytest
 
-HOOKS = hasattr(_netgraph_core, "_max_flows_per_call")
+HOOKS = hasattr(_netgraph_core, "_fail_native_allocation")
 
 needs_hooks = pytest.mark.skipif(
     not HOOKS, reason="needs the private hooks (NETGRAPH_CORE_PRIVATE_HOOKS)"

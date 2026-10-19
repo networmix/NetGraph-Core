@@ -4,9 +4,8 @@
 // Lossy forwarding through a source, weights frozen per epoch, the first-hop experiment),
 // increments and zero calls, the controllers (Global and CostOnly MaxFlow) under both origins,
 // min_cut as its own output, the result's accounting and per-source rows, the terminations and
-// the evaluators. Each test checks the hand-derived values of the step's expected-result rows
-// (LEDGER rows C, Q, P, I, M, G, S, T, V) on small graphs whose EdgeIds equal their input
-// positions (asserted). The property tests check the controllers' certificates (conservation,
+// the evaluators. Each test checks hand-derived values on small graphs whose EdgeIds equal their
+// input positions (asserted). The property tests check the controllers' certificates (conservation,
 // maximality under the origin, no negative residual cycle) with an independent augmenting-path
 // maximum flow and Bellman-Ford, and pooled records against their own routes; the pooled
 // forwarding itself is compared with an independent reference in tests/py/test_pooled.py.
@@ -138,9 +137,9 @@ std::string construct_error(const std::vector<InEdge>& edges, std::vector<NodeId
 
 }  // namespace
 
-// ---------------------------------------------------------------- configuration (C rows)
+// ---------------------------------------------------------------- configuration
 
-// C4 to C12: each defect's text, at a policy and at capacity().
+// Each defect's text, at a policy and at capacity().
 TEST(ConfigOrigin, MatrixTexts) {
   const std::vector<std::pair<FlowPolicyConfig, std::string>> rows = {
       {FlowPolicyConfig {.routing = CostOnly {}}, "CostOnly requires placement"},
@@ -152,19 +151,16 @@ TEST(ConfigOrigin, MatrixTexts) {
        "CostOnly with EQUAL_BALANCED or WEIGHTED requires origin=EQUAL"},
       {cost_only(FlowPlacement::MaxFlow, Admission::Lossy), "MAX_FLOW requires admission=LOSSLESS"},
       {FlowPolicyConfig {.routing = Global {}, .admission = Admission::Lossy}, "MAX_FLOW requires admission=LOSSLESS"},
-      {FlowPolicyConfig {.routing = CapacityAware {}, .placement = FlowPlacement::MaxFlow, .origin = Origin::Optimized},
-       "T1 requires origin=EQUAL"},
-      {FlowPolicyConfig {.routing = CapacityAware {}}, "CapacityAware requires placement"},
-      {FlowPolicyConfig {.routing = CapacityAware {}, .placement = FlowPlacement::EqualBalanced,
-                         .admission = Admission::Lossy},
-       "CapacityAware requires admission=LOSSLESS"},
+      {FlowPolicyConfig {.routing = CapacityAware {Tunnels {1}}, .origin = Origin::Optimized}, "T1 requires origin=EQUAL"},
+      {FlowPolicyConfig {.routing = CapacityAware {Tunnels {1}}, .placement = FlowPlacement::MaxFlow},
+       "T1 does not accept placement"},
   };
   const auto g = graph(kB1);
   for (const auto& [cfg, text] : rows) {
     EXPECT_EQ(construct_error(kB1, {0, 1}, {3}, cfg), text);
     EXPECT_EQ(error_of([&] { (void)capacity(*g, v({0, 1}), v({3}), QueryOptions {cfg}); }), text);
   }
-  // C10, C12 and C8 for Pinned: it takes neither a placement nor an origin (its program has it).
+  // Pinned takes neither a placement nor an origin (its program has it).
   const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0})});
   const auto pinned_error = [&](const FlowPolicyConfig& c) {
     FlowLedger fg(g);
@@ -174,13 +170,12 @@ TEST(ConfigOrigin, MatrixTexts) {
   EXPECT_EQ(pinned_error(FlowPolicyConfig {pin, FlowPlacement::MaxFlow, Admission::Lossy}),
             "Pinned does not accept placement");
   EXPECT_EQ(pinned_error(FlowPolicyConfig {.routing = pin, .admission = Admission::Lossy}), "");
-  // C11: only CostOnly reads a cache (policy and evaluators).
+  // Only CostOnly reads a cache (policy and evaluators).
   DagCache cache(*g);
   FlowLedger fg(g);
   const std::vector<std::tuple<FlowPolicyConfig, std::vector<NodeId>, std::string>> cached = {
       {glob(), {0, 1}, "Global does not use DagCache"},
-      {FlowPolicyConfig {.routing = CapacityAware {}, .placement = FlowPlacement::MaxFlow}, {0, 1},
-       "T1 does not use DagCache"},
+      {FlowPolicyConfig {.routing = CapacityAware {Tunnels {1}}}, {0, 1}, "T1 does not use DagCache"},
       {FlowPolicyConfig {.routing = pin}, {0}, "Pinned does not use DagCache"},
   };
   for (const auto& [cfg, s, text] : cached) {
@@ -191,7 +186,7 @@ TEST(ConfigOrigin, MatrixTexts) {
   EXPECT_EQ(cache.stats().misses + cache.stats().hits, 0);
 }
 
-// C13, C14, C16, Q6: the row, then the columns placement, origin, admission, selection; the table
+// The row, then the columns placement, origin, admission, selection; the table
 // before the cache check.
 TEST(ConfigOrigin, MatrixOrder) {
   EXPECT_EQ(construct_error(kB1, {0, 1}, {3},
@@ -213,7 +208,7 @@ TEST(ConfigOrigin, MatrixOrder) {
             "Global does not accept placement");
 }
 
-// C15: the endpoints come before the ownership of the mask.
+// The endpoints come before the ownership of the mask.
 TEST(ConfigOrigin, EndpointsBeforeOwnership) {
   const auto g = graph(kB1);
   const auto other = graph(kB1);
@@ -224,7 +219,7 @@ TEST(ConfigOrigin, EndpointsBeforeOwnership) {
   EXPECT_FALSE(contains(text, "foreign")) << text;
 }
 
-// C19: finite after infinite, place(0) included, until remove().
+// Finite after infinite, place(0) included, until remove().
 TEST(ConfigOrigin, FiniteAfterInfinite) {
   for (const auto& cfg : {cost_only(), glob(), cost_only(FlowPlacement::EqualBalanced, Admission::Lossy)}) {
     Case k(kOne, {0}, {1}, cfg);
@@ -237,9 +232,9 @@ TEST(ConfigOrigin, FiniteAfterInfinite) {
   }
 }
 
-// ---------------------------------------------------------------- the pooled single-path rule (Q rows)
+// ---------------------------------------------------------------- the pooled single-path rule
 
-// Q1 to Q4: two normalized input sources (also when a mask leaves one) reject PreferHigherPriority
+// Two normalized input sources (also when a mask leaves one) reject PreferHigherPriority
 // single paths for every kernel; one source and multipath are accepted.
 TEST(PooledSinglePath, Rejected) {
   for (auto k : {FlowPlacement::EqualBalanced, FlowPlacement::Weighted, FlowPlacement::MaxFlow}) {
@@ -252,7 +247,7 @@ TEST(PooledSinglePath, Rejected) {
   }
 }
 
-// Q5: DETERMINISTIC single paths pool: 0: [e0, e2], 1: [e1, e2] (equal cost and hops: e2).
+// DETERMINISTIC single paths pool: 0: [e0, e2], 1: [e1, e2] (equal cost and hops: e2).
 TEST(PooledSinglePath, DeterministicPaths) {
   const auto det = sel(EdgeTieBreak::Deterministic, EdgePriority::Capacity, false);
   Case k(kPool, {0, 1}, {3}, cost_only(FlowPlacement::EqualBalanced, Admission::Lossless, det));
@@ -270,9 +265,9 @@ TEST(PooledSinglePath, DeterministicPaths) {
   EXPECT_EQ(ascending_edges(*recs[1].bundle), (std::vector<EdgeId> {1, 2}));
 }
 
-// ---------------------------------------------------------------- pooled CostOnly (P rows)
+// ---------------------------------------------------------------- pooled CostOnly
 
-// P1 to P3 (B-pooled): one split at the shared router, attributed member by member.
+// One split at the shared router, attributed member by member.
 TEST(Pooled, SharedRouterSplitsOnce) {
   Case k(kPool, {0, 1}, {3}, cost_only());
   const auto r = k.place(2, kEdges);
@@ -292,17 +287,17 @@ TEST(Pooled, SharedRouterSplitsOnce) {
   EXPECT_EQ(w.place(2).placed, 2);
 }
 
-// P4: each member's arrivals divided by what each source brought.
+// Each member's arrivals divided by what each source brought.
 TEST(Pooled, LossyAttributionByArrivals) {
   Case k(kPool, {0, 1}, {3}, cost_only(FlowPlacement::EqualBalanced, Admission::Lossy));
   const auto r = k.place(4);
   EXPECT_EQ(r.placed, 2);
   EXPECT_EQ(r.call_drops, (Drops {{2, 1}, {3, 1}}));
   EXPECT_EQ(rows(r), (std::vector<Row> {{0, 2, 2, 2, 0, 0}, {1, 2, 2, 0, 0, 2}}));
-  for (const auto& rec : k.p->records()) expect_conserved(*k.g, rec, "P4");
+  for (const auto& rec : k.p->records()) expect_conserved(*k.g, rec, "Lossy attribution by arrivals");
 }
 
-// P5 to P7, P9 (B3-zero-first, B3-positive-first): Lossless admits only totals that give the
+// Lossless admits only totals that give the
 // source behind the zero edge nothing; Lossy drops its share on that edge.
 TEST(Pooled, EqualEntryThatCannotPass) {
   for (const auto& [edges, want] : {std::pair {kB3Z, Amount {0}}, std::pair {kB3P, Amount {1}}}) {
@@ -322,7 +317,7 @@ TEST(Pooled, EqualEntryThatCannotPass) {
   EXPECT_EQ(l.termination, Termination::Complete);
 }
 
-// P8: Weighted gives the zero edge weight 0; source 0's share has no member and is source loss.
+// Weighted gives the zero edge weight 0; source 0's share has no member and is source loss.
 TEST(Pooled, WeightedZeroRouteIsSourceLoss) {
   Case k(kB3Z, {0, 1}, {2}, cost_only(FlowPlacement::Weighted, Admission::Lossy));
   const auto r = k.place(10);
@@ -347,7 +342,7 @@ TEST(Pooled, EqualOriginLimitsTheTotal) {
   EXPECT_EQ(l.call_drops, (Drops {{0, 4}}));
 }
 
-// P12, P13, P17 on CHAIN: source 1's traffic passes source 0's router.
+// CHAIN: source 1's traffic passes source 0's router.
 TEST(Pooled, TransitThroughASource) {
   Case k(kChain, {0, 1}, {2}, cost_only(FlowPlacement::EqualBalanced, Admission::Lossy));
   const auto r = k.place(10);
@@ -355,7 +350,7 @@ TEST(Pooled, TransitThroughASource) {
   EXPECT_EQ(r.call_drops, (Drops {{0, 7}}));
   EXPECT_EQ(rows(r), (std::vector<Row> {{0, 5, 5, 2, 0, 3}, {1, 5, 5, 1, 0, 4}}));
   EXPECT_EQ(k.records(), (decltype(k.records()) {{{{0, 2}}, 2}, {{{0, 1}, {1, 5}}, 1}}));
-  for (const auto& rec : k.p->records()) expect_conserved(*k.g, rec, "P12");
+  for (const auto& rec : k.p->records()) expect_conserved(*k.g, rec, "transit through a source");
   Case lossless(kChain, {0, 1}, {2}, cost_only());
   const auto l = lossless.place(std::nullopt);
   EXPECT_EQ(l.placed, 3);
@@ -369,7 +364,7 @@ TEST(Pooled, TransitThroughASource) {
   EXPECT_EQ(rows(h), (std::vector<Row> {{0, 3, 3, 0, 0, 3}, {1, 10, 10, 3, 0, 7}}));
 }
 
-// P14: Residual weights read once, on the residual at the first positive call's entry.
+// Residual weights read once, on the residual at the first positive call's entry.
 TEST(Pooled, ResidualWeightsOnTheCommonView) {
   auto snapshot = cost_only(FlowPlacement::Weighted, Admission::Lossless, sel(EdgeTieBreak::Deterministic, EdgePriority::Residual));
   snapshot.weights = WeightBasis::ResidualSnapshot;
@@ -379,7 +374,7 @@ TEST(Pooled, ResidualWeightsOnTheCommonView) {
   EXPECT_EQ(k.records(), (decltype(k.records()) {{{{0, 6}, {2, 1}, {3, 5}}, 6}, {{{1, 6}, {2, 1}, {3, 5}}, 6}}));
 }
 
-// P15: the weights stay frozen for the epoch after the other owner leaves.
+// The weights stay frozen for the epoch after the other owner leaves.
 TEST(Pooled, WeightsFrozenForTheEpoch) {
   const auto g = graph(kSnap);
   FlowLedger fg(g);
@@ -395,7 +390,7 @@ TEST(Pooled, WeightsFrozenForTheEpoch) {
   EXPECT_EQ(*r.edge_flows, (std::vector<Amount> {6, 6, 2, 10}));
 }
 
-// P16: the first-hop experiment.
+// The first-hop experiment.
 TEST(Pooled, FirstHopExperiment) {
   Case k(kPriv, {0, 1}, {2}, cost_only(FlowPlacement::EqualBalanced, Admission::Lossy));
   const auto r = k.place(std::nullopt);
@@ -405,7 +400,7 @@ TEST(Pooled, FirstHopExperiment) {
   EXPECT_EQ(r.termination, Termination::Exhausted);
 }
 
-// P18, P19 (properties): on random graphs with several sources, masks, zero capacities and dispersed
+// On random graphs with several sources, masks, zero capacities and dispersed
 // costs, every pooled record (EB and W, both admissions, multipath or deterministic single paths)
 // carries and drops only on its own route, conserves its traffic, and the rows sum to the totals
 // with the accounting identities; the ledger stays within the capacities.
@@ -484,9 +479,8 @@ TEST(Pooled, RecordsStayOnTheirRoutesAndAccountExactly) {
   EXPECT_GT(carrying, 200);
 }
 
-// ---------------------------------------------------------------- increments and zero calls (I rows)
+// ---------------------------------------------------------------- increments and zero calls
 
-// I1 to I4.
 TEST(Increments, LosslessRefusedUnitsStayRefused) {
   Case k(kInc, {0, 1}, {2}, cost_only());
   const auto a = k.place(3);
@@ -509,7 +503,7 @@ TEST(Increments, LosslessRefusedUnitsStayRefused) {
   EXPECT_EQ(lo(lb.offered), 4);
   EXPECT_EQ(lb.delivered, 3);
   EXPECT_EQ(rows(lb), (std::vector<Row> {{0, 2, 2, 1, 0, 1}, {1, 2, 2, 2, 0, 0}}));
-  // I3: another owner holds 8, leaves, places 5.
+  // Another owner holds 8, leaves, places 5.
   const auto g = graph(kOne);
   FlowLedger fg(g);
   FlowPolicy other(fg, v({0}), v({1}), cost_only());
@@ -522,7 +516,6 @@ TEST(Increments, LosslessRefusedUnitsStayRefused) {
   EXPECT_EQ(r.placed, 1);
   EXPECT_EQ(lo(r.requested), 6);
   EXPECT_EQ(lo(r.unadmitted), 3);
-  // I4.
   Case rc(kRc, {0}, {1}, cost_only(FlowPlacement::EqualBalanced, Admission::Lossy));
   EXPECT_EQ(rc.place(1).placed, 1);
   EXPECT_EQ(rc.place(1).placed, 0);
@@ -533,7 +526,7 @@ TEST(Increments, LosslessRefusedUnitsStayRefused) {
   EXPECT_EQ(*rc3.place(1, kEdges).edge_flows, (std::vector<Amount> {1, 1}));
 }
 
-// I5, I6 (RC02-zero-unprepared): a zero call before preparation, after a positive call, after
+// A zero call before preparation, after a positive call, after
 // remove().
 TEST(Epochs, ZeroCallBeforePreparation) {
   for (const bool global : {false, true}) {
@@ -567,9 +560,9 @@ TEST(Epochs, ZeroCallBeforePreparation) {
   }
 }
 
-// ---------------------------------------------------------------- the controllers (M, G rows)
+// ---------------------------------------------------------------- the controllers
 
-// M1 to M7: one controller on the union of the sources' shortest routes.
+// One controller on the union of the sources' shortest routes.
 TEST(CostOnlyMaxFlow, OptimizedPoolsTheRoster) {
   struct Want {
     std::vector<InEdge> edges;
@@ -599,14 +592,12 @@ TEST(CostOnlyMaxFlow, OptimizedPoolsTheRoster) {
     for (const auto& rec : k.p->records()) got.push_back(rec.edges);
     EXPECT_EQ(got, w.records);
   }
-  // M6.
   Case r4(kR4, {0, 1}, {2}, cost_only(FlowPlacement::MaxFlow, Admission::Lossless, std::nullopt, Origin::Equal));
   EXPECT_EQ(r4.place(3).placed, 3);
   EXPECT_EQ(r4.place(3).placed, 1);
   EXPECT_EQ(*r4.place(0).total_cost, c(20));
 }
 
-// G1 to G7, G11.
 TEST(GlobalEqual, Examples) {
   struct Want {
     std::vector<InEdge> edges;
@@ -639,16 +630,15 @@ TEST(GlobalEqual, Examples) {
     EXPECT_EQ(*r.edge_flows, w.flows);
     EXPECT_EQ(r.cost_distribution.has_value(), w.origin == Origin::Optimized);
   }
-  // G3: source 0's 6 is 2 direct and 4 through node 1.
+  // Source 0's 6 is 2 direct and 4 through node 1.
   Case b2(kB2, {0, 1}, {2}, glob(Origin::Equal));
   (void)b2.place(12);
   EXPECT_EQ(b2.records(), (decltype(b2.records()) {{{{0, 4}, {1, 2}, {2, 4}}, 6}, {{{2, 6}}, 6}}));
-  // G6 B3-delete-zero.
+  // The source behind the zero-capacity link masked: it leaves the roster.
   Case masked(kB3Z, {0, 1}, {2}, glob(Origin::Equal), {0});
   EXPECT_EQ(masked.place(10).placed, 10);
 }
 
-// G8 to G10.
 TEST(GlobalEqual, Increments) {
   Case k(kR4, {0, 1}, {2}, glob(Origin::Equal));
   const auto a = k.place(3);
@@ -929,10 +919,8 @@ void certify_controllers(bool global) {
 
 }  // namespace
 
-// G16 (property).
 TEST(GlobalEqual, Certificates) { certify_controllers(true); }
 
-// M8 (property).
 TEST(CostOnlyMaxFlow, Certificates) { certify_controllers(false); }
 
 // total_cost is exact beyond 64 bits, for both controllers under both origins (the values as
@@ -972,7 +960,7 @@ TEST(ResultShape, TotalCostBeyond64Bits) {
   }
 }
 
-// G12 to G15: min_cut is its own output, for the optimized Global only.
+// min_cut is its own output, for the optimized Global only.
 TEST(GlobalMinCut, Flag) {
   for (const auto& [edges, t] : {std::pair {kB1, NodeId {3}}, std::pair {kB3Z, NodeId {2}}}) {
     Case k(edges, {0, 1}, {t}, glob());
@@ -997,9 +985,8 @@ TEST(GlobalMinCut, Flag) {
   EXPECT_EQ(*e.total_cost, c(0));
 }
 
-// ---------------------------------------------------------------- terminations and the result (T, S rows)
+// ---------------------------------------------------------------- terminations and the result
 
-// T1 to T5.
 TEST(Terminations, Order) {
   for (const auto& cfg : {glob(), cost_only(), cost_only(FlowPlacement::EqualBalanced, Admission::Lossy)}) {
     Case k({{1, 0, 5, 1}}, {0}, {1}, cfg);
@@ -1007,7 +994,7 @@ TEST(Terminations, Order) {
     const auto r = k.place(5);
     EXPECT_EQ(r.termination, Termination::NoRoute);
     if (cfg.admission == Admission::Lossy) {
-      // O2: nothing enters: the offer is all source loss, every row zero.
+      // Nothing enters: the offer is all source loss, every row zero.
       EXPECT_EQ(lo(r.offered), 5);
       EXPECT_EQ(lo(r.source_loss), 5);
       EXPECT_EQ(r.call_source_loss, 5);
@@ -1031,7 +1018,7 @@ TEST(Terminations, Order) {
   EXPECT_EQ(unlimited.place(std::nullopt).termination, Termination::Exhausted);
 }
 
-// T6: a controller whose maximum is 0 over existing routes is exhausted, not without a route.
+// A controller whose maximum is 0 over existing routes is exhausted, not without a route.
 TEST(Terminations, ControllerAtZero) {
   Case g(kZero, {0}, {1}, glob());
   EXPECT_EQ(g.place(5).termination, Termination::Exhausted);
@@ -1039,7 +1026,7 @@ TEST(Terminations, ControllerAtZero) {
   EXPECT_EQ(m.place(5).termination, Termination::Exhausted);
 }
 
-// S2: Lossless accounting (G1).
+// Lossless accounting.
 TEST(ResultShape, LosslessAccounting) {
   Case k(kB1, {0, 1}, {3}, glob(Origin::Equal));
   const auto r = k.place(12);
@@ -1055,7 +1042,7 @@ TEST(ResultShape, LosslessAccounting) {
   EXPECT_EQ(rows(r), (std::vector<Row> {{0, kNone, 2, 2, 0, 0}, {1, kNone, 2, 2, 0, 0}}));
 }
 
-// S3, S4: Lossy accounting (P12, I2): state versus call.
+// Lossy accounting: state versus call.
 TEST(ResultShape, LossyAccounting) {
   Case k(kChain, {0, 1}, {2}, cost_only(FlowPlacement::EqualBalanced, Admission::Lossy));
   const auto r = k.place(10);
@@ -1073,18 +1060,21 @@ TEST(ResultShape, LossyAccounting) {
   EXPECT_EQ(b.drops, (Counters {{0, c(1)}}));
 }
 
-// S5, S6: a row for every input source; total_cost only for the controllers.
+// A row for every input source; total_cost only for the controllers.
 TEST(ResultShape, RowsForEveryInputSource) {
   Case k(kRows, {0, 1, 4}, {3}, cost_only(), {4});
   EXPECT_EQ(rows(k.place(3)),
             (std::vector<Row> {{0, kNone, 3, 3, 0, 0}, {1, kNone, 0, 0, 0, 0}, {4, kNone, 0, 0, 0, 0}}));
   const auto g = graph(kB1);
   const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0})});
-  for (const auto& cfg : {cost_only(), cost_only(FlowPlacement::Weighted),
-                          FlowPolicyConfig {.routing = CapacityAware {}, .placement = FlowPlacement::EqualBalanced}}) {
+  for (const auto& cfg : {cost_only(), cost_only(FlowPlacement::Weighted)}) {
     FlowLedger fg(g);
     EXPECT_FALSE(FlowPolicy(fg, v({0, 1}), v({3}), cfg).place(1).total_cost.has_value());
   }
+  FlowLedger ft(g);
+  EXPECT_FALSE(FlowPolicy(ft, v({0, 1}), v({3}), FlowPolicyConfig {.routing = CapacityAware {Tunnels {1}}})
+                   .replace(1)
+                   .total_cost.has_value());
   FlowLedger fg(g);
   EXPECT_FALSE(FlowPolicy(fg, v({0}), v({3}), FlowPolicyConfig {.routing = pin}).place(1).total_cost.has_value());
   FlowLedger fs(g);
@@ -1094,18 +1084,7 @@ TEST(ResultShape, RowsForEveryInputSource) {
   EXPECT_EQ(*mf.place(12).total_cost, c(32));
 }
 
-// S7: CapacityAware keeps its per-source computation (offers 6 and 6).
-TEST(ResultShape, CapacityAwareKeepsItsComputation) {
-  Case k(kB1, {0, 1}, {3}, FlowPolicyConfig {.routing = CapacityAware {}, .placement = FlowPlacement::EqualBalanced});
-  const auto r = k.place(12);
-  EXPECT_EQ(r.placed, 8);
-  EXPECT_EQ(r.termination, Termination::Exhausted);
-  EXPECT_EQ(lo(r.requested), 12);
-  EXPECT_EQ(lo(r.unadmitted), 4);
-  EXPECT_EQ(rows(r), (std::vector<Row> {{0, kNone, 2, 2, 0, 0}, {1, kNone, 6, 6, 0, 0}}));
-}
-
-// S8, S9 (D-zero-service): Pinned over a zero edge in the new shape.
+// Pinned over a zero edge in the new shape.
 TEST(ResultShape, PinnedInTheNewShape) {
   const auto g = graph(kZero);
   FlowLedger fg(g);
@@ -1127,9 +1106,8 @@ TEST(ResultShape, PinnedInTheNewShape) {
   EXPECT_EQ(e.termination, Termination::Complete);
 }
 
-// ---------------------------------------------------------------- evaluators (V rows, Q7)
+// ---------------------------------------------------------------- evaluators
 
-// V1 to V4.
 TEST(Evaluators, CapacityUnderBothOrigins) {
   const auto g = graph(kB1);
   const std::vector<std::pair<FlowPolicyConfig, Amount>> wants = {
@@ -1149,7 +1127,6 @@ TEST(Evaluators, CapacityUnderBothOrigins) {
   EXPECT_EQ(r.termination, Termination::Exhausted);
 }
 
-// V5.
 TEST(Evaluators, BatchEqual) {
   const auto g = graph(kB1);
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {{{0, 1}, {3}}, {{0}, {3}}, {{1}, {3}}};
@@ -1158,7 +1135,7 @@ TEST(Evaluators, BatchEqual) {
   EXPECT_EQ(got, (std::vector<Amount> {4, 2, 10}));
 }
 
-// Q7: the pooled single-path rule per pair, the lowest failing pair.
+// The pooled single-path rule per pair, the lowest failing pair.
 TEST(Evaluators, BatchQ12PerPair) {
   const auto g = graph(kPool);
   const QueryOptions opts {cost_only(FlowPlacement::EqualBalanced, Admission::Lossless, kPreferPath)};
@@ -1168,7 +1145,7 @@ TEST(Evaluators, BatchQ12PerPair) {
   EXPECT_EQ(batch_capacity(*g, good, opts, {}, 1).size(), 2U);
 }
 
-// V6 (B3-delete-zero): every allowed edge is a candidate under the equal origin.
+// Every allowed edge is a candidate under the equal origin.
 TEST(Evaluators, SensitivityEqualGlobal) {
   for (int workers : {1, 2}) {
     const auto r = sensitivity(*graph(kB3Z), v({0, 1}), v({2}), QueryOptions {glob(Origin::Equal)}, workers);
@@ -1179,7 +1156,7 @@ TEST(Evaluators, SensitivityEqualGlobal) {
   }
 }
 
-// V7: pooled CostOnly: deleting e0 takes source 0 out of the roster.
+// Pooled CostOnly: deleting e0 takes source 0 out of the roster.
 TEST(Evaluators, SensitivityPooled) {
   const auto r = sensitivity(*graph(kB1), v({0, 1}), v({3}), QueryOptions {cost_only()}, 1);
   EXPECT_EQ(r.baseline.placed, 4);

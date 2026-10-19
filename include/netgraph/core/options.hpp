@@ -3,6 +3,7 @@
    component. */
 #pragma once
 
+#include <optional>
 #include <variant>
 
 #include "netgraph/core/types.hpp"
@@ -35,27 +36,30 @@ using CostCeiling = std::variant<Absolute, Stretch>;
 // first (multi_edge = false), then choose the walk among the remaining members.
 enum class EdgeTieBreak { Deterministic, PreferHigherPriority };
 
-// Per-edge priority for PreferHigherPriority (single-path and parallel-edge choices), and for
-// CapacityAware's Weighted membership and weights:
+// Per-edge priority for PreferHigherPriority (single-path and parallel-edge choices):
 // Residual is unused capacity in units on the search's view; Capacity is static capacity in
-// units; Headroom is the exact ratio residual / capacity, 0 on an edge of capacity 0 (rejected
-// with CapacityAware's Weighted). Without a supplied residual, a search reads the static capacity as the unused
-// capacity: Residual and Capacity read the capacity, Headroom 1 (0 on an edge of capacity 0).
+// units; Headroom is the exact ratio residual / capacity, 0 on an edge of capacity 0. Without a
+// supplied residual, a search reads the static capacity as the unused capacity: Residual and
+// Capacity read the capacity, Headroom 1 (0 on an edge of capacity 0). T1's CSPF reads the
+// unreserved view U: Residual U, Headroom U / C, Capacity C.
 enum class EdgePriority { Residual, Capacity, Headroom };
 
-// `multipath` keeps all equal-cost walks as a shortest-path DAG; false selects the canonical
-// single path. `multi_edge` keeps all eligible parallel edges between each (u, v) pair; false
-// keeps one by (minimum cost, higher priority under PreferHigherPriority, lowest EdgeId).
-// Every field has a default: Deterministic, Capacity, and both flags true. Invalid enum values
-// throw std::invalid_argument naming the field. Fields remain assignable, so every entry point
-// that uses a selection validates it again.
+// `multipath`: absent (the default) is the model's natural shape, all equal-cost walks as a
+// shortest-path DAG for the searches and CostOnly, one path for a tunnel model; true is the DAG,
+// false the canonical single path (a tunnel model rejects true). `multi_edge` keeps all eligible
+// parallel edges between each (u, v) pair; false keeps one by (minimum cost, higher priority under
+// PreferHigherPriority, lowest EdgeId). Every field has a default: Deterministic, Capacity,
+// multipath absent, multi_edge true. Invalid enum values throw std::invalid_argument naming the
+// field. Fields remain assignable, so every entry point that uses a selection validates it again.
 struct PathSelection {
   PathSelection(EdgeTieBreak tie_break_ = EdgeTieBreak::Deterministic, EdgePriority priority_ = EdgePriority::Capacity,
-                bool multipath_ = true, bool multi_edge_ = true);
+                std::optional<bool> multipath_ = std::nullopt, bool multi_edge_ = true);
   EdgeTieBreak tie_break;
   EdgePriority priority;
-  bool multipath;
+  std::optional<bool> multipath;
   bool multi_edge;
+  // multipath = false: the canonical single path (absent and true are the DAG for a search).
+  [[nodiscard]] bool single_path() const noexcept { return multipath == false; }
   friend bool operator==(const PathSelection&, const PathSelection&) = default;
 };
 

@@ -42,7 +42,7 @@ jobs:
       # its own: PowerShell does not stop at a failing command inside one step.
       - name: Check the editable build carries the private hooks (Windows)
         if: runner.os == 'Windows'
-        run: python -c "import sys, _netgraph_core as m; sys.exit(0 if hasattr(m, '_max_flows_per_call') else 'the editable build lacks the private hooks')"
+        run: python -c "import sys, _netgraph_core as m; sys.exit(0 if hasattr(m, '_fail_native_allocation') else 'the editable build lacks the private hooks')"
       - name: Run Python tests (Windows)
         if: runner.os == 'Windows'
         run: python -m pytest tests/py/ -v

@@ -633,7 +633,7 @@ std::optional<CreationProducts> cost_only_creation(const Graph& g, const std::sh
                                                    FlowPlacement placement, Admission admission,
                                                    const WeightSource& weights) {
   const bool weighted = placement == FlowPlacement::Weighted;
-  if (!selection.multipath || (weighted && weights.basis == WeightBasis::ResidualSnapshot)) return std::nullopt;
+  if (selection.single_path() || (weighted && weights.basis == WeightBasis::ResidualSnapshot)) return std::nullopt;
   check_kernel(placement, admission);
   // A Weighted route edge's weight (static membership: Capacity or Explicit).
   auto weight = [&](EdgeId e) -> Amount {

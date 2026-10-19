@@ -300,8 +300,8 @@ TEST(Apportion, RoundRobinAndHighestAveragesValues) {
 
 // Highest averages with zero weights (pooled attribution divides by what each source holds, and a
 // source can hold nothing): a zero weight gets nothing and all-zero weights give nothing. The
-// contract's examples H-not-one-unit (not "within one unit of proportional"), H-local-bound and
-// RR-local-bound, and H-bound-sweep: every total up to 24 over 1 to 4 members with weights 0 to 4,
+// contract's examples: a member more than one unit from proportional, the local bounds of highest
+// averages and of round robin, and the sweep: every total up to 24 over 1 to 4 members with weights 0 to 4,
 // not all zero (19,400 cases), equals the sequential definition, and each member's rounding error
 // against its proportional share is below k units (k members), below 1 for equal weights.
 TEST(Apportion, HighestAveragesExamplesAndZeroWeights) {

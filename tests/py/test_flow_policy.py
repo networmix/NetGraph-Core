@@ -29,6 +29,7 @@ from helpers import (
     plain,
     sel,
     sweep_python_allocation,
+    t1_config,
     to_ids,
 )
 from private_hooks import HOOKS, needs_hooks
@@ -49,7 +50,7 @@ def test_configurations_are_structural_and_explicit():
             ngc.CostOnly(), ngc.FlowPlacement.MAX_FLOW, ngc.Admission.LOSSLESS, sel()
         )
     # Keyword-only; every field but the routing has a default: placement, selection and origin
-    # None, admission LOSSLESS (contract r8 3.1). A wrong class is TypeError.
+    # None, admission LOSSLESS (contract 3.1). A wrong class is TypeError.
     plain = ngc.FlowPolicyConfig(routing=ngc.CostOnly())
     assert (plain.placement, plain.admission, plain.selection, plain.origin) == (
         None,
@@ -68,63 +69,59 @@ def test_configurations_are_structural_and_explicit():
     with pytest.raises(TypeError):
         ngc.FlowPolicyConfig(routing=ngc.CostOnly(), weights="EXPLICIT")
     with pytest.raises(TypeError, match="incompatible"):
-        ngc.CostOnly(flow_count=2)  # a field outside its routing variant: TypeError
+        ngc.CostOnly(
+            tunnels=ngc.Tunnels(2)
+        )  # a field outside its routing variant: TypeError
     with pytest.raises(TypeError, match="incompatible"):
-        ngc.Global(max_flow_count=4)
+        ngc.Global(max_path_cost=ngc.Absolute(4))
     with pytest.raises(TypeError, match="routing"):
         config("CostOnly")
+    # T1: the tunnel count (a Tunnels), the ceiling and the search minimum, every field as built.
     ca = ngc.CapacityAware(
-        flow_count=2,
-        max_flow_count=4,
-        max_path_cost=ngc.Stretch(1.5),
-        min_flow_bandwidth=3,
-        reoptimize=True,
-        diminishing=ngc.DiminishingReturns(2, 0.25),
+        ngc.Tunnels(2), max_path_cost=ngc.Stretch(1.5), min_unreserved_bandwidth=3
     )
-    assert (ca.flow_count, ca.max_flow_count, ca.min_flow_bandwidth, ca.reoptimize) == (
-        2,
-        4,
+    assert (ca.tunnels, ca.max_path_cost, ca.min_unreserved_bandwidth) == (
+        ngc.Tunnels(2),
+        ngc.Stretch(1.5),
         3,
-        True,
     )
-    assert ca.max_path_cost == ngc.Stretch(1.5)
-    assert (ca.diminishing.window, ca.diminishing.fraction) == (2, 0.25)
-    assert ngc.CapacityAware().max_path_cost is None
+    assert (ca.tunnels.count, ca.tunnels.up_to) == (2, False)
+    assert ngc.Tunnels(3, up_to=True).up_to is True
+    d = ngc.CapacityAware(ngc.Tunnels(1))
+    assert (d.max_path_cost, d.min_unreserved_bandwidth) == (None, 0)
     assert ngc.CapacityAware(
-        max_path_cost=ngc.Absolute(7)
+        ngc.Tunnels(1), max_path_cost=ngc.Absolute(7)
     ).max_path_cost == ngc.Absolute(7)
     with pytest.raises(TypeError):
-        ngc.CapacityAware(2)  # keyword-only
+        ngc.CapacityAware()  # the tunnel count is required
+    with pytest.raises(TypeError):
+        ngc.CapacityAware(2)  # a Tunnels, not an int
+    with pytest.raises(TypeError):
+        ngc.CapacityAware(ngc.Tunnels(1), ngc.Absolute(1))  # keyword-only after tunnels
+    with pytest.raises(TypeError):
+        ngc.Tunnels(2, True)  # up_to is keyword-only
     for bad, message in (
-        (2**40, "flow_count = 1099511627776 is out of range [-2147483648, 2147483647]"),
-        (True, "flow_count must be an integer (got bool)"),
-        (1.5, "flow_count must be an integer (got float)"),
+        (2**70, "tunnel count = 1180591620717411303424 is out of range"),
+        (True, "tunnel count must be an integer (got bool)"),
+        (1.5, "tunnel count must be an integer (got float)"),
     ):
-        with pytest.raises(ValueError, match=exact(message)):
-            ngc.CapacityAware(flow_count=bad)
+        with pytest.raises(
+            ValueError, match=message.replace("(", r"\(").replace(")", r"\)")
+        ):
+            ngc.Tunnels(bad)
     with pytest.raises(
         ValueError,
         match=exact(
-            "min_flow_bandwidth (units) = 1208925819614629174706176 is out of range "
+            "min_unreserved_bandwidth = 1208925819614629174706176 is out of range "
             "[-9223372036854775808, 9223372036854775807]"
         ),
     ):
-        ngc.CapacityAware(min_flow_bandwidth=2**80)
+        ngc.CapacityAware(ngc.Tunnels(1), min_unreserved_bandwidth=2**80)
     with pytest.raises(TypeError):
         ngc.Pinned([[0, 1]])
-    cfg = config(ca)
+    cfg = ngc.FlowPolicyConfig(routing=ca)
     assert isinstance(cfg.routing, ngc.CapacityAware)
-    assert cfg.routing.flow_count == 2
-    # Every field reads back as built, with the documented defaults.
-    d = ngc.CapacityAware()
-    assert (
-        d.flow_count,
-        d.max_flow_count,
-        d.max_path_cost,
-        d.min_flow_bandwidth,
-        d.reoptimize,
-        d.diminishing,
-    ) == (1, None, None, 0, False, None)
+    assert cfg.routing.tunnels.count == 2
     s = sel(ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY, RES, False, True)
     cfg = ngc.FlowPolicyConfig(
         routing=ngc.Global(),
@@ -137,22 +134,22 @@ def test_configurations_are_structural_and_explicit():
     assert cfg.admission == ngc.Admission.LOSSY
     assert cfg.selection == s
     assert cfg.origin == ngc.Origin.EQUAL
-    assert ngc.PathSelection() == sel(ngc.EdgeTieBreak.DETERMINISTIC, CAP, True, True)
+    assert ngc.PathSelection() == sel(ngc.EdgeTieBreak.DETERMINISTIC, CAP, None, True)
+    assert ngc.PathSelection().multipath is None
+    assert ngc.PathSelection() != sel(ngc.EdgeTieBreak.DETERMINISTIC, CAP, True, True)
     o = ngc.OutputOptions()
-    assert (o.edge_flows, o.residual, o.bottleneck, o.min_cut) == (False,) * 4
-    for flags in (
-        (True, False, False, False),
-        (False, True, False, False),
-        (False, False, True, False),
-        (False, False, False, True),
-    ):
-        o = ngc.OutputOptions(
-            edge_flows=flags[0],
-            residual=flags[1],
-            bottleneck=flags[2],
-            min_cut=flags[3],
-        )
-        assert (o.edge_flows, o.residual, o.bottleneck, o.min_cut) == flags
+    names = (
+        "edge_flows",
+        "residual",
+        "bottleneck",
+        "reservation_edge_flows",
+        "min_cut",
+    )
+    assert tuple(getattr(o, n) for n in names) == (False,) * 5
+    for k in range(len(names)):
+        flags = tuple(i == k for i in range(len(names)))
+        o = ngc.OutputOptions(**dict(zip(names, flags, strict=True)))
+        assert tuple(getattr(o, n) for n in names) == flags
     # Pinned keeps its program and black holes by reference (one shared, immutable value each).
     g = diamond()
     a, b = dag_of(g, ids(g, [0, 1])), dag_of(g, ids(g, [2, 3]))
@@ -174,7 +171,6 @@ def test_configurations_are_structural_and_explicit():
         (ngc.CostOnly(), ngc.FlowPlacement.WEIGHTED, ngc.Origin.EQUAL),
         (ngc.CostOnly(), ngc.FlowPlacement.MAX_FLOW, ngc.Origin.OPTIMIZED),
         (ngc.Global(), None, ngc.Origin.OPTIMIZED),
-        (ngc.CapacityAware(), ngc.FlowPlacement.MAX_FLOW, ngc.Origin.EQUAL),
     ):
         got = ngc.FlowPolicy(
             ngc.FlowLedger(g),
@@ -184,23 +180,19 @@ def test_configurations_are_structural_and_explicit():
         ).config
         assert got.origin == origin
         assert got.selection == (None if placement is None else ngc.PathSelection())
+    got = ngc.FlowPolicy(
+        ngc.FlowLedger(g),
+        0,
+        3,
+        ngc.FlowPolicyConfig(routing=ngc.CapacityAware(ngc.Tunnels(1))),
+    ).config
+    assert (got.origin, got.selection, got.placement) == (
+        ngc.Origin.EQUAL,
+        ngc.PathSelection(),
+        None,
+    )
     # The constructors' own checks: an integer field outside its C++ type raises ValueError; a
-    # field of the wrong class, a reoptimize that is not a truth value and an unknown keyword
-    # raise TypeError. reoptimize takes a bool, a number or None by its truth value.
-    with pytest.raises(
-        ValueError,
-        match=exact(
-            "max_flow_count = 2147483648 is out of range [-2147483648, 2147483647]"
-        ),
-    ):
-        ngc.CapacityAware(max_flow_count=2**31)
-    with pytest.raises(
-        ValueError,
-        match=exact(
-            "diminishing window = 2147483648 is out of range [-2147483648, 2147483647]"
-        ),
-    ):
-        ngc.DiminishingReturns(2**31, 0.5)
+    # field of the wrong class and an unknown keyword raise TypeError.
     assert ngc.Absolute(2**63 - 1).cost == 2**63 - 1
     assert ngc.Absolute(-(2**63)).cost == -(2**63)
     for bad in (2**63, -(2**63) - 1):
@@ -214,21 +206,9 @@ def test_configurations_are_structural_and_explicit():
     with pytest.raises(
         TypeError, match=exact("max_path_cost must be Absolute, Stretch or None")
     ):
-        ngc.CapacityAware(max_path_cost=3)
-    with pytest.raises(
-        TypeError, match=exact("diminishing must be DiminishingReturns or None")
-    ):
-        ngc.CapacityAware(diminishing=0.5)
+        ngc.CapacityAware(ngc.Tunnels(1), max_path_cost=3)
     with pytest.raises(TypeError):
-        ngc.CapacityAware(reoptimize="yes")
-    assert [ngc.CapacityAware(reoptimize=x).reoptimize for x in (1, 0, 2.5, None)] == [
-        True,
-        False,
-        True,
-        False,
-    ]
-    with pytest.raises(TypeError):
-        ngc.CapacityAware(flow_counts=2)
+        ngc.CapacityAware(ngc.Tunnels(1), min_flow_bandwidth=2)  # T0's field is gone
 
 
 class _ConversionFailed(Exception):
@@ -276,14 +256,14 @@ class _OverflowingIndex:
 
 
 def test_float_fields_hold_only_finite_floats():
-    # Stretch's factor and DiminishingReturns' fraction are C++ doubles. An integer with no finite
+    # Stretch's factor is a C++ double. An integer with no finite
     # double (at either sign, as a Python int or through __index__) is outside the field's domain:
     # ValueError naming the field. The last integer that rounds to the largest finite double is
     # kept as that double; the next one rounds past it.
     top = sys.float_info.max
     last = 2**1024 - 2**970 - 1
     assert ngc.Stretch(last).factor == top
-    assert ngc.DiminishingReturns(1, -last).fraction == -top
+    assert ngc.Stretch(-last).factor == -top
 
     class Index:
         def __index__(self):
@@ -293,10 +273,6 @@ def test_float_fields_hold_only_finite_floats():
     for bad in (last + 1, -(last + 1), 10**400, Index()):
         with pytest.raises(ValueError, match=exact("Stretch factor " + too_large)):
             ngc.Stretch(bad)
-        with pytest.raises(
-            ValueError, match=exact("diminishing fraction " + too_large)
-        ):
-            ngc.DiminishingReturns(1, bad)
     # So is an int subclass that keeps int's own conversion; one with its own __float__ is
     # converted by that first, as float() does.
     with pytest.raises(ValueError, match=exact("Stretch factor " + too_large)):
@@ -306,13 +282,9 @@ def test_float_fields_hold_only_finite_floats():
     # OverflowError raised by its own __float__ or __index__ too: no integer was returned.
     with pytest.raises(_ConversionFailed):
         ngc.Stretch(_FailingFloat(2.0))
-    with pytest.raises(_ConversionFailed):
-        ngc.DiminishingReturns(1, _FailingFloat(0.5))
     for bad in (_OverflowingFloat(2.0), _OverflowingIndex(), _OverflowingIntFloat(2)):
         with pytest.raises(OverflowError, match=exact("own conversion")):
             ngc.Stretch(bad)
-        with pytest.raises(OverflowError, match=exact("own conversion")):
-            ngc.DiminishingReturns(1, bad)
 
 
 def test_validation_messages_before_binding():
@@ -329,36 +301,25 @@ def test_validation_messages_before_binding():
         LOSSY_KERNEL,
     )
     rejects(
-        config(ngc.CapacityAware(), admission=ngc.Admission.LOSSY),
-        "CapacityAware requires admission=LOSSLESS",
-    )
-    rejects(
         ngc.FlowPolicyConfig(
             routing=ngc.Global(), placement=ngc.FlowPlacement.MAX_FLOW
         ),
         "Global does not accept placement",
     )
     rejects(ngc.FlowPolicyConfig(routing=ngc.CostOnly()), "CostOnly requires placement")
+    rejects(t1_config(0), "tunnel count must be in [1, 10000]")
+    rejects(t1_config(10001), "tunnel count must be in [1, 10000]")
     rejects(
-        config(ngc.CapacityAware(flow_count=0)),
-        "CapacityAware flow_count must be >= 1 (got 0)",
+        ngc.FlowPolicyConfig(routing=ngc.CapacityAware(ngc.Tunnels(2, up_to=True))),
+        "T1 requires an exact tunnel count",
     )
-    rejects(
-        config(ngc.CapacityAware(flow_count=2, max_flow_count=1)),
-        "CapacityAware max_flow_count (1) must be >= flow_count (2)",
-    )
-    rejects(
-        config(ngc.CapacityAware(max_path_cost=ngc.Stretch(0.5))),
-        stretch.format("0.500000"),
-    )
-    rejects(
-        config(ngc.CapacityAware(max_path_cost=ngc.Stretch(math.nan))),
-        stretch.format("nan"),
-    )
-    rejects(
-        config(ngc.CapacityAware(diminishing=ngc.DiminishingReturns(1, 1.0))),
-        "diminishing fraction must be in (0, 1) (got 1.000000)",
-    )
+    rejects(t1_config(1, max_path_cost=ngc.Stretch(0.5)), stretch.format("0.500000"))
+    rejects(t1_config(1, max_path_cost=ngc.Stretch(math.nan)), stretch.format("nan"))
+    for bad in (-1, 2**62):
+        rejects(
+            t1_config(1, min_unreserved_bandwidth=bad),
+            "min_unreserved_bandwidth must be an integer in [0, 2^62)",
+        )
     b = dag_of(g, ids(g, [0, 1]))
     program = ngc.ForwardingProgram.from_routes(g, 0, 3, [ngc.Route(0, b)])
     rejects(
@@ -418,19 +379,20 @@ def test_validation_messages_before_binding():
 
 
 LOSSY_KERNEL = "MAX_FLOW requires admission=LOSSLESS"
-HEADROOM_KERNEL = (
-    "the Weighted kernel is rejected with priority Headroom (weights are units)"
-)
 P = ngc.FlowPlacement
 A = ngc.Admission
 ORIGIN = ngc.Origin
+
+
+def T1():
+    return ngc.CapacityAware(ngc.Tunnels(1))
 
 
 @pytest.mark.parametrize(
     ("routing", "placement", "admission", "selection", "origin", "msg"),
     [
         # The rows of the matrix, their columns left to right: placement, origin, admission,
-        # selection (contract r8 3.2, 14.3, 14.4).
+        # selection (contract 3.2, 14.3, 14.4).
         (
             ngc.Global,
             P.MAX_FLOW,
@@ -466,21 +428,14 @@ ORIGIN = ngc.Origin
         ),
         (ngc.CostOnly, P.MAX_FLOW, A.LOSSY, True, ORIGIN.EQUAL, LOSSY_KERNEL),
         (
-            ngc.CapacityAware,
+            T1,
             P.MAX_FLOW,
             A.LOSSY,
             True,
             ORIGIN.OPTIMIZED,
-            "T1 requires origin=EQUAL",
+            "T1 does not accept placement",
         ),
-        (
-            ngc.CapacityAware,
-            P.EQUAL_BALANCED,
-            A.LOSSY,
-            True,
-            None,
-            "CapacityAware requires admission=LOSSLESS",
-        ),
+        (T1, None, A.LOSSY, True, ORIGIN.OPTIMIZED, "T1 requires origin=EQUAL"),
     ],
 )
 def test_several_defects_report_the_first_in_the_contract_order(
@@ -524,7 +479,7 @@ def test_enum_values_outside_their_enumeration_are_rejected():
     with pytest.raises(ValueError, match="priority: 99 is not a value of EdgePriority"):
         ngc.PathSelection(ngc.EdgeTieBreak.DETERMINISTIC, ngc.EdgePriority(99))
     g = diamond()
-    for routing in (ngc.CostOnly(), ngc.CapacityAware(), ngc.Global()):
+    for routing in (ngc.CostOnly(), T1(), ngc.Global()):
         for cfg, message in (
             (
                 ngc.FlowPolicyConfig(routing=routing, placement=ngc.FlowPlacement(99)),
@@ -630,137 +585,6 @@ def test_placement_result_fields_and_outputs():
     r = gl.place(INF, ngc.OutputOptions(min_cut=True))
     assert r.min_cut == sorted(ids(diamond(5, 3, 2), [0, 2]))
     assert [rec.delivered for rec in gl.records()] == [8]
-
-
-def three_routes(a, b, c):
-    # Three disjoint routes 0 -> x -> 4 (input order): A through 1 of cost 1 + 1 = 2, B through 2
-    # of cost 2 + 1 = 3, C through 3 of cost 2 + 2 = 4; capacities a, b, c on both edges.
-    return build(
-        5,
-        [
-            (0, 1, a, 1),
-            (1, 4, a, 1),
-            (0, 2, b, 2),
-            (2, 4, b, 1),
-            (0, 3, c, 2),
-            (3, 4, c, 2),
-        ],
-    )
-
-
-def routes_of(g, policy):
-    """Per record: (route cost, delivered, the bundle's input edges, units per input edge)."""
-    pos = g.input_index()
-    return [
-        (
-            r.route_cost,
-            r.delivered,
-            sorted(int(pos[e]) for e in r.bundle.via_edges()),
-            sorted((int(pos[e]), x) for e, x in r.edges),
-        )
-        for r in policy.records()
-    ]
-
-
-def gated(kernel, ceiling=None, floor=0):
-    return config(
-        ngc.CapacityAware(max_path_cost=ceiling, min_flow_bandwidth=floor), kernel
-    )
-
-
-# Each route of three_routes(2, 2, 2) carrying its 2 units, as routes_of reports it.
-A2 = (2, 2, [0, 1], [(0, 2), (1, 2)])
-B2 = (3, 2, [2, 3], [(2, 2), (3, 2)])
-C2 = (4, 2, [4, 5], [(4, 2), (5, 2)])
-KERNELS = [ngc.FlowPlacement.MAX_FLOW, ngc.FlowPlacement.EQUAL_BALANCED]
-
-
-@pytest.mark.parametrize("kernel", KERNELS)
-@pytest.mark.parametrize(
-    "ceiling, placed, routes",
-    [
-        (ngc.Absolute(3), 4, [A2, B2]),
-        (ngc.Stretch(1.5), 4, [A2, B2]),
-        (ngc.Absolute(4), 6, [A2, B2, C2]),
-        (ngc.Stretch(2.0), 6, [A2, B2, C2]),
-        (None, 6, [A2, B2, C2]),
-        (ngc.Absolute(1), 0, []),
-    ],
-)
-def test_path_cost_ceiling_excludes_a_costlier_route(kernel, ceiling, placed, routes):
-    # CapacityAwareGates.PathCostCeilingExcludesACostlierRoute through the binding, derived by
-    # hand on three_routes(2, 2, 2): A (cost 2) is created and filled to 2,
-    # growth adds B (cost 3; EqualBalanced: cohort [2, 2]), and C (cost 4) only when the
-    # inclusive ceiling admits it: Absolute(3) and Stretch(1.5) (1.5 * 2 = 3) exclude it
-    # (placed 4, exhausted), Absolute(4) and Stretch(2) admit it (placed 6). Absolute(1) admits
-    # no route: placed 0, no_route.
-    g = three_routes(2, 2, 2)
-    p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 4, gated(kernel, ceiling))
-    term = T.NO_ROUTE if placed == 0 else T.EXHAUSTED
-    if (
-        HOOKS
-    ):  # the trace shows the per-source reduction CapacityAware keeps until step 4
-        r, trace = p._place_traced(10, ngc.OutputOptions())
-        assert trace["local_outcomes"] == {0: term.name.lower()}
-    else:
-        r = p.place(10)
-    assert (r.placed, r.remaining, r.termination) == (placed, 10 - placed, term)
-    assert (r.routes_changed, r.weights_changed) == (bool(routes), False)
-    assert routes_of(g, p) == routes
-
-
-@pytest.mark.parametrize("kernel", KERNELS)
-@pytest.mark.parametrize("factor, placed, routes", [(1.5, 2, [B2]), (2.0, 4, [B2, C2])])
-def test_stretch_baseline_is_the_static_shortest_cost(kernel, factor, placed, routes):
-    # A third party holds both units of A: the static shortest cost stays 2 (the Stretch
-    # baseline ignores the residual), so Stretch(1.5) admits B (3) and not C (4): placed 2. A
-    # baseline on the residual (3) would admit C under 4.5. Stretch(2) admits C: placed 4.
-    g = three_routes(2, 2, 2)
-    ledger = ngc.FlowLedger(g)
-    third = ngc.FlowPolicy(
-        ledger,
-        0,
-        4,
-        ngc.FlowPolicyConfig(routing=ngc.Global(support=dag_of(g, ids(g, [0, 1])))),
-    )
-    assert third.place(2).placed == 2
-    p = ngc.FlowPolicy(ledger, 0, 4, gated(kernel, ngc.Stretch(factor)))
-    r = p.place(10)
-    assert (r.placed, r.termination) == (placed, T.EXHAUSTED)
-    assert routes_of(g, p) == routes
-
-
-@pytest.mark.parametrize(
-    "kernel, floor, placed, routes",
-    [
-        (ngc.FlowPlacement.MAX_FLOW, 3, 4, [(2, 4, [0, 1], [(0, 4), (1, 4)])]),
-        (ngc.FlowPlacement.MAX_FLOW, 2, 6, [(2, 4, [0, 1], [(0, 4), (1, 4)]), B2]),
-        (ngc.FlowPlacement.MAX_FLOW, 5, 0, []),
-        (ngc.FlowPlacement.EQUAL_BALANCED, 3, 4, [(2, 4, [0, 1], [(0, 4), (1, 4)])]),
-        (
-            ngc.FlowPlacement.EQUAL_BALANCED,
-            2,
-            5,
-            [(2, 3, [0, 1], [(0, 3), (1, 3)]), B2],
-        ),
-        (ngc.FlowPlacement.EQUAL_BALANCED, 5, 0, []),
-    ],
-)
-def test_min_flow_bandwidth_stops_growth_below_the_floor(kernel, floor, placed, routes):
-    # CapacityAwareGates.MinFlowBandwidthStopsGrowthBelowTheFloor through the binding, derived
-    # by hand (every search gated at residual >= max(1, floor)) on three_routes(4, 2, 0): A of
-    # 4 units at cost 2, B of 2 at cost 3. Floor 3: A is filled to 4, B (residual 2) is below
-    # the floor, growth stops: placed 4. Floor 2: B is added: MaxFlow 4 + 2; EqualBalanced the
-    # cohort [3, 2] (round robin, the odd unit to the first flow; [3, 3] exceeds B), then A's
-    # residual 1 is below the floor: placed 5. Floor 5: no route at all, no_route.
-    g = three_routes(4, 2, 0)
-    p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 4, gated(kernel, floor=floor))
-    r = p.place(10)
-    assert (r.placed, r.termination) == (
-        placed,
-        T.NO_ROUTE if placed == 0 else T.EXHAUSTED,
-    )
-    assert routes_of(g, p) == routes
 
 
 def test_lifetimes_keep_alive_and_orphans():
@@ -963,7 +787,7 @@ def test_sensitivity_candidates_and_signed_losses(monkeypatch):
     assert s.baseline.placed == 2
     pos = p.input_index()
     assert {int(pos[e.edge]): e.loss for e in s.entries} == {0: 1, 1: 1, 2: 0}
-    # A negative loss on a zero-capacity link (G8): the only shortest route 0 -> 1 has capacity
+    # A negative loss on a zero-capacity link (the search graph S): the only shortest route 0 -> 1 has capacity
     # 0, so equal splitting carries 0; without it the route 0 -> 2 -> 1 carries 5.
     g8 = build(3, [(0, 1, 0, 1), (0, 2, 5, 1), (2, 1, 5, 1)])
     s8 = ngc.sensitivity(g8, 0, 1, opts)

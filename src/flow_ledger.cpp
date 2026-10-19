@@ -1,14 +1,16 @@
 /*
   The integer ledger FlowLedger.
 
-  The aggregate allocation is kept exactly (integers) and changed only by an atomic commit, a
-  detach or a reset (which zeroes it); residual() is derived from it (baseline - allocated).
+  The aggregate allocation and the aggregate holds are kept exactly (integers) and changed only by
+  an atomic commit, a detach or a reset (which zeroes them); residual() and unreserved() are
+  derived from them (each baseline minus its aggregate). The two projections are never added.
   Records are kept by id (FlowId order); ids come from a per-ledger counter and are never
   reused, also across reset().
 */
 #include "netgraph/core/flow_ledger.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -31,7 +33,17 @@ FlowLedger::FlowLedger(std::shared_ptr<const Graph> graph) {
 FlowLedger::FlowLedger(std::shared_ptr<const Graph> graph, std::span<const Amount> residual) {
   if (!graph) throw std::invalid_argument("FlowLedger: graph is null");
   graph_ = std::move(graph);
-  baseline_ = checked_baseline(residual);
+  baseline_ = checked_baseline(residual, "residual");
+  allocated_.assign(baseline_.size(), 0);
+  uid_ = detail::next_uid();
+}
+
+FlowLedger::FlowLedger(std::shared_ptr<const Graph> graph, std::span<const Amount> residual,
+                       std::span<const Amount> unreserved) {
+  if (!graph) throw std::invalid_argument("FlowLedger: graph is null");
+  graph_ = std::move(graph);
+  baseline_ = checked_baseline(residual, "residual");
+  reservation_baseline_ = checked_baseline(unreserved, "unreserved");
   allocated_.assign(baseline_.size(), 0);
   uid_ = detail::next_uid();
 }
@@ -45,6 +57,8 @@ FlowLedger::FlowLedger(const FlowLedger& other) {
   uid_ = detail::next_uid();
   baseline_ = other.baseline_;
   allocated_ = other.allocated_;
+  reservation_baseline_ = other.reservation_baseline_;
+  reserved_ = other.reserved_;
   records_ = other.records_;
   owner_ids_ = other.owner_ids_;
   for (auto& [id, rec] : records_) rec.flow_id = FlowId {uid_, id};
@@ -62,6 +76,8 @@ FlowLedger::FlowLedger(FlowLedger&& other) {
   uid_ = other.uid_;
   baseline_ = std::move(other.baseline_);
   allocated_ = std::move(other.allocated_);
+  reservation_baseline_ = std::move(other.reservation_baseline_);
+  reserved_ = std::move(other.reserved_);
   records_ = std::move(other.records_);
   owner_ids_ = std::move(other.owner_ids_);
   next_id_ = other.next_id_;
@@ -70,6 +86,8 @@ FlowLedger::FlowLedger(FlowLedger&& other) {
   other.usable_ = false;
   other.baseline_.clear();
   other.allocated_.clear();
+  other.reservation_baseline_.clear();
+  other.reserved_.clear();
   other.records_.clear();
   other.owner_ids_.clear();
   other.owners_.clear();
@@ -79,9 +97,9 @@ void FlowLedger::check_usable() const {
   if (!usable_) throw std::logic_error("FlowLedger: a moved-from ledger is empty and unusable");
 }
 
-std::vector<Amount> FlowLedger::checked_baseline(std::span<const Amount> residual) const {
-  detail::check_edge_amounts(*graph_, residual, "residual");
-  return std::vector<Amount>(residual.begin(), residual.end());
+std::vector<Amount> FlowLedger::checked_baseline(std::span<const Amount> amounts, const char* label) const {
+  detail::check_edge_amounts(*graph_, amounts, label);
+  return std::vector<Amount>(amounts.begin(), amounts.end());
 }
 
 std::uint64_t FlowLedger::uid() const {
@@ -109,6 +127,18 @@ std::vector<Amount> FlowLedger::residual() const {
 std::vector<Amount> FlowLedger::allocated() const {
   check_usable();
   return allocated_;
+}
+
+std::vector<Amount> FlowLedger::reserved() const {
+  check_usable();
+  return reserved_.empty() ? std::vector<Amount>(baseline_.size(), 0) : reserved_;
+}
+
+std::vector<Amount> FlowLedger::unreserved() const {
+  check_usable();
+  std::vector<Amount> out(baseline_.size());
+  for (std::size_t e = 0; e < out.size(); ++e) out[e] = reservation_at(e) - reserved_at(e);
+  return out;
 }
 
 std::vector<FlowRecord> FlowLedger::records() const {
@@ -194,13 +224,31 @@ void FlowLedger::reset() {
 
 void FlowLedger::reset(std::span<const Amount> residual) {
   check_usable();
+  check_resettable();
+  install(checked_baseline(residual, "residual"), {});
+}
+
+void FlowLedger::reset(std::span<const Amount> residual, std::span<const Amount> unreserved) {
+  check_usable();
+  check_resettable();
+  auto baseline = checked_baseline(residual, "residual");
+  install(std::move(baseline), checked_baseline(unreserved, "unreserved"));
+}
+
+void FlowLedger::check_resettable() const {
   if (num_bound_ != 0) {
     throw std::invalid_argument("FlowLedger.reset is rejected while a policy is bound (" +
                                 std::to_string(num_bound_) + " bound)");
   }
-  auto baseline = checked_baseline(residual);
+}
+
+// The new baselines (an empty reservation: the capacities) and no records; allocated_ keeps its
+// size, so nothing here allocates.
+void FlowLedger::install(std::vector<Amount> baseline, std::vector<Amount> reservation) {
+  allocated_.assign(baseline.size(), 0);
+  reserved_.clear();
   baseline_ = std::move(baseline);
-  allocated_.assign(baseline_.size(), 0);
+  reservation_baseline_ = std::move(reservation);
   records_.clear();
   owner_ids_.clear();
   owners_.clear();
@@ -221,7 +269,8 @@ bool is_bound(const std::map<std::int64_t, bool>& owners, std::int64_t owner) {
 // later commits ignore old stamps, including after an exception. Only stamp wraparound (after
 // 2^32 commits on one thread, which a long-running process reaches) needs a full stamp clear.
 // Delta and stamp share one array: failed growth leaves the old array intact (the strong
-// guarantee).
+// guarantee). One scratch per projection (Projection 0: carried loads, 1: holds).
+template <int Projection>
 class DeltaScratch {
 public:
   explicit DeltaScratch(std::size_t num_edges) : s_(storage()) {
@@ -271,6 +320,7 @@ FlowRecord record_of(std::uint64_t uid, std::int64_t id, std::int64_t owner, Dra
   rec.owner = owner;
   std::erase_if(rec.edges, [](const auto& p) { return p.second == 0; });
   std::erase_if(rec.drops, [](const auto& p) { return p.second.is_zero(); });
+  std::erase_if(rec.reserved_edges, [](const auto& p) { return p.second == 0; });
   return rec;
 }
 
@@ -308,6 +358,7 @@ std::vector<std::int64_t> LedgerAccess::detach(FlowLedger& fg, std::int64_t owne
   for (std::int64_t id : ids) {
     const auto rec = fg.records_.find(id);
     for (const auto& [e, x] : rec->second.edges) fg.allocated_[static_cast<std::size_t>(e)] -= x;
+    for (const auto& [e, x] : rec->second.reserved_edges) fg.reserved_[static_cast<std::size_t>(e)] -= x;
     fg.records_.erase(rec);
   }
   return ids;
@@ -330,11 +381,12 @@ std::vector<FlowId> LedgerAccess::commit_drafts(FlowLedger& fg, std::int64_t own
   const auto owned = fg.owner_ids_.find(owner);
   const std::size_t num_current = owned == fg.owner_ids_.end() ? 0 : owned->second.size();
   if (owned == fg.owner_ids_.end() && drafts.size() == 1 && !drafts[0].id.has_value() &&
+      drafts[0].record.reserved_edges.empty() &&
       std::adjacent_find(drafts[0].record.edges.begin(), drafts[0].record.edges.end(),
                          [](const auto& a, const auto& b) { return a.first >= b.first; }) ==
           drafts[0].record.edges.end()) {
-    // One new record for an owner without live records (a fresh placement), its edges strictly
-    // ascending: each touched edge's delta is the draft's own amount, touched in the draft's order,
+    // One new record without holds for an owner without live records (a fresh placement), its
+    // edges strictly ascending: each touched edge's delta is the draft's own amount, touched in the draft's order,
     // so the checks below run on the draft itself, in the general path's order and with its
     // messages (negative amounts first, then feasibility edge by edge); the staging and the
     // publication are the general path's for one new record.
@@ -384,12 +436,17 @@ std::vector<FlowId> LedgerAccess::commit_drafts(FlowLedger& fg, std::int64_t own
                                   : "ledger: a commit must carry every live record of its policy");
   }
 
-  // 1. The new aggregate on every touched edge (old owner allocation out, new drafts in),
-  // checked before anything changes.
-  DeltaScratch delta(fg.allocated_.size());
+  // 1. The new aggregates on every touched edge (old owner allocation and holds out, new drafts
+  // in), checked before anything changes: carried loads against the service baseline, then holds
+  // against the reservation baseline (each below 2^62, so a sum of two stays below 2^63). Holds are
+  // gathered only when some record has one.
+  DeltaScratch<0> delta(fg.allocated_.size());
+  bool holds = false;
   if (num_current != 0) {
     for (std::int64_t id : owned->second) {
-      for (const auto& [e, x] : fg.records_.at(id).edges) delta.add(e, -x);
+      const FlowRecord& r = fg.records_.at(id);
+      for (const auto& [e, x] : r.edges) delta.add(e, -x);
+      holds = holds || !r.reserved_edges.empty();
     }
   }
   bool negative = false;
@@ -399,6 +456,7 @@ std::vector<FlowId> LedgerAccess::commit_drafts(FlowLedger& fg, std::int64_t own
       negative = negative || x < 0;
       delta.add(e, x);
     }
+    holds = holds || !r.reserved_edges.empty();
   }
   if (negative) throw std::logic_error("ledger: a negative allocation in a commit");
   for (EdgeId e : delta.touched()) {
@@ -409,9 +467,36 @@ std::vector<FlowId> LedgerAccess::commit_drafts(FlowLedger& fg, std::int64_t own
                              " of " + std::to_string(fg.baseline_[ei]) + ")");
     }
   }
+  std::optional<DeltaScratch<1>> held;
+  if (holds) {
+    held.emplace(fg.allocated_.size());
+    if (num_current != 0) {
+      for (std::int64_t id : owned->second) {
+        for (const auto& [e, x] : fg.records_.at(id).reserved_edges) held->add(e, -x);
+      }
+    }
+    bool negative_hold = false;
+    for (const auto& d : drafts) {
+      for (const auto& [e, x] : d.record.reserved_edges) {
+        negative_hold = negative_hold || x < 0;
+        held->add(e, x);
+      }
+    }
+    if (negative_hold) throw std::logic_error("ledger: a negative hold in a commit");
+    for (EdgeId e : held->touched()) {
+      const auto ei = static_cast<std::size_t>(e);
+      const Amount next = fg.reserved_at(ei) + held->at(e);
+      if (next < 0 || next > fg.reservation_at(ei)) {
+        throw std::logic_error("ledger: infeasible reservation on edge " + std::to_string(e) + " (" +
+                               std::to_string(next) + " of " + std::to_string(fg.reservation_at(ei)) + ")");
+      }
+    }
+  }
 
-  // 2. Every allocation of the publication, staged: the records (new ones as map nodes), the
-  // owner's index node, the returned ids and the next id. A throw here changes nothing.
+  // 2. Every allocation of the publication, staged: the holds' storage on the first hold (all
+  // zero, as the empty storage reads), the records (new ones as map nodes), the owner's index node,
+  // the returned ids and the next id. A throw here changes nothing.
+  if (held.has_value() && fg.reserved_.empty()) fg.reserved_.assign(fg.allocated_.size(), 0);
   std::vector<FlowId> created;
   created.reserve(num_new);
   std::vector<std::int64_t> live;  // the owner's new index, when it gains ids
@@ -448,6 +533,9 @@ std::vector<FlowId> LedgerAccess::commit_drafts(FlowLedger& fg, std::int64_t own
 
   // 3. Publication: nothing below allocates or throws (map nodes are spliced, not copied).
   for (EdgeId e : delta.touched()) fg.allocated_[static_cast<std::size_t>(e)] += delta.at(e);
+  if (held.has_value()) {
+    for (EdgeId e : held->touched()) fg.reserved_[static_cast<std::size_t>(e)] += held->at(e);
+  }
   for (std::size_t i = 0; i < targets.size(); ++i) targets[i]->second = std::move(updated[i]);
   for (const auto& it : retired) fg.records_.erase(it);
   fg.records_.merge(fresh);
@@ -484,6 +572,23 @@ std::span<const Amount> LedgerAccess::baseline(const FlowLedger& fg) {
 std::span<const Amount> LedgerAccess::allocated(const FlowLedger& fg) {
   fg.check_usable();
   return fg.allocated_;
+}
+
+std::span<const Amount> LedgerAccess::reservation_baseline(const FlowLedger& fg) {
+  fg.check_usable();
+  if (fg.reservation_baseline_.empty()) return fg.graph_->capacity_units();
+  return fg.reservation_baseline_;
+}
+
+std::span<const Amount> LedgerAccess::reserved(const FlowLedger& fg) {
+  fg.check_usable();
+  return fg.reserved_;
+}
+
+std::vector<Amount>& LedgerAccess::reserved_storage(FlowLedger& fg) {
+  fg.check_usable();
+  if (fg.reserved_.empty()) fg.reserved_.assign(fg.allocated_.size(), 0);
+  return fg.reserved_;
 }
 
 std::int64_t LedgerAccess::next_flow_id(const FlowLedger& fg) {

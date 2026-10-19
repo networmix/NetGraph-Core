@@ -59,7 +59,7 @@ GeneralPath general_path(const Graph& g, const std::shared_ptr<const PredDAG>& s
   GeneralPath out;
   auto r = support_route(g, PredDAGBuilder::ascending(*support), src, dsts, sel, view);
   out.route = r.edges;
-  Cost cost = !sel.multipath && !r.edges.empty() ? r.cost : kUnreachable;
+  Cost cost = sel.single_path() && !r.edges.empty() ? r.cost : kUnreachable;
   out.bundle = PredDAGBuilder::ascending(*support).size() == r.edges.size() ? support : dag_of(g, r.edges);
   (void)W;
   const bool computed = cost == kUnreachable;
@@ -158,7 +158,7 @@ Tally compare_with_general_path(std::mt19937& rng, int trials, Cost factor) {
                                     std::to_string(static_cast<int>(k.placement)) + "/" +
                                     std::to_string(static_cast<int>(k.admission)) + " sel " +
                                     std::to_string(static_cast<int>(sel.tie_break)) +
-                                    std::to_string(static_cast<int>(sel.priority)) + std::to_string(sel.multipath) +
+                                    std::to_string(static_cast<int>(sel.priority)) + std::to_string(!sel.single_path()) +
                                     std::to_string(sel.multi_edge);
           const auto want = general_path(g, support, src, dsts, sel, view, W, k.placement, k.admission);
           const auto got = cost_only_creation(g, support, src, dsts, sel, view, k.placement, k.admission, WeightSource {});
@@ -167,7 +167,7 @@ Tally compare_with_general_path(std::mt19937& rng, int trials, Cost factor) {
           // Weighted route with an edge of capacity 0, which has weight 0 and is no member).
           // Capacity weights (CostOnly's default basis) are static whatever the priority: every
           // multipath selection qualifies.
-          const bool qualifies = sel.multipath;
+          const bool qualifies = !sel.single_path();
           const bool applies = qualifies && !want.route.empty() && want.plan.members == want.route;
           EXPECT_EQ(got.has_value(), applies) << where;
           if (got.has_value() != applies) return t;

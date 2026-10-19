@@ -277,7 +277,7 @@ SCENARIOS = {
     "sensitivity.global": stateless(
         lambda g: (ngc.sensitivity, (g, 0, 4, ngc.QueryOptions(GLOBAL), 1))
     ),
-    # Forwarding programs (step 3): building one, every operation over one, black holes, a
+    # Forwarding programs: building one, every operation over one, black holes, a
     # support, and the evaluators over Pinned.
     "from_routes": stateless(split_route_args),
     "replace.pinned_tunnels_lossy": operation(

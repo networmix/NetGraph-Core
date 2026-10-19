@@ -38,19 +38,21 @@ py::object routing_obj(const Routing& r) {
 void register_policy_config(py::module_& m) {
   py::class_<FlowPolicyConfig>(
       m, "FlowPolicyConfig",
-      "One demand's settings: routing (CostOnly, CapacityAware, Global or Pinned), placement\n"
-      "(FlowPlacement: required for CostOnly and CapacityAware; Global and Pinned take none), admission\n"
-      "(LOSSLESS by default), selection (PathSelection; None: PathSelection(); Global and Pinned take\n"
-      "none), origin (Origin; None: the model's default, EQUAL for CostOnly EQUAL_BALANCED and WEIGHTED and\n"
-      "for CapacityAware, OPTIMIZED for CostOnly MAX_FLOW and Global; Pinned takes none, its program has\n"
-      "it), weights (WeightBasis, CostOnly WEIGHTED only; None: CAPACITY) and edge_weights (one integer per\n"
-      "edge, given exactly when weights=EXPLICIT; one array shared by every policy built from this\n"
+      "One demand's settings: routing (CostOnly, CapacityAware (T1), Global or Pinned), placement\n"
+      "(FlowPlacement: required for CostOnly; the other models take none), admission (LOSSLESS by\n"
+      "default; LOSSY for CostOnly EQUAL_BALANCED and WEIGHTED, T1 and Pinned), selection (PathSelection;\n"
+      "None: PathSelection(); Global and Pinned take none; T1 reads tie_break, priority and multi_edge and\n"
+      "rejects multipath=True), origin (Origin; None: the model's default, EQUAL for CostOnly EQUAL_BALANCED\n"
+      "and WEIGHTED and for T1, OPTIMIZED for CostOnly MAX_FLOW and Global; Pinned takes none, its program\n"
+      "has it), weights (WeightBasis, CostOnly WEIGHTED only; None: CAPACITY) and edge_weights (one integer\n"
+      "per edge, given exactly when weights=EXPLICIT; one array shared by every policy built from this\n"
       "configuration). A field that does not apply to the model must stay None. The combination is checked\n"
       "when a policy or an evaluator uses the configuration (ValueError): the enumeration values, then the\n"
-      "model's row (placement, origin, admission, selection, weights with edge_weights), then a DagCache\n"
-      "(only CostOnly reads one), then CapacityAware's parameters, then edge_weights' length and entries,\n"
-      "then the pooled single-path rule (CostOnly with several input sources rejects multipath=False with\n"
-      "PREFER_HIGHER_PRIORITY).")
+      "model's row (T1: an up_to count first; then placement, origin, admission, selection, weights with\n"
+      "edge_weights), then a DagCache (only CostOnly reads one), then T1's parameters (the tunnel count in\n"
+      "[1, 10000], max_path_cost, min_unreserved_bandwidth), then edge_weights' length and entries, then the\n"
+      "roster and count rules (CostOnly with several input sources rejects multipath=False with\n"
+      "PREFER_HIGHER_PRIORITY; T1's roster heads times its tunnel count at most 2^30 - 1).")
       .def(py::init([](const py::object& routing, std::optional<FlowPlacement> placement, Admission admission,
                        std::optional<PathSelection> selection, std::optional<Origin> origin,
                        std::optional<WeightBasis> weights, const py::object& edge_weights) {
@@ -95,13 +97,26 @@ void register_policy_config(py::module_& m) {
   py::class_<OutputOptions>(m, "OutputOptions",
                             "Optional outputs of a placement (all false by default; absent outputs are None):\n"
                             "edge_flows (the policy's own allocation per edge after the call), residual and\n"
-                            "bottleneck (the ledger's after the call), and min_cut (Global with the optimized origin,\n"
-                            "when its solve reached the maximum flow; None for every other model, origin or call).")
-      .def(py::init<bool, bool, bool, bool>(), py::kw_only(), py::arg("edge_flows") = false,
-           py::arg("residual") = false, py::arg("bottleneck") = false, py::arg("min_cut") = false)
+                            "bottleneck (the ledger's after the call), reservation_edge_flows (the policy's own strict\n"
+                            "holds per edge after the call; zeros for a model without holds), and min_cut (Global with\n"
+                            "the optimized origin, when its solve reached the maximum flow; None for every other\n"
+                            "model, origin or call).")
+      .def(py::init([](bool edge_flows, bool residual, bool bottleneck, bool reservation_edge_flows, bool min_cut) {
+             OutputOptions o;
+             o.edge_flows = edge_flows;
+             o.residual = residual;
+             o.bottleneck = bottleneck;
+             o.reservation_edge_flows = reservation_edge_flows;
+             o.min_cut = min_cut;
+             return o;
+           }),
+           py::kw_only(), py::arg("edge_flows") = false, py::arg("residual") = false, py::arg("bottleneck") = false,
+           py::arg("reservation_edge_flows") = false, py::arg("min_cut") = false)
       .def_readonly("edge_flows", &OutputOptions::edge_flows, "request PlacementResult.edge_flows")
       .def_readonly("residual", &OutputOptions::residual, "request PlacementResult.residual")
       .def_readonly("bottleneck", &OutputOptions::bottleneck, "request PlacementResult.bottleneck")
+      .def_readonly("reservation_edge_flows", &OutputOptions::reservation_edge_flows,
+                    "request PlacementResult.reservation_edge_flows")
       .def_readonly("min_cut", &OutputOptions::min_cut, "request PlacementResult.min_cut");
 }
 

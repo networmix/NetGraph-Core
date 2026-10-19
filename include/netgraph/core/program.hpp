@@ -23,26 +23,34 @@ struct ProgramAccess;
 struct ProgramBlock;
 } // namespace detail
 
-// A tunnel's state in one forwarding (a by_tunnel row): Up; Failed (the path touches a node or an
-// edge the forwarding policy's Eligibility excludes: the tunnel gets nothing and its head splits
-// over its other entries); Blackholed (up, but its path reaches a black hole of stale forwarding:
-// its traffic is dropped on the first link that is one or enters one). A program's own tunnels are
-// all up.
-enum class TunnelStatus { Up, Failed, Blackholed };
+// A tunnel's state: Up; NoBandwidth and CostCeiling (T1 setup found no path passing the bandwidth
+// filter, or the cheapest one exceeds the cost ceiling: the tunnel is down, has no path and weight
+// 0, and stays down in every forwarding of its program); and, in one forwarding only (a by_tunnel
+// row), Failed (the path touches a node or an edge the forwarding policy's Eligibility excludes:
+// the tunnel gets nothing and its head splits over its other entries) and Blackholed (up, but its
+// path reaches a black hole of stale forwarding: its traffic is dropped on the first link that is
+// one or enters one).
+enum class TunnelStatus { Up, NoBandwidth, CostCeiling, Failed, Blackholed };
 
-// One tunnel (a path entry) of a program. index: the entry identifier (Global and CostOnly
-// MaxFlow: the path's position in the decomposition order; supplied routes: the route's position
-// in the list), never a position in tunnels(); local_index: its position among its head's entries
-// of both kinds in ascending index; destination: where its path ends; edges in path order;
-// route_cost: the sum of their costs; weight: its integer share among the head's entries (a
-// controller path: its solved amount).
+// One tunnel (a path entry) of a program. index: the entry identifier (T1: j * H + i for round j
+// and roster position i; Global and CostOnly MaxFlow: the path's position in the decomposition
+// order; supplied routes: the route's position in the list), never a position in tunnels();
+// local_index: its position among its head's entries of both kinds in ascending index;
+// destination: where its path ends; edges in path order; route_cost: the sum of their costs (all
+// three absent for a tunnel that is down); status: Up, NoBandwidth or CostCeiling; requested and
+// reserved: T1's strict bandwidth (its request, and the request held on every link of its path
+// when it is up, else 0; 0 for the other models); weight: its integer share among the head's
+// entries (T1: 1 up, 0 down; a controller path: its solved amount).
 struct Tunnel {
   std::int32_t index {0};
   NodeId head {0};
   std::int32_t local_index {0};
-  NodeId destination {0};
-  std::vector<EdgeId> edges {};
-  Cost route_cost {0};
+  std::optional<NodeId> destination {};
+  std::optional<std::vector<EdgeId>> edges {};
+  std::optional<Cost> route_cost {};
+  TunnelStatus status {TunnelStatus::Up};
+  Amount requested {0};
+  Amount reserved {0};
   Amount weight {0};
   friend bool operator==(const Tunnel&, const Tunnel&) = default;
 };
@@ -70,7 +78,8 @@ struct RouteOptions {
 // An immutable value: one demand's sources and destinations (normalized sets), its entries and
 // its injection rule. Entries are tunnels (listed in tunnels(), ascending index) and split routes
 // (a DAG with per-router split tables; not listed). Injection: equal sources (round robin over the
-// roster, the sources with an entry) or captured source weights (source_weights(): highest
+// roster: the sources with an entry, or for T1 the policy's roster, heads without an up tunnel
+// included) or captured source weights (source_weights(): highest
 // averages over every roster source's saved supply, zero included); then each head splits its
 // share by highest averages over its entries' weights. Identical routes are never merged.
 // A program also keeps what a replay under a failure rebuilds its roster from (its basis: the

@@ -512,7 +512,7 @@ Expected expect_of(const RandomCase& c) {
   auto [dstar, edges] = ref::pruned(g, mem, starts, ends);
   if (dstar == ref::kNone) return out;
   out.target_cost = dstar;
-  if (c.selection.multipath) {
+  if (!c.selection.single_path()) {
     out.edges.assign(edges.begin(), edges.end());
   } else {
     auto walk = ref::canonical(q, mem, starts, ends);
@@ -575,8 +575,8 @@ TEST(Search, RandomQueriesAgreeWithTheReferenceOnBothQueues) {
     }
     full += !c.targets.has_value() && !want.edges.empty() ? 1 : 0;
     const bool reached = c.targets.has_value() && want.target_cost != kUnreachable;
-    multipath += reached && c.selection.multipath ? 1 : 0;
-    single += reached && !c.selection.multipath ? 1 : 0;
+    multipath += reached && !c.selection.single_path() ? 1 : 0;
+    single += reached && c.selection.single_path() ? 1 : 0;
   }
   EXPECT_GT(full, 300);
   EXPECT_GT(multipath, 300);
@@ -978,7 +978,8 @@ TEST(Search, LargeGraphsBothQueuesIdentical) {
 }
 
 TEST(Search, InternalEntriesMatchThePublicSearch) {
-  // route_search (CapacityAware), support_route (CostOnly on the cached support) and
+  // route_search (T1's CSPF: the single path, in walk order), support_route (CostOnly on the cached
+  // support) and
   // static_costs (rosters) against spf on the same questions; support_route under residual
   // priority views against the independent reference (search_reference.hpp).
   std::mt19937 rng(23);
@@ -1001,16 +1002,26 @@ TEST(Search, InternalEntriesMatchThePublicSearch) {
       for (bool me : {true, false}) {
         for (auto tie : {EdgeTieBreak::Deterministic, EdgeTieBreak::PreferHigherPriority}) {
           const auto s = sel(mp, me, tie, EdgePriority::Residual);
-          // CapacityAware: gated at 2 units on the residual.
-          auto want = run(g, {src}, Direction::Forward, dests, s, &residual, 2);
-          auto got = detail::route_search(g, detail::Gate {nullptr, residual, 2}, s, src, dests);
-          if (want.target_cost == kUnreachable) {
-            EXPECT_FALSE(got.has_value());
-          } else {
-            ASSERT_TRUE(got.has_value());
-            EXPECT_EQ(got->cost, *want.target_cost);
-            EXPECT_EQ(got->edges, edges_of(want.dag));
-            ++routed;
+          // T1's CSPF: gated at 2 units on the residual, the single path (it reads no multipath)
+          // in walk order from src.
+          if (!mp) {
+            auto want = run(g, {src}, Direction::Forward, dests, s, &residual, 2);
+            auto got = detail::route_search(g, detail::Gate {nullptr, residual, 2}, s, src, dests);
+            if (want.target_cost == kUnreachable) {
+              EXPECT_FALSE(got.has_value());
+            } else {
+              ASSERT_TRUE(got.has_value());
+              EXPECT_EQ(got->cost, *want.target_cost);
+              NodeId at = src;
+              for (EdgeId e : got->edges) {
+                EXPECT_EQ(g.edge_src()[static_cast<std::size_t>(e)], at);
+                at = g.edge_dst()[static_cast<std::size_t>(e)];
+              }
+              auto sorted = got->edges;
+              std::sort(sorted.begin(), sorted.end());
+              EXPECT_EQ(sorted, edges_of(want.dag));
+              ++routed;
+            }
           }
           // CostOnly: the static support toward dests projected with static priorities equals the
           // static search from src (no residual: Residual reads the capacities).

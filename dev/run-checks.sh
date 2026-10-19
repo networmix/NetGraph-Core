@@ -46,27 +46,62 @@ tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[ledger
 tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[policy]
 tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[result]
 tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[trace]
-tests/py/test_flow_policy_fixtures.py::test_every_other_replay_clause_reports_its_operation
 tests/py/test_flow_policy_fixtures.py::test_an_expected_value_of_another_type_fails[bool as integer]
 tests/py/test_flow_policy_fixtures.py::test_an_expected_value_of_another_type_fails[integer as float]
+tests/py/test_flow_policy_fixtures.py::test_every_other_replay_clause_reports_its_operation
 tests/py/test_ksp.py::test_python_result_lists_are_all_or_nothing
+tests/py/test_native_allocation.py::test_allocation_hooks_preserve_exception_identity
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[Eligibility.intersect]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[FlowLedger.reset]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[FlowRecord.bundle]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[PlacementResult.program]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[batch_capacity.global]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[batch_capacity.global_equal]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[capacity.frozen_cache]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[capacity.global]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[capacity.pinned_lossy]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[evaluate.global]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[forward.costonly_pooled_lossy_black_holes]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[from_routes]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[ksp]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.costonly]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.costonly_pooled_lossy]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.global]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.global_equal]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.pinned_split_route]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place_traced.global]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[replace.global_support]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[replace.pinned_tunnels_lossy]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[resolve_to_paths]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[sensitivity.global]
+tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[sensitivity.pinned]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[spf.full]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[spf.single_path]
 tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[spf.targets_residual]
-tests/py/test_native_allocation.py::test_allocation_hooks_preserve_exception_identity
 tests/py/test_native_allocation.py::test_the_row_checks_reject_a_wrong_call
+tests/py/test_programs.py::test_from_routes_and_getters_survive_python_allocation_failures
+tests/py/test_programs.py::test_operations_are_all_or_nothing[costonly forward]
+tests/py/test_programs.py::test_operations_are_all_or_nothing[costonly replace]
+tests/py/test_programs.py::test_operations_are_all_or_nothing[global evaluate]
+tests/py/test_programs.py::test_operations_are_all_or_nothing[pinned replace]
 tests/py/test_search.py::test_python_result_construction_is_all_or_nothing
 tests/py/test_search.py::test_the_python_allocation_sweep_rejects_a_wrong_call
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[ca.tunnels]
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[fg.record(fid)]
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[fg.records()]
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[fg.reserved()]
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[fg.unreserved()]
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[p.record(fid)]
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[p.records()]
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[r.plan.head_design]
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[r.plan]
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[r.program.tunnels]
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[repr(abs3)]
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[repr(st2)]
+tests/py/test_tunnels_t1.py::test_t1_getters_survive_python_allocation_failures[t0.status]
+tests/py/test_tunnels_t1.py::test_t1_results_survive_python_allocation_failures[evaluate]
+tests/py/test_tunnels_t1.py::test_t1_results_survive_python_allocation_failures[forward]
+tests/py/test_tunnels_t1.py::test_t1_results_survive_python_allocation_failures[replace]
 "
 EXPECTED_OFF_SKIPPED_PREFIX='tests/py/test_flow_policy_fixtures.py::test_fixture['
 
@@ -108,7 +143,7 @@ def pytest_sessionfinish(session, exitstatus):
     record = {
         "seen": sorted(_seen),
         "skipped": _skipped,
-        "hooks": hasattr(ext, "_max_flows_per_call"),
+        "hooks": hasattr(ext, "_fail_native_allocation"),
         "modules": [getattr(ext, "__file__", None), getattr(pkg, "__file__", None)],
     }
     with open(os.environ["NGC_SKIP_RECORD"], "w") as f:

@@ -91,6 +91,13 @@ inline py::list pairs_list(const std::vector<std::pair<EdgeId, Amount>>& v) {
   return out;
 }
 
+// ((id, amount), ...) as a tuple (TunnelPlan.head_design).
+inline py::tuple pairs_tuple(const std::vector<std::pair<std::int32_t, Amount>>& v) {
+  py::tuple out(v.size());
+  for (std::size_t i = 0; i < v.size(); ++i) out[i] = py::make_tuple(v[i].first, v[i].second);
+  return out;
+}
+
 // An amount argument: an integer number of units in [0, 2^62) or +inf (float('inf')); nullopt is
 // +inf. Any other value (a bool, another float, a non-integer, an integer out of range) raises the
 // one ValueError `text`; an exception of the object's own __index__ propagates as raised.

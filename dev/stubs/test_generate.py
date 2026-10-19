@@ -391,7 +391,7 @@ class InstalledPackage(unittest.TestCase):
         ext = types.ModuleType("_netgraph_core")
         pkg.__file__, ext.__file__ = pkg_file, ext_file
         if hooks:
-            ext._max_flows_per_call = lambda: 0
+            ext._fail_native_allocation = lambda: 0
         with mock.patch.dict(
             sys.modules, {"netgraph_core": pkg, "_netgraph_core": ext}
         ):

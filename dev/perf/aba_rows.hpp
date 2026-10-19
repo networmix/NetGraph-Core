@@ -863,7 +863,7 @@ inline std::vector<Row> rows() {
                    return d.h;
                  });
                }});
-  // ---- pooled sources and the equal origin (step 2: several sources of one demand)
+  // ---- pooled sources and the equal origin (several sources of one demand)
   // Eight demands of eight source leaves each to one destination leaf on a Clos 64x32 (unit costs,
   // links of 10..80): demand j has the leaves 8j..8j+7 and the leaf (8j + 36) mod 64. Every source
   // splits over its 32 spines and the eight sources share each spine's one link into the
@@ -907,7 +907,7 @@ inline std::vector<Row> rows() {
                  const std::vector<int> srcs = {1, 17, 33};
                  return Iter([g, srcs] { return abaapi::sensitivity_equal_global(*g, srcs, 50); });
                }});
-  // ---- forwarding programs (step 3): no older Core has them; they guard the later steps.
+  // ---- forwarding programs: no older Core has them; they guard later changes.
   // One demand of eight source leaves to one leaf on a Clos 32x16 (links of 10..80): its optimized
   // Global program (paths with solved amounts, captured source weights), solved for 2,000.
   auto program_demand = [] {
@@ -951,20 +951,31 @@ inline std::vector<Row> rows() {
                    return abaapi::replace_under_load(*g, srcs, 20, {9, 10, 11, 12}, 21, loads, 800.0);
                  });
                }});
-  // ---- cohort placement (TE_ECMP presets)
-  auto cohort_row = [](int min_flows, int max_flows) {
-    auto f = gen_fabric3(4, 8, 4, 8, 21);
-    auto g = std::make_shared<Graph>(abaapi::build(f.a));
+  // ---- T1 tunnels (the fabric of 4 pods, 12 demands of 120: one policy per demand, one ledger)
+  auto t1_pairs = [](const Fabric3& f) {
     std::vector<std::pair<int, int>> pairs;
     for (int p = 0; p < 4; ++p) for (int i = 0; i < 3; ++i) pairs.push_back({fabric3_leaf(f, p, i), fabric3_leaf(f, (p + 1) % 4, 7 - i)});
-    return Iter([g, pairs, min_flows, max_flows] { return abaapi::cohort_place(*g, pairs, 120.0, min_flows, max_flows); });
+    return pairs;
   };
-  r.push_back({"cohort.te_ecmp16", "cohort",
-               "TE_ECMP_16_LSP cohorts (16 single-path EB tunnels, reoptimised), fabric 4 pods, 12 demands of 120",
-               [=] { return cohort_row(16, 16); }});
-  r.push_back({"cohort.te_ecmp256", "cohort",
-               "TE_ECMP_UP_TO_256_LSP cohorts (1..256 tunnels, reoptimised), fabric 4 pods, 12 demands of 120",
-               [=] { return cohort_row(1, 256); }});
+  r.push_back({"t1.setup.fabric", "t1",
+               "T1 CapacityAware(Tunnels(16)) replace(120, design 120) per demand, fabric 4 pods, 12 demands on one "
+               "ledger: CSPF setup on the unreserved view, the holds' commit, Lossless forwarding",
+               [=] {
+                 auto f = gen_fabric3(4, 8, 4, 8, 21);
+                 auto g = std::make_shared<Graph>(abaapi::build(f.a));
+                 return Iter([g, pairs = t1_pairs(f)] { return abaapi::t1_setup(*g, pairs, 120.0, 16); });
+               }});
+  r.push_back({"t1.forward.fabric", "t1",
+               "the same 12 T1 programs (Lossy) set up once, then forward() of each under 32 offers (no setup, the holds "
+               "kept)",
+               [=] {
+                 auto f = gen_fabric3(4, 8, 4, 8, 21);
+                 auto g = std::make_shared<Graph>(abaapi::build(f.a));
+                 auto fabric = abaapi::t1_installed(*g, t1_pairs(f), 120.0, 16);
+                 std::vector<double> offers;
+                 for (int i = 0; i < 32; ++i) offers.push_back(40.0 + 10.0 * i);
+                 return Iter([g, fabric, offers] { return abaapi::t1_forward(*fabric, offers); });
+               }});
   // ---- MSD loop
   r.push_back({"msd.loop", "msd",
                "MSD bracket and bisection over CostOnly EB placement with a per-series DAG cache, Clos 32x16, 64 demands",

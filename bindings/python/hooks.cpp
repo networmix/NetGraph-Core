@@ -1,6 +1,5 @@
-// The private hooks (NETGRAPH_CORE_PRIVATE_HOOKS builds only): the test controls
-// of the creation cap and of Python and native allocation failures, and the apportionment
-// kernels.
+// The private hooks (NETGRAPH_CORE_PRIVATE_HOOKS builds only): the test controls of Python and
+// native allocation failures, and the apportionment kernels.
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -120,17 +119,6 @@ void native_free(void* p) noexcept {
 } // namespace
 
 void register_private_hooks(py::module_& m) {
-  m.def(
-      "_max_flows_per_call",
-      [](const py::object& value) {
-        auto& cap = detail::max_flows_per_call();
-        const auto old = cap.load();
-        if (!value.is_none()) cap.store(integer_value(value, 0, kMaxFlowsPerCall, "max_flows_per_call"));
-        return old;
-      },
-      py::arg("value") = py::none(),
-      "private test hook: the call-wide creation cap (MAX_FLOWS_PER_CALL by default); returns the old value");
-
   m.def(
       "_fail_python_allocation",
       [](const py::object& fn, const py::tuple& args, long k) {

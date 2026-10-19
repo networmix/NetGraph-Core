@@ -86,7 +86,7 @@ def installed_package():
                 f"{mod.__name__} is imported from {where}, not from an installation in "
                 "this interpreter's site-packages (build a wheel: bash dev/stubs/run.sh)"
             )
-    if hasattr(ext, "_max_flows_per_call"):
+    if hasattr(ext, "_fail_native_allocation"):
         raise Failure(
             "the installed extension carries the private hooks; generate from the "
             "shipped configuration (a wheel or an sdist build)"

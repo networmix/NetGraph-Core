@@ -20,7 +20,7 @@ namespace netgraph::core::detail {
 
 // A record proposed by a policy for the commit: `id` nullopt is a new flow (its id is assigned
 // at the commit, in draft order); the commit sets the record's flow_id and owner. The record's
-// `edges` and `drops` ascend by EdgeId; zero entries are dropped.
+// `edges`, `drops` and `reserved_edges` ascend by EdgeId; zero entries are dropped.
 struct Draft {
   std::optional<std::int64_t> id {};
   FlowRecord record {};
@@ -37,11 +37,12 @@ struct LedgerAccess {
   [[nodiscard]] static std::int64_t bind(FlowLedger& fg);
   // The owner's policy is destroyed without remove(): its records stay as orphans.
   static void release(FlowLedger& fg, std::int64_t owner) noexcept;
-  // remove(): the owner's records are deleted (allocations reverted), their ids retired.
+  // remove(): the owner's records are deleted (allocations and holds reverted), their ids retired.
   // Throws only before any change (a moved-from ledger, an unbound owner).
   static std::vector<std::int64_t> detach(FlowLedger& fg, std::int64_t owner);
   // One atomic exchange: `drafts` must carry every live record of the owner (by id) plus the
-  // new ones; the new aggregate must stay within [0, baseline] on every edge. Throws (and
+  // new ones; the new aggregates must stay within [0, baseline] on every edge (carried loads
+  // within the service baseline, holds within the reservation baseline). Throws (and
   // changes nothing) otherwise, an allocation failure included: every allocation happens
   // before a publication step that cannot throw. Returns the FlowIds of the new records in
   // draft order. The drafts' vectors are moved from.
@@ -59,6 +60,14 @@ struct LedgerAccess {
   [[nodiscard]] static std::span<const Amount> baseline(const FlowLedger& fg);
   // The aggregate allocation (borrowed; valid until the next commit, detach or reset).
   [[nodiscard]] static std::span<const Amount> allocated(const FlowLedger& fg);
+  // The reservation baseline R0 and the aggregate holds S (borrowed, as above). S is empty until a
+  // commit with holds stages it as zeros (a commit that fails after that leaves it staged); empty
+  // and staged S read as all zero.
+  [[nodiscard]] static std::span<const Amount> reservation_baseline(const FlowLedger& fg);
+  [[nodiscard]] static std::span<const Amount> reserved(const FlowLedger& fg);
+  // S as stored, made E zeros first when nothing has been held (the tests' state checks write
+  // through it).
+  static std::vector<Amount>& reserved_storage(FlowLedger& fg);
   // Diagnostics (the tests and the private bindings).
   [[nodiscard]] static std::int64_t next_flow_id(const FlowLedger& fg);
   [[nodiscard]] static std::vector<std::int64_t> bound_owners(const FlowLedger& fg);

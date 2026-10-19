@@ -180,7 +180,7 @@ def test_a_failed_reset_leaves_the_ledger_unchanged():
     del policy  # its records stay as orphans: reset() is allowed and would clear them
 
     uid, before = fg.uid(), ledger_state(fg)
-    assert before[1] == [2, 2] and len(before[2]) == 1
+    assert before[1] == [2, 2] and len(before[4]) == 1
     for bad in ([1], [1, 2.5], [6, 0], [4, 2**70]):
         with pytest.raises(ValueError):
             fg.reset(bad)

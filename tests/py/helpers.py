@@ -104,6 +104,15 @@ def config(
     )
 
 
+def t1_config(count, admission=None, selection=None, **routing):
+    """A T1 FlowPolicyConfig: CapacityAware(Tunnels(count), **routing), Lossless by default."""
+    return ngc.FlowPolicyConfig(
+        routing=ngc.CapacityAware(ngc.Tunnels(count), **routing),
+        admission=admission or ngc.Admission.LOSSLESS,
+        selection=selection,
+    )
+
+
 # The exact maximum flow (Global routing, the optimized origin) and CostOnly EqualBalanced, both
 # Lossless (CostOnly with sel()). Configurations are immutable, so tests share these values.
 GLOBAL = config(ngc.Global())
@@ -117,6 +126,7 @@ _RESULTS = (
     ngc.TunnelFlow,
     ngc.ForwardingProgram,
     ngc.Tunnel,
+    ngc.TunnelPlan,
     ngc.SensitivityResult,
     ngc.SensitivityEntry,
     ngc.SpfResult,
@@ -154,11 +164,13 @@ def plain(value):
 def ledger_state(ledger):
     """A FlowLedger's public state as comparable data, with no object identity (its uid, which
     is also the first half of every FlowId, and its graph's uid, which every bundle carries):
-    the residual, the allocations and every public field of every record, the bundle as its
-    three arrays."""
+    both projections (the residual and the allocations, the holds and the unreserved capacity)
+    and every public field of every record, the bundle as its three arrays."""
     return [
         ledger.residual().tolist(),
         ledger.allocated().tolist(),
+        ledger.reserved().tolist(),
+        ledger.unreserved().tolist(),
         [
             (
                 r.flow_id[1],
@@ -177,6 +189,7 @@ def ledger_state(ledger):
                 r.delivered,
                 r.edges,
                 r.drops,
+                r.reserved_edges,
             )
             for r in ledger.records()
         ],

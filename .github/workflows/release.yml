@@ -83,7 +83,7 @@ jobs:
           CIBW_TEST_REQUIRES: "pytest==9.1.1"
           CIBW_TEST_COMMAND: "PYTHON=python bash {project}/dev/run-checks.sh pytest off -p no:cacheprovider"
           CIBW_TEST_COMMAND_WINDOWS: >-
-            python -c "import sys, _netgraph_core as m; sys.exit('the wheel carries the private hooks' if hasattr(m, '_max_flows_per_call') else 0)"
+            python -c "import sys, _netgraph_core as m; sys.exit('the wheel carries the private hooks' if hasattr(m, '_fail_native_allocation') else 0)"
             && python -m pytest {project}/tests/py -p no:cacheprovider
           CIBW_BEFORE_ALL_LINUX: "yum install -y libatomic || (apt-get update && apt-get install -y libatomic1) || apk add libatomic"
 

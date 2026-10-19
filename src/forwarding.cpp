@@ -177,7 +177,7 @@ void finish_view(ForwardingView& v) {
       const auto e = static_cast<std::size_t>(p.tunnel_entry[t]);
       if (v.status_[e] != TunnelStatus::Up) continue;
       // An edge is black-holed when the Eligibility disallows it (itself or an endpoint).
-      for (EdgeId x : p.tunnels[t].edges) {
+      for (EdgeId x : path_of(p.tunnels[t])) {
         if (!v.dark->edge_ok(x)) {
           v.status_[e] = TunnelStatus::Blackholed;
           break;
@@ -196,11 +196,12 @@ void materialize(ForwardingView& v) {
   v.slots_.resize(p.roster.size());
   for (std::size_t s = 0; s < p.roster.size(); ++s) v.slots_[s] = static_cast<std::int32_t>(s);
   v.weights_ = p.head_weight;
-  v.status_.assign(n, TunnelStatus::Up);
+  v.status_.resize(n);
   v.bundles_.resize(n);
   v.costs_.resize(n);
   v.root_of_.resize(n);
   for (std::size_t e = 0; e < n; ++e) {
+    v.status_[e] = v.status(e);
     v.bundles_[e] = p.entries[e].bundle;
     v.costs_[e] = p.entries[e].cost;
     v.root_of_[e] = v.root_of(e);
@@ -229,8 +230,8 @@ ForwardingView make_view(const Graph& g, std::shared_ptr<const ForwardingProgram
     materialize(v);
     for (std::size_t e = 0; records && e < n; ++e) {
       if (p.entries[e].tunnel < 0) continue;
-      v.bundles_[e] = std::make_shared<const PredDAG>(
-          PredDAGBuilder::of_edges(g, p.tunnels[static_cast<std::size_t>(p.entries[e].tunnel)].edges));
+      const auto path = path_of(p.tunnels[static_cast<std::size_t>(p.entries[e].tunnel)]);
+      v.bundles_[e] = std::make_shared<const PredDAG>(path.empty() ? PredDAGBuilder::empty(g) : PredDAGBuilder::of_edges(g, path));
     }
     finish_view(v);
     return v;
@@ -273,18 +274,20 @@ ForwardingView make_view(const Graph& g, std::shared_ptr<const ForwardingProgram
   // Entries: a tunnel fails when it touches an excluded node or edge (an edge is excluded with its
   // endpoints); a split route keeps its allowed edges on the walks from its head to an allowed
   // destination and fails when none remains. Every entry of a head outside the replay roster fails.
+  // A tunnel that setup left down stays down with its status (replay never brings one up).
   for (std::size_t e = 0; e < n; ++e) {
     const auto& entry = p.entries[e];
     bool failed = view_head[static_cast<std::size_t>(entry.slot)] < 0;
     if (entry.tunnel >= 0) {
-      for (EdgeId x : p.tunnels[static_cast<std::size_t>(entry.tunnel)].edges) {
-        failed = failed || edge_ok[static_cast<std::size_t>(x)] == 0;
+      const auto& t = p.tunnels[static_cast<std::size_t>(entry.tunnel)];
+      if (t.status != TunnelStatus::Up) {
+        v.status_[e] = t.status;
+        if (records) v.bundles_[e] = std::make_shared<const PredDAG>(PredDAGBuilder::empty(g));
+        continue;
       }
+      for (EdgeId x : path_of(t)) failed = failed || edge_ok[static_cast<std::size_t>(x)] == 0;
       if (!failed) {
-        if (records) {
-          v.bundles_[e] = std::make_shared<const PredDAG>(
-              PredDAGBuilder::of_edges(g, p.tunnels[static_cast<std::size_t>(entry.tunnel)].edges));
-        }
+        if (records) v.bundles_[e] = std::make_shared<const PredDAG>(PredDAGBuilder::of_edges(g, path_of(t)));
         v.costs_[e] = entry.cost;
       }
     } else if (!failed) {
@@ -615,7 +618,7 @@ Net build_net(const ForwardingView& view, const FreeFn& free) {
       it.head = static_cast<std::int32_t>(h);
       if (entry.tunnel >= 0) {
         it.tunnel = entry.tunnel;
-        it.nocc = static_cast<std::int32_t>(p.tunnels[static_cast<std::size_t>(entry.tunnel)].edges.size());
+        it.nocc = static_cast<std::int32_t>(path_of(p.tunnels[static_cast<std::size_t>(entry.tunnel)]).size());
       } else {
         it.plan = view.plan(static_cast<std::size_t>(entry.context)).get();
         const auto r = view.root_of(e);
@@ -637,7 +640,7 @@ Net build_net(const ForwardingView& view, const FreeFn& free) {
     it.occ0 = nocc;
     nocc += it.nocc;
     if (it.tunnel >= 0) {
-      const auto& edges = p.tunnels[static_cast<std::size_t>(it.tunnel)].edges;
+      const auto edges = path_of(p.tunnels[static_cast<std::size_t>(it.tunnel)]);
       net.links.insert(net.links.end(), edges.begin(), edges.end());
     } else {
       net.links.insert(net.links.end(), it.plan->members.begin(), it.plan->members.end());
@@ -658,7 +661,7 @@ Net build_net(const ForwardingView& view, const FreeFn& free) {
     const auto& it = net.items[i];
     for (std::int32_t j = 0; j < it.nocc; ++j) {
       const auto o = static_cast<std::size_t>(it.occ0 + j);
-      const EdgeId e = it.tunnel >= 0 ? p.tunnels[static_cast<std::size_t>(it.tunnel)].edges[static_cast<std::size_t>(j)]
+      const EdgeId e = it.tunnel >= 0 ? path_of(p.tunnels[static_cast<std::size_t>(it.tunnel)])[static_cast<std::size_t>(j)]
                                       : it.plan->members[static_cast<std::size_t>(j)];
       net.occ_link[o] = link_index(net, e);
       net.occ_item[o] = static_cast<std::int32_t>(i);
@@ -875,9 +878,6 @@ private:
   // Event ids: barriers [0, nb), routers [nb, nb + num_pos).
   [[nodiscard]] std::int32_t router(const Net::Item& it, std::int32_t pos) const noexcept {
     return nb_ + it.pos0 + pos;
-  }
-  [[nodiscard]] bool barrier_occ(std::int32_t o) const noexcept {
-    return barrier_[static_cast<std::size_t>(net_.occ_link[static_cast<std::size_t>(o)])] >= 0;
   }
   [[nodiscard]] std::int32_t event_of_occ(std::int32_t o) const noexcept {
     return barrier_[static_cast<std::size_t>(net_.occ_link[static_cast<std::size_t>(o)])];

@@ -1,7 +1,9 @@
 """Prototype 2 fixtures in integer units (APPROACH revision 24, sections 8, 9 and 16).
 
-The 44 fixtures of the grid prototype regenerated in units (the old names mapped in
-``FIXTURE_MAP``), plus the review witnesses of review 13 to review 17. Graphs are
+The fixtures of the grid prototype regenerated in units (the old names mapped in
+``FIXTURE_MAP``), plus the review witnesses of review 13 to review 17; the deletion of T0 removed every
+``CapacityAware`` fixture and part with that routing mode (README "T1 replaces
+CapacityAware"). Graphs are
 stated in input coordinates; bundles and expected per-edge arrays are input
 positions translated through the inverse of ``input_index()``. Expected values are
 derived in the fixture text or bodies (round robin, highest averages, hand-traced
@@ -14,7 +16,6 @@ residual-snapshot weight basis (step 3: weights no longer come from the priority
 Graph shapes (input positions):
 * ``diamond(s0, t0, s1, t1)``: 0 -[0]-> 1 -[1]-> 3 and 0 -[2]-> 2 -[3]-> 3; route 0
   = {0, 1}, route 1 = {2, 3};
-* ``routes([(cap, cost), ...])``: route i is 0 -[2i]-> i+1 -[2i+1]-> d;
 * ``parallel(caps)``: links 0 -> 1.
 """
 
@@ -29,7 +30,7 @@ import search
 from ledger import FlowGraph
 from recorder import PSnap
 from snap import dict_to_input
-from units import INF, K_MAX_FLOWS_PER_CALL
+from units import INF
 
 MF, W, EB = P.MF, P.W_, P.EB
 LOSSLESS, LOSSY = P.LOSSLESS, P.LOSSY
@@ -46,33 +47,14 @@ FIXTURE_MAP = {
     "combine_multi_source_attribution": "sources_attribution",
     "combine_proportional_2_vs_3": "sources_maxflow_vs_global",
     "combine_source_split_additivity": "sources_split_cumulative",
-    "creation_fewer_routes": "creation_fewer_routes",
-    "creation_retry_after_release": "creation_retry_after_release",
     "eb_1_plus_2_vs_3": "eb_1_plus_2_vs_3",
     "eb_unequal_1_10": "eb_unequal_1_10",
-    "eight_versus_ten_capacity": "eight_versus_ten_capacity",
-    "eight_versus_ten_headroom": "eight_versus_ten_headroom",
-    "eight_versus_ten_residual": "eight_versus_ten_residual",
-    "flag_table": "flag_table",
     "four_calls_EB": "four_calls_EB",
     "four_calls_Lossy": "four_calls_Lossy",
     "four_calls_P": "four_calls_MaxFlow",
     "four_calls_W": "four_calls_W",
-    "growth_256_request_1278": "growth_256_request_1278",
-    "growth_request_6": "growth_request_6",
-    "harmful_growth_10_1": "harmful_growth_10_1",
-    "hidden_beneficial_route": "hidden_beneficial_route",
     "inf_every_kernel": "inf_every_kernel",
-    "invalidation_and_detach": "lifetime_remove_orphan_reset",
-    "limits_diminishing": "limits_diminishing",
-    "limits_max_flows_created": "limits_kmaxflowspercall",
     "lossy_diamond_10_then_1": "lossy_diamond_10_then_1",
-    "reopt_double_spend": "reopt_double_spend",
-    "request_12_on_5_5": "request_12_on_5_5",
-    "retention_third_party_removal": "retention_third_party_removal",
-    "rounded_retention_3_plus_g": "retention_same_structure",
-    "shared_capacity_view": "shared_capacity_view",
-    "ten_versus_five": "ten_versus_five",
     "third_party_occupancy": "third_party_occupancy",
     "weighted_1_plus_5_vs_6": "weighted_1_plus_5_vs_6",
     "weighted_frozen_third_party": "weighted_frozen_third_party",
@@ -106,32 +88,9 @@ def diamond(s0, t0, s1, t1, c0=1, c1=1):
     return 4, [(0, 1, s0, c0), (1, 3, t0, c0), (0, 2, s1, c1), (2, 3, t1, c1)]
 
 
-def routes(specs):
-    d = len(specs) + 1
-    edges = []
-    for i, (c, w) in enumerate(specs):
-        edges += [(0, i + 1, c, w), (i + 1, d, c, w)]
-    return d + 1, edges
-
-
 def parallel(caps, costs=None):
     costs = costs or [1] * len(caps)
     return 2, [(0, 1, c, w) for c, w in zip(caps, costs, strict=True)]
-
-
-def tunnel(priority="Capacity", tie=search.PREFER):
-    return search.Selection(
-        multipath=False, multi_edge=False, tie_break=tie, priority=priority
-    )
-
-
-def ca(kernel, priority="Capacity", fc=1, mx=None, reopt=False, sel=None, **kw):
-    return P.FlowPolicyConfig(
-        P.CapacityAware(flow_count=fc, max_flow_count=mx, reoptimize=reopt, **kw),
-        kernel,
-        LOSSLESS,
-        sel or tunnel(priority),
-    )
 
 
 def co(kernel, adm=LOSSLESS, sel=None):
@@ -184,284 +143,6 @@ class Ctx:
         st = pol.state()["cohorts"]
         src = next(iter(st)) if src is None else src
         return [f["route_input"] for f in st[src]]
-
-    def shares(self, pol, src=None):
-        st = pol.state()["cohorts"]
-        src = next(iter(st)) if src is None else src
-        return [f["T"] for f in st[src]]
-
-
-# ====================================================================== creation
-
-
-@fixture(
-    "creation_fewer_routes",
-    "creation",
-    ["8b", "9.2"],
-    "One capacity-5 link, CapacityAware flow_count 2, max 2, request 20: the "
-    "first reservation exhausts the link, the second search finds nothing, so one "
-    "flow is created (created flows are the ones that received a route); placed 5, "
-    "exhausted (growth finds no candidate), routes_changed true.",
-)
-def creation_fewer_routes(s: PSnap):
-    c = Ctx(s, "one_link", parallel([5]))
-    for kernel in (EB, MF, W):
-        fg = c.ledger()
-        pol = P.FlowPolicy(fg, 0, 1, ca(kernel, fc=2, mx=2))
-        r = s.place(f"{kernel}: request 20", pol, 20)
-        s.expect(
-            f"{kernel} result",
-            (r.placed, r.termination, r.routes_changed),
-            (5, "exhausted", True),
-        )
-        s.expect(f"{kernel} cohort size", len(pol.flow_ids()), 1)
-
-
-@fixture(
-    "creation_retry_after_release",
-    "creation",
-    ["8", "9.1", "9.4"],
-    "Another owner holds the only link: a CapacityAware call finds no route, ends "
-    "no_route, creates nothing and consumes no id (flags false). After the owner's "
-    "remove() the next call creates the cohort (creation is attempted on every call "
-    "while the cohort is empty), complete, routes_changed true.",
-)
-def creation_retry(s: PSnap):
-    c = Ctx(s, "one_link", parallel([5]))
-    fg = c.ledger()
-    other, _ = c.manual(fg, 0, 1, [0], 5)
-    pol = P.FlowPolicy(fg, 0, 1, ca(MF))
-    nxt = fg.next_flow_id()
-    r = s.place("first call", pol, 1)
-    s.expect(
-        "no route",
-        (r.termination, r.routes_changed, r.weights_changed),
-        ("no_route", False, False),
-    )
-    s.expect("no id consumed", fg.next_flow_id(), nxt)
-    other.remove()
-    r = s.place("second call", pol, 1)
-    s.expect(
-        "created", (r.placed, r.termination, r.routes_changed), (1, "complete", True)
-    )
-    s.expect("created id", pol.flow_ids()[0][1], nxt)
-
-
-# ====================================================================== reservations
-
-
-@fixture(
-    "ten_versus_five",
-    "reservations",
-    ["8b", "9.2", "9.4"],
-    "Two disjoint capacity-5 routes, EB CapacityAware, request 10: flow_count 2 "
-    "places 10 (the second route is found after the first reservation, complete); "
-    "flow_count 1 with max 1 places 5 and ends exhausted (a fixed-count cohort full; "
-    "revision 20, the grid prototype said limit_flows).",
-)
-def ten_versus_five(s: PSnap):
-    c = Ctx(s, "diamond_5", diamond(5, 5, 5, 5))
-    fg = c.ledger()
-    r = s.place("flow_count 2", P.FlowPolicy(fg, 0, 3, ca(EB, fc=2, mx=2)), 10, fg=fg)
-    s.expect("two flows", (r.placed, r.termination), (10, "complete"))
-    fg = c.ledger()
-    r = s.place(
-        "flow_count 1, max 1", P.FlowPolicy(fg, 0, 3, ca(EB, fc=1, mx=1)), 10, fg=fg
-    )
-    s.expect("one flow", (r.placed, r.termination), (5, "exhausted"))
-
-
-def _eight_versus_ten(s: PSnap, priority, at8, term8, routes8):
-    c = Ctx(s, "diamond_5", diamond(5, 5, 5, 5))
-    for volume, expect, term in ((8, at8, term8), (10, 10, "complete")):
-        fg = c.ledger()
-        pol = P.FlowPolicy(fg, 0, 3, ca(EB, priority=priority, fc=2, mx=2))
-        r = s.place(f"{priority}: request {volume}", pol, volume, fg=fg)
-        s.expect(f"{priority} {volume}", (r.placed, r.termination), (expect, term))
-        s.expect(
-            f"{priority} reservations at {volume}",
-            [x["reserved"] for x in r.trace["sources"][0]["stage1"]["reservations"]],
-            [volume // 2] * 2
-            if volume == 10
-            else ([4, 1] if routes8 == "shared" else [4, 4]),
-        )
-        if volume == 8:
-            want = [[0, 1], [0, 1]] if routes8 == "shared" else [[0, 1], [2, 3]]
-            s.expect(f"{priority} routes at 8", c.routes_of(pol), want)
-
-
-@fixture(
-    "eight_versus_ten_capacity",
-    "reservations",
-    ["8b", "9.2"],
-    "EB reservation target (P + v) div k with Capacity priority: request 8 reserves "
-    "4 on route 0, whose residual 1 still ties on static capacity, so the second "
-    "search takes route 0 again (reservation 1): both flows share route 0 and place "
-    "5 (exhausted: fixed count); request 10 reserves 5, route 0 is gated, the second "
-    "flow takes route 1: 10. The non-monotone CapacityAware fixture (9.2).",
-)
-def eight_versus_ten_capacity(s: PSnap):
-    _eight_versus_ten(s, "Capacity", 5, "exhausted", "shared")
-
-
-@fixture(
-    "eight_versus_ten_residual",
-    "reservations",
-    ["8b", "9.2"],
-    "Same with Residual priority: the second search prefers the untouched route "
-    "(bottleneck 5 against 1): 8 and 10.",
-)
-def eight_versus_ten_residual(s: PSnap):
-    _eight_versus_ten(s, "Residual", 8, "complete", "split")
-
-
-@fixture(
-    "eight_versus_ten_headroom",
-    "reservations",
-    ["8b", "9.2"],
-    "Same with Headroom priority (exact rationals 1/5 against 5/5): 8 and 10.",
-)
-def eight_versus_ten_headroom(s: PSnap):
-    _eight_versus_ten(s, "Headroom", 8, "complete", "split")
-
-
-@fixture(
-    "request_12_on_5_5",
-    "reservations",
-    ["8b", "9.2", "9.4"],
-    "Infeasible reservations: request 12, flow_count 2 = max 2, two capacity-5 "
-    "routes. EB targets 6 clip to 5 and 5; MaxFlow and Weighted sequential "
-    "reservations 5 and 5; placed 10, remaining 2, exhausted (fixed count).",
-)
-def request_12(s: PSnap):
-    c = Ctx(s, "diamond_5", diamond(5, 5, 5, 5))
-    for kernel in (EB, MF, W):
-        fg = c.ledger()
-        pol = P.FlowPolicy(fg, 0, 3, ca(kernel, fc=2, mx=2))
-        r = s.place(f"{kernel}: request 12", pol, 12, fg=fg)
-        s.expect(
-            f"{kernel} result",
-            (r.placed, r.remaining, r.termination),
-            (10, 2, "exhausted"),
-        )
-        res = r.trace["sources"][0]["stage1"]["reservations"]
-        s.expect(f"{kernel} reservations", [x["reserved"] for x in res], [5, 5])
-
-
-# ====================================================================== growth
-
-
-@fixture(
-    "growth_request_6",
-    "growth",
-    ["8b", "9.2"],
-    "EB CapacityAware flow_count 1, max 2, two capacity-5 routes, request 6: the "
-    "first flow takes 5, growth to two flows gives the cohort 6 split [3, 3] "
-    "(no over-admission); complete, routes_changed true.",
-)
-def growth_6(s: PSnap):
-    c = Ctx(s, "diamond_5", diamond(5, 5, 5, 5))
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 3, ca(EB, fc=1, mx=2))
-    r = s.place("request 6", pol, 6)
-    s.expect(
-        "result",
-        (r.placed, r.termination, r.routes_changed, r.weights_changed),
-        (6, "complete", True, False),
-    )
-    s.expect("shares", c.shares(pol), [3, 3])
-
-
-@fixture(
-    "growth_256_request_1278",
-    "growth",
-    ["8b", "9.2"],
-    "256 parallel capacity-5 links, EB tunnels (Residual), flow_count 1, max 256, "
-    "request 1278: 255 accepted growth steps, k = 256, the cohort total 1278 split "
-    "by round robin: 254 flows at 5 and 2 at 4; complete.",
-)
-def growth_256(s: PSnap):
-    c = Ctx(s, "parallel_256", parallel([5] * 256))
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 1, ca(EB, priority="Residual", fc=1, mx=256))
-    r = pol.place(1278)
-    steps = r.trace["sources"][0]["stage4"]
-    for st in steps:
-        st.pop("W", None)
-        st.pop("shares", None)
-    s.step("request 1278", result=r.to_json(), growth=steps, created=r.trace["created"])
-    s.expect("result", (r.placed, r.termination), (1278, "complete"))
-    shares = c.shares(pol)
-    s.expect(
-        "k and shares", (len(shares), shares.count(5), shares.count(4)), (256, 254, 2)
-    )
-    s.expect(
-        "accepted growth steps",
-        sum(1 for x in steps if x.get("decision") == "accepted"),
-        255,
-    )
-    s.expect("created", r.trace["created"], 256)
-
-
-@fixture(
-    "harmful_growth_10_1",
-    "growth",
-    ["8b", "9.2", "9.4"],
-    "Routes of capacity 10 (cost 2) and 1 (cost 4), EB, max 2. P = 10 on route 0; "
-    "place(1): the candidate on route 1 gives a cohort bound of 3 (round robin [2, 1] "
-    "over capacities [10, 1]) < 10 and is rejected: delta 0, exhausted, flags false, "
-    "no id consumed.",
-)
-def harmful_growth(s: PSnap):
-    c = Ctx(s, "harmful", diamond(10, 10, 1, 1, c0=1, c1=2))
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 3, ca(EB, fc=1, mx=2))
-    s.place("request 10", pol, 10)
-    nxt = fg.next_flow_id()
-    r = s.place("request 1", pol, 1)
-    s.expect(
-        "result",
-        (r.placed, r.termination, r.routes_changed, r.weights_changed),
-        (0, "exhausted", False, False),
-    )
-    rej = [
-        x
-        for x in r.trace["sources"][0]["stage4"]
-        if x.get("decision", "").startswith("rejected")
-    ]
-    s.expect(
-        "rejected candidate",
-        [(x["route"], x["T_candidate"]) for x in rej],
-        [(list(c.ids([2, 3])), 3)],
-    )
-    s.expect("no id consumed", fg.next_flow_id(), nxt)
-    s.expect("total", pol.placed_demand(), 10)
-
-
-@fixture(
-    "hidden_beneficial_route",
-    "growth",
-    ["8b", "9.4"],
-    "Routes (capacity, cost per edge) (10, 1), (1, 2), (10, 3); P = 10 on the "
-    "first; place(1) evaluates the cheapest candidate (route 1), rejects it (bound "
-    "3) and stops: exhausted under the greedy rule, although routes 0 and 2 jointly "
-    "would total 11 (round robin [6, 5] fits [10, 10]; documented, not searched).",
-)
-def hidden_beneficial(s: PSnap):
-    c = Ctx(s, "three_routes", routes([(10, 1), (1, 2), (10, 3)]))
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 4, ca(EB, fc=1, mx=2))
-    s.place("request 10", pol, 10)
-    r = s.place("request 1", pol, 1)
-    s.expect("result", (r.placed, r.termination), (0, "exhausted"))
-    tried = [x["route"] for x in r.trace["sources"][0]["stage4"] if "route" in x]
-    s.expect("candidate tried", tried, [list(c.ids([2, 3]))])
-    rr = P.round_robin(11, 2)
-    s.expect(
-        "alternative (not searched) fits",
-        (rr, rr[0] <= 10 and rr[1] <= 10),
-        ([6, 5], True),
-    )
 
 
 # ====================================================================== four calls
@@ -611,9 +292,8 @@ def lossy_diamond(s: PSnap):
     "infinite",
     ["15", "8a", "8b"],
     "+inf for every kernel: CostOnly MaxFlow, Weighted and EB on 5/5 place 10 "
-    "(exhausted, remaining +inf); EB and MaxFlow CapacityAware grow to two flows "
-    "(10); Lossy injects every source member to its residual: 11 on the 1/10 "
-    "diamond; on 10/10 over 1/10 delivered 11 with 20 offered and 9 dropped.",
+    "(exhausted, remaining +inf); Lossy injects every source member to its residual: 11 "
+    "on the 1/10 diamond; on 10/10 over 1/10 delivered 11 with 20 offered and 9 dropped.",
 )
 def inf_every_kernel(s: PSnap):
     c = Ctx(s, "diamond_5", diamond(5, 5, 5, 5))
@@ -627,15 +307,6 @@ def inf_every_kernel(s: PSnap):
             (r.placed, r.remaining, r.termination),
             (10, None, "exhausted"),
         )
-    for kernel in (EB, MF):
-        fg = c.ledger()
-        pol = P.FlowPolicy(fg, 0, 3, ca(kernel, fc=1))
-        r = s.place(f"CapacityAware {kernel} +inf", pol, INF, fg=fg)
-        s.expect(
-            f"CapacityAware {kernel}",
-            (r.placed, r.termination, len(pol.flow_ids())),
-            (10, "exhausted", 2),
-        )
     c2 = Ctx(s, "diamond_1_10", diamond(1, 1, 10, 10))
     fg = c2.ledger()
     r = s.place("Lossy +inf 1/10", P.FlowPolicy(fg, 0, 3, co(EB, LOSSY)), INF, fg=fg)
@@ -648,125 +319,6 @@ def inf_every_kernel(s: PSnap):
     s.expect(
         "Lossy transit", (r.placed, rec.offered, sum(rec.drops.values())), (11, 20, 9)
     )
-
-
-# ====================================================================== reoptimisation
-
-
-@fixture(
-    "retention_third_party_removal",
-    "reoptimisation",
-    ["8b", "9.2"],
-    "Two capacity-5 routes, another owner holds 2 on route 0. EB CapacityAware "
-    "count 2 (max 2), Capacity priority, reoptimisation. Request 8 reserves 3 and 4 "
-    "and places 6 ([3, 3]; exhausted). The owner leaves; request 1: flow 0 keeps "
-    "route 0, flow 1's candidate (route 0, view 2) cannot carry its 3 and is "
-    "rejected (retention); stage 3 raises the cohort to 7 ([4, 3]); flags false.",
-)
-def retention(s: PSnap):
-    c = Ctx(s, "diamond_5", diamond(5, 5, 5, 5))
-    fg = c.ledger()
-    other, _ = c.manual(fg, 0, 3, [0, 1], 2)
-    pol = P.FlowPolicy(fg, 0, 3, ca(EB, fc=2, mx=2, reopt=True))
-    r = s.place("request 8", pol, 8)
-    s.expect("first", (r.placed, r.termination), (6, "exhausted"))
-    res = r.trace["sources"][0]["stage1"]["reservations"]
-    s.expect("reservations", [x["reserved"] for x in res], [3, 4])
-    other.remove()
-    r = s.place("request 1", pol, 1)
-    rows = r.trace["sources"][0]["stage2"]
-    s.expect(
-        "reopt decisions",
-        [x["decision"].split(":")[0] for x in rows],
-        ["kept", "rejected"],
-    )
-    s.expect("second", (r.placed, pol.placed_demand(), c.shares(pol)), (1, 7, [4, 3]))
-    s.expect("flags", (r.routes_changed, r.weights_changed), (False, False))
-
-
-@fixture(
-    "shared_capacity_view",
-    "reoptimisation",
-    ["8b", "9.2"],
-    "Shared ingress e0 (10) and parallel egresses e1, e2 (10 each); a third party "
-    "holds 6 on e1. Two EB tunnels (Residual, Collapse picks the egress with the "
-    "larger residual) both take e2: [4, 4]. After the third party leaves, request "
-    "1: flow 0 sees e0 = 2 + 4 = 6 on its view W + own, moves to e1 at T_old = 4; "
-    "the cohort reaches 9 ([5, 4]); routes_changed true, weights_changed false.",
-)
-def shared_view(s: PSnap):
-    c = Ctx(s, "shared", (3, [(0, 1, 10, 1), (1, 2, 10, 1), (1, 2, 10, 1)]))
-    fg = c.ledger()
-    other, _ = c.manual(fg, 1, 2, [1], 6)
-    pol = P.FlowPolicy(fg, 0, 2, ca(EB, priority="Residual", fc=2, mx=2, reopt=True))
-    r = s.place("request 8", pol, 8)
-    s.expect("first", (r.placed, c.routes_of(pol)), (8, [[0, 2], [0, 2]]))
-    other.remove()
-    r = s.place("request 1", pol, 1)
-    row = r.trace["sources"][0]["stage2"][0]
-    s.expect(
-        "flow 0 adopted e1",
-        (row["decision"], row["candidate"]),
-        ("adopted", list(c.ids([0, 1]))),
-    )
-    s.expect("second", (r.placed, pol.placed_demand(), c.shares(pol)), (1, 9, [5, 4]))
-    s.expect("flags", (r.routes_changed, r.weights_changed), (True, False))
-
-
-@fixture(
-    "reopt_double_spend",
-    "reoptimisation",
-    ["8b", "9.2"],
-    "MaxFlow tunnel with reoptimisation on two parallel capacity-10 links: T = 4 on "
-    "e0; a third party fills e0. Request 1: the reroute to e1 happens at T_old = 4 "
-    "(no budget), stage 3 adds 1: placed 1, total 5. The single-link variant (no "
-    "third party) places 1 as well.",
-)
-def double_spend(s: PSnap):
-    c = Ctx(s, "parallel_10_10", parallel([10, 10]))
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 1, ca(MF, priority="Residual", fc=1, mx=1, reopt=True))
-    s.place("request 4", pol, 4)
-    c.manual(fg, 0, 1, [0], 6, "third party fills e0")
-    r = s.place("request 1", pol, 1)
-    s.expect("result", (r.placed, pol.placed_demand(), c.routes_of(pol)), (1, 5, [[1]]))
-    s.expect("flags", (r.routes_changed, r.weights_changed), (True, False))
-    c1 = Ctx(s, "one_link", parallel([10]))
-    fg1 = c1.ledger()
-    p1 = P.FlowPolicy(fg1, 0, 1, ca(MF, priority="Residual", fc=1, mx=1, reopt=True))
-    s.place("single link request 4", p1, 4, fg=fg1)
-    r = s.place("single link request 1", p1, 1, fg=fg1)
-    s.expect("single link", (r.placed, p1.placed_demand()), (1, 5))
-
-
-@fixture(
-    "retention_same_structure",
-    "reoptimisation",
-    ["8b", "9.4"],
-    "Three parallel capacity-2 links, EB CapacityAware multipath with "
-    "reoptimisation: request 3 gives [1, 1, 1]; third parties fill the leftovers. "
-    "Request 1: the candidate DAG equals the flow's route (a structurally equal "
-    "candidate is not a reroute): kept, nothing shed, placed 0, exhausted, flags "
-    "false. (Replaces the grid fixture 3 + g.)",
-)
-def retention_same(s: PSnap):
-    c = Ctx(s, "parallel_2", parallel([2, 2, 2]))
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 1, ca(EB, fc=1, reopt=True, sel=search.Selection()))
-    s.place("request 3", pol, 3)
-    s.expect("allocation", c.own(fg, pol), [1, 1, 1])
-    for p in range(3):
-        c.manual(fg, 0, 1, [p], 1, f"third party fills link {p}")
-    r = s.place("request 1", pol, 1)
-    s.expect(
-        "result",
-        (r.placed, r.termination, r.routes_changed, r.weights_changed),
-        (0, "exhausted", False, False),
-    )
-    s.expect(
-        "reopt", [x["decision"] for x in r.trace["sources"][0]["stage2"]], ["kept"]
-    )
-    s.expect("nothing shed", pol.placed_demand(), 3)
 
 
 # ====================================================================== third parties
@@ -879,31 +431,14 @@ def weighted_additivity(s: PSnap):
     "admission_zero_and_no_route",
     "admission",
     ["13", "9.4", "8"],
-    "Zero request: complete, nothing created, flags false. Overlapping endpoint "
-    "sets (src == dst) are rejected at construction (rule 13). Zero capacity is "
-    "not a missing route (contract r8 3.5, step 1): CostOnly over zero-capacity "
+    "Overlapping endpoint sets are rejected at construction (rule 13). Zero capacity "
+    "is not a missing route (the contract's 3.5): CostOnly over zero-capacity "
     "links has the source in its roster and creates its zero-delivery record on "
-    "the static support (exhausted: MaxFlow carries 0 there). No route: "
-    "CapacityAware on a zero baseline has a static roster but no residual "
-    "route (no_route, no id consumed).",
+    "the static support (exhausted: MaxFlow carries 0 there).",
 )
 def admission(s: PSnap):
     c = Ctx(s, "diamond_5", diamond(5, 5, 5, 5))
     fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 3, ca(MF))
-    r = s.place("request 0", pol, 0)
-    s.expect(
-        "zero",
-        (
-            r.termination,
-            r.placed,
-            r.routes_changed,
-            r.weights_changed,
-            fg.next_flow_id(),
-        ),
-        ("complete", 0, False, False, 0),
-    )
-    s.raises("src == dst rejected", P.FlowPolicy, fg, 0, 0, ca(MF))
     s.raises("overlapping sets rejected", P.FlowPolicy, fg, [0, 1], [1, 3], co(MF))
     c0 = Ctx(s, "diamond_0", diamond(0, 0, 0, 0))
     fg0 = c0.ledger()
@@ -921,230 +456,9 @@ def admission(s: PSnap):
         ),
         ("exhausted", 0, [0], [(0, 2, 4)]),
     )
-    fgz = c.ledger([0, 0, 0, 0])
-    pz = P.FlowPolicy(fgz, 0, 3, ca(EB, fc=2))
-    r = s.place("CapacityAware on a zero residual", pz, 1, fg=fgz)
-    s.expect(
-        "CapacityAware no route", (r.termination, fgz.next_flow_id()), ("no_route", 0)
-    )
-
-
-# ====================================================================== limits
-
-
-@fixture(
-    "limits_kmaxflowspercall",
-    "limits",
-    ["8b", "9.2", "9.4"],
-    "kMaxFlowsPerCall is an engine constant (10,000); the fixture lowers the "
-    "module's test hook to 3. Growth over five 1-unit links stops after 3 creations "
-    "(limit_flows, placed 3); two CapacityAware sources share one "
-    "created counter: source 0 creates 3, source 1's creation is blocked by the cap "
-    "(local limit_flows, nothing committed for it, no id consumed).",
-)
-def limits_created(s: PSnap):
-    s.expect("engine constant", K_MAX_FLOWS_PER_CALL, 10000)
-    saved = P.MAX_FLOWS_PER_CALL
-    P.MAX_FLOWS_PER_CALL = 3
-    try:
-        c = Ctx(s, "parallel_1x5", parallel([1] * 5))
-        fg = c.ledger()
-        pol = P.FlowPolicy(fg, 0, 1, ca(MF, priority="Residual"))
-        r = s.place("request 5", pol, 5)
-        s.expect(
-            "growth capped",
-            (r.placed, r.termination, len(pol.flow_ids())),
-            (3, "limit_flows", 3),
-        )
-        c2 = Ctx(s, "two_sources", (3, [(0, 2, 1, 1)] * 4 + [(1, 2, 1, 1)] * 4))
-        fg = c2.ledger()
-        two = P.FlowPolicy(fg, [0, 1], 2, ca(MF, priority="Residual"))
-        r = s.place("two sources request 8", two, 8, fg=fg)
-        s.expect("offers", r.trace["offers"], {0: 4, 1: 4})
-        s.expect(
-            "local outcomes",
-            r.trace["local_outcomes"],
-            {0: "limit_flows", 1: "limit_flows"},
-        )
-        s.expect(
-            "result",
-            (r.placed, r.termination, len(two.flow_ids())),
-            (3, "limit_flows", 3),
-        )
-    finally:
-        P.MAX_FLOWS_PER_CALL = saved
-
-
-@fixture(
-    "limits_diminishing",
-    "limits",
-    ["8b", "9.2", "9.4"],
-    "q = 2^-12: one 50-capacity link (204,800 units) and twenty 0.01 links (41 "
-    "units each). MaxFlow tunnels (Residual), Diminishing(window 8, fraction 1e-3), "
-    "request 100 (409,600 units): growth adds 41 units per step; after 8 steps the "
-    "window sum 328 < 409.6 stops growth (limit_diminishing). Without the guard all "
-    "20 links are used (exhausted); +inf never arms it.",
-)
-def limits_diminishing(s: PSnap):
-    q = 2.0**-12
-    from units import to_units
-
-    small = to_units(0.01, q)
-    big = to_units(50, q)
-    s.expect("units", (small, big), (41, 204800))
-    c = Ctx(s, "fan", parallel([big] + [small] * 20), resolution=q)
-    dim = P.Diminishing(8, 1e-3)
-    for label, d, volume, steps, term in (
-        ("window8", dim, to_units(100, q), 8, "limit_diminishing"),
-        ("no guard", None, to_units(100, q), 20, "exhausted"),
-        ("inf", dim, INF, 20, "exhausted"),
-    ):
-        fg = c.ledger()
-        pol = P.FlowPolicy(fg, 0, 1, ca(MF, priority="Residual", diminishing=d))
-        r = s.place(f"{label}", pol, volume, fg=fg)
-        s.expect(
-            f"{label}",
-            (r.placed, r.termination, len(pol.flow_ids())),
-            (big + steps * small, term, steps + 1),
-        )
-
-
-# ====================================================================== lifetime
-
-
-@fixture(
-    "lifetime_remove_orphan_reset",
-    "lifetime",
-    ["8", "18", "13"],
-    "Section 8 with policies (replaces the invalidation fixture: there is no "
-    "external removal): reset and copy are rejected while a policy is bound; "
-    "remove() reverts and retires the ids; a later place opens a new cohort with a "
-    "new id (routes_changed true); remove() on an empty cohort resets the epoch "
-    "state; a destroyed policy's records stay as orphans until reset; retired ids "
-    "throw; ids are never reused.",
-)
-def lifetime(s: PSnap):
-    c = Ctx(s, "diamond_5", diamond(5, 5, 5, 5))
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 3, ca(MF))
-    s.place("request 3", pol, 3)
-    fid = pol.flow_ids()[0]
-    s.raises("reset while bound", fg.reset)
-    s.raises("copy while bound", fg.copy)
-    pol.remove()
-    s.expect("reverted", (c.alloc(fg), pol.placed_demand()), ([0, 0, 0, 0], 0))
-    s.raises("retired id", fg.record, fid)
-    r = s.place("restart", pol, 2)
-    s.expect(
-        "restart",
-        (r.routes_changed, r.weights_changed, pol.flow_ids()[0][1]),
-        (True, False, 1),
-    )
-    pol.remove()
-    pol.remove()
-    s.expect(
-        "empty-cohort remove resets the epoch",
-        (pol.requested, pol.infinite),
-        (0, False),
-    )
-    other = P.FlowPolicy(fg, 0, 3, co(EB))
-    s.place("other 2", other, 2)
-    other.destroy()
-    s.expect("orphan readable", [x.delivered for x in fg.records()], [2])
-    s.raises("reset while pol bound", fg.reset)
-    pol.destroy()
-    fg.reset()
-    s.expect("reset clears orphans", (fg.records(), fg.next_flow_id()), ([], 3))
 
 
 # ====================================================================== flags
-
-
-@fixture(
-    "flag_table",
-    "flags",
-    ["14", "9.4"],
-    "The authoritative flag table of revision 20 (flags accumulate committed "
-    "events): creation (T, F), also at zero delivery; no-op (F, F); saturated call "
-    "(F, F); adopted Weighted reroute that admits zero (T, T; review-11 C4); "
-    "rejected growth only (F, F); accepted growth (T, F); EB routes [3, 2, 1] "
-    "holding 3, request 3: growth onto the second route accepted (gain 2), onto the "
-    "third rejected: routes_changed stays true; restart after remove() (T, F).",
-)
-def flag_table(s: PSnap):
-    c = Ctx(s, "diamond_5", diamond(5, 5, 5, 5))
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 3, ca(MF, mx=1))
-    rows = {}
-    rows["creation"] = s.place("creation", pol, 5)
-    rows["no-op"] = s.place("no-op", pol, 0)
-    rows["saturated without growth candidate change"] = s.place("saturated", pol, 1)
-    pol.remove()
-    rows["restart"] = s.place("restart", pol, 1)
-    cw = Ctx(s, "parallel_10_20", parallel([10, 20]))
-    fgw = cw.ledger()
-    blocking, _ = cw.manual(fgw, 0, 1, [1], 20, "blocking owner")
-    wsel = tunnel("Capacity")
-    wpol = P.FlowPolicy(
-        fgw,
-        0,
-        1,
-        P.FlowPolicyConfig(
-            P.CapacityAware(max_flow_count=1, reoptimize=True), W, LOSSLESS, wsel
-        ),
-    )
-    s.place("Weighted place(4)", wpol, 4, fg=fgw)
-    cw.manual(fgw, 0, 1, [0], 6, "owner fills e0")
-    blocking.remove()
-    cw.manual(fgw, 0, 1, [1], 16, "owner takes 16 of e1")
-    rows["adopted Weighted reroute at zero"] = s.place(
-        "Weighted reroute", wpol, 1, fg=fgw
-    )
-    s.expect(
-        "reroute admitted zero", rows["adopted Weighted reroute at zero"].placed, 0
-    )
-    ch = Ctx(s, "harmful", diamond(10, 10, 1, 1, c0=1, c1=2))
-    fgh = ch.ledger()
-    ph = P.FlowPolicy(fgh, 0, 3, ca(EB, fc=1, mx=2))
-    s.place("P = 10", ph, 10, fg=fgh)
-    rows["rejected growth only"] = s.place("rejected growth", ph, 1, fg=fgh)
-    cg = Ctx(s, "diamond_5b", diamond(5, 5, 5, 5))
-    fgg = cg.ledger()
-    pg = P.FlowPolicy(fgg, 0, 3, ca(EB, fc=1, mx=2))
-    s.place("first 5", pg, 5, fg=fgg)
-    rows["accepted growth"] = s.place("accepted growth", pg, 5, fg=fgg)
-    c3 = Ctx(s, "routes_3_2_1", routes([(3, 1), (2, 2), (1, 3)]))
-    fg3 = c3.ledger()
-    p3 = P.FlowPolicy(fg3, 0, 4, ca(EB, fc=1, mx=3))
-    s.place("hold 3", p3, 3, fg=fg3)
-    r = s.place("request 3", p3, 3, fg=fg3)
-    decisions = [
-        x.get("decision", x.get("stop")) for x in r.trace["sources"][0]["stage4"]
-    ]
-    s.expect(
-        "growth decisions",
-        [d.split(":")[0] for d in decisions],
-        ["accepted", "rejected"],
-    )
-    s.expect(
-        "[3, 2, 1] witness",
-        (r.placed, r.termination, c3.shares(p3)),
-        (2, "exhausted", [3, 2]),
-    )
-    rows["accepted then rejected growth"] = r
-    want = {
-        "creation": (True, False),
-        "no-op": (False, False),
-        "saturated without growth candidate change": (False, False),
-        "restart": (True, False),
-        "adopted Weighted reroute at zero": (True, True),
-        "rejected growth only": (False, False),
-        "accepted growth": (True, False),
-        "accepted then rejected growth": (True, False),
-    }
-    for name, (rc, wc) in want.items():
-        res = rows[name]
-        s.expect(f"flags: {name}", (res.routes_changed, res.weights_changed), (rc, wc))
 
 
 @fixture(
@@ -1495,82 +809,18 @@ def sources_partition(s: PSnap):
     s.expect("partition independence", out, [[2, 0], [2, 0]])
 
 
-@fixture(
-    "eb_two_flows_per_source_reservation",
-    "sources",
-    ["9.2", "9.3", "8b"],
-    "Per-source binding of the EB reservation target (review-16 R4): two sources, "
-    "EB CapacityAware flow_count 2 each, request 4: offers [2, 2], each source's "
-    "target (P_s + v_s) div flow_count = 1 per flow (not the policy-wide 2).",
-)
-def eb_reservation_binding(s: PSnap):
-    c = Ctx(
-        s,
-        "two_sources_two_links",
-        (3, [(0, 2, 5, 1), (0, 2, 5, 1), (1, 2, 5, 1), (1, 2, 5, 1)]),
-    )
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, [0, 1], 2, ca(EB, fc=2, mx=2, sel=tunnel("Residual")))
-    r = s.place("request 4", pol, 4)
-    targets = {src: tr["stage1"]["eb_target"] for src, tr in r.trace["sources"].items()}
-    reserved = {
-        src: [x["reserved"] for x in tr["stage1"]["reservations"]]
-        for src, tr in r.trace["sources"].items()
-    }
-    s.expect("targets", targets, {0: 1, 1: 1})
-    s.expect("reservations", reserved, {0: [1, 1], 1: [1, 1]})
-    s.expect("result", (r.placed, r.termination), (4, "complete"))
-
-
 # ====================================================================== termination
 
 
 @fixture(
-    "termination_reduction",
+    "termination_complete_and_no_route",
     "termination",
     ["9.4", "14"],
-    "Local outcomes and the reduction limit_flows > limit_diminishing > exhausted > "
-    "no_route over unserved sources (review-16 R2): one limit_flows and one "
-    "exhausted give limit_flows; two sources without routes give no_route; one "
-    "exhausted and one no_route give exhausted; a fixed-count cohort full is "
-    "exhausted; a Lossy finite offer consumed with drops is complete; v = 0 is "
-    "complete; an empty static roster (no walk from the source; a zero-capacity "
-    "walk would count) is no_route.",
+    "The terminations of the 14.2 table without a reduction: a Lossy finite offer "
+    "consumed with drops is complete; v = 0 is complete; an empty static roster (no "
+    "walk from the source; a zero-capacity walk would count) is no_route.",
 )
 def termination(s: PSnap):
-    # limit_flows + exhausted: source 0 grows over two 1-unit links with max 3 >
-    # flow_count 1 (limit_flows needs the guard to fire: max 2 reached with
-    # remaining offer); source 1 has one 1-unit link and no growth candidate.
-    c = Ctx(s, "mixed", (3, [(0, 2, 1, 1), (0, 2, 1, 1), (0, 2, 1, 1), (1, 2, 1, 1)]))
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, [0, 1], 2, ca(MF, priority="Residual", fc=1, mx=2))
-    r = s.place("request 6 (offers [3, 3])", pol, 6)
-    s.expect(
-        "limit_flows + exhausted",
-        (r.trace["local_outcomes"], r.termination),
-        ({0: "limit_flows", 1: "exhausted"}, "limit_flows"),
-    )
-    cz = Ctx(s, "no_routes", (3, [(0, 2, 1, 1), (1, 2, 1, 1)]))
-    fgz = cz.ledger([0, 0])
-    pz = P.FlowPolicy(fgz, [0, 1], 2, ca(MF))
-    r = s.place("two sources without routes", pz, 2, fg=fgz)
-    s.expect(
-        "no_route + no_route",
-        (r.trace["local_outcomes"], r.termination),
-        ({0: "no_route", 1: "no_route"}, "no_route"),
-    )
-    fge = cz.ledger([1, 0])
-    pe = P.FlowPolicy(fge, [0, 1], 2, ca(MF, mx=1))
-    r = s.place("exhausted + no_route", pe, 4, fg=fge)
-    s.expect(
-        "exhausted + no_route",
-        (r.trace["local_outcomes"], r.termination),
-        ({0: "exhausted", 1: "no_route"}, "exhausted"),
-    )
-    cf = Ctx(s, "fixed", parallel([1]))
-    fgf = cf.ledger()
-    r = s.place("fixed count", P.FlowPolicy(fgf, 0, 1, ca(MF, fc=1, mx=1)), 2, fg=fgf)
-    s.expect("fixed-count cohort full", (r.placed, r.termination), (1, "exhausted"))
     cl = Ctx(s, "lossy", parallel([1, 10]))
     fgl = cl.ledger()
     r = s.place(
@@ -1593,34 +843,6 @@ def termination(s: PSnap):
     )
     s.place("empty roster +inf", p0, INF)
     s.raises("finite after +inf with an empty roster", p0.place, 1)
-
-
-@fixture(
-    "eb_resplit_3_3_to_3_2_2",
-    "growth",
-    ["16.3", "9.2"],
-    "Review-16 R7: CapacityAware EB, flow_count 2, max 3, three disjoint routes of "
-    "capacities [3, 3, 2] and increasing cost. Request 6 reserves 3 on each of the "
-    "first two ([3, 3]). Request 1: stage 3 cannot grow the pair; growth adds the "
-    "third route and the cohort total 7 is resplit [3, 2, 2]: the second flow loses "
-    "1 while the cohort and placed_demand() gain 1 (individual T_i and edge deltas "
-    "may decrease; the cohort total never does).",
-)
-def eb_resplit(s: PSnap):
-    c = Ctx(s, "routes_3_3_2", routes([(3, 1), (3, 2), (2, 3)]))
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 4, ca(EB, fc=2, mx=3))
-    r = s.place("request 6", pol, 6)
-    s.expect("first", (r.placed, c.shares(pol)), (6, [3, 3]))
-    before = c.alloc(fg)
-    r = s.place("request 1", pol, 1)
-    s.expect(
-        "resplit",
-        (r.placed, r.termination, c.shares(pol), pol.placed_demand()),
-        (1, "complete", [3, 2, 2], 7),
-    )
-    delta = [a - b for a, b in zip(c.alloc(fg), before, strict=True)]
-    s.expect("edge deltas (signed)", delta, [0, 0, -1, -1, 2, 2])
 
 
 # ====================================================================== Global
@@ -1857,100 +1079,3 @@ def collapse_projection(s: PSnap):
                 s.place(f"mp={mp} {tie} {prio}", pol, 1, fg=fg)
                 want = [1] if tie == search.PREFER and prio != "Capacity" else [0]
                 s.expect(f"mp={mp} {tie} {prio}", c.routes_of(pol), [want])
-
-
-@fixture(
-    "eb_growth_equal_route_stop",
-    "growth",
-    ["8b", "9.2"],
-    "Revision 24: with multipath routes growth never adds a flow on a DAG "
-    "structurally equal to an existing flow's route. Parallel links of capacity 1 and 5, EB "
-    "CapacityAware multipath, flow_count 1, no max: the first flow (both links) is "
-    "capped at 2 by round robin over the 1-unit link; growth adds a flow on the "
-    "5-unit link alone (cohort [2, 2], gain 2); the next candidate is that same "
-    "route and growth stops: placed 4, exhausted (before revision 24 each further "
-    "equal-route flow raised the bound by a rounding remainder).",
-)
-def eb_growth_equal_route(s: PSnap):
-    c = Ctx(s, "parallel_1_5", parallel([1, 5]))
-    fg = c.ledger()
-    pol = P.FlowPolicy(fg, 0, 1, ca(EB, fc=1, sel=search.Selection()))
-    r = s.place("request 100", pol, 100)
-    s.expect(
-        "result", (r.placed, r.termination, r.routes_changed), (4, "exhausted", True)
-    )
-    s.expect(
-        "routes and shares", (c.routes_of(pol), c.shares(pol)), ([[0, 1], [1]], [2, 2])
-    )
-    last = r.trace["sources"][0]["stage4"][-1]
-    s.expect("growth stop reason", last["stop"], "candidate equals a cohort route")
-
-
-@fixture(
-    "capacityaware_blocked_inf_remove_place",
-    "lifetime",
-    ["8", "9.4", "13"],
-    "A CapacityAware policy whose static roster is non-empty but whose residual "
-    "routes are blocked by another owner: place(+inf) creates nothing (no_route, no "
-    "id consumed) yet opens the infinite state, so place(1) is rejected; remove() on "
-    "the empty cohort resets the epoch state and place(1) is accepted (no_route while "
-    "blocked); after the owner leaves, place(1) creates the cohort with the next id.",
-)
-def capacityaware_blocked(s: PSnap):
-    c = Ctx(s, "one_link", parallel([3]))
-    fg = c.ledger()
-    other, _ = c.manual(fg, 0, 1, [0], 3, "owner blocks the only link")
-    pol = P.FlowPolicy(fg, 0, 1, ca(MF))
-    s.expect("static roster", pol.roster, [0])
-    nxt = fg.next_flow_id()
-    r = s.place("place(+inf)", pol, INF)
-    s.expect(
-        "+inf creates nothing",
-        (r.placed, r.termination, r.routes_changed, fg.next_flow_id()),
-        (0, "no_route", False, nxt),
-    )
-    s.raises("place(1) after +inf in the same epoch", pol.place, 1)
-    pol.remove()
-    s.expect("epoch reset", (pol.requested, pol.infinite), (0, False))
-    r = s.place("place(1) after remove", pol, 1)
-    s.expect(
-        "accepted, still blocked",
-        (r.placed, r.termination, fg.next_flow_id()),
-        (0, "no_route", nxt),
-    )
-    other.remove()
-    r = s.place("place(1) after release", pol, 1)
-    s.expect(
-        "created",
-        (r.placed, r.termination, r.routes_changed, pol.flow_ids()[0][1]),
-        (1, "complete", True, nxt),
-    )
-
-
-@fixture(
-    "eb_growth_single_path_repeat",
-    "growth",
-    ["8b", "9.2"],
-    "Revision 24 (owner review): a repeated single path is a legitimate growth "
-    "candidate. Parallel links of capacity 1 and 2, EB CapacityAware single-path "
-    "tunnels (Deterministic, Collapse keeps the lowest id), flow_count 1, request 3: "
-    "the first tunnel takes the 1-link (1), growth adds a tunnel on the 2-link "
-    "(cohort 2, shares [1, 1]), then a third tunnel repeating the 2-link path (cohort "
-    "3, shares [1, 1, 1]): complete with three tunnels of 1. Stopping on the repeated "
-    "path would have ended at 2 (exhausted).",
-)
-def eb_growth_single_path(s: PSnap):
-    c = Ctx(s, "parallel_1_2", parallel([1, 2]))
-    fg = c.ledger()
-    pol = P.FlowPolicy(
-        fg, 0, 1, ca(EB, fc=1, sel=tunnel("Residual", search.DETERMINISTIC))
-    )
-    r = s.place("request 3", pol, 3)
-    s.expect(
-        "result", (r.placed, r.termination, r.routes_changed), (3, "complete", True)
-    )
-    s.expect(
-        "three tunnels of 1",
-        (c.routes_of(pol), c.shares(pol)),
-        ([[0], [1], [1]], [1, 1, 1]),
-    )

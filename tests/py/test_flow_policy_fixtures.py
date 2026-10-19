@@ -1,4 +1,4 @@
-"""The 55 fixtures of the independent reference replayed through the bindings (the ledger and
+"""The 31 fixtures of the independent reference replayed through the bindings (the ledger and
 the policies).
 
 ``tests/data/policy_fixtures.json`` was exported from the independent reference
@@ -6,28 +6,25 @@ the policies).
 ``source`` string: ``tests/reference/policy/README.md``): every ledger, policy and call of
 every fixture in order, with the reference's values after each operation. The
 replay asserts every one of them on the build: each call's result (placed, remaining,
-termination, local outcomes, flags, drops, the cost curve and the requested outputs), its
-trace (the reference's keys: offers, created, per source the creation reservations, reroute
-decisions, amounts and growth steps; Global's view, cap, flow-core payload and shares), the
-ledger after it (allocations, residuals, every record field, next FlowId, owners) and the
-policy state (roster, requested, +inf, placed demand, per source the flows'
-ids, routes, T, deliveries, allocations, members and weights). An operation the reference
-rejects must raise here too (the messages differ), and a rejected placement leaves the policy's
-state as it was. Normalised on both sides: the T_max probe
-counts, the flow core's operation counters and ledger uids. The replay reads the trace and sets
-the creation cap through the private hooks, so it is skipped without them.
+termination, flags, drops, the cost curve and the requested outputs), its trace (the
+reference's keys: CostOnly's prepared routes, offers and admitted totals; the controllers'
+view, cap, flow-core payload and shares), the ledger after it (allocations, residuals, every
+record field, next FlowId, owners) and the policy state (roster, requested, +inf, placed
+demand, per source the flows' ids, routes, T, deliveries and allocations). An operation the
+reference rejects must raise here too (the messages differ), and a rejected placement leaves
+the policy's state as it was. Normalised on both sides: the flow core's operation counters and
+ledger uids. The replay reads the trace through the private hooks, so it is skipped without
+them.
 """
 
 from __future__ import annotations
 
 import copy
-import gc
 import json
 import math
 import traceback
 from pathlib import Path
 
-import _netgraph_core as ext
 import pytest
 from helpers import build, dag_of
 from private_hooks import needs_hooks
@@ -65,7 +62,7 @@ def norm(x):
     if isinstance(x, dict):
         out = {}
         for k, v in x.items():
-            if k in ("evals", "ledger_uid", "counters", "evaluations"):
+            if k in ("ledger_uid", "counters"):
                 continue
             if (
                 k in ("flow_id", "flow")
@@ -110,24 +107,6 @@ def config_of(g, c):
     elif kind == "Global":
         support = r.get("support")
         routing = ngc.Global(support=None if support is None else dag_of(g, support))
-    elif kind == "CapacityAware":
-        ceiling = None
-        if r["max_path_cost"] is not None:
-            name, value = r["max_path_cost"]
-            ceiling = ngc.Absolute(value) if name == "Absolute" else ngc.Stretch(value)
-        dim = (
-            None
-            if r["diminishing"] is None
-            else ngc.DiminishingReturns(*r["diminishing"])
-        )
-        routing = ngc.CapacityAware(
-            flow_count=r["flow_count"],
-            max_flow_count=r["max_flow_count"],
-            max_path_cost=ceiling,
-            min_flow_bandwidth=r["min_flow_bandwidth"],
-            reoptimize=r["reoptimize"],
-            diminishing=dim,
-        )
     else:
         raise AssertionError(f"the data names an unknown routing ({kind})")
     sel = c["selection"]
@@ -216,10 +195,6 @@ def policy_json(pol):
             continue
         out = []
         for f in flows:
-            members = list(f["route"] if f["members"] is None else f["members"])
-            weights = None
-            if f["weights"] is not None:
-                weights = [[e, w] for e, w in zip(members, f["weights"], strict=True)]
             out.append(
                 {
                     "id": f["flow_id"][1],
@@ -227,8 +202,6 @@ def policy_json(pol):
                     "T": None if lossy else f["T"],
                     "delivered": f["delivered"],
                     "alloc": [[e, x] for e, x in f["alloc"]],
-                    "members": members,
-                    "weights": weights,
                 }
             )
         cohorts.append([s, out])
@@ -247,7 +220,6 @@ def replay(fx, at=None):
     graphs = [build_graph(spec) for spec in fx["graphs"]]
     ledgers: dict[int, object] = {}
     policies: dict[int, object] = {}
-    alive = []
     for i, op in enumerate(fx["ops"]):
         if at is not None:
             at.append(i)
@@ -259,25 +231,6 @@ def replay(fx, at=None):
             # rather than in a branch no fixture would reach.
             assert not op["error"], where
             ledgers[op["id"]] = ngc.FlowLedger(graphs[op["graph"]], op["baseline"])
-            continue
-        if kind == "copy":
-            src = ledgers[op["ledger"]]
-            if op["error"]:
-                with pytest.raises((ValueError, TypeError)):
-                    src.copy()
-                assert exactly(ledger_json(src), expect["ledger"]), where
-                continue
-            ledgers[op["id"]] = src.copy()
-            assert exactly(ledger_json(ledgers[op["id"]]), expect["ledger"]), where
-            continue
-        if kind == "reset":
-            fg = ledgers[op["ledger"]]
-            if op["error"]:
-                with pytest.raises((ValueError, TypeError)):
-                    fg.reset(op["baseline"])
-            else:
-                fg.reset(op["baseline"])
-            assert exactly(ledger_json(fg), expect["ledger"]), where
             continue
         if kind == "policy":
             fg = ledgers[op["ledger"]]
@@ -298,25 +251,16 @@ def replay(fx, at=None):
                     construct()
                 continue
             pol = construct()
-            alive.append(pol)
             policies[op["id"]] = (pol, fg)
             assert exactly(policy_json(pol), expect["policy"]), where
             continue
         pol, fg = policies[op["policy"]]
-        # Neither a removal nor a destruction can fail, so the reference must accept both.
-        assert kind not in ("remove", "destroy") or not op["error"], where
+        # A removal cannot fail, so the reference must accept it.
+        assert kind != "remove" or not op["error"], where
         if kind == "remove":
             pol.remove()
             assert exactly(ledger_json(fg), expect["ledger"]), where
             assert exactly(policy_json(pol), expect["policy"]), where
-            continue
-        if kind == "destroy":
-            # The destruction law: dropping the last reference orphans the records.
-            alive[:] = [x for x in alive if x is not pol]
-            policies[op["policy"]] = None
-            del pol
-            gc.collect()
-            assert exactly(ledger_json(fg), expect["ledger"]), where
             continue
         assert kind == "place", where
         volume = math.inf if op["volume"] == "inf" else op["volume"]
@@ -326,20 +270,16 @@ def replay(fx, at=None):
             outputs = ngc.OutputOptions(
                 edge_flows=e, residual=r, bottleneck=b, min_cut=m
             )
-        old = ext._max_flows_per_call(op["cap"])
-        try:
-            if op["error"]:
-                before = policy_json(pol)
-                with pytest.raises((ValueError, TypeError)):
-                    pol.place(volume, outputs)
-                assert exactly(ledger_json(fg), expect["ledger"]), where
-                # The reference records the ledger only; the policy's own state (requested,
-                # +inf, the flows) must be as before the call too.
-                assert exactly(policy_json(pol), before), where
-                continue
-            r, trace = pol._place_traced(volume, outputs)
-        finally:
-            ext._max_flows_per_call(old)
+        if op["error"]:
+            before = policy_json(pol)
+            with pytest.raises((ValueError, TypeError)):
+                pol.place(volume, outputs)
+            assert exactly(ledger_json(fg), expect["ledger"]), where
+            # The reference records the ledger only; the policy's own state (requested, +inf,
+            # the flows) must be as before the call too.
+            assert exactly(policy_json(pol), before), where
+            continue
+        r, trace = pol._place_traced(volume, outputs)
         assert exactly(result_json(r), expect["result"]), where
         assert exactly(norm(trace), expect["trace"]), where
         assert exactly(ledger_json(fg), expect["ledger"]), where
@@ -347,8 +287,8 @@ def replay(fx, at=None):
 
 
 def test_the_data_holds_every_fixture():
-    assert len(FIXTURES) == 55
-    assert len({fx["name"] for fx in FIXTURES}) == 55
+    assert len(FIXTURES) == 31
+    assert len({fx["name"] for fx in FIXTURES}) == 31
 
 
 @needs_hooks
@@ -427,7 +367,7 @@ def test_a_corrupted_expectation_fails(key):
         assert index == n, fx["name"]
         assert f'expect["{key}"]' in line, fx["name"]
         corrupted += 1
-    assert corrupted > 50
+    assert corrupted == len(FIXTURES)  # every fixture has such a placement
 
 
 def test_exactly_compares_types_at_every_level():
@@ -477,7 +417,7 @@ def test_an_expected_value_of_another_type_fails(change):
         assert index == n, fx["name"]
         assert 'expect["result"]' in line, fx["name"]
         changed += 1
-    assert changed > 50
+    assert changed == len(FIXTURES)
 
 
 @needs_hooks
@@ -518,57 +458,24 @@ def test_every_other_replay_clause_reports_its_operation(monkeypatch):
             'assert exactly(g.input_index().tolist(), spec["input_index"])',
         )
     assert sections == {
-        "copy failed ledger",
-        "destroy ok ledger",
         "place failed ledger",
         "policy ok policy",
         "remove ok ledger",
         "remove ok policy",
-        "reset failed ledger",
-        "reset ok ledger",
     }
     assert flags == {
-        "copy failed",
-        "destroy ok",
         "ledger ok",
         "place failed",
         "place ok",
         "policy failed",
         "policy ok",
         "remove ok",
-        "reset failed",
-        "reset ok",
     }
     # An unknown operation in place of op 3 of global_epochs (a placement).
     epochs = next(fx for fx in FIXTURES if fx["name"] == "global_epochs")
     renamed = copy.deepcopy(epochs)
     renamed["ops"][3]["op"] = "move"
     assert _failure(renamed) == (3, 'assert kind == "place", where')
-    # A copy of global_epochs' ledger 0 before op 1 binds a policy to it succeeds (the data holds
-    # only a failing copy). Flagged as failing, with the source's true state expected, it fails
-    # at that operation only because it must raise; flagged as succeeding with a wrong expected
-    # ledger, its comparison fails.
-    assert epochs["ops"][0]["op"] == "ledger" and epochs["ops"][1]["op"] == "policy"
-    fresh = ledger_json(ngc.FlowLedger(build_graph(epochs["graphs"][0]), None))
-    for error, expected in ((True, fresh), (False, {})):
-        copied = copy.deepcopy(epochs)
-        copied["ops"].insert(
-            1,
-            {
-                "op": "copy",
-                "ledger": 0,
-                "id": 1,
-                "error": error,
-                "expect": {"ledger": expected},
-            },
-        )
-        failure = _failure(copied)
-        assert failure is not None and failure[0] == 1, (error, failure)
-        if not error:
-            assert (
-                failure[1]
-                == 'assert exactly(ledger_json(ledgers[op["id"]]), expect["ledger"]), where'
-            )
     # Every call the data rejects, with the policy's +inf flag read flipped after that call only
     # (the binding gives no way to change a policy's state directly, so its state read is
     # changed): the comparison with the policy before the call must fail there. The ledger is
@@ -605,7 +512,7 @@ def test_every_other_replay_clause_reports_its_operation(monkeypatch):
                 n,
                 "assert exactly(policy_json(pol), before), where",
             ), (fx["name"], n)
-    assert rejected_calls == 4
+    assert rejected_calls == 3
     monkeypatch.undo()
     # Op 2 of global_epochs is a Global zero call on a fresh policy (nothing prepared: no curve),
     # op 3 a positive call with the curve [[1, 1]]. With op 3 moved before op 2, the zero call

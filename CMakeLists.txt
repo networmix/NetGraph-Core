@@ -78,6 +78,7 @@ add_library(netgraph_core STATIC
   src/evaluators.cpp
   src/program.cpp
   src/forwarding.cpp
+  src/tunnels_t1.cpp
 )
 target_include_directories(netgraph_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -160,6 +161,7 @@ if(NETGRAPH_CORE_BUILD_TESTS)
     tests/cpp/zero_capacity_tests.cpp
     tests/cpp/pooled_origin_tests.cpp
     tests/cpp/program_tests.cpp
+    tests/cpp/tunnels_t1_tests.cpp
   )
   target_compile_definitions(netgraph_core_tests PRIVATE NETGRAPH_CORE_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
   # Allocation-failure tests replace the global operator new: a separate executable.

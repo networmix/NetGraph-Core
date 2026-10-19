@@ -26,7 +26,7 @@ void register_path(pybind11::module_& m);              // Path
 void register_flow_record(pybind11::module_& m);       // FlowRecord
 void register_flow_ledger(pybind11::module_& m);       // FlowLedger
 void register_program(pybind11::module_& m);           // TunnelStatus, Tunnel, Route, ForwardingProgram
-void register_routing(pybind11::module_& m);           // Absolute, Stretch, DiminishingReturns, the four routings
+void register_routing(pybind11::module_& m);           // Absolute, Stretch, Tunnels, the four routings
 void register_policy_config(pybind11::module_& m);     // FlowPolicyConfig, OutputOptions
 void register_placement_result(pybind11::module_& m);  // Termination, SourceFlow, TunnelFlow, PlacementResult
 void register_dag_cache(pybind11::module_& m);         // DagCacheStats, DagCacheMiss, DagCache

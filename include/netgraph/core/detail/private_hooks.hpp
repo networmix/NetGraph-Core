@@ -1,10 +1,9 @@
 /* The private hooks of the development build (internal). CMake option NETGRAPH_CORE_PRIVATE_HOOKS:
    ON for the editable development build and the test suites, OFF for an installed wheel. The
    hooks declared here are test controls and diagnostics the tests compare with their
-   independent model of the policy; none of them is public API:
-   a lowered creation cap and the transaction trace.
-   Without the option neither is built: the engine reads the constant kMaxFlowsPerCall, and every
-   trace write is a compile-time-dead branch (kTraced), so only empty trace values are built. */
+   independent model of the policy; none of them is public API: the transaction trace.
+   Without the option it is not built: every trace write is a compile-time-dead branch (kTraced),
+   so only empty trace values are built. */
 #pragma once
 
 #include "netgraph/core/detail/hooks_flag.hpp"
@@ -18,8 +17,6 @@ inline constexpr bool kTraced = NETGRAPH_CORE_PRIVATE_HOOKS != 0;
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
 
-#include <atomic>
-#include <cstdint>
 #include <functional>
 #include <optional>
 
@@ -28,10 +25,6 @@ inline constexpr bool kTraced = NETGRAPH_CORE_PRIVATE_HOOKS != 0;
 
 namespace netgraph::core::detail {
 
-// The call-wide creation cap every CapacityAware call reads (kMaxFlowsPerCall unless a test
-// lowers it to reach the cap on small graphs).
-std::atomic<std::int64_t>& max_flows_per_call() noexcept;
-
 // FlowPolicy::place with the transaction's trace (a Trace: the call's intermediate values,
 // keyed as the tests' model of the policy keys them). `staged`, when given, runs
 // once the result and the trace are final and before anything is published (the commit, the
@@ -39,12 +32,6 @@ std::atomic<std::int64_t>& max_flows_per_call() noexcept;
 // its Python objects there).
 PlacementResult place_traced(FlowPolicy& policy, std::optional<Amount> volume, const OutputOptions& outputs, Trace& trace,
                              const std::function<void()>* staged = nullptr);
-
-// Any call of a policy with a `staged` callback (place_traced's, without the trace): it runs once
-// the result is final and before anything is published (evaluate: before it returns).
-enum class CallKind { Place, Evaluate, Replace, Forward };
-PlacementResult call_staged(FlowPolicy& policy, CallKind kind, std::optional<Amount> offer, const Eligibility* black_holes,
-                            const OutputOptions& outputs, const std::function<void()>* staged);
 
 } // namespace netgraph::core::detail
 

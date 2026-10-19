@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
@@ -19,6 +20,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "netgraph/core/dag_cache.hpp"
@@ -883,5 +885,265 @@ inline Amount lossless_bound(const Graph& g, const std::vector<RefTunnel>& t) {
 }
 
 } // namespace program_reference
+
+// An independent reference of T1 (contract 6.2 to 6.5, 8.3): the setup by brute force over the
+// simple paths of small graphs and the lossless bound with the policy's whole roster. It calls
+// none of the library's searches or apportionment helpers (its own round robin, Bellman-Ford
+// distances, exact comparisons in Int128).
+namespace t1_reference {
+
+struct Selection {
+  bool prefer {false};  // PreferHigherPriority
+  EdgePriority priority {EdgePriority::Capacity};
+  bool multi_edge {true};
+};
+
+struct RefTunnel {
+  NodeId head {0};
+  std::size_t slot {0};
+  Amount request {0};
+  TunnelStatus status {TunnelStatus::Up};
+  std::vector<EdgeId> path {};  // walk order; empty when down
+  Cost cost {0};
+};
+
+// RR(x, k, i) = x // k + [i < x % k].
+inline Amount rr(Amount x, std::int64_t k, std::int64_t i) { return x / k + (i < x % k ? 1 : 0); }
+
+// The sources that reach an allowed destination over allowed edges (capacity ignored), ascending.
+inline std::vector<NodeId> roster(const Graph& g, const Eligibility* elig, const std::vector<NodeId>& sources,
+                                  const std::vector<NodeId>& dests) {
+  const auto n = static_cast<std::size_t>(g.num_nodes());
+  std::vector<char> is_dst(n, 0);
+  for (NodeId d : dests) {
+    if (elig == nullptr || elig->node_ok(d)) is_dst[static_cast<std::size_t>(d)] = 1;
+  }
+  std::vector<NodeId> out;
+  for (NodeId s : sources) {
+    if (elig != nullptr && !elig->node_ok(s)) continue;
+    std::vector<char> seen(n, 0);
+    std::vector<NodeId> stack {s};
+    seen[static_cast<std::size_t>(s)] = 1;
+    bool reached = false;
+    while (!stack.empty() && !reached) {
+      const NodeId u = stack.back();
+      stack.pop_back();
+      for (EdgeId e = 0; e < g.num_edges(); ++e) {
+        if (g.edge_src()[static_cast<std::size_t>(e)] != u || (elig != nullptr && !elig->edge_ok(e))) continue;
+        const NodeId w = g.edge_dst()[static_cast<std::size_t>(e)];
+        if (is_dst[static_cast<std::size_t>(w)] != 0) reached = true;
+        if (seen[static_cast<std::size_t>(w)] == 0) {
+          seen[static_cast<std::size_t>(w)] = 1;
+          stack.push_back(w);
+        }
+      }
+    }
+    if (reached) out.push_back(s);
+  }
+  return out;
+}
+
+// The pool baseline c0: the smallest static distance from a roster head to an allowed destination
+// over allowed edges, every capacity (Bellman-Ford).
+inline Cost pool_baseline(const Graph& g, const Eligibility* elig, const std::vector<NodeId>& heads,
+                          const std::vector<NodeId>& dests) {
+  const auto n = static_cast<std::size_t>(g.num_nodes());
+  constexpr Cost kInf = std::numeric_limits<Cost>::max();
+  Cost best = kInf;
+  for (NodeId h : heads) {
+    std::vector<Cost> d(n, kInf);
+    d[static_cast<std::size_t>(h)] = 0;
+    for (std::size_t round = 0; round < n; ++round) {
+      for (EdgeId e = 0; e < g.num_edges(); ++e) {
+        if (elig != nullptr && !elig->edge_ok(e)) continue;
+        const auto u = static_cast<std::size_t>(g.edge_src()[static_cast<std::size_t>(e)]);
+        const auto w = static_cast<std::size_t>(g.edge_dst()[static_cast<std::size_t>(e)]);
+        if (d[u] == kInf) continue;
+        d[w] = std::min(d[w], d[u] + g.cost()[static_cast<std::size_t>(e)]);
+      }
+    }
+    for (NodeId t : dests) {
+      if (elig == nullptr || elig->node_ok(t)) best = std::min(best, d[static_cast<std::size_t>(t)]);
+    }
+  }
+  return best;
+}
+
+// cost <= f * base exactly, for costs in [0, 2^63) and f finite and >= 1: f = m * 2^x with an
+// integer m in [2^52, 2^53) (frexp). The magnitudes are compared before any product is formed, so
+// every product stays below 2^127: base * m < 2^116; for x >= 0, a positive base gives
+// f * base >= 2^(52 + x), above every cost once x >= 11, and below that rhs * 2^x < 2^126; for
+// x < 0 (x >= -52, as f >= 1), cost * 2^-x < 2^115.
+inline bool stretch_admits(Cost cost, Cost base, double f) {
+  int exp = 0;
+  const double frac = std::frexp(f, &exp);  // f = frac * 2^exp, frac in [0.5, 1)
+  const auto m = static_cast<std::int64_t>(std::ldexp(frac, 53));  // f = m * 2^(exp - 53)
+  const int x = exp - 53;
+  if (base == 0) return cost == 0;
+  if (x >= 11) return true;
+  const Int128 rhs = Int128(base) * m;
+  auto pow2 = [](int k) {  // the portable Int128 has no signed shift
+    Int128 v = 1;
+    for (int i = 0; i < k; ++i) v = v * 2;
+    return v;
+  };
+  if (x >= 0) return Int128(cost) <= rhs * pow2(x);
+  return Int128(cost) * pow2(-x) <= rhs;
+}
+
+// A priority as the exact rational num / den (Headroom: U / C, 0 on an edge of capacity 0).
+inline std::pair<Amount, Amount> priority(const Graph& g, EdgePriority p, const std::vector<Amount>& U, EdgeId e) {
+  const auto ei = static_cast<std::size_t>(e);
+  const Amount c = g.capacity_units()[ei];
+  if (p == EdgePriority::Residual) return {U[ei], 1};
+  if (p == EdgePriority::Capacity) return {c, 1};
+  return c == 0 ? std::pair<Amount, Amount> {0, 1} : std::pair<Amount, Amount> {U[ei], c};
+}
+inline int compare(std::pair<Amount, Amount> a, std::pair<Amount, Amount> b) {
+  const Int128 l = Int128(a.first) * b.second;
+  const Int128 r = Int128(b.first) * a.second;
+  return l < r ? -1 : l > r ? 1 : 0;
+}
+
+// The setup of 6.2 to 6.4 for the roster `heads` (ascending) on the view U (consumed).
+inline std::vector<RefTunnel> setup(const Graph& g, const Eligibility* elig, const std::vector<NodeId>& heads,
+                                    const std::vector<NodeId>& dests, const Selection& sel,
+                                    const std::optional<CostCeiling>& ceiling, Amount minimum, Amount D, std::int64_t N,
+                                    std::vector<Amount> U) {
+  const auto n = static_cast<std::size_t>(g.num_nodes());
+  std::vector<char> is_dst(n, 0);
+  for (NodeId d : dests) {
+    if (elig == nullptr || elig->node_ok(d)) is_dst[static_cast<std::size_t>(d)] = 1;
+  }
+  const Cost c0 = pool_baseline(g, elig, heads, dests);
+  const auto H = static_cast<std::int64_t>(heads.size());
+  std::vector<RefTunnel> out;
+  for (std::int64_t j = 0; j < N; ++j) {
+    for (std::int64_t i = 0; i < H; ++i) {
+      RefTunnel t;
+      t.head = heads[static_cast<std::size_t>(i)];
+      t.slot = static_cast<std::size_t>(i);
+      t.request = rr(rr(D, H, i), N, j);
+      const Amount threshold = std::max(t.request, minimum);
+      // The filtered member graph, then one member per (u, v) without multi_edge.
+      std::vector<EdgeId> usable;
+      for (EdgeId e = 0; e < g.num_edges(); ++e) {
+        if (elig != nullptr && !elig->edge_ok(e)) continue;
+        if (U[static_cast<std::size_t>(e)] < threshold) continue;
+        usable.push_back(e);
+      }
+      if (!sel.multi_edge) {
+        std::map<std::pair<NodeId, NodeId>, EdgeId> pick;
+        for (EdgeId e : usable) {
+          const auto key = std::pair {g.edge_src()[static_cast<std::size_t>(e)], g.edge_dst()[static_cast<std::size_t>(e)]};
+          const auto it = pick.find(key);
+          if (it == pick.end()) {
+            pick.emplace(key, e);
+            continue;
+          }
+          const EdgeId cur = it->second;
+          const Cost ce = g.cost()[static_cast<std::size_t>(e)];
+          const Cost cc = g.cost()[static_cast<std::size_t>(cur)];
+          if (ce < cc || (ce == cc && sel.prefer && compare(priority(g, sel.priority, U, e), priority(g, sel.priority, U, cur)) > 0)) {
+            it->second = e;
+          }
+        }
+        usable.clear();
+        for (const auto& [key, e] : pick) usable.push_back(e);
+        std::sort(usable.begin(), usable.end());
+      }
+      // Every simple path from the head that ends at the first destination it meets.
+      std::vector<std::vector<EdgeId>> found;
+      std::vector<EdgeId> walk;
+      std::vector<char> on(n, 0);
+      std::function<void(NodeId)> dfs = [&](NodeId u) {
+        on[static_cast<std::size_t>(u)] = 1;
+        for (EdgeId e : usable) {
+          if (g.edge_src()[static_cast<std::size_t>(e)] != u) continue;
+          const NodeId w = g.edge_dst()[static_cast<std::size_t>(e)];
+          if (on[static_cast<std::size_t>(w)] != 0) continue;
+          walk.push_back(e);
+          if (is_dst[static_cast<std::size_t>(w)] != 0) {
+            found.push_back(walk);
+          } else {
+            dfs(w);
+          }
+          walk.pop_back();
+        }
+        on[static_cast<std::size_t>(u)] = 0;
+      };
+      dfs(t.head);
+      // The single-path order: cost, the bottleneck priority (PreferHigherPriority, larger first),
+      // hops, the EdgeId sequence.
+      const std::vector<EdgeId>* best = nullptr;
+      Cost best_cost = 0;
+      std::pair<Amount, Amount> best_bottleneck {0, 1};
+      for (const auto& p : found) {
+        Cost cost = 0;
+        for (EdgeId e : p) cost += g.cost()[static_cast<std::size_t>(e)];
+        std::pair<Amount, Amount> bottleneck {std::numeric_limits<Amount>::max(), 1};
+        for (EdgeId e : p) {
+          const auto pr = priority(g, sel.priority, U, e);
+          if (compare(pr, bottleneck) < 0) bottleneck = pr;
+        }
+        bool better = best == nullptr;
+        if (!better && cost != best_cost) better = cost < best_cost;
+        else if (!better && sel.prefer && compare(bottleneck, best_bottleneck) != 0) better = compare(bottleneck, best_bottleneck) > 0;
+        else if (!better && p.size() != best->size()) better = p.size() < best->size();
+        else if (!better) better = p < *best;
+        if (better) {
+          best = &p;
+          best_cost = cost;
+          best_bottleneck = bottleneck;
+        }
+      }
+      if (best == nullptr) {
+        t.status = TunnelStatus::NoBandwidth;
+      } else if (ceiling.has_value() && (std::holds_alternative<Absolute>(*ceiling)
+                                             ? best_cost > std::get<Absolute>(*ceiling).cost
+                                             : !stretch_admits(best_cost, c0, std::get<Stretch>(*ceiling).factor))) {
+        t.status = TunnelStatus::CostCeiling;
+      } else {
+        t.path = *best;
+        t.cost = best_cost;
+        for (EdgeId e : t.path) U[static_cast<std::size_t>(e)] -= t.request;
+      }
+      out.push_back(std::move(t));
+    }
+  }
+  return out;
+}
+
+// The lossless bound (8.3) of the tunnels on the free capacity V: the largest total whose round
+// robin over the H heads, then over each head's up tunnels in index order, loads no edge above V
+// and gives no positive share to a head without an up tunnel (scanning up from 0).
+inline Amount lossless_bound(std::size_t H, const std::vector<RefTunnel>& tunnels, const std::vector<Amount>& V) {
+  Amount limit = 1;
+  for (Amount c : V) limit += c;
+  auto fits = [&](Amount x) {
+    std::vector<Amount> load(V.size(), 0);
+    for (std::size_t h = 0; h < H; ++h) {
+      const Amount share = rr(x, static_cast<std::int64_t>(H), static_cast<std::int64_t>(h));
+      std::vector<const RefTunnel*> up;
+      for (const auto& t : tunnels) {
+        if (t.slot == h && t.status == TunnelStatus::Up) up.push_back(&t);
+      }
+      if (share > 0 && up.empty()) return false;
+      for (std::size_t k = 0; k < up.size(); ++k) {
+        const Amount part = rr(share, static_cast<std::int64_t>(up.size()), static_cast<std::int64_t>(k));
+        for (EdgeId e : up[k]->path) load[static_cast<std::size_t>(e)] += part;
+      }
+    }
+    for (std::size_t e = 0; e < V.size(); ++e) {
+      if (load[e] > V[e]) return false;
+    }
+    return true;
+  };
+  Amount x = 0;
+  while (x < limit && fits(x + 1)) ++x;
+  return x;
+}
+
+} // namespace t1_reference
 
 } // namespace netgraph::core::test

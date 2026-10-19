@@ -1,8 +1,8 @@
 /* The transaction trace of a placement call (internal diagnostics for the tests, which compare
    it key by key with the same trace of their independent model of the policy): a small
-   JSON-like value of the call's intermediate values, per source the offer, the rows of the
-   stages (creation, reoptimisation, filling, growth) and the local outcome, then the flows
-   created and the final working residual; for Global the solve's input, result and counters.
+   JSON-like value of the call's intermediate values: the roster, the routes prepared at the
+   epoch's first positive call, CostOnly's offers or bound, and for the controllers the
+   bisection probes, the solve's view and capacities, the flow core's values and the shares.
    Filled only in a build with the private hooks, when a call asks for it (detail::place_traced);
    other calls build only empty values. */
 #pragma once

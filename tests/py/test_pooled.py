@@ -1,8 +1,7 @@
 """Pooled CostOnly sources (docs/semantics.md, section 7): one split per shared router,
 attribution to sources by highest averages, the equal origin's entry that cannot pass anything,
 Lossy forwarding through a source, weights read once per epoch, the first-hop experiment,
-increments and epochs. The values are derived by hand (dev/design step-2 LEDGER rows P1 to P17
-and I1 to I4); the random tests compare every field with the independent reference of
+increments and epochs. The values are derived by hand; the random tests compare every field with the independent reference of
 ``origin_oracle.py`` and check that each source's record uses only its own route."""
 
 from __future__ import annotations
@@ -66,7 +65,7 @@ def records(p):
 
 
 def test_b_pooled():
-    # P1: RR(2, 2) = (1, 1) injected; router 2 holds 2 and splits (1, 1) over e2, e3; e2's unit
+    # RR(2, 2) = (1, 1) injected; router 2 holds 2 and splits (1, 1) over e2, e3; e2's unit
     # goes to source 0 by H(1, [1, 1]) = [1, 0], e3's to source 1. Split separately, both units
     # would take e2 (capacity 1) and only 1 would fit.
     _, _, p = policy(POOL, [0, 1], 3, cfg())
@@ -78,18 +77,18 @@ def test_b_pooled():
     )
     assert rows(r) == [(0, None, 1, 1, 0, 0), (1, None, 1, 1, 0, 0)]
     assert records(p) == [([0], [(0, 1), (2, 1)], 1), ([1], [(1, 1), (3, 1)], 1)]
-    # P2: 3 would give e2 two units: the unlimited request admits 2.
+    # 3 would give e2 two units: the unlimited request admits 2.
     _, _, p = policy(POOL, [0, 1], 3, cfg())
     r = p.place(INF)
     assert (r.placed, r.remaining, r.termination) == (2, INF, T.EXHAUSTED)
     assert (r.requested, r.unadmitted, r.offered) == (INF, None, None)
-    # P3: capacity weights (1, 1) are equal: highest averages is the round robin.
+    # Capacity weights (1, 1) are equal: highest averages is the round robin.
     _, _, p = policy(POOL, [0, 1], 3, cfg(W))
     assert p.place(2).placed == 2
 
 
 def test_lossy_attribution_by_arrivals():
-    # P4: injections (2, 2); router 2 holds 4: (2, 2) over e2, e3, each attributed
+    # Injections (2, 2); router 2 holds 4: (2, 2) over e2, e3, each attributed
     # H(2, [2, 2]) = [1, 1] (then [1, 1] remain for e3); each edge carries 1 of its 2 arrivals,
     # H(1, [1, 1]) = [1, 0]: source 0 delivers 2, source 1 drops one unit on each.
     _, _, p = policy(POOL, [0, 1], 3, cfg(admission=LOSSY))
@@ -102,22 +101,22 @@ def test_lossy_attribution_by_arrivals():
 @pytest.mark.parametrize(
     ("edges", "lossless"),
     [(B3Z, 0), (B3P, 1)],
-    ids=["B3-zero-first", "B3-positive-first"],
+    ids=["zero-first", "positive-first"],
 )
-def test_b3(edges, lossless):
-    # P5, P6: Lossless admits a total only when it gives the source behind the zero edge
+def test_pooled_source_behind_a_zero_link(edges, lossless):
+    # Lossless admits a total only when it gives the source behind the zero edge
     # nothing: RR(1) gives source 0 the unit, RR(2) gives source 1 one.
     _, _, p = policy(edges, [0, 1], 2, cfg())
     r = p.place(10)
     assert (r.placed, r.termination) == (lossless, T.EXHAUSTED)
     assert [rec.delivered for rec in p.records()] == [lossless, 0]
-    # P9: the same with weights: a share without a usable route is not admitted.
+    # The same with weights: a share without a usable route is not admitted.
     _, _, p = policy(edges, [0, 1], 2, cfg(W))
     assert p.place(10).placed == lossless
 
 
 def test_lossy_entry_that_cannot_pass():
-    # P7: EB keeps the zero edge and drops source 0's 5 there.
+    # EB keeps the zero edge and drops source 0's 5 there.
     _, _, p = policy(B3Z, [0, 1], 2, cfg(admission=LOSSY))
     r = p.place(10)
     assert (r.placed, r.termination, r.call_drops, r.call_source_loss) == (
@@ -126,7 +125,7 @@ def test_lossy_entry_that_cannot_pass():
         [(0, 5)],
         0,
     )
-    # P8: W gives the zero edge weight 0: source 0 has no member, its 5 is lost at the source.
+    # W gives the zero edge weight 0: source 0 has no member, its 5 is lost at the source.
     _, _, p = policy(B3Z, [0, 1], 2, cfg(W, LOSSY))
     r = p.place(10)
     assert (r.placed, r.termination, r.call_drops, r.call_source_loss) == (
@@ -140,30 +139,30 @@ def test_lossy_entry_that_cannot_pass():
 
 
 def test_equal_origin_limits_the_total():
-    # P10: RR(5, 2) = (3, 2) would put 3 on e0 (capacity 2): 4, rows (2, 2).
+    # RR(5, 2) = (3, 2) would put 3 on e0 (capacity 2): 4, rows (2, 2).
     _, _, p = policy(B1, [0, 1], 3, cfg())
     r = p.place(12)
     assert (r.placed, r.termination) == (4, T.EXHAUSTED)
     assert [x.delivered for x in r.by_source] == [2, 2]
-    # P11: Lossy offers (6, 6): source 0 drops 4 on e0.
+    # Lossy offers (6, 6): source 0 drops 4 on e0.
     _, _, p = policy(B1, [0, 1], 3, cfg(admission=LOSSY))
     r = p.place(12)
     assert (r.placed, r.call_drops) == (8, [(0, 4)])
 
 
 def test_transit_through_a_source():
-    # P12: injections (5, 5); e1 carries source 1's 5 to node 0, which holds 10 for e0 (3):
+    # Injections (5, 5); e1 carries source 1's 5 to node 0, which holds 10 for e0 (3):
     # carried H(3, [5, 5]) = [2, 1].
     _, _, p = policy(CHAIN, [0, 1], 2, cfg(admission=LOSSY))
     r = p.place(10)
     assert (r.placed, r.call_drops) == (3, [(0, 7)])
     assert rows(r) == [(0, 5, 5, 2, 0, 3), (1, 5, 5, 1, 0, 4)]
     assert records(p) == [([0], [(0, 2)], 2), ([1], [(0, 1), (1, 5)], 1)]
-    # P13: Lossless: e0 carries the whole total, so 3, as RR(3) = (2, 1).
+    # Lossless: e0 carries the whole total, so 3, as RR(3) = (2, 1).
     _, _, p = policy(CHAIN, [0, 1], 2, cfg())
     r = p.place(INF)
     assert (r.placed, [x.delivered for x in r.by_source]) == (3, [2, 1])
-    # P17: the first-hop experiment: source 0 injects e0's 3, source 1 e1's 10; node 0 adds
+    # The first-hop experiment: source 0 injects e0's 3, source 1 e1's 10; node 0 adds
     # source 1's 10 of transit on e0: arrivals (3, 10), carried H(3, [3, 10]) = [0, 3].
     _, _, p = policy(CHAIN, [0, 1], 2, cfg(admission=LOSSY))
     r = p.place(INF)
@@ -178,7 +177,7 @@ def test_transit_through_a_source():
 
 
 def test_residual_weights_on_the_common_view():
-    # P14: weights read once, on the residual at the first positive call's entry: e2 2, e3 10;
+    # Weights read once, on the residual at the first positive call's entry: e2 2, e3 10;
     # router 2: H(12, [2, 10]) = (2, 10); RR(12) = (6, 6); each member attributed by highest
     # averages over what the sources still hold: e2 H(2, [6, 6]) = [1, 1], e3 H(10, [5, 5]).
     _, _, p = policy(
@@ -193,7 +192,7 @@ def test_residual_weights_on_the_common_view():
 
 
 def test_weights_frozen_for_the_epoch():
-    # P15: another owner holds 8 of e2 at the first call: weights (2, 10) for the epoch, also
+    # Another owner holds 8 of e2 at the first call: weights (2, 10) for the epoch, also
     # after the owner leaves (weights read again would give [6, 6, 6, 6]).
     g = build(4, SNAP)
     ledger = ngc.FlowLedger(g)
@@ -208,7 +207,7 @@ def test_weights_frozen_for_the_epoch():
 
 
 def test_first_hop_experiment():
-    # P16: every source injects its first edges' residual: 4 + 6.
+    # Every source injects its first edges' residual: 4 + 6.
     _, _, p = policy(PRIV, [0, 1], 2, cfg(admission=LOSSY))
     r = p.place(INF)
     assert (r.placed, r.termination, r.requested, r.offered) == (
@@ -228,7 +227,7 @@ def test_first_hop_experiment():
 
 
 def test_inc():
-    # I1: RR(3) = (2, 1) does not fit e0 (1): call 1 admits 2; call 2 targets 3 again: 0.
+    # RR(3) = (2, 1) does not fit e0 (1): call 1 admits 2; call 2 targets 3 again: 0.
     _, _, p = policy(INC, [0, 1], 2, cfg())
     a, b = p.place(3), p.place(1)
     assert (a.placed, a.termination, b.placed, b.termination) == (
@@ -238,7 +237,7 @@ def test_inc():
         T.EXHAUSTED,
     )
     assert (b.requested, b.admitted, b.unadmitted, b.offered) == (4, 2, 2, None)
-    # I2: Lossy: call 1 injects (2, 1) and drops 1 on e0; call 2 injects RR(4) - RR(3) = (0, 1).
+    # Lossy: call 1 injects (2, 1) and drops 1 on e0; call 2 injects RR(4) - RR(3) = (0, 1).
     _, _, p = policy(INC, [0, 1], 2, cfg(admission=LOSSY))
     a, b = p.place(3), p.place(1)
     assert (a.placed, a.call_drops, b.placed, b.call_drops) == (2, [(0, 1)], 1, [])
@@ -250,7 +249,7 @@ def test_inc():
         0,
     )
     assert rows(b) == [(0, 2, 2, 1, 0, 1), (1, 2, 2, 2, 0, 0)]
-    # I3: another owner holds 8 of 10: call 1 admits 2; it leaves and places 5; call 2 targets
+    # Another owner holds 8 of 10: call 1 admits 2; it leaves and places 5; call 2 targets
     # 3 on the free 3 plus the policy's own 2.
     g = build(2, ONE)
     ledger = ngc.FlowLedger(g)
@@ -262,7 +261,7 @@ def test_inc():
     other.place(5)
     r = p.place(1)
     assert (r.placed, r.requested, r.admitted, r.unadmitted) == (1, 6, 3, 3)
-    # I4: two parallel unit edges: Lossy 1 then 1 drops the second unit on e0 (RR(1) again);
+    # Two parallel unit edges: Lossy 1 then 1 drops the second unit on e0 (RR(1) again);
     # one call of 2 carries both; Lossless 1 then 1 fills both.
     _, _, p = policy(RC, 0, 1, cfg(admission=LOSSY))
     assert [p.place(1).placed, p.place(1).placed] == [1, 0]
@@ -314,10 +313,10 @@ def compare(where, r, want, p):
 
 @pytest.mark.parametrize("seed", range(400))
 def test_random_against_reference(seed):
-    # P19: random graphs with masks, zero-capacity edges, nonuniform costs and a partial
+    # Random graphs with masks, zero-capacity edges, nonuniform costs and a partial
     # residual; EB and W (capacity or residual weights), both admissions, multipath or the
     # canonical path; a series of calls. Every field equals the reference, the accounting
-    # identities hold, and (P18) each record's edges lie in its own route.
+    # identities hold, and each record's edges lie in its own route.
     rng = random.Random(seed)
     n, edges, sources, dests = random_case(rng)
     g = build(n, edges)

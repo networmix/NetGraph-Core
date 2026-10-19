@@ -115,9 +115,11 @@ def test_the_ledger_has_no_public_placement_or_removal():
         "graph",
         "record",
         "records",
+        "reserved",
         "reset",
         "residual",
         "uid",
+        "unreserved",
     }
 
 
@@ -317,8 +319,9 @@ def test_empty_split_graph_keeps_the_route_cost():
     rec = fg.record(flow_id(w))
     assert (rec.route_cost, rec.delivered, rec.edges) == (3, 0, [])
     if HOOKS:
+        # The flow's route is the split route before weight pruning (its replay basis).
         flows = next(iter(w._state()["cohorts"].values()))
-        assert flows[0]["members"] == []
+        assert flows[0]["route"] == [0]
 
 
 def test_flow_ids_of_other_ledgers_and_bad_shapes():

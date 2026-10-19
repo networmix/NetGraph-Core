@@ -319,7 +319,8 @@ failed.
 | `sensitivity` | `sens.exact`, `sens.policy_all_edges`, `sens.equal_global` | exact-model sensitivity; policy-model loss for every eligible edge; equal-origin Global, every edge solved afresh |
 | `pooled` | `pooled.{ecmp,lossy}.clos` | 8 demands of 8 pooled sources on one ledger, Lossless / Lossy above capacity |
 | `global` | `global.equal.random` | equal-origin Global capacity, 2 demands of 4 sources |
-| `cohort` | `cohort.te_ecmp16`, `cohort.te_ecmp256` | TE_ECMP cohorts, 12 demands on one ledger |
+| `program` | `program.forward.global`, `program.replay.lossy`, `program.stale.lossy`, `program.replace.costonly` | forwarding programs: a Global program forwarded, replayed under failures (Lossy), stale under black holes, CostOnly re-prepared by replace |
+| `t1` | `t1.setup.fabric`, `t1.forward.fabric` | T1 with 16 tunnels per head, 12 demands on one ledger: the setup with its holds; the installed programs forwarded under 32 offers |
 | `msd` | `msd.loop` | the maximum-supported-demand bracket and bisection with a per-series DAG cache |
 | `ksp` | `ksp.fabric3_k8` | k = 8 shortest paths for 8 pairs |
 | `cache` | `cache.cold`, `cache.warm` | DagCache series from a cleared / prepopulated cache |

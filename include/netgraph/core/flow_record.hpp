@@ -39,11 +39,11 @@ struct Counter128 {
 // A snapshot of one ledger flow, returned by records() or record(id). `bundle` is its route
 // structure; `route_cost` is the minimum walk cost from its sources to its destinations over
 // that bundle, or kUnreachable if none exists. `entry` is the program entry the record carries
-// (a Pinned policy: one record per entry, the entry identifier of its program); absent for the
-// records kept per roster source (CostOnly, Global) or per flow (CapacityAware). Lossy records
-// alone have `offered`: the cumulative amount submitted to this flow before any drops. `edges`
-// and `drops` contain positive values in ascending EdgeId; per-call and cumulative drop totals are
-// derived.
+// (T1 and Pinned: one record per entry, the entry identifier of its program); absent for the
+// records kept per roster source (CostOnly, Global). Lossy records alone have `offered`: the
+// cumulative amount submitted to this flow before any drops. `edges` (carried load), `drops` and
+// `reserved_edges` (the strict holds of an up T1 tunnel: its request on every link of its path)
+// contain positive values in ascending EdgeId; per-call and cumulative drop totals are derived.
 struct FlowRecord {
   FlowId flow_id {};
   std::int64_t owner {0};
@@ -57,6 +57,7 @@ struct FlowRecord {
   Amount delivered {0};
   std::vector<std::pair<EdgeId, Amount>> edges {};
   std::vector<std::pair<EdgeId, Counter128>> drops {};
+  std::vector<std::pair<EdgeId, Amount>> reserved_edges {};
 };
 
 } // namespace netgraph::core

@@ -42,8 +42,8 @@ ng.Graph(2, [0], [1], [1.5], [1], 1.0)  # expect: reportArgumentType
 ng.FlowLedger(g, residual=np.zeros(1, dtype=np.float64))  # expect: reportArgumentType
 ng.spf(g, 0, ng.KspOptions(1, sel))  # expect: reportArgumentType
 ng.capacity(g, 0, 1, cfg)  # expect: reportArgumentType
-guard = ng.DiminishingReturns(2, 0.5)
-ng.CapacityAware(max_path_cost=guard)  # expect: reportArgumentType
+guard = ng.Tunnels(2)
+ng.CapacityAware(guard, max_path_cost=guard)  # expect: reportArgumentType
 ng.to_units("1.5", 1.0)  # expect: reportCallIssue, reportArgumentType
 # FlowPolicyConfig takes keywords only.
 ng.FlowPolicyConfig(ng.Global())  # expect: reportCallIssue

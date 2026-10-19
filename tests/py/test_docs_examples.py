@@ -107,7 +107,7 @@ def test_semantics_examples_print_their_documented_output():
     text = (ROOT / "docs" / "semantics.md").read_text(encoding="utf-8")
     # The counts are pinned, so an example deleted together with its output is noticed: a
     # change to the document's examples updates them.
-    assert check_examples(text, "docs/semantics.md") == (20, 19)
+    assert check_examples(text, "docs/semantics.md") == (22, 21)
 
 
 def test_readme_quick_start_prints_its_commented_output():

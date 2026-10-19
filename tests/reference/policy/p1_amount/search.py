@@ -12,8 +12,6 @@
   prefix's bottleneck) and the DAG restricted to priority ``>= B*``, (3) one reverse
   hop count ``h`` and a greedy walk taking the smallest tight edge whose head has
   ``h(v) = h(u) - 1``;
-* ``CostCeiling``: ``Absolute(c)`` or ``Stretch(f)`` against the static shortest cost,
-  compared exactly (``stretch_le`` never forms a product above 128 bits).
 
 Priority values: ``Residual`` = residual units, ``Capacity`` = static capacity
 units, ``Headroom`` = the exact rational ``residual / capacity`` (0 on an edge of
@@ -351,73 +349,3 @@ def spf(
     if path is None:
         return SpfResult(None, [], None)
     return SpfResult(None, sorted(path.edges), path.cost, path)
-
-
-# ------------------------------------------------------------------ cost ceilings
-
-
-def check_ceiling(ceiling) -> tuple[str, object] | None:
-    if ceiling is None:
-        return None
-    kind, value = ceiling
-    if kind == "Absolute":
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ContractError("Absolute ceiling must be a non-negative integer cost")
-        return ceiling
-    if kind == "Stretch":
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ContractError("Stretch factor must be a number")
-        if not math.isfinite(value) or value < 1:
-            raise ContractError("Stretch factor outside [1, inf)")
-        return ceiling
-    raise ContractError(f"unknown ceiling {kind!r}")
-
-
-def stretch_le(cost: int, base: int, f: float) -> bool:
-    """``cost <= f * base`` exactly; f is the dyadic rational it is (f >= 1).
-
-    Exponent-aware: never forms a product above 128 bits (costs below 2^63, the
-    53-bit mantissa, and bit lengths compared first).
-    """
-    num, den = Fraction(f).as_integer_ratio()
-    k = den.bit_length() - 1  # den = 2^k
-    shift = 0
-    while num % 2 == 0 and num > 1:
-        num //= 2
-        shift += 1
-    # f = num * 2^(shift - k), num odd and below 2^53
-    exp = shift - k
-    if base == 0:
-        return cost <= 0
-    rhs = base * num  # below 2^116
-    assert rhs.bit_length() <= 116
-    if exp >= 0:
-        if rhs.bit_length() + exp > 64:
-            result = True  # rhs * 2^exp >= 2^64 > cost
-        else:
-            result = cost <= rhs << exp
-    else:
-        lhs = cost << (-exp)  # -exp < 53 because f >= 1
-        assert lhs.bit_length() <= 128
-        result = lhs <= rhs
-    assert result == (Fraction(cost) <= Fraction(f) * base)
-    return result
-
-
-def within_ceiling(cost: int, ceiling, baseline: int | None) -> bool:
-    if ceiling is None:
-        return True
-    kind, value = ceiling
-    if kind == "Absolute":
-        return cost <= value
-    if baseline is None or baseline == 0:
-        return False
-    return stretch_le(cost, baseline, float(value))
-
-
-def static_shortest(g: Graph, elig, sources, destinations) -> int | None:
-    """The static shortest cost under the Eligibility (residual ignored)."""
-    members = member_graph(g, elig, Selection())
-    d = distances(g, members, sources)
-    reach = [d[t] for t in destinations if d[t] is not None]
-    return min(reach) if reach else None

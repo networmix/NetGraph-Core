@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <functional>
 #include <memory>
+#include <numeric>
 #include <new>
 #include <optional>
 #include <stdexcept>
@@ -108,8 +109,8 @@ const std::vector<Scenario>& scenarios() {
 
 // The sweeps' only "nothing changed" comparisons compare every field: same_record and the
 // expect_same overloads of the ledger, a result and a policy's epoch report a copy with any one
-// field changed, and expect_balanced reports an aggregate that leaves the sum of the records or
-// [0, baseline] on one edge.
+// field changed, and expect_balanced reports an aggregate (of carried load or of holds) that leaves
+// the sum of the records or [0, its baseline] on one edge.
 TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   const auto g = shared(make_graph(3, {{0, 1, 9, 1}, {1, 2, 9, 1}, {0, 2, 4, 3}}));
   FlowLedger fg(g);
@@ -134,6 +135,7 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { ++x.delivered; },
       [](auto& x) { x.edges.emplace_back(2, 1); },
       [](auto& x) { x.drops.emplace_back(2, Counter128 {}); },
+      [](auto& x) { x.reserved_edges.emplace_back(2, 1); },
   };
   ASSERT_EQ(rec.admission, Admission::Lossless);
   ASSERT_FALSE(rec.offered.has_value());
@@ -154,6 +156,8 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   const std::vector<std::function<void(LedgerState&)>> states = {
       [](auto& x) { ++x.allocated[0]; },
       [](auto& x) { ++x.residual[0]; },
+      [](auto& x) { ++x.reserved[0]; },
+      [](auto& x) { ++x.unreserved[0]; },
       [](auto& x) { x.records.emplace_back(); },
       [](auto& x) { ++x.records[0].delivered; },
       [](auto& x) { ++x.next_id; },
@@ -176,6 +180,8 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { x.termination = Termination::NoRoute; },
       [](auto& x) { x.routes_changed = !x.routes_changed; },
       [](auto& x) { x.weights_changed = !x.weights_changed; },
+      [](auto& x) { x.reservations_changed = !x.reservations_changed; },
+      [](auto& x) { x.plan = TunnelPlan {}; },
       [](auto& x) { x.requested.reset(); },
       [](auto& x) { x.offered = Counter128 {0, 1}; },
       [](auto& x) { ++x.admitted.lo; },
@@ -190,6 +196,7 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { x.edge_flows->push_back(0); },
       [](auto& x) { x.residual->push_back(0); },
       [](auto& x) { x.bottleneck->push_back(0); },
+      [](auto& x) { x.reservation_edge_flows = std::vector<Amount> {0}; },
       [](auto& x) { x.min_cut = std::vector<EdgeId> {0}; },
   };
   ASSERT_NE(r.remaining, std::optional<Amount> {1});
@@ -221,6 +228,7 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { x.program.present = !x.program.present; },
       [](auto& x) { x.program.tunnels.emplace_back(); },
       [](auto& x) { x.program.members.emplace_back(); },
+      [](auto& x) { x.plan = TunnelPlan {}; },
       [](auto& x) { x.support.push_back(0); },
       [](auto& x) { x.head_lost.emplace_back(); },
       [](auto& x) { x.by_tunnel.emplace_back(); },
@@ -228,8 +236,7 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { ++x.cohorts[0][0].id; },
       [](auto& x) { ++x.cohorts[0][0].cost; },
       [](auto& x) { x.cohorts[0][0].route.push_back(0); },
-      [](auto& x) { x.cohorts[0][0].members.push_back(0); },
-      [](auto& x) { x.cohorts[0][0].weights.push_back(1); },
+      [](auto& x) { ++x.cohorts[0][0].entry; },
   };
   for (std::size_t k = 0; k < epochs.size(); ++k) {
     Epoch x = ep;
@@ -259,6 +266,20 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
          const_cast<Amount&>(detail::LedgerAccess::allocated(x)[ei]) -= under;
          auto& live = const_cast<FlowRecord&>(detail::LedgerAccess::live(x, rec.flow_id.second));
          for (auto& [edge, amount] : live.edges) amount -= edge == e ? under : 0;
+       }},
+      {"holds above the sum of the records", [&](FlowLedger& x) { ++detail::LedgerAccess::reserved_storage(x)[ei]; }},
+      {"record and holds above the reservation baseline",
+       [&](FlowLedger& x) {
+         const Amount over = detail::LedgerAccess::reservation_baseline(x)[ei] + 1;
+         detail::LedgerAccess::reserved_storage(x)[ei] += over;
+         auto& live = const_cast<FlowRecord&>(detail::LedgerAccess::live(x, rec.flow_id.second));
+         live.reserved_edges.emplace_back(e, over);
+       }},
+      {"record and holds below zero",
+       [&](FlowLedger& x) {
+         detail::LedgerAccess::reserved_storage(x)[ei] -= 1;
+         auto& live = const_cast<FlowRecord&>(detail::LedgerAccess::live(x, rec.flow_id.second));
+         live.reserved_edges.emplace_back(e, -1);
        }},
   };
   for (const auto& [name, breaks] : ledgers) {
@@ -398,9 +419,11 @@ TEST(LedgerFaults, EveryAllocationOfAResetFailsAtomically) {
     const auto dag = all_edges(*c.g);
     const auto with_orphan = [&] {
       auto fg = std::make_unique<FlowLedger>(c.g);
-      // The policy is destroyed without remove(): its record is an orphan.
+      // The policies are destroyed without remove(): their records are orphans, a T1 tunnel's
+      // with its holds.
       (void)RoutePolicy(*fg, c.src, c.dst, split_route(*fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless))
           .place(2);
+      (void)FlowPolicy(*fg, v({c.src}), v({c.dst}), FlowPolicyConfig {.routing = CapacityAware {Tunnels {1}}}).replace(0, 1);
       return fg;
     };
     const std::vector<Amount> half = [&] {
@@ -408,15 +431,19 @@ TEST(LedgerFaults, EveryAllocationOfAResetFailsAtomically) {
       for (auto& x : r) x /= 2;
       return r;
     }();
-    for (const bool to_capacities : {true, false}) {
-      const std::string where = c.name + (to_capacities ? " reset()" : " reset(residual)");
+    for (const int variant : {0, 1, 2}) {
+      const std::string where =
+          c.name + (variant == 0 ? " reset()" : variant == 1 ? " reset(residual)" : " reset(residual, unreserved)");
       const auto reset = [&](FlowLedger& fg) {
-        if (to_capacities) {
+        if (variant == 0) {
           fg.reset();
-        } else {
+        } else if (variant == 1) {
           fg.reset(half);
+        } else {
+          fg.reset(half, half);
         }
       };
+      const bool to_capacities = variant == 0;
       const auto ref = with_orphan();
       const LedgerState initial = ledger_state(*ref);
       ASSERT_FALSE(initial.records.empty()) << where;  // something to clear
@@ -426,6 +453,10 @@ TEST(LedgerFaults, EveryAllocationOfAResetFailsAtomically) {
                                                                    c.g->capacity_units().end())
                                              : half)
           << where;
+      EXPECT_EQ(want.unreserved, variant == 2 ? half
+                                              : std::vector<Amount>(c.g->capacity_units().begin(), c.g->capacity_units().end()))
+          << where;
+      EXPECT_EQ(want.reserved, std::vector<Amount>(half.size(), 0)) << where;
       long injected = 0;
       for (long at = 0;; ++at) {
         const std::string w = where + " allocation " + std::to_string(at);
@@ -463,15 +494,20 @@ TEST(LedgerFaults, EveryAllocationOfALedgerConstructionFailsWithoutALeak) {
     const std::vector<Amount> capacities(c.g->capacity_units().begin(), c.g->capacity_units().end());
     std::vector<Amount> half = capacities;
     for (auto& x : half) x /= 2;
-    for (const bool from_residual : {false, true}) {
-      const std::string where = c.name + (from_residual ? " FlowLedger(graph, residual)" : " FlowLedger(graph)");
+    for (const int variant : {0, 1, 2}) {
+      const bool from_residual = variant != 0;
+      const std::string where = c.name + (variant == 0   ? " FlowLedger(graph)"
+                                          : variant == 1 ? " FlowLedger(graph, residual)"
+                                                         : " FlowLedger(graph, residual, unreserved)");
       long injected = 0;
       for (long at = 0;; ++at) {
         const std::string w = where + " allocation " + std::to_string(at);
         std::optional<FlowLedger> fg;
         const long live = g_live.load();
         if (!fails_at(at, [&] {
-              if (from_residual) {
+              if (variant == 2) {
+                fg.emplace(c.g, half, half);
+              } else if (from_residual) {
                 fg.emplace(c.g, half);
               } else {
                 fg.emplace(c.g);
@@ -479,7 +515,9 @@ TEST(LedgerFaults, EveryAllocationOfALedgerConstructionFailsWithoutALeak) {
             })) {
           ASSERT_TRUE(fg.has_value()) << w;
           EXPECT_EQ(fg->residual(), from_residual ? half : capacities) << w;
+          EXPECT_EQ(fg->unreserved(), variant == 2 ? half : capacities) << w;
           EXPECT_EQ(fg->allocated(), std::vector<Amount>(capacities.size(), 0)) << w;
+          EXPECT_EQ(fg->reserved(), std::vector<Amount>(capacities.size(), 0)) << w;
           EXPECT_TRUE(fg->records().empty()) << w;
           break;
         }
@@ -488,7 +526,9 @@ TEST(LedgerFaults, EveryAllocationOfALedgerConstructionFailsWithoutALeak) {
         EXPECT_EQ(g_live.load(), live) << w << ": a leak";
         if (::testing::Test::HasFailure()) return;
       }
-      EXPECT_GE(injected, 2) << where;  // the baseline and the aggregate (MSVC's maps add their own)
+      // The service baseline and aggregate, and the reservation baseline when one is given (the
+      // holds and a default reservation baseline cost nothing until a hold); MSVC's maps add their own.
+      EXPECT_GE(injected, variant == 2 ? 3 : 2) << where;
     }
   }
 }
@@ -504,21 +544,28 @@ TEST(LedgerFaults, EveryAllocationOfALedgerCopyOrMoveFailsWithoutALeak) {
     // A baseline below the capacities: a ledger that rebuilt its baseline from them would differ.
     std::vector<Amount> half(c.g->capacity_units().begin(), c.g->capacity_units().end());
     for (auto& x : half) x /= 2;
-    FlowLedger fg(c.g, half);
+    FlowLedger fg(c.g, half, half);
     {
       RoutePolicy first(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless));
       (void)first.place(1);
       RoutePolicy second(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, FlowPlacement::Weighted, Admission::Lossy));
       (void)second.place(2);
-    }  // two orphans: a copy may only be taken of a ledger without bound policies
+      FlowPolicy holds(fg, v({c.src}), v({c.dst}), FlowPolicyConfig {.routing = CapacityAware {Tunnels {1}}});
+      (void)holds.replace(0, 1);
+    }  // three orphans (one with holds): a copy may only be taken of a ledger without bound policies
     const LedgerState source = ledger_state(fg);
+    // Both baselines (a ledger that rebuilt one from the capacities would differ).
     const auto baseline_of = [](const FlowLedger& x) {
       const auto b = LedgerAccess::baseline(x);
-      return std::vector<Amount>(b.begin(), b.end());
+      const auto r = LedgerAccess::reservation_baseline(x);
+      std::vector<Amount> out(b.begin(), b.end());
+      out.insert(out.end(), r.begin(), r.end());
+      return out;
     };
     const std::vector<Amount> source_baseline = baseline_of(fg);
     const auto fg_uid = fg.uid();
-    ASSERT_EQ(source.records.size(), 2U) << c.name;
+    ASSERT_EQ(source.records.size(), 3U) << c.name;
+    ASSERT_GT(std::accumulate(source.reserved.begin(), source.reserved.end(), Amount {0}), 0) << c.name;
     long injected = 0;
     for (long at = 0;; ++at) {
       const std::string w = c.name + " allocation " + std::to_string(at);

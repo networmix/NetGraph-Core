@@ -128,7 +128,7 @@ void register_search(py::module_& m) {
           t = node_ids(o.targets, n, "targets");
           detail::check_disjoint(detail::node_set(r, n, "roots"), detail::node_set(*t, n, "targets"), "roots",
                                  "targets");
-        } else if (!o.selection.multipath) {
+        } else if (o.selection.single_path()) {
           throw py::value_error("multipath = false requires targets (the single path joins a root to a target)");
         }
         std::optional<std::vector<Amount>> res;

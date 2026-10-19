@@ -52,28 +52,42 @@ std::optional<WideInts> wide_or_none(const py::object& obj, const char* name) {
 
 void register_program(py::module_& m) {
   py::enum_<TunnelStatus>(m, "TunnelStatus",
-                          "A tunnel's state in one forwarding (a by_tunnel row). UP; FAILED: its path touches a node or\n"
-                          "an edge the forwarding policy's Eligibility excludes, so it gets nothing and its head splits over\n"
-                          "its other entries (replay); BLACKHOLED: up, but its path reaches a black hole of stale\n"
-                          "forwarding, where its traffic is dropped. A program's own tunnels are all up.")
+                          "A tunnel's state. UP; NO_BANDWIDTH and COST_CEILING: T1's setup left it down (no path passes\n"
+                          "the bandwidth filter, or the cheapest exceeds the cost ceiling): no path, weight 0, and it\n"
+                          "stays down in every forwarding of its program; and in one forwarding only (a by_tunnel row)\n"
+                          "FAILED: its path touches a node or an edge the forwarding policy's Eligibility excludes, so it\n"
+                          "gets nothing and its head splits over its other entries (replay), and BLACKHOLED: up, but its\n"
+                          "path reaches a black hole of stale forwarding, where its traffic is dropped.")
       .value("UP", TunnelStatus::Up)
+      .value("NO_BANDWIDTH", TunnelStatus::NoBandwidth)
+      .value("COST_CEILING", TunnelStatus::CostCeiling)
       .value("FAILED", TunnelStatus::Failed)
       .value("BLACKHOLED", TunnelStatus::Blackholed);
 
   py::class_<Tunnel>(m, "Tunnel",
-                     "One tunnel (a path entry) of a ForwardingProgram, read-only. index: the entry identifier\n"
-                     "(Global and CostOnly MAX_FLOW: the path's position in the decomposition order; supplied routes:\n"
-                     "the route's position in the list), never a position in program.tunnels; head; local_index: its\n"
-                     "position among the head's entries of both kinds; destination: where its path ends; edges: its\n"
-                     "EdgeIds in path order; route_cost: the sum of their costs; weight: its integer share among the\n"
-                     "head's entries (a controller path: its solved amount).")
+                     "One tunnel (a path entry) of a ForwardingProgram, read-only. index: the entry identifier (T1:\n"
+                     "j*H + i for round j and roster position i; Global and CostOnly MAX_FLOW: the path's position in\n"
+                     "the decomposition order; supplied routes: the route's position in the list), never a position in\n"
+                     "program.tunnels; head; local_index: its position among the head's entries of both kinds;\n"
+                     "destination: where its path ends; edges: its EdgeIds in path order; route_cost: the sum of their\n"
+                     "costs (all three None for a tunnel that is down); status: UP, NO_BANDWIDTH or COST_CEILING;\n"
+                     "requested and reserved: T1's strict bandwidth (its request, and what it holds on every link of\n"
+                     "its path: the request when UP, else 0; 0 for the other models); weight: its integer share among\n"
+                     "the head's entries (T1: 1 up, 0 down; a controller path: its solved amount).")
       .def_readonly("index", &Tunnel::index)
       .def_readonly("head", &Tunnel::head)
       .def_readonly("local_index", &Tunnel::local_index)
       .def_readonly("destination", &Tunnel::destination)
       .def_property_readonly(
-          "edges", [](const Tunnel& t) { return py::tuple(py::cast(t.edges)); }, "the path's EdgeIds in path order")
+          "edges",
+          [](const Tunnel& t) -> py::object {
+            return t.edges.has_value() ? py::object(py::tuple(py::cast(*t.edges))) : py::object(py::none());
+          },
+          "the path's EdgeIds in path order; None for a tunnel that is down")
       .def_readonly("route_cost", &Tunnel::route_cost)
+      .def_property_readonly("status", [](const Tunnel& t) { return typed_object(t.status); })
+      .def_readonly("requested", &Tunnel::requested)
+      .def_readonly("reserved", &Tunnel::reserved)
       .def_readonly("weight", &Tunnel::weight)
       .def("__repr__", [](const Tunnel& t) {
         return "Tunnel(index=" + std::to_string(t.index) + ", head=" + std::to_string(t.head) +
@@ -117,7 +131,7 @@ void register_program(py::module_& m) {
       "captured source supplies ((source, weight) for every roster source, ascending) of the optimized\n"
       "controllers, None for equal sources (round robin over the roster). Each head splits its share by\n"
       "highest averages over its entries' weights; identical routes are never merged. CostOnly and Global\n"
-      "produce one (FlowPolicy.program, PlacementResult.program; CapacityAware has none); from_routes builds\n"
+      "produce one (FlowPolicy.program, PlacementResult.program), and so does T1 (its tunnels); from_routes builds\n"
       "one from given routes; Pinned forwards one. No public constructor.")
       .def_property_readonly(
           "sources", [](const ForwardingProgram& p) { return ids_tuple(p.sources()); }, "the source set, ascending")

@@ -145,7 +145,7 @@ TEST(FlowLedger, BoundNoFlowsRow) {
   EXPECT_TRUE(fg.records().empty());
   EXPECT_FALSE(p.infinite());
   EXPECT_TRUE(p.requested().is_zero());
-  // A positive request creates the cohort (new id), routes_changed true.
+  // A positive request creates the flow (new id), routes_changed true.
   r = p.place(2);
   EXPECT_EQ(r.placed, 2);
   EXPECT_TRUE(r.routes_changed);
@@ -228,7 +228,7 @@ TEST(FlowLedger, BoundWithFlowsRowAndEpochs) {
   p.remove();  // the epoch resets: the request of 1 is gone
   EXPECT_TRUE(p.requested().is_zero());
   EXPECT_FALSE(p.infinite());
-  p.remove();  // again, on an empty cohort: nothing changes
+  p.remove();  // again, with no flow: nothing changes
   EXPECT_TRUE(fg.records().empty());
   EXPECT_TRUE(p.requested().is_zero());
   EXPECT_FALSE(p.infinite());
@@ -285,7 +285,11 @@ TEST(FlowLedger, CopyAndMoveCarryTheWholeLedger) {
   std::vector<Amount> baseline(4);
   const Amount by_input[4] = {9, 8, 1, 9};
   for (std::size_t i = 0; i < 4; ++i) baseline[static_cast<std::size_t>(inv[i])] = by_input[i];
-  FlowLedger fg(g, baseline);
+  // A reservation baseline below the capacities: 7, 7, 1, 7 by input.
+  std::vector<Amount> reservation(4);
+  const Amount reserve_by_input[4] = {7, 7, 1, 7};
+  for (std::size_t i = 0; i < 4; ++i) reservation[static_cast<std::size_t>(inv[i])] = reserve_by_input[i];
+  FlowLedger fg(g, baseline, reservation);
   {
     RoutePolicy lossy(fg, 0, 3, split_route(fg, 0, 3, all_edges(*g), FlowPlacement::EqualBalanced, Admission::Lossy));
     (void)lossy.place(10);  // owner 0, FlowId 0: delivers 6, drops 4 on the 1 -> 3 edge
@@ -294,33 +298,42 @@ TEST(FlowLedger, CopyAndMoveCarryTheWholeLedger) {
     removed.remove();
     RoutePolicy lossless(fg, 0, 3, on_support(all_edges(*g)));
     (void)lossless.place(2);  // owner 2, FlowId 2
-  }  // three orphaned owners, two records: a copy or a move needs a ledger without bound policies
+    // owner 3, FlowId 3: one T1 tunnel over 0 -> 2 -> 3 holding 5 (the request filters out the
+    // 1-unit link 1 -> 3), carrying nothing.
+    FlowPolicy holds(fg, v({0}), v({3}), FlowPolicyConfig {.routing = CapacityAware {Tunnels {1}}});
+    (void)holds.replace(0, 5);
+  }  // four orphaned owners, three records: a copy or a move needs a ledger without bound policies
   const LedgerState source = ledger_state(fg);
   const std::vector<Amount> source_baseline = vec(LedgerAccess::baseline(fg));
+  const std::vector<Amount> source_reservation = vec(LedgerAccess::reservation_baseline(fg));
   // The source is what the comment above says, so that each part below can differ.
-  ASSERT_EQ(source.records.size(), 2u);
+  ASSERT_EQ(source.records.size(), 3u);
+  EXPECT_EQ(source.records[2].reserved_edges, (std::vector<std::pair<EdgeId, Amount>> {{inv[1], 5}, {inv[3], 5}}));
+  EXPECT_EQ(source.reserved[static_cast<std::size_t>(inv[1])], 5);
+  EXPECT_EQ(source_reservation, reservation);
   EXPECT_TRUE(source.records[0].offered.has_value());
   EXPECT_EQ(source.records[0].delivered, 6);
   EXPECT_EQ(source.records[0].drops, (std::vector<std::pair<EdgeId, Counter128>>{{inv[2], Counter128 {0, 4}}}));
   EXPECT_FALSE(source.records[1].offered.has_value());
   EXPECT_EQ(source.records[1].flow_id.second, 2);
-  EXPECT_EQ(source.next_id, 3);
+  EXPECT_EQ(source.next_id, 4);
   EXPECT_TRUE(source.bound.empty());
-  EXPECT_EQ(source.orphans, (std::vector<std::int64_t>{0, 1, 2}));
+  EXPECT_EQ(source.orphans, (std::vector<std::int64_t>{0, 1, 2, 3}));
   EXPECT_NE(source_baseline, vec(g->capacity_units()));
   EXPECT_NE(source.allocated, std::vector<Amount>(4, 0));
 
-  // Everything the source held, then the next policy: it gets the next owner id (3) and the next
-  // FlowId.
+  // Everything the source held (both baselines and both projections), then the next policy: it
+  // gets the next owner id (4) and the next FlowId.
   auto expect_whole = [&](FlowLedger& x, const std::string& what) {
     expect_same(ledger_state(x), source, what);
     EXPECT_EQ(vec(LedgerAccess::baseline(x)), source_baseline) << what;
+    EXPECT_EQ(vec(LedgerAccess::reservation_baseline(x)), source_reservation) << what;
     RoutePolicy next(x, 0, 3, on_support(all_edges(*g)));
     EXPECT_EQ(next.place(1).placed, 1) << what;
     ASSERT_TRUE(next.flow_id().has_value()) << what;
     EXPECT_EQ(next.flow_id()->second, source.next_id) << what;
-    EXPECT_EQ(x.record(*next.flow_id()).owner, 3) << what;
-    EXPECT_EQ(LedgerAccess::bound_owners(x), (std::vector<std::int64_t>{3})) << what;
+    EXPECT_EQ(x.record(*next.flow_id()).owner, 4) << what;
+    EXPECT_EQ(LedgerAccess::bound_owners(x), (std::vector<std::int64_t>{4})) << what;
     next.remove();
   };
 
@@ -346,11 +359,14 @@ TEST(FlowLedger, CopyAndMoveCarryTheWholeLedger) {
       {"capacity_units", [&] { (void)fg.capacity_units(); }},
       {"residual", [&] { (void)fg.residual(); }},
       {"allocated", [&] { (void)fg.allocated(); }},
+      {"reserved", [&] { (void)fg.reserved(); }},
+      {"unreserved", [&] { (void)fg.unreserved(); }},
       {"records", [&] { (void)fg.records(); }},
       {"record", [&] { (void)fg.record(some); }},
       {"bottleneck", [&] { (void)fg.bottleneck(sources); }},
       {"reset", [&] { fg.reset(); }},
       {"reset(residual)", [&] { fg.reset(baseline_again); }},
+      {"reset(residual, unreserved)", [&] { fg.reset(baseline_again, baseline_again); }},
       {"copy", [&] { FlowLedger again(fg); }},
       {"move", [&] { FlowLedger again(std::move(fg)); }},
       {"bind", [&] { (void)LedgerAccess::bind(fg); }},
@@ -359,6 +375,51 @@ TEST(FlowLedger, CopyAndMoveCarryTheWholeLedger) {
     EXPECT_EQ(logic_error_of(call), "FlowLedger: a moved-from ledger is empty and unusable") << name;
   }
   // NOLINTEND(bugprone-use-after-move)
+}
+
+// The commit checks holds against the reservation baseline exactly as it checks carried load
+// against the service baseline, in its own pass after the carried one, and publishes both or
+// neither: a hold above R0, a negative hold, and a draft whose load is infeasible (its holds
+// fine) each throw with nothing changed; the exchange releases the owner's old holds before the
+// check; detach releases both projections.
+TEST(FlowLedger, HoldsAreCheckedAgainstTheReservationBaseline) {
+  auto g = shared(make_graph(2, {{0, 1, 10, 1}}));
+  FlowLedger fg(g, std::vector<Amount> {10}, std::vector<Amount> {6});
+  const auto owner = LedgerAccess::bind(fg);
+  auto draft = [&](Amount load, Amount hold) {
+    detail::Draft d;
+    d.record.sources = {0};
+    d.record.destinations = {1};
+    d.record.bundle = all_edges(*g);
+    if (load != 0) d.record.edges = {{0, load}};
+    if (hold != 0) d.record.reserved_edges = {{0, hold}};
+    return d;
+  };
+  const LedgerState empty = ledger_state(fg);
+  for (const auto& [load, hold, text] :
+       {std::tuple {Amount {2}, Amount {7}, std::string("ledger: infeasible reservation on edge 0 (7 of 6)")},
+        std::tuple {Amount {2}, Amount {-1}, std::string("ledger: a negative hold in a commit")},
+        std::tuple {Amount {11}, Amount {6}, std::string("ledger: infeasible commit on edge 0 (11 of 10)")}}) {
+    std::vector<detail::Draft> ds {draft(load, hold)};
+    EXPECT_EQ(logic_error_of([&] { (void)LedgerAccess::commit(fg, owner, ds); }), text);
+    expect_same(ledger_state(fg), empty, text);
+  }
+  std::vector<detail::Draft> ds {draft(2, 6)};
+  const auto ids = LedgerAccess::commit(fg, owner, ds);
+  EXPECT_EQ(fg.reserved(), (std::vector<Amount> {6}));
+  EXPECT_EQ(fg.unreserved(), (std::vector<Amount> {0}));
+  EXPECT_EQ(fg.allocated(), (std::vector<Amount> {2}));
+  // An exchange retires the old record and its hold before checking the new one's: 6 again fits.
+  std::vector<detail::Draft> again {draft(3, 6)};
+  (void)LedgerAccess::exchange(fg, owner, again);
+  EXPECT_EQ(fg.reserved(), (std::vector<Amount> {6}));
+  EXPECT_EQ(fg.allocated(), (std::vector<Amount> {3}));
+  EXPECT_EQ(LedgerAccess::live(fg, ids[0].second + 1).reserved_edges, (std::vector<std::pair<EdgeId, Amount>> {{0, 6}}));
+  (void)LedgerAccess::detach(fg, owner);
+  EXPECT_EQ(fg.reserved(), (std::vector<Amount> {0}));
+  EXPECT_EQ(fg.allocated(), (std::vector<Amount> {0}));
+  expect_balanced(fg, "after detach");
+  LedgerAccess::release(fg, owner);
 }
 
 TEST(FlowLedger, FlowIdsOfOtherLedgersAndUnknownIds) {

@@ -1,5 +1,6 @@
 // The enumerations of the placement, origin and selection axes, and PathSelection.
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
 #include <string>
 
@@ -13,8 +14,8 @@ namespace netgraph::core::bindings {
 
 void register_axes(py::module_& m) {
   py::enum_<FlowPlacement>(m, "FlowPlacement",
-                           "How traffic spreads over the routes (CostOnly's kernel; CapacityAware's flows; the interior split\n"
-                           "of supplied PredDAG routes, EQUAL_BALANCED or WEIGHTED).\n"
+                           "How traffic spreads over the routes (CostOnly's kernel; the interior split of supplied PredDAG\n"
+                           "routes, EQUAL_BALANCED or WEIGHTED).\n"
                            "MAX_FLOW: the minimum-cost flow core over the routes (a controller restricted to them), re-solved\n"
                            "over the free capacity plus the policy's own allocation (it may move its own earlier placement,\n"
                            "never another's). WEIGHTED (WCMP, weighted-cost multipath): every node splits in proportion to\n"
@@ -61,12 +62,12 @@ void register_axes(py::module_& m) {
       .value("PREFER_HIGHER_PRIORITY", EdgeTieBreak::PreferHigherPriority);
 
   py::enum_<EdgePriority>(m, "EdgePriority",
-                          "The per-edge value PREFER_HIGHER_PRIORITY reads (single-path and parallel-member choices) and,\n"
-                          "for CapacityAware's WEIGHTED flows, the value that decides which edges a flow uses and their\n"
-                          "weights: RESIDUAL (residual units), CAPACITY (static capacity units), HEADROOM (residual /\n"
-                          "capacity, compared exactly as a fraction, 0 on an edge of capacity 0; rejected with\n"
-                          "CapacityAware's WEIGHTED). A search without a residual reads the static capacity as the residual:\n"
-                          "RESIDUAL and CAPACITY read the capacity, HEADROOM 1 (0 on an edge of capacity 0).")
+                          "The per-edge value PREFER_HIGHER_PRIORITY reads (single-path and parallel-member choices):\n"
+                          "RESIDUAL (residual units), CAPACITY (static capacity units), HEADROOM (residual / capacity,\n"
+                          "compared exactly as a fraction, 0 on an edge of capacity 0). A search without a residual reads\n"
+                          "the static capacity as the residual: RESIDUAL and CAPACITY read the capacity, HEADROOM 1 (0 on\n"
+                          "an edge of capacity 0). T1's CSPF reads its unreserved view U instead (RESIDUAL U, HEADROOM\n"
+                          "U / capacity).")
       .value("RESIDUAL", EdgePriority::Residual)
       .value("CAPACITY", EdgePriority::Capacity)
       .value("HEADROOM", EdgePriority::Headroom);
@@ -80,16 +81,19 @@ void register_axes(py::module_& m) {
 
   py::class_<PathSelection>(m, "PathSelection",
                             "The selection of a search or a policy: tie_break (DETERMINISTIC by default), priority\n"
-                            "(CAPACITY by default); multipath = True keeps every equal-cost walk (the DAG), False the one\n"
-                            "canonical single path; multi_edge = True keeps every eligible parallel member, False one per\n"
-                            "(u, v) pair. A tie_break or priority outside its enumeration raises ValueError.")
+                            "(CAPACITY by default); multipath None (the default) is the model's natural shape (every\n"
+                            "equal-cost walk for searches and CostOnly, one path for a tunnel model), True every equal-cost\n"
+                            "walk (the DAG; tunnel models reject it), False the one canonical single path; multi_edge = True\n"
+                            "keeps every eligible parallel member, False one per (u, v) pair. A tie_break or priority\n"
+                            "outside its enumeration raises ValueError.")
       // The constructor checks both enumerations (ValueError naming the field).
-      .def(py::init<EdgeTieBreak, EdgePriority, bool, bool>(), py::arg_v("tie_break", EdgeTieBreak::Deterministic, "EdgeTieBreak.DETERMINISTIC"),
-           py::arg_v("priority", EdgePriority::Capacity, "EdgePriority.CAPACITY"), py::arg("multipath") = true, py::arg("multi_edge") = true)
+      .def(py::init<EdgeTieBreak, EdgePriority, std::optional<bool>, bool>(), py::arg_v("tie_break", EdgeTieBreak::Deterministic, "EdgeTieBreak.DETERMINISTIC"),
+           py::arg_v("priority", EdgePriority::Capacity, "EdgePriority.CAPACITY"), py::arg("multipath") = py::none(), py::arg("multi_edge") = true)
       .def_readonly("tie_break", &PathSelection::tie_break, "the EdgeTieBreak")
       .def_readonly("priority", &PathSelection::priority, "the EdgePriority")
       .def_readonly("multipath", &PathSelection::multipath,
-                    "True: every equal-cost walk (a DAG); False: the canonical single path")
+                    "None: the model's natural shape; True: every equal-cost walk (a DAG); False: the canonical\n"
+                    "single path")
       .def_readonly("multi_edge", &PathSelection::multi_edge,
                     "True: every eligible parallel member; False: one member per (u, v) pair")
       .def("__eq__", [](const PathSelection& a, const py::object& b) {
@@ -105,7 +109,8 @@ void register_axes(py::module_& m) {
                ", priority=" +
                (a.priority == EdgePriority::Residual ? "RESIDUAL"
                                                      : (a.priority == EdgePriority::Capacity ? "CAPACITY" : "HEADROOM")) +
-               ", multipath=" + (a.multipath ? "True" : "False") + ", multi_edge=" + (a.multi_edge ? "True" : "False") +
+               ", multipath=" + (!a.multipath.has_value() ? "None" : *a.multipath ? "True" : "False") +
+               ", multi_edge=" + (a.multi_edge ? "True" : "False") +
                ")";
       });
 }

@@ -60,20 +60,24 @@ specified in [docs/semantics.md](docs/semantics.md).
   between the same two nodes;
   `cost()` is the sum over hops of the minimum member cost and `to_dag()` gives the equivalent
   `PredDAG`.
-- **`PathSelection(tie_break=DETERMINISTIC, priority=CAPACITY, multipath=True,
+- **`PathSelection(tie_break=DETERMINISTIC, priority=CAPACITY, multipath=None,
   multi_edge=True)`** with `EdgeTieBreak` and `EdgePriority`: the selection axes the searches and
-  policies read.
+  policies read (`multipath=None` is the model's natural shape: the DAG of equal-cost walks for
+  searches and CostOnly, one path for a tunnel).
 
 ### Ledger and kernels
 
-- **`FlowLedger(graph, residual=None)`**: the integer ledger of one graph: a baseline
-  in units (replaced by `reset()`) and the records (`FlowRecord`: flow id, owner, endpoints,
-  admission, program entry, bundle, route cost, offered, delivered, per-edge allocation and drops)
-  of the flows placed on it. `allocated()` is the exact sum of the records and `residual()`
-  the baseline minus it; `bottleneck(sources)` lists the full edges leaving the set of nodes
-  the sources can still reach. `reset()` and `copy()` are rejected while a policy is bound
-  to the ledger. Policies place and remove flows; `reset()` replaces an unbound ledger's
-  baseline and clears its records.
+- **`FlowLedger(graph, residual=None, *, unreserved=None)`**: the integer ledger of one graph,
+  in two projections that are never added: the carried traffic (a service baseline `residual`;
+  `allocated()` is the exact sum of the records' edges and `residual()` the baseline minus it)
+  and the strict holds of T1 tunnels (a reservation baseline `unreserved`; `reserved()` is the
+  sum of the records' holds and `unreserved()` the baseline minus it). Holds never police
+  traffic. The records (`FlowRecord`: flow id, owner, endpoints, admission, program entry,
+  bundle, route cost, offered, delivered, per-edge allocation, drops and holds) are the flows
+  placed on it; `bottleneck(sources)` lists the full edges leaving the set of nodes the sources
+  can still reach. `reset()` and `copy()` are rejected while a policy is bound to the ledger.
+  Policies place, hold and remove; `reset(residual=None, *, unreserved=None)` replaces an
+  unbound ledger's baselines and clears its records.
 - **Kernels**, the rules that spread one flow over its route (`FlowPlacement`: `MAX_FLOW`,
   `WEIGHTED`, `EQUAL_BALANCED`; `Admission`: `LOSSLESS`, `LOSSY`): `MAX_FLOW` re-solves the flow
   with the flow core on its DAG, over the free capacity plus its own allocation; `WEIGHTED` splits
@@ -87,17 +91,20 @@ specified in [docs/semantics.md](docs/semantics.md).
 - **`FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)`**: the placement
   engine for one demand, bound to its ledger. `FlowPolicyConfig(*, routing, placement=None,
   admission=LOSSLESS, selection=None, origin=None, weights=None, edge_weights=None)` chooses the
-  routing, its kernel (required for CostOnly and CapacityAware), the admission, the path
+  routing, its kernel (required for CostOnly, taken by no other routing), the admission, the path
   selection (default `PathSelection()`), the weight basis of CostOnly `WEIGHTED` and the origin: `EQUAL` (every source sends the same round-robin share) or
   `OPTIMIZED` (a controller chooses how much enters where; the default of the controllers). The
   routing is one of:
   - `CostOnly()`: static shortest paths, as routers forward with an IGP such as OSPF; the
     sources of one demand are pooled (where their routes meet, a router splits their traffic
     once); with `MAX_FLOW`, a controller restricted to those paths;
-  - `CapacityAware(flow_count=1, max_flow_count=None, max_path_cost=None, min_flow_bandwidth=0,
-    reoptimize=False, diminishing=None)`: tunnels that each search the free capacity (CSPF), with
-    an `Absolute` or `Stretch` cost ceiling, a `DiminishingReturns(window, fraction)` guard, and at
-    most `MAX_FLOWS_PER_CALL` (10,000) new flows per call;
+  - `CapacityAware(Tunnels(N), max_path_cost=None, min_unreserved_bandwidth=0)` (T1): every
+    head sets up its own N strict-bandwidth tunnels, as RSVP-TE head ends do, with no controller:
+    a design volume is split equally over the heads and their tunnels, each tunnel runs CSPF (the
+    shortest path among the links with enough unreserved bandwidth, within an `Absolute` or
+    `Stretch` cost ceiling) and either comes up holding its request on every link or stays down
+    (`NO_BANDWIDTH`, `COST_CEILING`); traffic then enters equally at the heads and splits equally
+    over their up tunnels;
   - `Global(support=None)`: an ideal controller: the minimum-cost flow from all the policy's
     sources to its destinations, on the free capacity plus its own allocation, optionally only
     over the edges of a support DAG;
@@ -105,22 +112,24 @@ specified in [docs/semantics.md](docs/semantics.md).
     nothing; the policy's Eligibility fails the tunnels it touches (their heads split over the
     survivors) and `black_holes` makes failed elements swallow what reaches them (stale
     forwarding).
-- **`ForwardingProgram`**: the routes and integer weights of one demand. CostOnly and Global
-  produce one (`policy.program`, `result.program`; CapacityAware has none); `ForwardingProgram.from_routes(graph,
+- **`ForwardingProgram`**: the routes and integer weights of one demand. CostOnly, Global and T1
+  produce one (`policy.program`, `result.program`); `ForwardingProgram.from_routes(graph,
   sources, destinations, routes)` builds one from `Route(head, Path or PredDAG, weight=1)`
   entries.
 - **`place(volume, outputs=None)`** adds `volume` to the policy's request as one all-or-nothing
   step (CostOnly forwards over the program it prepares once per epoch; the controllers re-solve
-  what they already deliver plus this request; CapacityAware places source by source) and returns
+  what they already deliver plus this request; T1 has no `place`) and returns
   a `PlacementResult`: this call's `placed`, `remaining`, `delivery_delta`, `call_drops`,
   `call_source_loss`, `termination` and flags; the demand's `requested`, `offered`, `admitted`,
   `delivered`, `unadmitted`, `source_loss`, `drops`, per-source rows `by_source`, `total_cost`
-  (controllers), `cost_distribution` (optimized Global), the `program` and per-tunnel rows
-  `by_tunnel`; and, when requested through `OutputOptions`, `edge_flows`, `residual`,
-  `bottleneck` and `min_cut` (optimized Global).
-  `evaluate(offer)` computes a whole new offer without publishing it, `replace(offer)` publishes
-  it, `forward(offer, black_holes=None)` sends it over the installed program; `remove()` reverts
-  the policy's flows; `records()`, `record(flow_id)`, `placed_demand()` and `program` read its
+  (controllers), `cost_distribution` (optimized Global), the `program`, T1's `plan` and
+  `reservations_changed`, and per-tunnel rows `by_tunnel`; and, when requested through
+  `OutputOptions`, `edge_flows`, `residual`, `bottleneck`, `reservation_edge_flows` and `min_cut`
+  (optimized Global).
+  `evaluate(offer, design_demand=None)` computes a whole new offer without publishing it,
+  `replace(offer, design_demand=None)` publishes it (T1 sets its tunnels up for the design,
+  `None` meaning the offer), `forward(offer, black_holes=None)` sends it over the installed
+  program (T1 keeps its tunnels and holds); `remove()` reverts the policy's flows and holds; `records()`, `record(flow_id)`, `placed_demand()` and `program` read its
   state.
 - **Failure guarantee**: every public call either completes or raises one exception and leaves
   every ledger, policy, cache and scratch buffer as it was, whatever fails (validation, memory, a
@@ -172,8 +181,9 @@ values.
 ### Evaluators
 
 All three take one options type, `QueryOptions(config, *, elig=None, cache=None,
-outputs=None, offered=None)`. `capacity(graph, sources, destinations, opts)` is `place(+inf)` of a policy on a fresh ledger
-(a Lossy Pinned policy places the finite `offered` instead); `Global()` gives the
+outputs=None, design_demand=None, offered=None)`. `capacity(graph, sources, destinations, opts)` is `place(+inf)` of a policy on a fresh ledger
+(a Lossy Pinned policy places the finite `offered` instead; T1 evaluates the tunnels it sets up
+for the required finite `design_demand`, forwarding `+inf` or, Lossy, the finite `offered`); `Global()` gives the
 exact maximum flow with its marginal cost curve, and its minimum cut with
 `outputs=OutputOptions(min_cut=True)`. `batch_capacity(graph, pairs,
 opts, per_pair_elig=None, workers=None)` evaluates pairs in pair order (the lowest failing
@@ -206,6 +216,14 @@ result = ngc.capacity(graph, 0, 3, ngc.QueryOptions(config))
 print(ngc.as_float(result.placed, q))   # 15.0
 print(result.cost_distribution)         # [(2, 40960), (4, 20480)]
 print(result.total_cost)                # 163840
+
+# T1: two tunnels sized for 12; the second finds no path with 6 units unreserved.
+t1 = ngc.FlowPolicyConfig(routing=ngc.CapacityAware(ngc.Tunnels(2)), admission=ngc.Admission.LOSSY)
+policy = ngc.FlowPolicy(ngc.FlowLedger(graph), 0, 3, t1)
+r = policy.replace(ngc.to_units(12.0, q), design_demand=ngc.to_units(12.0, q))
+print([t.status.name for t in r.program.tunnels])  # ['UP', 'NO_BANDWIDTH']
+print(ngc.as_float(r.placed, q))                    # 10.0
+print(ngc.as_float(r.plan.reserved_total, q))       # 6.0
 ```
 
 ## Installation

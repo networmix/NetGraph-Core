@@ -1,6 +1,6 @@
 // The routing modes of a policy (CostOnly, CapacityAware, Global, Pinned) and their parameters:
-// the cost ceilings Absolute and Stretch, the DiminishingReturns guard, Global's support and
-// Pinned's program and black holes.
+// the cost ceilings Absolute and Stretch, the tunnel count Tunnels, Global's support and Pinned's
+// program and black holes.
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -98,57 +98,53 @@ void register_routing(py::module_& m) {
       .def("__hash__", [](const Stretch& a) { return py::hash(py::make_tuple("Stretch", a.factor)); })
       .def("__repr__", [](const Stretch& a) { return "Stretch(" + std::string(py::str(py::float_(a.factor))) + ")"; });
 
-  py::class_<DiminishingReturns>(m, "DiminishingReturns",
-                                 "The diminishing-returns guard of CapacityAware growth: stop once at least `window`\n"
-                                 "growth steps were accepted in the call and the last `window` gains sum below\n"
-                                 "`fraction` times the source's (finite) offer. window >= 1, fraction in (0, 1).")
-      .def(py::init([](const py::object& window, const py::object& fraction) {
-             DiminishingReturns d;
-             d.window = static_cast<std::int32_t>(*int_field(window, std::numeric_limits<std::int32_t>::min(),
-                                                             std::numeric_limits<std::int32_t>::max(),
-                                                             "diminishing window", false));
-             d.fraction = float_field(fraction, "diminishing fraction");
-             return d;
+  py::class_<Tunnels>(m, "Tunnels",
+                      "The tunnel count of T1 (CapacityAware) and T2, per head: count in [1, 10000] (checked when a\n"
+                      "policy or an evaluator uses it). up_to=True (T2 only; T1 rejects it): one common count k in\n"
+                      "1..count for every head, the smallest that delivers the design.")
+      .def(py::init([](const py::object& count, bool up_to) {
+             return Tunnels {*int_field(count, std::numeric_limits<std::int64_t>::min(),
+                                        std::numeric_limits<std::int64_t>::max(), "tunnel count", false),
+                             up_to};
            }),
-           py::arg("window"), py::arg("fraction"),
-           "DiminishingReturns(window, fraction): a 32-bit integer and a number, checked (window >= 1,\n"
-           "fraction in (0, 1)) when a policy is built with them. Here, a window outside 32 bits or a fraction\n"
-           "that is an integer beyond the largest finite float raises ValueError.")
-      .def_readonly("window", &DiminishingReturns::window, "the number of recent accepted growth steps compared")
-      .def_readonly("fraction", &DiminishingReturns::fraction,
-                    "the share of the source's offer those steps must gain together to continue")
-      .def("__repr__", [](const DiminishingReturns& d) {
-        return "DiminishingReturns(window=" + std::to_string(d.window) + ", fraction=" + std::string(py::str(py::float_(d.fraction))) + ")";
+           py::arg("count"), py::kw_only(), py::arg("up_to") = false,
+           "Tunnels(count, *, up_to=False): a 64-bit integer count (a bool, a float or an integer outside 64 bits\n"
+           "raises ValueError here; [1, 10000] is checked where it is used) and a bool")
+      .def_readonly("count", &Tunnels::count, "the tunnels per head (the largest count for up_to)")
+      .def_readonly("up_to", &Tunnels::up_to, "True: the smallest sufficient count up to `count` (T2 only)")
+      .def("__eq__", [](const Tunnels& a, const py::object& b) { return py::isinstance<Tunnels>(b) && a == b.cast<Tunnels>(); })
+      .def("__hash__", [](const Tunnels& a) { return py::hash(py::make_tuple("Tunnels", a.count, a.up_to)); })
+      .def("__repr__", [](const Tunnels& a) {
+        return "Tunnels(" + std::to_string(a.count) + (a.up_to ? ", up_to=True)" : ")");
       });
 
   py::class_<CostOnly>(m, "CostOnly",
                        "Routing like IGP forwarding (OSPF, IS-IS routers) on each roster source's static shortest-path\n"
                        "DAG (read from the DagCache; the selection is applied at the epoch's first positive call),\n"
-                       "never refreshed, grown or reoptimised; one record per roster source. EQUAL_BALANCED and\n"
-                       "WEIGHTED pool the sources (origin EQUAL): where their routes meet, a router splits their traffic\n"
-                       "once. MAX_FLOW is a controller on the union of those routes (origin OPTIMIZED or EQUAL). An edge\n"
-                       "of capacity 0 stays in the DAG: EQUAL_BALANCED still sends it its share, which it cannot\n"
-                       "carry, and WEIGHTED gives it weight 0.")
+                       "fixed for the epoch; one record per roster source. EQUAL_BALANCED and WEIGHTED pool the sources\n"
+                       "(origin EQUAL): where their routes meet, a router splits their traffic once. MAX_FLOW is a\n"
+                       "controller on the union of those routes (origin OPTIMIZED or EQUAL). An edge of capacity 0\n"
+                       "stays in the DAG: EQUAL_BALANCED still sends it its share, which it cannot carry, and WEIGHTED\n"
+                       "gives it weight 0.")
       .def(py::init<>(), "CostOnly routing (no parameters)")
       .def("__repr__", [](const CostOnly&) { return std::string("CostOnly()"); });
 
   py::class_<CapacityAware>(
       m, "CapacityAware",
-      "Routing like distributed CSPF tunnels (each tunnel head picks its own shortest path among edges\n"
-      "with enough free capacity). Each source creates flow_count flows, one search at a time, on edges\n"
-      "with residual >= max(1, min_flow_bandwidth) units and within max_path_cost; while its offer is\n"
-      "unmet it adds flows up to max_flow_count (None: no ceiling). With reoptimize, a flow moves to a\n"
-      "new route only when it keeps its whole amount there. `diminishing` (None: off) stops adding flows\n"
-      "once the recent ones gain too little.")
-      .def(py::init([](const py::object& flow_count, const py::object& max_flow_count, const py::object& max_path_cost,
-                       const py::object& min_flow_bandwidth, bool reoptimize, const py::object& diminishing) {
+      "T1: every head sets up its own strict tunnels by CSPF, no controller (like RSVP-TE head ends).\n"
+      "The design volume D is split equally over the roster heads and each head's share equally over its\n"
+      "tunnels.count tunnels; in round order (round j, heads ascending: tunnel index j*H + i) each tunnel\n"
+      "keeps the allowed links whose unreserved capacity (the ledger's, minus the holds of every other\n"
+      "owner and of this setup's earlier tunnels) is at least max(request, min_unreserved_bandwidth) (a\n"
+      "request of 0 with a minimum of 0 has no filter) and takes the shortest path in the selection's\n"
+      "single-path order; it comes up holding exactly its request on every link (UP), or stays down\n"
+      "holding nothing: NO_BANDWIDTH (no path passes the filter) or COST_CEILING (the cheapest exceeds\n"
+      "max_path_cost: Absolute is inclusive; Stretch(f) is f times the smallest static shortest cost over\n"
+      "all roster heads). Traffic enters equally at the heads and splits equally over each head's up\n"
+      "tunnels; a head with no tunnel up loses its share. Holds never police traffic.")
+      .def(py::init([](const Tunnels& tunnels, const py::object& max_path_cost, const py::object& min_unreserved) {
              CapacityAware ca;
-             constexpr auto lo32 = std::numeric_limits<std::int32_t>::min();
-             constexpr auto hi32 = std::numeric_limits<std::int32_t>::max();
-             ca.flow_count = static_cast<std::int32_t>(*int_field(flow_count, lo32, hi32, "flow_count", false));
-             if (auto mx = int_field(max_flow_count, lo32, hi32, "max_flow_count", true)) {
-               ca.max_flow_count = static_cast<std::int32_t>(*mx);
-             }
+             ca.tunnels = tunnels;
              if (!max_path_cost.is_none()) {
                if (py::isinstance<Absolute>(max_path_cost)) {
                  ca.max_path_cost = max_path_cost.cast<Absolute>();
@@ -158,28 +154,21 @@ void register_routing(py::module_& m) {
                  throw py::type_error("max_path_cost must be Absolute, Stretch or None");
                }
              }
-             ca.min_flow_bandwidth = *int_field(min_flow_bandwidth, std::numeric_limits<Amount>::min(),
-                                                std::numeric_limits<Amount>::max(), "min_flow_bandwidth (units)", false);
-             ca.reoptimize = reoptimize;
-             if (!diminishing.is_none()) {
-               if (!py::isinstance<DiminishingReturns>(diminishing)) throw py::type_error("diminishing must be DiminishingReturns or None");
-               ca.diminishing = diminishing.cast<DiminishingReturns>();
-             }
+             ca.min_unreserved_bandwidth = *int_field(min_unreserved, std::numeric_limits<Amount>::min(),
+                                                      std::numeric_limits<Amount>::max(), "min_unreserved_bandwidth",
+                                                      false);
              return ca;
            }),
-           py::kw_only(), py::arg("flow_count") = 1, py::arg("max_flow_count") = py::none(),
-           py::arg("max_path_cost") = py::none(), py::arg("min_flow_bandwidth") = 0, py::arg("reoptimize") = false,
-           py::arg("diminishing") = py::none(),
-           "The fields are checked when a policy is built with them (flow_count >= 1, max_flow_count >=\n"
-           "flow_count, min_flow_bandwidth in [0, 2^62) units, the ceiling, the guard). Here, an integer field\n"
-           "of the wrong type or outside its integer type (32-bit flow_count and max_flow_count, 64-bit\n"
-           "min_flow_bandwidth) raises ValueError; a ceiling or guard of the wrong class, a reoptimize that is\n"
-           "not a bool, a number or None (a number or None counts by its truth value), and an unknown keyword\n"
-           "raise TypeError.")
-      .def_readonly("flow_count", &CapacityAware::flow_count,
-                    "the flows a source creates on its first positive request")
-      .def_readonly("max_flow_count", &CapacityAware::max_flow_count,
-                    "the most flows growth may reach per source; None: no ceiling")
+           py::arg("tunnels"), py::kw_only(), py::arg("max_path_cost") = py::none(),
+           py::arg("min_unreserved_bandwidth") = 0,
+           "CapacityAware(tunnels, *, max_path_cost=None, min_unreserved_bandwidth=0): the fields are checked\n"
+           "when a policy is built with them (the count in [1, 10000] and exact, the ceiling,\n"
+           "min_unreserved_bandwidth in [0, 2^62) units). Here, a min_unreserved_bandwidth of the wrong type or\n"
+           "outside 64 bits raises ValueError; tunnels that is not a Tunnels, a ceiling of the wrong class and\n"
+           "an unknown keyword raise TypeError.")
+      .def_property_readonly(
+          "tunnels", [](const CapacityAware& ca) { return typed_object(ca.tunnels); },
+          "the tunnel count per head (a Tunnels)")
       .def_property_readonly(
           "max_path_cost",
           [](const CapacityAware& ca) -> py::object {
@@ -187,14 +176,17 @@ void register_routing(py::module_& m) {
             return std::visit([](const auto& x) { return py::cast(x); }, *ca.max_path_cost);
           },
           "the inclusive route cost ceiling (Absolute or Stretch); None: no ceiling")
-      .def_readonly("min_flow_bandwidth", &CapacityAware::min_flow_bandwidth,
-                    "units in [0, 2^62): every search keeps only edges with at least max(1, this) residual units")
-      .def_readonly("reoptimize", &CapacityAware::reoptimize,
-                    "True: a retained flow moves to a newly found route when it keeps its whole amount there")
-      .def_readonly("diminishing", &CapacityAware::diminishing, "the growth guard; None: off")
+      .def_readonly("min_unreserved_bandwidth", &CapacityAware::min_unreserved_bandwidth,
+                    "units in [0, 2^62): a search minimum only (each attempt keeps the links with at least\n"
+                    "max(request, this) unreserved units), never a reservation")
       .def("__repr__", [](const CapacityAware& ca) {
-        return "CapacityAware(flow_count=" + std::to_string(ca.flow_count) + ", max_flow_count=" +
-               (ca.max_flow_count ? std::to_string(*ca.max_flow_count) : std::string("None")) + ")";
+        std::string ceiling = "None";
+        if (ca.max_path_cost.has_value()) {
+          ceiling = std::visit([](const auto& x) { return std::string(py::repr(typed_object(x))); }, *ca.max_path_cost);
+        }
+        return "CapacityAware(Tunnels(" + std::to_string(ca.tunnels.count) + (ca.tunnels.up_to ? ", up_to=True)" : ")") +
+               ", max_path_cost=" + ceiling + ", min_unreserved_bandwidth=" + std::to_string(ca.min_unreserved_bandwidth) +
+               ")";
       });
 
   py::class_<Global>(m, "Global",

@@ -320,10 +320,10 @@ def test_path_selection_and_enums():
     sel = ngc.PathSelection(
         ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY, ngc.EdgePriority.HEADROOM
     )
-    assert (sel.multipath, sel.multi_edge) == (True, True)
+    assert (sel.multipath, sel.multi_edge) == (None, True)
     assert sel.tie_break == ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY
     assert sel == ngc.PathSelection(
-        ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY, ngc.EdgePriority.HEADROOM, True, True
+        ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY, ngc.EdgePriority.HEADROOM, None, True
     )
     assert sel != ngc.PathSelection(
         ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY,
@@ -331,13 +331,14 @@ def test_path_selection_and_enums():
         multipath=False,
     )
     assert "PREFER_HIGHER_PRIORITY" in repr(sel)
-    # Every field has a default (contract r8 3.2): DETERMINISTIC, CAPACITY, multipath, multi_edge.
+    # Every field has a default (contract 3.2, 3.3): DETERMINISTIC, CAPACITY, multipath None
+    # (the model's natural shape), multi_edge.
     default = ngc.PathSelection()
     assert (default.tie_break, default.priority) == (
         ngc.EdgeTieBreak.DETERMINISTIC,
         ngc.EdgePriority.CAPACITY,
     )
-    assert (default.multipath, default.multi_edge) == (True, True)
+    assert (default.multipath, default.multi_edge) == (None, True)
     assert {m.name for m in ngc.FlowPlacement.__members__.values()} == {
         "MAX_FLOW",
         "WEIGHTED",

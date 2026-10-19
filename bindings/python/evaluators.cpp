@@ -38,9 +38,24 @@ struct PyQueryOptions {
   std::shared_ptr<Eligibility> elig;
   std::shared_ptr<DagCache> cache;
   OutputOptions outputs;
+  std::optional<std::optional<Amount>> design_demand;
   std::optional<std::optional<Amount>> offered;
-  [[nodiscard]] QueryOptions native() const { return QueryOptions {config, elig.get(), cache.get(), outputs, offered}; }
+  [[nodiscard]] QueryOptions native() const {
+    return QueryOptions {config, elig.get(), cache.get(), outputs, design_demand, offered};
+  }
 };
+
+// An optional amount option: None absent, else int units or float('inf') (the inner nullopt).
+std::optional<std::optional<Amount>> amount_option(const py::object& obj, const char* text) {
+  if (obj.is_none()) return std::nullopt;
+  return units_or_inf(obj, text);
+}
+
+py::object amount_or_none(const std::optional<std::optional<Amount>>& x) {
+  if (!x.has_value()) return py::none();
+  if (!x->has_value()) return py::float_(std::numeric_limits<double>::infinity());
+  return py::int_(**x);
+}
 
 // workers: an explicit integer is passed through (validated by the evaluator); None takes the
 // environment default (detail::default_workers), and 1 whenever a cache is supplied (a building
@@ -60,18 +75,23 @@ void register_evaluators(py::module_& m) {
   py::class_<PyQueryOptions>(m, "QueryOptions",
                              "The options of every evaluator (capacity, batch_capacity, sensitivity): the configuration,\n"
                              "the static Eligibility (None: all allowed), the DagCache (None: private per worker), the\n"
-                             "optional outputs of each result (sensitivity: of its baseline) and offered (int units or\n"
-                             "float('inf'); None: absent), the offer of a Pinned LOSSY evaluation: required and finite\n"
-                             "there; a LOSSLESS model rejects it (`<model> LOSSLESS capacity does not accept offered`),\n"
-                             "CostOnly LOSSY too (`CostOnly LOSSY capacity uses first-hop injection`).")
+                             "optional outputs of each result (sensitivity: of its baseline), design_demand (int units or\n"
+                             "float('inf'); None: absent): T1's design, always required and finite (`T1 capacity requires\n"
+                             "design_demand`, `T1 requires a finite design demand`), rejected by every other model\n"
+                             "(`<model> does not accept design_demand`), and offered (int units or float('inf'); None:\n"
+                             "absent), the offer of a T1 or Pinned LOSSY evaluation: required and finite there (`<T1 or\n"
+                             "Pinned> LOSSY capacity requires finite offered`); a LOSSLESS model rejects it (`<model>\n"
+                             "LOSSLESS capacity does not accept offered`), CostOnly LOSSY too (`CostOnly LOSSY capacity\n"
+                             "uses first-hop injection`).")
       .def(py::init([](const FlowPolicyConfig& config, const std::shared_ptr<Eligibility>& elig,
-                       const std::shared_ptr<DagCache>& cache, const py::object& outputs, const py::object& offered) {
-             std::optional<std::optional<Amount>> o;
-             if (!offered.is_none()) o = units_or_inf(offered, "offered must be an integer in [0, 2^62) or permitted +inf");
-             return PyQueryOptions {config, elig, cache, outputs_of(outputs), o};
+                       const std::shared_ptr<DagCache>& cache, const py::object& outputs, const py::object& design_demand,
+                       const py::object& offered) {
+             auto d = amount_option(design_demand, "design_demand must be an integer in [0, 2^62) or permitted +inf");
+             auto o = amount_option(offered, "offered must be an integer in [0, 2^62) or permitted +inf");
+             return PyQueryOptions {config, elig, cache, outputs_of(outputs), d, o};
            }),
            py::arg("config"), py::kw_only(), py::arg("elig") = nullptr, py::arg("cache") = nullptr,
-           py::arg("outputs") = py::none(), py::arg("offered") = py::none())
+           py::arg("outputs") = py::none(), py::arg("design_demand") = py::none(), py::arg("offered") = py::none())
       .def_readonly("config", &PyQueryOptions::config,
                     "the FlowPolicyConfig of every evaluated policy (sensitivity: the baseline and every deletion)")
       .def_readonly("elig", &PyQueryOptions::elig, "the static Eligibility; None: everything allowed")
@@ -79,13 +99,11 @@ void register_evaluators(py::module_& m) {
       .def_readonly("outputs", &PyQueryOptions::outputs,
                     "the OutputOptions of every result (sensitivity: of the baseline)")
       .def_property_readonly(
-          "offered",
-          [](const PyQueryOptions& o) -> py::object {
-            if (!o.offered.has_value()) return py::none();
-            if (!o.offered->has_value()) return py::float_(std::numeric_limits<double>::infinity());
-            return py::int_(**o.offered);
-          },
-          "the offer of a Pinned LOSSY evaluation (int units, or float('inf')); None: absent");
+          "design_demand", [](const PyQueryOptions& o) { return amount_or_none(o.design_demand); },
+          "T1's design volume (int units, or float('inf')); None: absent")
+      .def_property_readonly(
+          "offered", [](const PyQueryOptions& o) { return amount_or_none(o.offered); },
+          "the offer of a T1 or Pinned LOSSY evaluation (int units, or float('inf')); None: absent");
 
   py::class_<SensitivityEntry>(m, "SensitivityEntry",
                                 "One candidate edge: edge and loss (int units: the baseline minus the capacity without the\n"
@@ -98,8 +116,6 @@ void register_evaluators(py::module_& m) {
                                 "absent edge has loss 0).")
       .def_readonly("baseline", &SensitivityResult::baseline)
       .def_readonly("entries", &SensitivityResult::entries);
-
-  m.attr("MAX_FLOWS_PER_CALL") = py::int_(kMaxFlowsPerCall);
 
   m.def(
       "capacity",
@@ -123,7 +139,8 @@ void register_evaluators(py::module_& m) {
       },
       py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("opts"),
       "place(+inf) of a FlowPolicy with opts.config on a fresh ledger of the graph (Pinned LOSSY:\n"
-      "place(opts.offered)) -> PlacementResult.\n"
+      "place(opts.offered); T1: evaluate(+inf or opts.offered, design_demand=opts.design_demand), the\n"
+      "lossless bound of the tunnels set up for the design, or what they deliver of offered) -> PlacementResult.\n"
       "The exact maximum flow is Global() (the optimized origin); with origin=EQUAL, the largest total whose\n"
       "round-robin source shares are all carried. A supplied frozen cache raises DagCacheMiss for an absent\n"
       "key, unchanged.\n"

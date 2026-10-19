@@ -1,5 +1,6 @@
 /*
-  capacity() is place(+inf) on a fresh ledger (Pinned Lossy: place(offered)). batch_capacity()
+  capacity() is place(+inf) on a fresh ledger (Pinned Lossy: place(offered); T1: evaluate of its
+  design, with +inf or the offered amount). batch_capacity()
   runs it per pair and sensitivity() per candidate deletion on `workers` threads; results follow
   input order and the lowest failing index supplies the exception. Unrestricted Global with the
   optimized origin repairs the baseline flow after each deletion. CostOnly skips an edge that no
@@ -38,36 +39,63 @@ std::shared_ptr<const Graph> borrowed(const Graph& g) {
   return std::shared_ptr<const Graph>(std::shared_ptr<const void> {}, &g);
 }
 
-// The evaluators' offer (12.1): `offered` in its domain, then the model's rule; returns the call's
-// request (+inf, or a Pinned Lossy finite offer).
-std::optional<Amount> evaluator_offer(const FlowPolicyConfig& cfg, const std::optional<std::optional<Amount>>& offered) {
+// The call an evaluator makes on its fresh policy (12.1): place(offer), or for T1 evaluate(offer,
+// design) (`full`).
+struct EvaluatorCall {
+  std::optional<Amount> offer {};
+  std::optional<Amount> design {};
+  bool full {false};
+};
+
+bool outside(const std::optional<std::optional<Amount>>& x) noexcept {
+  return x.has_value() && x->has_value() && (**x < 0 || **x >= kDomainLimit);
+}
+
+// The evaluators' amounts (12.1): `offered` and `design_demand` in their domains, the design's
+// rules, then the model's offer rule.
+EvaluatorCall evaluator_call(const FlowPolicyConfig& cfg, const std::optional<std::optional<Amount>>& offered,
+                             const std::optional<std::optional<Amount>>& design) {
   const auto& r = cfg.routing;
-  if (offered.has_value() && offered->has_value() && (**offered < 0 || **offered >= kDomainLimit)) {
-    throw std::invalid_argument("offered must be an integer in [0, 2^62) or permitted +inf");
-  }
+  if (outside(offered)) throw std::invalid_argument("offered must be an integer in [0, 2^62) or permitted +inf");
+  if (outside(design)) throw std::invalid_argument("design_demand must be an integer in [0, 2^62) or permitted +inf");
   const std::string model = detail::model_name(r);
+  const bool t1 = std::holds_alternative<CapacityAware>(r);
+  EvaluatorCall call;
+  if (design.has_value() && !t1) throw std::invalid_argument(model + " does not accept design_demand");
+  if (t1) {
+    if (!design.has_value()) throw std::invalid_argument("T1 capacity requires design_demand");
+    if (!design->has_value()) throw std::invalid_argument("T1 requires a finite design demand");
+    call.design = *design;
+    call.full = true;
+  }
   if (cfg.admission == Admission::Lossless) {
     if (offered.has_value()) throw std::invalid_argument(model + " LOSSLESS capacity does not accept offered");
-    return std::nullopt;
+    return call;
   }
-  if (std::holds_alternative<Pinned>(r)) {
+  if (t1 || std::holds_alternative<Pinned>(r)) {
     if (!offered.has_value() || !offered->has_value()) {
-      throw std::invalid_argument("Pinned LOSSY capacity requires finite offered");
+      throw std::invalid_argument(model + " LOSSY capacity requires finite offered");
     }
-    return *offered;
+    call.offer = *offered;
+    return call;
   }
   if (offered.has_value()) throw std::invalid_argument("CostOnly LOSSY capacity uses first-hop injection");
-  return std::nullopt;
+  return call;
+}
+
+// The evaluation of a fresh policy.
+PlacementResult run(FlowPolicy& policy, const EvaluatorCall& call, const OutputOptions& outputs) {
+  if (call.full) return policy.evaluate(call.offer, call.design, outputs);
+  return policy.place(call.offer, outputs);
 }
 
 // One evaluation inside a public call: a supplied frozen cache's hit goes to the call's tally.
-PlacementResult evaluate(const Graph& g, std::span<const NodeId> sources,
-                         std::span<const NodeId> destinations, const FlowPolicyConfig& cfg, const Eligibility* elig,
-                         DagCache* cache, const OutputOptions& outputs, const std::optional<std::optional<Amount>>& offered,
-                         detail::FrozenTally& tally) {
+PlacementResult evaluate(const Graph& g, std::span<const NodeId> sources, std::span<const NodeId> destinations,
+                         const QueryOptions& opts, const Eligibility* elig, DagCache* cache,
+                         const OutputOptions& outputs, detail::FrozenTally& tally) {
   FlowLedger fg(borrowed(g));
-  FlowPolicy policy = detail::PolicyAccess::make(fg, sources, destinations, cfg, elig, cache, tally);
-  return policy.place(evaluator_offer(policy.config(), offered), outputs);
+  FlowPolicy policy = detail::PolicyAccess::make(fg, sources, destinations, opts.config, elig, cache, tally);
+  return run(policy, evaluator_call(policy.config(), opts.offered, opts.design_demand), outputs);
 }
 
 void check_common(const Graph& g, const Eligibility* elig, const DagCache* cache, std::int32_t workers) {
@@ -198,7 +226,7 @@ void check_batch_arguments(const Graph& g, const QueryOptions& opts, std::int32_
     throw std::invalid_argument("support belongs to another graph");
   }
   (void)resolve_config(opts.config, opts.cache != nullptr, g.num_edges());
-  (void)evaluator_offer(opts.config, opts.offered);
+  (void)evaluator_call(opts.config, opts.offered, opts.design_demand);
 }
 
 void check_batch_pair(const Graph& g, const FlowPolicyConfig& cfg, std::span<const NodeId> sources,
@@ -215,7 +243,7 @@ void check_batch_pair(const Graph& g, const FlowPolicyConfig& cfg, std::span<con
 
 PlacementResult capacity_in_call(const Graph& g, std::span<const NodeId> sources,
                                  std::span<const NodeId> destinations, const QueryOptions& opts, FrozenTally& tally) {
-  return evaluate(g, sources, destinations, opts.config, opts.elig, opts.cache, opts.outputs, opts.offered, tally);
+  return evaluate(g, sources, destinations, opts, opts.elig, opts.cache, opts.outputs, tally);
 }
 
 std::vector<PlacementResult> batch_capacity_in_call(
@@ -244,8 +272,8 @@ std::vector<PlacementResult> batch_capacity_in_call(
         elig = &*both;
       }
     }
-    results[i] = evaluate(g, pairs[i].first, pairs[i].second, opts.config, elig, worker_cache(opts.config, cache),
-                          opts.outputs, opts.offered, tally);
+    results[i] = evaluate(g, pairs[i].first, pairs[i].second, opts, elig, worker_cache(opts.config, cache),
+                          opts.outputs, tally);
   });
   std::vector<PlacementResult> out;
   out.reserve(results.size());
@@ -276,7 +304,7 @@ SensitivityResult sensitivity_in_call(const Graph& g, std::span<const NodeId> so
     FlowPolicy policy = PolicyAccess::make(fg, sources, destinations, opts.config, opts.elig, cache, tally);
     auto& pe = PolicyAccess::engine(policy);
     if (global) pe.capture = &capture;
-    out.baseline = policy.place(evaluator_offer(policy.config(), opts.offered), opts.outputs);
+    out.baseline = run(policy, evaluator_call(policy.config(), opts.offered, opts.design_demand), opts.outputs);
     pe.capture = nullptr;
     if (cost_only) on_route = reachable_support(g, pe);
   }
@@ -324,8 +352,8 @@ SensitivityResult sensitivity_in_call(const Graph& g, std::span<const NodeId> so
       const EdgeId one[1] = {e};
       Eligibility deleted = g.eligibility({}, one);
       if (opts.elig != nullptr) deleted = Eligibility::intersect(*opts.elig, deleted);
-      const auto r = evaluate(g, sources, destinations, opts.config, &deleted, worker_cache(opts.config, cache),
-                              OutputOptions {}, opts.offered, tally);
+      const auto r = evaluate(g, sources, destinations, opts, &deleted, worker_cache(opts.config, cache),
+                              OutputOptions {}, tally);
       entry.loss = base - r.placed;
     }
     if (&cache != opts.cache) cache.clear();
