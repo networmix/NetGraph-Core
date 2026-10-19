@@ -12,46 +12,46 @@
 #include <vector>
 
 #include "netgraph/core/detail/forwarding.hpp"
-#include "netgraph/core/detail/kernels.hpp"
+#include "netgraph/core/detail/route_kernels.hpp"
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/flow_record.hpp"
-#include "netgraph/core/pred_dag.hpp"
-#include "netgraph/core/program.hpp"
+#include "netgraph/core/route_structures.hpp"
+#include "netgraph/core/forwarding_program.hpp"
 
 namespace netgraph::core::detail {
 
 struct DeletionCapture;
 
-// A live flow of the policy between calls. Its amounts are its ledger record (delivered; edges;
-// Lossy offered and drops; T1's holds). The flows of CostOnly and Global are one per roster
-// source (CostOnly's sources share the epoch's program); a T1, T2 or Pinned policy's are one per
-// program entry (`entry`).
+// A live flow of the policy between calls. Its amounts are its ledger record (delivered; edge flows;
+// Lossy offered and edge drops; T1's holds). The flows of ShortestPaths and CentralizedTE are one per roster
+// source (ShortestPaths's sources share the epoch's program); a T1, T2 or Pinned policy's are one per
+// program entry (`entry_id`).
 struct LiveFlow {
-  std::int64_t id {-1};
-  NodeId src {0};
-  std::shared_ptr<const PredDAG> bundle {};
-  Cost cost {kUnreachable};
-  std::int32_t entry {-1};
+  std::int64_t record_counter {-1};
+  NodeId source {0};
+  std::shared_ptr<const PredecessorDAG> route {};
+  Cost min_route_cost {kUnreachable};
+  std::int32_t entry_id {-1};
 };
 
 // The state accumulated since construction or the last remove(), replace() or forward() (the
 // policy epoch): a value, so a full-offer call builds its own and publishes it whole.
-struct Epoch {
-  // The live flows: per roster index (CostOnly and Global: one per source), or per program entry
+struct PolicyEpoch {
+  // The live flows: per roster index (ShortestPaths and CentralizedTE: one per source), or per program entry
   // (T1, T2, Pinned).
-  std::vector<std::vector<LiveFlow>> cohorts {};
+  std::vector<std::vector<LiveFlow>> record_groups {};
   // The installed program (null before the first preparation) and, for T1 and T2, its setup summary
   // (shared, never changed: a policy without tunnels carries a null pointer, not a TunnelPlan).
   std::shared_ptr<const ForwardingProgram> program {};
   std::shared_ptr<const TunnelPlan> plan {};
-  // CostOnly MaxFlow: the union of the roster's routes, the controller's support (ascending).
+  // ShortestPaths Optimized: the union of the roster's routes, the controller's support (ascending).
   std::vector<EdgeId> support {};
-  // Unrestricted Global with the optimized origin: the cumulative marginal curve of the last solve
+  // Unrestricted CentralizedTE with the optimized source allocation: the cumulative marginal curve of the last solve
   // (absent before one, and after a forward).
-  std::optional<std::vector<std::pair<Cost, Amount>>> curve {};
+  std::optional<std::vector<std::pair<Cost, Amount>>> marginal_cost_curve {};
   // Pinned, Lossy: per view head, the shares it lost itself (black-holed, no surviving entry).
-  std::vector<Counter128> head_lost {};
+  std::vector<Counter128> source_drops_by_source {};
   // The by_tunnel rows of the state (a zero call reports them).
   std::vector<TunnelFlow> by_tunnel {};
   Counter128 requested {};
@@ -61,24 +61,29 @@ struct Epoch {
 };
 
 struct PolicyEngine {
-  PolicyEngine(FlowLedger& ledger, FlowPolicyConfig cfg) : fg(ledger), config(std::move(cfg)) {}
+  PolicyEngine(FlowLedger& ledger, FlowPolicyConfig config) : ledger(ledger), config(std::move(config)) {}
 
-  FlowLedger& fg;
+  FlowLedger& ledger;
   std::shared_ptr<const Graph> graph {};
-  FlowPolicyConfig config;       // validated, origin, selection and weights resolved
-  PathSelection selection {};    // *config.selection, or the default for Global and Pinned (unread)
-  Origin origin {Origin::Equal};  // *config.origin, or Equal for Pinned (unread)
-  const Eligibility* elig {nullptr};
+  FlowPolicyConfig config;       // validated, source allocation and weight basis resolved
+  // The model's route choice: ShortestPaths' fields, DistributedTE's tie rule and parallel_edges as
+  // a single path, the default for CentralizedTE and Pinned (unread).
+  RouteChoice route_choice {};
+  SourceAllocation source_allocation {SourceAllocation::Equal};  // source_allocation_of(routing), or Equal for Pinned (unread)
+  const Eligibility* eligibility {nullptr};
+  // T2 on a support: the policy's mask with every edge outside the support excluded too (the
+  // one allowed set of every T2 step); `eligibility` points to it.
+  std::unique_ptr<const Eligibility> support_mask {};
   std::vector<NodeId> sources {};       // the normalised sets
   std::vector<NodeId> destinations {};
-  std::vector<NodeId> dests_ok {};      // the allowed destinations (the records' destination set)
-  std::vector<NodeId> roster {};        // fixed at construction, ascending
-  Cost c0 {0};                          // T1 with a Stretch ceiling: the smallest static shortest cost
+  std::vector<NodeId> allowed_destinations {};      // the allowed destinations (the records' destination set)
+  std::vector<NodeId> reachable_sources {};        // fixed at construction, ascending
+  Cost c0 {0};                          // T1 with a CostStretch ceiling: the smallest static shortest cost
                                         // over the roster heads (the pool baseline)
-  std::shared_ptr<const PredDAG> support {};  // CostOnly: the full static support
-  // Global with a support: the trimmed support (ascending), shared with its programs' replay basis.
-  std::shared_ptr<const std::vector<EdgeId>> global_support {};
-  // Unrestricted Global, T1 and T2: the mask's excluded nodes and edges (ascending), their programs'
+  std::shared_ptr<const PredecessorDAG> support {};  // ShortestPaths: the full static support
+  // CentralizedTE with a support: the trimmed support (ascending), shared with its programs' replay basis.
+  std::shared_ptr<const std::vector<EdgeId>> centralized_te_support {};
+  // Unrestricted CentralizedTE, T1 and T2: the mask's excluded nodes and edges (ascending), their programs'
   // replay basis.
   std::vector<NodeId> excluded_nodes {};
   std::vector<EdgeId> excluded_edges {};
@@ -86,10 +91,10 @@ struct PolicyEngine {
   // and whether any head can place traffic (some head with a positive injection weight and a
   // surviving entry of positive weight with a usable route).
   ForwardingView view {};
-  bool active {false};
-  std::int64_t owner {0};
-  Epoch epoch {};
-  // Global: a capture request for the next solve's final state (the exact sensitivity model's
+  bool can_forward {false};
+  std::int64_t policy_id {0};
+  PolicyEpoch epoch {};
+  // CentralizedTE: a capture request for the next solve's final state (the exact sensitivity model's
   // baseline); set and cleared by the evaluator.
   DeletionCapture* capture {nullptr};
 };
@@ -103,33 +108,34 @@ struct PolicyAccess {
   // cache's hits; returned as a prvalue (FlowPolicy does not move).
   [[nodiscard]] static FlowPolicy make(FlowLedger& ledger, std::span<const NodeId> sources,
                                        std::span<const NodeId> destinations, FlowPolicyConfig config,
-                                       const Eligibility* elig, DagCache* cache, FrozenTally& tally) {
-    return FlowPolicy(ledger, sources, destinations, std::move(config), elig, cache, tally);
+                                       const Eligibility* eligibility, ShortestPathCache* cache, FrozenCacheHitTally& tally) {
+    return FlowPolicy(ledger, sources, destinations, std::move(config), eligibility, cache, tally);
   }
 };
 
 // The configuration checks of FlowPolicy, shared with the evaluators' argument checks, in
-// FlowPolicyConfig's order (the enumeration values, the model's row, the DagCache: `cache` says
-// whether one is supplied, the tunnel models' parameters, edge_weights' length and entries against
-// `num_edges`);
-// returns its selection, origin and weights with an absent one resolved (nothing else is copied).
-// Then, with the normalized endpoint counts, the pooled single-path rule (check_source_count: an
-// absent selection is PathSelection(), multipath absent, so it reads the configuration resolved or
-// not alike) and T2's several-sources rule, and with the roster size the tunnel limit
-// (check_tunnel_limit).
-struct ResolvedAxes {
-  std::optional<PathSelection> selection;
-  std::optional<Origin> origin;
-  std::optional<WeightBasis> weights;
-};
-[[nodiscard]] ResolvedAxes resolve_config(const FlowPolicyConfig& cfg, bool cache, std::int32_t num_edges);
-void check_source_count(const FlowPolicyConfig& cfg, std::size_t num_sources, std::size_t num_destinations);
+// FlowPolicyConfig's order (flow_policy.hpp): the enumeration values, the model matrix with a
+// supplied ShortestPathCache last (`cache` says whether one is supplied), the tunnel models'
+// parameters and edge_weights' length and entries against `num_edges`. With `num_sources` (the
+// normalized input sources) the two source-count rules run at their places in the matrix (T2's
+// several-sources rule first, the pooled single-path rule after the ineffective tie rule);
+// evaluate_pairs checks them per pair with check_source_count. Then, with the roster size, the
+// tunnel limit (check_tunnel_limit).
+void check_config(const FlowPolicyConfig& config, bool cache, std::int32_t num_edges, std::optional<std::size_t> num_sources);
+void check_source_count(const FlowPolicyConfig& config, std::size_t num_sources);
+// The policy's snapshot: ShortestPaths' absent source_allocation and an absent weight_basis of
+// Weighted resolved.
+[[nodiscard]] FlowPolicyConfig resolved_config(FlowPolicyConfig config);
+// The resolved source allocation of a computing model; none for Pinned (its program has one).
+[[nodiscard]] std::optional<SourceAllocation> source_allocation_of(const Routing& r) noexcept;
 void check_tunnel_limit(const FlowPolicyConfig& cfg, std::size_t num_heads);
 // forward()'s first checks, before its offer is read (the binding runs them before converting
 // it): `Pinned forwards with replace`, then `forward requires an installed program`.
 void check_forward_operation(const PolicyEngine& pe);
-// The model's name in messages: CostOnly, Global, T1 (CapacityAware), T2 (Global with tunnels) or
+// The model's name in messages: ShortestPaths, CentralizedTE, T1 (DistributedTE), T2 (CentralizedTE with tunnel_count) or
 // Pinned.
 [[nodiscard]] const char* model_name(const Routing& r) noexcept;
+// The model's class name, T2 included (CentralizedTE): the cache rule and the evaluators' texts.
+[[nodiscard]] const char* model_class(const Routing& r) noexcept;
 
 } // namespace netgraph::core::detail

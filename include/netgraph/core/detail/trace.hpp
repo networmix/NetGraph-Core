@@ -1,7 +1,7 @@
 /* The transaction trace of a placement call (internal diagnostics for the tests, which compare
    it key by key with the same trace of their independent model of the policy): a small
    JSON-like value of the call's intermediate values: the roster, the routes prepared at the
-   epoch's first positive call, CostOnly's offers or bound, and for the controllers the
+   epoch's first positive call, ShortestPaths's offers or bound, and for the controllers the
    bisection probes, the solve's view and capacities, the flow core's values and the shares.
    Filled only in a build with the private hooks, when a call asks for it (detail::place_traced);
    other calls build only empty values. */

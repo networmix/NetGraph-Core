@@ -1,7 +1,7 @@
 """Native allocation failures in the staged result constructions and in FlowLedger.reset: the
-k-th C++ allocation of spf, ksp, resolve_to_paths, ForwardingProgram.from_routes, of the calls
+k-th C++ allocation of spf, ksp, resolve_to_paths, ForwardingProgram.from_routes and from_dag, of the calls
 whose result objects are made before anything is published (place, evaluate, replace, forward,
-capacity, batch_capacity, sensitivity) and of reset fails,
+evaluate_demand, evaluate_pairs, evaluate_edge_failures) and of reset fails,
 for every k in turn (the private hook _fail_native_allocation). Every unabsorbed failure
 raises MemoryError, never aborts, leaves nothing it allocated behind and the observable state as
 it was. Standard-library optional buffers may absorb a failure; every successful call, including
@@ -36,7 +36,6 @@ from helpers import (
     build,
     full_ledger_state,
     plain,
-    sel,
     stats_of,
 )
 
@@ -59,15 +58,15 @@ def graph():
 
 
 POOLED_LOSSY = ngc.FlowPolicyConfig(
-    routing=ngc.CostOnly(),
-    placement=ngc.FlowPlacement.EQUAL_BALANCED,
-    admission=ngc.Admission.LOSSY,
+    routing=ngc.ShortestPaths(), admission=ngc.Admission.LOSSY
 )
-GLOBAL_EQUAL = ngc.FlowPolicyConfig(routing=ngc.Global(), origin=ngc.Origin.EQUAL)
+GLOBAL_EQUAL = ngc.FlowPolicyConfig(
+    routing=ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.EQUAL)
+)
 
 
 def caps(g):
-    return [int(c) for c in g.capacity_units()]
+    return [int(c) for c in g.edge_capacity_units()]
 
 
 def epoch_state(policy):
@@ -86,7 +85,7 @@ def stateless(call):
     def make():
         g = graph()
         fn, args = call(g)
-        return fn, args, lambda: [caps(g), g.cost().tolist()]
+        return fn, args, lambda: [caps(g), g.edge_costs().tolist()]
 
     return make
 
@@ -104,7 +103,7 @@ def placement(cfg, traced, sources=0):
             records = [(r.flow_id[1], r.delivered) for r in policy.records()]
             return [
                 full_ledger_state(ledger),
-                policy.placed_demand(),
+                policy.delivered(),
                 records,
                 epoch_state(policy),
             ]
@@ -115,7 +114,7 @@ def placement(cfg, traced, sources=0):
 
 
 def exported(g, cfg=None, sources=0):
-    """A model's program on g (a Global optimized one by default), for Pinned."""
+    """A model's program on g (a CentralizedTE optimized one by default), for Pinned."""
     return ngc.FlowPolicy(ngc.FlowLedger(g), sources, 4, cfg or GLOBAL).place(6).program
 
 
@@ -138,7 +137,7 @@ def operation(cfg_of, method, sources=0, prepare="place", **kw):
             records = [(r.flow_id[1], r.delivered) for r in policy.records()]
             return [
                 full_ledger_state(ledger),
-                policy.placed_demand(),
+                policy.delivered(),
                 records,
                 epoch_state(policy),
                 plain(policy.program),
@@ -168,13 +167,18 @@ def split_route_args(g):
     def call(*args):
         return ngc.ForwardingProgram.from_routes(
             *args,
-            placement=ngc.FlowPlacement.WEIGHTED,
-            weights=ngc.WeightBasis.RESIDUAL_SNAPSHOT,
+            allocation=ngc.RouteAllocation.WEIGHTED,
+            weight_basis=ngc.WeightBasis.RESIDUAL_SNAPSHOT,
             residual=residual,
         )
 
     residual = half(g)
-    return call, (g, 0, 4, [ngc.Route(0, dag, weight=2), ngc.Route(0, tunnel)])
+    return call, (
+        g,
+        0,
+        4,
+        [ngc.RouteDefinition(0, dag, weight=2), ngc.RouteDefinition(0, tunnel)],
+    )
 
 
 def split_route(g):
@@ -196,11 +200,11 @@ def getter(make_owner, read):
 
 def frozen_cache_capacity():
     g = graph()
-    cache = ngc.DagCache(g)
-    ngc.capacity(g, 0, 4, ngc.QueryOptions(COSTONLY, cache=cache))
+    cache = ngc.ShortestPathCache(g)
+    ngc.evaluate_demand(g, 0, 4, ngc.EvaluationOptions(COSTONLY, cache=cache))
     cache.freeze()
-    opts = ngc.QueryOptions(COSTONLY, cache=cache, outputs=ALL_OUT)
-    return ngc.capacity, (g, 0, 4, opts), lambda: stats_of(cache)
+    opts = ngc.EvaluationOptions(COSTONLY, cache=cache, outputs=ALL_OUT)
+    return ngc.evaluate_demand, (g, 0, 4, opts), lambda: stats_of(cache)
 
 
 def with_orphan(call):
@@ -220,12 +224,29 @@ def with_orphan(call):
     return make
 
 
+def pooled_dag_args(g):
+    """from_dag's arguments: sources 0 and 1 pooled on the reverse shortest-path DAG to node 4,
+    WEIGHTED with a snapshot of half the capacity; the DAG is made before the swept call."""
+    dag = ngc.spf(g, 4, spf_opts(ngc.Direction.REVERSE)).dag
+
+    def call(*args):
+        return ngc.ForwardingProgram.from_dag(
+            *args,
+            allocation=ngc.RouteAllocation.WEIGHTED,
+            weight_basis=ngc.WeightBasis.RESIDUAL_SNAPSHOT,
+            residual=residual,
+        )
+
+    residual = half(g)
+    return call, (g, [0, 1], 4, dag)
+
+
 def half(g):
     return [c // 2 for c in caps(g)]
 
 
 def spf_opts(direction=ngc.Direction.FORWARD, multipath=True, **kw):
-    return ngc.SpfOptions(direction, sel(mp=multipath), **kw)
+    return ngc.SpfOptions(direction, multipath=multipath, **kw)
 
 
 SCENARIOS = {
@@ -240,7 +261,7 @@ SCENARIOS = {
         lambda g: (ngc.spf, (g, 0, spf_opts(multipath=False, targets=4)))
     ),
     "ksp": stateless(
-        lambda g: (ngc.ksp, (g, 0, 4, ngc.KspOptions(4, sel(), residual=caps(g))))
+        lambda g: (ngc.ksp, (g, 0, 4, ngc.KspOptions(4, residual=caps(g))))
     ),
     "FlowLedger.reset": with_orphan(lambda fg: (fg.reset, (half(fg.graph()),))),
     "resolve_to_paths": stateless(
@@ -250,36 +271,40 @@ SCENARIOS = {
     "place.global": placement(GLOBAL, traced=False),
     "place_traced.global": placement(GLOBAL, traced=True),
     # Two sources: the pooled program's attribution and per-source rows, Lossy accounting, and
-    # the equal origin's bisection.
+    # the equal source allocation's bisection.
     "place.costonly_pooled_lossy": placement(
         POOLED_LOSSY, traced=False, sources=[0, 1]
     ),
     "place.global_equal": placement(GLOBAL_EQUAL, traced=False, sources=[0, 1]),
-    "batch_capacity.global_equal": stateless(
+    "evaluate_pairs.global_equal": stateless(
         lambda g: (
-            ngc.batch_capacity,
-            (g, [([0, 1], 4), (1, 3)], ngc.QueryOptions(GLOBAL_EQUAL), None, 1),
+            ngc.evaluate_pairs,
+            (g, [([0, 1], 4), (1, 3)], ngc.EvaluationOptions(GLOBAL_EQUAL), None, 1),
         )
     ),
     "capacity.global": stateless(
         lambda g: (
-            ngc.capacity,
-            (g, 0, 4, ngc.QueryOptions(GLOBAL, outputs=ALL_OUT)),
+            ngc.evaluate_demand,
+            (g, 0, 4, ngc.EvaluationOptions(GLOBAL, outputs=ALL_OUT)),
         )
     ),
     "capacity.frozen_cache": frozen_cache_capacity,
-    "batch_capacity.global": stateless(
+    "evaluate_pairs.global": stateless(
         lambda g: (
-            ngc.batch_capacity,
-            (g, [(0, 4), (1, 3)], ngc.QueryOptions(GLOBAL), None, 1),
+            ngc.evaluate_pairs,
+            (g, [(0, 4), (1, 3)], ngc.EvaluationOptions(GLOBAL), None, 1),
         )
     ),
     "sensitivity.global": stateless(
-        lambda g: (ngc.sensitivity, (g, 0, 4, ngc.QueryOptions(GLOBAL), 1))
+        lambda g: (
+            ngc.evaluate_edge_failures,
+            (g, 0, 4, ngc.EvaluationOptions(GLOBAL), 1),
+        )
     ),
     # Forwarding programs: building one, every operation over one, black holes, a
     # support, and the evaluators over Pinned.
     "from_routes": stateless(split_route_args),
+    "from_dag": stateless(pooled_dag_args),
     "replace.pinned_tunnels_lossy": operation(
         pinned_cfg(
             exported, ngc.Admission.LOSSY, lambda g: g.eligibility(excluded_edges=[1])
@@ -290,7 +315,10 @@ SCENARIOS = {
     "evaluate.global": operation(lambda g: GLOBAL, "evaluate"),
     "replace.global_support": operation(
         lambda g: ngc.FlowPolicyConfig(
-            routing=ngc.Global(support=ngc.spf(g, 0, spf_opts()).dag)
+            routing=ngc.CentralizedTE(
+                source_allocation=ngc.SourceAllocation.OPTIMIZED,
+                support=ngc.spf(g, 0, spf_opts()).dag,
+            )
         ),
         "replace",
     ),
@@ -303,14 +331,14 @@ SCENARIOS = {
     ),
     "capacity.pinned_lossy": stateless(
         lambda g: (
-            ngc.capacity,
+            ngc.evaluate_demand,
             (
                 g,
                 0,
                 4,
-                ngc.QueryOptions(
+                ngc.EvaluationOptions(
                     pinned_cfg(exported, ngc.Admission.LOSSY)(g),
-                    offered=6,
+                    offer=6,
                     outputs=ALL_OUT,
                 ),
             ),
@@ -321,11 +349,11 @@ SCENARIOS = {
         lambda g: ngc.FlowPolicy(ngc.FlowLedger(g), 0, 4, GLOBAL).place(6),
         lambda r: r.program,
     ),
-    "FlowRecord.bundle": getter(
+    "FlowRecord.route": getter(
         lambda g: (lambda p: (p.place(6), p.records()[0])[1])(
             ngc.FlowPolicy(ngc.FlowLedger(g), 0, 4, COSTONLY)
         ),
-        lambda r: r.bundle,
+        lambda r: r.route,
     ),
     "Eligibility.intersect": getter(
         lambda g: (
@@ -336,8 +364,8 @@ SCENARIOS = {
     ),
     "sensitivity.pinned": stateless(
         lambda g: (
-            ngc.sensitivity,
-            (g, 0, 4, ngc.QueryOptions(pinned_cfg(exported)(g)), 1),
+            ngc.evaluate_edge_failures,
+            (g, 0, 4, ngc.EvaluationOptions(pinned_cfg(exported)(g)), 1),
         )
     ),
 }
@@ -378,7 +406,7 @@ def leaking():
         kept.append(ngc.spf(g, 0, o))
         return ngc.spf(g, 0, o)
 
-    return leaks, (spf_opts(),), lambda: [caps(g), g.cost().tolist()]
+    return leaks, (spf_opts(),), lambda: [caps(g), g.edge_costs().tolist()]
 
 
 def replacing(g):
@@ -410,7 +438,7 @@ def exiting(status, after):
                     os._exit(status)
                 raise
 
-        return exits, (spf_opts(),), lambda: [caps(g), g.cost().tolist()]
+        return exits, (spf_opts(),), lambda: [caps(g), g.edge_costs().tolist()]
 
     return make
 
@@ -432,7 +460,7 @@ def walks():
     return (
         ngc.resolve_to_paths,
         (g, dag, 0, 30, True),
-        lambda: [caps(g), g.cost().tolist()],
+        lambda: [caps(g), g.edge_costs().tolist()],
     )
 
 
@@ -442,7 +470,11 @@ def by_turn(call):
 
     def make():
         g = graph()
-        return call(next(MADE), g), (spf_opts(),), lambda: [caps(g), g.cost().tolist()]
+        return (
+            call(next(MADE), g),
+            (spf_opts(),),
+            lambda: [caps(g), g.edge_costs().tolist()],
+        )
 
     return make
 
@@ -577,7 +609,7 @@ if __name__ != "__main__":
     FEW = {
         "FlowLedger.reset": 3,
         "PlacementResult.program": 1,
-        "FlowRecord.bundle": 1,
+        "FlowRecord.route": 1,
         "Eligibility.intersect": 4,
     }
 

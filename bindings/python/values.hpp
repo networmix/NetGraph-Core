@@ -76,6 +76,15 @@ inline py::tuple ints_tuple(std::span<const std::int32_t> v) {
   return out;
 }
 
+// A tuple of Python ints, each through a checked allocation.
+inline py::tuple amounts_tuple(std::span<const Amount> v) {
+  auto out = py::reinterpret_steal<py::tuple>(checked(PyTuple_New(static_cast<Py_ssize_t>(v.size()))).release());
+  for (std::size_t i = 0; i < v.size(); ++i) {
+    PyTuple_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), checked(PyLong_FromLongLong(v[i])).release().ptr());
+  }
+  return out;
+}
+
 inline py::array_t<std::int64_t> int64_array(const std::vector<std::int64_t>& v) {
   py::array_t<std::int64_t> out(static_cast<py::ssize_t>(v.size()));
   std::copy(v.begin(), v.end(), out.mutable_data());
@@ -111,7 +120,7 @@ inline py::list pairs_list(const std::vector<std::pair<EdgeId, Amount>>& v) {
   return out;
 }
 
-// ((id, amount), ...) as a tuple (TunnelPlan.head_design).
+// ((id, amount), ...) as a tuple (TunnelPlan.design_by_head).
 inline py::tuple pairs_tuple(const std::vector<std::pair<std::int32_t, Amount>>& v) {
   py::tuple out(v.size());
   for (std::size_t i = 0; i < v.size(); ++i) out[i] = py::make_tuple(v[i].first, v[i].second);
@@ -121,15 +130,15 @@ inline py::tuple pairs_tuple(const std::vector<std::pair<std::int32_t, Amount>>&
 // An amount argument: an integer number of units in [0, 2^62) or +inf (float('inf')); nullopt is
 // +inf. Any other value (a bool, another float, a non-integer, an integer out of range) raises the
 // one ValueError `text`; an exception of the object's own __index__ propagates as raised.
-inline std::optional<Amount> units_or_inf(const py::object& volume, const char* text) {
-  if (py::isinstance<py::float_>(volume) || py::isinstance(volume, py::module_::import("numpy").attr("floating"))) {
-    const double x = PyFloat_AsDouble(volume.ptr());
+inline std::optional<Amount> units_or_inf(const py::object& value, const char* text) {
+  if (py::isinstance<py::float_>(value) || py::isinstance(value, py::module_::import("numpy").attr("floating"))) {
+    const double x = PyFloat_AsDouble(value.ptr());
     if (x == -1.0 && PyErr_Occurred() != nullptr) throw py::error_already_set();
     if (std::isinf(x) && x > 0) return std::nullopt;
     throw py::value_error(text);
   }
-  if (is_bool(volume) || !PyIndex_Check(volume.ptr())) throw py::value_error(text);
-  const py::object idx = py::reinterpret_steal<py::object>(PyNumber_Index(volume.ptr()));
+  if (is_bool(value) || !PyIndex_Check(value.ptr())) throw py::value_error(text);
+  const py::object idx = py::reinterpret_steal<py::object>(PyNumber_Index(value.ptr()));
   if (!idx) throw py::error_already_set();
   int overflow = 0;
   const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
@@ -153,6 +162,15 @@ Options options_of(const py::object& obj, const char* name) {
                          ")");
   }
   return obj.cast<Options>();
+}
+
+// A cost ceiling argument (DistributedTE's and KspOptions'): None, an AbsoluteCost or a CostStretch;
+// any other object raises one TypeError.
+inline std::optional<CostCeiling> cost_ceiling_of(const py::object& obj) {
+  if (obj.is_none()) return std::nullopt;
+  if (py::isinstance<AbsoluteCost>(obj)) return CostCeiling {obj.cast<AbsoluteCost>()};
+  if (py::isinstance<CostStretch>(obj)) return CostCeiling {obj.cast<CostStretch>()};
+  throw py::type_error("cost_ceiling must be AbsoluteCost, CostStretch or None");
 }
 
 } // namespace netgraph::core::bindings

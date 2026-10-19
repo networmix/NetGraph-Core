@@ -21,7 +21,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # The C++ tests that need the private hooks and skip without them (GTEST_SKIP). Inside tests that
 # still run, three checks are weaker without them: the helper check_deletion
-# (flow_core_deletion_tests.cpp) checks each re-solve's final result, but observes each repair step
+# (min_cost_flow_deletion_tests.cpp) checks each re-solve's final result, but observes each repair step
 # only through the probe hook (see that file's header); PolicyFixtures.EveryFixtureReplaysIdentically
 # compares no trace, and PolicyFixtures.ACorruptedExpectationFails corrupts only what that replay
 # compares (see flow_policy_fixture_tests.cpp's header).
@@ -47,7 +47,7 @@ case "$mode" in
     release) build_dir=build/cpp-tests; build_type=Release ;;
     off) build_dir=build/cpp-tests-off; build_type=Release; hooks=OFF ;;
     sanitize) build_dir=build/cpp-sanitize; build_type=Debug; sanitize=ON ;;
-    # ThreadSanitizer (data races of the worker threads and the shared DagCache); the longest
+    # ThreadSanitizer (data races of the worker threads and the shared ShortestPathCache); the longest
     # instrumented test takes about 30 s, inside the common timeout.
     tsan) build_dir=build/cpp-tsan; build_type=Debug; tsan=ON ;;
     coverage) build_dir=build/cpp-tests-cov; build_type=Debug; coverage=ON ;;

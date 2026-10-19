@@ -100,8 +100,8 @@ inline void require_frozen(const Arrays& a, std::uint64_t frozen_input, const ch
 
 // ---------------------------------------------------------------- generators (API-free)
 
-// The harness "random" generator: ring plus random out-edges, costs 1..max_cost.
-inline Arrays gen_random(int n, int degree, unsigned seed, std::int64_t max_cost = 31) {
+// The harness "random" generator: ring plus random out-edges, costs 1..max_edge_cost.
+inline Arrays gen_random(int n, int degree, unsigned seed, std::int64_t max_edge_cost = 31) {
   Arrays a;
   a.n = n;
   std::mt19937 rng(seed);
@@ -112,10 +112,10 @@ inline Arrays gen_random(int n, int degree, unsigned seed, std::int64_t max_cost
     a.cap.push_back(1.0 + double(rng() % 100) / 7.0);
   };
   for (int u = 0; u < n; ++u) {
-    add(u, (u + 1) % n, 1 + std::int64_t(rng() % std::uint64_t(max_cost)));
+    add(u, (u + 1) % n, 1 + std::int64_t(rng() % std::uint64_t(max_edge_cost)));
     for (int k = 1; k < degree; ++k) {
       const int v = int(rng() % unsigned(n));  // one draw per statement: the draw order is fixed
-      add(u, v, 1 + std::int64_t(rng() % std::uint64_t(max_cost)));
+      add(u, v, 1 + std::int64_t(rng() % std::uint64_t(max_edge_cost)));
     }
   }
   return a;
@@ -295,11 +295,11 @@ inline std::uint64_t input_digest_full(const Arrays& a) {
 
 // The shape of an input, as frozen: N, E, the number K of distinct costs, the largest out- and
 // in-degree, the cost GCD and maximum (0 without edges), the nodes without any edge, the number
-// of input positions where src decreases, and whether the input is in ascending (src, cost, dst)
+// of input positions where src decreases, and whether the input is in ascending (source, cost, destination)
 // order (key_sorted; equal keys keep their input order, so this is the B' id order) or in
 // descending order (key_reversed). digest: input_digest_full.
 struct InputShape {
-  std::int64_t n = 0, e = 0, k = 0, max_out = 0, max_in = 0, gcd = 0, max_cost = 0, isolated = 0, src_descents = 0;
+  std::int64_t n = 0, e = 0, k = 0, max_out = 0, max_in = 0, gcd = 0, max_edge_cost = 0, isolated = 0, src_descents = 0;
   bool key_sorted = false, key_reversed = false;
   std::uint64_t digest = 0;
   bool operator==(const InputShape&) const = default;
@@ -317,7 +317,7 @@ inline InputShape shape_of(const Arrays& a) {
     ++out[std::size_t(a.src[e])];
     ++in[std::size_t(a.dst[e])];
     s.gcd = std::gcd(s.gcd, a.cost[e]);
-    s.max_cost = std::max(s.max_cost, a.cost[e]);
+    s.max_edge_cost = std::max(s.max_edge_cost, a.cost[e]);
   }
   for (int v = 0; v < a.n; ++v) {
     s.max_out = std::max(s.max_out, out[std::size_t(v)]);
@@ -339,7 +339,7 @@ inline InputShape shape_of(const Arrays& a) {
 inline std::string json_shape(const InputShape& s) {
   return "{\"n\":" + std::to_string(s.n) + ",\"e\":" + std::to_string(s.e) + ",\"k\":" + std::to_string(s.k) +
          ",\"max_out\":" + std::to_string(s.max_out) + ",\"max_in\":" + std::to_string(s.max_in) + ",\"gcd\":" +
-         std::to_string(s.gcd) + ",\"max_cost\":" + std::to_string(s.max_cost) + ",\"isolated\":" +
+         std::to_string(s.gcd) + ",\"max_cost\":" + std::to_string(s.max_edge_cost) + ",\"isolated\":" +
          std::to_string(s.isolated) + ",\"src_descents\":" + std::to_string(s.src_descents) + ",\"key_sorted\":" +
          (s.key_sorted ? "true" : "false") + ",\"key_reversed\":" + (s.key_reversed ? "true" : "false") +
          ",\"digest\":\"" + std::to_string(s.digest) + "\"}";
@@ -477,7 +477,7 @@ inline Arrays gen_star1m() {
 }
 
 // The same single long out-row with exactly 31 costs (1..31) and distinct capacities 1 + the
-// input position (equal (src, cost, dst) keys are told apart by their capacity); reversed: every
+// input position (equal (source, cost, destination) keys are told apart by their capacity); reversed: every
 // edge turned around, one long in-row of node 0.
 inline Arrays gen_star1m_smallk(bool reversed) {
   Arrays a;
@@ -774,11 +774,11 @@ inline std::vector<Row> rows() {
                  return Iter([ts] { Digest d; for (int i = 0; i < 16; ++i) d.add(abaapi::targetset_run(*ts)); return d.h; });
                }});
   // ---- the canonical single path
-  // The canonical single path (multipath = false: the complete key under PreferHigherPriority on
-  // the residual, one member per pair, residual gating) from 8 fixed sources to frozen targets
+  // The canonical single path (multipath = false: the complete key under HIGHER_AVAILABLE_CAPACITY
+  // on the residual, one member per pair, residual gating) from 8 fixed sources to frozen targets
   // (queries/canonical16k.json: the farthest node over the edges the gating keeps).
   r.push_back({"spf.single.canonical16k", "spf",
-               "canonical single path to a fixed target, PreferHigherPriority on the residual, one member, residual "
+               "canonical single path to a fixed target, HIGHER_AVAILABLE_CAPACITY on the residual, one member, residual "
                "gating, random 16k, 8 frozen pairs",
                []() -> Iter {
                  auto a = gen_random(16384, 8, 5);
@@ -787,8 +787,8 @@ inline std::vector<Row> rows() {
                  auto res = std::make_shared<std::vector<double>>(abaapi::edge_values(*g, masks_residual(a).res_in));
                  Sel s;
                  s.multipath = false;
-                 s.multi_edge = false;
-                 s.prefer_priority = true;
+                 s.parallel_edges = false;
+                 s.higher_available_capacity = true;
                  std::vector<std::pair<int, int>> q(kCanonical16k.begin(), kCanonical16k.end());
                  return Iter([g, res, q, s] { Digest d; for (auto [u, v] : q) d.add(abaapi::spf_path(*g, u, v, s, res.get())); return d.h; });
                }});
@@ -817,24 +817,24 @@ inline std::vector<Row> rows() {
     return p;
   };
   r.push_back({"kernel.proportional.clos", "kernel",
-               "MaxFlow placement on fixed cost-only DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
-               [=] { return kernel_row(gen_clos(64, 32, 13), clos_pairs(), 50.0, Kernel::MaxFlow); }});
+               "Optimized placement on fixed cost-only DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
+               [=] { return kernel_row(gen_clos(64, 32, 13), clos_pairs(), 50.0, Kernel::Optimized); }});
   r.push_back({"kernel.eb.clos", "kernel",
-               "EqualBalanced placement on fixed cost-only DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
-               [=] { return kernel_row(gen_clos(64, 32, 13), clos_pairs(), 50.0, Kernel::EqualBalanced); }});
+               "Equal placement on fixed cost-only DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
+               [=] { return kernel_row(gen_clos(64, 32, 13), clos_pairs(), 50.0, Kernel::Equal); }});
   r.push_back({"kernel.lossy.clos", "kernel",
-               "EqualBalanced placement with Lossy admission on fixed cost-only DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
+               "Equal placement with Lossy admission on fixed cost-only DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
                [=] { return kernel_row(gen_clos(64, 32, 13), clos_pairs(), 50.0, Kernel::Lossy); }});
   r.push_back({"kernel.proportional.grid", "kernel",
-               "MaxFlow placement on fixed cost-only DAGs, 24x24 unit grid, 32 corner pairs of 20",
-               [=] { return kernel_row(gen_grid(24, 14, true), grid_pairs(), 20.0, Kernel::MaxFlow); }});
+               "Optimized placement on fixed cost-only DAGs, 24x24 unit grid, 32 corner pairs of 20",
+               [=] { return kernel_row(gen_grid(24, 14, true), grid_pairs(), 20.0, Kernel::Optimized); }});
   r.push_back({"kernel.eb.grid", "kernel",
-               "EqualBalanced placement on fixed cost-only DAGs, 24x24 unit grid, 32 corner pairs of 20",
-               [=] { return kernel_row(gen_grid(24, 14, true), grid_pairs(), 20.0, Kernel::EqualBalanced); }});
+               "Equal placement on fixed cost-only DAGs, 24x24 unit grid, 32 corner pairs of 20",
+               [=] { return kernel_row(gen_grid(24, 14, true), grid_pairs(), 20.0, Kernel::Equal); }});
   r.push_back({"kernel.weighted.clos", "kernel",
                "Weighted placement on fixed cost-only DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
                [=] { return kernel_row(gen_clos(64, 32, 13), clos_pairs(), 50.0, Kernel::Weighted); }});
-  // ---- scalar CostOnly capacity across unique failure states and pairs
+  // ---- scalar ShortestPaths capacity across unique failure states and pairs
   auto capacity_row = [](Kernel k) {
     auto a = gen_clos(32, 16, 15);
     auto g = std::make_shared<Graph>(abaapi::build(a));
@@ -849,11 +849,11 @@ inline std::vector<Row> rows() {
     });
   };
   r.push_back({"capacity.costonly_eb.failures", "capacity",
-               "scalar CostOnly EqualBalanced capacity, Clos 32x16, 32 unique failure states (3 links) x 8 pairs",
-               [=] { return capacity_row(Kernel::EqualBalanced); }});
+               "scalar ShortestPaths Equal capacity, Clos 32x16, 32 unique failure states (3 links) x 8 pairs",
+               [=] { return capacity_row(Kernel::Equal); }});
   r.push_back({"capacity.costonly_prop.failures", "capacity",
-               "scalar CostOnly MaxFlow capacity, Clos 32x16, 32 unique failure states (3 links) x 8 pairs",
-               [=] { return capacity_row(Kernel::MaxFlow); }});
+               "scalar ShortestPaths Optimized capacity, Clos 32x16, 32 unique failure states (3 links) x 8 pairs",
+               [=] { return capacity_row(Kernel::Optimized); }});
   // ---- exact max-flow, totals only versus detailed
   auto exact_row = [](bool detailed) {
     auto a = gen_random(1024, 6, 17);
@@ -878,33 +878,33 @@ inline std::vector<Row> rows() {
   r.push_back({"maxflow.exact.detailed", "maxflow",
                "exact max-flow with edge flows, residuals and bottleneck edges, same inputs as totals",
                [=] { return exact_row(true); }});
-  // ---- sensitivity
+  // ---- the failure study (evaluate_edge_failures)
   r.push_back({"sens.exact", "sensitivity",
                "exact-model sensitivity (candidates: the positive-flow edges), random 256 x6, 4 pairs",
                [] {
                  auto g = std::make_shared<Graph>(abaapi::build(gen_random(256, 6, 19)));
                  auto el = std::make_shared<Elig>(abaapi::eligibility(*g, {}, {}));
                  std::vector<std::pair<int, int>> pairs = {{1, 129}, {30, 200}, {77, 5}, {250, 60}};
-                 return Iter([g, el, pairs] { Digest d; for (auto [s, t] : pairs) d.add(abaapi::sensitivity_exact(*g, s, t, *el)); return d.h; });
+                 return Iter([g, el, pairs] { Digest d; for (auto [s, t] : pairs) d.add(abaapi::edge_failures_exact(*g, s, t, *el)); return d.h; });
                }});
   r.push_back({"sens.policy_all_edges", "sensitivity",
-               "policy-model sensitivity over every eligible edge, CostOnly EB, Clos 16x8 (256 edges), 2 pairs",
+               "policy-model sensitivity over every eligible edge, ShortestPaths EB, Clos 16x8 (256 edges), 2 pairs",
                [] {
                  auto g = std::make_shared<Graph>(abaapi::build(gen_clos(16, 8, 20)));
                  auto el = std::make_shared<Elig>(abaapi::eligibility(*g, {}, {}));
                  return Iter([g, el] {
                    Digest d;
-                   d.add(abaapi::sensitivity_policy_all_edges(*g, 0, 8, *el));
-                   d.add(abaapi::sensitivity_policy_all_edges(*g, 3, 12, *el));
+                   d.add(abaapi::edge_failures_policy_all_edges(*g, 0, 8, *el));
+                   d.add(abaapi::edge_failures_policy_all_edges(*g, 3, 12, *el));
                    return d.h;
                  });
                }});
-  // ---- pooled sources and the equal origin (several sources of one demand)
+  // ---- pooled sources and the equal source allocation (several sources of one demand)
   // Eight demands of eight source leaves each to one destination leaf on a Clos 64x32 (unit costs,
   // links of 10..80): demand j has the leaves 8j..8j+7 and the leaf (8j + 36) mod 64. Every source
   // splits over its 32 spines and the eight sources share each spine's one link into the
   // destination: the pooled program, its attribution and (Lossless) its bisection. One ledger.
-  auto pooled_row = [](double volume, bool lossy) {
+  auto pooled_row = [](double offer, bool lossy) {
     auto g = std::make_shared<Graph>(abaapi::build(gen_clos(64, 32, 22)));
     std::vector<std::pair<std::vector<int>, int>> demands;
     for (int j = 0; j < 8; ++j) {
@@ -912,18 +912,49 @@ inline std::vector<Row> rows() {
       for (int i = 0; i < 8; ++i) srcs.push_back(8 * j + i);
       demands.push_back({srcs, (8 * j + 36) % 64});
     }
-    return Iter([g, demands, volume, lossy] { return abaapi::pooled_place(*g, demands, volume, lossy); });
+    return Iter([g, demands, offer, lossy] { return abaapi::pooled_place(*g, demands, offer, lossy); });
   };
   r.push_back({"pooled.ecmp.clos", "pooled",
-               "pooled CostOnly EqualBalanced Lossless placement, Clos 64x32, 8 demands of 8 source leaves to one leaf, "
+               "pooled ShortestPaths Equal Lossless placement, Clos 64x32, 8 demands of 8 source leaves to one leaf, "
                "400 each on one ledger (the program, attribution and bisection over 8 x 32 + 32 links per demand)",
                [=] { return pooled_row(400.0, false); }});
   r.push_back({"pooled.lossy.clos", "pooled",
-               "pooled CostOnly EqualBalanced Lossy placement, the same Clos and demands, 4,000 each (above capacity: "
+               "pooled ShortestPaths Equal Lossy placement, the same Clos and demands, 4,000 each (above capacity: "
                "drops attributed by highest averages on every shared spine link)",
                [=] { return pooled_row(4000.0, true); }});
+  // The same demands forwarded by Pinned over from_dag programs of their reverse shortest-path DAGs
+  // (built once, before timing: the one pooled builder ShortestPaths Equal uses), and the building
+  // of those programs alone.
+  auto pooled_dag_row = [](double offer) {
+    auto g = std::make_shared<Graph>(abaapi::build(gen_clos(64, 32, 22)));
+    std::vector<std::pair<std::vector<int>, int>> demands;
+    for (int j = 0; j < 8; ++j) {
+      std::vector<int> srcs;
+      for (int i = 0; i < 8; ++i) srcs.push_back(8 * j + i);
+      demands.push_back({srcs, (8 * j + 36) % 64});
+    }
+    auto programs = std::make_shared<const abaapi::PooledPrograms>(abaapi::pooled_dag_programs(*g, demands));
+    return Iter([g, demands, programs, offer] { return abaapi::pooled_pinned_place(*g, demands, *programs, offer, false); });
+  };
+  r.push_back({"pooled.from_dag.clos", "pooled",
+               "Pinned over from_dag programs (built before timing) of the same Clos 64x32 demands, Equal Lossless, "
+               "400 each on one ledger: the forwarding and bisection of pooled.ecmp.clos without the route search",
+               [=] { return pooled_dag_row(400.0); }});
+  r.push_back({"pooled.from_dag_build.clos", "pooled",
+               "building the from_dag programs of the same 8 demands from their reverse shortest-path DAGs (the "
+               "search, trimming and the pooled plan; reported, no budget)",
+               [] {
+                 auto g = std::make_shared<Graph>(abaapi::build(gen_clos(64, 32, 22)));
+                 std::vector<std::pair<std::vector<int>, int>> demands;
+                 for (int j = 0; j < 8; ++j) {
+                   std::vector<int> srcs;
+                   for (int i = 0; i < 8; ++i) srcs.push_back(8 * j + i);
+                   demands.push_back({srcs, (8 * j + 36) % 64});
+                 }
+                 return Iter([g, demands] { return abaapi::pooled_dag_build(*g, demands); });
+               }});
   r.push_back({"global.equal.random", "global",
-               "capacity() of Global with the equal origin, random 1024 x6, 2 demands of 4 sources (the bisection's "
+               "evaluate_demand() of CentralizedTE with the equal source allocation, random 1024 x6, 2 demands of 4 sources (the bisection's "
                "probe solves and the final solve)",
                [] {
                  auto g = std::make_shared<Graph>(abaapi::build(gen_random(1024, 6, 23)));
@@ -936,23 +967,23 @@ inline std::vector<Row> rows() {
                  });
                }});
   r.push_back({"sens.equal_global", "sensitivity",
-               "sensitivity() of Global with the equal origin (every edge a candidate, each solved afresh with its "
+               "evaluate_edge_failures() of CentralizedTE with the equal source allocation (every edge a candidate, each solved afresh with its "
                "bisection), random 64 x4 (256 edges), 3 sources to one destination",
                [] {
                  auto g = std::make_shared<Graph>(abaapi::build(gen_random(64, 4, 24)));
                  const std::vector<int> srcs = {1, 17, 33};
-                 return Iter([g, srcs] { return abaapi::sensitivity_equal_global(*g, srcs, 50); });
+                 return Iter([g, srcs] { return abaapi::edge_failures_equal_global(*g, srcs, 50); });
                }});
   // ---- forwarding programs: no older Core has them; they guard later changes.
   // One demand of eight source leaves to one leaf on a Clos 32x16 (links of 10..80): its optimized
-  // Global program (paths with solved amounts, captured source weights), solved for 2,000.
+  // CentralizedTE program (paths with solved amounts, captured source weights), solved for 2,000.
   auto program_demand = [] {
     std::vector<int> srcs;
     for (int i = 0; i < 8; ++i) srcs.push_back(i);
     return srcs;
   };
   r.push_back({"program.forward.global", "program",
-               "forward() of an installed optimized Global program, Clos 32x16, 8 sources to one leaf, 32 offers "
+               "forward() of an installed optimized CentralizedTE program, Clos 32x16, 8 sources to one leaf, 32 offers "
                "of 100..3,200 (the injection by captured weights and the per-tunnel split, no solve)",
                [=] {
                  auto g = std::make_shared<Graph>(abaapi::build(gen_clos(32, 16, 25)));
@@ -969,7 +1000,7 @@ inline std::vector<Row> rows() {
     return Iter([g, prog, states, stale] { return abaapi::pinned_failures(*g, *prog, *states, 2400.0, stale); });
   };
   r.push_back({"program.replay.lossy", "program",
-               "Pinned Lossy replace() of that Global program under 32 failure states (3 links) as the mask, each on a "
+               "Pinned Lossy replace() of that CentralizedTE program under 32 failure states (3 links) as the mask, each on a "
                "fresh ledger: failed tunnels, the heads' shares over the survivors, the loss rule",
                [=] { return failure_row(false); }});
   r.push_back({"program.stale.lossy", "program",
@@ -977,7 +1008,7 @@ inline std::vector<Row> rows() {
                "dropped at the failures)",
                [=] { return failure_row(true); }});
   r.push_back({"program.replace.costonly", "program",
-               "CostOnly EqualBalanced replace() of 8 source leaves to one leaf, Clos 32x16, under 16 changing loads of "
+               "ShortestPaths Equal replace() of 8 source leaves to one leaf, Clos 32x16, under 16 changing loads of "
                "an outside demand (re-preparation on the released view, the retiring commit)",
                [=] {
                  auto g = std::make_shared<Graph>(abaapi::build(gen_clos(32, 16, 25)));
@@ -994,7 +1025,7 @@ inline std::vector<Row> rows() {
     return pairs;
   };
   r.push_back({"t1.setup.fabric", "t1",
-               "T1 CapacityAware(Tunnels(16)) replace(120, design 120) per demand, fabric 4 pods, 12 demands on one "
+               "T1 DistributedTE(TunnelCount(16)) replace(120, design 120) per demand, fabric 4 pods, 12 demands on one "
                "ledger: CSPF setup on the unreserved view, the holds' commit, Lossless forwarding",
                [=] {
                  auto f = gen_fabric3(4, 8, 4, 8, 21);
@@ -1023,18 +1054,18 @@ inline std::vector<Row> rows() {
     });
   };
   r.push_back({"t2.exact16.headroom", "t2",
-               "T2 Global(tunnels=Tunnels(16), prefer_headroom=True), replace(120, design 120) per demand, fabric 4 pods, 12 demands "
+               "T2 CentralizedTE(tunnel_count=TunnelCount(16), prefer_headroom=True), replace(120, design 120) per demand, fabric 4 pods, 12 demands "
                "on one ledger: sizing, the canonical augmentation with Phi, the lossless bound, Lossless forwarding",
                [=] { return t2_row(16, false, true); }});
   r.push_back({"t2.exact16.cost", "t2",
                "the same without prefer_headroom: sizing and the canonical augmentation without Phi",
                [=] { return t2_row(16, false, false); }});
   r.push_back({"t2.upto256.headroom", "t2",
-               "T2 Global(tunnels=Tunnels(256, up_to=True), prefer_headroom=True), the same demands: count selection over 1..256 with "
+               "T2 CentralizedTE(tunnel_count=TunnelCount(256, up_to=True), prefer_headroom=True), the same demands: count selection over 1..256 with "
                "the proved bounds, then the chosen count's layout",
                [=] { return t2_row(256, true, true); }});
   r.push_back({"t2.size.mesh", "t2",
-               "T2 Tunnels(16) without prefer_headroom, replace(+inf) of 10 heads on a 500-node mesh (2000 links, 5/8 to 8/8 free): "
+               "T2 TunnelCount(16) without prefer_headroom, replace(+inf) of 10 heads on a 500-node mesh (2000 links, 5/8 to 8/8 free): "
                "sizing-dominated",
                [] {
                  auto m = gen_t2_mesh(500, 10, 1744);
@@ -1043,7 +1074,7 @@ inline std::vector<Row> rows() {
                }});
   // ---- MSD loop
   r.push_back({"msd.loop", "msd",
-               "MSD bracket and bisection over CostOnly EB placement with a per-series DAG cache, Clos 32x16, 64 demands",
+               "MSD bracket and bisection over ShortestPaths EB placement with a per-series DAG cache, Clos 32x16, 64 demands",
                [] {
                  auto g = std::make_shared<Graph>(abaapi::build(gen_clos(32, 16, 22)));
                  auto el = std::make_shared<Elig>(abaapi::eligibility(*g, {}, {}));
@@ -1061,8 +1092,8 @@ inline std::vector<Row> rows() {
                      ++probes;
                      std::vector<double> v(base.size());
                      for (std::size_t i = 0; i < v.size(); ++i) v[i] = base[i] * alpha;
-                     auto placed = series.place_all(dem, v);
-                     for (std::size_t i = 0; i < v.size(); ++i) if (v[i] - placed[i] > abaapi::grid_resolution()) return false;
+                     auto delivered = series.place_all(dem, v);
+                     for (std::size_t i = 0; i < v.size(); ++i) if (v[i] - delivered[i] > abaapi::grid_resolution()) return false;
                      return true;
                    };
                    // NetGraph MaximumSupportedDemand: start 1, growth 2, resolution 0.01.
@@ -1094,9 +1125,9 @@ inline std::vector<Row> rows() {
     abaapi::dag_cache_series(*g, {}, warm);  // setup: creates the warm row's cache
     return Iter([g, roots, warm] { return abaapi::dag_cache_series(*g, roots, warm); });
   };
-  r.push_back({"cache.cold", "cache", "DagCache series from a cleared cache: 64 roots, Clos 64x32",
+  r.push_back({"cache.cold", "cache", "ShortestPathCache series from a cleared cache: 64 roots, Clos 64x32",
                [=] { return cache_row(false); }});
-  r.push_back({"cache.warm", "cache", "DagCache series on a prepopulated cache: 64 roots, Clos 64x32",
+  r.push_back({"cache.warm", "cache", "ShortestPathCache series on a prepopulated cache: 64 roots, Clos 64x32",
                [=] { return cache_row(true); }});
   r.push_back({"elig.build_intersect", "eligibility",
                "Eligibility build for 64 failure states and intersect with a common state, Clos 64x32",

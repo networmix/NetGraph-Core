@@ -1,8 +1,8 @@
-// Allocation-failure atomicity of the ledger and of a one-bundle Pinned policy's transaction.
+// Allocation-failure atomicity of the ledger and of a one-route Pinned policy's transaction.
 // The fault-injection executable replaces the global operator new so that one chosen allocation
 // throws std::bad_alloc (fault_injection.cpp). Every operation is swept over every allocation it
 // makes: after each injected failure the ledger (aggregate, residual, every record field, bound
-// and orphaned owners, next FlowId) and the policy's epoch state (requested, +inf, placed demand,
+// and orphaned owners, next FlowId) and the policy's epoch state (requested, +inf, delivered(),
 // and its flow's id, route cost and plan: route, members, weights) must equal their state before
 // the call, the per-thread scratch must not be poisoned (a clean retry gives the reference
 // result), and remove() must leave the state the reference's own remove() leaves (the policy's
@@ -31,7 +31,7 @@
 
 #include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/node_map.hpp"
-#include "netgraph/core/detail/pred_dag_builder.hpp"
+#include "netgraph/core/detail/route_builders.hpp"
 #include "netgraph/core/flow_ledger.hpp"
 #include "fault_injection.hpp"
 #include "route_policy.hpp"
@@ -43,28 +43,28 @@ using detail::LedgerAccess;
 
 namespace {
 
-// The policies on one route the sweeps run: Global with the route as its support, and Pinned over
+// The policies on one route the sweeps run: CentralizedTE with the route as its support, and Pinned over
 // the route as a supplied split route under each kernel, weight basis and admission.
 struct Kernel {
   std::string name;
   Admission admission;
-  std::function<FlowPolicyConfig(const FlowLedger&, NodeId, NodeId, std::shared_ptr<const PredDAG>)> config;
+  std::function<FlowPolicyConfig(const FlowLedger&, NodeId, NodeId, std::shared_ptr<const PredecessorDAG>)> config;
 };
 
 const std::vector<Kernel>& kernels() {
-  using D = std::shared_ptr<const PredDAG>;
-  auto split = [](FlowPlacement placement, Admission admission, WeightBasis weights) {
+  using D = std::shared_ptr<const PredecessorDAG>;
+  auto split = [](RouteAllocation placement, Admission admission, WeightBasis weights) {
     return [=](const FlowLedger& fg, NodeId s, NodeId d, D dag) {
       return split_route(fg, s, d, std::move(dag), placement, admission, weights);
     };
   };
   static const std::vector<Kernel> all = {
       {"global support", Admission::Lossless, [](const FlowLedger&, NodeId, NodeId, D dag) { return on_support(std::move(dag)); }},
-      {"weighted snapshot", Admission::Lossless, split(FlowPlacement::Weighted, Admission::Lossless, WeightBasis::ResidualSnapshot)},
-      {"weighted capacity", Admission::Lossless, split(FlowPlacement::Weighted, Admission::Lossless, WeightBasis::Capacity)},
-      {"equal balanced", Admission::Lossless, split(FlowPlacement::EqualBalanced, Admission::Lossless, WeightBasis::Capacity)},
-      {"equal balanced lossy", Admission::Lossy, split(FlowPlacement::EqualBalanced, Admission::Lossy, WeightBasis::Capacity)},
-      {"weighted capacity lossy", Admission::Lossy, split(FlowPlacement::Weighted, Admission::Lossy, WeightBasis::Capacity)},
+      {"weighted snapshot", Admission::Lossless, split(RouteAllocation::Weighted, Admission::Lossless, WeightBasis::ResidualSnapshot)},
+      {"weighted capacity", Admission::Lossless, split(RouteAllocation::Weighted, Admission::Lossless, WeightBasis::Capacity)},
+      {"equal balanced", Admission::Lossless, split(RouteAllocation::Equal, Admission::Lossless, WeightBasis::Capacity)},
+      {"equal balanced lossy", Admission::Lossy, split(RouteAllocation::Equal, Admission::Lossy, WeightBasis::Capacity)},
+      {"weighted capacity lossy", Admission::Lossy, split(RouteAllocation::Weighted, Admission::Lossy, WeightBasis::Capacity)},
   };
   return all;
 }
@@ -87,7 +87,7 @@ std::vector<Case> cases() {
   };
 }
 
-// One scenario: a third party's 1-unit EqualBalanced placement on the same bundle, then the
+// One scenario: a third party's 1-unit Equal placement on the same route, then the
 // policy's earlier calls, then the call under test.
 struct Scenario {
   std::vector<std::optional<Amount>> before;
@@ -119,23 +119,23 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   const LedgerState st = ledger_state(fg);
   ASSERT_EQ(st.records.size(), 1U);
   const FlowRecord& rec = st.records.front();
-  ASSERT_TRUE(rec.bundle != nullptr);
+  ASSERT_TRUE(rec.route != nullptr);
   ASSERT_TRUE(same_record(rec, rec));
-  const auto other_bundle = all_edges(*g);
-  ASSERT_FALSE(*other_bundle == *rec.bundle);
+  const auto other_route = all_edges(*g);
+  ASSERT_FALSE(*other_route == *rec.route);
   const std::vector<std::function<void(FlowRecord&)>> records = {
       [](auto& x) { ++x.flow_id.second; },
-      [](auto& x) { ++x.owner; },
+      [](auto& x) { ++x.policy_id; },
       [](auto& x) { x.sources.push_back(1); },
       [](auto& x) { x.destinations.push_back(1); },
       [](auto& x) { x.admission = Admission::Lossy; },
-      [&](auto& x) { x.bundle = other_bundle; },
-      [](auto& x) { ++x.route_cost; },
+      [&](auto& x) { x.route = other_route; },
+      [](auto& x) { ++x.min_route_cost; },
       [](auto& x) { x.offered = Counter128 {}; },
       [](auto& x) { ++x.delivered; },
-      [](auto& x) { x.edges.emplace_back(2, 1); },
-      [](auto& x) { x.drops.emplace_back(2, Counter128 {}); },
-      [](auto& x) { x.reserved_edges.emplace_back(2, 1); },
+      [](auto& x) { x.edge_flows.emplace_back(2, 1); },
+      [](auto& x) { x.edge_drops.emplace_back(2, Counter128 {}); },
+      [](auto& x) { x.edge_reservations.emplace_back(2, 1); },
   };
   ASSERT_EQ(rec.admission, Admission::Lossless);
   ASSERT_FALSE(rec.offered.has_value());
@@ -154,7 +154,7 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   }
   EXPECT_EQ(failures_of([&] { expect_same(st, st, "same"); }), 0);
   const std::vector<std::function<void(LedgerState&)>> states = {
-      [](auto& x) { ++x.allocated[0]; },
+      [](auto& x) { ++x.carried[0]; },
       [](auto& x) { ++x.residual[0]; },
       [](auto& x) { ++x.reserved[0]; },
       [](auto& x) { ++x.unreserved[0]; },
@@ -169,14 +169,14 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
     states[k](x);
     EXPECT_GT(failures_of([&] { expect_same(x, st, "state"); }), 0) << "ledger field " << k;
   }
-  ASSERT_TRUE(r.edge_flows.has_value() && r.residual.has_value() && r.bottleneck.has_value());
+  ASSERT_TRUE(r.edge_flows.has_value() && r.residual.has_value() && r.saturated_boundary_edges.has_value());
   EXPECT_EQ(failures_of([&] { expect_same(r, r, "same"); }), 0);
   const std::vector<std::function<void(PlacementResult&)>> results = {
-      [](auto& x) { ++x.placed; },
-      [](auto& x) { x.remaining = Amount {1}; },
+      [](auto& x) { ++x.call_delivered; },
+      [](auto& x) { x.call_undelivered = Amount {1}; },
       [](auto& x) { ++x.delivery_delta; },
-      [](auto& x) { x.call_drops.emplace_back(2, 1); },
-      [](auto& x) { ++x.call_source_loss; },
+      [](auto& x) { x.call_edge_drops.emplace_back(2, 1); },
+      [](auto& x) { ++x.call_source_drops; },
       [](auto& x) { x.termination = Termination::NoRoute; },
       [](auto& x) { x.routes_changed = !x.routes_changed; },
       [](auto& x) { x.weights_changed = !x.weights_changed; },
@@ -187,23 +187,23 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { ++x.admitted.lo; },
       [](auto& x) { ++x.delivered; },
       [](auto& x) { x.unadmitted.reset(); },
-      [](auto& x) { ++x.source_loss.lo; },
-      [](auto& x) { x.drops.emplace_back(2, Counter128 {0, 1}); },
+      [](auto& x) { ++x.source_drops.lo; },
+      [](auto& x) { x.edge_drops.emplace_back(2, Counter128 {0, 1}); },
       [](auto& x) { x.by_source.emplace_back(); },
       [](auto& x) { ++x.by_source[0].delivered; },
       [](auto& x) { x.total_cost = Counter128 {0, 1}; },
-      [](auto& x) { x.cost_distribution = std::vector<std::pair<Cost, Amount>> {{9, 1}}; },
+      [](auto& x) { x.marginal_cost_curve = std::vector<std::pair<Cost, Amount>> {{9, 1}}; },
       [](auto& x) { x.edge_flows->push_back(0); },
       [](auto& x) { x.residual->push_back(0); },
-      [](auto& x) { x.bottleneck->push_back(0); },
-      [](auto& x) { x.reservation_edge_flows = std::vector<Amount> {0}; },
+      [](auto& x) { x.saturated_boundary_edges->push_back(0); },
+      [](auto& x) { x.edge_reservations = std::vector<Amount> {0}; },
       [](auto& x) { x.min_cut = std::vector<EdgeId> {0}; },
   };
-  ASSERT_NE(r.remaining, std::optional<Amount> {1});
+  ASSERT_NE(r.call_undelivered, std::optional<Amount> {1});
   ASSERT_NE(r.termination, Termination::NoRoute);
-  ASSERT_FALSE(r.cost_distribution.has_value());  // CostOnly: Global's curve only
+  ASSERT_FALSE(r.marginal_cost_curve.has_value());  // ShortestPaths: CentralizedTE's curve only
   ASSERT_FALSE(r.min_cut.has_value());
-  ASSERT_FALSE(r.offered.has_value() || r.total_cost.has_value());  // Lossless CostOnly EqualBalanced
+  ASSERT_FALSE(r.offered.has_value() || r.total_cost.has_value());  // Lossless ShortestPaths Equal
   ASSERT_TRUE(r.requested.has_value() && r.unadmitted.has_value() && !r.by_source.empty());
   for (std::size_t k = 0; k < results.size(); ++k) {
     PlacementResult x = r;
@@ -220,7 +220,7 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { ++x.offered.lo; },
       [](auto& x) { x.infinite = !x.infinite; },
       [](auto& x) { x.prepared = !x.prepared; },
-      [](auto& x) { ++x.placed; },
+      [](auto& x) { ++x.delivered; },
       [](auto& x) {
         if (!x.curve) x.curve.emplace();
         x.curve->emplace_back(9, 1);
@@ -230,7 +230,7 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { x.program.members.emplace_back(); },
       [](auto& x) { x.plan = TunnelPlan {}; },
       [](auto& x) { x.support.push_back(0); },
-      [](auto& x) { x.head_lost.emplace_back(); },
+      [](auto& x) { x.source_drops_by_source.emplace_back(); },
       [](auto& x) { x.by_tunnel.emplace_back(); },
       [](auto& x) { x.cohorts.emplace_back(); },
       [](auto& x) { ++x.cohorts[0][0].id; },
@@ -248,24 +248,24 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   // record (the copy is not const, so writing through the borrowed views is defined).
   p.reset();
   EXPECT_EQ(failures_of([&] { expect_balanced(fg, "balanced"); }), 0);
-  const EdgeId e = rec.edges.front().first;
+  const EdgeId e = rec.edge_flows.front().first;
   const auto ei = static_cast<std::size_t>(e);
   const std::vector<std::pair<std::string, std::function<void(FlowLedger&)>>> ledgers = {
       {"aggregate above the sum of the records",
-       [&](FlowLedger& x) { ++const_cast<Amount&>(detail::LedgerAccess::allocated(x)[ei]); }},
+       [&](FlowLedger& x) { ++const_cast<Amount&>(detail::LedgerAccess::carried(x)[ei]); }},
       {"record and aggregate above the baseline",
        [&](FlowLedger& x) {
-         const Amount over = detail::LedgerAccess::baseline(x)[ei] + 1 - detail::LedgerAccess::allocated(x)[ei];
-         const_cast<Amount&>(detail::LedgerAccess::allocated(x)[ei]) += over;
+         const Amount over = detail::LedgerAccess::baseline(x)[ei] + 1 - detail::LedgerAccess::carried(x)[ei];
+         const_cast<Amount&>(detail::LedgerAccess::carried(x)[ei]) += over;
          auto& live = const_cast<FlowRecord&>(detail::LedgerAccess::live(x, rec.flow_id.second));
-         for (auto& [edge, amount] : live.edges) amount += edge == e ? over : 0;
+         for (auto& [edge, amount] : live.edge_flows) amount += edge == e ? over : 0;
        }},
       {"record and aggregate below zero",
        [&](FlowLedger& x) {
-         const Amount under = detail::LedgerAccess::allocated(x)[ei] + 1;
-         const_cast<Amount&>(detail::LedgerAccess::allocated(x)[ei]) -= under;
+         const Amount under = detail::LedgerAccess::carried(x)[ei] + 1;
+         const_cast<Amount&>(detail::LedgerAccess::carried(x)[ei]) -= under;
          auto& live = const_cast<FlowRecord&>(detail::LedgerAccess::live(x, rec.flow_id.second));
-         for (auto& [edge, amount] : live.edges) amount -= edge == e ? under : 0;
+         for (auto& [edge, amount] : live.edge_flows) amount -= edge == e ? under : 0;
        }},
       {"holds above the sum of the records", [&](FlowLedger& x) { ++detail::LedgerAccess::reserved_storage(x)[ei]; }},
       {"record and holds above the reservation baseline",
@@ -273,13 +273,13 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
          const Amount over = detail::LedgerAccess::reservation_baseline(x)[ei] + 1;
          detail::LedgerAccess::reserved_storage(x)[ei] += over;
          auto& live = const_cast<FlowRecord&>(detail::LedgerAccess::live(x, rec.flow_id.second));
-         live.reserved_edges.emplace_back(e, over);
+         live.edge_reservations.emplace_back(e, over);
        }},
       {"record and holds below zero",
        [&](FlowLedger& x) {
          detail::LedgerAccess::reserved_storage(x)[ei] -= 1;
          auto& live = const_cast<FlowRecord&>(detail::LedgerAccess::live(x, rec.flow_id.second));
-         live.reserved_edges.emplace_back(e, -1);
+         live.edge_reservations.emplace_back(e, -1);
        }},
   };
   for (const auto& [name, breaks] : ledgers) {
@@ -353,10 +353,10 @@ TEST(LedgerFaults, EveryAllocationOfAPlacementFailsAtomically) {
         // A Lossy program forwarding needs a finite offer (no first-hop experiment).
         if (k.admission == Admission::Lossy && !sc.call.has_value()) continue;
         const std::string where = c.name + " " + k.name + " " + sc.name;
-        // A third party's 1-unit EqualBalanced placement on the same bundle, then the policy's
+        // A third party's 1-unit Equal placement on the same route, then the policy's
         // earlier calls.
         const auto setup = [&](FlowLedger& fg) {
-          auto third = std::make_shared<RoutePolicy>(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless));
+          auto third = std::make_shared<RoutePolicy>(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, RouteAllocation::Equal, Admission::Lossless));
           (void)third->place(1);
           auto p = std::make_shared<RoutePolicy>(fg, c.src, c.dst, k.config(fg, c.src, c.dst, dag));
           for (auto v : sc.before) (void)p->place(v);
@@ -390,14 +390,14 @@ TEST(LedgerFaults, PolicyConstructionFailsWithoutBinding) {
         const std::string w = c.name + " construction allocation " + std::to_string(at);
         FlowLedger fg(c.g);
         {
-          RoutePolicy other(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless));
+          RoutePolicy other(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, RouteAllocation::Equal, Admission::Lossless));
           (void)other.place(1);
         }  // an orphan
         const LedgerState before = ledger_state(fg);
         std::optional<RoutePolicy> p;
         const long live = g_live.load();
         if (!fails_at(at, [&] { p.emplace(fg, c.src, c.dst, k.config(fg, c.src, c.dst, dag)); })) {
-          EXPECT_EQ(LedgerAccess::bound_owners(fg).size(), 1U);
+          EXPECT_EQ(LedgerAccess::bound_policy_ids(fg).size(), 1U);
           break;
         }
         ++injected;
@@ -421,13 +421,13 @@ TEST(LedgerFaults, EveryAllocationOfAResetFailsAtomically) {
       auto fg = std::make_unique<FlowLedger>(c.g);
       // The policies are destroyed without remove(): their records are orphans, a T1 tunnel's
       // with its holds.
-      (void)RoutePolicy(*fg, c.src, c.dst, split_route(*fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless))
+      (void)RoutePolicy(*fg, c.src, c.dst, split_route(*fg, c.src, c.dst, dag, RouteAllocation::Equal, Admission::Lossless))
           .place(2);
-      (void)FlowPolicy(*fg, v({c.src}), v({c.dst}), FlowPolicyConfig {.routing = CapacityAware {Tunnels {1}}}).replace(0, 1);
+      (void)FlowPolicy(*fg, v({c.src}), v({c.dst}), FlowPolicyConfig {.routing = DistributedTE {TunnelCount {1}}}).replace(0, 1);
       return fg;
     };
     const std::vector<Amount> half = [&] {
-      std::vector<Amount> r(c.g->capacity_units().begin(), c.g->capacity_units().end());
+      std::vector<Amount> r(c.g->edge_capacity_units().begin(), c.g->edge_capacity_units().end());
       for (auto& x : r) x /= 2;
       return r;
     }();
@@ -449,12 +449,12 @@ TEST(LedgerFaults, EveryAllocationOfAResetFailsAtomically) {
       ASSERT_FALSE(initial.records.empty()) << where;  // something to clear
       reset(*ref);
       const LedgerState want = ledger_state(*ref);
-      EXPECT_EQ(want.residual, to_capacities ? std::vector<Amount>(c.g->capacity_units().begin(),
-                                                                   c.g->capacity_units().end())
+      EXPECT_EQ(want.residual, to_capacities ? std::vector<Amount>(c.g->edge_capacity_units().begin(),
+                                                                   c.g->edge_capacity_units().end())
                                              : half)
           << where;
       EXPECT_EQ(want.unreserved, variant == 2 ? half
-                                              : std::vector<Amount>(c.g->capacity_units().begin(), c.g->capacity_units().end()))
+                                              : std::vector<Amount>(c.g->edge_capacity_units().begin(), c.g->edge_capacity_units().end()))
           << where;
       EXPECT_EQ(want.reserved, std::vector<Amount>(half.size(), 0)) << where;
       long injected = 0;
@@ -491,7 +491,7 @@ TEST(LedgerFaults, EveryAllocationOfAResetFailsAtomically) {
 // leaks nothing; the completing one holds the expected baseline and nothing else.
 TEST(LedgerFaults, EveryAllocationOfALedgerConstructionFailsWithoutALeak) {
   for (const auto& c : cases()) {
-    const std::vector<Amount> capacities(c.g->capacity_units().begin(), c.g->capacity_units().end());
+    const std::vector<Amount> capacities(c.g->edge_capacity_units().begin(), c.g->edge_capacity_units().end());
     std::vector<Amount> half = capacities;
     for (auto& x : half) x /= 2;
     for (const int variant : {0, 1, 2}) {
@@ -516,7 +516,7 @@ TEST(LedgerFaults, EveryAllocationOfALedgerConstructionFailsWithoutALeak) {
           ASSERT_TRUE(fg.has_value()) << w;
           EXPECT_EQ(fg->residual(), from_residual ? half : capacities) << w;
           EXPECT_EQ(fg->unreserved(), variant == 2 ? half : capacities) << w;
-          EXPECT_EQ(fg->allocated(), std::vector<Amount>(capacities.size(), 0)) << w;
+          EXPECT_EQ(fg->carried(), std::vector<Amount>(capacities.size(), 0)) << w;
           EXPECT_EQ(fg->reserved(), std::vector<Amount>(capacities.size(), 0)) << w;
           EXPECT_TRUE(fg->records().empty()) << w;
           break;
@@ -542,15 +542,15 @@ TEST(LedgerFaults, EveryAllocationOfALedgerCopyOrMoveFailsWithoutALeak) {
   for (const auto& c : cases()) {
     const auto dag = all_edges(*c.g);
     // A baseline below the capacities: a ledger that rebuilt its baseline from them would differ.
-    std::vector<Amount> half(c.g->capacity_units().begin(), c.g->capacity_units().end());
+    std::vector<Amount> half(c.g->edge_capacity_units().begin(), c.g->edge_capacity_units().end());
     for (auto& x : half) x /= 2;
     FlowLedger fg(c.g, half, half);
     {
-      RoutePolicy first(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, FlowPlacement::EqualBalanced, Admission::Lossless));
+      RoutePolicy first(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, RouteAllocation::Equal, Admission::Lossless));
       (void)first.place(1);
-      RoutePolicy second(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, FlowPlacement::Weighted, Admission::Lossy));
+      RoutePolicy second(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, RouteAllocation::Weighted, Admission::Lossy));
       (void)second.place(2);
-      FlowPolicy holds(fg, v({c.src}), v({c.dst}), FlowPolicyConfig {.routing = CapacityAware {Tunnels {1}}});
+      FlowPolicy holds(fg, v({c.src}), v({c.dst}), FlowPolicyConfig {.routing = DistributedTE {TunnelCount {1}}});
       (void)holds.replace(0, 1);
     }  // three orphans (one with holds): a copy may only be taken of a ledger without bound policies
     const LedgerState source = ledger_state(fg);
@@ -623,7 +623,7 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
   const auto dag = all_edges(*large);
   const std::int32_t n = large->num_nodes();
   const auto policy = [&](FlowLedger& fg) {
-    return RoutePolicy(fg, 0, n - 1, split_route(fg, 0, n - 1, dag, FlowPlacement::EqualBalanced, Admission::Lossless));
+    return RoutePolicy(fg, 0, n - 1, split_route(fg, 0, n - 1, dag, RouteAllocation::Equal, Admission::Lossless));
   };
   // The reference, without a failure: the empty ledger, the ledger and epoch right after the
   // construction, and the result, ledger and epoch of place(2).
@@ -643,14 +643,14 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
     want_state = ledger_state(fg);
     want_epoch = epoch(p.policy());
   }
-  ASSERT_EQ(want.placed, 2);  // the whole chain carries the request: the comparison is not of zeros
+  ASSERT_EQ(want.call_delivered, 2);  // the whole chain carries the request: the comparison is not of zeros
   ASSERT_EQ(want_state.records.size(), 1U);
   // Construction (the route plan's per-node scratch) and a placement (the commit's per-edge
   // scratch and the kernels' buffers) on the small graph.
   const auto warm_up = [&] {
     FlowLedger fg(small);
-    RoutePolicy p(fg, 0, 2, split_route(fg, 0, 2, small_dag, FlowPlacement::EqualBalanced, Admission::Lossless));
-    EXPECT_EQ(p.place(2).placed, 2);
+    RoutePolicy p(fg, 0, 2, split_route(fg, 0, 2, small_dag, RouteAllocation::Equal, Admission::Lossless));
+    EXPECT_EQ(p.place(2).call_delivered, 2);
   };
   sweep_scratch_growth(
       "construction", warm_up,

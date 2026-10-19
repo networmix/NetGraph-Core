@@ -23,10 +23,10 @@ public:
   [[nodiscard]] std::uint64_t uid() const noexcept { return uid_; }
   [[nodiscard]] std::span<const std::uint8_t> node_allowed() const noexcept { return node_allowed_; }
   [[nodiscard]] std::span<const std::uint8_t> edge_allowed() const noexcept { return edge_allowed_; }
-  [[nodiscard]] bool node_ok(NodeId v) const noexcept {
+  [[nodiscard]] bool allows_node(NodeId v) const noexcept {
     return node_allowed_[static_cast<std::size_t>(v)] != 0;
   }
-  [[nodiscard]] bool edge_ok(EdgeId e) const noexcept {
+  [[nodiscard]] bool allows_edge(EdgeId e) const noexcept {
     return edge_allowed_[static_cast<std::size_t>(e)] != 0;
   }
   // The intersection of two values of one graph (std::invalid_argument for values of different

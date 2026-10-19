@@ -25,7 +25,7 @@ using detail::next_uid;
 Eligibility Graph::eligibility(std::span<const NodeId> excluded_nodes,
                                std::span<const EdgeId> excluded_edges) const {
   const auto n = static_cast<std::size_t>(num_nodes_);
-  const auto m = capacity_.size();
+  const auto m = edge_capacity_units_.size();
   for (NodeId v : excluded_nodes) {
     if (v < 0 || static_cast<std::size_t>(v) >= n) {
       throw std::invalid_argument("excluded node " + std::to_string(v) + " out of node range [0, " +
@@ -47,11 +47,11 @@ Eligibility Graph::eligibility(std::span<const NodeId> excluded_nodes,
     const auto vi = static_cast<std::size_t>(v);
     if (el.node_allowed_[vi] == 0) continue;  // duplicate
     el.node_allowed_[vi] = 0;
-    for (auto e = row_offsets_[vi]; e < row_offsets_[vi + 1]; ++e) {
+    for (auto e = outgoing_offsets_[vi]; e < outgoing_offsets_[vi + 1]; ++e) {
       el.edge_allowed_[static_cast<std::size_t>(e)] = 0;
     }
-    for (auto s = in_row_offsets_[vi]; s < in_row_offsets_[vi + 1]; ++s) {
-      el.edge_allowed_[static_cast<std::size_t>(in_adj_edge_index_[static_cast<std::size_t>(s)])] = 0;
+    for (auto s = incoming_offsets_[vi]; s < incoming_offsets_[vi + 1]; ++s) {
+      el.edge_allowed_[static_cast<std::size_t>(incoming_edges_[static_cast<std::size_t>(s)])] = 0;
     }
   }
   el.uid_ = (excluded_nodes.empty() && excluded_edges.empty()) ? 0 : next_uid();

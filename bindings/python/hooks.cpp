@@ -14,7 +14,7 @@
 #include <thread>
 #include <vector>
 
-#include "netgraph/core/detail/kernels.hpp"
+#include "netgraph/core/detail/route_kernels.hpp"
 #include "netgraph/core/detail/private_hooks.hpp"
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/types.hpp"

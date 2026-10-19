@@ -15,6 +15,23 @@ reference rejects must raise here too (the messages differ), and a rejected plac
 the policy's state as it was. Normalised on both sides: the flow core's operation counters and
 ledger uids. The replay reads the trace through the private hooks, so it is skipped without
 them.
+
+The data keeps the reference's own names; the replay maps them to the library's here and
+nowhere else: the routing kinds ``CostOnly`` and ``Global`` build ``ShortestPaths`` and
+``CentralizedTE`` (source allocation OPTIMIZED, the reference's only one); the configuration's
+``placement`` and ``weights`` are ShortestPaths' ``allocation`` and ``weight_basis``, its
+``selection`` ShortestPaths' route choice
+(``Deterministic`` is FEWER_HOPS whatever the ``priority``, ``PreferHigherPriority`` with
+``Residual``, ``Capacity`` or ``Headroom`` is HIGHER_AVAILABLE_CAPACITY, HIGHER_CAPACITY or
+HIGHER_HEADROOM, ``multi_edge`` is ``parallel_edges``); ``elig`` is the policy's eligibility, ``volume`` the offer; a result's
+``placed``, ``remaining``, ``call_drops``, ``call_source_loss``, ``source_loss``, ``drops`` and
+``cost_distribution`` are ``call_delivered``, ``call_undelivered``, ``call_edge_drops``,
+``call_source_drops``, ``source_drops``, ``edge_drops`` and ``marginal_cost_curve``, a source
+row's last two entries ``source_drops`` and ``total_edge_drops``, the output ``bottleneck``
+``saturated_boundary_edges``; the ledger's ``allocated`` is ``carried()``; a record's ``owner``,
+``bundle``, ``route_cost``, ``edges`` and ``drops`` are ``policy_id``, ``route``,
+``min_route_cost``, ``edge_flows`` and ``edge_drops``; a graph's ``input_index`` is
+``input_positions()``.
 """
 
 from __future__ import annotations
@@ -35,20 +52,17 @@ DATA = Path(__file__).resolve().parents[1] / "data" / "policy_fixtures.json"
 FIXTURES = json.loads(DATA.read_text())["fixtures"]
 
 PLACEMENT = {
-    "MaxFlow": ngc.FlowPlacement.MAX_FLOW,
-    "Weighted": ngc.FlowPlacement.WEIGHTED,
-    "EqualBalanced": ngc.FlowPlacement.EQUAL_BALANCED,
+    "MaxFlow": ngc.RouteAllocation.OPTIMIZED,
+    "Weighted": ngc.RouteAllocation.WEIGHTED,
+    "EqualBalanced": ngc.RouteAllocation.EQUAL,
 }
 ADMISSION = {"Lossless": ngc.Admission.LOSSLESS, "Lossy": ngc.Admission.LOSSY}
 ADMISSION_NAME = {v: k for k, v in ADMISSION.items()}
-TIE = {
-    "Deterministic": ngc.EdgeTieBreak.DETERMINISTIC,
-    "PreferHigherPriority": ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY,
-}
-PRIORITY = {
-    "Residual": ngc.EdgePriority.RESIDUAL,
-    "Capacity": ngc.EdgePriority.CAPACITY,
-    "Headroom": ngc.EdgePriority.HEADROOM,
+PREFER = {"Deterministic": False, "PreferHigherPriority": True}
+HIGHER = {
+    "Residual": ngc.RouteTieBreak.HIGHER_AVAILABLE_CAPACITY,
+    "Capacity": ngc.RouteTieBreak.HIGHER_CAPACITY,
+    "Headroom": ngc.RouteTieBreak.HIGHER_HEADROOM,
 }
 WEIGHTS = {
     "Capacity": ngc.WeightBasis.CAPACITY,
@@ -95,54 +109,69 @@ def exactly(a, b):
 
 def build_graph(spec):
     g = build(spec["n"], spec["edges"], spec["q"])
-    assert exactly(g.input_index().tolist(), spec["input_index"])
+    assert exactly(g.input_positions().tolist(), spec["input_index"])
     return g
 
 
 def config_of(g, c):
     r = c["routing"]
     kind = r["kind"]
+    sel = c["selection"]
     if kind == "CostOnly":
-        routing = ngc.CostOnly()
+        choice = {}
+        if sel is not None:
+            higher = HIGHER[
+                sel["priority"]
+            ]  # an unknown name fails here, even under Deterministic
+            choice = {
+                "tie_break": higher
+                if PREFER[sel["tie_break"]]
+                else ngc.RouteTieBreak.FEWER_HOPS,
+                "multipath": sel["multipath"],
+                "parallel_edges": sel["multi_edge"],
+            }
+        routing = ngc.ShortestPaths(
+            allocation=PLACEMENT[c["placement"]],
+            weight_basis=None if c.get("weights") is None else WEIGHTS[c["weights"]],
+            **choice,
+        )
     elif kind == "Global":
+        assert sel is None, f"the data names a selection for {kind}"
+        assert c["placement"] is None and c.get("weights") is None, c
         support = r.get("support")
-        routing = ngc.Global(support=None if support is None else dag_of(g, support))
+        routing = ngc.CentralizedTE(
+            source_allocation=ngc.SourceAllocation.OPTIMIZED,
+            support=None if support is None else dag_of(g, support),
+        )
     else:
         raise AssertionError(f"the data names an unknown routing ({kind})")
-    sel = c["selection"]
-    return ngc.FlowPolicyConfig(
-        routing=routing,
-        placement=None if c["placement"] is None else PLACEMENT[c["placement"]],
-        admission=ADMISSION[c["admission"]],
-        selection=None
-        if sel is None
-        else ngc.PathSelection(
-            TIE[sel["tie_break"]],
-            PRIORITY[sel["priority"]],
-            sel["multipath"],
-            sel["multi_edge"],
-        ),
-        weights=None if c.get("weights") is None else WEIGHTS[c["weights"]],
-    )
+    return ngc.FlowPolicyConfig(routing=routing, admission=ADMISSION[c["admission"]])
 
 
 def result_json(r):
     out = {
-        "placed": r.placed,
-        "remaining": "inf" if r.remaining == math.inf else r.remaining,
+        "placed": r.call_delivered,
+        "remaining": "inf" if r.call_undelivered == math.inf else r.call_undelivered,
         "delivery_delta": r.delivery_delta,
-        "call_drops": [[e, x] for e, x in r.call_drops],
-        "call_source_loss": r.call_source_loss,
+        "call_drops": [[e, x] for e, x in r.call_edge_drops],
+        "call_source_loss": r.call_source_drops,
         "termination": r.termination.name.lower(),
         "routes_changed": r.routes_changed,
         "weights_changed": r.weights_changed,
         "requested": "inf" if r.requested == math.inf else r.requested,
         "admitted": r.admitted,
         "delivered": r.delivered,
-        "source_loss": r.source_loss,
-        "drops": [[e, x] for e, x in r.drops],
+        "source_loss": r.source_drops,
+        "drops": [[e, x] for e, x in r.edge_drops],
         "by_source": [
-            [x.source, x.offered, x.admitted, x.delivered, x.source_loss, x.dropped]
+            [
+                x.source,
+                x.offered,
+                x.admitted,
+                x.delivered,
+                x.source_drops,
+                x.total_edge_drops,
+            ]
             for x in r.by_source
         ],
     }
@@ -150,10 +179,15 @@ def result_json(r):
         value = getattr(r, name)
         if value is not None:
             out[name] = value
-    if r.cost_distribution is not None:
-        out["cost_distribution"] = [[c, u] for c, u in r.cost_distribution]
-    for name in ("edge_flows", "residual", "bottleneck", "min_cut"):
-        value = getattr(r, name)
+    if r.marginal_cost_curve is not None:
+        out["cost_distribution"] = [[c, u] for c, u in r.marginal_cost_curve]
+    for name, attribute in (
+        ("edge_flows", "edge_flows"),
+        ("residual", "residual"),
+        ("bottleneck", "saturated_boundary_edges"),
+        ("min_cut", "min_cut"),
+    ):
+        value = getattr(r, attribute)
         if value is not None:
             out[name] = [int(x) for x in value]
     return out
@@ -162,21 +196,21 @@ def result_json(r):
 def ledger_json(fg):
     st = fg._state()
     return {
-        "allocated": [int(x) for x in fg.allocated()],
+        "allocated": [int(x) for x in fg.carried()],
         "residual": [int(x) for x in fg.residual()],
         "records": [
             {
                 "flow_id": r.flow_id[1],
-                "owner": r.owner,
+                "owner": r.policy_id,
                 "sources": list(r.sources),
                 "destinations": list(r.destinations),
                 "admission": ADMISSION_NAME[r.admission],
-                "bundle": sorted(int(e) for e in r.bundle.via_edges()),
-                "route_cost": r.route_cost,
+                "bundle": sorted(int(e) for e in r.route.via_edges()),
+                "route_cost": r.min_route_cost,
                 "offered": r.offered,
                 "delivered": r.delivered,
-                "edges": [[e, x] for e, x in r.edges],
-                "drops": [[e, x] for e, x in r.drops],
+                "edges": [[e, x] for e, x in r.edge_flows],
+                "drops": [[e, x] for e, x in r.edge_drops],
             }
             for r in fg.records()
         ],
@@ -237,14 +271,16 @@ def replay(fx, at=None):
             g = fg.graph()
 
             def construct(op=op, fg=fg, g=g):
-                elig = None
+                eligibility = None
                 if op["elig"] is not None:
-                    elig = g.eligibility(
+                    eligibility = g.eligibility(
                         excluded_nodes=op["elig"]["nodes"],
                         excluded_edges=op["elig"]["edges"],
                     )
                 cfg = config_of(g, op["config"])
-                return ngc.FlowPolicy(fg, op["sources"], op["destinations"], cfg, elig)
+                return ngc.FlowPolicy(
+                    fg, op["sources"], op["destinations"], cfg, eligibility
+                )
 
             if op["error"]:
                 with pytest.raises((ValueError, TypeError)):
@@ -263,23 +299,23 @@ def replay(fx, at=None):
             assert exactly(policy_json(pol), expect["policy"]), where
             continue
         assert kind == "place", where
-        volume = math.inf if op["volume"] == "inf" else op["volume"]
+        offer = math.inf if op["volume"] == "inf" else op["volume"]
         outputs = None
         if op["outputs"] is not None:
             e, r, b, m = op["outputs"]
             outputs = ngc.OutputOptions(
-                edge_flows=e, residual=r, bottleneck=b, min_cut=m
+                edge_flows=e, residual=r, saturated_boundary_edges=b, min_cut=m
             )
         if op["error"]:
             before = policy_json(pol)
             with pytest.raises((ValueError, TypeError)):
-                pol.place(volume, outputs)
+                pol.place(offer, outputs)
             assert exactly(ledger_json(fg), expect["ledger"]), where
             # The reference records the ledger only; the policy's own state (requested, +inf,
             # the flows) must be as before the call too.
             assert exactly(policy_json(pol), before), where
             continue
-        r, trace = pol._place_traced(volume, outputs)
+        r, trace = pol._place_traced(offer, outputs)
         assert exactly(result_json(r), expect["result"]), where
         assert exactly(norm(trace), expect["trace"]), where
         assert exactly(ledger_json(fg), expect["ledger"]), where
@@ -455,7 +491,7 @@ def test_every_other_replay_clause_reports_its_operation(monkeypatch):
         _corrupt(bad["graphs"][0]["input_index"], 0)
         assert _failure(bad) == (
             None,
-            'assert exactly(g.input_index().tolist(), spec["input_index"])',
+            'assert exactly(g.input_positions().tolist(), spec["input_index"])',
         )
     assert sections == {
         "place failed ledger",

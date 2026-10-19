@@ -57,7 +57,7 @@ void expect_removal_and_release_allocate_nothing(const FlowLedger& fg, std::uniq
   ASSERT_EQ(held.bound.size(), 1U) << where;
   EXPECT_FALSE(fails_at(0, [&] { p.reset(); })) << where;
   const LedgerState orphaned = ledger_state(fg);
-  EXPECT_EQ(orphaned.allocated, held.allocated) << where;
+  EXPECT_EQ(orphaned.carried, held.carried) << where;
   EXPECT_EQ(orphaned.records.size(), held.records.size()) << where;
   EXPECT_TRUE(orphaned.bound.empty()) << where;
   EXPECT_EQ(orphaned.orphans, held.bound) << where;

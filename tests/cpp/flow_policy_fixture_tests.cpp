@@ -15,6 +15,21 @@
 // the private hooks (NETGRAPH_CORE_PRIVATE_HOOKS): without them, in the shipped configuration,
 // the replay compares everything but the trace, and the corruption test corrupts what that
 // replay compares: every section but the trace.
+//
+// The data keeps the reference's own names; the replay maps them to the library's here and nowhere
+// else: the routing kinds "CostOnly" and "Global" build ShortestPaths and CentralizedTE (with
+// source allocation OPTIMIZED, Global's default there), a configuration's "placement" is
+// ShortestPaths' allocation ("MaxFlow" and "EqualBalanced" are RouteAllocation::Optimized and
+// Equal) and its "weights" ShortestPaths' weight_basis; the configuration's "selection" is
+// ShortestPaths' route choice: "Deterministic" is FEWER_HOPS
+// whatever the "priority", "PreferHigherPriority" with "Residual", "Capacity" or "Headroom" is
+// HIGHER_AVAILABLE_CAPACITY, HIGHER_CAPACITY or HIGHER_HEADROOM, "multipath" is multipath and
+// "multi_edge" parallel_edges; a result's
+// "placed", "remaining", "call_drops", "call_source_loss", "source_loss", "drops",
+// "cost_distribution" and "bottleneck" are call_delivered, call_undelivered, call_edge_drops,
+// call_source_drops, source_drops, edge_drops, marginal_cost_curve and saturated_boundary_edges; the
+// ledger's "allocated" is carried(); a record's "owner", "bundle", "route_cost" and "edges" are
+// policy_id, route, min_route_cost and edge_flows; the policy's "placed_demand" is delivered().
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -38,7 +53,7 @@
 
 #include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/policy_engine.hpp"
-#include "netgraph/core/detail/pred_dag_builder.hpp"
+#include "netgraph/core/detail/route_builders.hpp"
 #include "netgraph/core/detail/private_hooks.hpp"
 #include "netgraph/core/detail/trace.hpp"
 #include "netgraph/core/flow_ledger.hpp"
@@ -425,19 +440,19 @@ J counter_pairs(const std::vector<std::pair<EdgeId, Counter128>>& v) {
 
 J result_json(const PlacementResult& r) {
   J j = J::obj();
-  j.set("placed", J::integer(r.placed));
-  j.set("remaining", r.remaining.has_value() ? J::integer(*r.remaining) : J::str("inf"));
+  j.set("placed", J::integer(r.call_delivered));
+  j.set("remaining", r.call_undelivered.has_value() ? J::integer(*r.call_undelivered) : J::str("inf"));
   j.set("delivery_delta", J::integer(r.delivery_delta));
-  j.set("call_drops", pairs(r.call_drops));
-  j.set("call_source_loss", J::integer(r.call_source_loss));
+  j.set("call_drops", pairs(r.call_edge_drops));
+  j.set("call_source_loss", J::integer(r.call_source_drops));
   j.set("termination", J::str(outcome_name(r.termination)));
   j.set("routes_changed", J::boolean(r.routes_changed));
   j.set("weights_changed", J::boolean(r.weights_changed));
   j.set("requested", r.requested.has_value() ? J::integer(wide(*r.requested)) : J::str("inf"));
   j.set("admitted", J::integer(wide(r.admitted)));
   j.set("delivered", J::integer(r.delivered));
-  j.set("source_loss", J::integer(wide(r.source_loss)));
-  j.set("drops", counter_pairs(r.drops));
+  j.set("source_loss", J::integer(wide(r.source_drops)));
+  j.set("drops", counter_pairs(r.edge_drops));
   J rows = J::arr();
   for (const auto& x : r.by_source) {
     J row = J::arr();
@@ -445,41 +460,41 @@ J result_json(const PlacementResult& r) {
     row.push(x.offered.has_value() ? J::integer(wide(*x.offered)) : J::null());
     row.push(J::integer(wide(x.admitted)));
     row.push(J::integer(x.delivered));
-    row.push(J::integer(wide(x.source_loss)));
-    row.push(J::integer(wide(x.dropped)));
+    row.push(J::integer(wide(x.source_drops)));
+    row.push(J::integer(wide(x.total_edge_drops)));
     rows.push(std::move(row));
   }
   j.set("by_source", std::move(rows));
   if (r.offered.has_value()) j.set("offered", J::integer(wide(*r.offered)));
   if (r.unadmitted.has_value()) j.set("unadmitted", J::integer(wide(*r.unadmitted)));
   if (r.total_cost.has_value()) j.set("total_cost", J::integer(wide(*r.total_cost)));
-  if (r.cost_distribution.has_value()) j.set("cost_distribution", pairs(*r.cost_distribution));
+  if (r.marginal_cost_curve.has_value()) j.set("cost_distribution", pairs(*r.marginal_cost_curve));
   if (r.edge_flows.has_value()) j.set("edge_flows", ints(*r.edge_flows));
   if (r.residual.has_value()) j.set("residual", ints(*r.residual));
-  if (r.bottleneck.has_value()) j.set("bottleneck", ints(*r.bottleneck));
+  if (r.saturated_boundary_edges.has_value()) j.set("bottleneck", ints(*r.saturated_boundary_edges));
   if (r.min_cut.has_value()) j.set("min_cut", ints(*r.min_cut));
   return j;
 }
 
 J ledger_json(const FlowLedger& fg) {
   J j = J::obj();
-  j.set("allocated", ints(fg.allocated()));
+  j.set("allocated", ints(fg.carried()));
   j.set("residual", ints(fg.residual()));
   J recs = J::arr();
   for (const auto& r : fg.records()) {
     J x = J::obj();
     x.set("flow_id", J::integer(r.flow_id.second));
-    x.set("owner", J::integer(r.owner));
+    x.set("owner", J::integer(r.policy_id));
     x.set("sources", ints(r.sources));
     x.set("destinations", ints(r.destinations));
     x.set("admission", J::str(r.admission == Admission::Lossy ? "Lossy" : "Lossless"));
-    x.set("bundle", ints(detail::PredDAGBuilder::ascending(*r.bundle)));
-    x.set("route_cost", r.route_cost == kUnreachable ? J::null() : J::integer(r.route_cost));
+    x.set("bundle", ints(detail::PredecessorDAGBuilder::ascending(*r.route)));
+    x.set("route_cost", r.min_route_cost == kUnreachable ? J::null() : J::integer(r.min_route_cost));
     x.set("offered", r.offered.has_value() ? J::integer(wide(*r.offered)) : J::null());
     x.set("delivered", J::integer(r.delivered));
-    x.set("edges", pairs(r.edges));
+    x.set("edges", pairs(r.edge_flows));
     J drops = J::arr();
-    for (const auto& [e, c] : r.drops) {
+    for (const auto& [e, c] : r.edge_drops) {
       J p = J::arr();
       p.push(J::integer(e));
       p.push(J::integer(wide(c)));
@@ -489,9 +504,9 @@ J ledger_json(const FlowLedger& fg) {
     recs.push(std::move(x));
   }
   j.set("records", std::move(recs));
-  j.set("next_flow_id", J::integer(LedgerAccess::next_flow_id(fg)));
-  j.set("bound", ints(LedgerAccess::bound_owners(fg)));
-  j.set("orphans", ints(LedgerAccess::orphan_owners(fg)));
+  j.set("next_flow_id", J::integer(LedgerAccess::next_record_counter(fg)));
+  j.set("bound", ints(LedgerAccess::bound_policy_ids(fg)));
+  j.set("orphans", ints(LedgerAccess::orphan_policy_ids(fg)));
   return j;
 }
 
@@ -499,28 +514,28 @@ J policy_json(const FlowPolicy& policy) {
   const auto& pe = detail::PolicyAccess::engine(policy);
   const bool lossy = pe.config.admission == Admission::Lossy;
   J j = J::obj();
-  j.set("roster", ints(pe.roster));
+  j.set("roster", ints(pe.reachable_sources));
   j.set("requested", J::integer(wide(pe.epoch.requested)));
   j.set("infinite", J::boolean(pe.epoch.infinite));
-  j.set("placed_demand", J::integer(policy.placed_demand()));
+  j.set("placed_demand", J::integer(policy.delivered()));
   J cohorts = J::arr();
-  for (std::size_t i = 0; i < pe.roster.size(); ++i) {
-    if (pe.epoch.cohorts[i].empty()) continue;
+  for (std::size_t i = 0; i < pe.reachable_sources.size(); ++i) {
+    if (pe.epoch.record_groups[i].empty()) continue;
     J flows = J::arr();
-    for (const auto& s : pe.epoch.cohorts[i]) {
-      const FlowRecord& rec = LedgerAccess::live(pe.fg, s.id);
-      const auto e = detail::PredDAGBuilder::ascending(*s.bundle);
+    for (const auto& s : pe.epoch.record_groups[i]) {
+      const FlowRecord& rec = LedgerAccess::live(pe.ledger, s.record_counter);
+      const auto e = detail::PredecessorDAGBuilder::ascending(*s.route);
       const std::vector<EdgeId> route(e.begin(), e.end());
       J f = J::obj();
-      f.set("id", J::integer(s.id));
+      f.set("id", J::integer(s.record_counter));
       f.set("route", ints(route));
       f.set("T", lossy ? J::null() : J::integer(rec.delivered));
       f.set("delivered", J::integer(rec.delivered));
-      f.set("alloc", pairs(rec.edges));
+      f.set("alloc", pairs(rec.edge_flows));
       flows.push(std::move(f));
     }
     J entry = J::arr();
-    entry.push(J::integer(pe.roster[i]));
+    entry.push(J::integer(pe.reachable_sources[i]));
     entry.push(std::move(flows));
     cohorts.push(std::move(entry));
   }
@@ -595,38 +610,45 @@ T named(const std::string& what, const std::string& name, std::initializer_list<
 FlowPolicyConfig config_of(const Graph& g, const J& c) {
   const J& r = c.at("routing");
   const std::string kind = r.at("kind").s;
-  Routing routing = CostOnly {};
+  Routing routing = ShortestPaths {};
   if (kind == "Global") {
-    Global gl;
+    CentralizedTE gl(SourceAllocation::Optimized);  // the frozen data's Global: the optimized source allocation
     if (const J* support = r.get("support")) gl.support = test::dag_of(g, int32s(*support));
     routing = gl;
   } else if (kind != "CostOnly") {
     throw UnknownName("the data names an unknown routing (" + kind + ")");
   }
   FlowPolicyConfig out {.routing = std::move(routing)};
+  auto* sp = std::get_if<ShortestPaths>(&out.routing);
   if (!c.at("placement").is_null()) {
-    out.placement = named<FlowPlacement>("placement", c.at("placement").s,
-                                         {{"MaxFlow", FlowPlacement::MaxFlow},
-                                          {"Weighted", FlowPlacement::Weighted},
-                                          {"EqualBalanced", FlowPlacement::EqualBalanced}});
+    const auto allocation = named<RouteAllocation>("placement", c.at("placement").s,
+                                                   {{"MaxFlow", RouteAllocation::Optimized},
+                                                    {"Weighted", RouteAllocation::Weighted},
+                                                    {"EqualBalanced", RouteAllocation::Equal}});
+    if (sp == nullptr) throw UnknownName("the data names a placement for a routing without one (" + kind + ")");
+    sp->allocation = allocation;
   }
   out.admission = named<Admission>("admission", c.at("admission").s,
                                    {{"Lossless", Admission::Lossless}, {"Lossy", Admission::Lossy}});
   if (const J& sel = c.at("selection"); !sel.is_null()) {
-    const EdgeTieBreak tie = named<EdgeTieBreak>(
-        "tie break", sel.at("tie_break").s,
-        {{"Deterministic", EdgeTieBreak::Deterministic}, {"PreferHigherPriority", EdgeTieBreak::PreferHigherPriority}});
-    const EdgePriority prio = named<EdgePriority>("priority", sel.at("priority").s,
-                                                  {{"Residual", EdgePriority::Residual},
-                                                   {"Capacity", EdgePriority::Capacity},
-                                                   {"Headroom", EdgePriority::Headroom}});
-    out.selection = PathSelection(tie, prio, sel.at("multipath").b, sel.at("multi_edge").b);
+    const bool prefer = named<bool>("tie break", sel.at("tie_break").s,
+                                    {{"Deterministic", false}, {"PreferHigherPriority", true}});
+    const RouteTieBreak higher = named<RouteTieBreak>("priority", sel.at("priority").s,
+                                                      {{"Residual", RouteTieBreak::HigherAvailableCapacity},
+                                                       {"Capacity", RouteTieBreak::HigherCapacity},
+                                                       {"Headroom", RouteTieBreak::HigherHeadroom}});
+    if (sp == nullptr) throw UnknownName("the data names a selection for a routing without a route choice (" + kind + ")");
+    sp->tie_break = prefer ? higher : RouteTieBreak::FewerHops;
+    sp->multipath = sel.at("multipath").b;
+    sp->parallel_edges = sel.at("multi_edge").b;
   }
   if (const J* w = c.get("weights")) {
-    out.weights = named<WeightBasis>("weight basis", w->s,
-                                     {{"Capacity", WeightBasis::Capacity},
-                                      {"Explicit", WeightBasis::Explicit},
-                                      {"ResidualSnapshot", WeightBasis::ResidualSnapshot}});
+    const auto basis = named<WeightBasis>("weight basis", w->s,
+                                          {{"Capacity", WeightBasis::Capacity},
+                                           {"Explicit", WeightBasis::Explicit},
+                                           {"ResidualSnapshot", WeightBasis::ResidualSnapshot}});
+    if (sp == nullptr) throw UnknownName("the data names weights for a routing without them (" + kind + ")");
+    sp->weight_basis = basis;
   }
   return out;
 }
@@ -655,7 +677,7 @@ std::vector<std::string> replay(const J& fx, std::size_t* compared = nullptr,
     const double q = spec.at("q").k == J::K::Dbl ? spec.at("q").d : static_cast<double>(spec.at("q").int64());
     auto g = std::make_shared<const Graph>(
         test::make_graph(static_cast<std::int32_t>(spec.at("n").int64()), edges, q));
-    const auto ii = g->input_index();
+    const auto ii = g->input_positions();
     if (std::vector<std::int32_t>(ii.begin(), ii.end()) != int32s(spec.at("input_index"))) {
       fails.push_back(name + ": the engine ranks the edges differently (input_index)");
       return fails;
@@ -887,7 +909,7 @@ bool reported(const J& fx, const std::string& prefix) {
 // of every section of every other operation's expectations (failed placements, policies,
 // removals); the error flag of the first operation of every kind and
 // outcome in each fixture; the input order of the first graph; an unknown operation; a ledger the
-// data accepts and the engine rejects; an unknown and a non-integer volume; the curve a Global
+// data accepts and the engine rejects; an unknown and a non-integer volume; the curve a CentralizedTE
 // zero call reports, against the remembered one; a policy changed by a call the data rejects;
 // an exception other than a rejection; and a configuration name the replay does not know.
 void expect_every_other_clause_reported() {
@@ -961,7 +983,7 @@ void expect_every_other_clause_reported() {
   volume.k = J::K::Dbl;
   volume.d = 0.5;
   EXPECT_TRUE(reported(fractional, "global_epochs op 3 (place): a non-integer request accepted"));
-  // Op 2 of global_epochs is a Global zero call on a fresh policy (no curve: nothing prepared),
+  // Op 2 of global_epochs is a CentralizedTE zero call on a fresh policy (no curve: nothing prepared),
   // op 3 a positive call with the curve [[1, 1]]. With op 3 moved before op 2, the zero call
   // reports the remembered curve [[1, 1]] where the data, recorded before any placement, has
   // none: a result difference.
@@ -1016,7 +1038,7 @@ void expect_every_other_clause_reported() {
     EXPECT_TRUE(test::has_failure(fails, where + ": throws an exception other than a rejection: planted")) << where;
   }
   EXPECT_EQ(planted, (std::set<std::string> {"ledger ok", "place failed", "policy failed"}));
-  // A name the replay does not know, in the configuration of eb_unequal_1_10's CostOnly policy
+  // A name the replay does not know, in the configuration of eb_unequal_1_10's ShortestPaths policy
   // (op 1): a failure of the replay, never taken for the engine rejecting the policy.
   const auto& unequal = *std::find_if(fixtures.begin(), fixtures.end(),
                                       [](const J& fx) { return fx.at("name").s == "eb_unequal_1_10"; });

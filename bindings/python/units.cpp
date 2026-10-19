@@ -87,7 +87,7 @@ void register_units(py::module_& m) {
       [](const py::object& x, double resolution) -> py::object {
         const int k = resolution_exponent(resolution);  // the resolution before the shape
         // A sequence, a NumPy array of any rank included: wide_integers refuses a rank other than 1.
-        if (!not_a_sequence(x)) {
+        if (!is_invalid_sequence(x)) {
           const auto v = wide_integers(x, "as_float: x");
           py::array_t<double> out(static_cast<py::ssize_t>(v.size()));
           auto o = out.mutable_unchecked<1>();

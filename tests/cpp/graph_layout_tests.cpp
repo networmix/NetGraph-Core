@@ -21,11 +21,11 @@
 #include "graph_inputs.hpp"
 #include "graph_reference.hpp"
 #include "layout_checker.hpp"
-#include "netgraph/core/dag_cache.hpp"
+#include "netgraph/core/shortest_path_cache.hpp"
 #include "netgraph/core/detail/graph_access.hpp"
 #include "netgraph/core/evaluators.hpp"
 #include "netgraph/core/graph.hpp"
-#include "netgraph/core/pred_dag.hpp"
+#include "netgraph/core/route_structures.hpp"
 #include "netgraph/core/search.hpp"
 #include "test_utils.hpp"
 
@@ -36,28 +36,28 @@ using detail::GraphAccess;
 namespace {
 
 // Every public array, its element width, the counts, the resolution and the scans equal the
-// reference's; the internal copy equals the reference's edge_src[in_adj_edge_index[slot]].
+// reference's; the internal copy equals the reference's edge_sources()[incoming_edges()[slot]].
 void expect_same_as_reference(const Graph& g, const Input& in) {
   const auto r = reference_graph(in.n, in.src, in.dst, in.cap, in.cost, in.q);
-  static_assert(sizeof(decltype(g.capacity_units())::element_type) == 8);
-  static_assert(sizeof(decltype(g.cost())::element_type) == 8);
-  static_assert(sizeof(decltype(g.edge_src())::element_type) == 4);
-  static_assert(sizeof(decltype(g.input_index())::element_type) == 4);
-  static_assert(sizeof(decltype(g.in_adj_edge_index())::element_type) == 4);
+  static_assert(sizeof(decltype(g.edge_capacity_units())::element_type) == 8);
+  static_assert(sizeof(decltype(g.edge_costs())::element_type) == 8);
+  static_assert(sizeof(decltype(g.edge_sources())::element_type) == 4);
+  static_assert(sizeof(decltype(g.input_positions())::element_type) == 4);
+  static_assert(sizeof(decltype(g.incoming_edges())::element_type) == 4);
   EXPECT_EQ(g.num_nodes(), r.num_nodes) << in.name;
   EXPECT_EQ(g.num_edges(), static_cast<std::int32_t>(r.capacity.size())) << in.name;
   EXPECT_EQ(g.resolution(), r.resolution) << in.name;
-  EXPECT_EQ(g.max_cost(), r.max_cost) << in.name;
-  EXPECT_EQ(g.cost_gcd(), r.cost_gcd) << in.name;
-  EXPECT_EQ(vec(g.capacity_units()), r.capacity) << in.name;
-  EXPECT_EQ(vec(g.cost()), r.cost) << in.name;
-  EXPECT_EQ(vec(g.edge_src()), r.src) << in.name;
-  EXPECT_EQ(vec(g.edge_dst()), r.dst) << in.name;
-  EXPECT_EQ(vec(g.input_index()), r.input_index) << in.name;
-  EXPECT_EQ(vec(g.row_offsets()), r.row_offsets) << in.name;
-  EXPECT_EQ(vec(g.in_row_offsets()), r.in_row_offsets) << in.name;
-  EXPECT_EQ(vec(g.in_adj_edge_index()), r.in_adj_edge_index) << in.name;
-  EXPECT_EQ(vec(GraphAccess::in_col_indices(g)), reference_in_col_indices(r)) << in.name;
+  EXPECT_EQ(g.max_edge_cost(), r.max_edge_cost) << in.name;
+  EXPECT_EQ(g.edge_cost_gcd(), r.edge_cost_gcd) << in.name;
+  EXPECT_EQ(vec(g.edge_capacity_units()), r.capacity) << in.name;
+  EXPECT_EQ(vec(g.edge_costs()), r.cost) << in.name;
+  EXPECT_EQ(vec(g.edge_sources()), r.src) << in.name;
+  EXPECT_EQ(vec(g.edge_destinations()), r.dst) << in.name;
+  EXPECT_EQ(vec(g.input_positions()), r.input_positions) << in.name;
+  EXPECT_EQ(vec(g.outgoing_offsets()), r.outgoing_offsets) << in.name;
+  EXPECT_EQ(vec(g.incoming_offsets()), r.incoming_offsets) << in.name;
+  EXPECT_EQ(vec(g.incoming_edges()), r.incoming_edges) << in.name;
+  EXPECT_EQ(vec(GraphAccess::incoming_edge_sources(g)), reference_in_col_indices(r)) << in.name;
   const auto bad = check_layout(spans_of(g), view(in));
   EXPECT_TRUE(bad.empty()) << in.name << ": " << (bad.empty() ? "" : bad.front());
 }
@@ -78,7 +78,7 @@ Input permuted(const Input& in, const std::vector<std::size_t>& p, const std::st
 // The same edges in EdgeId order, reversed and shuffled (all property arrays permuted together).
 std::vector<Input> orders(const Input& in, std::uint64_t seed) {
   const auto r = reference_graph(in.n, in.src, in.dst, in.cap, in.cost, in.q);
-  std::vector<std::size_t> sorted(r.input_index.begin(), r.input_index.end());
+  std::vector<std::size_t> sorted(r.input_positions.begin(), r.input_positions.end());
   std::vector<std::size_t> rev(in.src.size());
   std::iota(rev.rbegin(), rev.rend(), 0);
   std::vector<std::size_t> sh(in.src.size());
@@ -154,8 +154,8 @@ TEST(GraphLayout, DifferentialWideIntegers) {
   const Input both {"2^53 + 1", 2, {0, 0, 1}, {1, 1, 0}, {above, above + 2, 0}, {(Cost{1} << 53) + 1, (Cost{1} << 53) + 3, 1}};
   const Graph g = build(both);
   expect_same_as_reference(g, both);
-  EXPECT_EQ(g.capacity_units()[0], above);
-  EXPECT_EQ(g.cost()[0], (Cost{1} << 53) + 1);
+  EXPECT_EQ(g.edge_capacity_units()[0], above);
+  EXPECT_EQ(g.edge_costs()[0], (Cost{1} << 53) + 1);
 }
 
 TEST(GraphLayout, DifferentialHashCollisions) {
@@ -237,7 +237,7 @@ TEST(GraphLayout, DifferentialErrorsFirstInvalidIndexAndSumOrder) {
   Input in {"two costs", 3, {0, 1, 2, 0}, {1, 2, 0, 2}, {1, 1, 1, 1}, {1, -2, 0, 1}};
   auto got = outcome([&] { (void)build(in); });
   EXPECT_EQ(got, outcome([&] { (void)reference_graph(in.n, in.src, in.dst, in.cap, in.cost, in.q); }));
-  EXPECT_NE(got.second.find("cost[1] = -2"), std::string::npos) << got.second;
+  EXPECT_NE(got.second.find("edge_costs[1] = -2"), std::string::npos) << got.second;
   // Capacity and cost sums both over: the one whose running sum crosses first, in input order.
   Input both {"sums", 2, {0, 0, 0}, {1, 1, 1}, {1, kL62 / 2, kL62 / 2}, {kL62 / 2, kL62 / 2, 1}};
   got = outcome([&] { (void)build(both); });
@@ -253,7 +253,7 @@ TEST(GraphLayout, DifferentialErrorsFirstInvalidIndexAndSumOrder) {
 // --------------------------------------------------------------------------- the layout checker
 
 // The corruption controls of the checker, on a graph built by the constructor.
-// The fixture repeats (src, cost, dst) keys with distinct capacities and input positions, and its
+// The fixture repeats (source, cost, destination) keys with distinct capacities and input positions, and its
 // reverse slot order differs from its id order, with different source values.
 TEST(GraphLayout, CheckerRejectsEveryCorruption) {
   const Input in {"controls", 4, {0, 2, 0, 1, 0, 3, 2, 0}, {1, 1, 1, 1, 1, 1, 3, 3}, {5, 6, 7, 8, 9, 1, 2, 3},
@@ -266,25 +266,25 @@ TEST(GraphLayout, CheckerRejectsEveryCorruption) {
   for (std::size_t s = 0; s < clean.in_adj.size(); ++s) reverse_differs |= clean.in_adj[s] != static_cast<EdgeId>(s);
   ASSERT_TRUE(reverse_differs);
   auto check = [&](const Copy& c) {
-    return check_layout({in.n, static_cast<std::int64_t>(in.src.size()), c.capacity, c.cost, c.src, c.dst, c.input_index,
-                         c.row_offsets, c.in_row_offsets, c.in_adj, std::span<const NodeId>(c.in_col), c.max_cost,
-                         c.cost_gcd},
+    return check_layout({in.n, static_cast<std::int64_t>(in.src.size()), c.capacity, c.cost, c.src, c.dst, c.input_positions,
+                         c.outgoing_offsets, c.incoming_offsets, c.in_adj, std::span<const NodeId>(c.in_col), c.max_edge_cost,
+                         c.edge_cost_gcd},
                         view(in));
   };
   const std::vector<std::tuple<std::string, std::string, std::function<void(Copy&)>>> controls = {
       // Wrong source or row boundary
       {"wrong source", "forward:membership", [](Copy& c) { c.src[0] = 1; }},
-      {"row boundary moved", "forward:membership", [](Copy& c) { ++c.row_offsets[1]; }},
+      {"row boundary moved", "forward:membership", [](Copy& c) { ++c.outgoing_offsets[1]; }},
       // All-zero offsets (a graph with edges)
-      {"all-zero offsets", "row_offsets:end", [](Copy& c) { std::fill(c.row_offsets.begin(), c.row_offsets.end(), 0); }},
+      {"all-zero offsets", "row_offsets:end", [](Copy& c) { std::fill(c.outgoing_offsets.begin(), c.outgoing_offsets.end(), 0); }},
       // Missing or duplicated reverse coverage
       {"duplicated reverse slot", "slot:permutation", [](Copy& c) { c.in_adj[1] = c.in_adj[0]; }},
-      {"wrong reverse destination", "reverse:membership", [](Copy& c) { ++c.in_row_offsets[1]; }},
-      // (src, cost) substituted for (cost, src)
+      {"wrong reverse destination", "reverse:membership", [](Copy& c) { ++c.incoming_offsets[1]; }},
+      // (source, cost) substituted for (cost, source)
       {"(src, cost) reverse order", "reverse:order",
        [](Copy& c) {
-         for (std::size_t v = 0; v + 1 < c.in_row_offsets.size(); ++v) {
-           std::sort(c.in_adj.begin() + c.in_row_offsets[v], c.in_adj.begin() + c.in_row_offsets[v + 1],
+         for (std::size_t v = 0; v + 1 < c.incoming_offsets.size(); ++v) {
+           std::sort(c.in_adj.begin() + c.incoming_offsets[v], c.in_adj.begin() + c.incoming_offsets[v + 1],
                      [&](EdgeId p, EdgeId q) {
                        return std::tuple(c.src[static_cast<std::size_t>(p)], c.cost[static_cast<std::size_t>(p)], p) <
                               std::tuple(c.src[static_cast<std::size_t>(q)], c.cost[static_cast<std::size_t>(q)], q);
@@ -297,7 +297,7 @@ TEST(GraphLayout, CheckerRejectsEveryCorruption) {
        [](Copy& c) {
          for (std::size_t e = 0; e + 1 < c.cost.size(); ++e) {
            if (c.src[e] == c.src[e + 1] && c.cost[e] == c.cost[e + 1] && c.dst[e] == c.dst[e + 1]) {
-             std::swap(c.input_index[e], c.input_index[e + 1]);
+             std::swap(c.input_positions[e], c.input_positions[e + 1]);
              std::swap(c.capacity[e], c.capacity[e + 1]);
              return;
            }
@@ -305,43 +305,43 @@ TEST(GraphLayout, CheckerRejectsEveryCorruption) {
          FAIL() << "the fixture has no equal-key pair";
        }},
       // Corrupted map
-      {"map entries swapped", "property:capacity", [](Copy& c) { std::swap(c.input_index[0], c.input_index[1]); }},
+      {"map entries swapped", "property:capacity", [](Copy& c) { std::swap(c.input_positions[0], c.input_positions[1]); }},
       // Property-only mispermutation
       {"capacities swapped", "property:capacity", [](Copy& c) { std::swap(c.capacity[1], c.capacity[2]); }},
       // Out-of-range map or slot before access
-      {"negative map entry", "map:permutation", [](Copy& c) { c.input_index[1] = -3; }},
-      {"duplicated map entry", "map:permutation", [](Copy& c) { c.input_index[1] = c.input_index[0]; }},
-      {"map entry E", "map:permutation", [](Copy& c) { c.input_index[1] = static_cast<std::int32_t>(c.input_index.size()); }},
+      {"negative map entry", "map:permutation", [](Copy& c) { c.input_positions[1] = -3; }},
+      {"duplicated map entry", "map:permutation", [](Copy& c) { c.input_positions[1] = c.input_positions[0]; }},
+      {"map entry E", "map:permutation", [](Copy& c) { c.input_positions[1] = static_cast<std::int32_t>(c.input_positions.size()); }},
       {"slot out of range", "slot:permutation", [](Copy& c) { c.in_adj[2] = 1 << 30; }},
       {"negative slot", "slot:permutation", [](Copy& c) { c.in_adj[2] = -1; }},
       // Additional size, offset and copied-source corruption controls.
       {"truncated capacity", "size:capacity", [](Copy& c) { c.capacity.pop_back(); }},
       {"oversized slots", "size:in_adj_edge_index", [](Copy& c) { c.in_adj.push_back(0); }},
-      {"truncated offsets", "size:in_row_offsets", [](Copy& c) { c.in_row_offsets.pop_back(); }},
+      {"truncated offsets", "size:in_row_offsets", [](Copy& c) { c.incoming_offsets.pop_back(); }},
       {"truncated copy", "size:in_col_indices", [](Copy& c) { c.in_col.pop_back(); }},
-      {"negative offset", "row_offsets:range", [](Copy& c) { c.row_offsets[1] = -1; }},
-      {"excessive offset", "in_row_offsets:range", [](Copy& c) { c.in_row_offsets[2] = 1 << 30; }},
+      {"negative offset", "row_offsets:range", [](Copy& c) { c.outgoing_offsets[1] = -1; }},
+      {"excessive offset", "in_row_offsets:range", [](Copy& c) { c.incoming_offsets[2] = 1 << 30; }},
       {"wrong copied source", "copy:source", [](Copy& c) { c.in_col[0] = (c.in_col[0] + 1) % 4; }},
       {"copy indexed by id", "copy:source",
        [](Copy& c) {
          for (std::size_t s = 0; s < c.in_col.size(); ++s) c.in_col[s] = c.src[s];
        }},
       {"copied source out of range", "range:in_col_indices", [](Copy& c) { c.in_col[0] = 4; }},
-      {"changed maximum", "scan:max_cost", [](Copy& c) { ++c.max_cost; }},
-      {"changed GCD", "scan:cost_gcd", [](Copy& c) { c.cost_gcd = 2; }},
+      {"changed maximum", "scan:max_cost", [](Copy& c) { ++c.max_edge_cost; }},
+      {"changed GCD", "scan:cost_gcd", [](Copy& c) { c.edge_cost_gcd = 2; }},
       // Every other code: each array's size, each offset rule of both offset arrays, the endpoint
       // ranges and each permuted property.
       {"truncated costs", "size:cost", [](Copy& c) { c.cost.pop_back(); }},
       {"truncated sources", "size:src", [](Copy& c) { c.src.pop_back(); }},
       {"truncated destinations", "size:dst", [](Copy& c) { c.dst.pop_back(); }},
-      {"truncated map", "size:input_index", [](Copy& c) { c.input_index.pop_back(); }},
-      {"truncated row offsets", "size:row_offsets", [](Copy& c) { c.row_offsets.pop_back(); }},
-      {"row offsets start at 1", "row_offsets:start", [](Copy& c) { c.row_offsets[0] = 1; }},
-      {"reverse offsets start at 1", "in_row_offsets:start", [](Copy& c) { c.in_row_offsets[0] = 1; }},
-      {"reverse offsets end early", "in_row_offsets:end", [](Copy& c) { --c.in_row_offsets.back(); }},
-      {"row offsets decrease", "row_offsets:monotone", [](Copy& c) { c.row_offsets[1] = c.row_offsets[2] + 1; }},
+      {"truncated map", "size:input_index", [](Copy& c) { c.input_positions.pop_back(); }},
+      {"truncated row offsets", "size:row_offsets", [](Copy& c) { c.outgoing_offsets.pop_back(); }},
+      {"row offsets start at 1", "row_offsets:start", [](Copy& c) { c.outgoing_offsets[0] = 1; }},
+      {"reverse offsets start at 1", "in_row_offsets:start", [](Copy& c) { c.incoming_offsets[0] = 1; }},
+      {"reverse offsets end early", "in_row_offsets:end", [](Copy& c) { --c.incoming_offsets.back(); }},
+      {"row offsets decrease", "row_offsets:monotone", [](Copy& c) { c.outgoing_offsets[1] = c.outgoing_offsets[2] + 1; }},
       {"reverse offsets decrease", "in_row_offsets:monotone",
-       [](Copy& c) { c.in_row_offsets[2] = c.in_row_offsets[1] - 1; }},
+       [](Copy& c) { c.incoming_offsets[2] = c.incoming_offsets[1] - 1; }},
       {"source out of range", "range:src", [](Copy& c) { c.src[0] = 4; }},
       {"negative destination", "range:dst", [](Copy& c) { c.dst[0] = -1; }},
       // Two different values exchanged (the first one and the first that differs from it).
@@ -762,13 +762,13 @@ TEST(GraphLayout, MoveTransfersEverythingAndLeavesAnEmptyGraph) {
     EXPECT_EQ(x.resolution(), q) << what;
     EXPECT_EQ(x.num_nodes(), 0) << what;
     EXPECT_EQ(x.num_edges(), 0) << what;
-    EXPECT_EQ(x.max_cost(), 0) << what;
-    EXPECT_EQ(x.cost_gcd(), 0) << what;
-    EXPECT_TRUE(x.capacity_units().empty() && x.cost().empty() && x.edge_src().empty() && x.edge_dst().empty() &&
-                x.input_index().empty() && x.in_adj_edge_index().empty() && GraphAccess::in_col_indices(x).empty())
+    EXPECT_EQ(x.max_edge_cost(), 0) << what;
+    EXPECT_EQ(x.edge_cost_gcd(), 0) << what;
+    EXPECT_TRUE(x.edge_capacity_units().empty() && x.edge_costs().empty() && x.edge_sources().empty() && x.edge_destinations().empty() &&
+                x.input_positions().empty() && x.incoming_edges().empty() && GraphAccess::incoming_edge_sources(x).empty())
         << what;
-    EXPECT_EQ(vec(x.row_offsets()), (std::vector<std::int32_t> {0})) << what;
-    EXPECT_EQ(vec(x.in_row_offsets()), (std::vector<std::int32_t> {0})) << what;
+    EXPECT_EQ(vec(x.outgoing_offsets()), (std::vector<std::int32_t> {0})) << what;
+    EXPECT_EQ(vec(x.incoming_offsets()), (std::vector<std::int32_t> {0})) << what;
     EXPECT_TRUE(check_layout(spans_of(x), view(Input {"moved-from", 0})).empty()) << what;
   };
   // NOLINTBEGIN(bugprone-use-after-move): the documented moved-from state.
@@ -809,7 +809,7 @@ TEST(GraphLayout, RetainedPayloadIs36BytesPerEdgePlusOffsets) {
 
 // Graph-bound objects from another graph are rejected at their existing use sites, on a twin
 // graph with identical arrays (only the uid differs, so the check is by identity, not by shape):
-// the evaluators' Eligibility and DagCache checks, and a Path's DAG (to_dag keeps the Path's
+// the evaluators' Eligibility and ShortestPathCache checks, and a Path's DAG (to_dag keeps the Path's
 // graph) in resolve_to_paths. The flow core, ledger, policy, KSP, search and cache sites have
 // their own tests.
 TEST(GraphLayout, ForeignGraphBoundObjectsAreRejectedAtTheirUseSites) {
@@ -819,22 +819,21 @@ TEST(GraphLayout, ForeignGraphBoundObjectsAreRejectedAtTheirUseSites) {
   const Graph g(4, src, dst, cap, cost, 1.0), twin(4, src, dst, cap, cost, 1.0);
   ASSERT_NE(g.uid(), twin.uid());
   const std::vector<NodeId> s {0}, d {3};
-  const FlowPolicyConfig cfg {CostOnly {}, FlowPlacement::MaxFlow, Admission::Lossless,
-                              PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Capacity)};
+  const FlowPolicyConfig cfg {shortest_paths(RouteAllocation::Optimized), Admission::Lossless};
   const Eligibility el = twin.eligibility({}, std::vector<EdgeId> {0});
-  DagCache cache(twin);
+  ShortestPathCache cache(twin);
   const std::string elig_msg = "foreign Eligibility: built for another graph";
-  const std::string cache_msg = "foreign DagCache: bound to another graph";
-  EXPECT_EQ(error_of([&] { (void)capacity(g, s, d, QueryOptions {cfg, &el}); }), elig_msg);
-  EXPECT_EQ(error_of([&] { (void)capacity(g, s, d, QueryOptions {cfg, nullptr, &cache}); }), cache_msg);
+  const std::string cache_msg = "foreign ShortestPathCache: bound to another graph";
+  EXPECT_EQ(error_of([&] { (void)evaluate_demand(g, s, d, EvaluationOptions {cfg, &el}); }), elig_msg);
+  EXPECT_EQ(error_of([&] { (void)evaluate_demand(g, s, d, EvaluationOptions {cfg, nullptr, &cache}); }), cache_msg);
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs {{s, d}};
-  EXPECT_EQ(error_of([&] { (void)batch_capacity(g, pairs, QueryOptions {cfg, nullptr, &cache}, {}, 1); }), cache_msg);
-  EXPECT_EQ(error_of([&] { (void)sensitivity(g, s, d, QueryOptions {cfg, &el}, 1); }), elig_msg);
-  EXPECT_EQ(error_of([&] { (void)sensitivity(g, s, d, QueryOptions {cfg, nullptr, &cache}, 1); }), cache_msg);
+  EXPECT_EQ(error_of([&] { (void)evaluate_pairs(g, pairs, EvaluationOptions {cfg, nullptr, &cache}, {}, 1); }), cache_msg);
+  EXPECT_EQ(error_of([&] { (void)evaluate_edge_failures(g, s, d, EvaluationOptions {cfg, &el}, 1); }), elig_msg);
+  EXPECT_EQ(error_of([&] { (void)evaluate_edge_failures(g, s, d, EvaluationOptions {cfg, nullptr, &cache}, 1); }), cache_msg);
   const Path p(twin, {{0}, {2}});
-  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, p.to_dag(), 0, 3); }), "foreign PredDAG: built for another graph");
+  EXPECT_EQ(error_of([&] { (void)resolve_to_paths(g, p.to_dag(), 0, 3); }), "foreign PredecessorDAG: built for another graph");
   // The same calls on the owning graph succeed (the controls).
-  EXPECT_NO_THROW((void)capacity(twin, s, d, QueryOptions {cfg, &el, &cache}));
+  EXPECT_NO_THROW((void)evaluate_demand(twin, s, d, EvaluationOptions {cfg, &el, &cache}));
   EXPECT_EQ(resolve_to_paths(twin, p.to_dag(), 0, 3).size(), 1U);
 }
 

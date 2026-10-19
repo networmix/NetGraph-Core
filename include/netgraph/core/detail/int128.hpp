@@ -4,7 +4,7 @@
    (Counter128 keeps its own two words). Compare fractions a/b and c/d by comparing a*d and
    c*b; compute a lower quota as floor(I*w/W), where I is the total, w one weight and W the sum
    of weights.
-   A double factor is used exactly as stored: an integer divided by a power of two.
+   A cost-stretch factor is an exact fraction n/d.
    Product operands stay below 2^63, products below 2^126, and quotients fit 64 bits.
    Use __int128 when available; otherwise split products into 32-bit parts (limbs).
 
@@ -16,7 +16,6 @@
 #pragma once
 
 #include <bit>
-#include <cmath>
 #include <compare>
 #include <cstdint>
 
@@ -146,34 +145,11 @@ struct I128 {
   constexpr I128& operator+=(I128 b) noexcept { return *this = *this + b; }
 };
 
-// A positive finite double as the exact dyadic rational it is: f = m * 2^x with m odd and
-// below 2^53.
-struct Dyadic {
-  std::uint64_t m {0};
-  int x {0};
-};
-inline Dyadic dyadic(double f) noexcept {
-  int e = 0;
-  const double frac = std::frexp(f, &e);  // f = frac * 2^e, frac in [0.5, 1)
-  Dyadic d {static_cast<std::uint64_t>(std::ldexp(frac, 53)), e - 53};
-  const int tz = std::countr_zero(d.m);
-  d.m >>= tz;
-  d.x += tz;
-  return d;
-}
-
-// cost <= f * base, exactly (the Stretch cost ceiling): f is the dyadic rational
-// it is (finite, f >= 1), cost >= 0 and base >= 1 below 2^63. f = m * 2^x with m odd below 2^53;
-// bit lengths are compared before any shift, so no product exceeds 128 bits.
-inline bool stretch_le(std::int64_t cost, std::int64_t base, double f) noexcept {
-  const auto [m, x] = dyadic(f);
-  const U128 rhs = mul_u64(static_cast<std::uint64_t>(base), m);  // below 2^116
-  if (x >= 0) {
-    if (bits(rhs) + x > 64) return true;  // rhs * 2^x >= 2^64 > cost
-    return !(shl(rhs, x) < U128 {0, static_cast<std::uint64_t>(cost)});
-  }
-  // f >= 1 with m < 2^53: -x < 53, so cost * 2^-x < 2^116.
-  const U128 lhs = shl(U128 {0, static_cast<std::uint64_t>(cost)}, -x);
+// cost <= (n / d) * base, exactly (the CostStretch cost ceiling): cost * d <= n * base, for cost and
+// base in [0, 2^63) and a reduced factor n / d >= 1 (so n >= d >= 1). Each product is below 2^126.
+inline bool stretch_le(std::int64_t cost, std::int64_t base, std::int64_t n, std::int64_t d) noexcept {
+  const U128 lhs = mul_u64(static_cast<std::uint64_t>(cost), static_cast<std::uint64_t>(d));
+  const U128 rhs = mul_u64(static_cast<std::uint64_t>(base), static_cast<std::uint64_t>(n));
   return !(rhs < lhs);
 }
 

@@ -7,7 +7,7 @@
 
   Both queues pop in (distance, node) order: the heap by its key, the cyclic buckets because
   each holds one distance at a time and the active bucket is sorted by node. After popping
-  distance d, pending distances lie in [d, d + max_cost], all multiples of cost_gcd. A node is
+  distance d, pending distances lie in [d, d + max_edge_cost], all multiples of edge_cost_gcd. A node is
   pushed only on a strict improvement, so it appears at most once per bucket. Equal-distance pop
   order cannot change the result: positive costs make every tight predecessor of a node
   strictly nearer, so it is finalised first.
@@ -29,8 +29,8 @@
 #include "netgraph/core/detail/graph_access.hpp"
 #include "netgraph/core/detail/hooks_flag.hpp"
 #include "netgraph/core/detail/int128.hpp"
-#include "netgraph/core/detail/pred_dag_builder.hpp"
-#include "netgraph/core/detail/traversal.hpp"
+#include "netgraph/core/detail/route_builders.hpp"
+#include "netgraph/core/detail/search_detail.hpp"
 
 namespace netgraph::core::detail {
 
@@ -43,30 +43,30 @@ int compare(const Priority& a, const Priority& b) noexcept {
   return left < right ? -1 : 1;
 }
 
-Priority priority_value(EdgePriority priority, Amount residual, Amount capacity) noexcept {
-  if (priority == EdgePriority::Capacity) return {capacity, 1, false};
-  if (priority == EdgePriority::Residual) return {residual, 1, false};
+Priority priority_value(RouteTieBreak tie_break, Amount residual, Amount capacity) noexcept {
+  if (tie_break == RouteTieBreak::HigherAvailableCapacity) return {residual, 1, false};
+  if (tie_break != RouteTieBreak::HigherHeadroom) return {capacity, 1, false};
   if (capacity == 0) return {0, 1, false};  // a zero-capacity edge has headroom 0
   return {residual, capacity, false};
 }
 
 Priority PriorityValues::of(EdgeId e) const noexcept {
   const auto ei = static_cast<std::size_t>(e);
-  const Amount cap = g->capacity_units()[ei];
-  return priority_value(priority, residual.empty() ? cap : residual[ei], cap);
+  const Amount cap = graph->edge_capacity_units()[ei];
+  return priority_value(tie_break, residual.empty() ? cap : residual[ei], cap);
 }
 
-PriorityFn PriorityFn::of(const PriorityValues& values) noexcept {
+PriorityReader PriorityReader::of(const PriorityValues& values) noexcept {
   return {&values, [](const void* ctx, EdgeId e) noexcept { return static_cast<const PriorityValues*>(ctx)->of(e); }};
 }
 
-std::int64_t bucket_width(const Graph& g) noexcept {
-  const Cost stride = std::max<Cost>(1, g.cost_gcd());
-  return g.max_cost() / stride + 1;  // max_cost < 2^62: no overflow
+std::int64_t bucket_width(const Graph& graph) noexcept {
+  const Cost stride = std::max<Cost>(1, graph.edge_cost_gcd());
+  return graph.max_edge_cost() / stride + 1;  // max_edge_cost < 2^62: no overflow
 }
 
-bool uses_buckets(const Graph& g, SpfQueue queue) noexcept {
-  return queue == SpfQueue::Auto && bucket_width(g) <= kMaxBucketWidth;
+bool uses_buckets(const Graph& graph, SpfQueue queue) noexcept {
+  return queue == SpfQueue::Auto && bucket_width(graph) <= kMaxBucketWidth;
 }
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
@@ -102,30 +102,30 @@ void trim(Vec& v, std::size_t used) noexcept {
 class HeapQueue {
 public:
   void begin(std::span<const NodeId> roots) {
-    h_.clear();
+    heap_.clear();
     peak_ = 0;
     for (NodeId r : roots) push(0, r);
   }
   void push(Cost c, NodeId v) {
-    h_.emplace_back(c, v);  // strong guarantee: a failed growth leaves the heap as it was
-    std::push_heap(h_.begin(), h_.end(), std::greater<> {});
-    if (h_.size() > peak_) peak_ = h_.size();
+    heap_.emplace_back(c, v);  // strong guarantee: a failed growth leaves the heap as it was
+    std::push_heap(heap_.begin(), heap_.end(), std::greater<> {});
+    if (heap_.size() > peak_) peak_ = heap_.size();
   }
   bool pop(Cost& c, NodeId& v) noexcept {
-    if (h_.empty()) return false;
-    std::pop_heap(h_.begin(), h_.end(), std::greater<> {});
-    c = h_.back().first;
-    v = h_.back().second;
-    h_.pop_back();
+    if (heap_.empty()) return false;
+    std::pop_heap(heap_.begin(), heap_.end(), std::greater<> {});
+    c = heap_.back().first;
+    v = heap_.back().second;
+    heap_.pop_back();
     return true;
   }
   void end() noexcept {
-    h_.clear();
-    trim(h_, peak_);
+    heap_.clear();
+    trim(heap_, peak_);
   }
 
 private:
-  std::vector<std::pair<Cost, NodeId>> h_ {};
+  std::vector<std::pair<Cost, NodeId>> heap_ {};
   std::size_t peak_ {0};
 };
 
@@ -286,10 +286,10 @@ struct PoolEntry {
 // flags == 0 for every node; touched, marked, the pool and both queues empty. touched and marked
 // have the capacity of the node arrays, so recording a node never allocates; scratch buffers are
 // rewritten before every use.
-struct Workspace {
-  std::vector<Cost> dist {};
-  std::vector<std::int32_t> head {};
-  std::vector<std::int32_t> loc {};
+struct SearchWorkspace {
+  std::vector<Cost> distances {};
+  std::vector<std::int32_t> predecessor_list_heads {};
+  std::vector<std::int32_t> local_positions {};
   std::vector<std::uint8_t> flags {};
   std::vector<NodeId> touched {};  // the nodes whose dist (and head) a lease wrote
   std::vector<NodeId> marked {};   // the nodes whose flags (and loc) a lease wrote
@@ -302,10 +302,10 @@ struct Workspace {
   std::vector<EdgeId> pruned {};
   std::vector<NodeId> kept {};
   std::vector<NodeId> stack {};
-  std::vector<std::int32_t> off_out {};
-  std::vector<std::int32_t> off_in {};
-  std::vector<std::int32_t> idx_out {};
-  std::vector<std::int32_t> idx_in {};
+  std::vector<std::int32_t> outgoing_offsets {};
+  std::vector<std::int32_t> incoming_offsets {};
+  std::vector<std::int32_t> outgoing_edge_positions {};
+  std::vector<std::int32_t> incoming_edge_positions {};
   std::vector<std::int32_t> hops {};
   std::vector<std::uint8_t> keep_edge {};
   std::vector<std::uint8_t> has_best {};
@@ -313,18 +313,18 @@ struct Workspace {
   bool leased {false};
 };
 
-thread_local Workspace tls_workspace;
+thread_local SearchWorkspace tls_workspace;
 
 // The lease of the thread's workspace for one search (and its extraction): sizes the node arrays
 // for the graph, refuses an overlapping lease, and restores the workspace's invariant on every
 // exit, exceptions included. A failed acquisition changes nothing (the arrays are replaced
 // together or not at all). The workspace holds no pointer into a graph, a residual or an
 // Eligibility between leases.
-class Lease {
+class SearchWorkspaceLease {
 public:
-  explicit Lease(std::size_t n) : ws_(tls_workspace) {
-    if (ws_.leased) throw std::logic_error("search: the thread's workspace is already leased (overlapping searches)");
-    if (ws_.dist.size() < n || ws_.dist.size() > 4 * n + 4096) {
+  explicit SearchWorkspaceLease(std::size_t n) : workspace_(tls_workspace) {
+    if (workspace_.leased) throw std::logic_error("search: the thread's workspace is already leased (overlapping searches)");
+    if (workspace_.distances.size() < n || workspace_.distances.size() > 4 * n + 4096) {
       std::vector<Cost> dist(n, kInf);
       std::vector<std::int32_t> head(n, -1);
       std::vector<std::int32_t> loc(n, -1);
@@ -333,40 +333,40 @@ public:
       std::vector<NodeId> marked;
       touched.reserve(n);
       marked.reserve(n);
-      ws_.dist.swap(dist);
-      ws_.head.swap(head);
-      ws_.loc.swap(loc);
-      ws_.flags.swap(flags);
-      ws_.touched.swap(touched);
-      ws_.marked.swap(marked);
+      workspace_.distances.swap(dist);
+      workspace_.predecessor_list_heads.swap(head);
+      workspace_.local_positions.swap(loc);
+      workspace_.flags.swap(flags);
+      workspace_.touched.swap(touched);
+      workspace_.marked.swap(marked);
     }
-    ws_.leased = true;
+    workspace_.leased = true;
   }
-  Lease(const Lease&) = delete;
-  Lease& operator=(const Lease&) = delete;
-  ~Lease() { release(); }
-  [[nodiscard]] Workspace& ws() noexcept { return ws_; }
+  SearchWorkspaceLease(const SearchWorkspaceLease&) = delete;
+  SearchWorkspaceLease& operator=(const SearchWorkspaceLease&) = delete;
+  ~SearchWorkspaceLease() { release(); }
+  [[nodiscard]] SearchWorkspace& workspace() noexcept { return workspace_; }
 
 private:
   void release() noexcept {
-    auto& w = ws_;
-    const std::size_t n = w.dist.size();
+    auto& w = workspace_;
+    const std::size_t n = w.distances.size();
     if (w.touched.size() * 4 >= n) {
-      std::fill(w.dist.begin(), w.dist.end(), kInf);
-      std::fill(w.head.begin(), w.head.end(), -1);
+      std::fill(w.distances.begin(), w.distances.end(), kInf);
+      std::fill(w.predecessor_list_heads.begin(), w.predecessor_list_heads.end(), -1);
     } else {
       for (NodeId v : w.touched) {
-        w.dist[static_cast<std::size_t>(v)] = kInf;
-        w.head[static_cast<std::size_t>(v)] = -1;
+        w.distances[static_cast<std::size_t>(v)] = kInf;
+        w.predecessor_list_heads[static_cast<std::size_t>(v)] = -1;
       }
     }
     if (w.marked.size() * 4 >= n) {
       std::fill(w.flags.begin(), w.flags.end(), std::uint8_t {0});
-      std::fill(w.loc.begin(), w.loc.end(), -1);
+      std::fill(w.local_positions.begin(), w.local_positions.end(), -1);
     } else {
       for (NodeId v : w.marked) {
         w.flags[static_cast<std::size_t>(v)] = 0;
-        w.loc[static_cast<std::size_t>(v)] = -1;
+        w.local_positions[static_cast<std::size_t>(v)] = -1;
       }
     }
     w.touched.clear();
@@ -379,10 +379,10 @@ private:
     w.buckets.end();
     w.leased = false;
   }
-  Workspace& ws_;
+  SearchWorkspace& workspace_;
 };
 
-void mark(Workspace& ws, NodeId v, std::uint8_t bit) noexcept {
+void mark(SearchWorkspace& ws, NodeId v, std::uint8_t bit) noexcept {
   auto& f = ws.flags[static_cast<std::size_t>(v)];
   if (f == 0) ws.marked.push_back(v);  // within the reserved capacity
   f = static_cast<std::uint8_t>(f | bit);
@@ -390,7 +390,7 @@ void mark(Workspace& ws, NodeId v, std::uint8_t bit) noexcept {
 
 // A KSP spur is the node where an alternative path leaves an earlier path's prefix. Spur rules
 // apply to forward searches only: excluded prefix nodes (kExcluded) prevent cycles. At the spur,
-// multi_edge = true (Expand) bans the listed edges; false (Collapse) bans every edge to a head
+// parallel_edges = true (Expand) bans the listed edges; false (Collapse) bans every edge to a head
 // marked kBannedHead.
 struct Spur {
   NodeId node {-1};
@@ -400,36 +400,36 @@ struct Spur {
 
 // One search over validated inputs. `roots`: allowed, sorted, unique, non-empty; with `targets`
 // the live targets carry kTarget and the search stops at the first one popped.
-struct SearchIn {
-  const Graph* g {nullptr};
-  Gate gate {};
+struct SearchInput {
+  const Graph* graph {nullptr};
+  SearchFilter filter {};
   Direction direction {Direction::Forward};
   SpfQueue queue {SpfQueue::Auto};
   std::span<const NodeId> roots {};
   bool targets {false};
-  bool lists {true};
+  bool collect_predecessors {true};
   const Spur* spur {nullptr};
 };
 
 template <Direction D, class Q>
-Cost loop(Workspace& ws, Q& q, const SearchIn& in) {
-  const Graph& g = *in.g;
-  const Cost* const cost = g.cost().data();
-  const NodeId* const edst = g.edge_dst().data();
-  const std::int32_t* const row = g.row_offsets().data();
-  const std::int32_t* const in_row = g.in_row_offsets().data();
-  const EdgeId* const in_adj = g.in_adj_edge_index().data();
-  const NodeId* const in_col = detail::GraphAccess::in_col_indices(g).data();  // in_col[s] = esrc[in_adj[s]]
-  const std::uint8_t* const allowed = in.gate.elig != nullptr ? in.gate.elig->edge_allowed().data() : nullptr;
-  const Amount* const res = in.gate.residual.empty() ? nullptr : in.gate.residual.data();
-  const Amount minr = in.gate.min_residual;
+Cost run_dijkstra(SearchWorkspace& ws, Q& q, const SearchInput& in) {
+  const Graph& g = *in.graph;
+  const Cost* const cost = g.edge_costs().data();
+  const NodeId* const edst = g.edge_destinations().data();
+  const std::int32_t* const row = g.outgoing_offsets().data();
+  const std::int32_t* const in_row = g.incoming_offsets().data();
+  const EdgeId* const in_adj = g.incoming_edges().data();
+  const NodeId* const in_col = detail::GraphAccess::incoming_edge_sources(g).data();  // in_col[s] = esrc[in_adj[s]]
+  const std::uint8_t* const allowed = in.filter.eligibility != nullptr ? in.filter.eligibility->edge_allowed().data() : nullptr;
+  const Amount* const res = in.filter.residual.empty() ? nullptr : in.filter.residual.data();
+  const Amount minr = in.filter.min_residual;
   // The node arrays are not resized during a lease: raw pointers keep the compiler from
   // reloading the vector bases around every store into the thread-local workspace.
-  Cost* const dist = ws.dist.data();
-  std::int32_t* const head = ws.head.data();
+  Cost* const dist = ws.distances.data();
+  std::int32_t* const head = ws.predecessor_list_heads.data();
   const std::uint8_t* const flags = ws.flags.data();
   const bool targets = in.targets;
-  const bool lists = in.lists;
+  const bool lists = in.collect_predecessors;
   const Spur* const spur = in.spur;
   auto candidate = [&](std::size_t e) noexcept {
     return (allowed == nullptr || allowed[e] != 0) && (res == nullptr || res[e] >= minr);
@@ -487,42 +487,42 @@ Cost loop(Workspace& ws, Q& q, const SearchIn& in) {
 
 // Runs one search into the leased workspace; returns the nearest targets' distance d* (kInf
 // without targets or when none is reached).
-Cost run(Workspace& ws, const SearchIn& in) {
+Cost run_search(SearchWorkspace& ws, const SearchInput& in) {
   for (NodeId r : in.roots) {
     ws.touched.push_back(r);  // before the write; within the reserved capacity
-    ws.dist[static_cast<std::size_t>(r)] = 0;
+    ws.distances[static_cast<std::size_t>(r)] = 0;
   }
-  const Graph& g = *in.g;
+  const Graph& g = *in.graph;
   const bool forward = in.direction == Direction::Forward;
   if (uses_buckets(g, in.queue)) {
 #if NETGRAPH_CORE_PRIVATE_HOOKS
     ++thread_queue_counts().buckets;
 #endif
-    ws.buckets.begin(bucket_width(g), std::max<Cost>(1, g.cost_gcd()), ws.dist.size(), in.roots);
-    return forward ? loop<Direction::Forward>(ws, ws.buckets, in) : loop<Direction::Reverse>(ws, ws.buckets, in);
+    ws.buckets.begin(bucket_width(g), std::max<Cost>(1, g.edge_cost_gcd()), ws.distances.size(), in.roots);
+    return forward ? run_dijkstra<Direction::Forward>(ws, ws.buckets, in) : run_dijkstra<Direction::Reverse>(ws, ws.buckets, in);
   }
   ws.heap.begin(in.roots);
-  return forward ? loop<Direction::Forward>(ws, ws.heap, in) : loop<Direction::Reverse>(ws, ws.heap, in);
+  return forward ? run_dijkstra<Direction::Forward>(ws, ws.heap, in) : run_dijkstra<Direction::Reverse>(ws, ws.heap, in);
 }
 
 // How a list's entries are read after a search: the list of a node holds its tight in-edges
 // (Forward: the other endpoint is the edge's source) or its tight out-edges toward the roots
 // (Reverse: the other endpoint is the edge's destination); Collapse keeps one member per pair.
-struct Emit {
-  const Graph* g {nullptr};
+struct SearchOutputOptions {
+  const Graph* graph {nullptr};
   bool forward {true};
-  bool collapse {false};
-  bool prefer {false};
-  PriorityFn prio {};
+  bool collapse_parallel_edges {false};
+  bool prefer_priority {false};
+  PriorityReader priority {};
 };
 
 // Appends node x's list to `out` with Collapse applied. The entries of one pair are consecutive
 // in the list (each node's scan inserts them one after another; they are the pair's cheapest
 // candidates, consecutive in both adjacency orders), so one pass groups them by the other endpoint.
-void read_list(const Workspace& ws, const Emit& em, NodeId x, std::vector<EdgeId>& out) {
-  const NodeId* const other = em.forward ? em.g->edge_src().data() : em.g->edge_dst().data();
-  std::int32_t k = ws.head[static_cast<std::size_t>(x)];
-  if (!em.collapse) {
+void read_list(const SearchWorkspace& ws, const SearchOutputOptions& em, NodeId x, std::vector<EdgeId>& out) {
+  const NodeId* const other = em.forward ? em.graph->edge_sources().data() : em.graph->edge_destinations().data();
+  std::int32_t k = ws.predecessor_list_heads[static_cast<std::size_t>(x)];
+  if (!em.collapse_parallel_edges) {
     for (; k >= 0; k = ws.pool[static_cast<std::size_t>(k)].next) out.push_back(ws.pool[static_cast<std::size_t>(k)].edge);
     return;
   }
@@ -533,8 +533,8 @@ void read_list(const Workspace& ws, const Emit& em, NodeId x, std::vector<EdgeId
     for (; k >= 0; k = ws.pool[static_cast<std::size_t>(k)].next) {
       const EdgeId e = ws.pool[static_cast<std::size_t>(k)].edge;
       if (other[static_cast<std::size_t>(e)] != y) break;
-      if (em.prefer) {
-        const int c = compare(em.prio(e), em.prio(best));
+      if (em.prefer_priority) {
+        const int c = compare(em.priority(e), em.priority(best));
         if (c > 0 || (c == 0 && e < best)) best = e;
       } else if (e < best) {
         best = e;
@@ -553,11 +553,11 @@ void sort_small(std::vector<EdgeId>& v, std::size_t from) {
 // for its costs anyway): Forward lists are per child, so the entries come grouped by child and
 // the ascending order by a counting pass over the parents; Reverse lists are per parent, so the
 // ascending order comes directly and the grouping by a counting pass over the children.
-PredDAG emit_full(Workspace& ws, const Emit& em) {
-  const Graph& g = *em.g;
+PredecessorDAG emit_full(SearchWorkspace& ws, const SearchOutputOptions& em) {
+  const Graph& g = *em.graph;
   const auto n = static_cast<std::size_t>(g.num_nodes());
-  const auto esrc = g.edge_src();
-  const auto edst = g.edge_dst();
+  const auto esrc = g.edge_sources();
+  const auto edst = g.edge_destinations();
   std::vector<NodeId> nodes;
   std::vector<std::int32_t> offsets {0};
   std::vector<NodeId> parents;
@@ -567,7 +567,7 @@ PredDAG emit_full(Workspace& ws, const Emit& em) {
   list.clear();
   if (em.forward) {
     for (std::size_t v = 0; v < n; ++v) {
-      if (ws.head[v] < 0) continue;
+      if (ws.predecessor_list_heads[v] < 0) continue;
       const std::size_t from = list.size();
       read_list(ws, em, static_cast<NodeId>(v), list);
       sort_small(list, from);
@@ -591,14 +591,14 @@ PredDAG emit_full(Workspace& ws, const Emit& em) {
       from = to;
     }
   } else {
-    const auto row = g.row_offsets();
+    const auto row = g.outgoing_offsets();
     for (std::size_t u = 0; u < n; ++u) {
-      if (ws.head[u] < 0) continue;
-      if (!em.collapse && row[u + 1] - row[u] <= 64) {
+      if (ws.predecessor_list_heads[u] < 0) continue;
+      if (!em.collapse_parallel_edges && row[u + 1] - row[u] <= 64) {
         // The list holds distinct out-edges of u, ids in [row[u], row[u + 1]): one bit per id gives
         // them in ascending order without a sort.
         std::uint64_t bits = 0;
-        for (std::int32_t k = ws.head[u]; k >= 0; k = ws.pool[static_cast<std::size_t>(k)].next) {
+        for (std::int32_t k = ws.predecessor_list_heads[u]; k >= 0; k = ws.pool[static_cast<std::size_t>(k)].next) {
           bits |= std::uint64_t {1} << (ws.pool[static_cast<std::size_t>(k)].edge - row[u]);
         }
         for (; bits != 0; bits &= bits - 1) list.push_back(row[u] + std::countr_zero(bits));
@@ -625,20 +625,20 @@ PredDAG emit_full(Workspace& ws, const Emit& em) {
       from = to;
     }
   }
-  return PredDAGBuilder::of_parts(g, std::move(nodes), std::move(offsets), std::move(parents), std::move(via),
+  return PredecessorDAGBuilder::of_parts(g, std::move(nodes), std::move(offsets), std::move(parents), std::move(via),
                                   std::move(asc));
 }
 
 // The walk back from the targets at d* along the lists (anycast pruning): every tight edge on a
 // walk from a root to a nearest target, Collapse applied, into ws.pruned (any order); the nodes on
 // those walks carry kKeep and are listed in ws.kept.
-void prune(Workspace& ws, const Emit& em, std::span<const NodeId> targets, Cost dstar) {
-  const NodeId* const other = em.forward ? em.g->edge_src().data() : em.g->edge_dst().data();
+void prune(SearchWorkspace& ws, const SearchOutputOptions& em, std::span<const NodeId> targets, Cost dstar) {
+  const NodeId* const other = em.forward ? em.graph->edge_sources().data() : em.graph->edge_destinations().data();
   ws.pruned.clear();
   ws.kept.clear();
   ws.stack.clear();
   for (NodeId t : targets) {
-    if (ws.dist[static_cast<std::size_t>(t)] != dstar) continue;
+    if (ws.distances[static_cast<std::size_t>(t)] != dstar) continue;
     mark(ws, t, kKeep);
     ws.kept.push_back(t);
     ws.stack.push_back(t);
@@ -661,7 +661,7 @@ void prune(Workspace& ws, const Emit& em, std::span<const NodeId> targets, Cost 
 // Choose one path from tight DAG `edges` (ws.pruned, any order) and `nodes` (ws.kept, kKeep).
 // pot(v) is distance from the starts: 0 there, `total` at the ends. Increasing pot orders
 // every predecessor before its child (topological order).
-// Under PreferHigherPriority (`prio`), first maximise the smallest edge priority on a walk
+// Under a HIGHER_* tie_break (`prio`), first maximise the smallest tie value on a walk
 // (its bottleneck), capped by `cap` for a KSP prefix; call this B*. Keep edges with priority >= B*.
 // Then compute minimum remaining hops h from the ends. Start where h is smallest and repeatedly
 // take the lowest EdgeId with h(v) = h(u) - 1. Decreasing h prevents cycles; choosing the smallest
@@ -673,12 +673,12 @@ struct Walk {
 };
 
 template <class Pot>
-Walk extract(Workspace& ws, const Graph& g, Pot pot, Cost total, const PriorityFn* prio, const Priority* cap) {
+Walk extract(SearchWorkspace& ws, const Graph& graph, Pot pot, Cost total, const PriorityReader* prio, const Priority* cap) {
   auto& nodes = ws.kept;
   auto& edges = ws.pruned;
-  const auto esrc = g.edge_src();
-  const auto edst = g.edge_dst();
-  const auto cost = g.cost();
+  const auto esrc = graph.edge_sources();
+  const auto edst = graph.edge_destinations();
+  const auto cost = graph.edge_costs();
   std::sort(nodes.begin(), nodes.end(), [&](NodeId a, NodeId b) {
     const Cost pa = pot(a);
     const Cost pb = pot(b);
@@ -686,30 +686,30 @@ Walk extract(Workspace& ws, const Graph& g, Pot pot, Cost total, const PriorityF
   });
   std::sort(edges.begin(), edges.end());
   const std::size_t k = nodes.size();
-  for (std::size_t i = 0; i < k; ++i) ws.loc[static_cast<std::size_t>(nodes[i])] = static_cast<std::int32_t>(i);
-  auto local = [&](NodeId v) { return static_cast<std::size_t>(ws.loc[static_cast<std::size_t>(v)]); };
+  for (std::size_t i = 0; i < k; ++i) ws.local_positions[static_cast<std::size_t>(nodes[i])] = static_cast<std::int32_t>(i);
+  auto local = [&](NodeId v) { return static_cast<std::size_t>(ws.local_positions[static_cast<std::size_t>(v)]); };
   // Local CSRs over the edges in ascending EdgeId: out-lists by tail, in-lists by head.
-  ws.off_out.assign(k + 1, 0);
-  ws.off_in.assign(k + 1, 0);
+  ws.outgoing_offsets.assign(k + 1, 0);
+  ws.incoming_offsets.assign(k + 1, 0);
   for (EdgeId e : edges) {
-    ++ws.off_out[local(esrc[static_cast<std::size_t>(e)]) + 1];
-    ++ws.off_in[local(edst[static_cast<std::size_t>(e)]) + 1];
+    ++ws.outgoing_offsets[local(esrc[static_cast<std::size_t>(e)]) + 1];
+    ++ws.incoming_offsets[local(edst[static_cast<std::size_t>(e)]) + 1];
   }
   for (std::size_t i = 1; i <= k; ++i) {
-    ws.off_out[i] += ws.off_out[i - 1];
-    ws.off_in[i] += ws.off_in[i - 1];
+    ws.outgoing_offsets[i] += ws.outgoing_offsets[i - 1];
+    ws.incoming_offsets[i] += ws.incoming_offsets[i - 1];
   }
-  ws.idx_out.resize(edges.size());
-  ws.idx_in.resize(edges.size());
+  ws.outgoing_edge_positions.resize(edges.size());
+  ws.incoming_edge_positions.resize(edges.size());
   ws.hops.assign(k, 0);  // reused as the fill cursors, then as h
   for (std::size_t p = 0; p < edges.size(); ++p) {
     const std::size_t t = local(esrc[static_cast<std::size_t>(edges[p])]);
-    ws.idx_out[static_cast<std::size_t>(ws.off_out[t] + ws.hops[t]++)] = static_cast<std::int32_t>(p);
+    ws.outgoing_edge_positions[static_cast<std::size_t>(ws.outgoing_offsets[t] + ws.hops[t]++)] = static_cast<std::int32_t>(p);
   }
   std::fill(ws.hops.begin(), ws.hops.end(), 0);
   for (std::size_t p = 0; p < edges.size(); ++p) {
     const std::size_t h = local(edst[static_cast<std::size_t>(edges[p])]);
-    ws.idx_in[static_cast<std::size_t>(ws.off_in[h] + ws.hops[h]++)] = static_cast<std::int32_t>(p);
+    ws.incoming_edge_positions[static_cast<std::size_t>(ws.incoming_offsets[h] + ws.hops[h]++)] = static_cast<std::int32_t>(p);
   }
   ws.keep_edge.assign(edges.size(), 1);
   if (prio != nullptr) {
@@ -721,8 +721,8 @@ Walk extract(Workspace& ws, const Graph& g, Pot pot, Cost total, const PriorityF
     }
     for (std::size_t i = 0; i < k; ++i) {
       if (ws.has_best[i] == 0) continue;
-      for (auto s = ws.off_out[i]; s < ws.off_out[i + 1]; ++s) {
-        const EdgeId e = edges[static_cast<std::size_t>(ws.idx_out[static_cast<std::size_t>(s)])];
+      for (auto s = ws.outgoing_offsets[i]; s < ws.outgoing_offsets[i + 1]; ++s) {
+        const EdgeId e = edges[static_cast<std::size_t>(ws.outgoing_edge_positions[static_cast<std::size_t>(s)])];
         Priority c = (*prio)(e);
         if (compare(ws.best[i], c) < 0) c = ws.best[i];
         const std::size_t j = local(edst[static_cast<std::size_t>(e)]);
@@ -751,8 +751,8 @@ Walk extract(Workspace& ws, const Graph& g, Pot pot, Cost total, const PriorityF
   }
   for (std::size_t qi = 0; qi < queue.size(); ++qi) {
     const std::size_t x = local(queue[qi]);
-    for (auto s = ws.off_in[x]; s < ws.off_in[x + 1]; ++s) {
-      const auto p = static_cast<std::size_t>(ws.idx_in[static_cast<std::size_t>(s)]);
+    for (auto s = ws.incoming_offsets[x]; s < ws.incoming_offsets[x + 1]; ++s) {
+      const auto p = static_cast<std::size_t>(ws.incoming_edge_positions[static_cast<std::size_t>(s)]);
       if (ws.keep_edge[p] == 0) continue;
       const std::size_t y = local(esrc[static_cast<std::size_t>(edges[p])]);
       if (h[y] < 0) {
@@ -763,8 +763,8 @@ Walk extract(Workspace& ws, const Graph& g, Pot pot, Cost total, const PriorityF
   }
   // The first qualifying out-edge of a node (out-lists ascending: its smallest), or -1.
   auto next_edge = [&](std::size_t x) -> EdgeId {
-    for (auto s = ws.off_out[x]; s < ws.off_out[x + 1]; ++s) {
-      const auto p = static_cast<std::size_t>(ws.idx_out[static_cast<std::size_t>(s)]);
+    for (auto s = ws.outgoing_offsets[x]; s < ws.outgoing_offsets[x + 1]; ++s) {
+      const auto p = static_cast<std::size_t>(ws.outgoing_edge_positions[static_cast<std::size_t>(s)]);
       if (ws.keep_edge[p] == 0) continue;
       const EdgeId e = edges[p];
       if (h[local(edst[static_cast<std::size_t>(e)])] == h[x] - 1) return e;
@@ -802,70 +802,70 @@ Walk extract(Workspace& ws, const Graph& g, Pot pot, Cost total, const PriorityF
 }
 
 // The live (allowed) members of a sorted node set.
-std::vector<NodeId> live(std::span<const NodeId> set, const Eligibility* elig) {
+std::vector<NodeId> allowed_nodes(std::span<const NodeId> set, const Eligibility* eligibility) {
   std::vector<NodeId> out;
   out.reserve(set.size());
   for (NodeId v : set) {
-    if (elig == nullptr || elig->node_ok(v)) out.push_back(v);
+    if (eligibility == nullptr || eligibility->allows_node(v)) out.push_back(v);
   }
   return out;
 }
 
-Emit emit_of(const Graph& g, Direction direction, const PathSelection& selection, const PriorityFn& prio) {
-  Emit em;
-  em.g = &g;
+SearchOutputOptions emit_of(const Graph& graph, Direction direction, const RouteChoice& choice, const PriorityReader& prio) {
+  SearchOutputOptions em;
+  em.graph = &graph;
   em.forward = direction == Direction::Forward;
-  em.collapse = !selection.multi_edge;
-  em.prefer = selection.tie_break == EdgeTieBreak::PreferHigherPriority;
-  em.prio = prio;
+  em.collapse_parallel_edges = !choice.parallel_edges;
+  em.prefer_priority = choice.prefers_score();
+  em.priority = prio;
   return em;
 }
 
-// One KSP spur search: the canonical walk from `spur` to `dst` over the
+// One KSP spur search: the canonical walk from `spur` to `destination` over the
 // candidates of `gate`, without the excluded prefix nodes, with the spur node's banned
 // transitions (Expand: the banned edges; Collapse: every edge to a banned head, no re-selection),
-// B* capped by `cap` (the root prefix's bottleneck). nullopt when dst is unreachable.
-std::optional<Walk> spur_walk(const Graph& g, const Gate& gate, const PathSelection& selection, const PriorityFn& prio,
-                              NodeId spur, NodeId dst, std::span<const NodeId> excluded, std::span<const EdgeId> banned,
+// B* capped by `cap` (the root prefix's bottleneck). nullopt when `destination` is unreachable.
+std::optional<Walk> spur_walk(const Graph& graph, const SearchFilter& gate, const RouteChoice& choice, const PriorityReader& prio,
+                              NodeId spur, NodeId destination, std::span<const NodeId> excluded, std::span<const EdgeId> banned,
                               const Priority* cap) {
-  Lease lease(static_cast<std::size_t>(g.num_nodes()));
-  Workspace& ws = lease.ws();
-  mark(ws, dst, kTarget);
+  SearchWorkspaceLease lease(static_cast<std::size_t>(graph.num_nodes()));
+  SearchWorkspace& ws = lease.workspace();
+  mark(ws, destination, kTarget);
   for (NodeId v : excluded) mark(ws, v, kExcluded);
   Spur rule;
   rule.node = spur;
-  if (selection.multi_edge) {
+  if (choice.parallel_edges) {
     rule.banned_edges = banned;
   } else {
     rule.ban_heads = true;
-    for (EdgeId e : banned) mark(ws, g.edge_dst()[static_cast<std::size_t>(e)], kBannedHead);
+    for (EdgeId e : banned) mark(ws, graph.edge_destinations()[static_cast<std::size_t>(e)], kBannedHead);
   }
   const NodeId roots[1] = {spur};
-  SearchIn in;
-  in.g = &g;
-  in.gate = gate;
+  SearchInput in;
+  in.graph = &graph;
+  in.filter = gate;
   in.roots = roots;
   in.targets = true;
   in.spur = &rule;
-  const Cost dstar = run(ws, in);
+  const Cost dstar = run_search(ws, in);
   if (dstar == kInf) return std::nullopt;
-  const Emit em = emit_of(g, Direction::Forward, selection, prio);
-  const NodeId targets[1] = {dst};
+  const SearchOutputOptions em = emit_of(graph, Direction::Forward, choice, prio);
+  const NodeId targets[1] = {destination};
   prune(ws, em, targets, dstar);
-  const bool prefer = selection.tie_break == EdgeTieBreak::PreferHigherPriority;
-  return extract(ws, g, [&](NodeId v) { return ws.dist[static_cast<std::size_t>(v)]; }, dstar,
+  const bool prefer = choice.prefers_score();
+  return extract(ws, graph, [&](NodeId v) { return ws.distances[static_cast<std::size_t>(v)]; }, dstar,
                  prefer ? &prio : nullptr, cap);
 }
 
 
 // The walks of resolve_to_paths (validated inputs): see the public function.
-std::vector<Path> enumerate_paths(const Graph& g, const PredDAG& dag, NodeId src, NodeId dst, bool split,
+std::vector<Path> enumerate_paths(const Graph& graph, const PredecessorDAG& dag, NodeId source, NodeId destination, bool split,
                                   std::optional<std::int64_t> max_paths) {
-  const auto children = PredDAGBuilder::member_nodes(dag);
-  const auto offsets = PredDAGBuilder::member_offsets(dag);
+  const auto children = PredecessorDAGBuilder::member_nodes(dag);
+  const auto offsets = PredecessorDAGBuilder::member_offsets(dag);
   const auto parents = dag.parents();
   const auto via = dag.via_edges();
-  const auto cost = g.cost();
+  const auto cost = graph.edge_costs();
   std::vector<Path> out;
   // The entries of a child: [offsets[i], offsets[i + 1]) for children[i], none for another node.
   auto entries_of = [&](NodeId v) -> std::pair<std::int32_t, std::int32_t> {
@@ -874,16 +874,16 @@ std::vector<Path> enumerate_paths(const Graph& g, const PredDAG& dag, NodeId src
     const auto i = static_cast<std::size_t>(it - children.begin());
     return {offsets[i], offsets[i + 1]};
   };
-  Lease lease(static_cast<std::size_t>(g.num_nodes()));
-  Workspace& ws = lease.ws();
-  // The nodes that reach dst inside the DAG (the walk back over the entries), local index by
+  SearchWorkspaceLease lease(static_cast<std::size_t>(graph.num_nodes()));
+  SearchWorkspace& ws = lease.workspace();
+  // The nodes that reach destination inside the DAG (the walk back over the entries), local index by
   // discovery.
   auto& kept = ws.kept;
   kept.clear();
   ws.stack.clear();
-  mark(ws, dst, kKeep);
-  kept.push_back(dst);
-  ws.stack.push_back(dst);
+  mark(ws, destination, kKeep);
+  kept.push_back(destination);
+  ws.stack.push_back(destination);
   while (!ws.stack.empty()) {
     const NodeId v = ws.stack.back();
     ws.stack.pop_back();
@@ -896,9 +896,9 @@ std::vector<Path> enumerate_paths(const Graph& g, const PredDAG& dag, NodeId src
       ws.stack.push_back(u);
     }
   }
-  if ((ws.flags[static_cast<std::size_t>(src)] & kKeep) == 0) return out;  // src is not on a walk to dst
-  for (std::size_t i = 0; i < kept.size(); ++i) ws.loc[static_cast<std::size_t>(kept[i])] = static_cast<std::int32_t>(i);
-  auto local = [&](NodeId v) { return static_cast<std::size_t>(ws.loc[static_cast<std::size_t>(v)]); };
+  if ((ws.flags[static_cast<std::size_t>(source)] & kKeep) == 0) return out;  // source is not on a walk to destination
+  for (std::size_t i = 0; i < kept.size(); ++i) ws.local_positions[static_cast<std::size_t>(kept[i])] = static_cast<std::int32_t>(i);
+  auto local = [&](NodeId v) { return static_cast<std::size_t>(ws.local_positions[static_cast<std::size_t>(v)]); };
   // The hops: per child, its entries come in ascending via, so grouped by parent (EdgeIds rank by
   // source first); a hop is one parent's run (its members ascending, its cost the cheapest, its
   // key the lowest id), or one member when split.
@@ -943,32 +943,32 @@ std::vector<Path> enumerate_paths(const Graph& g, const PredDAG& dag, NodeId src
       out_hop[static_cast<std::size_t>(fill[static_cast<std::size_t>(hops[h].tail)]++)] = static_cast<std::int32_t>(h);
     }
   }
-  // A completion is a walk suffix from a node to dst. Per node: the completions found so far
+  // A completion is a walk suffix from a node to destination. Per node: the completions found so far
   // (sorted) and a heap holding the next completion through each hop.
-  struct Elem {
+  struct PathCompletion {
     Cost cost;
     std::int64_t hops;
-    std::int32_t hop;   // -1: the empty completion of dst
+    std::int32_t hop;   // -1: the empty completion of destination
     std::int64_t rank;  // the completion of the hop's head this one extends
   };
-  struct Next {
+  struct CompletionCandidate {
     Cost cost;
     std::int64_t hops;
     EdgeId key;
     std::int32_t hop;
     std::int64_t rank;
   };
-  auto after = [](const Next& a, const Next& b) {  // a pops after b: (cost, hops, key) ascending
+  auto after = [](const CompletionCandidate& a, const CompletionCandidate& b) {  // a pops after b: (cost, hops, key) ascending
     if (a.cost != b.cost) return a.cost > b.cost;
     if (a.hops != b.hops) return a.hops > b.hops;
     return a.key > b.key;
   };
-  std::vector<std::vector<Elem>> list(n);
-  std::vector<std::vector<Next>> heap(n);
+  std::vector<std::vector<PathCompletion>> list(n);
+  std::vector<std::vector<CompletionCandidate>> heap(n);
   std::vector<std::uint8_t> ready(n, 0);
-  const std::size_t t = local(dst);
+  const std::size_t t = local(destination);
   list[t].push_back({0, 0, -1, -1});
-  ready[t] = 1;  // a walk ends at dst: its out-hops never extend a completion
+  ready[t] = 1;  // a walk ends at destination: its out-hops never extend a completion
   auto offer = [&](std::size_t x, std::int32_t h, std::int64_t rank) {
     const auto& s = list[static_cast<std::size_t>(hops[static_cast<std::size_t>(h)].head)][static_cast<std::size_t>(rank)];
     heap[x].push_back({hops[static_cast<std::size_t>(h)].cost + s.cost, s.hops + 1, hops[static_cast<std::size_t>(h)].key, h, rank});
@@ -1026,7 +1026,7 @@ std::vector<Path> enumerate_paths(const Graph& g, const PredDAG& dag, NodeId src
             break;
           }
           std::pop_heap(hx.begin(), hx.end(), after);
-          const Next c = hx.back();
+          const CompletionCandidate c = hx.back();
           hx.pop_back();
           list[f.x].push_back({c.cost, c.hops, c.hop, c.rank});
           frames[top].stage = 4;
@@ -1043,80 +1043,80 @@ std::vector<Path> enumerate_paths(const Graph& g, const PredDAG& dag, NodeId src
     }
     return ret;
   };
-  const std::size_t s = local(src);
+  const std::size_t s = local(source);
   for (std::int64_t j = 0; !max_paths.has_value() || j < *max_paths; ++j) {
     if (!get(s, j)) break;
     std::vector<std::vector<EdgeId>> walk;
     std::size_t x = s;
     std::int64_t idx = j;
     while (x != t) {
-      const Elem& e = list[x][static_cast<std::size_t>(idx)];
+      const PathCompletion& e = list[x][static_cast<std::size_t>(idx)];
       const Hop& h = hops[static_cast<std::size_t>(e.hop)];
       walk.emplace_back(via.begin() + h.first, via.begin() + h.first + h.count);
       x = static_cast<std::size_t>(h.head);
       idx = e.rank;
     }
-    out.push_back(PathBuilder::of_hops(g, std::move(walk)));
+    out.push_back(PathBuilder::of_hops(graph, std::move(walk)));
   }
   return out;
 }
 
 } // namespace
 
-std::optional<SearchRoute> route_search(const Graph& g, const Gate& gate, const PathSelection& selection, NodeId src,
-                                        std::span<const NodeId> dests) {
-  if (dests.empty()) return std::nullopt;
-  const PriorityValues values {&g, selection.priority, gate.residual};
-  const PriorityFn prio = PriorityFn::of(values);
-  Lease lease(static_cast<std::size_t>(g.num_nodes()));
-  Workspace& ws = lease.ws();
-  for (NodeId t : dests) mark(ws, t, kTarget);
-  const NodeId roots[1] = {src};
-  SearchIn in;
-  in.g = &g;
-  in.gate = gate;
+std::optional<SearchRoute> route_search(const Graph& graph, const SearchFilter& gate, const RouteChoice& choice, NodeId source,
+                                        std::span<const NodeId> destinations) {
+  if (destinations.empty()) return std::nullopt;
+  const PriorityValues values {&graph, choice.tie_break, gate.residual};
+  const PriorityReader prio = PriorityReader::of(values);
+  SearchWorkspaceLease lease(static_cast<std::size_t>(graph.num_nodes()));
+  SearchWorkspace& ws = lease.workspace();
+  for (NodeId t : destinations) mark(ws, t, kTarget);
+  const NodeId roots[1] = {source};
+  SearchInput in;
+  in.graph = &graph;
+  in.filter = gate;
   in.roots = roots;
   in.targets = true;
-  const Cost dstar = run(ws, in);
+  const Cost dstar = run_search(ws, in);
   if (dstar == kInf) return std::nullopt;
-  const Emit em = emit_of(g, Direction::Forward, selection, prio);
-  prune(ws, em, dests, dstar);
+  const SearchOutputOptions em = emit_of(graph, Direction::Forward, choice, prio);
+  prune(ws, em, destinations, dstar);
   SearchRoute out;
   out.cost = dstar;
-  const bool prefer = selection.tie_break == EdgeTieBreak::PreferHigherPriority;
-  auto walk = extract(ws, g, [&](NodeId v) { return ws.dist[static_cast<std::size_t>(v)]; }, dstar,
+  const bool prefer = choice.prefers_score();
+  auto walk = extract(ws, graph, [&](NodeId v) { return ws.distances[static_cast<std::size_t>(v)]; }, dstar,
                       prefer ? &prio : nullptr, nullptr);
   out.edges = std::move(walk.edges);
   return out;
 }
 
-SearchRoute support_route(const Graph& g, std::span<const EdgeId> support, NodeId src, std::span<const NodeId> dests,
-                          const PathSelection& selection, PriorityFn view) {
-  const auto row = g.row_offsets();
-  const auto edst = g.edge_dst();
-  const auto esrc = g.edge_src();
-  const auto cost = g.cost();
-  Lease lease(static_cast<std::size_t>(g.num_nodes()));
-  Workspace& ws = lease.ws();
-  for (NodeId t : dests) mark(ws, t, kTarget);
-  // The part of the support reachable from src: every walk of a support from one node has one
+SearchRoute support_route(const Graph& graph, std::span<const EdgeId> support, NodeId source, std::span<const NodeId> destinations,
+                          const RouteChoice& choice, PriorityReader view) {
+  const auto row = graph.outgoing_offsets();
+  const auto edst = graph.edge_destinations();
+  const auto esrc = graph.edge_sources();
+  const auto cost = graph.edge_costs();
+  SearchWorkspaceLease lease(static_cast<std::size_t>(graph.num_nodes()));
+  SearchWorkspace& ws = lease.workspace();
+  for (NodeId t : destinations) mark(ws, t, kTarget);
+  // The part of the support reachable from source: every walk of a support from one node has one
   // cost to each node it reaches (the support is a reverse multipath DAG), so the order of the
-  // walk assigns each node its distance from src exactly.
+  // walk assigns each node its distance from source exactly.
   auto& route = ws.pruned;
   route.clear();
   ws.kept.clear();
   ws.stack.clear();
-  mark(ws, src, kKeep);
-  ws.kept.push_back(src);
-  ws.touched.push_back(src);
-  ws.dist[static_cast<std::size_t>(src)] = 0;
-  ws.stack.push_back(src);
+  mark(ws, source, kKeep);
+  ws.kept.push_back(source);
+  ws.touched.push_back(source);
+  ws.distances[static_cast<std::size_t>(source)] = 0;
+  ws.stack.push_back(source);
   Cost total = kInf;
   while (!ws.stack.empty()) {
     const NodeId u = ws.stack.back();
     ws.stack.pop_back();
     const auto ui = static_cast<std::size_t>(u);
-    if ((ws.flags[ui] & kTarget) != 0) total = ws.dist[ui];
+    if ((ws.flags[ui] & kTarget) != 0) total = ws.distances[ui];
     auto it = std::lower_bound(support.begin(), support.end(), row[ui]);
     for (; it != support.end() && *it < row[ui + 1]; ++it) {
       route.push_back(*it);
@@ -1126,18 +1126,18 @@ SearchRoute support_route(const Graph& g, std::span<const EdgeId> support, NodeI
       mark(ws, v, kKeep);
       ws.kept.push_back(v);
       ws.touched.push_back(v);
-      ws.dist[vi] = ws.dist[ui] + cost[static_cast<std::size_t>(*it)];
+      ws.distances[vi] = ws.distances[ui] + cost[static_cast<std::size_t>(*it)];
       ws.stack.push_back(v);
     }
   }
   SearchRoute out;
   if (total == kInf) return out;  // no destination reached (the roster excludes such a source)
   std::sort(route.begin(), route.end());
-  const bool prefer = selection.tie_break == EdgeTieBreak::PreferHigherPriority;
-  if (!selection.multi_edge) {
-    // One member per (u, v) by select_adjacency on the view (no gating: the support's members are
+  const bool prefer = choice.prefers_score();
+  if (!choice.parallel_edges) {
+    // One member per (u, v) by replaces() on the view (no gating: the support's members are
     // all statically eligible). The members of a pair in the support have one cost, so they are
-    // consecutive in id order (EdgeIds rank by (src, cost, dst, input)).
+    // consecutive in id order (EdgeIds rank by (source, cost, destination, input)).
     std::size_t w = 0;
     for (std::size_t i = 0; i < route.size();) {
       const auto ei = static_cast<std::size_t>(route[i]);
@@ -1146,7 +1146,7 @@ SearchRoute support_route(const Graph& g, std::span<const EdgeId> support, NodeI
       for (; j < route.size() && esrc[static_cast<std::size_t>(route[j])] == esrc[ei] &&
              edst[static_cast<std::size_t>(route[j])] == edst[ei];
            ++j) {
-        if (replaces(g, route[j], best, prefer, view)) best = route[j];
+        if (replaces(graph, route[j], best, prefer, view)) best = route[j];
       }
       route[w++] = best;
       i = j;
@@ -1154,61 +1154,62 @@ SearchRoute support_route(const Graph& g, std::span<const EdgeId> support, NodeI
     route.resize(w);
   }
   out.cost = total;
-  if (!selection.single_path()) {
+  if (!choice.single_path()) {
     out.edges = route;
     return out;
   }
-  auto walk = extract(ws, g, [&](NodeId v) { return ws.dist[static_cast<std::size_t>(v)]; }, total,
+  auto walk = extract(ws, graph, [&](NodeId v) { return ws.distances[static_cast<std::size_t>(v)]; }, total,
                       prefer ? &view : nullptr, nullptr);
   out.edges = std::move(walk.edges);
   std::sort(out.edges.begin(), out.edges.end());
   return out;
 }
 
-PredDAG static_support(const Graph& g, std::span<const NodeId> roots, Direction direction, const Eligibility* elig) {
-  const auto live_roots = live(roots, elig);
-  if (live_roots.empty()) return PredDAGBuilder::empty(g);
-  Lease lease(static_cast<std::size_t>(g.num_nodes()));
-  Workspace& ws = lease.ws();
-  SearchIn in;
-  in.g = &g;
-  in.gate.elig = elig;
+PredecessorDAG static_support(const Graph& graph, std::span<const NodeId> roots, Direction direction, const Eligibility* eligibility) {
+  const auto live_roots = allowed_nodes(roots, eligibility);
+  if (live_roots.empty()) return PredecessorDAGBuilder::empty(graph);
+  SearchWorkspaceLease lease(static_cast<std::size_t>(graph.num_nodes()));
+  SearchWorkspace& ws = lease.workspace();
+  SearchInput in;
+  in.graph = &graph;
+  in.filter.eligibility = eligibility;
   in.direction = direction;
   in.roots = live_roots;
-  (void)run(ws, in);
-  Emit em;
-  em.g = &g;
+  (void)run_search(ws, in);
+  SearchOutputOptions em;
+  em.graph = &graph;
   em.forward = direction == Direction::Forward;
   return emit_full(ws, em);
 }
 
-std::vector<Cost> static_costs(const Graph& g, const Eligibility* elig, std::span<const NodeId> dests,
+std::vector<Cost> static_costs(const Graph& graph, const Eligibility* eligibility, std::span<const NodeId> destinations,
                                std::span<const NodeId> sources) {
   std::vector<Cost> out(sources.size(), kInf);
-  const auto roots = live(dests, elig);
+  const auto roots = allowed_nodes(destinations, eligibility);
   if (roots.empty()) return out;
-  Lease lease(static_cast<std::size_t>(g.num_nodes()));
-  Workspace& ws = lease.ws();
-  SearchIn in;
-  in.g = &g;
-  in.gate.elig = elig;
+  SearchWorkspaceLease lease(static_cast<std::size_t>(graph.num_nodes()));
+  SearchWorkspace& ws = lease.workspace();
+  SearchInput in;
+  in.graph = &graph;
+  in.filter.eligibility = eligibility;
   in.direction = Direction::Reverse;
   in.roots = roots;
-  in.lists = false;
-  (void)run(ws, in);
-  for (std::size_t i = 0; i < sources.size(); ++i) out[i] = ws.dist[static_cast<std::size_t>(sources[i])];
+  in.collect_predecessors = false;
+  (void)run_search(ws, in);
+  for (std::size_t i = 0; i < sources.size(); ++i) out[i] = ws.distances[static_cast<std::size_t>(sources[i])];
   return out;
 }
 
 void check_ceiling(const std::optional<CostCeiling>& ceiling) {
   if (!ceiling.has_value()) return;
-  if (const auto* a = std::get_if<Absolute>(&*ceiling)) {
-    if (a->cost < 0) throw std::invalid_argument("max_path_cost Absolute cost must be >= 0 (got " + std::to_string(a->cost) + ")");
+  if (const auto* a = std::get_if<AbsoluteCost>(&*ceiling)) {
+    if (a->cost < 0) throw std::invalid_argument("cost_ceiling AbsoluteCost cost must be >= 0 (got " + std::to_string(a->cost) + ")");
     return;
   }
-  const double f = std::get<Stretch>(*ceiling).factor;
-  if (!(f >= 1.0) || !std::isfinite(f)) {
-    throw std::invalid_argument("max_path_cost Stretch factor must be finite and in [1, inf) (got " + std::to_string(f) + ")");
+  const auto& f = std::get<CostStretch>(*ceiling);
+  if (f.numerator() < f.denominator()) {
+    throw std::invalid_argument("cost_ceiling CostStretch factor must be >= 1 (got " + std::to_string(f.numerator()) + "/" +
+                                std::to_string(f.denominator()) + ")");
   }
 }
 
@@ -1216,138 +1217,136 @@ void check_ceiling(const std::optional<CostCeiling>& ceiling) {
 
 namespace netgraph::core {
 
-// The selection of a search (options.hpp): its two enum-typed fields inside their enumerations.
-PathSelection::PathSelection(EdgeTieBreak tie_break_, EdgePriority priority_, std::optional<bool> multipath_,
-                             bool multi_edge_)
-    : tie_break(tie_break_), priority(priority_), multipath(multipath_), multi_edge(multi_edge_) {
-  detail::check_member(tie_break, "tie_break");
-  detail::check_member(priority, "priority");
-}
-
-SpfOptions::SpfOptions(Direction direction_, PathSelection selection_) : direction(direction_), selection(selection_) {
+SpfOptions::SpfOptions(Direction direction_) : direction(direction_) {
   detail::check_member(direction, "direction");
 }
 
-SpfResult spf(const Graph& g, std::span<const NodeId> roots, const SpfOptions& opts, SpfQueue queue) {
+SpfResult spf(const Graph& graph, std::span<const NodeId> roots, const SpfOptions& options, SpfQueue queue) {
   using namespace detail;
-  check_member(opts.direction, "direction");
-  check_selection(opts.selection);
+  check_member(options.direction, "direction");
+  check_member(options.tie_break, "tie_break");
   check_member(queue, "queue");
-  const auto root_set = node_set(roots, g.num_nodes(), "roots");
+  const auto root_set = node_set(roots, graph.num_nodes(), "roots");
   std::vector<NodeId> target_set;
-  if (opts.targets.has_value()) {
-    target_set = node_set(*opts.targets, g.num_nodes(), "targets");
+  if (options.targets.has_value()) {
+    target_set = node_set(*options.targets, graph.num_nodes(), "targets");
     check_disjoint(root_set, target_set, "roots", "targets");
-  } else if (opts.selection.single_path()) {
+  } else if (!options.multipath) {
     throw std::invalid_argument("multipath = false requires targets (the single path joins a root to a target)");
   }
-  const std::span<const Amount> residual = opts.residual.value_or(std::span<const Amount> {});
-  if (opts.residual.has_value()) check_edge_amounts(g, residual, "residual");
-  if (opts.min_residual < 1) {
-    throw std::invalid_argument("min_residual must be at least 1 unit (got " + std::to_string(opts.min_residual) + ")");
+  const RouteChoice choice {options.tie_break, options.multipath, options.parallel_edges};
+  if (choice.tie_is_ineffective()) {
+    throw std::invalid_argument("spf tie_break requires multipath=False or parallel_edges=False");
   }
-  if (opts.elig != nullptr && opts.elig->graph_uid() != g.uid()) {
+  const std::span<const Amount> residual = options.residual.value_or(std::span<const Amount> {});
+  if (options.residual.has_value()) check_edge_amounts(graph, residual, "residual");
+  if (options.min_residual < 1) {
+    throw std::invalid_argument("min_residual must be at least 1 unit (got " + std::to_string(options.min_residual) + ")");
+  }
+  if (options.eligibility != nullptr && options.eligibility->graph_uid() != graph.uid()) {
     throw std::invalid_argument("foreign Eligibility: built for another graph");
   }
-  const PriorityValues values {&g, opts.selection.priority, residual};
-  const PriorityFn prio = PriorityFn::of(values);
-  const Emit em = emit_of(g, opts.direction, opts.selection, prio);
-  const auto live_roots = live(root_set, opts.elig);
-  SearchIn in;
-  in.g = &g;
-  in.gate = Gate {opts.elig, residual, opts.min_residual};
-  in.direction = opts.direction;
+  const PriorityValues values {&graph, choice.tie_break, residual};
+  const PriorityReader prio = PriorityReader::of(values);
+  const SearchOutputOptions em = emit_of(graph, options.direction, choice, prio);
+  const auto live_roots = allowed_nodes(root_set, options.eligibility);
+  SearchInput in;
+  in.graph = &graph;
+  in.filter = SearchFilter {options.eligibility, residual, options.min_residual};
+  in.direction = options.direction;
   in.queue = queue;
   in.roots = live_roots;
-  if (!opts.targets.has_value()) {
-    const auto n = static_cast<std::size_t>(g.num_nodes());
+  if (!options.targets.has_value()) {
+    const auto n = static_cast<std::size_t>(graph.num_nodes());
     if (live_roots.empty()) {
-      return SpfResult {std::vector<Cost>(n, kUnreachable), PredDAGBuilder::empty(g), std::nullopt};
+      return SpfResult {std::vector<Cost>(n, kUnreachable), PredecessorDAGBuilder::empty(graph), std::nullopt};
     }
-    Lease lease(n);
-    Workspace& ws = lease.ws();
-    (void)run(ws, in);
-    std::vector<Cost> costs(ws.dist.begin(), ws.dist.begin() + static_cast<std::ptrdiff_t>(n));
-    PredDAG dag = emit_full(ws, em);
+    SearchWorkspaceLease lease(n);
+    SearchWorkspace& ws = lease.workspace();
+    (void)run_search(ws, in);
+    std::vector<Cost> costs(ws.distances.begin(), ws.distances.begin() + static_cast<std::ptrdiff_t>(n));
+    PredecessorDAG dag = emit_full(ws, em);
     return SpfResult {std::move(costs), std::move(dag), std::nullopt};
   }
-  const auto live_targets = live(target_set, opts.elig);
-  if (live_roots.empty() || live_targets.empty()) return SpfResult {std::nullopt, PredDAGBuilder::empty(g), kUnreachable};
-  Lease lease(static_cast<std::size_t>(g.num_nodes()));
-  Workspace& ws = lease.ws();
+  const auto live_targets = allowed_nodes(target_set, options.eligibility);
+  if (live_roots.empty() || live_targets.empty()) return SpfResult {std::nullopt, PredecessorDAGBuilder::empty(graph), kUnreachable};
+  SearchWorkspaceLease lease(static_cast<std::size_t>(graph.num_nodes()));
+  SearchWorkspace& ws = lease.workspace();
   for (NodeId t : live_targets) mark(ws, t, kTarget);
   in.targets = true;
-  const Cost dstar = run(ws, in);
-  if (dstar == kInf) return SpfResult {std::nullopt, PredDAGBuilder::empty(g), kUnreachable};
+  const Cost dstar = run_search(ws, in);
+  if (dstar == kInf) return SpfResult {std::nullopt, PredecessorDAGBuilder::empty(graph), kUnreachable};
   prune(ws, em, live_targets, dstar);
-  if (!opts.selection.single_path()) return SpfResult {std::nullopt, PredDAGBuilder::of_edges(g, ws.pruned), dstar};
+  if (!choice.single_path()) return SpfResult {std::nullopt, PredecessorDAGBuilder::of_edges(graph, ws.pruned), dstar};
   // The walks run from the walk starts (Forward: the roots; Reverse: the targets) to the ends;
   // the potential is the forward distance from the starts (Reverse: d* - the distance to the roots).
-  const bool prefer = opts.selection.tie_break == EdgeTieBreak::PreferHigherPriority;
+  const bool prefer = choice.prefers_score();
   Walk walk;
-  if (opts.direction == Direction::Forward) {
-    walk = extract(ws, g, [&](NodeId v) { return ws.dist[static_cast<std::size_t>(v)]; }, dstar,
+  if (options.direction == Direction::Forward) {
+    walk = extract(ws, graph, [&](NodeId v) { return ws.distances[static_cast<std::size_t>(v)]; }, dstar,
                    prefer ? &prio : nullptr, nullptr);
   } else {
-    walk = extract(ws, g, [&](NodeId v) { return dstar - ws.dist[static_cast<std::size_t>(v)]; }, dstar,
+    walk = extract(ws, graph, [&](NodeId v) { return dstar - ws.distances[static_cast<std::size_t>(v)]; }, dstar,
                    prefer ? &prio : nullptr, nullptr);
   }
-  return SpfResult {std::nullopt, PredDAGBuilder::of_edges(g, walk.edges), dstar};
+  return SpfResult {std::nullopt, PredecessorDAGBuilder::of_edges(graph, walk.edges), dstar};
 }
 
 
-KspOptions::KspOptions(std::int64_t k_, PathSelection selection_) : k(k_), selection(selection_) {}
+KspOptions::KspOptions(std::int64_t k_) : k(k_) {}
 
-std::vector<std::pair<Cost, Path>> ksp(const Graph& g, NodeId src, NodeId dst, const KspOptions& opts) {
+std::vector<std::pair<Cost, Path>> ksp(const Graph& graph, NodeId source, NodeId destination, const KspOptions& options) {
   using namespace detail;
-  check_selection(opts.selection);
-  const NodeId s1[1] = {src};
-  const NodeId t1[1] = {dst};
-  check_range(s1, g.num_nodes(), "src");
-  check_range(t1, g.num_nodes(), "dst");
-  check_disjoint(s1, t1, "src", "dst");
-  if (opts.k < 1) throw std::invalid_argument("k must be >= 1 (got " + std::to_string(opts.k) + ")");
-  check_ceiling(opts.max_path_cost);
-  const std::span<const Amount> residual = opts.residual.value_or(std::span<const Amount> {});
-  if (opts.residual.has_value()) check_edge_amounts(g, residual, "residual");
-  if (opts.elig != nullptr && opts.elig->graph_uid() != g.uid()) {
+  check_member(options.tie_break, "tie_break");
+  const NodeId s1[1] = {source};
+  const NodeId t1[1] = {destination};
+  check_range(s1, graph.num_nodes(), "source");
+  check_range(t1, graph.num_nodes(), "destination");
+  check_disjoint(s1, t1, "source", "destination");
+  if (options.k < 1) throw std::invalid_argument("k must be >= 1 (got " + std::to_string(options.k) + ")");
+  check_ceiling(options.cost_ceiling);
+  const std::span<const Amount> residual = options.residual.value_or(std::span<const Amount> {});
+  if (options.residual.has_value()) check_edge_amounts(graph, residual, "residual");
+  if (options.eligibility != nullptr && options.eligibility->graph_uid() != graph.uid()) {
     throw std::invalid_argument("foreign Eligibility: built for another graph");
   }
   std::vector<std::pair<Cost, Path>> out;
-  if (opts.elig != nullptr && (!opts.elig->node_ok(src) || !opts.elig->node_ok(dst))) return out;
-  // The ceiling: Absolute(c), or Stretch(f) times the static shortest cost of the member graph
+  if (options.eligibility != nullptr && (!options.eligibility->allows_node(source) || !options.eligibility->allows_node(destination))) return out;
+  // The ceiling: AbsoluteCost(c), or CostStretch(f) times the static shortest cost of the member graph
   // under the Eligibility (residual ignored, as for T1's ceiling); no static route
   // gives [].
-  const auto* absolute = opts.max_path_cost.has_value() ? std::get_if<Absolute>(&*opts.max_path_cost) : nullptr;
-  const auto* stretch = opts.max_path_cost.has_value() ? std::get_if<Stretch>(&*opts.max_path_cost) : nullptr;
+  const auto* absolute = options.cost_ceiling.has_value() ? std::get_if<AbsoluteCost>(&*options.cost_ceiling) : nullptr;
+  const auto* stretch = options.cost_ceiling.has_value() ? std::get_if<CostStretch>(&*options.cost_ceiling) : nullptr;
   Cost base = 0;
   if (stretch != nullptr) {
-    base = static_costs(g, opts.elig, t1, s1)[0];
+    base = static_costs(graph, options.eligibility, t1, s1)[0];
     if (base == kUnreachable) return out;
   }
   auto within = [&](Cost c) {
     if (absolute != nullptr) return c <= absolute->cost;
-    if (stretch != nullptr) return stretch_le(c, base, stretch->factor);
+    if (stretch != nullptr) return stretch_le(c, base, stretch->numerator(), stretch->denominator());
     return true;
   };
-  const Gate gate {opts.elig, residual, 1};  // KSP gates a supplied residual at 1 unit
-  const PriorityValues values {&g, opts.selection.priority, residual};
-  const PriorityFn prio = PriorityFn::of(values);
-  const bool prefer = opts.selection.tie_break == EdgeTieBreak::PreferHigherPriority;
+  const SearchFilter gate {options.eligibility, residual, 1};  // KSP gates a supplied residual at 1 unit
+  // ksp always orders single paths: multipath is not one of its options.
+  const RouteChoice choice {options.tie_break, false, options.parallel_edges};
+  const PriorityValues values {&graph, choice.tie_break, residual};
+  const PriorityReader prio = PriorityReader::of(values);
+  const bool prefer = choice.prefers_score();
   // Yen's method finds alternatives by keeping a prefix and replacing its suffix at a spur.
   // The first path and each spur suffix use the canonical search with that spur's exclusions.
   // Match prefixes by EdgeId sequence. Ban the next edge of every accepted matching path
   // (Expand), or its entire (u, v) transition (Collapse); exclude earlier prefix vertices to
   // prevent cycles. Store candidates once in a set ordered by (cost, decreasing bottleneck
-  // under PreferHigherPriority, hops, EdgeId sequence).
-  struct Cand {
+  // under a HIGHER_* tie_break, hops, EdgeId sequence).
+  struct PathCandidate {
     Cost cost {0};
     Priority bottleneck {0, 1, true};
     std::vector<EdgeId> edges {};
   };
-  struct CandLess {
+  struct PathCandidateOrder {
     bool prefer;
-    bool operator()(const Cand& a, const Cand& b) const {
+    bool operator()(const PathCandidate& a, const PathCandidate& b) const {
       if (a.cost != b.cost) return a.cost < b.cost;
       if (prefer) {
         const int c = compare(a.bottleneck, b.bottleneck);
@@ -1357,18 +1356,18 @@ std::vector<std::pair<Cost, Path>> ksp(const Graph& g, NodeId src, NodeId dst, c
       return a.edges < b.edges;
     }
   };
-  auto first = spur_walk(g, gate, opts.selection, prio, src, dst, {}, {}, nullptr);
+  auto first = spur_walk(graph, gate, choice, prio, source, destination, {}, {}, nullptr);
   if (!first.has_value() || !within(first->cost)) return out;
-  std::vector<Cand> accepted;
-  accepted.push_back(Cand {first->cost, first->bottleneck, std::move(first->edges)});
-  std::set<Cand, CandLess> candidates(CandLess {prefer});
-  const auto edst = g.edge_dst();
-  const auto cost = g.cost();
+  std::vector<PathCandidate> accepted;
+  accepted.push_back(PathCandidate {first->cost, first->bottleneck, std::move(first->edges)});
+  std::set<PathCandidate, PathCandidateOrder> candidates(PathCandidateOrder {prefer});
+  const auto edst = graph.edge_destinations();
+  const auto cost = graph.edge_costs();
   std::vector<NodeId> nodes;
   std::vector<EdgeId> banned;
-  while (static_cast<std::int64_t>(accepted.size()) < opts.k) {
+  while (static_cast<std::int64_t>(accepted.size()) < options.k) {
     const std::vector<EdgeId> last = accepted.back().edges;
-    nodes.assign(1, src);
+    nodes.assign(1, source);
     for (EdgeId e : last) nodes.push_back(edst[static_cast<std::size_t>(e)]);
     Cost prefix_cost = 0;
     Priority prefix_bottleneck {0, 1, true};
@@ -1380,10 +1379,10 @@ std::vector<std::pair<Cost, Path>> ksp(const Graph& g, NodeId src, NodeId dst, c
         }
       }
       const std::span<const NodeId> excluded(nodes.data(), j);
-      auto sp = spur_walk(g, gate, opts.selection, prio, nodes[j], dst, excluded, banned,
+      auto sp = spur_walk(graph, gate, choice, prio, nodes[j], destination, excluded, banned,
                           prefer && j > 0 ? &prefix_bottleneck : nullptr);
       if (sp.has_value()) {
-        Cand c;
+        PathCandidate c;
         c.cost = prefix_cost + sp->cost;
         c.bottleneck = compare(sp->bottleneck, prefix_bottleneck) < 0 ? sp->bottleneck : prefix_bottleneck;
         c.edges.assign(last.begin(), last.begin() + static_cast<std::ptrdiff_t>(j));
@@ -1406,23 +1405,23 @@ std::vector<std::pair<Cost, Path>> ksp(const Graph& g, NodeId src, NodeId dst, c
     candidates.erase(best);
   }
   out.reserve(accepted.size());
-  for (auto& p : accepted) out.emplace_back(p.cost, PathBuilder::of_walk(g, p.edges));
+  for (auto& p : accepted) out.emplace_back(p.cost, PathBuilder::of_walk(graph, p.edges));
   return out;
 }
 
-std::vector<Path> resolve_to_paths(const Graph& g, const PredDAG& dag, NodeId src, NodeId dst, bool split_parallel_edges,
+std::vector<Path> resolve_to_paths(const Graph& graph, const PredecessorDAG& dag, NodeId source, NodeId destination, bool split_parallel_edges,
                                    std::optional<std::int64_t> max_paths) {
   using namespace detail;
-  if (dag.graph_uid() != g.uid()) throw std::invalid_argument("foreign PredDAG: built for another graph");
-  const NodeId s1[1] = {src};
-  const NodeId t1[1] = {dst};
-  check_range(s1, g.num_nodes(), "src");
-  check_range(t1, g.num_nodes(), "dst");
-  check_disjoint(s1, t1, "src", "dst");
+  if (dag.graph_uid() != graph.uid()) throw std::invalid_argument("foreign PredecessorDAG: built for another graph");
+  const NodeId s1[1] = {source};
+  const NodeId t1[1] = {destination};
+  check_range(s1, graph.num_nodes(), "source");
+  check_range(t1, graph.num_nodes(), "destination");
+  check_disjoint(s1, t1, "source", "destination");
   if (max_paths.has_value() && *max_paths < 1) {
     throw std::invalid_argument("max_paths must be >= 1 (got " + std::to_string(*max_paths) + ")");
   }
-  return enumerate_paths(g, dag, src, dst, split_parallel_edges, max_paths);
+  return enumerate_paths(graph, dag, source, destination, split_parallel_edges, max_paths);
 }
 
 } // namespace netgraph::core

@@ -8,40 +8,40 @@
   ledger commit, then the epoch); evaluate discards it. The change flags compare the program the
   policy had installed with the call's.
 
-  * CostOnly EqualBalanced and Weighted (place_pooled): the epoch's first positive call (or a
+  * ShortestPaths Equal and Weighted (place_pooled): the epoch's first positive call (or a
     replace) prepares every roster source's route on the working residual at its entry and joins
     them into the program's one pooled split context, a plan rooted at the whole roster (a router
     reached by several sources splits their added traffic once). Weighted weights come from the
     configured basis (capacity, explicit edge weights, or the free capacity read then and frozen).
-    Lossless admits the largest total of the equal origin whose no-drop forwarding fits V = W +
+    Lossless admits the largest total of the equal source allocation whose no-drop forwarding fits V = W +
     own; Lossy forwards the round-robin increments of the offer on W. The amounts are attributed
     back to the sources (kernels' forward()).
-  * The controllers (place_controller): unrestricted Global over every eligible edge, Global with a
-    support over that support trimmed, CostOnly MaxFlow over the union of the roster's routes
+  * The controllers (place_optimized_flow): unrestricted CentralizedTE over every eligible edge, CentralizedTE with a
+    support over that support trimmed, ShortestPaths Optimized over the union of the roster's routes
     (prepared as above). A minimum-cost flow of the cumulative value on V = W + own, from one
-    virtual source (the optimized origin) or with source i's arc capped at its round-robin share of
-    the largest total whose shares all fit (the equal origin, integer bisection), cut into paths
+    virtual source (the optimized source allocation) or with source i's arc capped at its round-robin share of
+    the largest total whose shares all fit (the equal source allocation, integer bisection), cut into paths
     per source (decompose()): the program, each path a tunnel weighted by its amount; each source's
     record is the sum of its paths.
   * Pinned (place_pinned): forwarding its program as the policy's view replays it under its mask
     with its black holes, through the forwarding engine (forwarding.hpp), one record per program
     entry (forward_entries); forward() (forward_installed) forwards a computing model's installed
     program the same way, with records per roster source.
-  * T1 (place_t1): replace and evaluate set up the tunnels (tunnels_t1.cpp) on the unreserved view
-    with the policy's own holds released, build the program of 8.1 and forward it like a Pinned
+  * T1 (apply_distributed_te_call): replace and evaluate set up the tunnels (distributed_te.cpp) on the unreserved view
+    with the policy's own holds released, build the tunnel program and forward it like a Pinned
     program, one record per entry, each up tunnel's record holding its request on its path.
-  * T2 (place_t2): replace and evaluate lay out the tunnels (tunnels_t2.cpp) on the residual with
-    the policy's own traffic released, build the program of 8.1 (dead heads keep their roster
+  * T2 (place_t2): replace and evaluate lay out the tunnels (centralized_te_tunnels.cpp) on the residual with
+    the policy's own traffic released, build the tunnel program (dead heads keep their roster
     place), take its lossless bound as the plan's forwarding bound and forward it the same way; a
     plan books nothing.
   * The tunnel models' forward() (forward_tunnels) forwards the installed program the same way,
     keeping its plan and T1's holds.
 
   Work on copies and publish all changes together; an exception leaves ledger and policy intact.
-  Store only changes to ledger residual in per-thread slots. Unrestricted Global reads a dense
+  Store only changes to ledger residual in per-thread slots. Unrestricted CentralizedTE reads a dense
   residual and solves over every edge (its view and flows per EdgeId); the other controllers
   gather their view over their support and keep their flows aligned with it. T1's setup reads a
-  dense unreserved view; CostOnly preparation reads the working residual edge by edge.
+  dense unreserved view; ShortestPaths preparation reads the working residual edge by edge.
 
   The transaction trace (the call's intermediate values, keyed as the tests' model of the policy
   keys them) exists in a build with the private hooks only: every
@@ -59,18 +59,18 @@
 #include "netgraph/core/detail/cache_access.hpp"
 #include "netgraph/core/detail/endpoints.hpp"
 #include "netgraph/core/detail/enum_domain.hpp"
-#include "netgraph/core/detail/flow_core.hpp"
+#include "netgraph/core/detail/min_cost_flow.hpp"
 #include "netgraph/core/detail/forwarding.hpp"
 #include "netgraph/core/detail/int128.hpp"
-#include "netgraph/core/detail/kernels.hpp"
+#include "netgraph/core/detail/route_kernels.hpp"
 #include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/policy_engine.hpp"
-#include "netgraph/core/detail/pred_dag_builder.hpp"
+#include "netgraph/core/detail/route_builders.hpp"
 #include "netgraph/core/detail/private_hooks.hpp"
 #include "netgraph/core/detail/program_data.hpp"
 #include "netgraph/core/detail/trace.hpp"
-#include "netgraph/core/detail/traversal.hpp"
-#include "netgraph/core/detail/tunnels.hpp"
+#include "netgraph/core/detail/search_detail.hpp"
+#include "netgraph/core/detail/tunnel_setup.hpp"
 
 namespace netgraph::core {
 
@@ -80,34 +80,34 @@ namespace {
 
 // ================================================================ working residual
 
-// W = baseline - allocated + delta; delta holds this call's releases and new allocations.
+// W = service baseline - carried() + delta; delta holds this call's releases and new allocations.
 // Each call advances a scratch epoch (a numeric stamp, separate from the policy epoch).
 // Read a slot only when its stamp matches; later calls ignore stale slots even after a throw.
 // Clear all stamps only on wraparound (after 2^32 calls on one thread, which a long-running
 // process reaches). Slots share one per-thread array, so failed growth leaves the old array
 // intact.
-class Working {
+class ServiceCapacityWorkspace {
 public:
-  explicit Working(const FlowLedger& fg)
-      : s_(storage()), base_(LedgerAccess::baseline(fg)), held_(LedgerAccess::allocated(fg)) {
-    if (s_.slot.size() < base_.size()) s_.slot.resize(base_.size());
-    if (++s_.epoch == 0) {
-      for (auto& x : s_.slot) x.stamp = 0;
-      s_.epoch = 1;
+  explicit ServiceCapacityWorkspace(const FlowLedger& ledger)
+      : storage_(storage()), service_baseline_(LedgerAccess::baseline(ledger)), carried_(LedgerAccess::carried(ledger)) {
+    if (storage_.slot.size() < service_baseline_.size()) storage_.slot.resize(service_baseline_.size());
+    if (++storage_.generation == 0) {
+      for (auto& x : storage_.slot) x.stamp = 0;
+      storage_.generation = 1;
     }
   }
-  Working(const Working&) = delete;
-  Working& operator=(const Working&) = delete;
+  ServiceCapacityWorkspace(const ServiceCapacityWorkspace&) = delete;
+  ServiceCapacityWorkspace& operator=(const ServiceCapacityWorkspace&) = delete;
 
   [[nodiscard]] Amount at(EdgeId e) const noexcept {
     const auto ei = static_cast<std::size_t>(e);
-    const auto& x = s_.slot[ei];
-    return base_[ei] - held_[ei] + (x.stamp == s_.epoch ? x.delta : 0);
+    const auto& x = storage_.slot[ei];
+    return service_baseline_[ei] - carried_[ei] + (x.stamp == storage_.generation ? x.delta : 0);
   }
   void add(EdgeId e, Amount v) noexcept {
-    auto& x = s_.slot[static_cast<std::size_t>(e)];
-    if (x.stamp != s_.epoch) {
-      x.stamp = s_.epoch;
+    auto& x = storage_.slot[static_cast<std::size_t>(e)];
+    if (x.stamp != storage_.generation) {
+      x.stamp = storage_.generation;
       x.delta = 0;
     }
     x.delta += v;
@@ -117,19 +117,19 @@ public:
     out.resize(members.size());
     for (std::size_t m = 0; m < members.size(); ++m) out[m] = at(members[m]);
   }
-  // The dense working residual (searches, Global, traces).
+  // The dense working residual (searches, CentralizedTE, traces).
   void dense(std::vector<Amount>& out) const {
-    out.resize(base_.size());
+    out.resize(service_baseline_.size());
     for (std::size_t e = 0; e < out.size(); ++e) {
-      const auto& x = s_.slot[e];
-      out[e] = base_[e] - held_[e] + (x.stamp == s_.epoch ? x.delta : 0);
+      const auto& x = storage_.slot[e];
+      out[e] = service_baseline_[e] - carried_[e] + (x.stamp == storage_.generation ? x.delta : 0);
     }
   }
   // The policy's own carried load released (the view of a full-offer call): its live records'
   // edges added back.
   void release_records(std::span<const FlowRecord* const> records) noexcept {
     for (const FlowRecord* r : records) {
-      for (const auto& [e, x] : r->edges) add(e, x);
+      for (const auto& [e, x] : r->edge_flows) add(e, x);
     }
   }
 
@@ -140,15 +140,15 @@ private:
   };
   struct Storage {
     std::vector<Slot> slot;
-    std::uint32_t epoch {0};
+    std::uint32_t generation {0};
   };
   static Storage& storage() {
     thread_local Storage st;
     return st;
   }
-  Storage& s_;
-  std::span<const Amount> base_;
-  std::span<const Amount> held_;
+  Storage& storage_;
+  std::span<const Amount> service_baseline_;
+  std::span<const Amount> carried_;
 };
 
 // ================================================================ small helpers
@@ -196,112 +196,114 @@ void cumulative_offers(const Counter128& requested, Amount v, std::size_t k, Off
   for (std::size_t i = 0; i < k; ++i) offer(i, base + (i < extra ? 1 : 0) - (i < r ? 1 : 0));
 }
 
-// A CostOnly preparation's inputs: the policy, its graph and the call's working residual.
-struct Call {
-  const PolicyEngine& pe;
-  const Graph& g;
-  Working& W;
+// A ShortestPaths preparation's inputs: the policy, its graph and the call's working residual.
+struct PolicyCallContext {
+  const PolicyEngine& engine;
+  const Graph& graph;
+  ServiceCapacityWorkspace& service_capacity;
 };
 
 // ================================================================ routes and plans
 
-struct Route {
+struct RouteSupport {
   std::vector<EdgeId> edges {};  // ascending
   Cost cost {kUnreachable};
 };
 
-// The priority values of the creation view W, as the selection reads them (CostOnly). The
-// PriorityFn of `on_w` points at this view: it must outlive every call through that PriorityFn.
+// The edge scores of the creation view W, as the route choice reads them (ShortestPaths). The
+// PriorityReader of `as_priority_reader` points at this view: it must outlive every call through it.
 struct WorkingPriority {
-  const Working* W;
+  const ServiceCapacityWorkspace* service_capacity;
   std::span<const Amount> capacity;
-  EdgePriority priority;
-  [[nodiscard]] PriorityFn on_w() const noexcept {
+  RouteTieBreak tie_break;
+  [[nodiscard]] PriorityReader as_priority_reader() const noexcept {
     return {this, [](const void* ctx, EdgeId e) noexcept {
               const auto& v = *static_cast<const WorkingPriority*>(ctx);
-              return priority_value(v.priority, v.W->at(e), v.capacity[static_cast<std::size_t>(e)]);
+              return priority_value(v.tie_break, v.service_capacity->at(e), v.capacity[static_cast<std::size_t>(e)]);
             }};
   }
 };
 
-// The record bundle of a route: `share` itself when it is the whole route, else a new DAG.
-std::shared_ptr<const PredDAG> bundle_of(const Graph& g, std::span<const EdgeId> route,
-                                         const std::shared_ptr<const PredDAG>& share) {
-  if (share && PredDAGBuilder::ascending(*share).size() == route.size()) return share;
-  return std::make_shared<const PredDAG>(PredDAGBuilder::of_edges(g, route));
+// The record route of a route: `share` itself when it is the whole route, else a new DAG.
+std::shared_ptr<const PredecessorDAG> record_route_of(const Graph& graph, std::span<const EdgeId> route,
+                                         const std::shared_ptr<const PredecessorDAG>& share) {
+  if (share && PredecessorDAGBuilder::ascending(*share).size() == route.size()) return share;
+  return std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::of_edges(graph, route));
 }
 
-// CostOnly: keep static shortest-path support reachable from src, then apply selection on W.
-// For multi_edge = false (Collapse), choose one edge per (u, v) by (cost, higher priority under
-// PreferHigherPriority, lowest EdgeId). For multipath = false, choose the canonical single
-// path in stages. Both use W's priority values without excluding edges for low residual.
-Route cost_only_route(const Call& c, NodeId src) {
-  const auto& g = c.g;
-  const auto& pe = c.pe;
-  const auto& sel = pe.selection;
-  const WorkingPriority view {&c.W, g.capacity_units(), sel.priority};
-  auto r = support_route(g, PredDAGBuilder::ascending(*pe.support), src, pe.dests_ok, sel, view.on_w());
-  Route out;
+// ShortestPaths: keep static shortest-path support reachable from source, then apply the route choice on W.
+// For parallel_edges = false (Collapse), choose one edge per (u, v) by (cost, higher tie value under
+// a HIGHER_* tie_break, lowest EdgeId). For multipath = false, choose the canonical single
+// path in stages. Both use W's tie values without excluding edges for low residual.
+RouteSupport shortest_path_support(const PolicyCallContext& c, NodeId source) {
+  const auto& g = c.graph;
+  const auto& pe = c.engine;
+  const auto& choice = pe.route_choice;
+  const WorkingPriority view {&c.service_capacity, g.edge_capacity_units(), choice.tie_break};
+  auto r = support_route(g, PredecessorDAGBuilder::ascending(*pe.support), source, pe.allowed_destinations, choice, view.as_priority_reader());
+  RouteSupport out;
   out.edges = std::move(r.edges);
-  if (sel.single_path() && !out.edges.empty()) out.cost = r.cost;
+  if (choice.single_path() && !out.edges.empty()) out.cost = r.cost;
   return out;
 }
 
-// CostOnly Weighted's static weight source (Capacity or Explicit; ResidualSnapshot reads the view
+// ShortestPaths Weighted's static weight source (Capacity or Explicit; ResidualSnapshot reads the view
 // at preparation and is made there).
-WeightSource cost_only_weights(const PolicyEngine& pe) noexcept {
-  if (pe.config.weights == WeightBasis::Explicit) return {WeightBasis::Explicit, *pe.config.edge_weights};
-  return {pe.config.weights.value_or(WeightBasis::Capacity), {}};
+WeightSource shortest_path_weight_source(const PolicyEngine& pe) noexcept {
+  const auto& sp = std::get<ShortestPaths>(pe.config.routing);
+  if (sp.weight_basis == WeightBasis::Explicit) return {WeightBasis::Explicit, *sp.edge_weights};
+  return {sp.weight_basis.value_or(WeightBasis::Capacity), {}};
 }
 
-// CostOnly's creation products in one pass (kernels' cost_only_creation, identical to
-// cost_only_route, bundle_of and the plan where it applies); nullopt elsewhere.
-std::optional<CreationProducts> creation_products(const Call& c, NodeId src) {
-  const auto& pe = c.pe;
-  const auto& sel = pe.selection;
-  const WorkingPriority view {&c.W, c.g.capacity_units(), sel.priority};
-  return cost_only_creation(c.g, pe.support, src, pe.dests_ok, sel, view.on_w(), *pe.config.placement,
-                            pe.config.admission, cost_only_weights(pe));
+// ShortestPaths's creation products in one pass (prepare_shortest_paths, identical to
+// shortest_path_support, record_route_of and the plan where it applies); nullopt elsewhere.
+std::optional<PreparedRouteResult> creation_products(const PolicyCallContext& c, NodeId source) {
+  const auto& pe = c.engine;
+  const auto& choice = pe.route_choice;
+  const WorkingPriority view {&c.service_capacity, c.graph.edge_capacity_units(), choice.tie_break};
+  return prepare_shortest_paths(c.graph, pe.support, source, pe.allowed_destinations, choice, view.as_priority_reader(), std::get<ShortestPaths>(pe.config.routing).allocation,
+                            pe.config.admission, shortest_path_weight_source(pe));
 }
 
 // ---------------------------------------------------------------- outputs
 
 // The optional outputs of a call whose policy records become `after`, computed before the commit
 // (so nothing allocates once the ledger changed): edge_flows = the policy's own allocation after
-// the call, residual = the ledger's after it (now + own before - own after), bottleneck on that
-// residual, reservation_edge_flows = the policy's own holds after the call.
+// the call, residual = the ledger's after it (now + own before - own after),
+// saturated_boundary_edges on that residual, edge_reservations = the policy's own holds after the
+// call.
 void prepare_outputs(const PolicyEngine& pe, const OutputOptions& outputs, std::span<const FlowRecord* const> after,
                      PlacementResult& out) {
   const auto m = static_cast<std::size_t>(pe.graph->num_edges());
-  if (outputs.reservation_edge_flows) {
+  if (outputs.edge_reservations) {
     std::vector<Amount> held(m, 0);
     for (const FlowRecord* r : after) {
-      for (const auto& [e, x] : r->reserved_edges) held[static_cast<std::size_t>(e)] += x;
+      for (const auto& [e, x] : r->edge_reservations) held[static_cast<std::size_t>(e)] += x;
     }
-    out.reservation_edge_flows = std::move(held);
+    out.edge_reservations = std::move(held);
   }
-  if (!outputs.edge_flows && !outputs.residual && !outputs.bottleneck) return;
+  if (!outputs.edge_flows && !outputs.residual && !outputs.saturated_boundary_edges) return;
   std::vector<Amount> own(m, 0);
   for (const FlowRecord* r : after) {
-    for (const auto& [e, x] : r->edges) own[static_cast<std::size_t>(e)] += x;
+    for (const auto& [e, x] : r->edge_flows) own[static_cast<std::size_t>(e)] += x;
   }
-  if (outputs.residual || outputs.bottleneck) {
+  if (outputs.residual || outputs.saturated_boundary_edges) {
     std::vector<Amount> res;
-    LedgerAccess::residual_into(pe.fg, res);
-    for (const auto& cohort : pe.epoch.cohorts) {
+    LedgerAccess::residual_into(pe.ledger, res);
+    for (const auto& cohort : pe.epoch.record_groups) {
       for (const auto& s : cohort) {
-        for (const auto& [e, x] : LedgerAccess::live(pe.fg, s.id).edges) res[static_cast<std::size_t>(e)] += x;
+        for (const auto& [e, x] : LedgerAccess::live(pe.ledger, s.record_counter).edge_flows) res[static_cast<std::size_t>(e)] += x;
       }
     }
     for (std::size_t e = 0; e < m; ++e) res[e] -= own[e];
-    if (outputs.bottleneck) out.bottleneck = bottleneck_of(*pe.graph, res, pe.sources, pe.elig);
+    if (outputs.saturated_boundary_edges) out.saturated_boundary_edges = saturated_boundary_edges_of(*pe.graph, res, pe.sources, pe.eligibility);
     if (outputs.residual) out.residual = std::move(res);
   }
   if (outputs.edge_flows) out.edge_flows = std::move(own);
 }
 
 bool any_output(const OutputOptions& outputs) noexcept {
-  return outputs.edge_flows || outputs.residual || outputs.bottleneck || outputs.reservation_edge_flows;
+  return outputs.edge_flows || outputs.residual || outputs.saturated_boundary_edges || outputs.edge_reservations;
 }
 
 // ---------------------------------------------------------------- the demand's state
@@ -344,8 +346,8 @@ void fill_state(const PolicyEngine& pe, std::span<const FlowRecord* const> after
   if (lossy) {
     std::size_t n = 0;
     for (const FlowRecord* r : after) {
-      n += r->drops.size();
-      dropping += r->drops.empty() ? 0 : 1;
+      n += r->edge_drops.size();
+      dropping += r->edge_drops.empty() ? 0 : 1;
     }
     drops.reserve(n);
   }
@@ -356,8 +358,8 @@ void fill_state(const PolicyEngine& pe, std::span<const FlowRecord* const> after
     out.delivered += r->delivered;
     if (!lossy) continue;
     accumulate(*row.offered, r->offered.value_or(Counter128 {}), "offered");
-    for (const auto& [e, x] : r->drops) {
-      accumulate(row.dropped, x, "drops");
+    for (const auto& [e, x] : r->edge_drops) {
+      accumulate(row.total_edge_drops, x, "drops");
       drops.emplace_back(e, x);
     }
   }
@@ -373,29 +375,29 @@ void fill_state(const PolicyEngine& pe, std::span<const FlowRecord* const> after
   }
   for (auto& row : out.by_source) {
     row.admitted = *row.offered;
-    row.source_loss = minus(minus(*row.offered, c128(row.delivered)), row.dropped);
+    row.source_drops = minus(minus(*row.offered, c128(row.delivered)), row.total_edge_drops);
   }
   if (dropping > 1) std::sort(drops.begin(), drops.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-  out.drops.reserve(drops.size());
+  out.edge_drops.reserve(drops.size());
   Counter128 dropped {};
   for (const auto& [e, x] : drops) {
-    if (out.drops.empty() || out.drops.back().first != e) out.drops.emplace_back(e, Counter128 {});
-    accumulate(out.drops.back().second, x, "drops");
+    if (out.edge_drops.empty() || out.edge_drops.back().first != e) out.edge_drops.emplace_back(e, Counter128 {});
+    accumulate(out.edge_drops.back().second, x, "drops");
     accumulate(dropped, x, "drops");
   }
   out.offered = offered;
   out.admitted = offered;
   out.unadmitted = Counter128 {};
-  out.source_loss = minus(minus(offered, c128(out.delivered)), dropped);
+  out.source_drops = minus(minus(offered, c128(out.delivered)), dropped);
 }
 
 // The exact sum of cost * flow over the records' edges (a controller's total cost; below 2^124:
 // the costs and the capacities each sum below 2^62).
-Counter128 total_cost_of(const Graph& g, std::span<const FlowRecord* const> after) {
-  const auto cost = g.cost();
+Counter128 total_cost_of(const Graph& graph, std::span<const FlowRecord* const> after) {
+  const auto cost = graph.edge_costs();
   U128 sum {};
   for (const FlowRecord* r : after) {
-    for (const auto& [e, x] : r->edges) {
+    for (const auto& [e, x] : r->edge_flows) {
       const U128 p = mul_u64(static_cast<std::uint64_t>(cost[static_cast<std::size_t>(e)]), static_cast<std::uint64_t>(x));
       const std::uint64_t lo = sum.lo + p.lo;
       sum = U128 {sum.hi + p.hi + (lo < sum.lo ? 1U : 0U), lo};
@@ -407,40 +409,40 @@ Counter128 total_cost_of(const Graph& g, std::span<const FlowRecord* const> afte
 // The records of the policy's live flows (a call that commits nothing).
 std::vector<const FlowRecord*> current_records(const PolicyEngine& pe) {
   std::vector<const FlowRecord*> out;
-  for (const auto& cohort : pe.epoch.cohorts) {
-    for (const auto& s : cohort) out.push_back(&LedgerAccess::live(pe.fg, s.id));
+  for (const auto& cohort : pe.epoch.record_groups) {
+    for (const auto& s : cohort) out.push_back(&LedgerAccess::live(pe.ledger, s.record_counter));
   }
   return out;
 }
 
 // The drafts' records as a list, in per-thread storage reused by every call (valid until this
 // thread's next draft_records; it grows before any commit).
-std::span<const FlowRecord* const> draft_records(const std::vector<Draft>& drafts) {
+std::span<const FlowRecord* const> draft_records(const std::vector<RecordDraft>& drafts) {
   thread_local std::vector<const FlowRecord*> out;
   out.clear();
   for (const auto& d : drafts) out.push_back(&d.record);
   return out;
 }
 
-// T2: Global with a tunnel count.
+// T2: CentralizedTE with a tunnel count.
 bool is_t2(const Routing& r) noexcept {
-  const auto* gl = std::get_if<Global>(&r);
-  return gl != nullptr && gl->tunnels.has_value();
+  const auto* gl = std::get_if<CentralizedTE>(&r);
+  return gl != nullptr && gl->tunnel_count.has_value();
 }
 bool t2(const PolicyEngine& pe) noexcept { return is_t2(pe.config.routing); }
 
 // The tunnel models: T1 and T2 (one record per program entry; a full-offer call is their only
 // computation).
-bool tunnel_model(const PolicyEngine& pe) noexcept { return is<CapacityAware>(pe) || t2(pe); }
+bool tunnel_model(const PolicyEngine& pe) noexcept { return is<DistributedTE>(pe) || t2(pe); }
 
-// Global without tunnels (with or without a support), or CostOnly MaxFlow: a controller.
-bool controller(const PolicyEngine& pe) noexcept {
-  return (is<Global>(pe) && !t2(pe)) || (is<CostOnly>(pe) && *pe.config.placement == FlowPlacement::MaxFlow);
+// CentralizedTE without tunnels (with or without a support), or ShortestPaths Optimized: a controller.
+bool uses_optimized_flow(const PolicyEngine& pe) noexcept {
+  return (is<CentralizedTE>(pe) && !t2(pe)) || (is<ShortestPaths>(pe) && std::get<ShortestPaths>(pe.config.routing).allocation == RouteAllocation::Optimized);
 }
 
-// Unrestricted Global: the controller over every eligible edge (dense arrays, the curve, the cut).
-bool dense_global(const PolicyEngine& pe) noexcept {
-  return controller(pe) && is<Global>(pe) && !std::get<Global>(pe.config.routing).support;
+// Unrestricted CentralizedTE: the controller over every eligible edge (dense arrays, the curve, the cut).
+bool is_unrestricted_centralized_te(const PolicyEngine& pe) noexcept {
+  return uses_optimized_flow(pe) && is<CentralizedTE>(pe) && !std::get<CentralizedTE>(pe.config.routing).support;
 }
 
 // ================================================================ the transaction
@@ -452,41 +454,41 @@ std::string key(NodeId v) { return std::to_string(v); }
 
 // What a call computes. place(v) continues the epoch `cur` (the policy's); evaluate, replace and
 // forward start from a fresh epoch (forward keeps the installed program) on the released view.
-enum class Op { Place, Evaluate, Replace, Forward };
+enum class PolicyOperation { Place, Evaluate, Replace, Forward };
 
-struct Request {
-  Op op {Op::Place};
-  std::optional<Amount> v {};          // nullopt: +inf
+struct PolicyCall {
+  PolicyOperation operation {PolicyOperation::Place};
+  std::optional<Amount> offer {};          // nullopt: +inf
   std::optional<std::optional<Amount>> design {};  // evaluate and replace: absent, or a design (nullopt: +inf)
-  const Eligibility* dark {nullptr};   // forward's black holes
+  const Eligibility* black_holes {nullptr};   // forward's black holes
   const OutputOptions* outputs {nullptr};
   Trace* trace {nullptr};
-  [[nodiscard]] bool full() const noexcept { return op != Op::Place; }
+  [[nodiscard]] bool is_full_offer() const noexcept { return operation != PolicyOperation::Place; }
 };
 
 // A computed call, published or discarded whole: its result, the drafts of its commit (a place:
 // every live record plus the new ones; a full-offer call: only new ones, the live ones retired),
 // the epoch after it, and per new draft (in draft order) its flow in that epoch.
-struct Staged {
-  PlacementResult out {};
-  std::vector<Draft> drafts {};
-  Epoch next {};
+struct PendingPolicyUpdate {
+  PlacementResult result {};
+  std::vector<RecordDraft> drafts {};
+  PolicyEpoch next_epoch {};
   std::vector<std::pair<std::size_t, std::size_t>> fresh {};
 };
 
 // The requested total after the call (a full-offer call: its offer alone) and whether it is
 // infinite.
-Counter128 requested_after(const Epoch& cur, std::optional<Amount> v) noexcept {
+Counter128 requested_after(const PolicyEpoch& cur, std::optional<Amount> v) noexcept {
   Counter128 r = cur.requested;
   if (v.has_value()) (void)r.add(*v);  // checked at the call's entry
   return r;
 }
 
 // The epoch a full-offer call starts: one empty cohort per roster source (or program entry);
-// forward keeps the installed program and CostOnly MaxFlow's support.
-Epoch fresh_epoch(const PolicyEngine& pe, bool keep_program) {
-  Epoch e;
-  e.cohorts.resize(pe.epoch.cohorts.size());
+// forward keeps the installed program and ShortestPaths Optimized's support.
+PolicyEpoch fresh_epoch(const PolicyEngine& pe, bool keep_program) {
+  PolicyEpoch e;
+  e.record_groups.resize(pe.epoch.record_groups.size());
   if (keep_program) {
     e.program = pe.epoch.program;
     e.plan = pe.epoch.plan;
@@ -498,10 +500,10 @@ Epoch fresh_epoch(const PolicyEngine& pe, bool keep_program) {
 // The termination of a forwarding call (Termination's rule after the empty roster): rule (3) when
 // the program has an entry with a path (`has_path`) and no head can use one (`active` false).
 Termination forwarding_termination(bool active, bool has_path, bool lossy, std::optional<Amount> v,
-                                   Amount placed) noexcept {
+                                   Amount call_delivered) noexcept {
   if (has_path && !active) return Termination::NoActiveWeight;
   if (lossy) return v.has_value() ? Termination::Complete : Termination::Exhausted;
-  return v.has_value() && placed == *v ? Termination::Complete : Termination::Exhausted;
+  return v.has_value() && call_delivered == *v ? Termination::Complete : Termination::Exhausted;
 }
 
 // ---------------------------------------------------------------- the controllers' paths
@@ -524,16 +526,16 @@ struct DecomposeScratch {
 
 } // namespace
 
-Decomposition decompose(const Graph& g, std::span<const EdgeId> edges, std::vector<Amount> rem,
-                        std::span<const NodeId> roster, std::span<const NodeId> dests) {
-  const bool dense = edges.empty() && rem.size() == static_cast<std::size_t>(g.num_edges());
-  const auto edge_src = g.edge_src();
-  const auto edge_dst = g.edge_dst();
+Decomposition decompose(const Graph& graph, std::span<const EdgeId> edges, std::vector<Amount> rem,
+                        std::span<const NodeId> reachable_sources, std::span<const NodeId> destinations) {
+  const bool dense = edges.empty() && rem.size() == static_cast<std::size_t>(graph.num_edges());
+  const auto edge_sources = graph.edge_sources();
+  const auto edge_destinations = graph.edge_destinations();
   // Position p of the flows: EdgeId p (dense) or edges[p]. Out-edges have consecutive EdgeIds, so
   // a node's positions are one range.
   auto edge_at = [&](std::size_t p) { return dense ? static_cast<EdgeId>(p) : edges[p]; };
   thread_local DecomposeScratch sc;
-  const auto n = static_cast<std::size_t>(g.num_nodes());
+  const auto n = static_cast<std::size_t>(graph.num_nodes());
   // Each grown on its own (a failed growth leaves the others' sizes as they were).
   if (sc.cur.size() < n) sc.cur.resize(n, -1);
   if (sc.end.size() < n) sc.end.resize(n, 0);
@@ -549,9 +551,9 @@ Decomposition decompose(const Graph& g, std::span<const EdgeId> edges, std::vect
       for (NodeId d : dests) sc.is_dst[static_cast<std::size_t>(d)] = 0;
       for (NodeId s : roster) sc.slot[static_cast<std::size_t>(s)] = -1;
     }
-  } reset {sc, dests, roster};
-  for (NodeId d : dests) sc.is_dst[static_cast<std::size_t>(d)] = 1;
-  for (std::size_t i = 0; i < roster.size(); ++i) sc.slot[static_cast<std::size_t>(roster[i])] = static_cast<std::int32_t>(i);
+  } reset {sc, destinations, reachable_sources};
+  for (NodeId d : destinations) sc.is_dst[static_cast<std::size_t>(d)] = 1;
+  for (std::size_t i = 0; i < reachable_sources.size(); ++i) sc.slot[static_cast<std::size_t>(reachable_sources[i])] = static_cast<std::int32_t>(i);
   // A node without positive out-edges has an empty range.
   auto cursor = [&](NodeId u) -> std::int64_t& {
     auto& c = sc.cur[static_cast<std::size_t>(u)];
@@ -563,8 +565,8 @@ Decomposition decompose(const Graph& g, std::span<const EdgeId> edges, std::vect
     return c;
   };
   Decomposition out;
-  out.shares.resize(roster.size());
-  out.supplies.resize(roster.size());
+  out.shares.resize(reachable_sources.size());
+  out.supplies.resize(reachable_sources.size());
   // One pass over the flow's positions before any walk: each node's range of positive out-edges
   // (the zero positions around them are skipped by the walks anyway); each source's supply, its
   // net outflow (transit through it from another source is not supply; a walk through another
@@ -575,23 +577,23 @@ Decomposition decompose(const Graph& g, std::span<const EdgeId> edges, std::vect
     if (rem[p] == 0) continue;
     ++positive;
     const auto e = static_cast<std::size_t>(edge_at(p));
-    const auto u = static_cast<std::size_t>(edge_src[e]);
+    const auto u = static_cast<std::size_t>(edge_sources[e]);
     if (sc.cur[u] < 0) {
-      sc.touched.push_back(edge_src[e]);
+      sc.touched.push_back(edge_sources[e]);
       sc.cur[u] = static_cast<std::int64_t>(p);
     }
     sc.end[u] = p + 1;
     const auto from = sc.slot[u];
-    const auto to = sc.slot[static_cast<std::size_t>(edge_dst[e])];
+    const auto to = sc.slot[static_cast<std::size_t>(edge_destinations[e])];
     if (from >= 0) out.supplies[static_cast<std::size_t>(from)] += rem[p];
     if (to >= 0) out.supplies[static_cast<std::size_t>(to)] -= rem[p];
   }
   // A one-source flow is all that source's share: the walks cover the flow (checked below), so the
   // sum of its paths is the flow's positive positions, ascending (the per-path sum's degenerate
   // form).
-  const bool one = roster.size() == 1;
+  const bool one = reachable_sources.size() == 1;
   // Every path zeroes a position or ends a source's supply.
-  out.paths.reserve(positive + roster.size());
+  out.paths.reserve(positive + reachable_sources.size());
   if (one) {
     out.shares[0].reserve(positive);
     for (std::size_t p = 0; p < rem.size(); ++p) {
@@ -600,8 +602,8 @@ Decomposition decompose(const Graph& g, std::span<const EdgeId> edges, std::vect
   }
   auto& walk = sc.walk;
   auto& acc = sc.acc;
-  for (std::size_t i = 0; i < roster.size(); ++i) {
-    const NodeId s = roster[i];
+  for (std::size_t i = 0; i < reachable_sources.size(); ++i) {
+    const NodeId s = reachable_sources[i];
     Amount left = out.supplies[i];
     acc.clear();
     while (left > 0) {
@@ -612,17 +614,17 @@ Decomposition decompose(const Graph& g, std::span<const EdgeId> edges, std::vect
         const auto stop = sc.end[static_cast<std::size_t>(u)];
         while (static_cast<std::size_t>(p) < stop && rem[static_cast<std::size_t>(p)] == 0) ++p;
         if (static_cast<std::size_t>(p) == stop) {
-          throw std::logic_error("Global decomposition: flow conservation broken (no continuation)");
+          throw std::logic_error("CentralizedTE decomposition: flow conservation broken (no continuation)");
         }
         walk.push_back(static_cast<std::size_t>(p));
-        u = edge_dst[static_cast<std::size_t>(edge_at(static_cast<std::size_t>(p)))];
-        if (walk.size() > n) throw std::logic_error("Global decomposition: a cycle with positive flow");
+        u = edge_destinations[static_cast<std::size_t>(edge_at(static_cast<std::size_t>(p)))];
+        if (walk.size() > n) throw std::logic_error("CentralizedTE decomposition: a cycle with positive flow");
       }
       Amount amount = left;
       for (std::size_t p : walk) amount = std::min(amount, rem[p]);
-      ControllerPath path;
-      path.slot = static_cast<std::int32_t>(i);
-      path.amount = amount;
+      OptimizedFlowPath path;
+      path.roster_index = static_cast<std::int32_t>(i);
+      path.weight = amount;
       path.edges.reserve(walk.size());
       for (std::size_t p : walk) {
         rem[p] -= amount;
@@ -644,66 +646,60 @@ Decomposition decompose(const Graph& g, std::span<const EdgeId> edges, std::vect
     }
   }
   for (Amount x : rem) {
-    if (x != 0) throw std::logic_error("Global decomposition: the walks do not cover the flow");
+    if (x != 0) throw std::logic_error("CentralizedTE decomposition: the walks do not cover the flow");
   }
   return out;
 }
 
 namespace {
 
-// ---------------------------------------------------------------- CostOnly preparation
+// ---------------------------------------------------------------- ShortestPaths preparation
 
-// A CostOnly demand's routes for the epoch, prepared at its first positive call (or a replace)
-// on the working residual at that call's entry: per roster source its route (the record's bundle
-// and route cost), and its program (EqualBalanced, Weighted: one split route per source in one
-// plan rooted at the roster) or the routes' union (MaxFlow, the controller's support).
-struct Prepared {
+// A ShortestPaths demand's routes for the epoch, prepared at its first positive call (or a replace)
+// on the working residual at that call's entry: per roster source its route (the record's route
+// and route cost), and its program (Equal, Weighted: one split route per source in one
+// plan rooted at the roster) or the routes' union (Optimized, the controller's support).
+struct PreparedShortestPaths {
   std::vector<LiveFlow> flows {};  // per roster source, new (id -1)
   std::shared_ptr<const ForwardingProgram> program {};
   std::vector<EdgeId> edges {};    // ascending: the union of the routes
 };
 
-Prepared prepare_cost_only(Call& c) {
-  const auto& pe = c.pe;
-  const auto& g = c.g;
-  const std::size_t k = pe.roster.size();
-  const FlowPlacement placement = *pe.config.placement;
-  Prepared out;
+PreparedShortestPaths prepare_shortest_path_program(PolicyCallContext& c) {
+  const auto& pe = c.engine;
+  const auto& g = c.graph;
+  const std::size_t k = pe.reachable_sources.size();
+  const RouteAllocation allocation = std::get<ShortestPaths>(pe.config.routing).allocation;
+  PreparedShortestPaths out;
   out.flows.resize(k);
   std::vector<std::vector<EdgeId>> routes(k);
-  std::shared_ptr<const KernelPlan> single;  // one source's plan from its one-pass creation
+  std::shared_ptr<const PreparedRoute> single;  // one source's plan from its one-pass creation
   for (std::size_t i = 0; i < k; ++i) {
-    const NodeId s = pe.roster[i];
+    const NodeId s = pe.reachable_sources[i];
     auto& f = out.flows[i];
-    f.src = s;
+    f.source = s;
     if (auto made = creation_products(c, s)) {
-      f.bundle = std::move(made->bundle);
-      f.cost = made->cost;
-      if (k == 1 && placement != FlowPlacement::MaxFlow) {
-        single = std::make_shared<const KernelPlan>(std::move(made->plan));
+      f.route = std::move(made->route);
+      f.min_route_cost = made->min_route_cost;
+      if (k == 1 && allocation != RouteAllocation::Optimized) {
+        single = std::make_shared<const PreparedRoute>(std::move(made->prepared_route));
       } else {
-        routes[i] = std::move(made->plan.route);
+        routes[i] = std::move(made->prepared_route.support_edges);
       }
     } else {
-      Route r = cost_only_route(c, s);
-      f.bundle = bundle_of(g, r.edges, pe.support);
-      f.cost = r.cost != kUnreachable ? r.cost : route_cost(g, *f.bundle, s, pe.dests_ok);
+      RouteSupport r = shortest_path_support(c, s);
+      f.route = record_route_of(g, r.edges, pe.support);
+      f.min_route_cost = r.cost != kUnreachable ? r.cost : min_route_cost(g, *f.route, s, pe.allowed_destinations);
       routes[i] = std::move(r.edges);
     }
   }
-  // The program: one entry per roster source with its record bundle (its route, the replay basis)
-  // and route cost.
-  auto program_of = [&](std::shared_ptr<const KernelPlan> plan) {
-    std::vector<ProgramEntry> entries(k);
-    for (std::size_t i = 0; i < k; ++i) {
-      entries[i].bundle = out.flows[i].bundle;
-      entries[i].cost = out.flows[i].cost;
-    }
-    return cost_only_program(g, pe.sources, pe.destinations, pe.roster, std::move(plan), std::move(entries));
-  };
-  // One split-routing source: its one-pass creation plan is the program (its route is the union).
+  // One split-routing source: its one-pass creation plan (the pooled builder's plan of its route,
+  // rooted at it) is the program; its route is the union.
   if (single) {
-    out.program = program_of(std::move(single));
+    std::vector<ProgramEntry> entries(1);
+    entries[0].route = out.flows[0].route;
+    entries[0].min_route_cost = out.flows[0].min_route_cost;
+    out.program = shortest_path_program(g, pe.sources, pe.destinations, pe.reachable_sources, std::move(single), std::move(entries));
     return out;
   }
   for (const auto& r : routes) out.edges.insert(out.edges.end(), r.begin(), r.end());
@@ -712,57 +708,62 @@ Prepared prepare_cost_only(Call& c) {
   // One continuation per router: every source's route leaves each of its routers by all the
   // union's edges there. The routes are read on one view under one mask, so a router's
   // continuation depends on the router alone (a single path's suffix is the canonical path of
-  // its first node; the rejected multipath = false with PreferHigherPriority is the exception).
+  // its first node; the rejected multipath = false with a HIGHER_* tie_break is the exception).
   // One route is its own union: nothing to check.
-  const auto row = g.row_offsets();
-  const auto edge_src = g.edge_src();
+  const auto row = g.outgoing_offsets();
+  const auto edge_sources = g.edge_sources();
   for (std::size_t i = 0; k > 1 && i < k; ++i) {
     const auto& r = routes[i];
     for (std::size_t a = 0; a < r.size();) {
-      const auto u = static_cast<std::size_t>(edge_src[static_cast<std::size_t>(r[a])]);
+      const auto u = static_cast<std::size_t>(edge_sources[static_cast<std::size_t>(r[a])]);
       std::size_t b = a;
-      while (b < r.size() && static_cast<std::size_t>(edge_src[static_cast<std::size_t>(r[b])]) == u) ++b;
+      while (b < r.size() && static_cast<std::size_t>(edge_sources[static_cast<std::size_t>(r[b])]) == u) ++b;
       const auto lo = std::lower_bound(out.edges.begin(), out.edges.end(), row[u]);
       const auto hi = std::lower_bound(lo, out.edges.end(), row[u + 1]);
       if (static_cast<std::size_t>(hi - lo) != b - a) {
-        throw std::logic_error("CostOnly: two roster sources continue differently at node " + std::to_string(u));
+        throw std::logic_error("ShortestPaths: two roster sources continue differently at node " + std::to_string(u));
       }
       a = b;
     }
   }
-  if (placement == FlowPlacement::MaxFlow) return out;
-  const auto support = PredDAGBuilder::ascending(*pe.support);
+  if (allocation == RouteAllocation::Optimized) return out;
+  const auto support = PredecessorDAGBuilder::ascending(*pe.support);
   const auto dag = std::equal(out.edges.begin(), out.edges.end(), support.begin(), support.end())
                        ? pe.support
-                       : std::make_shared<const PredDAG>(PredDAGBuilder::of_edges(g, out.edges));
+                       : std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::of_edges(g, out.edges));
   // Weighted weights: the static source, or the free capacity read now (ResidualSnapshot, frozen
   // for the epoch).
   std::vector<Amount> creation;
-  WeightSource weights = cost_only_weights(pe);
-  if (placement == FlowPlacement::Weighted && weights.basis == WeightBasis::ResidualSnapshot) {
+  WeightSource weights = shortest_path_weight_source(pe);
+  if (allocation == RouteAllocation::Weighted && weights.basis == WeightBasis::ResidualSnapshot) {
     creation.resize(out.edges.size());
-    for (std::size_t i = 0; i < out.edges.size(); ++i) creation[i] = c.W.at(out.edges[i]);
+    for (std::size_t i = 0; i < out.edges.size(); ++i) creation[i] = c.service_capacity.at(out.edges[i]);
     weights.values = creation;
   }
-  out.program = program_of(std::make_shared<const KernelPlan>(
-      make_plan(g, placement, pe.config.admission, weights, pe.roster, pe.dests_ok, *dag)));
+  std::vector<ProgramEntry> entries(k);
+  for (std::size_t i = 0; i < k; ++i) {
+    entries[i].route = out.flows[i].route;
+    entries[i].min_route_cost = out.flows[i].min_route_cost;
+  }
+  out.program = pooled_dag_program(g, pe.sources, pe.destinations, pe.reachable_sources, *dag, allocation, weights,
+                                   std::move(entries));
   return out;
 }
 
-Trace routes_trace(const Prepared& p) {
+Trace routes_trace(const PreparedShortestPaths& p) {
   Trace t = Trace::map();
-  for (const auto& f : p.flows) t.set(key(f.src), route_trace(PredDAGBuilder::ascending(*f.bundle)));
+  for (const auto& f : p.flows) t.set(key(f.source), route_trace(PredecessorDAGBuilder::ascending(*f.route)));
   return t;
 }
 
-// A record of one roster source of CostOnly or Global (its route, its route cost).
+// A record of one roster source of ShortestPaths or CentralizedTE (its route, its route cost).
 FlowRecord source_record(const PolicyEngine& pe, const LiveFlow& f) {
   FlowRecord r;
-  r.sources = {f.src};
-  r.destinations = pe.dests_ok;
+  r.sources = {f.source};
+  r.destinations = pe.allowed_destinations;
   r.admission = pe.config.admission;
-  r.bundle = f.bundle;
-  r.route_cost = f.cost;
+  r.route = f.route;
+  r.min_route_cost = f.min_route_cost;
   return r;
 }
 
@@ -825,24 +826,24 @@ std::vector<std::pair<EdgeId, Amount>> merged(std::vector<std::pair<EdgeId, Amou
   return out;
 }
 
-// One record per roster source (CostOnly, Global): the drafts in roster order, kept ids when
+// One record per roster source (ShortestPaths, CentralizedTE): the drafts in roster order, kept ids when
 // the epoch already has them, else new (with their place in the next epoch).
-void source_drafts(const PolicyEngine& pe, const std::vector<LiveFlow>& flows, Staged& s) {
+void source_drafts(const PolicyEngine& pe, const std::vector<LiveFlow>& flows, PendingPolicyUpdate& s) {
   const std::size_t k = flows.size();
   s.drafts.resize(k);
-  s.next.cohorts.assign(k, {});
+  s.next_epoch.record_groups.assign(k, {});
   for (std::size_t i = 0; i < k; ++i) {
-    if (flows[i].id >= 0) {
-      s.drafts[i].id = flows[i].id;
+    if (flows[i].record_counter >= 0) {
+      s.drafts[i].record_counter = flows[i].record_counter;
     } else {
       s.fresh.emplace_back(i, 0);
     }
     s.drafts[i].record = source_record(pe, flows[i]);
-    s.next.cohorts[i].push_back(flows[i]);
+    s.next_epoch.record_groups[i].push_back(flows[i]);
   }
 }
 
-// The programs of a call and the flags they give (10.4). Only T1's own setup books holds, so only it
+// The programs of a call and the flags they give. Only T1's own setup books holds, so only it
 // reports a reservation change; Pinned over a T1 program keeps the imported amounts and books none.
 void set_flags(PlacementResult& out, const ForwardingProgram* before, const ForwardingProgram* after,
                bool reserves) noexcept {
@@ -853,40 +854,40 @@ void set_flags(PlacementResult& out, const ForwardingProgram* before, const Forw
 }
 
 // The by_tunnel rows of a controller's program: every path up, assigned = delivered = its amount.
-std::vector<TunnelFlow> controller_rows(const ForwardingProgram& program) {
+std::vector<TunnelFlow> optimized_flow_tunnel_rows(const ForwardingProgram& program) {
   std::vector<TunnelFlow> rows;
   rows.reserve(program.tunnels().size());
-  for (const auto& t : program.tunnels()) rows.push_back(TunnelFlow {t.index, t.head, TunnelStatus::Up, c128(t.weight), t.weight, {}});
+  for (const auto& t : program.tunnels()) rows.push_back(TunnelFlow {t.entry_id, t.head, TunnelStatus::Up, c128(t.weight), t.weight, {}});
   return rows;
 }
 
-// ---------------------------------------------------------------- CostOnly EqualBalanced and Weighted
+// ---------------------------------------------------------------- ShortestPaths Equal and Weighted
 
-Staged place_pooled(const PolicyEngine& pe, const Epoch& cur, Working& W, const Request& rq,
+PendingPolicyUpdate place_pooled(const PolicyEngine& pe, const PolicyEpoch& cur, ServiceCapacityWorkspace& W, const PolicyCall& rq,
                     const ForwardingProgram* before_program) {
   const auto& g = *pe.graph;
-  const auto v = rq.v;
+  const auto v = rq.offer;
   Trace* trace = rq.trace;
-  Call c {pe, g, W};
-  const std::size_t k = pe.roster.size();
+  PolicyCallContext c {pe, g, W};
+  const std::size_t k = pe.reachable_sources.size();
   const bool lossy = pe.config.admission == Admission::Lossy;
-  const bool created = cur.cohorts.front().empty();
-  Prepared prep;
+  const bool created = cur.record_groups.front().empty();
+  PreparedShortestPaths prep;
   std::vector<LiveFlow> flows(k);
   if (created) {
-    prep = prepare_cost_only(c);
+    prep = prepare_shortest_path_program(c);
     flows = prep.flows;
   } else {
-    for (std::size_t i = 0; i < k; ++i) flows[i] = cur.cohorts[i].front();
+    for (std::size_t i = 0; i < k; ++i) flows[i] = cur.record_groups[i].front();
   }
   const auto program = created ? prep.program : cur.program;
-  const KernelPlan& plan = *ProgramAccess::data(*program).contexts.front().plan;
-  const auto members = std::span<const EdgeId>(plan.members);
+  const PreparedRoute& plan = *ProgramAccess::data(*program).split_contexts.front().prepared_route;
+  const auto members = std::span<const EdgeId>(plan.forwarding_edges);
   std::vector<const FlowRecord*> before(k, nullptr);
   if (!created) {
-    for (std::size_t i = 0; i < k; ++i) before[i] = &LedgerAccess::live(pe.fg, flows[i].id);
+    for (std::size_t i = 0; i < k; ++i) before[i] = &LedgerAccess::live(pe.ledger, flows[i].record_counter);
   }
-  Staged s;
+  PendingPolicyUpdate s;
   source_drafts(pe, flows, s);
   auto& drafts = s.drafts;
   // A one-source program is its own attribution.
@@ -894,7 +895,7 @@ Staged place_pooled(const PolicyEngine& pe, const Epoch& cur, Working& W, const 
   Attribution* per_source = k > 1 ? &attr : nullptr;
   std::vector<Amount> inject(k, 0);
   Forwarding fw;
-  Amount placed = 0;
+  Amount call_delivered = 0;
   Counter128 offered = cur.offered;
   Trace step_tr = Trace::map();
   if (!lossy) {
@@ -905,36 +906,36 @@ Staged place_pooled(const PolicyEngine& pe, const Epoch& cur, Working& W, const 
     for (const FlowRecord* r : before) {
       if (r == nullptr) continue;
       admitted += r->delivered;
-      align(members, r->edges, part);
+      align(members, r->edge_flows, part);
       for (std::size_t m = 0; m < members.size(); ++m) own[m] += part[m];
     }
     std::vector<Amount> view;
     W.gather(members, view);
     for (std::size_t m = 0; m < members.size(); ++m) view[m] += own[m];
     auto step = lossless_step(g, plan, admitted, view, own, v);
-    placed = step.total - admitted;
+    call_delivered = step.admitted - admitted;
     if (per_source == nullptr) {
       // One source holds the whole admitted allocation (the attribution's degenerate form): it
       // delivers all of it, with no second forwarding.
       auto& r = drafts.front().record;
-      r.edges = positive(members, step.alloc);
-      r.delivered = step.total;
+      r.edge_flows = positive(members, step.edge_flows);
+      r.delivered = step.admitted;
     } else {
       // Several sources: forward the admitted total again to attribute it.
-      round_robin(step.total, inject);
+      round_robin(step.admitted, inject);
       fw = forward(plan, Injection {inject, false}, {}, per_source);
-      if (fw.carried != step.alloc) {
-        throw std::logic_error("CostOnly: the attributed forwarding differs from the admitted allocation");
+      if (fw.edge_flows != step.edge_flows) {
+        throw std::logic_error("ShortestPaths: the attributed forwarding differs from the admitted allocation");
       }
       for (std::size_t i = 0; i < k; ++i) {
         auto& r = drafts[i].record;
         for (const auto& x : attr.entries[i]) {
-          if (x.carried != 0) r.edges.emplace_back(members[static_cast<std::size_t>(x.member)], x.carried);
+          if (x.carried != 0) r.edge_flows.emplace_back(members[static_cast<std::size_t>(x.edge_position)], x.carried);
         }
         r.delivered = attr.delivered[i];
       }
     }
-    if (kTraced && trace) step_tr = Trace::ints(std::vector<Amount> {admitted, step.total});
+    if (kTraced && trace) step_tr = Trace::ints(std::vector<Amount> {admitted, step.admitted});
   } else {
     // The new round-robin injections of the offer (or the first-hop experiment) on W.
     Injection in;
@@ -947,7 +948,7 @@ Staged place_pooled(const PolicyEngine& pe, const Epoch& cur, Working& W, const 
     std::vector<Amount> w;
     W.gather(members, w);
     fw = forward(plan, in, w, per_source);
-    placed = fw.delivered;
+    call_delivered = fw.delivered;
     for (std::size_t i = 0; i < k; ++i) {
       auto& r = drafts[i].record;
       std::vector<std::pair<EdgeId, Amount>> carried;
@@ -955,46 +956,46 @@ Staged place_pooled(const PolicyEngine& pe, const Epoch& cur, Working& W, const 
       Amount offer = fw.offered;
       Amount delivered = fw.delivered;
       if (per_source == nullptr) {
-        carried = positive(members, fw.carried);
-        dropped = positive(members, fw.drops);
+        carried = positive(members, fw.edge_flows);
+        dropped = positive(members, fw.edge_drops);
       } else {
         for (const auto& x : attr.entries[i]) {
-          const EdgeId e = members[static_cast<std::size_t>(x.member)];
+          const EdgeId e = members[static_cast<std::size_t>(x.edge_position)];
           if (x.carried != 0) carried.emplace_back(e, x.carried);
-          if (x.dropped != 0) dropped.emplace_back(e, x.dropped);
+          if (x.drops != 0) dropped.emplace_back(e, x.drops);
         }
         offer = attr.offered[i];
         delivered = attr.delivered[i];
       }
       // The counters' 2^127 checks: a drop counter first, then the offered ones.
       const FlowRecord* b = before[i];
-      r.drops = plus(b != nullptr ? b->drops : std::vector<std::pair<EdgeId, Counter128>> {}, dropped);
+      r.edge_drops = plus(b != nullptr ? b->edge_drops : std::vector<std::pair<EdgeId, Counter128>> {}, dropped);
       r.offered = b != nullptr ? b->offered.value_or(Counter128 {}) : Counter128 {};
       accumulate(*r.offered, c128(offer), "offered");
       r.delivered = (b != nullptr ? b->delivered : 0) + delivered;
-      r.edges = b != nullptr ? plus(b->edges, carried) : std::move(carried);
+      r.edge_flows = b != nullptr ? plus(b->edge_flows, carried) : std::move(carried);
     }
     accumulate(offered, c128(fw.offered), "offered");
     if (kTraced && trace) {
       step_tr = Trace::map();
       for (std::size_t i = 0; i < k; ++i) {
-        step_tr.set(key(pe.roster[i]), v.has_value() ? Trace::integer(inject[i]) : Trace::str("inf"));
+        step_tr.set(key(pe.reachable_sources[i]), v.has_value() ? Trace::integer(inject[i]) : Trace::str("inf"));
       }
     }
   }
   const Counter128 requested = requested_after(cur, v);
-  PlacementResult& out = s.out;
-  out.placed = placed;
-  if (v.has_value()) out.remaining = *v - placed;
-  out.delivery_delta = placed;
-  if (lossy) out.call_drops = positive(members, fw.drops);
-  out.call_source_loss = fw.source_loss;
+  PlacementResult& out = s.result;
+  out.call_delivered = call_delivered;
+  if (v.has_value()) out.call_undelivered = *v - call_delivered;
+  out.delivery_delta = call_delivered;
+  if (lossy) out.call_edge_drops = positive(members, fw.edge_drops);
+  out.call_source_drops = fw.source_drops;
   if (members.empty()) {
     out.termination = Termination::NoActiveWeight;
   } else if (lossy) {
     out.termination = v.has_value() ? Termination::Complete : Termination::Exhausted;
   } else {
-    out.termination = v.has_value() && placed == *v ? Termination::Complete : Termination::Exhausted;
+    out.termination = v.has_value() && call_delivered == *v ? Termination::Complete : Termination::Exhausted;
   }
   if (created) set_flags(out, before_program, program.get(), false);
   out.program = program;
@@ -1003,60 +1004,60 @@ Staged place_pooled(const PolicyEngine& pe, const Epoch& cur, Working& W, const 
     trace->set("prepare", created ? routes_trace(prep) : Trace::null());
     trace->set(lossy ? "offers" : "T", std::move(step_tr));
   }
-  s.next.program = program;
-  s.next.requested = requested;
-  s.next.offered = offered;
-  s.next.prepared = true;
-  s.next.infinite = cur.infinite || !v.has_value();
+  s.next_epoch.program = program;
+  s.next_epoch.requested = requested;
+  s.next_epoch.offered = offered;
+  s.next_epoch.prepared = true;
+  s.next_epoch.infinite = cur.infinite || !v.has_value();
   return s;
 }
 
 // ---------------------------------------------------------------- the controllers
 
 // One solve of a controller from zero on the view V with value cap `cap` (nullopt: uncapped);
-// `caps` (the equal origin) caps source i's arc at caps[i]. Unrestricted Global solves over every
-// eligible edge, its V and flows per EdgeId; Global with a support and CostOnly MaxFlow over
+// `caps` (the equal source allocation) caps source i's arc at caps[i]. Unrestricted CentralizedTE solves over every
+// eligible edge, its V and flows per EdgeId; CentralizedTE with a support and ShortestPaths Optimized over
 // `support`, their V and flows aligned with it.
-struct Solve {
-  Amount placed {0};
-  std::vector<Amount> flows {};
-  FlowCoreResult payload {};  // unrestricted Global: the flow core's payload (the curve, the cut, the trace's values)
+struct OptimizedFlowResult {
+  Amount flow_value {0};
+  std::vector<Amount> edge_flows {};
+  MinCostFlowResult payload {};  // unrestricted CentralizedTE: the flow core's payload (the curve, the cut, the trace's values)
 };
 
-Solve solve(const PolicyEngine& pe, std::span<const EdgeId> support, std::span<const Amount> V,
+OptimizedFlowResult solve(const PolicyEngine& pe, std::span<const EdgeId> support, std::span<const Amount> V,
             std::optional<Amount> cap, std::span<const Amount> caps) {
   const auto& g = *pe.graph;
-  Solve out;
-  if (dense_global(pe)) {
-    out.payload = place_global_units(g, V, pe.roster, pe.dests_ok, pe.elig, cap, caps.empty() ? pe.capture : nullptr, caps);
-    out.placed = out.payload.placed;
-    out.flows = out.payload.edge_flows;
+  OptimizedFlowResult out;
+  if (is_unrestricted_centralized_te(pe)) {
+    out.payload = solve_min_cost_flow(g, V, pe.reachable_sources, pe.allowed_destinations, pe.eligibility, cap, caps.empty() ? pe.capture : nullptr, caps);
+    out.flow_value = out.payload.flow_value;
+    out.edge_flows = out.payload.edge_flows;
     return out;
   }
-  auto r = solve_subset(g, support, V, pe.roster, pe.dests_ok, cap, caps);
-  out.placed = r.placed;
-  out.flows = std::move(r.flows);
+  auto r = solve_subset(g, support, V, pe.reachable_sources, pe.allowed_destinations, cap, caps);
+  out.flow_value = r.flow_value;
+  out.edge_flows = std::move(r.edge_flows);
   return out;
 }
 
-// The equal origin: the largest total T in [lo, hi] whose round-robin supplies RR(T, H, i) are all
+// The equal source allocation: the largest total T in [lo, hi] whose round-robin supplies RR(T, H, i) are all
 // carried (a solve capped at T with source i's arc capped at its share reaches T), given that lo's
 // are. Feasible totals form a prefix (each share never decreases in T, and a smaller supply
 // vector stays feasible), so integer bisection is exact; T's solve from zero is returned, so the
 // result does not depend on the probes.
-Solve solve_equal(const PolicyEngine& pe, std::span<const EdgeId> support, std::span<const Amount> V, Amount lo,
+OptimizedFlowResult solve_equal(const PolicyEngine& pe, std::span<const EdgeId> support, std::span<const Amount> V, Amount lo,
                   Amount hi, Trace* probes) {
-  std::vector<Amount> caps(pe.roster.size());
-  auto attempt = [&](Amount t) -> std::optional<Solve> {
+  std::vector<Amount> caps(pe.reachable_sources.size());
+  auto attempt = [&](Amount t) -> std::optional<OptimizedFlowResult> {
     std::fill(caps.begin(), caps.end(), 0);
     round_robin(t, caps);
     auto s = solve(pe, support, V, t, caps);
     if (kTraced && probes != nullptr) probes->push(Trace::integer(t));
-    if (s.placed != t) return std::nullopt;
+    if (s.flow_value != t) return std::nullopt;
     return s;
   };
   if (auto s = attempt(hi)) return std::move(*s);
-  std::optional<Solve> best;
+  std::optional<OptimizedFlowResult> best;
   while (hi - lo > 1) {
     const Amount mid = lo + (hi - lo) / 2;
     if (auto s = attempt(mid)) {
@@ -1067,22 +1068,22 @@ Solve solve_equal(const PolicyEngine& pe, std::span<const EdgeId> support, std::
     }
   }
   if (!best) best = attempt(lo);
-  if (!best) throw std::logic_error("equal origin: the admitted total is no longer carried");
+  if (!best) throw std::logic_error("equal source allocation: the admitted total is no longer carried");
   return std::move(*best);
 }
 
 // The upper end of the equal search: the view summed over the edges leaving the roster sources
-// (unrestricted Global: the eligible ones, V per EdgeId; otherwise the support's, V aligned with
+// (unrestricted CentralizedTE: the eligible ones, V per EdgeId; otherwise the support's, V aligned with
 // it); the supplies leave through them.
-Amount roster_out(const PolicyEngine& pe, std::span<const EdgeId> support, std::span<const Amount> V) {
-  const auto row = pe.graph->row_offsets();
-  const bool dense = dense_global(pe);
+Amount source_outgoing_capacity_bound(const PolicyEngine& pe, std::span<const EdgeId> support, std::span<const Amount> V) {
+  const auto row = pe.graph->outgoing_offsets();
+  const bool dense = is_unrestricted_centralized_te(pe);
   Amount sum = 0;
-  for (NodeId s : pe.roster) {
+  for (NodeId s : pe.reachable_sources) {
     const auto si = static_cast<std::size_t>(s);
     if (dense) {
       for (auto e = row[si]; e < row[si + 1]; ++e) {
-        if (pe.elig == nullptr || pe.elig->edge_ok(e)) sum += V[static_cast<std::size_t>(e)];
+        if (pe.eligibility == nullptr || pe.eligibility->allows_edge(e)) sum += V[static_cast<std::size_t>(e)];
       }
     } else {
       for (auto it = std::lower_bound(support.begin(), support.end(), row[si]);
@@ -1094,56 +1095,56 @@ Amount roster_out(const PolicyEngine& pe, std::span<const EdgeId> support, std::
   return sum;
 }
 
-// The program basis of a controller: unrestricted Global the topology under its mask; Global with
-// a support that support; CostOnly MaxFlow each source's route.
-ControllerBasis controller_basis(const PolicyEngine& pe, const std::vector<LiveFlow>& flows) {
-  ControllerBasis b;
-  if (dense_global(pe)) {
-    b.topology = true;
+// The program basis of a controller: unrestricted CentralizedTE the topology under its mask; CentralizedTE with
+// a support that support; ShortestPaths Optimized each source's route.
+ReplayBasis optimized_flow_replay_basis(const PolicyEngine& pe, const std::vector<LiveFlow>& flows) {
+  ReplayBasis b;
+  if (is_unrestricted_centralized_te(pe)) {
+    b.uses_topology_basis = true;
     b.excluded_nodes = pe.excluded_nodes;
     b.excluded_edges = pe.excluded_edges;
-  } else if (is<Global>(pe)) {
-    b.common = pe.global_support;
+  } else if (is<CentralizedTE>(pe)) {
+    b.common_support = pe.centralized_te_support;
   } else {
-    b.per_source.reserve(flows.size());
-    for (const auto& f : flows) b.per_source.push_back(f.bundle);
+    b.source_supports.reserve(flows.size());
+    for (const auto& f : flows) b.source_supports.push_back(f.route);
   }
   return b;
 }
 
-Staged place_controller(const PolicyEngine& pe, const Epoch& cur, Working& W, const Request& rq,
+PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpoch& cur, ServiceCapacityWorkspace& W, const PolicyCall& rq,
                         const ForwardingProgram* before_program) {
   const auto& g = *pe.graph;
-  const auto v = rq.v;
+  const auto v = rq.offer;
   Trace* trace = rq.trace;
-  const bool dense = dense_global(pe);
-  const bool global = is<Global>(pe);
-  const bool equal = pe.origin == Origin::Equal;
-  const std::size_t k = pe.roster.size();
-  const bool created = cur.cohorts.front().empty();
-  // CostOnly MaxFlow: the support of the epoch (its routes, prepared at its first call).
-  Prepared prep;
+  const bool dense = is_unrestricted_centralized_te(pe);
+  const bool global = is<CentralizedTE>(pe);
+  const bool equal = pe.source_allocation == SourceAllocation::Equal;
+  const std::size_t k = pe.reachable_sources.size();
+  const bool created = cur.record_groups.front().empty();
+  // ShortestPaths Optimized: the support of the epoch (its routes, prepared at its first call).
+  PreparedShortestPaths prep;
   if (!global && created) {
-    Call c {pe, g, W};
-    prep = prepare_cost_only(c);
+    PolicyCallContext c {pe, g, W};
+    prep = prepare_shortest_path_program(c);
   }
   const std::span<const EdgeId> support = dense      ? std::span<const EdgeId> {}
-                                          : global   ? std::span<const EdgeId>(*pe.global_support)
+                                          : global   ? std::span<const EdgeId>(*pe.centralized_te_support)
                                           : created  ? std::span<const EdgeId>(prep.edges)
                                                      : std::span<const EdgeId>(cur.support);
   std::vector<LiveFlow> flows(k);
   for (std::size_t i = 0; i < k; ++i) {
     if (!created) {
-      flows[i] = cur.cohorts[i].front();
+      flows[i] = cur.record_groups[i].front();
     } else if (!global) {
       flows[i] = prep.flows[i];
     } else {
-      flows[i].src = pe.roster[i];
+      flows[i].source = pe.reachable_sources[i];
     }
   }
   // V = W + own: the working residual plus the policy's own allocation (its live records, or none
   // in a full-offer call, whose view already holds them released), per EdgeId (unrestricted
-  // Global) or aligned with the support (a record's edges lie in it, both ascending).
+  // CentralizedTE) or aligned with the support (a record's edges lie in it, both ascending).
   std::vector<Amount> V;
   if (dense) {
     W.dense(V);
@@ -1152,11 +1153,11 @@ Staged place_controller(const PolicyEngine& pe, const Epoch& cur, Working& W, co
   }
   Amount P = 0;
   for (const auto& f : flows) {
-    if (f.id < 0) continue;
-    const FlowRecord& rec = LedgerAccess::live(pe.fg, f.id);
+    if (f.record_counter < 0) continue;
+    const FlowRecord& rec = LedgerAccess::live(pe.ledger, f.record_counter);
     P += rec.delivered;
     std::size_t p = 0;
-    for (const auto& [e, x] : rec.edges) {
+    for (const auto& [e, x] : rec.edge_flows) {
       if (dense) {
         V[static_cast<std::size_t>(e)] += x;
         continue;
@@ -1168,73 +1169,73 @@ Staged place_controller(const PolicyEngine& pe, const Epoch& cur, Working& W, co
   }
   const std::optional<Amount> cap = v.has_value() ? std::optional<Amount>(P + *v) : std::nullopt;
   if (pe.capture != nullptr) {
-    if (equal || !dense) throw std::logic_error("a deletion capture of a controller other than optimized Global");
+    if (equal || !dense) throw std::logic_error("a deletion capture of a controller other than optimized CentralizedTE");
     pe.capture->graph = pe.graph;
   }
   Trace probes = Trace::list();
-  Solve sol;
+  OptimizedFlowResult sol;
   if (equal) {
-    const Amount top = roster_out(pe, support, V);
+    const Amount top = source_outgoing_capacity_bound(pe, support, V);
     sol = solve_equal(pe, support, V, P, cap.has_value() ? std::min(*cap, top) : top, &probes);
   } else {
     sol = solve(pe, support, V, cap, {});
   }
-  if (sol.placed < P) throw std::logic_error("controller: a call reduced placed_demand()");
-  // The program: each source's supply cut into paths (4.1); each source's share is the sum of its
+  if (sol.flow_value < P) throw std::logic_error("controller: a call reduced placed_demand()");
+  // The program: each source's supply cut into paths; each source's share is the sum of its
   // paths.
   // The solved flows move into the decomposition (a trace reads them afterwards: a copy).
   const bool traced = kTraced && trace != nullptr;
-  auto dec = decompose(g, support, traced ? sol.flows : std::move(sol.flows), pe.roster, pe.dests_ok);
-  Staged s;
-  // A supplied support, which a share that uses every one of its edges reuses as its bundle (a
-  // PredDAG is fixed by its graph and edge set: the same value).
-  const auto* gl = std::get_if<Global>(&pe.config.routing);
-  const std::shared_ptr<const PredDAG> supplied = gl != nullptr ? gl->support : nullptr;
+  auto dec = decompose(g, support, traced ? sol.edge_flows : std::move(sol.edge_flows), pe.reachable_sources, pe.allowed_destinations);
+  PendingPolicyUpdate s;
+  // A supplied support, which a share that uses every one of its edges reuses as its route (a
+  // PredecessorDAG is fixed by its graph and edge set: the same value).
+  const auto* gl = std::get_if<CentralizedTE>(&pe.config.routing);
+  const std::shared_ptr<const PredecessorDAG> supplied = gl != nullptr ? gl->support : nullptr;
   for (std::size_t i = 0; i < k; ++i) {
-    const NodeId src = pe.roster[i];
+    const NodeId src = pe.reachable_sources[i];
     auto& f = flows[i];
     if (global) {
-      // Global's record bundle is the edges its share uses.
+      // CentralizedTE's record route is the edges its share uses.
       const auto& share = dec.shares[i];
       auto same = [&](std::span<const EdgeId> edges) {
         return std::equal(share.begin(), share.end(), edges.begin(), edges.end(),
                           [](const auto& ex, EdgeId e) { return ex.first == e; });
       };
-      if (f.bundle && same(PredDAGBuilder::ascending(*f.bundle))) continue;
-      if (supplied && same(PredDAGBuilder::ascending(*supplied))) {
-        f.bundle = supplied;
+      if (f.route && same(PredecessorDAGBuilder::ascending(*f.route))) continue;
+      if (supplied && same(PredecessorDAGBuilder::ascending(*supplied))) {
+        f.route = supplied;
       } else {
         std::vector<EdgeId> route;
         route.reserve(share.size());
         for (const auto& [e, x] : share) route.push_back(e);
-        f.bundle = std::make_shared<const PredDAG>(PredDAGBuilder::of_edges(g, route));
+        f.route = std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::of_edges(g, route));
       }
-      f.cost = share.empty() ? kUnreachable : route_cost(g, *f.bundle, src, pe.dests_ok);
+      f.min_route_cost = share.empty() ? kUnreachable : min_route_cost(g, *f.route, src, pe.allowed_destinations);
     }
   }
   source_drafts(pe, flows, s);
   for (std::size_t i = 0; i < k; ++i) {
     s.drafts[i].record.delivered = dec.supplies[i];
-    s.drafts[i].record.edges = std::move(dec.shares[i]);
+    s.drafts[i].record.edge_flows = std::move(dec.shares[i]);
   }
   const auto& supplies = dec.supplies;
-  auto program = controller_program(g, pe.sources, pe.destinations, pe.roster, std::move(dec.paths),
+  auto program = optimized_flow_program(g, pe.sources, pe.destinations, pe.reachable_sources, std::move(dec.paths),
                                     equal ? std::span<const Amount> {} : std::span<const Amount>(supplies),
-                                    controller_basis(pe, flows));
+                                    optimized_flow_replay_basis(pe, flows));
   const Counter128 requested = requested_after(cur, v);
-  PlacementResult& out = s.out;
-  out.placed = sol.placed - P;
-  if (v.has_value()) out.remaining = *v - out.placed;
-  out.delivery_delta = out.placed;
-  out.termination = v.has_value() && out.placed == *v ? Termination::Complete : Termination::Exhausted;
+  PlacementResult& out = s.result;
+  out.call_delivered = sol.flow_value - P;
+  if (v.has_value()) out.call_undelivered = *v - out.call_delivered;
+  out.delivery_delta = out.call_delivered;
+  out.termination = v.has_value() && out.call_delivered == *v ? Termination::Complete : Termination::Exhausted;
   set_flags(out, before_program, program.get(), false);
   out.program = program;
-  out.by_tunnel = controller_rows(*program);
+  out.by_tunnel = optimized_flow_tunnel_rows(*program);
   const auto after = draft_records(s.drafts);
   fill_state(pe, after, requested, cur.infinite || !v.has_value(), Counter128 {}, out);
   out.total_cost = total_cost_of(g, after);
   const bool curve = dense && !equal;
-  if (curve) out.cost_distribution = sol.payload.cost_distribution;
+  if (curve) out.marginal_cost_curve = sol.payload.marginal_cost_curve;
   if (curve && rq.outputs != nullptr && rq.outputs->min_cut) out.min_cut = sol.payload.min_cut;
   if (kTraced && trace) {
     if (!global) trace->set("prepare", created ? routes_trace(prep) : Trace::null());
@@ -1242,10 +1243,10 @@ Staged place_controller(const PolicyEngine& pe, const Epoch& cur, Working& W, co
     if (dense) trace->set("V", Trace::ints(V));
     trace->set("cap", cap.has_value() ? Trace::integer(*cap) : Trace::null());
     Trace fc = Trace::map();
-    fc.set("placed", Trace::integer(sol.placed));
+    fc.set("placed", Trace::integer(sol.flow_value));
     if (dense) {
       const auto& r = sol.payload;
-      fc.set("cost_distribution", Trace::pairs(r.cost_distribution));
+      fc.set("cost_distribution", Trace::pairs(r.marginal_cost_curve));
       fc.set("edge_flows", Trace::ints(r.edge_flows));
       fc.set("min_cut", r.min_cut.has_value() ? Trace::ints(*r.min_cut) : Trace::null());
       fc.set("potentials", Trace::ints(r.potentials));
@@ -1259,47 +1260,47 @@ Staged place_controller(const PolicyEngine& pe, const Epoch& cur, Working& W, co
       fc.set("counters", std::move(counters));
     } else {
       std::vector<Amount> flows_dense(static_cast<std::size_t>(g.num_edges()), 0);
-      for (std::size_t p = 0; p < support.size(); ++p) flows_dense[static_cast<std::size_t>(support[p])] = sol.flows[p];
+      for (std::size_t p = 0; p < support.size(); ++p) flows_dense[static_cast<std::size_t>(support[p])] = sol.edge_flows[p];
       fc.set("edge_flows", Trace::ints(flows_dense));
     }
     Trace supply = Trace::map();
     Trace shares_tr = Trace::map();
     for (std::size_t i = 0; i < k; ++i) {
-      supply.set(key(pe.roster[i]), Trace::integer(supplies[i]));
-      shares_tr.set(key(pe.roster[i]), Trace::pairs(s.drafts[i].record.edges));
+      supply.set(key(pe.reachable_sources[i]), Trace::integer(supplies[i]));
+      shares_tr.set(key(pe.reachable_sources[i]), Trace::pairs(s.drafts[i].record.edge_flows));
     }
     fc.set("supply", std::move(supply));
     trace->set("flow_core", std::move(fc));
     trace->set("shares", std::move(shares_tr));
   }
-  if (curve) s.next.curve = *out.cost_distribution;  // the cumulative curve a later zero call reports
-  if (!global) s.next.support = created ? prep.edges : cur.support;
-  s.next.program = program;
-  s.next.by_tunnel = out.by_tunnel;
-  s.next.requested = requested;
-  s.next.prepared = true;
-  s.next.infinite = cur.infinite || !v.has_value();
+  if (curve) s.next_epoch.marginal_cost_curve = *out.marginal_cost_curve;  // the cumulative curve a later zero call reports
+  if (!global) s.next_epoch.support = created ? prep.edges : cur.support;
+  s.next_epoch.program = program;
+  s.next_epoch.by_tunnel = out.by_tunnel;
+  s.next_epoch.requested = requested;
+  s.next_epoch.prepared = true;
+  s.next_epoch.infinite = cur.infinite || !v.has_value();
   return s;
 }
 
 // ---------------------------------------------------------------- forwarding a program
 
 // The by_tunnel rows of a forwarding: per tunnel its status in the view and its amounts
-// (`assigned`, `delivered`, `dropped` per program entry).
+// (assigned, delivered and dropped amounts per program entry).
 std::vector<TunnelFlow> tunnel_rows(const ForwardingView& view, std::span<const Counter128> assigned,
                                     std::span<const Amount> delivered, std::span<const Counter128> dropped) {
   const ProgramData& p = *view.data;
   std::vector<TunnelFlow> rows;
   rows.reserve(p.tunnels.size());
   for (std::size_t t = 0; t < p.tunnels.size(); ++t) {
-    const auto e = static_cast<std::size_t>(p.tunnel_entry[t]);
-    rows.push_back(TunnelFlow {p.tunnels[t].index, p.tunnels[t].head, view.status(e), assigned[e], delivered[e], dropped[e]});
+    const auto e = static_cast<std::size_t>(p.tunnel_entry_positions[t]);
+    rows.push_back(TunnelFlow {p.tunnels[t].entry_id, p.tunnels[t].head, view.status(e), assigned[e], delivered[e], dropped[e]});
   }
   return rows;
 }
 
 // The free capacity of the forwarding's edges in the call's working residual.
-FreeFn free_of(const Working& W) {
+AvailableCapacityFn available_capacity_reader(const ServiceCapacityWorkspace& W) {
   return [&W](std::span<const EdgeId> edges, std::span<Amount> out) {
     for (std::size_t i = 0; i < edges.size(); ++i) out[i] = W.at(edges[i]);
   };
@@ -1309,15 +1310,15 @@ FreeFn free_of(const Working& W) {
 // positive weight whose route has a member.
 bool view_active(const ForwardingView& v) {
   const auto& p = *v.data;
-  for (std::size_t h = 0; h < v.num_heads(); ++h) {
-    if (!v.weights().empty() && v.weights()[h] == 0) continue;
-    for (const std::int32_t ei : v.head_entries(h)) {
+  for (std::size_t h = 0; h < v.num_sources(); ++h) {
+    if (!v.source_weights().empty() && v.source_weights()[h] == 0) continue;
+    for (const std::int32_t ei : v.entries_for_source(h)) {
       const auto e = static_cast<std::size_t>(ei);
       const auto& entry = p.entries[e];
       if (entry.weight == 0) continue;
-      if (entry.tunnel >= 0) return true;
-      const auto r = v.root_of(e);
-      if (r >= 0 && v.plan(static_cast<std::size_t>(entry.context))->root_pos[static_cast<std::size_t>(r)] >= 0) return true;
+      if (entry.tunnel_position >= 0) return true;
+      const auto r = v.context_source_index(e);
+      if (r >= 0 && v.prepared_route(static_cast<std::size_t>(entry.split_context_position))->source_positions[static_cast<std::size_t>(r)] >= 0) return true;
     }
   }
   return false;
@@ -1328,24 +1329,24 @@ bool view_active(const ForwardingView& v) {
 // forward. `active`: some head can place traffic (view_active). With `holds` (a T1 policy's own
 // program), each up tunnel's record holds its request on every edge of its path; `plan` is the
 // result's and the epoch's.
-Staged forward_entries(const PolicyEngine& pe, const Epoch& cur, Working& W, const Request& rq,
+PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& cur, ServiceCapacityWorkspace& W, const PolicyCall& rq,
                        const ForwardingProgram* before_program, const ForwardingView& view, bool active, bool holds,
                        std::shared_ptr<const TunnelPlan> plan) {
   const auto& g = *pe.graph;
-  const auto v = rq.v;
+  const auto v = rq.offer;
   const ProgramData& p = *view.data;
   const std::size_t n = p.entries.size();
-  const std::size_t k = view.num_heads();
+  const std::size_t k = view.num_sources();
   const bool lossy = pe.config.admission == Admission::Lossy;
   const bool created = !cur.prepared;
   // The entries' live records (none before the first call).
   std::vector<const FlowRecord*> before;
   if (!created) {
     before.resize(n);
-    for (std::size_t e = 0; e < n; ++e) before[e] = &LedgerAccess::live(pe.fg, cur.cohorts[e].front().id);
+    for (std::size_t e = 0; e < n; ++e) before[e] = &LedgerAccess::live(pe.ledger, cur.record_groups[e].front().record_counter);
   }
   ProgramFlow flow;
-  Amount placed = 0;
+  Amount call_delivered = 0;
   Counter128 offered = cur.offered;
   if (!lossy) {
     // The largest total in [admitted, admitted + v] on the residual plus the policy's own load.
@@ -1356,65 +1357,65 @@ Staged forward_entries(const PolicyEngine& pe, const Epoch& cur, Working& W, con
     }
     if (!created) W.release_records(before);
     const std::optional<Amount> hi = v.has_value() ? std::optional<Amount>(admitted + *v) : std::nullopt;
-    flow = detail::lossless(g, view, free_of(W), admitted, hi);
-    placed = flow.total - admitted;
+    flow = detail::lossless(g, view, available_capacity_reader(W), admitted, hi);
+    call_delivered = flow.admitted - admitted;
   } else {
     std::vector<Amount> inject(k, 0);
-    if (rq.full()) {
-      head_shares(view, *v, inject);
+    if (rq.is_full_offer()) {
+      source_shares(view, *v, inject);
     } else {
-      head_increments(view, cur.offered, *v, inject);
+      source_offer_increments(view, cur.offered, *v, inject);
     }
-    flow = detail::lossy(g, view, free_of(W), inject);
-    placed = flow.delivered;
+    flow = detail::lossy(g, view, available_capacity_reader(W), inject);
+    call_delivered = flow.delivered;
     // The whole offer is sent: what no head receives (every remaining captured weight 0) is lost at
     // the sources, outside every row.
-    flow.source_loss += *v - flow.offered;
+    flow.source_drops += *v - flow.offered;
     accumulate(offered, c128(*v), "offered");
   }
-  Staged s;
+  PendingPolicyUpdate s;
   s.drafts.resize(n);
-  s.next.cohorts.assign(n, {});
+  s.next_epoch.record_groups.assign(n, {});
   // The by_tunnel amounts per entry, kept only when the program has tunnels (only they have rows).
   const bool rows = !p.tunnels.empty();
   std::vector<Counter128> assigned(rows ? n : 0);
   std::vector<Amount> delivered(rows ? n : 0, 0);
   std::vector<Counter128> dropped(rows ? n : 0);
-  std::vector<std::pair<EdgeId, Amount>> call_drops;
+  std::vector<std::pair<EdgeId, Amount>> call_edge_drops;
   for (std::size_t e = 0; e < n; ++e) {
     const auto& entry = p.entries[e];
     auto& f = flow.entries[e];
     LiveFlow live;
-    live.src = entry.head;
-    live.bundle = view.bundle(e);
-    live.cost = view.cost(e);
-    live.entry = entry.index;
+    live.source = entry.head;
+    live.route = view.route(e);
+    live.min_route_cost = view.min_route_cost(e);
+    live.entry_id = entry.entry_id;
     if (!created) {
-      live.id = cur.cohorts[e].front().id;
-      s.drafts[e].id = live.id;
+      live.record_counter = cur.record_groups[e].front().record_counter;
+      s.drafts[e].record_counter = live.record_counter;
     } else {
       s.fresh.emplace_back(e, 0);
     }
-    s.next.cohorts[e].push_back(live);
+    s.next_epoch.record_groups[e].push_back(live);
     FlowRecord& r = s.drafts[e].record;
     r.sources = {entry.head};
-    r.destinations = pe.dests_ok;
+    r.destinations = pe.allowed_destinations;
     r.admission = pe.config.admission;
-    r.bundle = live.bundle;
-    r.route_cost = live.cost;
-    r.entry = entry.index;
-    if (holds && entry.tunnel >= 0) {
-      const auto& t = p.tunnels[static_cast<std::size_t>(entry.tunnel)];
-      if (t.reserved != 0) {
+    r.route = live.route;
+    r.min_route_cost = live.min_route_cost;
+    r.entry_id = entry.entry_id;
+    if (holds && entry.tunnel_position >= 0) {
+      const auto& t = p.tunnels[static_cast<std::size_t>(entry.tunnel_position)];
+      if (t.reserved_bandwidth != 0) {
         const auto path = path_of(t);
-        r.reserved_edges.reserve(path.size());
-        for (EdgeId x : path) r.reserved_edges.emplace_back(x, t.reserved);
-        std::sort(r.reserved_edges.begin(), r.reserved_edges.end());
+        r.edge_reservations.reserve(path.size());
+        for (EdgeId x : path) r.edge_reservations.emplace_back(x, t.reserved_bandwidth);
+        std::sort(r.edge_reservations.begin(), r.edge_reservations.end());
       }
     }
     const FlowRecord* b = created ? nullptr : before[e];
     if (!lossy) {
-      r.edges = std::move(f.carried);
+      r.edge_flows = std::move(f.edge_flows);
       r.delivered = f.delivered;
       if (rows) {
         assigned[e] = c128(f.delivered);
@@ -1422,14 +1423,14 @@ Staged forward_entries(const PolicyEngine& pe, const Epoch& cur, Working& W, con
       }
       continue;
     }
-    r.drops = plus(b != nullptr ? b->drops : std::vector<std::pair<EdgeId, Counter128>> {}, f.dropped);
+    r.edge_drops = plus(b != nullptr ? b->edge_drops : std::vector<std::pair<EdgeId, Counter128>> {}, f.edge_drops);
     r.offered = b != nullptr ? b->offered.value_or(Counter128 {}) : Counter128 {};
     accumulate(*r.offered, c128(f.assigned), "offered");
     r.delivered = (b != nullptr ? b->delivered : 0) + f.delivered;
-    r.edges = b != nullptr ? plus(b->edges, f.carried) : std::move(f.carried);
-    call_drops.insert(call_drops.end(), f.dropped.begin(), f.dropped.end());
+    r.edge_flows = b != nullptr ? plus(b->edge_flows, f.edge_flows) : std::move(f.edge_flows);
+    call_edge_drops.insert(call_edge_drops.end(), f.edge_drops.begin(), f.edge_drops.end());
     Counter128 drops;
-    for (const auto& [x, d] : r.drops) accumulate(drops, d, "drops");
+    for (const auto& [x, d] : r.edge_drops) accumulate(drops, d, "drops");
     if (rows) {
       assigned[e] = *r.offered;
       delivered[e] = r.delivered;
@@ -1439,156 +1440,156 @@ Staged forward_entries(const PolicyEngine& pe, const Epoch& cur, Working& W, con
   // The shares the heads lost themselves (Lossy): per view head, cumulative.
   std::vector<std::pair<NodeId, Counter128>> lost;
   if (lossy) {
-    s.next.head_lost = cur.head_lost.empty() ? std::vector<Counter128>(k) : cur.head_lost;
+    s.next_epoch.source_drops_by_source = cur.source_drops_by_source.empty() ? std::vector<Counter128>(k) : cur.source_drops_by_source;
     for (std::size_t h = 0; h < k; ++h) {
-      accumulate(s.next.head_lost[h], c128(flow.head_lost[h]), "offered");
-      if (!s.next.head_lost[h].is_zero()) lost.emplace_back(view.head(h), s.next.head_lost[h]);
+      accumulate(s.next_epoch.source_drops_by_source[h], c128(flow.source_drops_by_source[h]), "offered");
+      if (!s.next_epoch.source_drops_by_source[h].is_zero()) lost.emplace_back(view.source(h), s.next_epoch.source_drops_by_source[h]);
     }
   }
   const Counter128 requested = requested_after(cur, v);
-  PlacementResult& out = s.out;
-  out.placed = placed;
-  if (v.has_value()) out.remaining = *v - placed;
-  out.delivery_delta = placed;
-  if (lossy) out.call_drops = merged(std::move(call_drops));
-  out.call_source_loss = flow.source_loss;
+  PlacementResult& out = s.result;
+  out.call_delivered = call_delivered;
+  if (v.has_value()) out.call_undelivered = *v - call_delivered;
+  out.delivery_delta = call_delivered;
+  if (lossy) out.call_edge_drops = merged(std::move(call_edge_drops));
+  out.call_source_drops = flow.source_drops;
   // No head reaches a destination (every entry failed): NO_ROUTE, the records kept per entry.
-  out.termination = k == 0 ? Termination::NoRoute : forwarding_termination(active, p.has_path(), lossy, v, placed);
-  set_flags(out, before_program, view.program.get(), is<CapacityAware>(pe));
+  out.termination = k == 0 ? Termination::NoRoute : forwarding_termination(active, p.has_path(), lossy, v, call_delivered);
+  set_flags(out, before_program, view.program.get(), is<DistributedTE>(pe));
   out.program = view.program;
   if (plan) out.plan = *plan;
   out.by_tunnel = tunnel_rows(view, assigned, delivered, dropped);
   fill_state(pe, draft_records(s.drafts), requested, cur.infinite || !v.has_value(), offered, out, lost);
-  s.next.program = view.program;
-  s.next.plan = std::move(plan);
-  s.next.by_tunnel = out.by_tunnel;
-  s.next.requested = requested;
-  s.next.offered = offered;
-  s.next.prepared = true;
-  s.next.infinite = cur.infinite || !v.has_value();
+  s.next_epoch.program = view.program;
+  s.next_epoch.plan = std::move(plan);
+  s.next_epoch.by_tunnel = out.by_tunnel;
+  s.next_epoch.requested = requested;
+  s.next_epoch.offered = offered;
+  s.next_epoch.prepared = true;
+  s.next_epoch.infinite = cur.infinite || !v.has_value();
   return s;
 }
 
 // Pinned: forwarding its program as the policy replays it (place, evaluate, replace); no holds.
-Staged place_pinned(const PolicyEngine& pe, const Epoch& cur, Working& W, const Request& rq,
+PendingPolicyUpdate place_pinned(const PolicyEngine& pe, const PolicyEpoch& cur, ServiceCapacityWorkspace& W, const PolicyCall& rq,
                     const ForwardingProgram* before_program) {
-  return forward_entries(pe, cur, W, rq, before_program, pe.view, pe.active, false, nullptr);
+  return forward_entries(pe, cur, W, rq, before_program, pe.view, pe.can_forward, false, nullptr);
 }
 
 // T1's setup view U: the reservation baseline minus every hold, this policy's own holds released
 // (never above static capacity: R0 <= capacity and the own holds are part of S).
 std::vector<Amount> reservation_view(const PolicyEngine& pe) {
-  const auto r0 = LedgerAccess::reservation_baseline(pe.fg);
-  const auto held = LedgerAccess::reserved(pe.fg);
+  const auto r0 = LedgerAccess::reservation_baseline(pe.ledger);
+  const auto held = LedgerAccess::reserved(pe.ledger);
   std::vector<Amount> U(r0.begin(), r0.end());
   if (!held.empty()) {
     for (std::size_t e = 0; e < U.size(); ++e) U[e] -= held[e];
   }
   for (const FlowRecord* r : current_records(pe)) {
-    for (const auto& [e, x] : r->reserved_edges) U[static_cast<std::size_t>(e)] += x;
+    for (const auto& [e, x] : r->edge_reservations) U[static_cast<std::size_t>(e)] += x;
   }
   return U;
 }
 
 // The design volume of a tunnel model's call: the explicit design, or the offer (nullopt:
 // unlimited; T1's is finite, checked by check_call).
-std::optional<Amount> design_of(const Request& rq) noexcept { return rq.design.has_value() ? *rq.design : rq.v; }
+std::optional<Amount> design_of(const PolicyCall& rq) noexcept { return rq.design.has_value() ? *rq.design : rq.offer; }
 
 // The plan of a T1 setup for the design D: the tunnel count, D, the heads' shares and the holds
 // of the up tunnels counted once each.
-TunnelPlan t1_plan(const PolicyEngine& pe, Amount D, const ForwardingProgram* program) {
+TunnelPlan distributed_te_plan(const PolicyEngine& pe, Amount D, const ForwardingProgram* program) {
   TunnelPlan plan;
-  plan.count = std::get<CapacityAware>(pe.config.routing).tunnels.count;
+  plan.tunnels_per_head = std::get<DistributedTE>(pe.config.routing).tunnel_count.per_head;
   plan.design_demand = D;
-  plan.head_design = head_design(pe.roster, D);
+  plan.design_by_head = design_by_head(pe.reachable_sources, D);
   if (program != nullptr) {
-    for (const auto& t : program->tunnels()) plan.reserved_total += t.reserved;
+    for (const auto& t : program->tunnels()) plan.total_reserved_bandwidth += t.reserved_bandwidth;
   }
   return plan;
 }
 
 // The tunnel models' forward(): the installed program forwarded with its plan (and the call's
 // black holes), records per program entry, T1's holds kept.
-Staged forward_tunnels(const PolicyEngine& pe, const Epoch& cur, Working& W, const Request& rq,
+PendingPolicyUpdate forward_tunnels(const PolicyEngine& pe, const PolicyEpoch& cur, ServiceCapacityWorkspace& W, const PolicyCall& rq,
                        const ForwardingProgram* before_program) {
-  const ForwardingView view = make_view(*pe.graph, pe.epoch.program, nullptr, pe.dests_ok, rq.dark, true);
-  return forward_entries(pe, cur, W, rq, before_program, view, view_active(view), is<CapacityAware>(pe), pe.epoch.plan);
+  const ForwardingView view = make_forwarding_view(*pe.graph, pe.epoch.program, nullptr, pe.allowed_destinations, rq.black_holes, true);
+  return forward_entries(pe, cur, W, rq, before_program, view, view_active(view), is<DistributedTE>(pe), pe.epoch.plan);
 }
 
 // T1: replace and evaluate set up the tunnels for the design on the unreserved view and forward
 // the new program, one record per entry.
-Staged place_t1(const PolicyEngine& pe, const Epoch& cur, Working& W, const Request& rq,
+PendingPolicyUpdate apply_distributed_te_call(const PolicyEngine& pe, const PolicyEpoch& cur, ServiceCapacityWorkspace& W, const PolicyCall& rq,
                 const ForwardingProgram* before_program) {
   const auto& g = *pe.graph;
   const Amount D = *design_of(rq);
-  const auto& ca = std::get<CapacityAware>(pe.config.routing);
-  auto tunnels = t1_setup(g, pe.elig, pe.roster, pe.dests_ok, pe.selection, ca, pe.c0, D, reservation_view(pe));
-  const auto program = tunnel_program(g, pe.sources, pe.destinations, pe.roster, std::move(tunnels),
+  const auto& ca = std::get<DistributedTE>(pe.config.routing);
+  auto tunnels = setup_distributed_te_tunnels(g, pe.eligibility, pe.reachable_sources, pe.allowed_destinations, ca, pe.c0, D, reservation_view(pe));
+  const auto program = distributed_te_program(g, pe.sources, pe.destinations, pe.reachable_sources, std::move(tunnels),
                                       pe.excluded_nodes, pe.excluded_edges);
-  const ForwardingView view = make_view(g, program, nullptr, pe.dests_ok, nullptr, true);
+  const ForwardingView view = make_forwarding_view(g, program, nullptr, pe.allowed_destinations, nullptr, true);
   return forward_entries(pe, cur, W, rq, before_program, view, view_active(view), true,
-                         std::make_shared<const TunnelPlan>(t1_plan(pe, D, program.get())));
+                         std::make_shared<const TunnelPlan>(distributed_te_plan(pe, D, program.get())));
 }
 
 // The plan of a T2 layout (zeros without a tunnel) for the design D (nullopt: unlimited), with its
 // K tunnels and its program's forwarding bound F.
 TunnelPlan t2_plan(const PolicyEngine& pe, std::optional<Amount> D, const T2Layout& lay, std::size_t K, Amount F) {
   TunnelPlan plan;
-  plan.count = lay.count;
+  plan.tunnels_per_head = lay.count;
   plan.design_demand = D;
-  if (D.has_value()) plan.head_design = head_design(pe.roster, *D);
-  plan.live_heads = lay.live;
+  if (D.has_value()) plan.design_by_head = design_by_head(pe.reachable_sources, *D);
+  plan.heads_with_capacity = lay.live;
   plan.insufficient_resolution = !lay.live.empty() && lay.common == 0;
-  plan.fluid_share = std::pair<Amount, Amount> {lay.fluid_num, lay.fluid_den};
-  plan.common_share = lay.common;
-  plan.planned_per_tunnel = lay.planned;
-  plan.planned_total = static_cast<Amount>(K) * lay.planned;
-  plan.route_cost = lay.route_cost;
-  if (std::get<Global>(pe.config.routing).prefer_headroom) plan.headroom_penalty = lay.headroom_penalty;
-  plan.forwarding_bound = F;
+  plan.max_fractional_bandwidth_per_tunnel = std::pair<Amount, Amount> {lay.fluid_num, lay.fluid_den};
+  plan.max_bandwidth_per_tunnel = lay.common;
+  plan.planned_bandwidth_per_tunnel = lay.planned;
+  plan.total_planned_bandwidth = static_cast<Amount>(K) * lay.planned;
+  plan.total_tunnel_cost = lay.route_cost;
+  if (std::get<CentralizedTE>(pe.config.routing).prefer_headroom) plan.headroom_penalty = lay.headroom_penalty;
+  plan.max_lossless_offer = F;
   return plan;
 }
 
 // T2: replace and evaluate lay out the tunnels for the design on the released residual and
 // forward the new program, one record per entry; the plan's forwarding bound is the program's
 // lossless maximum on that view.
-Staged place_t2(const PolicyEngine& pe, const Epoch& cur, Working& W, const Request& rq,
+PendingPolicyUpdate place_t2(const PolicyEngine& pe, const PolicyEpoch& cur, ServiceCapacityWorkspace& W, const PolicyCall& rq,
                 const ForwardingProgram* before_program) {
   const auto& g = *pe.graph;
   const std::optional<Amount> D = design_of(rq);
   std::vector<Amount> V;
   W.dense(V);
-  const auto& gl = std::get<Global>(pe.config.routing);
-  auto lay = t2_layout(g, pe.elig, pe.roster, pe.dests_ok, *gl.tunnels, gl.prefer_headroom, D, V);
-  const auto program = tunnel_program(g, pe.sources, pe.destinations, pe.roster, std::move(lay.tunnels),
+  const auto& gl = std::get<CentralizedTE>(pe.config.routing);
+  auto lay = t2_layout(g, pe.eligibility, pe.reachable_sources, pe.allowed_destinations, *gl.tunnel_count, gl.prefer_headroom, D, V);
+  const auto program = distributed_te_program(g, pe.sources, pe.destinations, pe.reachable_sources, std::move(lay.tunnels),
                                       pe.excluded_nodes, pe.excluded_edges);
-  const ForwardingView view = make_view(g, program, nullptr, pe.dests_ok, nullptr, true);
-  const Amount F = detail::lossless(g, view, free_of(W), 0, std::nullopt).total;
+  const ForwardingView view = make_forwarding_view(g, program, nullptr, pe.allowed_destinations, nullptr, true);
+  const Amount F = detail::lossless(g, view, available_capacity_reader(W), 0, std::nullopt).admitted;
   return forward_entries(pe, cur, W, rq, before_program, view, view_active(view), false,
                          std::make_shared<const TunnelPlan>(t2_plan(pe, D, lay, program->tunnels().size(), F)));
 }
 
 // forward(): a computing model's installed program forwarded with no route computation, on the
-// released view, records per roster source (CostOnly and Global).
-Staged forward_installed(const PolicyEngine& pe, Working& W, const Request& rq) {
+// released view, records per roster source (ShortestPaths and CentralizedTE).
+PendingPolicyUpdate forward_installed(const PolicyEngine& pe, ServiceCapacityWorkspace& W, const PolicyCall& rq) {
   const auto& g = *pe.graph;
-  const auto v = rq.v;
+  const auto v = rq.offer;
   const auto& program = pe.epoch.program;
-  const ForwardingView view = make_view(g, program, nullptr, pe.dests_ok, rq.dark);
+  const ForwardingView view = make_forwarding_view(g, program, nullptr, pe.allowed_destinations, rq.black_holes);
   const ProgramData& p = *view.data;
-  const std::size_t k = pe.roster.size();
+  const std::size_t k = pe.reachable_sources.size();
   const std::size_t n = p.entries.size();
   const bool lossy = pe.config.admission == Admission::Lossy;
   ProgramFlow flow;
   if (!lossy) {
-    flow = detail::lossless(g, view, free_of(W), 0, v);
+    flow = detail::lossless(g, view, available_capacity_reader(W), 0, v);
   } else {
     std::vector<Amount> inject(k, 0);
-    head_shares(view, *v, inject);
-    flow = detail::lossy(g, view, free_of(W), inject);
+    source_shares(view, *v, inject);
+    flow = detail::lossy(g, view, available_capacity_reader(W), inject);
   }
-  Staged s;
-  s.next = fresh_epoch(pe, true);
+  PendingPolicyUpdate s;
+  s.next_epoch = fresh_epoch(pe, true);
   std::vector<LiveFlow> flows(k);
   // Per roster source: its entries' carried, drops and deliveries summed (the view's heads are the
   // roster: nothing is replayed).
@@ -1596,36 +1597,36 @@ Staged forward_installed(const PolicyEngine& pe, Working& W, const Request& rq) 
   std::vector<std::vector<std::pair<EdgeId, Amount>>> drops(k);
   std::vector<Amount> got(k, 0);
   for (std::size_t e = 0; e < n; ++e) {
-    const auto slot = static_cast<std::size_t>(p.entries[e].slot);
+    const auto slot = static_cast<std::size_t>(p.entries[e].roster_index);
     const auto& f = flow.entries[e];
-    carried[slot].insert(carried[slot].end(), f.carried.begin(), f.carried.end());
-    drops[slot].insert(drops[slot].end(), f.dropped.begin(), f.dropped.end());
+    carried[slot].insert(carried[slot].end(), f.edge_flows.begin(), f.edge_flows.end());
+    drops[slot].insert(drops[slot].end(), f.edge_drops.begin(), f.edge_drops.end());
     got[slot] += f.delivered;
   }
   for (std::size_t i = 0; i < k; ++i) {
-    flows[i] = pe.epoch.cohorts[i].front();
-    flows[i].id = -1;
+    flows[i] = pe.epoch.record_groups[i].front();
+    flows[i].record_counter = -1;
     carried[i] = merged(std::move(carried[i]));
     drops[i] = merged(std::move(drops[i]));
-    if (is<Global>(pe)) {
-      // Global's record bundle is the edges its share uses.
+    if (is<CentralizedTE>(pe)) {
+      // CentralizedTE's record route is the edges its share uses.
       std::vector<EdgeId> route;
       route.reserve(carried[i].size());
       for (const auto& [e, x] : carried[i]) route.push_back(e);
-      flows[i].bundle = std::make_shared<const PredDAG>(PredDAGBuilder::of_edges(g, route));
-      flows[i].cost = route.empty() ? kUnreachable : route_cost(g, *flows[i].bundle, pe.roster[i], pe.dests_ok);
+      flows[i].route = std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::of_edges(g, route));
+      flows[i].min_route_cost = route.empty() ? kUnreachable : min_route_cost(g, *flows[i].route, pe.reachable_sources[i], pe.allowed_destinations);
     }
   }
   source_drafts(pe, flows, s);
-  std::vector<std::pair<EdgeId, Amount>> call_drops;
+  std::vector<std::pair<EdgeId, Amount>> call_edge_drops;
   for (std::size_t i = 0; i < k; ++i) {
     FlowRecord& r = s.drafts[i].record;
-    r.edges = carried[i];
+    r.edge_flows = carried[i];
     r.delivered = got[i];
     if (!lossy) continue;
-    r.drops = plus(std::vector<std::pair<EdgeId, Counter128>> {}, drops[i]);
-    r.offered = c128(flow.head_offered[i]);
-    call_drops.insert(call_drops.end(), drops[i].begin(), drops[i].end());
+    r.edge_drops = plus(std::vector<std::pair<EdgeId, Counter128>> {}, drops[i]);
+    r.offered = c128(flow.offered_by_source[i]);
+    call_edge_drops.insert(call_edge_drops.end(), drops[i].begin(), drops[i].end());
   }
   std::vector<Counter128> assigned(n);
   std::vector<Amount> delivered(n, 0);
@@ -1634,31 +1635,31 @@ Staged forward_installed(const PolicyEngine& pe, Working& W, const Request& rq) 
     const auto& f = flow.entries[e];
     assigned[e] = c128(lossy ? f.assigned : f.delivered);
     delivered[e] = f.delivered;
-    for (const auto& [x, d] : f.dropped) accumulate(dropped[e], c128(d), "drops");
+    for (const auto& [x, d] : f.edge_drops) accumulate(dropped[e], c128(d), "drops");
   }
   const Counter128 requested = v.has_value() ? c128(*v) : Counter128 {};
   const Counter128 offered = lossy ? c128(flow.offered) : Counter128 {};
-  PlacementResult& out = s.out;
-  out.placed = lossy ? flow.delivered : flow.total;
-  if (v.has_value()) out.remaining = *v - out.placed;
-  out.call_drops = merged(std::move(call_drops));
-  out.call_source_loss = flow.source_loss;
+  PlacementResult& out = s.result;
+  out.call_delivered = lossy ? flow.delivered : flow.admitted;
+  if (v.has_value()) out.call_undelivered = *v - out.call_delivered;
+  out.call_edge_drops = merged(std::move(call_edge_drops));
+  out.call_source_drops = flow.source_drops;
   bool active = false;
-  for (std::size_t h = 0; h < view.num_heads() && !active; ++h) {
-    for (const std::int32_t e : view.head_entries(h)) active = active || p.entries[static_cast<std::size_t>(e)].weight > 0;
+  for (std::size_t h = 0; h < view.num_sources() && !active; ++h) {
+    for (const std::int32_t e : view.entries_for_source(h)) active = active || p.entries[static_cast<std::size_t>(e)].weight > 0;
   }
-  if (p.pooled) active = !view.plan(0)->members.empty();
-  out.termination = forwarding_termination(active, p.has_path(), lossy, v, out.placed);
+  if (p.pools_source_inflows) active = !view.prepared_route(0)->forwarding_edges.empty();
+  out.termination = forwarding_termination(active, p.has_path(), lossy, v, out.call_delivered);
   out.program = program;
   out.by_tunnel = tunnel_rows(view, assigned, delivered, dropped);
   const auto after = draft_records(s.drafts);
   fill_state(pe, after, requested, !v.has_value(), offered, out);
-  if (controller(pe)) out.total_cost = total_cost_of(g, after);
-  s.next.by_tunnel = out.by_tunnel;
-  s.next.requested = requested;
-  s.next.offered = offered;
-  s.next.prepared = true;
-  s.next.infinite = !v.has_value();
+  if (uses_optimized_flow(pe)) out.total_cost = total_cost_of(g, after);
+  s.next_epoch.by_tunnel = out.by_tunnel;
+  s.next_epoch.requested = requested;
+  s.next_epoch.offered = offered;
+  s.next_epoch.prepared = true;
+  s.next_epoch.infinite = !v.has_value();
   return s;
 }
 
@@ -1667,120 +1668,134 @@ Staged forward_installed(const PolicyEngine& pe, Working& W, const Request& rq) 
 } // namespace
 
 const char* model_name(const Routing& r) noexcept {
-  if (std::holds_alternative<CostOnly>(r)) return "CostOnly";
-  if (is_t2(r)) return "T2";
-  if (std::holds_alternative<Global>(r)) return "Global";
-  if (std::holds_alternative<CapacityAware>(r)) return "T1";
+  if (std::holds_alternative<ShortestPaths>(r)) return "ShortestPaths";
+  if (is_t2(r)) return "CentralizedTE with tunnel_count";
+  if (std::holds_alternative<CentralizedTE>(r)) return "CentralizedTE";
+  if (std::holds_alternative<DistributedTE>(r)) return "DistributedTE";
   return "Pinned";
 }
 
-ResolvedAxes resolve_config(const FlowPolicyConfig& cfg, bool cache, std::int32_t num_edges) {
-  const auto& r = cfg.routing;
+const char* model_class(const Routing& r) noexcept {
+  if (std::holds_alternative<ShortestPaths>(r)) return "ShortestPaths";
+  if (std::holds_alternative<CentralizedTE>(r)) return "CentralizedTE";
+  if (std::holds_alternative<DistributedTE>(r)) return "DistributedTE";
+  return "Pinned";
+}
+
+namespace {
+
+// T2's several-sources rule: OPTIMIZED with one input source is the equal calculation; with several
+// it would be another (strongly NP-hard) problem.
+void check_t2_sources(const Routing& r, std::size_t num_sources) {
+  const auto* gl = std::get_if<CentralizedTE>(&r);
+  if (gl != nullptr && gl->tunnel_count.has_value() && num_sources > 1 && gl->source_allocation == SourceAllocation::Optimized) {
+    invalid("CentralizedTE with tunnel_count and several sources requires source_allocation=EQUAL");
+  }
+}
+
+// The pooled single-path rule: a bottleneck choice would differ per source at a shared router.
+void check_pooled_single_path(const Routing& r, std::size_t num_sources) {
+  const auto* sp = std::get_if<ShortestPaths>(&r);
+  if (sp != nullptr && num_sources > 1 && !sp->multipath && detail::RouteChoice {sp->tie_break}.prefers_score()) {
+    invalid("ShortestPaths with multiple input sources requires tie_break=FEWER_HOPS when multipath=False");
+  }
+}
+
+} // namespace
+
+void check_config(const FlowPolicyConfig& config, bool cache, std::int32_t num_edges, std::optional<std::size_t> num_sources) {
+  const auto& r = config.routing;
   if (r.valueless_by_exception()) invalid("routing: the variant holds no routing mode");
   // The enumeration values.
-  if (cfg.placement.has_value()) check_member(*cfg.placement, "placement");
-  check_member(cfg.admission, "admission");
-  if (cfg.origin.has_value()) check_member(*cfg.origin, "origin");
-  if (cfg.selection.has_value()) check_selection(*cfg.selection);
-  if (cfg.weights.has_value()) check_member(*cfg.weights, "weights");
-  // The model's row (Global: no selection, then support and tunnels together decide it, then
-  // prefer_headroom needs tunnels; T1: an "up to" count is not T1's row), its columns left to
-  // right: placement, origin, admission, selection, weights (with edge_weights).
-  ResolvedAxes out {cfg.selection, cfg.origin, cfg.weights};
-  const bool cost_only = std::holds_alternative<CostOnly>(r);
-  const auto* gl = std::get_if<Global>(&r);
-  const auto* t1 = std::get_if<CapacityAware>(&r);
-  const bool pinned = std::holds_alternative<Pinned>(r);
-  if (gl != nullptr) {
-    if (cfg.selection.has_value()) invalid("Global does not accept selection");
-    if (gl->support && gl->tunnels.has_value()) invalid("Global support and tunnels are mutually exclusive");
-    if (gl->prefer_headroom && !gl->tunnels.has_value()) invalid("prefer_headroom requires tunnels");
+  check_member(config.admission, "admission");
+  const auto* sp = std::get_if<ShortestPaths>(&r);
+  const auto* gl = std::get_if<CentralizedTE>(&r);
+  const auto* t1 = std::get_if<DistributedTE>(&r);
+  if (sp != nullptr) {
+    check_member(sp->allocation, "allocation");
+    if (sp->source_allocation.has_value()) check_member(*sp->source_allocation, "source_allocation");
+    if (sp->weight_basis.has_value()) check_member(*sp->weight_basis, "weight_basis");
+    check_member(sp->tie_break, "tie_break");
   }
+  if (gl != nullptr) check_member(gl->source_allocation, "source_allocation");
+  if (t1 != nullptr) check_member(t1->tie_break, "tie_break");
   const bool t2 = is_t2(r);
-  const bool global = gl != nullptr && !t2;
-  const std::string model = model_name(r);
-  if (t1 != nullptr && t1->tunnels.up_to) invalid("T1 requires an exact tunnel count");
-  if (!cost_only) {
-    if (cfg.placement.has_value()) invalid(model + " does not accept placement");
-  } else if (!cfg.placement.has_value()) {
-    invalid("CostOnly requires placement");
-  }
-  const bool max_flow = global || (cfg.placement.has_value() && *cfg.placement == FlowPlacement::MaxFlow);
-  if (cost_only && !max_flow && cfg.origin == Origin::Optimized) {
-    invalid("CostOnly with EQUAL_BALANCED or WEIGHTED requires origin=EQUAL");
-  }
-  if (t1 != nullptr && cfg.origin == Origin::Optimized) invalid("T1 requires origin=EQUAL");
-  if (pinned && cfg.origin.has_value()) invalid("Pinned does not accept origin");
-  if (!cfg.origin.has_value() && !pinned) {
-    out.origin = (cost_only && !max_flow) || t1 != nullptr || t2 ? Origin::Equal : Origin::Optimized;
-  }
-  if (cfg.admission == Admission::Lossy && max_flow) invalid("MAX_FLOW requires admission=LOSSLESS");
-  if (pinned) {
-    if (cfg.selection.has_value()) invalid("Pinned does not accept selection");
-  } else if (gl == nullptr) {
-    if (!cfg.selection.has_value()) out.selection = PathSelection();
-    if (t1 != nullptr) {
-      // A tunnel is one path: T1 reads tie_break, priority and multi_edge.
-      if (out.selection->multipath == true) invalid("T1 requires multipath=False");
-    } else {
-      check_kernel_combination(*cfg.placement, cfg.admission);
+  const bool lossy = config.admission == Admission::Lossy;
+  // The model matrix in its order: route and source allocation, admission, the route-choice
+  // controls, prefer_headroom, the weight combinations, then a cache on a model that does not read it.
+  if (sp != nullptr) {
+    const bool optimized = sp->allocation == RouteAllocation::Optimized;
+    if (!optimized && sp->source_allocation == SourceAllocation::Optimized) {
+      invalid("ShortestPaths with EQUAL or WEIGHTED requires source_allocation=EQUAL");
     }
+    if (optimized && lossy) invalid("ShortestPaths OPTIMIZED requires admission=LOSSLESS");
+    if (detail::RouteChoice {sp->tie_break, sp->multipath, sp->parallel_edges}.tie_is_ineffective()) {
+      invalid("ShortestPaths tie_break requires multipath=False or parallel_edges=False");
+    }
+    if (num_sources.has_value()) check_pooled_single_path(r, *num_sources);
+    const bool weighted = sp->allocation == RouteAllocation::Weighted;
+    if (sp->weight_basis.has_value() && !weighted) invalid("weight_basis requires allocation=WEIGHTED");
+    if (sp->weight_basis == WeightBasis::Explicit && !sp->edge_weights) invalid("weight_basis=EXPLICIT requires edge_weights");
+    if (sp->edge_weights && sp->weight_basis != WeightBasis::Explicit) invalid("edge_weights require weight_basis=EXPLICIT");
   }
-  // The weights column: CostOnly Weighted reads them (Capacity by default); another CostOnly
-  // placement names the placement it needs; every other model takes none.
-  const bool weighted = cost_only && *cfg.placement == FlowPlacement::Weighted;
-  if (weighted) {
-    if (!cfg.weights.has_value()) out.weights = WeightBasis::Capacity;
-    if (cfg.weights == WeightBasis::Explicit && !cfg.edge_weights) invalid("weights=EXPLICIT requires edge_weights");
-    if (cfg.edge_weights && cfg.weights != WeightBasis::Explicit) invalid("edge_weights require weights=EXPLICIT");
-  } else if (cost_only) {
-    if (cfg.weights.has_value()) invalid("weights require CostOnly placement=WEIGHTED");
-    if (cfg.edge_weights) invalid("edge_weights require weights=EXPLICIT");
-  } else {
-    if (cfg.weights.has_value()) invalid(model + " does not accept weights");
-    if (cfg.edge_weights) invalid(model + " does not accept edge_weights");
+  if (gl != nullptr) {
+    if (num_sources.has_value()) check_t2_sources(r, *num_sources);
+    if (!t2 && lossy) invalid("CentralizedTE without tunnel_count requires admission=LOSSLESS");
+    if (gl->prefer_headroom && !t2) invalid("prefer_headroom requires tunnel_count");
   }
-  if (cache && !cost_only) invalid(model + " does not use DagCache");
-  // The tunnel models' parameters: the tunnel count; T1's cost ceiling and search minimum.
-  if (t2 && (gl->tunnels->count < 1 || gl->tunnels->count > kMaxTunnelCount)) invalid("tunnel count must be in [1, 10000]");
+  if (cache && sp == nullptr) invalid(std::string(model_class(r)) + " does not use ShortestPathCache");
+  // Then the tunnel count, an "up to" count for DistributedTE, the ceilings, the search minimum and
+  // edge_weights' length and entries (they need the graph).
+  if (t2 && (gl->tunnel_count->per_head < 1 || gl->tunnel_count->per_head > kMaxTunnelCount)) invalid("tunnel count must be in [1, 10000]");
   if (t1 != nullptr) {
-    if (t1->tunnels.count < 1 || t1->tunnels.count > kMaxTunnelCount) invalid("tunnel count must be in [1, 10000]");
-    check_ceiling(t1->max_path_cost);
+    if (t1->tunnel_count.per_head < 1 || t1->tunnel_count.per_head > kMaxTunnelCount) invalid("tunnel count must be in [1, 10000]");
+    if (t1->tunnel_count.up_to) invalid("DistributedTE requires an exact tunnel count");
+    check_ceiling(t1->cost_ceiling);
     if (t1->min_unreserved_bandwidth < 0 || t1->min_unreserved_bandwidth >= kDomainLimit) {
       invalid("min_unreserved_bandwidth must be an integer in [0, 2^62)");
     }
   }
-  // edge_weights' length and entries (they need the graph).
-  if (weighted && cfg.edge_weights) {
-    const auto& w = *cfg.edge_weights;
+  if (sp != nullptr && sp->allocation == RouteAllocation::Weighted && sp->edge_weights) {
+    const auto& w = *sp->edge_weights;
     if (w.size() != static_cast<std::size_t>(num_edges)) invalid("edge_weights: expected " + str(num_edges) + " entries");
     for (std::size_t e = 0; e < w.size(); ++e) {
       if (w[e] < 0 || w[e] >= kDomainLimit) invalid("edge_weights[" + std::to_string(e) + "] must be an integer in [0, 2^62)");
     }
   }
-  return out;
 }
 
-void check_source_count(const FlowPolicyConfig& cfg, std::size_t num_sources, std::size_t num_destinations) {
-  const auto& r = cfg.routing;
-  (void)num_destinations;
-  // The pooled single-path rule: a bottleneck choice would differ per source at a shared router.
-  if (std::holds_alternative<CostOnly>(r) && num_sources > 1 && cfg.selection.has_value() &&
-      cfg.selection->single_path() && cfg.selection->tie_break == EdgeTieBreak::PreferHigherPriority) {
-    invalid("CostOnly with multiple input sources rejects multipath=false with PREFER_HIGHER_PRIORITY");
+void check_source_count(const FlowPolicyConfig& config, std::size_t num_sources) {
+  check_pooled_single_path(config.routing, num_sources);
+  check_t2_sources(config.routing, num_sources);
+}
+
+FlowPolicyConfig resolved_config(FlowPolicyConfig config) {
+  if (auto* sp = std::get_if<ShortestPaths>(&config.routing)) {
+    if (!sp->source_allocation.has_value()) {
+      sp->source_allocation = sp->allocation == RouteAllocation::Optimized ? SourceAllocation::Optimized : SourceAllocation::Equal;
+    }
+    if (sp->allocation == RouteAllocation::Weighted && !sp->weight_basis.has_value()) sp->weight_basis = WeightBasis::Capacity;
   }
-  // T2 optimized is the equal calculation with one source; with several it would be another
-  // (strongly NP-hard) problem.
-  if (is_t2(r) && num_sources > 1 && cfg.origin == Origin::Optimized) invalid("T2 with several sources requires origin=EQUAL");
+  return config;
+}
+
+std::optional<SourceAllocation> source_allocation_of(const Routing& r) noexcept {
+  if (const auto* sp = std::get_if<ShortestPaths>(&r)) {
+    return sp->source_allocation.value_or(sp->allocation == RouteAllocation::Optimized ? SourceAllocation::Optimized
+                                                                                          : SourceAllocation::Equal);
+  }
+  if (const auto* gl = std::get_if<CentralizedTE>(&r)) return gl->source_allocation;
+  if (std::holds_alternative<DistributedTE>(r)) return SourceAllocation::Equal;
+  return std::nullopt;
 }
 
 void check_tunnel_limit(const FlowPolicyConfig& cfg, std::size_t num_heads) {
-  const auto* t1 = std::get_if<CapacityAware>(&cfg.routing);
-  const auto* gl = std::get_if<Global>(&cfg.routing);
-  if (t1 == nullptr && (gl == nullptr || !gl->tunnels.has_value())) return;
-  // The count (the largest for "up to") is in [1, 10000] (resolve_config) and H < 2^31: the
+  const auto* t1 = std::get_if<DistributedTE>(&cfg.routing);
+  const auto* gl = std::get_if<CentralizedTE>(&cfg.routing);
+  if (t1 == nullptr && (gl == nullptr || !gl->tunnel_count.has_value())) return;
+  // The count (the largest for "up to") is in [1, 10000] (check_config) and H < 2^31: the
   // product fits 64 bits.
-  const std::int64_t count = t1 != nullptr ? t1->tunnels.count : gl->tunnels->count;
+  const std::int64_t count = t1 != nullptr ? t1->tunnel_count.per_head : gl->tunnel_count->per_head;
   const auto heads = static_cast<std::int64_t>(num_heads);
   if (heads * count > kMaxTunnels) {
     invalid("tunnel limit exceeded: " + str(heads) + " heads x " + str(count) + " tunnels > " + str(kMaxTunnels));
@@ -1801,7 +1816,7 @@ namespace {
 // succeeded, an evaluator once its whole call has.
 std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const NodeId> sources,
                                           std::span<const NodeId> destinations, FlowPolicyConfig config,
-                                          const Eligibility* elig, DagCache* cache, detail::FrozenTally& tally) {
+                                          const Eligibility* eligibility, ShortestPathCache* cache, detail::FrozenCacheHitTally& tally) {
   auto pe = std::make_unique<PolicyEngine>(ledger, std::move(config));
   pe->graph = ledger.graph();
   const auto& g = *pe->graph;
@@ -1810,11 +1825,11 @@ std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const No
   pe->sources = detail::node_set(sources, g.num_nodes(), "sources");
   pe->destinations = detail::node_set(destinations, g.num_nodes(), "destinations");
   detail::check_disjoint(pe->sources, pe->destinations, "sources", "destinations");
-  if (elig != nullptr && elig->graph_uid() != g.uid()) {
+  if (eligibility != nullptr && eligibility->graph_uid() != g.uid()) {
     throw std::invalid_argument("foreign Eligibility: built for another graph");
   }
   const auto* pinned = std::get_if<Pinned>(&pe->config.routing);
-  const auto* global = std::get_if<Global>(&pe->config.routing);
+  const auto* global = std::get_if<CentralizedTE>(&pe->config.routing);
   if (pinned != nullptr) {
     if (!pinned->program) throw std::invalid_argument("Pinned requires a program");
     if (pinned->program->graph_uid() != g.uid()) throw std::invalid_argument("program belongs to another graph");
@@ -1823,17 +1838,31 @@ std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const No
     throw std::invalid_argument("support belongs to another graph");
   }
   if (cache != nullptr && cache->graph_uid() != g.uid()) {
-    throw std::invalid_argument("foreign DagCache: bound to another graph");
+    throw std::invalid_argument("foreign ShortestPathCache: bound to another graph");
   }
   if (pinned != nullptr && pinned->black_holes && pinned->black_holes->graph_uid() != g.uid()) {
     throw std::invalid_argument("black_holes belongs to another graph");
   }
-  pe->elig = elig;
-  const auto axes = detail::resolve_config(pe->config, cache != nullptr, g.num_edges());
-  pe->config.selection = axes.selection;
-  pe->config.origin = axes.origin;
-  pe->config.weights = axes.weights;
-  detail::check_source_count(pe->config, pe->sources.size(), pe->destinations.size());
+  pe->eligibility = eligibility;
+  detail::check_config(pe->config, cache != nullptr, g.num_edges(), pe->sources.size());
+  pe->config = detail::resolved_config(std::move(pe->config));
+  if (global != nullptr && global->support && global->tunnel_count.has_value()) {
+    // T2 on a support: the support's edges intersected with the mask are the allowed links of every
+    // step (roster, sizing, objectives, decomposition, the programs' replay basis).
+    std::vector<NodeId> xn;
+    std::vector<EdgeId> xe;
+    const auto kept = detail::PredecessorDAGBuilder::ascending(*global->support);
+    for (NodeId v = 0; v < g.num_nodes(); ++v) {
+      if (eligibility != nullptr && !eligibility->allows_node(v)) xn.push_back(v);
+    }
+    for (EdgeId e = 0; e < g.num_edges(); ++e) {
+      const bool in_support = std::binary_search(kept.begin(), kept.end(), e);
+      if (!in_support || (eligibility != nullptr && !eligibility->allows_edge(e))) xe.push_back(e);
+    }
+    pe->support_mask = std::make_unique<const Eligibility>(g.eligibility(xn, xe));
+    eligibility = pe->support_mask.get();
+    pe->eligibility = eligibility;
+  }
   if (pinned != nullptr) {
     const auto& prog = *pinned->program;
     if (!std::equal(prog.sources().begin(), prog.sources().end(), pe->sources.begin(), pe->sources.end()) ||
@@ -1842,71 +1871,75 @@ std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const No
       throw std::invalid_argument("program endpoints do not match policy endpoints");
     }
   }
-  if (pe->config.selection.has_value()) pe->selection = *pe->config.selection;
-  if (pe->config.origin.has_value()) pe->origin = *pe->config.origin;
-  auto node_ok = [&](NodeId v) { return elig == nullptr || elig->node_ok(v); };
+  if (const auto* sp = std::get_if<ShortestPaths>(&pe->config.routing)) {
+    pe->route_choice = detail::RouteChoice {sp->tie_break, sp->multipath, sp->parallel_edges};
+  } else if (const auto* ca = std::get_if<DistributedTE>(&pe->config.routing)) {
+    pe->route_choice = detail::RouteChoice {ca->tie_break, false, ca->parallel_edges};
+  }
+  if (const auto s = detail::source_allocation_of(pe->config.routing)) pe->source_allocation = *s;
+  auto node_allowed = [&](NodeId v) { return eligibility == nullptr || eligibility->allows_node(v); };
   for (NodeId d : pe->destinations) {
-    if (node_ok(d)) pe->dests_ok.push_back(d);
+    if (node_allowed(d)) pe->allowed_destinations.push_back(d);
   }
   if (pinned != nullptr) {
     // The program as this policy forwards it: replayed under the mask, the black holes laid over.
-    pe->view = detail::make_view(g, pinned->program, elig, pe->dests_ok, pinned->black_holes.get(), true);
-    for (std::size_t h = 0; h < pe->view.num_heads(); ++h) pe->roster.push_back(pe->view.head(h));
-    pe->active = detail::view_active(pe->view);
-    pe->epoch.cohorts.resize(detail::ProgramAccess::data(*pinned->program).entries.size());
-    pe->owner = LedgerAccess::bind(ledger);
+    pe->view = detail::make_forwarding_view(g, pinned->program, eligibility, pe->allowed_destinations, pinned->black_holes.get(), true);
+    for (std::size_t h = 0; h < pe->view.num_sources(); ++h) pe->reachable_sources.push_back(pe->view.source(h));
+    pe->can_forward = detail::view_active(pe->view);
+    pe->epoch.record_groups.resize(detail::ProgramAccess::data(*pinned->program).entries.size());
+    pe->policy_id = LedgerAccess::bind(ledger);
     return pe;
   }
-  if (detail::is<CostOnly>(*pe)) {
+  if (detail::is<ShortestPaths>(*pe)) {
     pe->support = cache != nullptr
-                      ? detail::DagCacheAccess::lookup(*cache, g, pe->destinations, Direction::Reverse, elig, tally)
-                      : std::make_shared<const PredDAG>(detail::static_support(g, pe->destinations, Direction::Reverse, elig));
-    const auto edges = detail::PredDAGBuilder::ascending(*pe->support);
-    const auto row = g.row_offsets();
+                      ? detail::DagCacheAccess::lookup(*cache, g, pe->destinations, Direction::Reverse, eligibility, tally)
+                      : std::make_shared<const PredecessorDAG>(detail::static_support(g, pe->destinations, Direction::Reverse, eligibility));
+    const auto edges = detail::PredecessorDAGBuilder::ascending(*pe->support);
+    const auto row = g.outgoing_offsets();
     for (NodeId s : pe->sources) {
-      if (!node_ok(s)) continue;
+      if (!node_allowed(s)) continue;
       const auto it = std::lower_bound(edges.begin(), edges.end(), row[static_cast<std::size_t>(s)]);
-      if (it != edges.end() && *it < row[static_cast<std::size_t>(s) + 1]) pe->roster.push_back(s);
+      if (it != edges.end() && *it < row[static_cast<std::size_t>(s) + 1]) pe->reachable_sources.push_back(s);
     }
-  } else if (global != nullptr && global->support) {
+  } else if (global != nullptr && global->support && !global->tunnel_count.has_value()) {
     // The support trimmed to the walks from the sources to the allowed destinations under the mask;
     // the roster is the sources that reach one inside it.
     std::vector<EdgeId> trimmed;
     for (NodeId s : pe->sources) {
-      if (!node_ok(s)) continue;
-      auto part = detail::prune(g, *global->support, s, pe->dests_ok, elig);
+      if (!node_allowed(s)) continue;
+      auto part = detail::prune(g, *global->support, s, pe->allowed_destinations, eligibility);
       if (part.empty()) continue;
-      pe->roster.push_back(s);
+      pe->reachable_sources.push_back(s);
       trimmed.insert(trimmed.end(), part.begin(), part.end());
     }
     std::sort(trimmed.begin(), trimmed.end());
     trimmed.erase(std::unique(trimmed.begin(), trimmed.end()), trimmed.end());
-    pe->global_support = std::make_shared<const std::vector<EdgeId>>(std::move(trimmed));
+    pe->centralized_te_support = std::make_shared<const std::vector<EdgeId>>(std::move(trimmed));
   } else {
-    // The static costs fix the roster (unrestricted Global, T1 and T2); T1's Stretch baseline c0
+    // The static costs fix the roster (unrestricted CentralizedTE, T1 and T2); T1's CostStretch baseline c0
     // is their minimum over the roster heads (zero-capacity edges included, before any filter).
-    const auto dist = detail::static_costs(g, elig, pe->dests_ok, pe->sources);
+    const auto dist = detail::static_costs(g, eligibility, pe->allowed_destinations, pe->sources);
     pe->c0 = kUnreachable;
     for (std::size_t i = 0; i < pe->sources.size(); ++i) {
       const NodeId s = pe->sources[i];
-      if (!node_ok(s) || dist[i] == kUnreachable) continue;
-      pe->roster.push_back(s);
+      if (!node_allowed(s) || dist[i] == kUnreachable) continue;
+      pe->reachable_sources.push_back(s);
       pe->c0 = std::min(pe->c0, dist[i]);
     }
-    detail::check_tunnel_limit(pe->config, pe->roster.size());
-    if (elig != nullptr && elig->uid() != 0) {
+    detail::check_tunnel_limit(pe->config, pe->reachable_sources.size());
+    if (eligibility != nullptr && eligibility->uid() != 0) {
       // Its programs' replay basis: the topology under this mask.
       for (NodeId v = 0; v < g.num_nodes(); ++v) {
-        if (!elig->node_ok(v)) pe->excluded_nodes.push_back(v);
+        if (!eligibility->allows_node(v)) pe->excluded_nodes.push_back(v);
       }
       for (EdgeId e = 0; e < g.num_edges(); ++e) {
-        if (!elig->edge_ok(e)) pe->excluded_edges.push_back(e);
+        if (!eligibility->allows_edge(e)) pe->excluded_edges.push_back(e);
       }
     }
   }
   // The tunnel models' cohorts are per program entry, sized by their first call.
-  if (!detail::tunnel_model(*pe)) pe->epoch.cohorts.resize(pe->roster.size());
-  pe->owner = LedgerAccess::bind(ledger);  // last: nothing is bound when construction fails
+  if (!detail::tunnel_model(*pe)) pe->epoch.record_groups.resize(pe->reachable_sources.size());
+  pe->policy_id = LedgerAccess::bind(ledger);  // last: nothing is bound when construction fails
   return pe;
 }
 
@@ -1914,17 +1947,17 @@ std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const No
 
 // A public call of its own: a supplied frozen cache counts the hit once the policy exists.
 FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
-                       FlowPolicyConfig config, const Eligibility* elig, DagCache* cache)
-    : engine_(detail::frozen_call(cache, [&](detail::FrozenTally& tally) {
-        return make_engine(ledger, sources, destinations, std::move(config), elig, cache, tally);
+                       FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache)
+    : engine_(detail::frozen_call(cache, [&](detail::FrozenCacheHitTally& tally) {
+        return make_engine(ledger, sources, destinations, std::move(config), eligibility, cache, tally);
       })) {}
 
 FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
-                       FlowPolicyConfig config, const Eligibility* elig, DagCache* cache, detail::FrozenTally& tally)
-    : engine_(make_engine(ledger, sources, destinations, std::move(config), elig, cache, tally)) {}
+                       FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache, detail::FrozenCacheHitTally& tally)
+    : engine_(make_engine(ledger, sources, destinations, std::move(config), eligibility, cache, tally)) {}
 
 // The destruction law: the records stay in the ledger as orphans.
-FlowPolicy::~FlowPolicy() { LedgerAccess::release(engine_->fg, engine_->owner); }
+FlowPolicy::~FlowPolicy() { LedgerAccess::release(engine_->ledger, engine_->policy_id); }
 
 namespace detail {
 namespace {
@@ -1932,7 +1965,7 @@ namespace {
 // The program a computing model installs for an empty roster (R22): an empty one. Pinned never
 // comes here: its forwarding with no head is place_pinned's.
 std::shared_ptr<const ForwardingProgram> empty_roster_program(const PolicyEngine& pe) {
-  return empty_program(pe.graph->uid(), pe.sources, pe.destinations, controller(pe) && pe.origin == Origin::Optimized);
+  return empty_program(pe.graph->uid(), pe.sources, pe.destinations, uses_optimized_flow(pe) && pe.source_allocation == SourceAllocation::Optimized);
 }
 
 // The current state of a zero call: its records, its program and rows, every flag false; before
@@ -1940,16 +1973,16 @@ std::shared_ptr<const ForwardingProgram> empty_roster_program(const PolicyEngine
 // nothing, so it claims no cut.
 PlacementResult zero_state(const PolicyEngine& pe, const OutputOptions& outputs) {
   PlacementResult out;
-  out.remaining = 0;
+  out.call_undelivered = 0;
   const auto& ep = pe.epoch;
   const auto records = current_records(pe);
   std::vector<std::pair<NodeId, Counter128>> lost;
-  for (std::size_t h = 0; h < ep.head_lost.size(); ++h) {
-    if (!ep.head_lost[h].is_zero()) lost.emplace_back(pe.view.head(h), ep.head_lost[h]);
+  for (std::size_t h = 0; h < ep.source_drops_by_source.size(); ++h) {
+    if (!ep.source_drops_by_source[h].is_zero()) lost.emplace_back(pe.view.source(h), ep.source_drops_by_source[h]);
   }
   fill_state(pe, records, ep.requested, ep.infinite, ep.offered, out, lost);
-  if (controller(pe)) out.total_cost = total_cost_of(*pe.graph, records);
-  if (dense_global(pe) && pe.origin == Origin::Optimized && ep.prepared && ep.curve.has_value()) out.cost_distribution = *ep.curve;
+  if (uses_optimized_flow(pe)) out.total_cost = total_cost_of(*pe.graph, records);
+  if (is_unrestricted_centralized_te(pe) && pe.source_allocation == SourceAllocation::Optimized && ep.prepared && ep.marginal_cost_curve.has_value()) out.marginal_cost_curve = *ep.marginal_cost_curve;
   out.program = ep.program;
   out.by_tunnel = ep.by_tunnel;
   prepare_outputs(pe, outputs, records, out);
@@ -1958,45 +1991,45 @@ PlacementResult zero_state(const PolicyEngine& pe, const OutputOptions& outputs)
 
 // A computing model's call when no source reaches an allowed destination (Pinned with no head
 // forwards through place_pinned, keeping its per-entry records): nothing is forwarded. A Lossy
-// offer is lost before it enters (the demand's source loss; no source's row has it). Global's flow
+// offer is lost before it enters (the demand's source loss; no source's row has it). CentralizedTE's flow
 // is 0 and maximal: its curve is empty and its cut is empty (no roster source, so the closure is
 // empty).
-Staged empty_roster(const PolicyEngine& pe, const Epoch& cur, const Request& rq, const ForwardingProgram* before) {
+PendingPolicyUpdate empty_roster(const PolicyEngine& pe, const PolicyEpoch& cur, const PolicyCall& rq, const ForwardingProgram* before) {
   const bool lossy = pe.config.admission == Admission::Lossy;
-  const bool optimized_global = dense_global(pe) && pe.origin == Origin::Optimized;
-  const auto v = rq.v;
-  Staged s;
-  s.next.cohorts.resize(cur.cohorts.size());
-  s.next.requested = requested_after(cur, v);
-  s.next.offered = cur.offered;
-  if (lossy && v.has_value()) (void)s.next.offered.add(*v);  // offered <= requested
-  s.next.prepared = true;
-  s.next.infinite = cur.infinite || !v.has_value();
-  s.next.program = cur.program ? cur.program : empty_roster_program(pe);
+  const bool optimized_global = is_unrestricted_centralized_te(pe) && pe.source_allocation == SourceAllocation::Optimized;
+  const auto v = rq.offer;
+  PendingPolicyUpdate s;
+  s.next_epoch.record_groups.resize(cur.record_groups.size());
+  s.next_epoch.requested = requested_after(cur, v);
+  s.next_epoch.offered = cur.offered;
+  if (lossy && v.has_value()) (void)s.next_epoch.offered.add(*v);  // offered <= requested
+  s.next_epoch.prepared = true;
+  s.next_epoch.infinite = cur.infinite || !v.has_value();
+  s.next_epoch.program = cur.program ? cur.program : empty_roster_program(pe);
   // The tunnel models: forward keeps the installed plan; a setup plans no head.
-  if (rq.op == Op::Forward) {
-    s.next.plan = cur.plan;
-  } else if (is<CapacityAware>(pe)) {
-    s.next.plan = std::make_shared<const TunnelPlan>(t1_plan(pe, *design_of(rq), nullptr));
+  if (rq.operation == PolicyOperation::Forward) {
+    s.next_epoch.plan = cur.plan;
+  } else if (is<DistributedTE>(pe)) {
+    s.next_epoch.plan = std::make_shared<const TunnelPlan>(distributed_te_plan(pe, *design_of(rq), nullptr));
   } else if (t2(pe)) {
     T2Layout none;
-    none.count = std::get<Global>(pe.config.routing).tunnels->up_to ? 1 : std::get<Global>(pe.config.routing).tunnels->count;
-    s.next.plan = std::make_shared<const TunnelPlan>(t2_plan(pe, design_of(rq), none, 0, 0));
+    none.count = std::get<CentralizedTE>(pe.config.routing).tunnel_count->up_to ? 1 : std::get<CentralizedTE>(pe.config.routing).tunnel_count->per_head;
+    s.next_epoch.plan = std::make_shared<const TunnelPlan>(t2_plan(pe, design_of(rq), none, 0, 0));
   }
-  PlacementResult& out = s.out;
-  out.remaining = v;
+  PlacementResult& out = s.result;
+  out.call_undelivered = v;
   out.delivery_delta = 0;
   out.termination = Termination::NoRoute;
-  if (lossy && v.has_value()) out.call_source_loss = *v;
-  set_flags(out, before, s.next.program.get(), is<CapacityAware>(pe));
-  out.program = s.next.program;
-  if (s.next.plan) out.plan = *s.next.plan;
-  fill_state(pe, {}, s.next.requested, s.next.infinite, s.next.offered, out);
-  if (controller(pe)) out.total_cost = Counter128 {};
+  if (lossy && v.has_value()) out.call_source_drops = *v;
+  set_flags(out, before, s.next_epoch.program.get(), is<DistributedTE>(pe));
+  out.program = s.next_epoch.program;
+  if (s.next_epoch.plan) out.plan = *s.next_epoch.plan;
+  fill_state(pe, {}, s.next_epoch.requested, s.next_epoch.infinite, s.next_epoch.offered, out);
+  if (uses_optimized_flow(pe)) out.total_cost = Counter128 {};
   if (optimized_global) {
-    out.cost_distribution.emplace();
+    out.marginal_cost_curve.emplace();
     if (rq.outputs != nullptr && rq.outputs->min_cut) out.min_cut.emplace();
-    s.next.curve.emplace();
+    s.next_epoch.marginal_cost_curve.emplace();
   }
   if (kTraced && rq.trace) rq.trace->set("roster", Trace::list());
   return s;
@@ -2015,18 +2048,18 @@ namespace {
 // operation for the model (T1's and T2's place) and an installed program (forward), the offer, a
 // Lossy full offer's finiteness, the design demand (the model, its domain, T1's finiteness), a
 // finite place after +inf, the requested total's limit, the black holes' graph.
-void check_call(const PolicyEngine& pe, const Request& rq) {
+void check_call(const PolicyEngine& pe, const PolicyCall& rq) {
   const bool lossy = pe.config.admission == Admission::Lossy;
-  const bool t1 = is<CapacityAware>(pe);
-  if (rq.op == Op::Place && tunnel_model(pe)) {
+  const bool t1 = is<DistributedTE>(pe);
+  if (rq.operation == PolicyOperation::Place && tunnel_model(pe)) {
     invalid(std::string(model_name(pe.config.routing)) + " does not support incremental placement");
   }
-  if (rq.op == Op::Forward) check_forward_operation(pe);
-  if (rq.v.has_value() && (*rq.v < 0 || *rq.v >= kDomainLimit)) {
+  if (rq.operation == PolicyOperation::Forward) check_forward_operation(pe);
+  if (rq.offer.has_value() && (*rq.offer < 0 || *rq.offer >= kDomainLimit)) {
     invalid("offer must be an integer in [0, 2^62) or permitted +inf");
   }
-  // A Lossy full offer is finite; CostOnly's place(+inf) is its first-hop experiment.
-  if (lossy && !rq.v.has_value() && (rq.full() || is<Pinned>(pe))) invalid("LOSSY forwarding requires a finite offer");
+  // A Lossy full offer is finite; ShortestPaths's place(+inf) is its first-hop experiment.
+  if (lossy && !rq.offer.has_value() && (rq.is_full_offer() || is<Pinned>(pe))) invalid("LOSSY forwarding requires a finite offer");
   // The design demand: the tunnel models' alone, in its domain, T1's finite (absent: the offer).
   if (rq.design.has_value()) {
     if (!tunnel_model(pe)) invalid(std::string(model_name(pe.config.routing)) + " does not accept design_demand");
@@ -2034,138 +2067,138 @@ void check_call(const PolicyEngine& pe, const Request& rq) {
       invalid("design_demand must be an integer in [0, 2^62) or permitted +inf");
     }
   }
-  if (t1 && rq.op != Op::Forward && (rq.design.has_value() ? !rq.design->has_value() : !rq.v.has_value())) {
-    invalid("T1 requires a finite design demand");
+  if (t1 && rq.operation != PolicyOperation::Forward && (rq.design.has_value() ? !rq.design->has_value() : !rq.offer.has_value())) {
+    invalid("DistributedTE requires a finite design demand");
   }
-  if (rq.op == Op::Place) {
-    if (pe.epoch.infinite && rq.v.has_value()) invalid("finite placement after infinite placement requires a new epoch");
+  if (rq.operation == PolicyOperation::Place) {
+    if (pe.epoch.infinite && rq.offer.has_value()) invalid("finite placement after infinite placement requires a new epoch");
     // The only check of the cumulative request: nothing changes the requested total between here
     // and the call's publication, so the later additions repeat this sum and cannot fail.
-    if (rq.v.has_value()) {
+    if (rq.offer.has_value()) {
       Counter128 probe = pe.epoch.requested;
-      if (!probe.add(*rq.v)) invalid("requested limit exceeded");
+      if (!probe.add(*rq.offer)) invalid("requested limit exceeded");
     }
   }
-  if (rq.op == Op::Forward && rq.dark != nullptr && rq.dark->graph_uid() != pe.graph->uid()) {
+  if (rq.operation == PolicyOperation::Forward && rq.black_holes != nullptr && rq.black_holes->graph_uid() != pe.graph->uid()) {
     invalid("black_holes belongs to another graph");
   }
 }
 
 // The computation of a call: nothing published. A full-offer call works on the residual with
 // the policy's own load released, from a fresh epoch.
-Staged compute(const PolicyEngine& pe, const Request& rq) {
-  Working W(pe.fg);
-  if (rq.full()) W.release_records(current_records(pe));
-  const Epoch fresh = rq.full() ? fresh_epoch(pe, rq.op == Op::Forward) : Epoch {};
-  const Epoch& cur = rq.full() ? fresh : pe.epoch;
+PendingPolicyUpdate compute(const PolicyEngine& pe, const PolicyCall& rq) {
+  ServiceCapacityWorkspace W(pe.ledger);
+  if (rq.is_full_offer()) W.release_records(current_records(pe));
+  const PolicyEpoch fresh = rq.is_full_offer() ? fresh_epoch(pe, rq.operation == PolicyOperation::Forward) : PolicyEpoch {};
+  const PolicyEpoch& cur = rq.is_full_offer() ? fresh : pe.epoch;
   // The flags compare the program the policy has installed now.
   const ForwardingProgram* before = pe.epoch.program.get();
-  Staged s;
-  if (pe.roster.empty() && !is<Pinned>(pe)) {
+  PendingPolicyUpdate s;
+  if (pe.reachable_sources.empty() && !is<Pinned>(pe)) {
     // No roster source (a computing model): nothing is computed. A Pinned policy whose heads all
     // fail keeps its per-entry records and forwards nothing (place_pinned).
     s = empty_roster(pe, cur, rq, before);
-  } else if (tunnel_model(pe) && rq.op == Op::Forward) {
+  } else if (tunnel_model(pe) && rq.operation == PolicyOperation::Forward) {
     s = forward_tunnels(pe, cur, W, rq, before);
-  } else if (is<CapacityAware>(pe)) {
-    s = place_t1(pe, cur, W, rq, before);
+  } else if (is<DistributedTE>(pe)) {
+    s = apply_distributed_te_call(pe, cur, W, rq, before);
   } else if (t2(pe)) {
     s = place_t2(pe, cur, W, rq, before);
-  } else if (rq.op == Op::Forward) {
+  } else if (rq.operation == PolicyOperation::Forward) {
     s = forward_installed(pe, W, rq);
   } else if (is<Pinned>(pe)) {
     s = place_pinned(pe, cur, W, rq, before);
-  } else if (controller(pe)) {
-    s = place_controller(pe, cur, W, rq, before);
+  } else if (uses_optimized_flow(pe)) {
+    s = place_optimized_flow(pe, cur, W, rq, before);
   } else {
     s = place_pooled(pe, cur, W, rq, before);
   }
-  // A full-offer call: its placed is the whole new delivery, compared with the old one.
-  if (rq.full()) {
+  // A full-offer call: its call_delivered is the whole new delivery, compared with the old one.
+  if (rq.is_full_offer()) {
     Amount old = 0;
     for (const FlowRecord* r : current_records(pe)) old += r->delivered;
-    s.out.placed = s.out.delivered;
-    s.out.delivery_delta = s.out.delivered - old;
-    if (rq.v.has_value()) s.out.remaining = *rq.v - s.out.placed;
+    s.result.call_delivered = s.result.delivered;
+    s.result.delivery_delta = s.result.delivered - old;
+    if (rq.offer.has_value()) s.result.call_undelivered = *rq.offer - s.result.call_delivered;
   }
-  // The first termination row (14.2): a request of 0 is COMPLETE, also for a full-offer call, which
+  // The first termination row: a request of 0 is COMPLETE, also for a full-offer call, which
   // still prepared and publishes what it computed.
-  if (rq.v == Amount {0}) s.out.termination = Termination::Complete;
-  if (rq.outputs != nullptr && any_output(*rq.outputs)) prepare_outputs(pe, *rq.outputs, draft_records(s.drafts), s.out);
+  if (rq.offer == Amount {0}) s.result.termination = Termination::Complete;
+  if (rq.outputs != nullptr && any_output(*rq.outputs)) prepare_outputs(pe, *rq.outputs, draft_records(s.drafts), s.result);
   return s;
 }
 
 // The publication: the ledger's one atomic exchange (a place commits every live record and the new
 // ones; a full-offer call retires the live ones and creates the new ones), then the epoch.
-void publish(PolicyEngine& pe, Staged& s, bool full) {
-  const auto ids = full ? LedgerAccess::exchange(pe.fg, pe.owner, s.drafts) : LedgerAccess::commit(pe.fg, pe.owner, s.drafts);
+void publish(PolicyEngine& pe, PendingPolicyUpdate& s, bool full) {
+  const auto ids = full ? LedgerAccess::exchange(pe.ledger, pe.policy_id, s.drafts) : LedgerAccess::commit(pe.ledger, pe.policy_id, s.drafts);
   // Committed: the epoch state follows (nothing below throws).
-  for (std::size_t n = 0; n < s.fresh.size(); ++n) s.next.cohorts[s.fresh[n].first][s.fresh[n].second].id = ids[n].second;
-  pe.epoch = std::move(s.next);
+  for (std::size_t n = 0; n < s.fresh.size(); ++n) s.next_epoch.record_groups[s.fresh[n].first][s.fresh[n].second].record_counter = ids[n].second;
+  pe.epoch = std::move(s.next_epoch);
 }
 
-// `staged` (optional) runs once the call's result and trace are final and before anything is
+// `before_publish` (optional) runs once the call's result and trace are final and before anything is
 // published (the ledger commit, the epoch state): an exception from it aborts the call with
 // nothing changed (the Python binding builds its result objects there).
-PlacementResult run_call(PolicyEngine& pe, const Request& rq, const std::function<void()>* staged) {
+PlacementResult run_call(PolicyEngine& pe, const PolicyCall& rq, const std::function<void()>* before_publish) {
   check_call(pe, rq);
-  if (rq.op == Op::Place && rq.v.has_value() && *rq.v == 0) {
+  if (rq.operation == PolicyOperation::Place && rq.offer.has_value() && *rq.offer == 0) {
     PlacementResult out = zero_state(pe, *rq.outputs);
-    if (staged != nullptr && *staged) (*staged)();
+    if (before_publish != nullptr && *before_publish) (*before_publish)();
     return out;
   }
-  Staged s = compute(pe, rq);
-  if (staged != nullptr && *staged) (*staged)();
-  if (rq.op == Op::Evaluate) return std::move(s.out);
-  PlacementResult out = std::move(s.out);
-  publish(pe, s, rq.full());
+  PendingPolicyUpdate s = compute(pe, rq);
+  if (before_publish != nullptr && *before_publish) (*before_publish)();
+  if (rq.operation == PolicyOperation::Evaluate) return std::move(s.result);
+  PlacementResult out = std::move(s.result);
+  publish(pe, s, rq.is_full_offer());
   return out;
 }
 
 } // namespace
 } // namespace detail
 
-PlacementResult FlowPolicy::place(std::optional<Amount> volume, const OutputOptions& outputs) {
-  return detail::run_call(*engine_, detail::Request {detail::Op::Place, volume, {}, nullptr, &outputs, nullptr}, nullptr);
+PlacementResult FlowPolicy::place(std::optional<Amount> offer, const OutputOptions& outputs) {
+  return detail::run_call(*engine_, detail::PolicyCall {detail::PolicyOperation::Place, offer, {}, nullptr, &outputs, nullptr}, nullptr);
 }
 
 PlacementResult FlowPolicy::evaluate(std::optional<Amount> offer, const std::optional<std::optional<Amount>>& design_demand,
                                      const OutputOptions& outputs) const {
-  const detail::Request rq {detail::Op::Evaluate, offer, design_demand, nullptr, &outputs, nullptr};
+  const detail::PolicyCall rq {detail::PolicyOperation::Evaluate, offer, design_demand, nullptr, &outputs, nullptr};
   detail::check_call(*engine_, rq);
-  return std::move(detail::compute(*engine_, rq).out);
+  return std::move(detail::compute(*engine_, rq).result);
 }
 
 PlacementResult FlowPolicy::replace(std::optional<Amount> offer, const std::optional<std::optional<Amount>>& design_demand,
                                     const OutputOptions& outputs) {
-  return detail::run_call(*engine_, detail::Request {detail::Op::Replace, offer, design_demand, nullptr, &outputs, nullptr},
+  return detail::run_call(*engine_, detail::PolicyCall {detail::PolicyOperation::Replace, offer, design_demand, nullptr, &outputs, nullptr},
                           nullptr);
 }
 
 PlacementResult FlowPolicy::forward(std::optional<Amount> offer, const Eligibility* black_holes,
                                     const OutputOptions& outputs) {
-  return detail::run_call(*engine_, detail::Request {detail::Op::Forward, offer, {}, black_holes, &outputs, nullptr},
+  return detail::run_call(*engine_, detail::PolicyCall {detail::PolicyOperation::Forward, offer, {}, black_holes, &outputs, nullptr},
                           nullptr);
 }
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
-PlacementResult detail::place_traced(FlowPolicy& policy, std::optional<Amount> volume, const OutputOptions& outputs,
-                                     Trace& trace, const std::function<void()>* staged) {
+PlacementResult detail::place_traced(FlowPolicy& policy, std::optional<Amount> offer, const OutputOptions& outputs,
+                                     Trace& trace, const std::function<void()>* before_publish) {
   trace = Trace::map();
-  return run_call(PolicyAccess::engine(policy), Request {Op::Place, volume, {}, nullptr, &outputs, &trace}, staged);
+  return run_call(PolicyAccess::engine(policy), PolicyCall {PolicyOperation::Place, offer, {}, nullptr, &outputs, &trace}, before_publish);
 }
 #endif
 
 void FlowPolicy::remove() {
   auto& pe = *engine_;
-  (void)LedgerAccess::detach(pe.fg, pe.owner);
+  (void)LedgerAccess::detach(pe.ledger, pe.policy_id);
   // A new epoch (nothing below throws): the same number of cohorts, every one empty.
-  for (auto& c : pe.epoch.cohorts) c.clear();
+  for (auto& c : pe.epoch.record_groups) c.clear();
   pe.epoch.program.reset();
   pe.epoch.plan.reset();
   pe.epoch.support.clear();
-  pe.epoch.curve.reset();
-  pe.epoch.head_lost.clear();
+  pe.epoch.marginal_cost_curve.reset();
+  pe.epoch.source_drops_by_source.clear();
   pe.epoch.by_tunnel.clear();
   pe.epoch.requested = Counter128 {};
   pe.epoch.offered = Counter128 {};
@@ -2173,11 +2206,11 @@ void FlowPolicy::remove() {
   pe.epoch.prepared = false;
 }
 
-Amount FlowPolicy::placed_demand() const {
+Amount FlowPolicy::delivered() const {
   const auto& pe = *engine_;
   Amount total = 0;
-  for (const auto& c : pe.epoch.cohorts) {
-    for (const auto& s : c) total += LedgerAccess::live(pe.fg, s.id).delivered;
+  for (const auto& c : pe.epoch.record_groups) {
+    for (const auto& s : c) total += LedgerAccess::live(pe.ledger, s.record_counter).delivered;
   }
   return total;
 }
@@ -2185,22 +2218,22 @@ Amount FlowPolicy::placed_demand() const {
 std::vector<FlowRecord> FlowPolicy::records() const {
   const auto& pe = *engine_;
   std::vector<std::int64_t> ids;
-  for (const auto& c : pe.epoch.cohorts) {
-    for (const auto& s : c) ids.push_back(s.id);
+  for (const auto& c : pe.epoch.record_groups) {
+    for (const auto& s : c) ids.push_back(s.record_counter);
   }
   std::sort(ids.begin(), ids.end());
   std::vector<FlowRecord> out;
   out.reserve(ids.size());
-  for (std::int64_t id : ids) out.push_back(LedgerAccess::live(pe.fg, id));
+  for (std::int64_t id : ids) out.push_back(LedgerAccess::live(pe.ledger, id));
   return out;
 }
 
 FlowRecord FlowPolicy::record(const FlowId& flow_id) const {
   const auto& pe = *engine_;
-  const FlowLedger& fg = pe.fg;
+  const FlowLedger& fg = pe.ledger;
   // The ledger's checks first (another ledger, a retired or unknown id), then the owner.
   FlowRecord rec = fg.record(flow_id);
-  if (rec.owner != pe.owner) {
+  if (rec.policy_id != pe.policy_id) {
     throw std::invalid_argument("FlowId (" + std::to_string(flow_id.first) + ", " + std::to_string(flow_id.second) +
                                 ") is not a record of this policy");
   }

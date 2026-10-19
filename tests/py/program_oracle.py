@@ -1,9 +1,9 @@
 """An independent reference for forwarding programs of tunnels (the property tests of
-test_programs.py). It restates the contract's rules in plain Python and calls nothing of the
-library: round robin and highest averages (2.3), the injection over the roster and the split of
-each head's share over its entries (8.1), the lossless bound of a fixed program (8.3), the loss
-rule inside one program with the nested split at each link, sources first and then entries
-(9.1, 9.2), and a maximum flow with its residual-graph certificates (4.1).
+test_programs.py). It restates the rules of docs/semantics.md in plain Python and calls nothing
+of the library: round robin and highest averages, the injection over the roster and the split of
+each head's share over its entries, the lossless bound of a fixed program, the loss rule inside
+one program with the nested split at each link, sources first and then entries, and a maximum
+flow with its residual-graph certificates.
 
 The loss rule is evaluated by synchronous rounds from zero, not by the library's ordering of
 events: for tunnels that visit links in one topological order (the generators draw paths over a
@@ -36,7 +36,7 @@ def ha(n, weights):
 
 
 def replay_roster(specs, rows, excluded_edges, destinations):
-    """The replay roster (8.4): the heads (ascending) that still reach a destination over their
+    """The replay roster: the heads (ascending) that still reach a destination over their
     original routes' edges (the union of their tunnels, the saved basis) without the excluded
     edges, whether or not one of their tunnels survives whole. rows: (u, v, ...) per EdgeId."""
     heads = sorted({h for h, _, _ in specs})
@@ -66,7 +66,7 @@ def entry_amounts(x, specs, alive=None, source_weights=None, roster=None):
     a head then splits its share by highest averages over its surviving tunnels' weights. What no
     tunnel carries is lost at the source: an empty roster's whole offer, the offer captured
     weights of 0 do not inject, a head whose surviving tunnels have weight 0 or that has none.
-    Returns (amounts, source_loss)."""
+    Returns (amounts, source_drops)."""
     alive = alive if alive is not None else [True] * len(specs)
     roster = roster if roster is not None else sorted({h for h, _, _ in specs})
     if not roster:

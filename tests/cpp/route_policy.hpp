@@ -1,5 +1,5 @@
-// A policy on one fixed route, in the program API: Global restricted to the route (on_support) or
-// Pinned over a program of the route as one supplied split route (split_route: EqualBalanced, or
+// A policy on one fixed route, in the program API: CentralizedTE restricted to the route (on_support) or
+// Pinned over a program of the route as one supplied split route (split_route: Equal, or
 // Weighted with its WeightBasis; RESIDUAL_SNAPSHOT reads the ledger's residual when the program
 // is made). The ledger tests (flow_ledger_tests.cpp, flow_ledger_fault_tests.cpp) drive the ledger
 // through RoutePolicy and compare the real PlacementResult.
@@ -13,30 +13,32 @@
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/options.hpp"
-#include "netgraph/core/pred_dag.hpp"
-#include "netgraph/core/program.hpp"
+#include "netgraph/core/route_structures.hpp"
+#include "netgraph/core/forwarding_program.hpp"
 
 namespace netgraph::core::test {
 
-inline FlowPolicyConfig on_support(std::shared_ptr<const PredDAG> dag, Admission admission = Admission::Lossless) {
+inline FlowPolicyConfig on_support(std::shared_ptr<const PredecessorDAG> dag, Admission admission = Admission::Lossless) {
   FlowPolicyConfig cfg;
-  cfg.routing = Global {std::move(dag)};
+  CentralizedTE controller(SourceAllocation::Optimized);
+  controller.support = std::move(dag);
+  cfg.routing = std::move(controller);
   cfg.admission = admission;
   return cfg;
 }
 
-inline FlowPolicyConfig split_route(const FlowLedger& fg, NodeId src, NodeId dst, std::shared_ptr<const PredDAG> dag,
-                                    FlowPlacement placement, Admission admission,
+inline FlowPolicyConfig split_route(const FlowLedger& fg, NodeId src, NodeId dst, std::shared_ptr<const PredecessorDAG> dag,
+                                    RouteAllocation placement, Admission admission,
                                     WeightBasis weights = WeightBasis::Capacity) {
   const NodeId s[1] = {src};
   const NodeId d[1] = {dst};
   RouteOptions options;
-  options.placement = placement;
-  if (placement == FlowPlacement::Weighted && weights != WeightBasis::Capacity) {
-    options.weights = weights;
+  options.allocation = placement;
+  if (placement == RouteAllocation::Weighted && weights != WeightBasis::Capacity) {
+    options.weight_basis = weights;
     if (weights == WeightBasis::ResidualSnapshot) options.residual = fg.residual();
   }
-  const Route routes[1] = {Route {src, std::move(dag), 1}};
+  const RouteDefinition routes[1] = {RouteDefinition {src, std::move(dag), 1}};
   FlowPolicyConfig cfg;
   cfg.routing = Pinned {ForwardingProgram::from_routes(*fg.graph(), s, d, routes, options), nullptr};
   cfg.admission = admission;
@@ -53,19 +55,19 @@ public:
     policy_ = std::make_unique<FlowPolicy>(fg, s, d, std::move(cfg), elig_.get());
   }
 
-  PlacementResult place(std::optional<Amount> volume) { return policy_->place(volume); }
+  PlacementResult place(std::optional<Amount> offer) { return policy_->place(offer); }
   void remove() { policy_->remove(); }
   // The FlowId of the policy's one record (its first), if it has one.
   [[nodiscard]] std::optional<FlowId> flow_id() const {
     const auto& pe = engine();
-    if (pe.epoch.cohorts.empty() || pe.epoch.cohorts.front().empty()) return std::nullopt;
-    return FlowId {pe.fg.uid(), pe.epoch.cohorts.front().front().id};
+    if (pe.epoch.record_groups.empty() || pe.epoch.record_groups.front().empty()) return std::nullopt;
+    return FlowId {pe.ledger.uid(), pe.epoch.record_groups.front().front().record_counter};
   }
-  // The split route's plan as forwarded (Pinned), or null (Global's support has none).
-  [[nodiscard]] const detail::KernelPlan* plan() const {
+  // The split route's plan as forwarded (Pinned), or null (CentralizedTE's support has none).
+  [[nodiscard]] const detail::PreparedRoute* plan() const {
     const auto& pe = engine();
-    if (!std::holds_alternative<Pinned>(pe.config.routing) || pe.view.data->contexts.empty()) return nullptr;
-    return pe.view.plan(0).get();
+    if (!std::holds_alternative<Pinned>(pe.config.routing) || pe.view.data->split_contexts.empty()) return nullptr;
+    return pe.view.prepared_route(0).get();
   }
   [[nodiscard]] const Counter128& requested() const { return engine().epoch.requested; }
   [[nodiscard]] bool infinite() const { return engine().epoch.infinite; }

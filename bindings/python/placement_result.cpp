@@ -10,7 +10,7 @@
 #include <string>
 
 #include "netgraph/core/flow_policy.hpp"
-#include "netgraph/core/program.hpp"
+#include "netgraph/core/forwarding_program.hpp"
 #include "values.hpp"
 #include "publication.hpp"
 #include "registration.hpp"
@@ -20,6 +20,18 @@ namespace py = pybind11;
 namespace netgraph::core::bindings {
 
 namespace {
+
+// A Termination's name, without a Python object (a repr must not fail on its own allocation of an
+// enum object).
+const char* termination_name(Termination t) {
+  switch (t) {
+    case Termination::Complete: return "COMPLETE";
+    case Termination::NoRoute: return "NO_ROUTE";
+    case Termination::Exhausted: return "EXHAUSTED";
+    case Termination::NoActiveWeight: return "NO_ACTIVE_WEIGHT";
+  }
+  return "?";
+}
 
 py::object inf_or(const std::optional<Amount>& r) {
   return r.has_value() ? py::object(py::int_(*r)) : py::object(py::float_(std::numeric_limits<double>::infinity()));
@@ -35,7 +47,7 @@ py::list counter_pairs(const std::vector<std::pair<EdgeId, Counter128>>& v) {
   return out;
 }
 
-// fractions.Fraction, imported once when the module is registered: TunnelPlan.fluid_share only
+// fractions.Fraction, imported once when the module is registered: TunnelPlan.max_fractional_bandwidth_per_tunnel only
 // calls it (an import inside a getter can absorb a failed allocation and still succeed).
 py::gil_safe_call_once_and_store<py::object>& fraction_class() {
   PYBIND11_CONSTINIT static py::gil_safe_call_once_and_store<py::object> storage;
@@ -64,137 +76,148 @@ void register_placement_result(py::module_& m) {
   py::class_<SourceFlow>(m, "SourceFlow",
                          "One normalized input source's forwarding in the epoch (read-only; zero rows included: a\n"
                          "masked or unreachable source): source, offered (LOSSY: its injections; None when\n"
-                         "LOSSLESS), admitted (LOSSLESS: what it delivers; LOSSY: offered), delivered, source_loss\n"
-                         "(offered units lost at the source for lack of a usable route) and dropped (its losses on\n"
-                         "links). LOSSY: offered = delivered + source_loss + dropped. Exact ints.")
+                         "LOSSLESS), admitted (LOSSLESS: what it delivers; LOSSY: offered), delivered, source_drops\n"
+                         "(offered units lost at the source for lack of a usable route) and total_edge_drops (its losses\n"
+                         "on links). LOSSY: offered = delivered + source_drops + total_edge_drops. Exact ints.")
       .def_readonly("source", &SourceFlow::source, "the source node id")
       .def_property_readonly(
+
           "offered", [](const SourceFlow& r) { return counter_or_none(r.offered); },
           "LOSSY: the units this source injected; None when LOSSLESS")
       .def_property_readonly(
+
           "admitted", [](const SourceFlow& r) { return counter_int(r.admitted); },
           "LOSSLESS: the units it delivers; LOSSY: offered")
       .def_readonly("delivered", &SourceFlow::delivered, "the units it delivers to the destinations")
       .def_property_readonly(
-          "source_loss", [](const SourceFlow& r) { return counter_int(r.source_loss); },
+          "source_drops", [](const SourceFlow& r) { return counter_int(r.source_drops); },
           "LOSSY: its offered units lost at the source (no usable route); 0 when LOSSLESS")
       .def_property_readonly(
-          "dropped", [](const SourceFlow& r) { return counter_int(r.dropped); },
+          "total_edge_drops", [](const SourceFlow& r) { return counter_int(r.total_edge_drops); },
           "LOSSY: its units dropped on links; 0 when LOSSLESS")
       .def("__repr__", [](const SourceFlow& r) {
         return "SourceFlow(source=" + std::to_string(r.source) + ", delivered=" + std::to_string(r.delivered) + ")";
       });
 
   py::class_<TunnelFlow>(m, "TunnelFlow",
-                         "One program tunnel's forwarding in the epoch (read-only): index (its entry identifier) and\n"
-                         "head, status (TunnelStatus: UP; NO_BANDWIDTH or COST_CEILING for a tunnel T1's setup left\n"
-                         "down; FAILED, BLACKHOLED in this forwarding), assigned (its share of the injections: LOSSY the\n"
-                         "shares sent to it, LOSSLESS what it carries), delivered and dropped (its losses on links).\n"
-                         "Exact ints (assigned and dropped may exceed 64 bits).")
-      .def_readonly("index", &TunnelFlow::index, "the tunnel's entry identifier")
+                         "One program tunnel's forwarding in the epoch (read-only): entry_id (its entry identifier) and\n"
+                         "head, status (TunnelStatus: UP; INSUFFICIENT_BANDWIDTH or COST_CEILING_EXCEEDED for a tunnel\n"
+                         "T1's setup left down; FAILED, BLACKHOLED in this forwarding), assigned (its share of the\n"
+                         "injections: LOSSY the shares sent to it, LOSSLESS what it carries), delivered and\n"
+                         "total_edge_drops (its losses on links). Exact ints (assigned and total_edge_drops may exceed 64\n"
+                         "bits).")
+      .def_readonly("entry_id", &TunnelFlow::entry_id, "the tunnel's entry identifier")
       .def_readonly("head", &TunnelFlow::head, "the tunnel's head")
-      .def_readonly("status", &TunnelFlow::status,
-                    "UP, a down tunnel's setup status (NO_BANDWIDTH, COST_CEILING), FAILED or BLACKHOLED in this\n"
-                    "forwarding")
+      .def_property_readonly("status", field_object(&TunnelFlow::status),
+                    "UP, a down tunnel's setup status (INSUFFICIENT_BANDWIDTH, COST_CEILING_EXCEEDED), FAILED or\n"
+                    "BLACKHOLED in this forwarding")
       .def_property_readonly(
+
           "assigned", [](const TunnelFlow& r) { return counter_int(r.assigned); },
           "its share of the injections in the epoch (LOSSY: sent to it; LOSSLESS: what it carries)")
       .def_readonly("delivered", &TunnelFlow::delivered, "the units it delivers")
       .def_property_readonly(
-          "dropped", [](const TunnelFlow& r) { return counter_int(r.dropped); }, "its units dropped on links")
+          "total_edge_drops", [](const TunnelFlow& r) { return counter_int(r.total_edge_drops); }, "its units dropped on links")
       .def("__repr__", [](const TunnelFlow& r) {
-        return "TunnelFlow(index=" + std::to_string(r.index) + ", delivered=" + std::to_string(r.delivered) + ")";
+        return "TunnelFlow(entry_id=" + std::to_string(r.entry_id) + ", delivered=" + std::to_string(r.delivered) + ")";
       });
 
   py::class_<TunnelPlan>(m, "TunnelPlan",
-                         "The tunnel models' setup summary (read-only): count (the tunnels per head; T2 up to: the\n"
-                         "chosen count), design_demand (the design volume D in units), head_design ((head, RR(D, H, i))\n"
-                         "for every roster head in ascending NodeId) and reserved_total (T1's strict holds, counted once\n"
-                         "per up tunnel: the sum of their requests; 0 for T2). T2 only (None for T1): live_heads,\n"
+                         "The tunnel models' setup summary (read-only): tunnels_per_head (T2 up to: the chosen count),\n"
+                         "design_demand (the design volume D in units), design_by_head ((head, RR(D, H, i)) for every\n"
+                         "roster head in ascending NodeId) and total_reserved_bandwidth (T1's strict holds, counted once\n"
+                         "per up tunnel: the sum of their requests; 0 for T2). T2 only (None for T1): heads_with_capacity,\n"
                          "insufficient_resolution (live heads exist but no whole unit per tunnel fits, U == 0: the\n"
-                         "program has no tunnels), fluid_share (the exact fluid optimum s*, a Fraction), common_share\n"
-                         "(U), planned_per_tunnel (u), planned_total (K*u), route_cost (the route-cost sum, can exceed\n"
-                         "2^64), headroom_penalty (with prefer_headroom only) and forwarding_bound (the program's\n"
-                         "lossless maximum; a dead head's share blocks it). Exact ints.")
-      .def_readonly("count", &TunnelPlan::count, "the tunnels per head (T2 up to: the chosen count)")
+                         "program has no tunnels), max_fractional_bandwidth_per_tunnel (the exact fluid optimum s*, a\n"
+                         "Fraction), max_bandwidth_per_tunnel (U), planned_bandwidth_per_tunnel (u),\n"
+                         "total_planned_bandwidth (K*u), total_tunnel_cost (the route-cost sum, can exceed 2^64),\n"
+                         "headroom_penalty (with prefer_headroom only) and max_lossless_offer (the program's lossless\n"
+                         "maximum; a dead head's share blocks it). Exact ints.")
+      .def_readonly("tunnels_per_head", &TunnelPlan::tunnels_per_head, "the tunnels per head (T2 up to: the chosen count)")
       .def_property_readonly(
+
           "design_demand", [](const TunnelPlan& p) { return inf_or(p.design_demand); },
           "the design volume D in units; float('inf') when unlimited")
       .def_property_readonly(
-          "head_design", [](const TunnelPlan& p) { return pairs_tuple(p.head_design); },
+          "design_by_head", [](const TunnelPlan& p) { return pairs_tuple(p.design_by_head); },
           "((head, share), ...): every roster head's share RR(D, H, i), ascending NodeId")
-      .def_readonly("reserved_total", &TunnelPlan::reserved_total,
+      .def_readonly("total_reserved_bandwidth", &TunnelPlan::total_reserved_bandwidth,
                     "the strict holds of the up tunnels, each tunnel's request counted once")
       .def_property_readonly(
-          "live_heads",
+          "heads_with_capacity",
           [](const TunnelPlan& p) -> py::object {
-            return p.live_heads.has_value() ? py::object(ints_tuple(*p.live_heads)) : py::object(py::none());
+            return p.heads_with_capacity.has_value() ? py::object(ints_tuple(*p.heads_with_capacity)) : py::object(py::none());
           },
           "T2: the heads that reach a destination over links with free capacity >= 1 (ascending); None for T1")
       .def_readonly("insufficient_resolution", &TunnelPlan::insufficient_resolution,
-                    "T2: True when live heads exist but no whole unit per tunnel fits (common_share 0, no tunnels)")
+                    "T2: True when live heads exist but no whole unit per tunnel fits (max_bandwidth_per_tunnel 0,\n"
+                    "no tunnels)")
       .def_property_readonly(
-          "fluid_share",
+          "max_fractional_bandwidth_per_tunnel",
           [](const TunnelPlan& p) -> py::object {
-            if (!p.fluid_share.has_value()) return py::none();
-            return fraction_class().get_stored()(p.fluid_share->first, p.fluid_share->second);
+            if (!p.max_fractional_bandwidth_per_tunnel.has_value()) return py::none();
+            return fraction_class().get_stored()(p.max_fractional_bandwidth_per_tunnel->first, p.max_fractional_bandwidth_per_tunnel->second);
           },
           "T2: the exact fluid optimum s* (a fractions.Fraction; 0 without a live head); None for T1")
-      .def_readonly("common_share", &TunnelPlan::common_share, "T2: U, the largest common whole-unit size")
-      .def_readonly("planned_per_tunnel", &TunnelPlan::planned_per_tunnel, "T2: u, every tunnel's planned bandwidth")
-      .def_readonly("planned_total", &TunnelPlan::planned_total, "T2: K*u over the K tunnels")
+      .def_readonly("max_bandwidth_per_tunnel", &TunnelPlan::max_bandwidth_per_tunnel, "T2: U, the largest common whole-unit size")
+      .def_readonly("planned_bandwidth_per_tunnel", &TunnelPlan::planned_bandwidth_per_tunnel, "T2: u, every tunnel's planned bandwidth")
+      .def_readonly("total_planned_bandwidth", &TunnelPlan::total_planned_bandwidth, "T2: K*u over the K tunnels")
       .def_property_readonly(
-          "route_cost",
-          [](const TunnelPlan& p) -> py::object { return p.route_cost.has_value() ? counter_int(*p.route_cost) : py::none(); },
+          "total_tunnel_cost",
+          [](const TunnelPlan& p) -> py::object { return p.total_tunnel_cost.has_value() ? counter_int(*p.total_tunnel_cost) : py::none(); },
           "T2: the sum of cost * tunnel count over the links (exact; can exceed 2^64)")
       .def_property_readonly(
+
           "headroom_penalty",
           [](const TunnelPlan& p) -> py::object {
             return p.headroom_penalty.has_value() ? counter_int(*p.headroom_penalty) : py::none();
           },
           "T2 with prefer_headroom: the sum over the links' tunnel slots j of floor(2^32 (B - V + j*u) / B)\n"
           "(B: static capacity; V: free capacity); None without prefer_headroom and for T1")
-      .def_readonly("forwarding_bound", &TunnelPlan::forwarding_bound,
+      .def_readonly("max_lossless_offer", &TunnelPlan::max_lossless_offer,
                     "T2: F, the program's lossless maximum on the call's view (a dead head's share blocks it)")
       .def("__repr__", [](const TunnelPlan& p) {
-        return "TunnelPlan(count=" + std::to_string(p.count) + ", reserved_total=" + std::to_string(p.reserved_total) + ")";
+        return "TunnelPlan(tunnels_per_head=" + std::to_string(p.tunnels_per_head) + ", total_reserved_bandwidth=" + std::to_string(p.total_reserved_bandwidth) + ")";
       });
 
   py::class_<PlacementResult>(
       m, "PlacementResult",
-      "The result of one call. This call: placed (units delivered by the call; replace, forward and\n"
-      "evaluate: the full new delivery), remaining (request - placed; float('inf') for an infinite\n"
-      "request), delivery_delta (new minus old delivery, may be negative), call_drops [(EdgeId, units)],\n"
-      "call_source_loss, termination, routes_changed, weights_changed and reservations_changed. The\n"
+      "The result of one call. This call: call_delivered (units delivered by the call; replace, forward\n"
+      "and evaluate: the full new delivery), call_undelivered (request - call_delivered; float('inf') for\n"
+      "an infinite request), delivery_delta (new minus old delivery, may be negative), call_edge_drops\n"
+      "[(EdgeId, units)], call_source_drops, termination, routes_changed, weights_changed and\n"
+      "reservations_changed. The\n"
       "demand's state after the call (totals of the epoch): program (the installed ForwardingProgram;\n"
       "evaluate: the computed one; None before the first preparation), plan (a TunnelPlan for T1 and T2;\n"
       "None for every other model), requested (float('inf') after an infinite request), offered (LOSSY: the traffic sent; None when LOSSLESS), admitted, delivered, unadmitted\n"
-      "(LOSSLESS: requested - delivered, None after an infinite request; LOSSY: 0), source_loss, drops\n"
-      "[(EdgeId, units)], by_source (one SourceFlow per normalized input source, ascending NodeId),\n"
-      "by_tunnel (one TunnelFlow per program tunnel, ascending index; an alternative view, never added to\n"
-      "by_source), total_cost (controllers: Global and CostOnly MAX_FLOW; else None) and cost_distribution\n"
-      "(unrestricted Global with the optimized origin only). LOSSY: offered = source_loss + sum(drops) +\n"
-      "delivered. The rows sum to the totals, except for LOSSY with an empty roster, where the whole offer\n"
-      "is the demand's source loss and every row is zero. Optional outputs, None unless requested:\n"
-      "edge_flows, residual and reservation_edge_flows (int64[E]), bottleneck, min_cut (they describe the same\n"
+      "(LOSSLESS: requested - delivered, None after an infinite request; LOSSY: 0), source_drops,\n"
+      "edge_drops [(EdgeId, units)], by_source (one SourceFlow per normalized input source, ascending\n"
+      "NodeId), by_tunnel (one TunnelFlow per program tunnel, ascending entry_id; an alternative view, never\n"
+      "added to by_source), total_cost (controllers: CentralizedTE and ShortestPaths OPTIMIZED; else None)\n"
+      "and marginal_cost_curve (unrestricted CentralizedTE with the optimized source allocation only).\n"
+      "LOSSY: offered = source_drops + sum(edge_drops) + delivered. The rows sum to the totals, except for\n"
+      "LOSSY with an empty roster, where the whole offer is the demand's source drops and every row is\n"
+      "zero. Optional outputs, None unless requested: edge_flows, residual and edge_reservations\n"
+      "(int64[E]), saturated_boundary_edges, min_cut (they describe the same\n"
       "state; evaluate: the evaluated one). Amounts that accumulate are exact ints (they may exceed 64 bits).")
-      .def_readonly("placed", &PlacementResult::placed, "the units placed (delivered) by this call")
+      .def_readonly("call_delivered", &PlacementResult::call_delivered, "the units placed (delivered) by this call")
       .def_property_readonly(
-          "remaining", [](const PlacementResult& r) { return inf_or(r.remaining); },
-          "the request minus placed, in units (an amount, not a status); float('inf') for an infinite request")
+          "call_undelivered", [](const PlacementResult& r) { return inf_or(r.call_undelivered); },
+          "the request minus call_delivered, in units (an amount, not a status); float('inf') for an infinite\n"
+          "request")
       .def_readonly("delivery_delta", &PlacementResult::delivery_delta,
-                    "the delivery after the call minus before it (placed for a placement; may be negative for a\n"
-                    "full-offer call)")
+                    "the delivery after the call minus before it (call_delivered for a placement; may be negative\n"
+                    "for a full-offer call)")
       .def_property_readonly(
-          "call_drops", [](const PlacementResult& r) { return pairs_list(r.call_drops); },
+          "call_edge_drops", [](const PlacementResult& r) { return pairs_list(r.call_edge_drops); },
           "this call's drops on links [(EdgeId, units)], ascending EdgeId (empty unless LOSSY)")
-      .def_readonly("call_source_loss", &PlacementResult::call_source_loss,
+      .def_readonly("call_source_drops", &PlacementResult::call_source_drops,
                     "this call's offered units lost at sources without a usable route (LOSSY)")
-      .def_readonly("termination", &PlacementResult::termination, "the call's outcome (Termination)")
+      .def_property_readonly("termination", field_object(&PlacementResult::termination), "the call's outcome (Termination)")
       .def_readonly("routes_changed", &PlacementResult::routes_changed,
                     "True when the call's program differs from the installed one in its ordered heads, paths, split\n"
                     "tables or duplicates (no program counts as the empty program; two programs without an entry\n"
-                    "are equal). An offer-only change (forward, Pinned, CostOnly increments) and an identical\n"
+                    "are equal). An offer-only change (forward, Pinned, ShortestPaths increments) and an identical\n"
                     "replace set nothing")
       .def_readonly("weights_changed", &PlacementResult::weights_changed,
                     "True when the call's program differs from the installed one in its injection (source weights)\n"
@@ -204,15 +227,18 @@ void register_placement_result(py::module_& m) {
                     "True when a tunnel's requested or reserved amount differs from the installed program's, by\n"
                     "index (an absent tunnel holds 0): only T1 sets it; forward and Pinned never do")
       .def_property_readonly(
+
           "program",
           [](const PlacementResult& r) { return optional_shared(r.program); },
           "the installed ForwardingProgram after the call (evaluate: the computed one); None before the first\n"
           "preparation")
       .def_property_readonly(
+
           "plan", [](const PlacementResult& r) { return optional_of(r.plan); },
           "T1 and T2: the TunnelPlan of the program after the call; None for every other model (Pinned over\n"
           "a tunnel program too)")
       .def_property_readonly(
+
           "requested",
           [](const PlacementResult& r) -> py::object {
             return r.requested.has_value() ? counter_int(*r.requested)
@@ -220,39 +246,46 @@ void register_placement_result(py::module_& m) {
           },
           "the sum of the epoch's requests; float('inf') after an infinite one")
       .def_property_readonly(
+
           "offered", [](const PlacementResult& r) { return counter_or_none(r.offered); },
           "LOSSY: the traffic sent in the epoch (the first-hop injection of an infinite request); None\n"
           "when LOSSLESS")
       .def_property_readonly(
+
           "admitted", [](const PlacementResult& r) { return counter_int(r.admitted); },
           "LOSSLESS: the total carried; LOSSY: offered")
       .def_readonly("delivered", &PlacementResult::delivered, "the units the demand delivers")
       .def_property_readonly(
+
           "unadmitted", [](const PlacementResult& r) { return counter_or_none(r.unadmitted); },
           "LOSSLESS: requested - delivered, None after an infinite request; LOSSY: 0")
       .def_property_readonly(
-          "source_loss", [](const PlacementResult& r) { return counter_int(r.source_loss); },
+          "source_drops", [](const PlacementResult& r) { return counter_int(r.source_drops); },
           "LOSSY: the offered units lost at sources (no usable route, or an empty roster); 0 when LOSSLESS")
       .def_property_readonly(
-          "drops", [](const PlacementResult& r) { return counter_pairs(r.drops); },
+          "edge_drops", [](const PlacementResult& r) { return counter_pairs(r.edge_drops); },
           "the epoch's drops on links [(EdgeId, units)], ascending EdgeId (empty unless LOSSY)")
       .def_property_readonly(
+
           "by_source", [](const PlacementResult& r) { return tuple_of(r.by_source); },
           "one SourceFlow per normalized input source, ascending NodeId (zero rows included)")
       .def_property_readonly(
+
           "by_tunnel", [](const PlacementResult& r) { return tuple_of(r.by_tunnel); },
           "one TunnelFlow per program tunnel, ascending index (empty without tunnels)")
       .def_property_readonly(
+
           "total_cost", [](const PlacementResult& r) { return counter_or_none(r.total_cost); },
-          "controllers (Global, CostOnly MAX_FLOW): the exact sum of cost * flow over the policy's\n"
+          "controllers (CentralizedTE, ShortestPaths OPTIMIZED): the exact sum of cost * flow over the policy's\n"
           "allocation; None for the other models (T1, T2, Pinned)")
-      .def_readonly("cost_distribution", &PlacementResult::cost_distribution,
-                    "unrestricted Global with the optimized origin: the marginal cost curve [(cost, units)] of the policy's\n"
+      .def_readonly("marginal_cost_curve", &PlacementResult::marginal_cost_curve,
+                    "unrestricted CentralizedTE with the optimized source allocation: the marginal cost curve [(cost, units)] of the policy's\n"
                     "cumulative flow (a zero call reports it unchanged; None before the epoch's first positive\n"
                     "call); in ascending cost, delivering `units` more raised the minimum total flow cost by `cost`\n"
                     "per unit (more delivery can reroute earlier flow, so these are not the costs of the final\n"
-                    "paths). None for the other models and the equal origin")
+                    "paths). None for the other models and the equal source allocation")
       .def_property_readonly(
+
           "edge_flows",
           [](const PlacementResult& r) -> py::object {
             return r.edge_flows ? py::object(int64_array(*r.edge_flows)) : py::object(py::none());
@@ -260,31 +293,33 @@ void register_placement_result(py::module_& m) {
           "if requested: the policy's own allocation per edge after the call (int64[E], EdgeId order),\n"
           "else None")
       .def_property_readonly(
+
           "residual",
           [](const PlacementResult& r) -> py::object {
             return r.residual ? py::object(int64_array(*r.residual)) : py::object(py::none());
           },
           "if requested: the ledger's residual after the call (int64[E], EdgeId order), else None")
       .def_property_readonly(
-          "reservation_edge_flows",
+          "edge_reservations",
           [](const PlacementResult& r) -> py::object {
-            return r.reservation_edge_flows ? py::object(int64_array(*r.reservation_edge_flows)) : py::object(py::none());
+            return r.edge_reservations ? py::object(int64_array(*r.edge_reservations)) : py::object(py::none());
           },
           "if requested: the policy's own strict holds per edge after the call (int64[E], EdgeId order; zeros\n"
           "for a model without holds), else None")
-      .def_readonly("bottleneck", &PlacementResult::bottleneck,
-                    "if requested: the ledger's saturation report after the call (FlowLedger.bottleneck of the\n"
+      .def_readonly("saturated_boundary_edges", &PlacementResult::saturated_boundary_edges,
+                    "if requested: the ledger's saturation report after the call\n"
+                    "(FlowLedger.saturated_boundary_edges of the "
                     "policy's sources and Eligibility), else None")
       .def_readonly("min_cut", &PlacementResult::min_cut,
-                    "if requested (OutputOptions(min_cut=True)), unrestricted Global with the optimized origin, when the solve\n"
+                    "if requested (OutputOptions(min_cut=True)), unrestricted CentralizedTE with the optimized source allocation, when the solve\n"
                     "reached the maximum flow: the minimum cut closest to the sources, every allowed edge leaving\n"
                     "the nodes the roster sources reach in the residual network (free capacity plus the policy's\n"
                     "own allocation), an edge with nothing free (capacity 0, or held by others) included,\n"
-                    "ascending EdgeId; [] for an empty roster. None otherwise (another model, the equal origin, a\n"
+                    "ascending EdgeId; [] for an empty roster. None otherwise (another model, the equal source allocation, a\n"
                     "support, a call below the maximum, a zero call, forward)")
       .def("__repr__", [](const PlacementResult& r) {
-        return "PlacementResult(placed=" + std::to_string(r.placed) + ", termination=" +
-               std::string(py::str(py::cast(r.termination).attr("name"))) + ")";
+        return "PlacementResult(call_delivered=" + std::to_string(r.call_delivered) + ", termination=" +
+               termination_name(r.termination) + ")";
       });
 }
 

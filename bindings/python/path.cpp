@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "netgraph/core/graph.hpp"
-#include "netgraph/core/pred_dag.hpp"
+#include "netgraph/core/route_structures.hpp"
 #include "integers.hpp"
 #include "registration.hpp"
 
@@ -25,9 +25,9 @@ void register_path(py::module_& m) {
       "each hop's cheapest member.")
       .def(py::init([](const std::shared_ptr<Graph>& graph, const py::object& hops) {
              if (!graph) throw py::value_error("graph must be a Graph");
-             if (not_a_sequence(hops)) throw py::value_error("Path: hops must be a sequence of hops (sequences of EdgeIds)");
+             if (is_invalid_sequence(hops)) throw py::value_error("Path: hops must be a sequence of hops (sequences of EdgeIds)");
              auto seq = py::reinterpret_borrow<py::sequence>(hops);
-             std::vector<WideInts> raw;
+             std::vector<CheckedIntegerVector> raw;
              for (std::size_t h = 0; h < seq.size(); ++h) {
                py::object hop = seq[h];
                raw.push_back(wide_integers(hop, ("hops[" + std::to_string(h) + "]").c_str()));
@@ -54,12 +54,12 @@ void register_path(py::module_& m) {
            "contiguous hops, no repeated node.")
       .def("graph_uid", &Path::graph_uid, "uid of the graph this path belongs to")
       .def("hops", [](const Path& p) { return p.hops(); }, "the hops as lists of EdgeIds (the caller's member order)")
-      .def("src", &Path::src, "the first node of the walk")
-      .def("dst", &Path::dst, "the last node of the walk")
+      .def("source", &Path::source, "the first node of the walk")
+      .def("destination", &Path::destination, "the last node of the walk")
       .def("cost", &Path::cost, "sum over hops of the minimum member cost")
       .def(
-          "to_dag", [](const Path& p) { return std::make_shared<PredDAG>(p.to_dag()); },
-          "the equivalent PredDAG (every member of every hop)")
+          "to_dag", [](const Path& p) { return std::make_shared<PredecessorDAG>(p.to_dag()); },
+          "the equivalent PredecessorDAG (every member of every hop)")
       .def("__eq__", [](const Path& a, const py::object& b) {
         return py::isinstance<Path>(b) && a == b.cast<const Path&>();
       })
@@ -70,7 +70,7 @@ void register_path(py::module_& m) {
              return py::hash(py::make_tuple(a.graph_uid(), py::tuple(hops)));
            })
       .def("__repr__", [](const Path& a) {
-        return "Path(src=" + std::to_string(a.src()) + ", dst=" + std::to_string(a.dst()) +
+        return "Path(source=" + std::to_string(a.source()) + ", destination=" + std::to_string(a.destination()) +
                ", hops=" + std::to_string(a.hops().size()) + ", cost=" + std::to_string(a.cost()) + ")";
       });
 }

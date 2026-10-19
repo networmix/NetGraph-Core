@@ -1,4 +1,4 @@
-"""Independent checks of the flow-core payload (``_place_global_units``) for the Python tests.
+"""Independent checks of the flow-core payload (``_solve_min_cost_flow``) for the Python tests.
 
 Nothing here calls the extension's solver: an exhaustive minimum cost of every integer
 value on small graphs, an independent successive-shortest-path solver (Bellman-Ford) for the
@@ -122,24 +122,28 @@ def certify(
 ):
     """Failed clauses of the certificate (empty when the payload is certified)."""
     n, m = g.num_nodes(), g.num_edges()
-    src = [int(x) for x in g.edge_src()]
-    dst = [int(x) for x in g.edge_dst()]
-    cost = [int(x) for x in g.cost()]
-    node_ok = [True] * n if node_allowed is None else [bool(x) for x in node_allowed]
-    edge_ok = [True] * m if edge_allowed is None else [bool(x) for x in edge_allowed]
+    src = [int(x) for x in g.edge_sources()]
+    dst = [int(x) for x in g.edge_destinations()]
+    cost = [int(x) for x in g.edge_costs()]
+    node_usable = (
+        [True] * n if node_allowed is None else [bool(x) for x in node_allowed]
+    )
+    edge_usable = (
+        [True] * m if edge_allowed is None else [bool(x) for x in edge_allowed]
+    )
     s_all, d_all = sorted(set(sources)), sorted(set(dests))
     f = payload["edge_flows"]
     pi = payload["potentials"]
-    placed = payload["placed"]
-    curve = [tuple(t) for t in payload["cost_distribution"]]
+    value = payload["flow_value"]
+    curve = [tuple(t) for t in payload["marginal_cost_curve"]]
     fails: list[str] = []
     if len(f) != m or len(pi) != n:
         fails.append("shape")
         return fails
     if cap == 0:
         zero = {
-            "placed": 0,
-            "cost_distribution": [],
+            "flow_value": 0,
+            "marginal_cost_curve": [],
             "edge_flows": [0] * m,
             "min_cut": None,
             "potentials": [NEVER_REACHED] * n,
@@ -153,7 +157,7 @@ def certify(
     for e in range(m):
         if not 0 <= f[e] <= view[e]:
             fails.append(f"feasibility at {e}")
-        if not edge_ok[e] and f[e]:
+        if not edge_usable[e] and f[e]:
             fails.append(f"flow on ineligible edge {e}")
         bal[src[e]] -= f[e]
         bal[dst[e]] += f[e]
@@ -161,33 +165,33 @@ def certify(
     inflow = {d: bal[d] for d in d_all}
     for v in range(n):
         if v in supply:
-            if supply[v] < 0 or (not node_ok[v] and supply[v]):
+            if supply[v] < 0 or (not node_usable[v] and supply[v]):
                 fails.append(f"source {v}")
         elif v in inflow:
-            if inflow[v] < 0 or (not node_ok[v] and inflow[v]):
+            if inflow[v] < 0 or (not node_usable[v] and inflow[v]):
                 fails.append(f"destination {v}")
         elif bal[v]:
             fails.append(f"conservation at {v}")
-    if sum(supply.values()) != placed or sum(inflow.values()) != placed:
+    if sum(supply.values()) != value or sum(inflow.values()) != value:
         fails.append("value differs from supply or inflow")
-    if placed < 0 or (cap is not None and placed > cap):
+    if value < 0 or (cap is not None and value > cap):
         fails.append("placed outside [0, cap]")
     s_star, t_star = n, n + 1
     out: list[list[tuple[int, int]]] = [[] for _ in range(n + 2)]
     for e in range(m):
-        if not edge_ok[e]:
+        if not edge_usable[e]:
             continue
         if f[e] < view[e]:
             out[src[e]].append((dst[e], cost[e]))
         if f[e] > 0:
             out[dst[e]].append((src[e], -cost[e]))
-    roots = [s for s in s_all if node_ok[s]]
+    roots = [s for s in s_all if node_usable[s]]
     for s in roots:
         out[s_star].append((s, 0))
         if supply[s] > 0:
             out[s].append((s_star, 0))
     for d in d_all:
-        if node_ok[d]:
+        if node_usable[d]:
             out[d].append((t_star, 0))
             if inflow[d] > 0:
                 out[t_star].append((d, 0))
@@ -202,18 +206,20 @@ def certify(
     connected = t_star in seen
     if cap is None and connected:
         fails.append("uncapped solve left the destinations connected")
-    if cap is not None and placed != cap and connected:
+    if cap is not None and value != cap and connected:
         fails.append("attained value: early stop")
     if connected:
         if payload["min_cut"] is not None:
             fails.append("min_cut on a connected solve")
     else:
         expect = [
-            e for e in range(m) if edge_ok[e] and src[e] in seen and dst[e] not in seen
+            e
+            for e in range(m)
+            if edge_usable[e] and src[e] in seen and dst[e] not in seen
         ]
         if payload["min_cut"] != expect:
             fails.append(f"min_cut {payload['min_cut']} != closure cut {expect}")
-        if sum(view[e] for e in expect) != placed:
+        if sum(view[e] for e in expect) != value:
             fails.append("cut value differs from placed")
     # The vertices some search settled: the first search runs on the zero flow and settles
     # every vertex an allowed source reaches over eligible edges of positive view; a later
@@ -223,7 +229,7 @@ def certify(
     while queue:
         u = queue.popleft()
         for e in range(m):
-            if src[e] == u and edge_ok[e] and view[e] > 0 and dst[e] not in settled:
+            if src[e] == u and edge_usable[e] and view[e] > 0 and dst[e] not in settled:
                 settled.add(dst[e])
                 queue.append(dst[e])
     for v in range(n):
@@ -252,38 +258,40 @@ def certify(
                 fails.append(f"inflow destination {d} potential differs from pi(t*)")
         if curve and curve[-1][0] != pt:
             fails.append("pi(t*) differs from the last curve cost")
-    elif placed:
+    elif value:
         fails.append("flow delivered but no destination reached")
     if any(u <= 0 for _c, u in curve):
         fails.append("curve volume not positive")
     if any(b[0] <= a[0] for a, b in zip(curve, curve[1:], strict=False)):
         fails.append("curve costs not strictly increasing")
-    if sum(u for _c, u in curve) != placed:
+    if sum(u for _c, u in curve) != value:
         fails.append("curve total differs from placed")
     if sum(c * u for c, u in curve) != sum(cost[e] * f[e] for e in range(m)):
         fails.append("curve moment differs from the flow cost")
-    allowed_dests = [d for d in d_all if node_ok[d]]
+    allowed_dests = [d for d in d_all if node_usable[d]]
     if m <= 7 and max(view, default=0) <= 3:
-        best = exhaustive(n, src, dst, cost, view, roots, allowed_dests, edge_ok)
+        best = exhaustive(n, src, dst, cost, view, roots, allowed_dests, edge_usable)
         fmax = max(best)
         top = fmax if cap is None else min(cap, fmax)
-        if placed != top:
-            fails.append(f"placed {placed} != min(cap, F_max) {top} (exhaustive)")
-        for x in range(min(top, placed) + 1):
+        if value != top:
+            fails.append(f"placed {value} != min(cap, F_max) {top} (exhaustive)")
+        for x in range(min(top, value) + 1):
             if curve_value(curve, x) != best[x]:
                 fails.append(f"curve differs from the exhaustive optimum at {x}")
                 break
     else:
-        ref = independent_curve(n, src, dst, cost, view, roots, allowed_dests, edge_ok)
+        ref = independent_curve(
+            n, src, dst, cost, view, roots, allowed_dests, edge_usable
+        )
         fmax = ref[-1][0]
         top = fmax if cap is None else min(cap, fmax)
-        if placed != top:
-            fails.append(f"placed {placed} != min(cap, F_max) {top} (independent)")
+        if value != top:
+            fails.append(f"placed {value} != min(cap, F_max) {top} (independent)")
         mine = [(0, 0)]
         for c, u in curve:
             mine.append((mine[-1][0] + u, mine[-1][1] + c * u))
         for x in sorted({x for x, _c in mine + ref}):
-            if x <= min(top, placed) and points_value(mine, x) != points_value(ref, x):
+            if x <= min(top, value) and points_value(mine, x) != points_value(ref, x):
                 fails.append(f"curve differs from the independent solver at {x}")
                 break
     return fails

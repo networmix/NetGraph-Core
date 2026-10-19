@@ -1,5 +1,5 @@
 """Builders and constants shared by the Python tests (not collected: no test_ prefix): graphs,
-EdgeId mappings, DAGs, path selections, the two policy configurations most tests use, results
+EdgeId mappings, DAGs, the two policy configurations most tests use, results
 and ledgers as comparable data, the sweep of a call's Python object allocations, and the
 pytest.raises pattern of an exact message."""
 
@@ -14,12 +14,14 @@ import netgraph_core as ngc
 
 INF = math.inf
 L62 = 1 << 62
-DET = ngc.EdgeTieBreak.DETERMINISTIC
-PREFER = ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY
-CAP = ngc.EdgePriority.CAPACITY
-RES = ngc.EdgePriority.RESIDUAL
+FEWER = ngc.RouteTieBreak.FEWER_HOPS
+HIGHER_CAP = ngc.RouteTieBreak.HIGHER_CAPACITY
+HIGHER_AVAIL = ngc.RouteTieBreak.HIGHER_AVAILABLE_CAPACITY
+HIGHER_HEADROOM = ngc.RouteTieBreak.HIGHER_HEADROOM
 # Every optional output of a placement or an evaluator.
-ALL_OUT = ngc.OutputOptions(edge_flows=True, residual=True, bottleneck=True)
+ALL_OUT = ngc.OutputOptions(
+    edge_flows=True, residual=True, saturated_boundary_edges=True
+)
 # A chain 0 -> 1 -> 2 -> 3 (cost 1 per edge) with the bypasses 0 -> 2 and 1 -> 3 (cost 3), every
 # capacity 1: (u, v, capacity, cost) in input order.
 CHAIN = [(0, 1, 1, 1), (1, 2, 1, 1), (2, 3, 1, 1), (0, 2, 1, 3), (1, 3, 1, 3)]
@@ -29,6 +31,19 @@ def exact(text):
     """The pytest.raises pattern of exactly this message: the whole text, so a message with
     anything more, a trailing newline included, does not match."""
     return rf"\A{re.escape(text)}\Z"
+
+
+def assert_read_only(obj, *names):
+    """Each name is a read-only property of obj: the class defines it without a setter, it reads
+    (a misspelt or removed name fails here, not as the AttributeError below), and assigning the
+    value it holds raises AttributeError and leaves it unchanged."""
+    for name in names:
+        prop = getattr(type(obj), name)
+        assert isinstance(prop, property) and prop.fset is None, name
+        value = getattr(obj, name)
+        with pytest.raises(AttributeError):
+            setattr(obj, name, value)
+        assert getattr(obj, name) == value, name
 
 
 def build(n, edges, q=1.0):
@@ -45,19 +60,19 @@ def build(n, edges, q=1.0):
 
 def to_ids(g, values_in):
     """A per-edge list in input order, permuted to EdgeId order."""
-    return [values_in[int(i)] for i in g.input_index()]
+    return [values_in[int(i)] for i in g.input_positions()]
 
 
 def by_input(g, values):
     """A per-edge list in EdgeId order, permuted to input order (the inverse of to_ids)."""
     out = [0] * len(values)
     for e, x in enumerate(values):
-        out[int(g.input_index()[e])] = x
+        out[int(g.input_positions()[e])] = x
     return out
 
 
 def stats_of(cache):
-    """The five statistics of a DagCache as one comparable tuple."""
+    """The five statistics of a ShortestPathCache as one comparable tuple."""
     s = cache.stats()
     return (s.hits, s.misses, s.entries, s.bytes, s.live_values)
 
@@ -65,58 +80,77 @@ def stats_of(cache):
 def ids(g, positions):
     """The EdgeIds of the edges at the given input positions, ascending."""
     wanted = {int(p) for p in positions}
-    return sorted(int(e) for e, p in enumerate(g.input_index()) if int(p) in wanted)
+    return sorted(int(e) for e, p in enumerate(g.input_positions()) if int(p) in wanted)
 
 
 def dag_of(g, edges):
-    """The PredDAG of a set of EdgeIds, through the public PredDAG.from_csr."""
+    """The PredecessorDAG of a set of EdgeIds, through the public PredecessorDAG.from_csr."""
     per = [[] for _ in range(g.num_nodes())]
     for e in sorted(edges):
-        per[int(g.edge_dst()[e])].append(e)
+        per[int(g.edge_destinations()[e])].append(e)
     offsets, parents, via = [0], [], []
     for v in range(g.num_nodes()):
         for e in per[v]:
-            parents.append(int(g.edge_src()[e]))
+            parents.append(int(g.edge_sources()[e]))
             via.append(e)
         offsets.append(len(via))
-    return ngc.PredDAG.from_csr(g, offsets, parents, via)
+    return ngc.PredecessorDAG.from_csr(g, offsets, parents, via)
 
 
-def sel(tie=DET, prio=CAP, mp=True, me=True):
-    """A PathSelection: deterministic ties, capacity priority, multipath, multi-edge by default."""
-    return ngc.PathSelection(tie, prio, mp, me)
-
-
-def config(
-    routing, placement=ngc.FlowPlacement.EQUAL_BALANCED, admission=None, selection=None
-):
-    """A FlowPolicyConfig: EqualBalanced, Lossless and sel() by default; Global takes neither a
-    placement nor a selection, so they are left out for it."""
-    if isinstance(routing, ngc.Global):
-        return ngc.FlowPolicyConfig(
-            routing=routing, admission=admission or ngc.Admission.LOSSLESS
+def shortest(model=None, **changes):
+    """A ShortestPaths model: `model` (default ShortestPaths()) with the named fields replaced."""
+    model = model or ngc.ShortestPaths()
+    fields = {
+        name: getattr(model, name)
+        for name in (
+            "allocation",
+            "source_allocation",
+            "weight_basis",
+            "edge_weights",
+            "tie_break",
+            "multipath",
+            "parallel_edges",
         )
+    }
+    fields.update(changes)
+    return ngc.ShortestPaths(**fields)
+
+
+def config(routing, allocation=None, admission=None):
+    """A FlowPolicyConfig, Lossless by default; `allocation` (ShortestPaths only) replaces the
+    model's own."""
+    if allocation is not None:
+        routing = shortest(routing, allocation=allocation)
     return ngc.FlowPolicyConfig(
-        routing=routing,
-        placement=placement,
-        admission=admission or ngc.Admission.LOSSLESS,
-        selection=selection or sel(),
+        routing=routing, admission=admission or ngc.Admission.LOSSLESS
     )
 
 
-def t1_config(count, admission=None, selection=None, **routing):
-    """A T1 FlowPolicyConfig: CapacityAware(Tunnels(count), **routing), Lossless by default."""
+def centralized(source_allocation=None, **fields):
+    """CentralizedTE with its required source allocation: OPTIMIZED (the exact maximum flow) by
+    default, EQUAL with a tunnel count (T2)."""
+    if source_allocation is None:
+        source_allocation = (
+            ngc.SourceAllocation.EQUAL
+            if fields.get("tunnel_count") is not None
+            else ngc.SourceAllocation.OPTIMIZED
+        )
+    return ngc.CentralizedTE(source_allocation=source_allocation, **fields)
+
+
+def t1_config(count, admission=None, **routing):
+    """A T1 FlowPolicyConfig: DistributedTE(TunnelCount(count), **routing), Lossless by default."""
     return ngc.FlowPolicyConfig(
-        routing=ngc.CapacityAware(ngc.Tunnels(count), **routing),
+        routing=ngc.DistributedTE(ngc.TunnelCount(count), **routing),
         admission=admission or ngc.Admission.LOSSLESS,
-        selection=selection,
     )
 
 
-# The exact maximum flow (Global routing, the optimized origin) and CostOnly EqualBalanced, both
-# Lossless (CostOnly with sel()). Configurations are immutable, so tests share these values.
-GLOBAL = config(ngc.Global())
-COSTONLY = config(ngc.CostOnly())
+# The exact maximum flow (CentralizedTE routing, the optimized source allocation) and ShortestPaths Equal, both
+# Lossless (ShortestPaths() is ECMP: FEWER_HOPS, every route and parallel edge). Configurations
+# are immutable, so tests share these values.
+GLOBAL = config(centralized())
+COSTONLY = config(ngc.ShortestPaths())
 
 
 # The result classes whose public attributes are all fields (no methods).
@@ -135,7 +169,7 @@ _RESULTS = (
 
 def plain(value):
     """A result as comparable data, with no object identities: a result object (a program and its
-    tunnels included) by every public field, a PredDAG by its three arrays, a Path by its
+    tunnels included) by every public field, a PredecessorDAG by its three arrays, a Path by its
     endpoints, hops and cost, an Eligibility by its two masks, containers element by element,
     arrays as lists."""
     if isinstance(value, _RESULTS):
@@ -145,7 +179,7 @@ def plain(value):
             if not f.startswith("_") and not callable(getattr(value, f))
         ]
         return {f: plain(getattr(value, f)) for f in fields}
-    if isinstance(value, ngc.PredDAG):
+    if isinstance(value, ngc.PredecessorDAG):
         return [
             plain(a)
             for a in (value.parent_offsets(), value.parents(), value.via_edges())
@@ -153,7 +187,7 @@ def plain(value):
     if isinstance(value, ngc.Eligibility):
         return [plain(value.node_allowed()), plain(value.edge_allowed())]
     if isinstance(value, ngc.Path):
-        return [value.src(), value.dst(), plain(value.hops()), value.cost()]
+        return [value.source(), value.destination(), plain(value.hops()), value.cost()]
     if isinstance(value, dict):
         return {k: plain(x) for k, x in value.items()}
     if isinstance(value, (list, tuple)):
@@ -163,33 +197,33 @@ def plain(value):
 
 def ledger_state(ledger):
     """A FlowLedger's public state as comparable data, with no object identity (its uid, which
-    is also the first half of every FlowId, and its graph's uid, which every bundle carries):
+    is also the first half of every FlowId, and its graph's uid, which every route carries):
     both projections (the residual and the allocations, the holds and the unreserved capacity)
-    and every public field of every record, the bundle as its three arrays."""
+    and every public field of every record, the route as its three arrays."""
     return [
         ledger.residual().tolist(),
-        ledger.allocated().tolist(),
+        ledger.carried().tolist(),
         ledger.reserved().tolist(),
         ledger.unreserved().tolist(),
         [
             (
                 r.flow_id[1],
-                r.owner,
+                r.policy_id,
                 r.sources,
                 r.destinations,
                 r.admission,
-                r.entry,
+                r.entry_id,
                 [
-                    r.bundle.parent_offsets().tolist(),
-                    r.bundle.parents().tolist(),
-                    r.bundle.via_edges().tolist(),
+                    r.route.parent_offsets().tolist(),
+                    r.route.parents().tolist(),
+                    r.route.via_edges().tolist(),
                 ],
-                r.route_cost,
+                r.min_route_cost,
                 r.offered,
                 r.delivered,
-                r.edges,
-                r.drops,
-                r.reserved_edges,
+                r.edge_flows,
+                r.edge_drops,
+                r.edge_reservations,
             )
             for r in ledger.records()
         ],

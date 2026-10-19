@@ -1,4 +1,4 @@
-"""PredDAG, Path, PathSelection, the enums and Eligibility.intersect through the bindings
+"""PredecessorDAG, Path, RouteTieBreak, the enums and Eligibility.intersect through the bindings
 (docs/semantics.md#3-route-values-preddag-and-path): validation in the documented order on
 unnarrowed values, read-only views, structural equality."""
 
@@ -15,13 +15,13 @@ import netgraph_core as ngc
 L64 = 1 << 64
 
 
-# ids by (src, cost, dst, input): 0: 0->1, 1: 0->1, 2: 0->2 (cost 3), 3: 1->2, 4: 2->0
+# ids by (source, cost, destination, input): 0: 0->1, 1: 0->1, 2: 0->2 (cost 3), 3: 1->2, 4: 2->0
 G_EDGES = [(0, 1, 5, 1), (0, 1, 5, 1), (1, 2, 5, 1), (0, 2, 5, 3), (2, 0, 5, 1)]
 
 
 def test_from_csr_round_trip_and_views():
     g = build(3, G_EDGES)
-    dag = ngc.PredDAG.from_csr(g, [0, 0, 2, 4], [0, 0, 0, 1], [0, 1, 2, 3])
+    dag = ngc.PredecessorDAG.from_csr(g, [0, 0, 2, 4], [0, 0, 0, 1], [0, 1, 2, 3])
     assert dag.graph_uid() == g.uid()
     assert list(dag.parent_offsets()) == [0, 0, 2, 4]
     assert list(dag.parents()) == [0, 0, 0, 1]
@@ -43,16 +43,16 @@ def test_from_csr_round_trip_and_views():
     gc.collect()
     assert list(view) == [0, 1, 2, 3]  # the views keep the DAG alive
     assert list(parents) == [0, 0, 0, 1]
-    same = ngc.PredDAG.from_csr(
+    same = ngc.PredecessorDAG.from_csr(
         g, np.array([0, 0, 2, 4]), np.array([0, 0, 0, 1]), np.array([0, 1, 2, 3])
     )
-    again = ngc.PredDAG.from_csr(g, [0, 0, 2, 4], [0, 0, 0, 1], [0, 1, 2, 3])
+    again = ngc.PredecessorDAG.from_csr(g, [0, 0, 2, 4], [0, 0, 0, 1], [0, 1, 2, 3])
     assert same == again and hash(same) == hash(again)
-    assert same != ngc.PredDAG.from_csr(g, [0, 0, 0, 0], [], [])
+    assert same != ngc.PredecessorDAG.from_csr(g, [0, 0, 0, 0], [], [])
     # Equality includes the graph: the same CSR on a twin graph (the same arrays, another uid) is
     # another value.
     twin = build(3, G_EDGES)
-    there = ngc.PredDAG.from_csr(twin, [0, 0, 2, 4], [0, 0, 0, 1], [0, 1, 2, 3])
+    there = ngc.PredecessorDAG.from_csr(twin, [0, 0, 2, 4], [0, 0, 0, 1], [0, 1, 2, 3])
     assert there.graph_uid() == twin.uid() != g.uid()
     assert list(there.via_edges()) == list(same.via_edges())
     assert there != same and not there == same
@@ -61,27 +61,32 @@ def test_from_csr_round_trip_and_views():
 @pytest.mark.parametrize(
     ("offsets", "parents", "via", "message"),
     [
-        ([0, 0, 0], [], [], "offsets has length 3, expected N + 1 = 4"),
-        ([1, 0, 2, 1], [], [], "offsets[0] = 1, expected 0"),
-        ([L64, 0, 0, 0], [], [], "offsets[0] = 18446744073709551616, expected 0"),
-        ([0, 2, 1, 2], [0, 0], [0, 1], "offsets are not monotone at 2 (2 > 1)"),
+        ([0, 0, 0], [], [], "parent_offsets has length 3, expected N + 1 = 4"),
+        ([1, 0, 2, 1], [], [], "parent_offsets[0] = 1, expected 0"),
+        (
+            [L64, 0, 0, 0],
+            [],
+            [],
+            "parent_offsets[0] = 18446744073709551616, expected 0",
+        ),
+        ([0, 2, 1, 2], [0, 0], [0, 1], "parent_offsets are not monotone at 2 (2 > 1)"),
         (
             [0, L64, 0, 0],
             [],
             [],
-            "offsets are not monotone at 2 (18446744073709551616 > 0)",
+            "parent_offsets are not monotone at 2 (18446744073709551616 > 0)",
         ),
         (
             [0, 0, 2, 2],
             [0],
             [0, 1],
-            "offsets[N] = 2 but parents has 1 and via has 2 entries",
+            "parent_offsets[N] = 2 but parents has 1 and via_edges has 2 entries",
         ),
         (
             [0, 0, 2, 3],
             [9, 0],
             [0, 1],
-            "offsets[N] = 3 but parents has 2 and via has 2 entries",
+            "parent_offsets[N] = 3 but parents has 2 and via_edges has 2 entries",
         ),
         ([0, 0, 2, 2], [3, 0], [0, 1], "parents[0] = 3 out of node range [0, 3)"),
         (
@@ -94,7 +99,7 @@ def test_from_csr_round_trip_and_views():
             [0, 0, 2, 2],
             [0, 0],
             [0, L64],
-            "via[1] = 18446744073709551616 out of edge range [0, 5)",
+            "via_edges[1] = 18446744073709551616 out of edge range [0, 5)",
         ),
         (
             [0, 0, 2, 2],
@@ -115,8 +120,8 @@ def test_from_csr_round_trip_and_views():
 )
 def test_from_csr_validation_order(offsets, parents, via, message):
     g = build(3, G_EDGES)
-    with pytest.raises(ValueError, match=exact(f"PredDAG.from_csr: {message}")):
-        ngc.PredDAG.from_csr(g, offsets, parents, via)
+    with pytest.raises(ValueError, match=exact(f"PredecessorDAG.from_csr: {message}")):
+        ngc.PredecessorDAG.from_csr(g, offsets, parents, via)
 
 
 def test_from_csr_reports_the_first_of_several_defects():
@@ -127,20 +132,20 @@ def test_from_csr_reports_the_first_of_several_defects():
     g = build(3, G_EDGES)
     big = 2**70
     steps = [
-        ([1, 0, 0], [big], [big], "offsets has length 3, expected N + 1 = 4"),
-        ([1, 0, 2, 5], [big], [big], "offsets[0] = 1, expected 0"),
-        ([0, 2, 1, 5], [big], [big], "offsets are not monotone at 2 (2 > 1)"),
+        ([1, 0, 0], [big], [big], "parent_offsets has length 3, expected N + 1 = 4"),
+        ([1, 0, 2, 5], [big], [big], "parent_offsets[0] = 1, expected 0"),
+        ([0, 2, 1, 5], [big], [big], "parent_offsets are not monotone at 2 (2 > 1)"),
         (
             [0, 0, 2, 5],
             [big],
             [big],
-            "offsets[N] = 5 but parents has 1 and via has 1 entries",
+            "parent_offsets[N] = 5 but parents has 1 and via_edges has 1 entries",
         ),
         (
             [0, 1, 4, 6],
             [2, 0, 0, 0, 0, 1],
             [4, 1, 0, 0, 0, big],
-            f"via[5] = {big} out of edge range [0, 5)",
+            f"via_edges[5] = {big} out of edge range [0, 5)",
         ),
         (
             [0, 1, 4, 6],
@@ -164,9 +169,9 @@ def test_from_csr_reports_the_first_of_several_defects():
     ]
     for offsets, parents, via, message in steps:
         with pytest.raises(ValueError) as info:
-            ngc.PredDAG.from_csr(g, offsets, parents, via)
-        assert str(info.value) == "PredDAG.from_csr: " + message
-    ngc.PredDAG.from_csr(g, [0, 0, 2, 4], [0, 0, 0, 1], [0, 1, 2, 3])
+            ngc.PredecessorDAG.from_csr(g, offsets, parents, via)
+        assert str(info.value) == "PredecessorDAG.from_csr: " + message
+    ngc.PredecessorDAG.from_csr(g, [0, 0, 2, 4], [0, 0, 0, 1], [0, 1, 2, 3])
 
 
 @pytest.mark.parametrize(
@@ -184,12 +189,12 @@ def test_from_csr_compares_offsets_beyond_int64_exactly(offsets):
     # monotonicity error at its index, before the offsets[N] count check.
     g = build(2, [(0, 1, 1, 1)])
     with pytest.raises(ValueError, match="not monotone at 2"):
-        ngc.PredDAG.from_csr(g, offsets, [], [])
+        ngc.PredecessorDAG.from_csr(g, offsets, [], [])
     increasing = [0, 2**99, 2**100]
     with pytest.raises(
         ValueError, match=r"offsets\[N\] = 1267650600228229401496703205376"
     ):
-        ngc.PredDAG.from_csr(g, increasing, [], [])
+        ngc.PredecessorDAG.from_csr(g, increasing, [], [])
 
 
 class FailingIndex:
@@ -224,35 +229,37 @@ def test_from_csr_passes_a_failed_offset_conversion_through(fail_on, which, erro
     error = error_type("conversion failed")
     offsets[which].fail_on, offsets[which].error = fail_on, error
     with pytest.raises(error_type) as info:
-        ngc.PredDAG.from_csr(g, offsets, [], [])
+        ngc.PredecessorDAG.from_csr(g, offsets, [], [])
     assert info.value is error
     assert info.value.__cause__ is None and info.value.__context__ is None
     assert offsets[which].calls == fail_on
     # Without a failure the same offsets reach the count check (2**100 is not 0 entries).
-    with pytest.raises(ValueError, match=r"^PredDAG.from_csr: offsets\[N\] = "):
-        ngc.PredDAG.from_csr(g, [0, FailingIndex(), FailingIndex()], [], [])
+    with pytest.raises(
+        ValueError, match=r"^PredecessorDAG.from_csr: parent_offsets\[N\] = "
+    ):
+        ngc.PredecessorDAG.from_csr(g, [0, FailingIndex(), FailingIndex()], [], [])
 
 
 def test_from_csr_type_and_shape_defects():
     g = build(3, G_EDGES)
     with pytest.raises(
-        ValueError, match=exact("offsets must be a 1-D array (got 2 dimensions)")
+        ValueError, match=exact("parent_offsets must be a 1-D array (got 2 dimensions)")
     ):
-        ngc.PredDAG.from_csr(g, np.zeros((2, 2), dtype=np.int64), [], [])
+        ngc.PredecessorDAG.from_csr(g, np.zeros((2, 2), dtype=np.int64), [], [])
     with pytest.raises(
-        ValueError, match=exact("offsets[3] must be an integer (got float)")
+        ValueError, match=exact("parent_offsets[3] must be an integer (got float)")
     ):
-        ngc.PredDAG.from_csr(g, [0, 0, 0, 0.0], [], [])
+        ngc.PredecessorDAG.from_csr(g, [0, 0, 0, 0.0], [], [])
     with pytest.raises(
-        ValueError, match=exact("offsets[3] must be an integer (got bool)")
+        ValueError, match=exact("parent_offsets[3] must be an integer (got bool)")
     ):
-        ngc.PredDAG.from_csr(g, [0, 0, 0, True], [], [])
+        ngc.PredecessorDAG.from_csr(g, [0, 0, 0, True], [], [])
 
 
 def test_path_cost_hops_and_to_dag():
     g = build(3, G_EDGES)
     p = ngc.Path(g, [[1, 0], [3]])
-    assert (p.src(), p.dst(), p.cost()) == (0, 2, 2)
+    assert (p.source(), p.destination(), p.cost()) == (0, 2, 2)
     assert p.hops() == [[1, 0], [3]]  # the caller's member order is kept
     dag = p.to_dag()
     assert list(dag.parent_offsets()) == [0, 0, 2, 3]
@@ -316,41 +323,25 @@ def test_path_reports_the_first_of_several_defects():
         assert str(info.value) == "Path: " + message
 
 
-def test_path_selection_and_enums():
-    sel = ngc.PathSelection(
-        ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY, ngc.EdgePriority.HEADROOM
-    )
-    assert (sel.multipath, sel.multi_edge) == (None, True)
-    assert sel.tie_break == ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY
-    assert sel == ngc.PathSelection(
-        ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY, ngc.EdgePriority.HEADROOM, None, True
-    )
-    assert sel != ngc.PathSelection(
-        ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY,
-        ngc.EdgePriority.HEADROOM,
-        multipath=False,
-    )
-    assert "PREFER_HIGHER_PRIORITY" in repr(sel)
-    # Every field has a default (contract 3.2, 3.3): DETERMINISTIC, CAPACITY, multipath None
-    # (the model's natural shape), multi_edge.
-    default = ngc.PathSelection()
-    assert (default.tie_break, default.priority) == (
-        ngc.EdgeTieBreak.DETERMINISTIC,
-        ngc.EdgePriority.CAPACITY,
-    )
-    assert (default.multipath, default.multi_edge) == (None, True)
-    assert {m.name for m in ngc.FlowPlacement.__members__.values()} == {
-        "MAX_FLOW",
+def test_route_tie_break_and_enums():
+    # RouteTieBreak has exactly four values, FEWER_HOPS first (the default everywhere); the
+    # route choice is fields of the models and the search options, not an object.
+    assert list(ngc.RouteTieBreak.__members__) == [
+        "FEWER_HOPS",
+        "HIGHER_CAPACITY",
+        "HIGHER_AVAILABLE_CAPACITY",
+        "HIGHER_HEADROOM",
+    ]
+    assert ngc.ShortestPaths().tie_break == ngc.RouteTieBreak.FEWER_HOPS
+    assert {m.name for m in ngc.RouteAllocation.__members__.values()} == {
+        "OPTIMIZED",
         "WEIGHTED",
-        "EQUAL_BALANCED",
+        "EQUAL",
     }
     assert set(ngc.Admission.__members__) == {"LOSSLESS", "LOSSY"}
-    assert set(ngc.Origin.__members__) == {"EQUAL", "OPTIMIZED"}
-    assert set(ngc.EdgePriority.__members__) == {"RESIDUAL", "CAPACITY", "HEADROOM"}
-    assert set(ngc.EdgeTieBreak.__members__) == {
-        "DETERMINISTIC",
-        "PREFER_HIGHER_PRIORITY",
-    }
+    assert set(ngc.SourceAllocation.__members__) == {"EQUAL", "OPTIMIZED"}
+    for retired in ("PathSelection", "EdgeTieBreak", "EdgePriority"):
+        assert retired not in dir(ngc), retired
 
 
 def test_eligibility_intersect_returns_the_operand_object():

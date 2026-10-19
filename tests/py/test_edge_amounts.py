@@ -1,7 +1,7 @@
 """The per-edge amount arrays at the binding: a ledger's baseline (at
 construction and reset), a search's residual (the public search and its K shortest paths) and
-the flow core's view (the private _place_global_units) share one validation of the unnarrowed Python integers: the length first,
-then every entry in EdgeId order, the first one outside [0, capacity_units[e]] reported with its
+the flow core's view (the private _solve_min_cost_flow) share one validation of the unnarrowed Python integers: the length first,
+then every entry in EdgeId order, the first one outside [0, edge_capacity_units[e]] reported with its
 exact value. Each user keeps its own names: ``residual`` / ``residual (units)`` and ``view`` /
 ``view (capacity units)``.
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 import _netgraph_core as ext
 import numpy as np
 import pytest
-from helpers import GLOBAL, build, exact, ledger_state, sel
+from helpers import GLOBAL, build, exact, ledger_state
 
 import netgraph_core as ngc
 
@@ -35,23 +35,23 @@ def reset(g, a, later):
 
 def search(g, a, later):
     opts = ngc.SpfOptions(
-        ngc.Direction.FORWARD, sel(), residual=a, min_residual=0 if later else 1
+        ngc.Direction.FORWARD, residual=a, min_residual=0 if later else 1
     )
     return ngc.spf(g, 0, opts)
 
 
 def paths(g, a, later):
-    elig = graph().eligibility() if later else None  # a foreign Eligibility
-    return ngc.ksp(g, 0, 2, ngc.KspOptions(1, sel(), residual=a, elig=elig))
+    eligibility = graph().eligibility() if later else None  # a foreign Eligibility
+    return ngc.ksp(g, 0, 2, ngc.KspOptions(1, residual=a, eligibility=eligibility))
 
 
 def view(g, a, later):
-    return ext._place_global_units(g, a, [9] if later else [0], [2], None, None)
+    return ext._solve_min_cost_flow(g, a, [9] if later else [0], [2], None, None)
 
 
 USERS = {
-    "ledger": ("residual", "residual (units)", ledger),
-    "reset": ("residual", "residual (units)", reset),
+    "ledger": ("service_baseline", "service_baseline (units)", ledger),
+    "reset": ("service_baseline", "service_baseline (units)", reset),
     "search": ("residual", "residual (units)", search),
     "paths": ("residual", "residual (units)", paths),
     "view": ("view", "view (capacity units)", view),
@@ -83,30 +83,30 @@ CASES = [
         "{label} entries must be integers (got dtype float64)",
     ),
     # the values: the first entry outside, exact also beyond int64
-    ([-1, 99], False, "{name}[0] = -1 is outside [0, capacity_units[0] = 5]"),
-    ([5, 4], False, "{name}[1] = 4 is outside [0, capacity_units[1] = 3]"),
+    ([-1, 99], False, "{name}[0] = -1 is outside [0, edge_capacity_units[0] = 5]"),
+    ([5, 4], False, "{name}[1] = 4 is outside [0, edge_capacity_units[1] = 3]"),
     (
         [5, 2**70],
         False,
-        "{name}[1] = 1180591620717411303424 is outside [0, capacity_units[1] = 3]",
+        "{name}[1] = 1180591620717411303424 is outside [0, edge_capacity_units[1] = 3]",
     ),
     (
         [-(2**70), 9],
         False,
-        "{name}[0] = -1180591620717411303424 is outside [0, capacity_units[0] = 5]",
+        "{name}[0] = -1180591620717411303424 is outside [0, edge_capacity_units[0] = 5]",
     ),
     (
         np.array([5, 2**64 - 1], dtype=np.uint64),
         False,
-        "{name}[1] = 18446744073709551615 is outside [0, capacity_units[1] = 3]",
+        "{name}[1] = 18446744073709551615 is outside [0, edge_capacity_units[1] = 3]",
     ),
     # an amount above its capacity (one above; beyond 64 bits) wins over an argument checked
     # after the amounts
-    ([6, 0], True, "{name}[0] = 6 is outside [0, capacity_units[0] = 5]"),
+    ([6, 0], True, "{name}[0] = 6 is outside [0, edge_capacity_units[0] = 5]"),
     (
         [5, 2**70],
         True,
-        "{name}[1] = 1180591620717411303424 is outside [0, capacity_units[1] = 3]",
+        "{name}[1] = 1180591620717411303424 is outside [0, edge_capacity_units[1] = 3]",
     ),
 ]
 
@@ -156,7 +156,7 @@ BOUND_OUTCOMES = {
         [0, ngc.UNREACHABLE, ngc.UNREACHABLE],
     ),
     "paths": (len, 1, 0),
-    "view": (lambda r: (r["placed"], r["edge_flows"]), (3, [3, 3]), (0, [0, 0])),
+    "view": (lambda r: (r["flow_value"], r["edge_flows"]), (3, [3, 3]), (0, [0, 0])),
 }
 
 
@@ -176,7 +176,7 @@ def test_a_failed_reset_leaves_the_ledger_unchanged():
     g = graph()
     fg = ngc.FlowLedger(g, [4, 2])
     policy = ngc.FlowPolicy(fg, 0, 2, GLOBAL)
-    assert policy.place(2).placed == 2
+    assert policy.place(2).call_delivered == 2
     del policy  # its records stay as orphans: reset() is allowed and would clear them
 
     uid, before = fg.uid(), ledger_state(fg)
@@ -186,7 +186,7 @@ def test_a_failed_reset_leaves_the_ledger_unchanged():
             fg.reset(bad)
         assert (fg.uid(), ledger_state(fg)) == (uid, before)
     fg.reset([1, 1])
-    assert (fg.residual().tolist(), fg.allocated().tolist(), fg.records()) == (
+    assert (fg.residual().tolist(), fg.carried().tolist(), fg.records()) == (
         [1, 1],
         [0, 0],
         [],

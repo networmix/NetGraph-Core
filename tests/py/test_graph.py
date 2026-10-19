@@ -12,7 +12,7 @@ from helpers import L62, build, by_input, exact
 
 import netgraph_core as ngc
 
-# (u, v, capacity_units, cost) in input order.
+# (u, v, capacity in units, cost) in input order.
 EDGES = [
     (2, 0, 5, 3),
     (0, 2, 4, 2),
@@ -24,28 +24,28 @@ EDGES = [
 ]
 
 
-def test_edge_id_order_and_input_index():
+def test_edge_id_order_and_input_positions():
     g = build(3, EDGES)
     order = sorted(
         range(len(EDGES)), key=lambda i: (EDGES[i][0], EDGES[i][3], EDGES[i][1], i)
     )
-    assert g.input_index().tolist() == order == [5, 2, 4, 1, 3, 6, 0]
-    assert g.row_offsets().tolist() == [0, 4, 5, 7]
-    assert g.edge_src().tolist() == [EDGES[i][0] for i in order]
-    assert g.edge_dst().tolist() == [EDGES[i][1] for i in order]
-    assert g.capacity_units().tolist() == [EDGES[i][2] for i in order]
-    assert g.cost().tolist() == [EDGES[i][3] for i in order]
+    assert g.input_positions().tolist() == order == [5, 2, 4, 1, 3, 6, 0]
+    assert g.outgoing_offsets().tolist() == [0, 4, 5, 7]
+    assert g.edge_sources().tolist() == [EDGES[i][0] for i in order]
+    assert g.edge_destinations().tolist() == [EDGES[i][1] for i in order]
+    assert g.edge_capacity_units().tolist() == [EDGES[i][2] for i in order]
+    assert g.edge_costs().tolist() == [EDGES[i][3] for i in order]
     inv = np.empty(len(EDGES), dtype=np.int64)
-    inv[g.input_index()] = np.arange(len(EDGES))
-    assert g.input_index()[inv].tolist() == list(range(len(EDGES)))
-    # Reverse CSR in (cost, src, input) order, as input positions.
+    inv[g.input_positions()] = np.arange(len(EDGES))
+    assert g.input_positions()[inv].tolist() == list(range(len(EDGES)))
+    # Reverse CSR in (cost, source, input) order, as input positions.
     rev = []
-    off, adj = g.in_row_offsets(), g.in_adj_edge_index()
+    off, adj = g.incoming_offsets(), g.incoming_edges()
     for v in range(3):
-        rev.append([int(g.input_index()[e]) for e in adj[off[v] : off[v + 1]]])
+        rev.append([int(g.input_positions()[e]) for e in adj[off[v] : off[v + 1]]])
     assert rev == [[0], [6, 2, 4], [5, 3, 1]]
-    assert g.max_cost() == 3
-    assert g.cost_gcd() == 1
+    assert g.max_edge_cost() == 3
+    assert g.edge_cost_gcd() == 1
     assert g.num_nodes() == 3 and g.num_edges() == 7
     assert g.resolution() == 1.0
 
@@ -60,16 +60,16 @@ def test_numpy_integer_inputs_and_exact_large_units():
         np.array([2, 1], dtype=np.uint64),
         2.0**-12,
     )
-    assert g.capacity_units().tolist() == [7, big]
+    assert g.edge_capacity_units().tolist() == [7, big]
     assert g.resolution() == 2.0**-12
 
 
 def test_empty_and_isolated():
     g = ngc.Graph(0, [], [], [], [], 1)
-    assert g.row_offsets().tolist() == [0] and g.in_row_offsets().tolist() == [0]
-    assert g.max_cost() == 0 and g.cost_gcd() == 0
+    assert g.outgoing_offsets().tolist() == [0] and g.incoming_offsets().tolist() == [0]
+    assert g.max_edge_cost() == 0 and g.edge_cost_gcd() == 0
     h = ngc.Graph(3, [], [], [], [], 1)
-    assert h.row_offsets().tolist() == [0, 0, 0, 0]
+    assert h.outgoing_offsets().tolist() == [0, 0, 0, 0]
 
 
 def test_uids_are_distinct():
@@ -105,42 +105,45 @@ def test_resolution_has_no_default():
         # The unit values.
         (
             (2, [0], [1], [-1], [1], 1),
-            "capacity_units[0] = -1 is outside the units domain [0, 2^62)",
+            "edge_capacity_units[0] = -1 is outside the units domain [0, 2^62)",
         ),
         (
             (2, [0], [1], [L62], [1], 1),
-            "capacity_units[0] = 4611686018427387904 is outside the units domain [0, 2^62)",
+            "edge_capacity_units[0] = 4611686018427387904 is outside the units domain [0, 2^62)",
         ),
         (
             (2, [0], [1], [1.0], [1], 1),
-            "capacity_units[0] must be an integer (got float)",
+            "edge_capacity_units[0] must be an integer (got float)",
         ),
         (
             (2, [0], [1], np.array([1.5]), [1], 1),
-            "capacity_units entries must be integers (got dtype float64)",
+            "edge_capacity_units entries must be integers (got dtype float64)",
         ),
         (
             (2, [0], [1], [True], [1], 1),
-            "capacity_units[0] must be an integer (got bool)",
+            "edge_capacity_units[0] must be an integer (got bool)",
         ),
         # The shapes.
         ((-1, [], [], [], [], 1), "num_nodes = -1 is out of range [0, 2147483647]"),
         ((2.0, [0], [1], [1], [1], 1), "num_nodes must be an integer (got float)"),
         (
             (2, [0, 1], [1], [1], [1], 1),
-            "src, dst, capacity_units and cost must have the same length (got 2, 1, 1, 1)",
+            "edge_sources, edge_destinations, edge_capacity_units and edge_costs must have the same length (got 2, 1, 1, 1)",
         ),
         (
             (2, [0], [1], [1, 1], [1], 1),
-            "src, dst, capacity_units and cost must have the same length (got 1, 1, 2, 1)",
+            "edge_sources, edge_destinations, edge_capacity_units and edge_costs must have the same length (got 1, 1, 2, 1)",
         ),
         # Zero, negative and non-integer costs.
-        ((2, [0], [1], [1], [0], 1), "cost[0] = 0: costs must be positive (cost >= 1)"),
+        (
+            (2, [0], [1], [1], [0], 1),
+            "edge_costs[0] = 0: costs must be positive (edge_costs >= 1)",
+        ),
         (
             (2, [0], [1], [1], [-3], 1),
-            "cost[0] = -3: costs must be positive (cost >= 1)",
+            "edge_costs[0] = -3: costs must be positive (edge_costs >= 1)",
         ),
-        ((2, [0], [1], [1], [1.5], 1), "cost[0] must be an integer (got float)"),
+        ((2, [0], [1], [1], [1.5], 1), "edge_costs[0] must be an integer (got float)"),
         # The remaining bounds.
         (
             (2, [0], [2], [1], [1], 1),
@@ -162,26 +165,30 @@ def test_validation_errors(args, message):
 
 
 def test_validation_order():
-    # The unit values before the shapes (the length message names capacity_units too), the
+    # The unit values before the shapes (the length message names edge_capacity_units too), the
     # shapes before the costs, the costs before the remaining bounds (endpoints and sums).
     with pytest.raises(
         ValueError,
-        match=exact("capacity_units[0] = -1 is outside the units domain [0, 2^62)"),
+        match=exact(
+            "edge_capacity_units[0] = -1 is outside the units domain [0, 2^62)"
+        ),
     ):
         ngc.Graph(2, [0, 1], [1], [-1], [1], 1)
     with pytest.raises(
         ValueError,
         match=exact(
-            "src, dst, capacity_units and cost must have the same length (got 2, 1, 1, 1)"
+            "edge_sources, edge_destinations, edge_capacity_units and edge_costs must have the same length (got 2, 1, 1, 1)"
         ),
     ):
         ngc.Graph(2, [0, 1], [1], [1], [0], 1)
     with pytest.raises(
-        ValueError, match=exact("cost[0] = 0: costs must be positive (cost >= 1)")
+        ValueError,
+        match=exact("edge_costs[0] = 0: costs must be positive (edge_costs >= 1)"),
     ):
         ngc.Graph(2, [0], [9], [1], [0], 1)
     with pytest.raises(
-        ValueError, match=exact("cost[0] = 0: costs must be positive (cost >= 1)")
+        ValueError,
+        match=exact("edge_costs[0] = 0: costs must be positive (edge_costs >= 1)"),
     ):
         ngc.Graph(2, [0, 0], [1, 1], [L62 // 2, L62 // 2], [0, 1], 1)
     with pytest.raises(
@@ -218,8 +225,8 @@ def test_bounds_just_below_are_accepted():
     g = ngc.Graph(
         2, [0, 0], [1, 1], [L62 // 2, L62 // 2 - 1], [L62 // 2, L62 // 2 - 1], 1
     )
-    assert sum(int(x) for x in g.capacity_units()) == L62 - 1
-    assert sum(int(x) for x in g.cost()) == L62 - 1
+    assert sum(int(x) for x in g.edge_capacity_units()) == L62 - 1
+    assert sum(int(x) for x in g.edge_costs()) == L62 - 1
 
 
 def test_eligibility():
@@ -266,36 +273,36 @@ def test_eligibility():
         # the C++ type (endpoints beyond int32, a cost beyond int64).
         (
             (2, [2**31], [1], [1], [0], 1.0),
-            "cost[0] = 0: costs must be positive (cost >= 1)",
+            "edge_costs[0] = 0: costs must be positive (edge_costs >= 1)",
         ),
         (
             (2, [-1], [1], [1], [0], 1.0),
-            "cost[0] = 0: costs must be positive (cost >= 1)",
+            "edge_costs[0] = 0: costs must be positive (edge_costs >= 1)",
         ),
         (
             (2, [0], [2**31], [1], [-1], 1.0),
-            "cost[0] = -1: costs must be positive (cost >= 1)",
+            "edge_costs[0] = -1: costs must be positive (edge_costs >= 1)",
         ),
         (
             (2, [0], [-(2**70)], [1], [-(2**70)], 1.0),
-            "cost[0] = -1180591620717411303424: costs must be positive (cost >= 1)",
+            "edge_costs[0] = -1180591620717411303424: costs must be positive (edge_costs >= 1)",
         ),
         (
             (2, [0, 0], [1, 1], [1, 1], [2**63, 0], 1.0),
-            "cost[1] = 0: costs must be positive (cost >= 1)",
+            "edge_costs[1] = 0: costs must be positive (edge_costs >= 1)",
         ),
         # The unit values come before the costs, the resolution before everything.
         (
             (2, [0], [1], [2**62], [0], 1.0),
-            "capacity_units[0] = 4611686018427387904 is outside the units domain [0, 2^62)",
+            "edge_capacity_units[0] = 4611686018427387904 is outside the units domain [0, 2^62)",
         ),
         (
             (2, [0], [1], [2**64], [0], 1.0),
-            "capacity_units[0] = 18446744073709551616 is outside the units domain [0, 2^62)",
+            "edge_capacity_units[0] = 18446744073709551616 is outside the units domain [0, 2^62)",
         ),
         (
             (2, [0], [1], [-(2**70)], [0], 1.0),
-            "capacity_units[0] = -1180591620717411303424 is outside the units domain [0, 2^62)",
+            "edge_capacity_units[0] = -1180591620717411303424 is outside the units domain [0, 2^62)",
         ),
         (
             (2, [0], [1], [-1], [0], 3.0),
@@ -347,7 +354,9 @@ def test_validation_independent_of_representation():
             ngc.Graph(*args)
         messages.append(str(info.value))
     assert (
-        messages[0] == messages[1] == "cost[0] = 0: costs must be positive (cost >= 1)"
+        messages[0]
+        == messages[1]
+        == "edge_costs[0] = 0: costs must be positive (edge_costs >= 1)"
     )
     with pytest.raises(
         ValueError,
@@ -375,8 +384,18 @@ def test_eligibility_ids_checked_before_narrowing():
         g.eligibility(excluded_nodes=[5], excluded_edges=[2**70])
 
 
-ARG_INDEX = {"src": 1, "dst": 2, "capacity_units": 3, "cost": 4}
-VALID = {"src": 0, "dst": 1, "capacity_units": 1, "cost": 0}  # the cost stays zero
+ARG_INDEX = {
+    "edge_sources": 1,
+    "edge_destinations": 2,
+    "edge_capacity_units": 3,
+    "edge_costs": 4,
+}
+VALID = {
+    "edge_sources": 0,
+    "edge_destinations": 1,
+    "edge_capacity_units": 1,
+    "edge_costs": 0,
+}  # the cost stays zero
 
 
 @pytest.mark.parametrize("name", list(ARG_INDEX))
@@ -386,7 +405,7 @@ def test_array_rank_is_a_shape_defect_before_costs(name, ndim, cost):
     # The shape step checks rank 1 for every array argument before the
     # cost step, so a 2-D or 0-D array is reported before a zero or negative cost.
     args = [2, [0], [1], [1], [cost], 1.0]
-    value = cost if name == "cost" else VALID[name]
+    value = cost if name == "edge_costs" else VALID[name]
     bad = np.array(value, dtype=np.int64)
     args[ARG_INDEX[name]] = bad.reshape(1, 1) if ndim == 2 else bad
     pattern = exact(f"{name} must be a 1-D array (got {ndim} dimensions)")
@@ -423,53 +442,59 @@ def test_shape_step_keeps_its_place_in_the_order():
     with pytest.raises(
         ValueError,
         match=exact(
-            "capacity_units[0] = 4611686018427387904 is outside the units domain [0, 2^62)"
+            "edge_capacity_units[0] = 4611686018427387904 is outside the units domain [0, 2^62)"
         ),
     ):
         ngc.Graph(2, [0], [1], np.array([[2**62]], dtype=np.int64), [0], 1.0)
     with pytest.raises(
         ValueError,
-        match=exact("capacity_units[0] = -1 is outside the units domain [0, 2^62)"),
+        match=exact(
+            "edge_capacity_units[0] = -1 is outside the units domain [0, 2^62)"
+        ),
     ):
         ngc.Graph(2, [0], [1], np.array(-1, dtype=np.int64), [0], 1.0)
     with pytest.raises(
         ValueError,
-        match=exact("capacity_units[1] = -5 is outside the units domain [0, 2^62)"),
+        match=exact(
+            "edge_capacity_units[1] = -5 is outside the units domain [0, 2^62)"
+        ),
     ):
         ngc.Graph(2, [0], [1], [[1], -5], [0], 1.0)
     with pytest.raises(
         ValueError,
-        match=exact("capacity_units = -5 is outside the units domain [0, 2^62)"),
+        match=exact("edge_capacity_units = -5 is outside the units domain [0, 2^62)"),
     ):
         ngc.Graph(2, [0], [1], -5, [0], 1.0)
     # With valid values the misshapen capacity is a shape defect, before the costs.
     with pytest.raises(
-        ValueError, match=exact("capacity_units must be a 1-D array (got 2 dimensions)")
+        ValueError,
+        match=exact("edge_capacity_units must be a 1-D array (got 2 dimensions)"),
     ):
         ngc.Graph(2, [0], [1], np.array([[1]]), [0], 1.0)
     # Rank before lengths.
     with pytest.raises(
-        ValueError, match=exact("dst must be a 1-D array (got 2 dimensions)")
+        ValueError,
+        match=exact("edge_destinations must be a 1-D array (got 2 dimensions)"),
     ):
         ngc.Graph(2, [0, 1], np.array([[1, 0]]), [1, 1], [1, 1], 1.0)
     # A valid graph from 1-D arrays of every integer kind still builds.
     g = ngc.Graph(
         2, np.array([0]), np.array([1], dtype=np.uint8), np.array([7]), (3,), 1.0
     )
-    assert g.capacity_units().tolist() == [7]
+    assert g.edge_capacity_units().tolist() == [7]
 
 
 def test_repeated_views_share_storage_and_refuse_write_access():
     g = build(3, EDGES)
     for name in (
-        "capacity_units",
-        "cost",
-        "edge_src",
-        "edge_dst",
-        "input_index",
-        "row_offsets",
-        "in_row_offsets",
-        "in_adj_edge_index",
+        "edge_capacity_units",
+        "edge_costs",
+        "edge_sources",
+        "edge_destinations",
+        "input_positions",
+        "outgoing_offsets",
+        "incoming_offsets",
+        "incoming_edges",
     ):
         a, b = getattr(g, name)(), getattr(g, name)()
         assert np.shares_memory(a, b), name
@@ -479,14 +504,14 @@ def test_repeated_views_share_storage_and_refuse_write_access():
 
 
 VIEW_DTYPES = {
-    "capacity_units": np.int64,
-    "cost": np.int64,
-    "edge_src": np.int32,
-    "edge_dst": np.int32,
-    "input_index": np.int32,
-    "row_offsets": np.int32,
-    "in_row_offsets": np.int32,
-    "in_adj_edge_index": np.int32,
+    "edge_capacity_units": np.int64,
+    "edge_costs": np.int64,
+    "edge_sources": np.int32,
+    "edge_destinations": np.int32,
+    "input_positions": np.int32,
+    "outgoing_offsets": np.int32,
+    "incoming_offsets": np.int32,
+    "incoming_edges": np.int32,
 }
 
 
@@ -521,7 +546,7 @@ def test_every_view_keeps_its_graph_alive_and_refuses_write_access(n, edges):
 
 
 def _reference_layout(n, src, dst, cost):
-    # EdgeIds: (src, cost, dst, input); the reverse slots: (dst, cost, src, input).
+    # EdgeIds: (source, cost, destination, input); the reverse slots: (destination, cost, source, input).
     i = np.arange(len(src))
     order = np.lexsort((i, dst, cost, src))
     pos = np.empty_like(order)
@@ -556,12 +581,12 @@ def test_construction_orders_match_a_reference(shape):
         src, dst, cap, cost = (a[order[::-1]] for a in (src, dst, cap, cost))
     g = ngc.Graph(n, src, dst, cap, cost, 1)
     order, row, rev = _reference_layout(n, src, dst, cost)
-    assert g.input_index().tolist() == order.tolist()
-    assert g.row_offsets().tolist() == row.tolist()
-    assert g.in_adj_edge_index().tolist() == rev.tolist()
+    assert g.input_positions().tolist() == order.tolist()
+    assert g.outgoing_offsets().tolist() == row.tolist()
+    assert g.incoming_edges().tolist() == rev.tolist()
     assert (
-        g.in_row_offsets().tolist()
+        g.incoming_offsets().tolist()
         == np.searchsorted(np.sort(dst), np.arange(n + 1)).tolist()
     )
-    assert g.capacity_units().tolist() == cap[order].tolist()
-    assert g.max_cost() == (int(cost.max()) if e else 0)
+    assert g.edge_capacity_units().tolist() == cap[order].tolist()
+    assert g.max_edge_cost() == (int(cost.max()) if e else 0)

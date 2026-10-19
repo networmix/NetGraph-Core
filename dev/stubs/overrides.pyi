@@ -48,32 +48,32 @@ class Eligibility:
 
 class Graph:
     # reason: num_nodes is an integer, the four edge arrays are integers (exact values checked by the binding)
-    # generated: def __init__(self, num_nodes: typing.Any, src: typing.Any, dst: typing.Any, capacity_units: typing.Any, cost: typing.Any, resolution: typing.SupportsFloat | typing.SupportsIndex) -> None:
+    # generated: def __init__(self, num_nodes: typing.Any, edge_sources: typing.Any, edge_destinations: typing.Any, edge_capacity_units: typing.Any, edge_costs: typing.Any, resolution: typing.SupportsFloat | typing.SupportsIndex) -> None:
     def __init__(
         self,
         num_nodes: typing.SupportsIndex,
-        src: collections.abc.Sequence[typing.SupportsIndex]
+        edge_sources: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer],
-        dst: collections.abc.Sequence[typing.SupportsIndex]
+        edge_destinations: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer],
-        capacity_units: collections.abc.Sequence[typing.SupportsIndex]
+        edge_capacity_units: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer],
-        cost: collections.abc.Sequence[typing.SupportsIndex]
+        edge_costs: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer],
         resolution: typing.SupportsFloat | typing.SupportsIndex,
     ) -> None: ...
     # reason: a read-only int64 view
-    # generated: def capacity_units(self) -> numpy.ndarray:
-    def capacity_units(self) -> numpy.typing.NDArray[numpy.int64]: ...
+    # generated: def edge_capacity_units(self) -> numpy.ndarray:
+    def edge_capacity_units(self) -> numpy.typing.NDArray[numpy.int64]: ...
     # reason: a read-only int64 view
-    # generated: def cost(self) -> numpy.ndarray:
-    def cost(self) -> numpy.typing.NDArray[numpy.int64]: ...
+    # generated: def edge_costs(self) -> numpy.ndarray:
+    def edge_costs(self) -> numpy.typing.NDArray[numpy.int64]: ...
     # reason: a read-only int32 view
-    # generated: def edge_dst(self) -> numpy.ndarray:
-    def edge_dst(self) -> numpy.typing.NDArray[numpy.int32]: ...
+    # generated: def edge_destinations(self) -> numpy.ndarray:
+    def edge_destinations(self) -> numpy.typing.NDArray[numpy.int32]: ...
     # reason: a read-only int32 view
-    # generated: def edge_src(self) -> numpy.ndarray:
-    def edge_src(self) -> numpy.typing.NDArray[numpy.int32]: ...
+    # generated: def edge_sources(self) -> numpy.ndarray:
+    def edge_sources(self) -> numpy.typing.NDArray[numpy.int32]: ...
     # reason: the excluded node ids and EdgeIds are integers
     # generated: def eligibility(self, excluded_nodes: typing.Any = (), excluded_edges: typing.Any = ()) -> Eligibility:
     def eligibility(
@@ -84,34 +84,34 @@ class Graph:
         | numpy.typing.NDArray[numpy.integer] = (),
     ) -> Eligibility: ...
     # reason: a read-only int32 view
-    # generated: def in_adj_edge_index(self) -> numpy.ndarray:
-    def in_adj_edge_index(self) -> numpy.typing.NDArray[numpy.int32]: ...
+    # generated: def incoming_edges(self) -> numpy.ndarray:
+    def incoming_edges(self) -> numpy.typing.NDArray[numpy.int32]: ...
     # reason: a read-only int32 view
-    # generated: def in_row_offsets(self) -> numpy.ndarray:
-    def in_row_offsets(self) -> numpy.typing.NDArray[numpy.int32]: ...
+    # generated: def incoming_offsets(self) -> numpy.ndarray:
+    def incoming_offsets(self) -> numpy.typing.NDArray[numpy.int32]: ...
     # reason: a read-only int32 view
-    # generated: def input_index(self) -> numpy.ndarray:
-    def input_index(self) -> numpy.typing.NDArray[numpy.int32]: ...
+    # generated: def input_positions(self) -> numpy.ndarray:
+    def input_positions(self) -> numpy.typing.NDArray[numpy.int32]: ...
     # reason: a read-only int32 view
-    # generated: def row_offsets(self) -> numpy.ndarray:
-    def row_offsets(self) -> numpy.typing.NDArray[numpy.int32]: ...
+    # generated: def outgoing_offsets(self) -> numpy.ndarray:
+    def outgoing_offsets(self) -> numpy.typing.NDArray[numpy.int32]: ...
 
-class PredDAG:
-    # reason: no constructor: built by PredDAG.from_csr, Path.to_dag and the searches
+class PredecessorDAG:
+    # reason: no constructor: built by PredecessorDAG.from_csr, Path.to_dag and the searches
     # generated: (none)
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
     # reason: offsets, parents and via are integers
-    # generated: def from_csr(graph: Graph, offsets: typing.Any, parents: typing.Any, via: typing.Any) -> PredDAG:
+    # generated: def from_csr(graph: Graph, parent_offsets: typing.Any, parents: typing.Any, via_edges: typing.Any) -> PredecessorDAG:
     @staticmethod
     def from_csr(
         graph: Graph,
-        offsets: collections.abc.Sequence[typing.SupportsIndex]
+        parent_offsets: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer],
         parents: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer],
-        via: collections.abc.Sequence[typing.SupportsIndex]
+        via_edges: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer],
-    ) -> PredDAG: ...
+    ) -> PredecessorDAG: ...
     # reason: a read-only int32 view
     # generated: def parents(self) -> numpy.ndarray:
     def parents(self) -> numpy.typing.NDArray[numpy.int32]: ...
@@ -138,101 +138,110 @@ class FlowRecord:
     # generated: (none)
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
     # reason: a list of (EdgeId, units) pairs; units are exact Python ints
-    # generated: def drops(self) -> list:
+    # generated: def edge_drops(self) -> list:
     @property
-    def drops(self) -> list[tuple[int, int]]: ...
+    def edge_drops(self) -> list[tuple[int, int]]: ...
     # reason: a list of (EdgeId, units) pairs
-    # generated: def edges(self) -> list:
+    # generated: def edge_flows(self) -> list:
     @property
-    def edges(self) -> list[tuple[int, int]]: ...
+    def edge_flows(self) -> list[tuple[int, int]]: ...
     # reason: a list of (EdgeId, units) pairs
-    # generated: def reserved_edges(self) -> list:
+    # generated: def edge_reservations(self) -> list:
     @property
-    def reserved_edges(self) -> list[tuple[int, int]]: ...
+    def edge_reservations(self) -> list[tuple[int, int]]: ...
     # reason: an exact Python int for a Lossy flow, None otherwise
     # generated: def offered(self) -> typing.Any:
     @property
     def offered(self) -> int | None: ...
     # reason: an int, None when the route is empty
-    # generated: def route_cost(self) -> typing.Any:
+    # generated: def min_route_cost(self) -> typing.Any:
     @property
-    def route_cost(self) -> int | None: ...
+    def min_route_cost(self) -> int | None: ...
 
 class FlowLedger:
     # reason: the service and reservation baselines are integers, or None for the capacities
-    # generated: def __init__(self, graph: Graph, residual: typing.Any = None, *, unreserved: typing.Any = None) -> None:
+    # generated: def __init__(self, graph: Graph, service_baseline: typing.Any = None, *, reservation_baseline: typing.Any = None) -> None:
     def __init__(
         self,
         graph: Graph,
-        residual: collections.abc.Sequence[typing.SupportsIndex]
+        service_baseline: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer]
         | None = None,
         *,
-        unreserved: collections.abc.Sequence[typing.SupportsIndex]
+        reservation_baseline: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer]
         | None = None,
     ) -> None: ...
-    # reason: sources is a node set; elig may be None (all allowed)
-    # generated: def bottleneck(self, sources: typing.Any, elig: Eligibility = None) -> list[int]:
-    def bottleneck(
+    # reason: sources is a node set; eligibility may be None (all allowed)
+    # generated: def saturated_boundary_edges(self, sources: typing.Any, eligibility: Eligibility = None) -> list[int]:
+    def saturated_boundary_edges(
         self,
         sources: typing.SupportsIndex
         | collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer],
-        elig: Eligibility | None = None,
+        eligibility: Eligibility | None = None,
     ) -> list[int]: ...
     # reason: a read-only int64 view
-    # generated: def capacity_units(self) -> numpy.ndarray:
-    def capacity_units(self) -> numpy.typing.NDArray[numpy.int64]: ...
+    # generated: def edge_capacity_units(self) -> numpy.ndarray:
+    def edge_capacity_units(self) -> numpy.typing.NDArray[numpy.int64]: ...
     # reason: a FlowId is a tuple (ledger uid, id) of integers
     # generated: def record(self, flow_id: typing.Any) -> FlowRecord:
     def record(
         self, flow_id: tuple[typing.SupportsIndex, typing.SupportsIndex]
     ) -> FlowRecord: ...
     # reason: the new baselines are integers, or None for the capacities
-    # generated: def reset(self, residual: typing.Any = None, *, unreserved: typing.Any = None) -> None:
+    # generated: def reset(self, service_baseline: typing.Any = None, *, reservation_baseline: typing.Any = None) -> None:
     def reset(
         self,
-        residual: collections.abc.Sequence[typing.SupportsIndex]
+        service_baseline: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer]
         | None = None,
         *,
-        unreserved: collections.abc.Sequence[typing.SupportsIndex]
+        reservation_baseline: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer]
         | None = None,
     ) -> None: ...
 
-class Absolute:
+class AbsoluteCost:
     # reason: cost is an integer
     # generated: def __init__(self, cost: typing.Any) -> None:
     def __init__(self, cost: typing.SupportsIndex) -> None: ...
 
-class Stretch:
-    # reason: factor is a number (a float, a NumPy floating scalar or an integer)
+class CostStretch:
+    # reason: factor is a Fraction, a float, a NumPy floating scalar or an integer (a bool is rejected at run time)
     # generated: def __init__(self, factor: typing.Any) -> None:
     def __init__(
-        self, factor: float | numpy.floating | typing.SupportsIndex
+        self,
+        factor: fractions.Fraction | float | numpy.floating | typing.SupportsIndex,
+    ) -> None: ...
+    # reason: the exact factor, a fractions.Fraction built on each access
+    # generated: def factor(self) -> typing.Any:
+    @property
+    def factor(self) -> fractions.Fraction: ...
+
+class TunnelCount:
+    # reason: count is an integer
+    # generated: def __init__(self, per_head: typing.Any, *, up_to: bool = False) -> None:
+    def __init__(
+        self, per_head: typing.SupportsIndex, *, up_to: bool = False
     ) -> None: ...
 
-class Tunnels:
-    # reason: count is an integer
-    # generated: def __init__(self, count: typing.Any, *, up_to: bool = False) -> None:
-    def __init__(self, count: typing.SupportsIndex, *, up_to: bool = False) -> None: ...
-
-class CapacityAware:
-    # reason: the ceiling is Absolute, Stretch or None; the search minimum is an integer
-    # generated: def __init__(self, tunnels: Tunnels, *, max_path_cost: typing.Any = None, min_unreserved_bandwidth: typing.Any = 0) -> None:
+class DistributedTE:
+    # reason: the ceiling is AbsoluteCost, CostStretch or None; the search minimum is an integer
+    # generated: def __init__(self, tunnel_count: TunnelCount, *, cost_ceiling: typing.Any = None, min_unreserved_bandwidth: typing.Any = 0, tie_break: RouteTieBreak = ..., parallel_edges: bool = True) -> None:
     def __init__(
         self,
-        tunnels: Tunnels,
+        tunnel_count: TunnelCount,
         *,
-        max_path_cost: Absolute | Stretch | None = None,
+        cost_ceiling: AbsoluteCost | CostStretch | None = None,
         min_unreserved_bandwidth: typing.SupportsIndex = 0,
+        tie_break: RouteTieBreak = ...,
+        parallel_edges: bool = True,
     ) -> None: ...
-    # reason: the ceiling given at construction: Absolute, Stretch or None
-    # generated: def max_path_cost(self) -> typing.Any:
+    # reason: the ceiling given at construction: AbsoluteCost, CostStretch or None
+    # generated: def cost_ceiling(self) -> typing.Any:
     @property
-    def max_path_cost(self) -> Absolute | Stretch | None: ...
+    def cost_ceiling(self) -> AbsoluteCost | CostStretch | None: ...
 
 class Tunnel:
     # reason: no constructor: a tunnel of ForwardingProgram.tunnels
@@ -243,23 +252,23 @@ class Tunnel:
     @property
     def edges(self) -> tuple[int, ...] | None: ...
 
-class Route:
-    # reason: head and weight are integers (weight checked by from_routes); bundle a Path or a PredDAG (TypeError otherwise)
-    # generated: def __init__(self, head: typing.Any, bundle: typing.Any, *, weight: typing.Any = 1) -> None:
+class RouteDefinition:
+    # reason: head and weight are integers (weight checked by from_routes); bundle a Path or a PredecessorDAG (TypeError otherwise)
+    # generated: def __init__(self, head: typing.Any, route: typing.Any, *, weight: typing.Any = 1) -> None:
     def __init__(
         self,
         head: typing.SupportsIndex,
-        bundle: Path | PredDAG,
+        route: Path | PredecessorDAG,
         *,
         weight: typing.SupportsIndex = 1,
     ) -> None: ...
 
 class ForwardingProgram:
-    # reason: no constructor: made by from_routes and returned by the policies
+    # reason: no constructor: made by from_routes or from_dag and returned by the policies
     # generated: (none)
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
     # reason: sources and destinations are node sets; routes a sequence of Route; edge_weights and residual integers or None
-    # generated: def from_routes(graph: Graph, sources: typing.Any, destinations: typing.Any, routes: typing.Any, *, placement: FlowPlacement | None = None, weights: WeightBasis | None = None, edge_weights: typing.Any = None, residual: typing.Any = None) -> ForwardingProgram:
+    # generated: def from_routes(graph: Graph, sources: typing.Any, destinations: typing.Any, routes: typing.Any, *, allocation: RouteAllocation | None = None, weight_basis: WeightBasis | None = None, edge_weights: typing.Any = None, residual: typing.Any = None) -> ForwardingProgram:
     @staticmethod
     def from_routes(
         graph: Graph,
@@ -269,10 +278,32 @@ class ForwardingProgram:
         destinations: typing.SupportsIndex
         | collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer],
-        routes: collections.abc.Sequence[Route],
+        routes: collections.abc.Sequence[RouteDefinition],
         *,
-        placement: FlowPlacement | None = None,
-        weights: WeightBasis | None = None,
+        allocation: RouteAllocation | None = None,
+        weight_basis: WeightBasis | None = None,
+        edge_weights: collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer]
+        | None = None,
+        residual: collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer]
+        | None = None,
+    ) -> ForwardingProgram: ...
+    # reason: sources and destinations are node sets; dag a PredecessorDAG; edge_weights and residual integers or None
+    # generated: def from_dag(graph: Graph, sources: typing.Any, destinations: typing.Any, dag: typing.Any, *, allocation: RouteAllocation | None = None, weight_basis: WeightBasis | None = None, edge_weights: typing.Any = None, residual: typing.Any = None) -> ForwardingProgram:
+    @staticmethod
+    def from_dag(
+        graph: Graph,
+        sources: typing.SupportsIndex
+        | collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer],
+        destinations: typing.SupportsIndex
+        | collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer],
+        dag: PredecessorDAG,
+        *,
+        allocation: RouteAllocation | None = None,
+        weight_basis: WeightBasis | None = None,
         edge_weights: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer]
         | None = None,
@@ -297,14 +328,36 @@ class ForwardingProgram:
     @property
     def tunnels(self) -> tuple[Tunnel, ...]: ...
 
-class Global:
-    # reason: support is a PredDAG or None; tunnels (T2) a Tunnels or None
-    # generated: def __init__(self, *, support: typing.Any = None, tunnels: typing.Any = None, prefer_headroom: bool = False) -> None:
+class ShortestPaths:
+    # reason: edge_weights one integer per edge (a sequence or an integer array) or None
+    # generated: def __init__(self, *, allocation: RouteAllocation = ..., source_allocation: SourceAllocation | None = None, weight_basis: WeightBasis | None = None, edge_weights: typing.Any = None, tie_break: RouteTieBreak = ..., multipath: bool = True, parallel_edges: bool = True) -> None:
     def __init__(
         self,
         *,
-        support: PredDAG | None = None,
-        tunnels: Tunnels | None = None,
+        allocation: RouteAllocation = ...,
+        source_allocation: SourceAllocation | None = None,
+        weight_basis: WeightBasis | None = None,
+        edge_weights: collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer]
+        | None = None,
+        tie_break: RouteTieBreak = ...,
+        multipath: bool = True,
+        parallel_edges: bool = True,
+    ) -> None: ...
+    # reason: the explicit weights, one int per edge, or None
+    # generated: def edge_weights(self) -> typing.Any:
+    @property
+    def edge_weights(self) -> tuple[int, ...] | None: ...
+
+class CentralizedTE:
+    # reason: support is a PredecessorDAG or None; tunnel_count (T2) a TunnelCount or None
+    # generated: def __init__(self, *, source_allocation: SourceAllocation, support: typing.Any = None, tunnel_count: typing.Any = None, prefer_headroom: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        source_allocation: SourceAllocation,
+        support: PredecessorDAG | None = None,
+        tunnel_count: TunnelCount | None = None,
         prefer_headroom: bool = False,
     ) -> None: ...
 
@@ -317,28 +370,17 @@ class Pinned:
 
 class FlowPolicyConfig:
     # reason: routing is one of the four routing modes (TypeError otherwise)
-    # generated: def __init__(self, *, routing: typing.Any, placement: FlowPlacement | None = None, admission: Admission = ..., selection: PathSelection | None = None, origin: Origin | None = None, weights: WeightBasis | None = None, edge_weights: typing.Any = None) -> None:
+    # generated: def __init__(self, *, routing: typing.Any, admission: Admission = ...) -> None:
     def __init__(
         self,
         *,
-        routing: CostOnly | CapacityAware | Global | Pinned,
-        placement: FlowPlacement | None = None,
+        routing: ShortestPaths | DistributedTE | CentralizedTE | Pinned,
         admission: Admission = ...,
-        selection: PathSelection | None = None,
-        origin: Origin | None = None,
-        weights: WeightBasis | None = None,
-        edge_weights: collections.abc.Sequence[typing.SupportsIndex]
-        | numpy.typing.NDArray[numpy.integer]
-        | None = None,
     ) -> None: ...
-    # reason: the explicit weights, one int per edge, or None
-    # generated: def edge_weights(self) -> typing.Any:
-    @property
-    def edge_weights(self) -> tuple[int, ...] | None: ...
     # reason: the routing mode given at construction
     # generated: def routing(self) -> typing.Any:
     @property
-    def routing(self) -> CostOnly | CapacityAware | Global | Pinned: ...
+    def routing(self) -> ShortestPaths | DistributedTE | CentralizedTE | Pinned: ...
 
 class SourceFlow:
     # reason: no constructor: one row of PlacementResult.by_source
@@ -349,17 +391,17 @@ class SourceFlow:
     @property
     def admitted(self) -> int: ...
     # reason: an exact int (a 128-bit counter)
-    # generated: def dropped(self) -> typing.Any:
+    # generated: def total_edge_drops(self) -> typing.Any:
     @property
-    def dropped(self) -> int: ...
+    def total_edge_drops(self) -> int: ...
     # reason: an exact int when LOSSY, None when LOSSLESS
     # generated: def offered(self) -> typing.Any:
     @property
     def offered(self) -> int | None: ...
     # reason: an exact int (a 128-bit counter)
-    # generated: def source_loss(self) -> typing.Any:
+    # generated: def source_drops(self) -> typing.Any:
     @property
-    def source_loss(self) -> int: ...
+    def source_drops(self) -> int: ...
 
 class TunnelFlow:
     # reason: no constructor: one row of PlacementResult.by_tunnel
@@ -370,9 +412,9 @@ class TunnelFlow:
     @property
     def assigned(self) -> int: ...
     # reason: an exact int (a 128-bit counter)
-    # generated: def dropped(self) -> typing.Any:
+    # generated: def total_edge_drops(self) -> typing.Any:
     @property
-    def dropped(self) -> int: ...
+    def total_edge_drops(self) -> int: ...
 
 class PlacementResult:
     # reason: no constructor: returned by FlowPolicy.place and the evaluators
@@ -391,9 +433,9 @@ class PlacementResult:
     @property
     def by_tunnel(self) -> tuple[TunnelFlow, ...]: ...
     # reason: a list of (EdgeId, units) pairs
-    # generated: def call_drops(self) -> list:
+    # generated: def call_edge_drops(self) -> list:
     @property
-    def call_drops(self) -> list[tuple[int, int]]: ...
+    def call_edge_drops(self) -> list[tuple[int, int]]: ...
     # reason: an exact int when LOSSY, None when LOSSLESS
     # generated: def offered(self) -> typing.Any:
     @property
@@ -403,9 +445,9 @@ class PlacementResult:
     @property
     def requested(self) -> int | float: ...
     # reason: an exact int (a 128-bit counter)
-    # generated: def source_loss(self) -> typing.Any:
+    # generated: def source_drops(self) -> typing.Any:
     @property
-    def source_loss(self) -> int: ...
+    def source_drops(self) -> int: ...
     # reason: an exact int for the controllers, None otherwise
     # generated: def total_cost(self) -> typing.Any:
     @property
@@ -415,25 +457,25 @@ class PlacementResult:
     @property
     def unadmitted(self) -> int | None: ...
     # reason: a list of (EdgeId, units) pairs; units are exact Python ints
-    # generated: def drops(self) -> list:
+    # generated: def edge_drops(self) -> list:
     @property
-    def drops(self) -> list[tuple[int, int]]: ...
+    def edge_drops(self) -> list[tuple[int, int]]: ...
     # reason: an int64 array when requested, else None
     # generated: def edge_flows(self) -> typing.Any:
     @property
     def edge_flows(self) -> numpy.typing.NDArray[numpy.int64] | None: ...
     # reason: an int, or float('inf') after an infinite request
-    # generated: def remaining(self) -> typing.Any:
+    # generated: def call_undelivered(self) -> typing.Any:
     @property
-    def remaining(self) -> int | float: ...
+    def call_undelivered(self) -> int | float: ...
     # reason: an int64 array when requested, else None
     # generated: def residual(self) -> typing.Any:
     @property
     def residual(self) -> numpy.typing.NDArray[numpy.int64] | None: ...
     # reason: an int64 array when requested, else None
-    # generated: def reservation_edge_flows(self) -> typing.Any:
+    # generated: def edge_reservations(self) -> typing.Any:
     @property
-    def reservation_edge_flows(self) -> numpy.typing.NDArray[numpy.int64] | None: ...
+    def edge_reservations(self) -> numpy.typing.NDArray[numpy.int64] | None: ...
 
 class TunnelPlan:
     # reason: no constructor: the plan of a T1 or T2 result
@@ -444,34 +486,34 @@ class TunnelPlan:
     @property
     def design_demand(self) -> int | float: ...
     # reason: an exact Fraction (T2), or None for T1
-    # generated: def fluid_share(self) -> typing.Any:
+    # generated: def max_fractional_bandwidth_per_tunnel(self) -> typing.Any:
     @property
-    def fluid_share(self) -> fractions.Fraction | None: ...
+    def max_fractional_bandwidth_per_tunnel(self) -> fractions.Fraction | None: ...
     # reason: (head, share) pairs
-    # generated: def head_design(self) -> tuple:
+    # generated: def design_by_head(self) -> tuple:
     @property
-    def head_design(self) -> tuple[tuple[int, int], ...]: ...
+    def design_by_head(self) -> tuple[tuple[int, int], ...]: ...
     # reason: an exact int, possibly above 2^64 (T2 with prefer_headroom), or None
     # generated: def headroom_penalty(self) -> typing.Any:
     @property
     def headroom_penalty(self) -> int | None: ...
     # reason: the live heads, ascending (T2), or None for T1
-    # generated: def live_heads(self) -> typing.Any:
+    # generated: def heads_with_capacity(self) -> typing.Any:
     @property
-    def live_heads(self) -> tuple[int, ...] | None: ...
+    def heads_with_capacity(self) -> tuple[int, ...] | None: ...
     # reason: an exact int, possibly above 2^64 (T2), or None for T1
-    # generated: def route_cost(self) -> typing.Any:
+    # generated: def total_tunnel_cost(self) -> typing.Any:
     @property
-    def route_cost(self) -> int | None: ...
+    def total_tunnel_cost(self) -> int | None: ...
 
-class DagCacheStats:
-    # reason: no constructor: returned by DagCache.stats
+class ShortestPathCacheStats:
+    # reason: no constructor: returned by ShortestPathCache.stats
     # generated: (none)
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
 
 class FlowPolicy:
-    # reason: sources and destinations are node sets; elig and cache may be None
-    # generated: def __init__(self, ledger: FlowLedger, sources: typing.Any, destinations: typing.Any, config: FlowPolicyConfig, elig: Eligibility = None, cache: DagCache = None) -> None:
+    # reason: sources and destinations are node sets; eligibility and cache may be None
+    # generated: def __init__(self, ledger: FlowLedger, sources: typing.Any, destinations: typing.Any, config: FlowPolicyConfig, eligibility: Eligibility = None, cache: ShortestPathCache = None) -> None:
     def __init__(
         self,
         ledger: FlowLedger,
@@ -482,14 +524,14 @@ class FlowPolicy:
         | collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer],
         config: FlowPolicyConfig,
-        elig: Eligibility | None = None,
-        cache: DagCache | None = None,
+        eligibility: Eligibility | None = None,
+        cache: ShortestPathCache | None = None,
     ) -> None: ...
     # reason: volume is integer units or float('inf') (a NumPy floating +inf too); outputs may be None; the result is a PlacementResult
-    # generated: def place(self, volume: typing.Any, outputs: typing.Any = None) -> typing.Any:
+    # generated: def place(self, offer: typing.Any, outputs: typing.Any = None) -> typing.Any:
     def place(
         self,
-        volume: typing.SupportsIndex | float | numpy.floating,
+        offer: typing.SupportsIndex | float | numpy.floating,
         outputs: OutputOptions | None = None,
     ) -> PlacementResult: ...
     # reason: offer and design_demand are integer units or float('inf') (design_demand may be None); outputs may be None; the result is a PlacementResult
@@ -525,35 +567,27 @@ class FlowPolicy:
         self, flow_id: tuple[typing.SupportsIndex, typing.SupportsIndex]
     ) -> FlowRecord: ...
 
-class QueryOptions:
-    # reason: elig, cache, outputs, design_demand and offered may be None; design_demand and offered are integer units or float('inf')
-    # generated: def __init__(self, config: FlowPolicyConfig, *, elig: Eligibility = None, cache: DagCache = None, outputs: typing.Any = None, design_demand: typing.Any = None, offered: typing.Any = None) -> None:
+class EvaluationOptions:
+    # reason: eligibility, cache, outputs, design_demand and offer may be None; design_demand and offer are integer units or a float, kept as given
+    # generated: def __init__(self, config: FlowPolicyConfig, *, eligibility: Eligibility = None, cache: ShortestPathCache = None, outputs: typing.Any = None, design_demand: typing.Any = None, offer: typing.Any = None) -> None:
     def __init__(
         self,
         config: FlowPolicyConfig,
         *,
-        elig: Eligibility | None = None,
-        cache: DagCache | None = None,
+        eligibility: Eligibility | None = None,
+        cache: ShortestPathCache | None = None,
         outputs: OutputOptions | None = None,
         design_demand: typing.SupportsIndex | float | numpy.floating | None = None,
-        offered: typing.SupportsIndex | float | numpy.floating | None = None,
+        offer: typing.SupportsIndex | float | numpy.floating | None = None,
     ) -> None: ...
-    # reason: the design given, an int or float('inf'), or None
+    # reason: the design as given, an int or a float, or None
     # generated: def design_demand(self) -> typing.Any:
     @property
     def design_demand(self) -> int | float | None: ...
-    # reason: the offer given, an int or float('inf'), or None
-    # generated: def offered(self) -> typing.Any:
+    # reason: the offer as given, an int or a float, or None
+    # generated: def offer(self) -> typing.Any:
     @property
-    def offered(self) -> int | float | None: ...
-    # reason: None when no cache was given
-    # generated: def cache(self) -> DagCache:
-    @property
-    def cache(self) -> DagCache | None: ...
-    # reason: None when no Eligibility was given
-    # generated: def elig(self) -> Eligibility:
-    @property
-    def elig(self) -> Eligibility | None: ...
+    def offer(self) -> int | float | None: ...
 
 class SensitivityEntry:
     # reason: no constructor: the entries of a SensitivityResult
@@ -566,31 +600,28 @@ class SensitivityResult:
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
 
 class KspOptions:
-    # reason: k is an integer; the ceiling is Absolute, Stretch or None; residual is integers or None; elig may be None (each validated by ksp)
-    # generated: def __init__(self, k: typing.Any, selection: PathSelection, *, max_path_cost: typing.Any = None, residual: typing.Any = None, elig: Eligibility = None) -> None:
+    # reason: k is an integer; the ceiling is AbsoluteCost, CostStretch or None; residual is integers or None; eligibility may be None (each validated by ksp)
+    # generated: def __init__(self, k: typing.Any, *, tie_break: RouteTieBreak = ..., parallel_edges: bool = True, cost_ceiling: typing.Any = None, residual: typing.Any = None, eligibility: Eligibility = None) -> None:
     def __init__(
         self,
         k: typing.SupportsIndex,
-        selection: PathSelection,
         *,
-        max_path_cost: Absolute | Stretch | None = None,
+        tie_break: RouteTieBreak = ...,
+        parallel_edges: bool = True,
+        cost_ceiling: AbsoluteCost | CostStretch | None = None,
         residual: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer]
         | None = None,
-        elig: Eligibility | None = None,
+        eligibility: Eligibility | None = None,
     ) -> None: ...
-    # reason: None when no Eligibility was given
-    # generated: def elig(self) -> Eligibility:
-    @property
-    def elig(self) -> Eligibility | None: ...
     # reason: the k given at construction (an integer)
     # generated: def k(self) -> typing.Any:
     @property
     def k(self) -> typing.SupportsIndex: ...
     # reason: the ceiling given at construction
-    # generated: def max_path_cost(self) -> typing.Any:
+    # generated: def cost_ceiling(self) -> typing.Any:
     @property
-    def max_path_cost(self) -> Absolute | Stretch | None: ...
+    def cost_ceiling(self) -> AbsoluteCost | CostStretch | None: ...
     # reason: the residual given at construction (the same object)
     # generated: def residual(self) -> typing.Any:
     @property
@@ -603,27 +634,25 @@ class KspOptions:
     ): ...
 
 class SpfOptions:
-    # reason: targets is a node set or None; residual is integers or None; min_residual is an integer; elig may be None (each validated by spf)
-    # generated: def __init__(self, direction: Direction, selection: PathSelection, *, targets: typing.Any = None, residual: typing.Any = None, min_residual: typing.Any = 1, elig: Eligibility = None) -> None:
+    # reason: targets is a node set or None; residual is integers or None; min_residual is an integer; eligibility may be None (each validated by spf)
+    # generated: def __init__(self, direction: Direction, *, targets: typing.Any = None, tie_break: RouteTieBreak = ..., multipath: bool = True, parallel_edges: bool = True, residual: typing.Any = None, min_residual: typing.Any = 1, eligibility: Eligibility = None) -> None:
     def __init__(
         self,
         direction: Direction,
-        selection: PathSelection,
         *,
         targets: typing.SupportsIndex
         | collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer]
         | None = None,
+        tie_break: RouteTieBreak = ...,
+        multipath: bool = True,
+        parallel_edges: bool = True,
         residual: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer]
         | None = None,
         min_residual: typing.SupportsIndex = 1,
-        elig: Eligibility | None = None,
+        eligibility: Eligibility | None = None,
     ) -> None: ...
-    # reason: None when no Eligibility was given
-    # generated: def elig(self) -> Eligibility:
-    @property
-    def elig(self) -> Eligibility | None: ...
     # reason: the min_residual given at construction (an integer)
     # generated: def min_residual(self) -> typing.Any:
     @property
@@ -658,10 +687,10 @@ class SpfResult:
     # generated: def costs(self) -> typing.Any:
     @property
     def costs(self) -> numpy.typing.NDArray[numpy.int64] | None: ...
-    # reason: always a PredDAG
+    # reason: always a PredecessorDAG
     # generated: def dag(self) -> typing.Any:
     @property
-    def dag(self) -> PredDAG: ...
+    def dag(self) -> PredecessorDAG: ...
     # reason: the nearest targets' cost, None when no target is reached and for a full search
     # generated: def target_cost(self) -> typing.Any:
     @property
@@ -680,9 +709,9 @@ def as_float(
     x: typing.SupportsIndex, resolution: typing.SupportsFloat | typing.SupportsIndex
 ) -> float: ...
 
-# reason: pairs of node sets, each pair a length-2 sequence (sources, destinations), an integer array included (so pairs may be an integer array of shape (k, 2), or (k, 2, m) for sets of m nodes); opts is QueryOptions; per_pair_elig has one Eligibility or None per pair; workers is an integer or None; one PlacementResult per pair
-# generated: def batch_capacity(graph: Graph, pairs: typing.Any, opts: typing.Any, per_pair_elig: typing.Any = None, workers: typing.Any = None) -> typing.Any:
-def batch_capacity(
+# reason: pairs of node sets, each pair a length-2 sequence (sources, destinations), an integer array included (so pairs may be an integer array of shape (k, 2), or (k, 2, m) for sets of m nodes); opts is EvaluationOptions; per_pair_eligibility has one Eligibility or None per pair; workers is an integer or None; one PlacementResult per pair
+# generated: def evaluate_pairs(graph: Graph, pairs: typing.Any, options: typing.Any, per_pair_eligibility: typing.Any = None, workers: typing.Any = None) -> typing.Any:
+def evaluate_pairs(
     graph: Graph,
     pairs: collections.abc.Sequence[
         collections.abc.Sequence[
@@ -693,14 +722,14 @@ def batch_capacity(
         | numpy.typing.NDArray[numpy.integer]
     ]
     | numpy.typing.NDArray[numpy.integer],
-    opts: QueryOptions,
-    per_pair_elig: collections.abc.Sequence[Eligibility | None] | None = None,
+    options: EvaluationOptions,
+    per_pair_eligibility: collections.abc.Sequence[Eligibility | None] | None = None,
     workers: typing.SupportsIndex | None = None,
 ) -> list[PlacementResult]: ...
 
-# reason: sources and destinations are node sets; opts is QueryOptions (TypeError otherwise)
-# generated: def capacity(graph: Graph, sources: typing.Any, destinations: typing.Any, opts: typing.Any) -> typing.Any:
-def capacity(
+# reason: sources and destinations are node sets; opts is EvaluationOptions (TypeError otherwise)
+# generated: def evaluate_demand(graph: Graph, sources: typing.Any, destinations: typing.Any, options: typing.Any) -> typing.Any:
+def evaluate_demand(
     graph: Graph,
     sources: typing.SupportsIndex
     | collections.abc.Sequence[typing.SupportsIndex]
@@ -708,29 +737,32 @@ def capacity(
     destinations: typing.SupportsIndex
     | collections.abc.Sequence[typing.SupportsIndex]
     | numpy.typing.NDArray[numpy.integer],
-    opts: QueryOptions,
+    options: EvaluationOptions,
 ) -> PlacementResult: ...
 
 # reason: src and dst are integers; opts is KspOptions; a list of (cost, Path)
-# generated: def ksp(graph: Graph, src: typing.Any, dst: typing.Any, opts: typing.Any) -> list:
+# generated: def ksp(graph: Graph, source: typing.Any, destination: typing.Any, options: typing.Any) -> list:
 def ksp(
-    graph: Graph, src: typing.SupportsIndex, dst: typing.SupportsIndex, opts: KspOptions
+    graph: Graph,
+    source: typing.SupportsIndex,
+    destination: typing.SupportsIndex,
+    options: KspOptions,
 ) -> list[tuple[int, Path]]: ...
 
 # reason: src, dst and max_paths are integers (max_paths may be None); a list of Path
-# generated: def resolve_to_paths(graph: Graph, dag: PredDAG, src: typing.Any, dst: typing.Any, split_parallel_edges: bool = False, max_paths: typing.Any = None) -> list:
+# generated: def resolve_to_paths(graph: Graph, dag: PredecessorDAG, source: typing.Any, destination: typing.Any, split_parallel_edges: bool = False, max_paths: typing.Any = None) -> list:
 def resolve_to_paths(
     graph: Graph,
-    dag: PredDAG,
-    src: typing.SupportsIndex,
-    dst: typing.SupportsIndex,
+    dag: PredecessorDAG,
+    source: typing.SupportsIndex,
+    destination: typing.SupportsIndex,
     split_parallel_edges: bool = False,
     max_paths: typing.SupportsIndex | None = None,
 ) -> list[Path]: ...
 
-# reason: sources and destinations are node sets; opts is QueryOptions; workers is an integer or None
-# generated: def sensitivity(graph: Graph, sources: typing.Any, destinations: typing.Any, opts: typing.Any, workers: typing.Any = None) -> typing.Any:
-def sensitivity(
+# reason: sources and destinations are node sets; opts is EvaluationOptions; workers is an integer or None
+# generated: def evaluate_edge_failures(graph: Graph, sources: typing.Any, destinations: typing.Any, options: typing.Any, workers: typing.Any = None) -> typing.Any:
+def evaluate_edge_failures(
     graph: Graph,
     sources: typing.SupportsIndex
     | collections.abc.Sequence[typing.SupportsIndex]
@@ -738,18 +770,18 @@ def sensitivity(
     destinations: typing.SupportsIndex
     | collections.abc.Sequence[typing.SupportsIndex]
     | numpy.typing.NDArray[numpy.integer],
-    opts: QueryOptions,
+    options: EvaluationOptions,
     workers: typing.SupportsIndex | None = None,
 ) -> SensitivityResult: ...
 
 # reason: roots is a node set; opts is SpfOptions (TypeError otherwise)
-# generated: def spf(graph: Graph, roots: typing.Any, opts: typing.Any) -> typing.Any:
+# generated: def spf(graph: Graph, roots: typing.Any, options: typing.Any) -> typing.Any:
 def spf(
     graph: Graph,
     roots: typing.SupportsIndex
     | collections.abc.Sequence[typing.SupportsIndex]
     | numpy.typing.NDArray[numpy.integer],
-    opts: SpfOptions,
+    options: SpfOptions,
 ) -> SpfResult: ...
 
 # reason: a scalar number gives an int, a sequence or a 1-D array of numbers an int64 array (a 0-d array gives an int, which the array overload cannot say)

@@ -28,9 +28,9 @@ namespace netgraph::core::detail {
 }
 
 struct GraphAccess {
-  // in_col_indices[slot] = edge_src()[in_adj_edge_index()[slot]], filled before the graph is
+  // incoming_edge_sources[slot] = edge_sources()[incoming_edges()[slot]], filled before the graph is
   // published and never written after.
-  [[nodiscard]] static std::span<const NodeId> in_col_indices(const Graph& g) noexcept { return g.in_col_indices_; }
+  [[nodiscard]] static std::span<const NodeId> incoming_edge_sources(const Graph& graph) noexcept { return graph.incoming_edge_sources_; }
 
   // The retained arrays' heap payload: capacity() and size() times the element size, summed.
   struct Retained {
@@ -38,7 +38,7 @@ struct GraphAccess {
     std::size_t size_bytes {0};
     std::size_t arrays {0};
   };
-  [[nodiscard]] static Retained retained(const Graph& g) noexcept {
+  [[nodiscard]] static Retained retained(const Graph& graph) noexcept {
     Retained r;
     auto add = [&r](const auto& v) {
       using T = typename std::remove_cvref_t<decltype(v)>::value_type;
@@ -46,15 +46,15 @@ struct GraphAccess {
       r.size_bytes += v.size() * sizeof(T);
       ++r.arrays;
     };
-    add(g.capacity_);
-    add(g.cost_);
-    add(g.src_);
-    add(g.dst_);
-    add(g.input_index_);
-    add(g.row_offsets_);
-    add(g.in_row_offsets_);
-    add(g.in_adj_edge_index_);
-    add(g.in_col_indices_);
+    add(graph.edge_capacity_units_);
+    add(graph.edge_costs_);
+    add(graph.edge_sources_);
+    add(graph.edge_destinations_);
+    add(graph.input_positions_);
+    add(graph.outgoing_offsets_);
+    add(graph.incoming_offsets_);
+    add(graph.incoming_edges_);
+    add(graph.incoming_edge_sources_);
     return r;
   }
 };

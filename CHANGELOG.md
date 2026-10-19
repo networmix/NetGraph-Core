@@ -8,257 +8,240 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 A rebuilt Core (breaking): one numeric domain (integer units), one flow core, one placement
-engine. It replaces the 0.11 API.
+engine with four routing models, forwarding programs and three evaluators. It replaces the 0.11
+API.
 
 ### Changed
 
-- **Graph**: `Graph(num_nodes, src, dst, capacity_units, cost, resolution)` (replacing 0.11's
-  `StrictMultiDiGraph`) is the one constructor: capacities are `int64` units of an explicit
-  resolution (a power of two in `[2^-32, 2^32]`), costs are positive integers, and the public
-  `EdgeId` is the rank of an edge in `(src, cost, dst, input)` with `input_index()` mapping ids
-  to input positions. Validation reports the first defect in a fixed order (the resolution, the
-  unit values, the shapes, zero or negative costs, the remaining bounds including the cost-sum
-  guard), on the exact integers also beyond int64. Accessors return read-only NumPy views that
-  keep their graph alive, also when empty.
+- **Graph**: `Graph(num_nodes, edge_sources, edge_destinations, edge_capacity_units, edge_costs,
+  resolution)` (replacing 0.11's `StrictMultiDiGraph`) is the one constructor: capacities are
+  `int64` units of an explicit resolution (a power of two in `[2^-32, 2^32]`), costs are positive
+  integers, and the public `EdgeId` is the rank of an edge in `(source, cost, destination, input)`
+  with `input_positions()` mapping ids to input positions. Validation reports the first defect in
+  a fixed order (the resolution, the unit values, the shapes, zero or negative costs, the remaining
+  bounds including the cost-sum guard), on the exact integers also beyond int64. Accessors
+  (`edge_capacity_units()`, `edge_costs()`, `edge_sources()`, `edge_destinations()`,
+  `outgoing_offsets()`, `incoming_offsets()`, `incoming_edges()`) return read-only NumPy views
+  that keep their graph alive, also when empty; `max_edge_cost()` and `edge_cost_gcd()` read the
+  costs.
   Construction numbers the edges by counting sort, in expected time linear in edges plus nodes
   for typical costs; above 65,536 distinct costs, or when the hash table that ranks the costs
   examines too many slots, it sorts all costs instead. Moving a graph no longer allocates.
   `Eligibility` is built from excluded node ids and EdgeIds, with `Eligibility.intersect(a, b)`.
   `to_units` (round half up) and `as_float` are the only conversions between physical values and
   units.
-- **Route structures**: `PredDAG.from_csr(graph, offsets, parents, via)` with the complete
-  validation (shape, ranges, endpoints, duplicates, cycles, ascending via within a node); a DAG
-  is stored over its member nodes and presents the CSR shape on demand. `Path(graph, hops)`
-  with `to_dag()`. `PathSelection` (every field defaulted: `DETERMINISTIC`, `CAPACITY`,
-  `multipath=None`, `multi_edge=True`; `multipath=None` is the model's natural shape, the DAG for
-  the searches and CostOnly, one path for a tunnel model, which rejects `True`), `EdgeTieBreak` (`DETERMINISTIC`, `PREFER_HIGHER_PRIORITY`),
-  `EdgePriority` (`RESIDUAL`, `CAPACITY`, `HEADROOM`).
-- **Ledger**: `FlowLedger(graph, residual=None, *, unreserved=None)` (replacing 0.11's
-  `FlowGraph`) is the integer ledger, in two projections that are never added: the carried
-  traffic (a service baseline `residual`; `allocated()`, `residual()`) and the strict holds of T1
-  tunnels (a reservation baseline `unreserved`; `reserved()`, `unreserved()`), each baseline
-  validated within `[0, capacity_units]` (`unreserved` with the residual's messages under its own
-  name). Records as snapshots in FlowId order (`records()`, `record(flow_id)` with `FlowId =
-  (ledger uid, id)`, ids never reused), `capacity_units()`, `bottleneck(sources, elig)` (the
-  carried traffic only), `reset(residual=None, *, unreserved=None)` and `copy()` (both rejected
-  while a policy is bound; `reset()` clears the records and holds a destroyed policy left behind;
-  a copy keeps the holds). `FlowRecord` carries the flow's endpoints as sets, admission, bundle
-  (`PredDAG`), route cost, `offered` (Lossy only), delivery, per-edge allocations, drops and
-  `reserved_edges` (an up T1 tunnel's holds), and `entry` (the program entry a T1, T2 or Pinned
-  record carries); counters are 128-bit (exact Python ints). Policies place, hold and remove; holds
-  never police traffic.
-- **Kernels**: `FlowPlacement` (`MAX_FLOW`, `WEIGHTED`, `EQUAL_BALANCED`) and `Admission`
-  (`LOSSLESS`, `LOSSY`). `MAX_FLOW` re-solves the flow with the flow core on its route over the free
-  capacity plus its own allocation; `WEIGHTED` splits in proportion to integer weights frozen when
-  the route is prepared, from a `WeightBasis` (`CAPACITY`, `EXPLICIT` with `edge_weights`,
-  `RESIDUAL_SNAPSHOT`; the selection's priority no longer chooses weights, so `WEIGHTED` with
-  `HEADROOM` is allowed for CostOnly) (highest averages, D'Hondt, EdgeId ties); `EQUAL_BALANCED` splits equally by
-  round robin from the lowest EdgeId; Lossy splits each offer per call and records transit drops
-  and what is lost at a source.
-- **Policies**: `FlowPolicy(ledger, sources, destinations, config, elig=None, cache=None)`
-  is the one placement engine. `FlowPolicyConfig(*, routing, placement=None,
-  admission=LOSSLESS, selection=None, origin=None, weights=None, edge_weights=None)` takes
-  keywords only; the routing is `CostOnly()`, `CapacityAware(Tunnels(N), *, max_path_cost=None,
-  min_unreserved_bandwidth=0)` (T1, below), `Global(*, support=None, tunnels=None)` (a support
-  restricts the controller to a DAG's edges; `tunnels` makes it T2, below) or `Pinned(program, *,
-  black_holes=None)`; each routing accepts the
-  combinations of one table (placement required for CostOnly and accepted by no other routing;
-  `Origin.EQUAL` or `OPTIMIZED`; admission; selection; weights) and any other raises
-  `ValueError`, the first defect in a stated order.
-  `place(volume, outputs=None)` forwards CostOnly's pooled program or re-solves the controllers
-  (Global and CostOnly `MAX_FLOW`: the cumulative minimum-cost flow on the residual plus the
-  policy's own allocation, under either origin); T1 and T2 have no `place` (`<T1 or T2> does not
-  support incremental placement`). Every call returns `PlacementResult`: this call's `placed`,
-  `remaining`, `delivery_delta`, `call_drops`, `call_source_loss`, `termination` and the flags
-  `routes_changed`, `weights_changed` and `reservations_changed`; the demand's `requested`,
-  `offered`, `admitted`, `delivered`, `unadmitted`, `source_loss`, `drops`, `by_source`
-  (`SourceFlow` rows), `total_cost` and `cost_distribution`, `program`, `plan` (the tunnel
-  models' `TunnelPlan`: `count`, `design_demand`, `head_design`, `reserved_total`, and T2's
-  `live_heads`, `insufficient_resolution`, `fluid_share`, `common_share`, `planned_per_tunnel`,
-  `planned_total`, `route_cost`, `headroom_penalty`, `forwarding_bound`) and `by_tunnel`
-  (`TunnelFlow` rows); and `edge_flows`, `residual`, `bottleneck`, `reservation_edge_flows` and
-  `min_cut` when requested through `OutputOptions`. A request of 0 is validated like any other.
-  `evaluate(offer, *, design_demand=None)` (computes a whole new offer on the policy's released
-  view and publishes nothing), `replace(offer, *, design_demand=None)` (the same, published: new
-  records, a new epoch; `design_demand` is the tunnel models' design, `None` meaning the offer,
-  rejected by the other routings) and `forward(offer, black_holes=None)` (a whole new offer over
-  the installed program, no route computation, T1's holds and T2's plan kept), `remove()`, `records()`, `record(flow_id)`
-  (the policy's own records), `placed_demand()` and `program` complete the policy.
-- **T1 tunnels**: `CapacityAware(Tunnels(N))` models distributed RSVP-TE head ends, with no
+- **Route structures**: `PredecessorDAG.from_csr(graph, parent_offsets, parents, via_edges)` with
+  the complete validation (shape, ranges, endpoints, duplicates, cycles, ascending via within a
+  node); a DAG is stored over its member nodes and presents the CSR shape on demand.
+  `Path(graph, hops)` with `source()`, `destination()`, `cost()` and `to_dag()`.
+- **Route choice**: one tie rule, `RouteTieBreak` (`FEWER_HOPS`, the default, `HIGHER_CAPACITY`,
+  `HIGHER_AVAILABLE_CAPACITY`, `HIGHER_HEADROOM`): cost first, then for a `HIGHER_*` value the
+  larger bottleneck of its edge score (static capacity, the availability of the search, or their
+  exact ratio), then fewer hops, then the smaller EdgeId sequence. `multipath: bool` (every
+  equal-cost route, or the canonical path; `ShortestPaths` and `spf` only) and `parallel_edges:
+  bool` (every parallel link, or one per pair) sit on the model or the search options. A
+  `HIGHER_*` rule with every route and every parallel edge kept has nothing to choose and is
+  rejected (`spf tie_break requires multipath=False or parallel_edges=False`, `ShortestPaths
+  tie_break requires multipath=False or parallel_edges=False`). The tie rule never supplies
+  weights.
+- **Ledger**: `FlowLedger(graph, service_baseline=None, *, reservation_baseline=None)`
+  (replacing 0.11's `FlowGraph`) is the integer ledger, in two projections that are never added:
+  the carried traffic (`carried()`, `residual()`) and the strict holds of T1 tunnels
+  (`reserved()`, `unreserved()`), each baseline validated within `[0, edge_capacity_units]`.
+  Records as snapshots in FlowId order (`records()`, `record(flow_id)` with `FlowId = (ledger uid,
+  id)`, ids never reused), `edge_capacity_units()`, `saturated_boundary_edges(sources,
+  eligibility=None)` (the carried traffic only), `reset(service_baseline=None, *,
+  reservation_baseline=None)` and `copy()` (both rejected while a policy is bound; `reset()` clears
+  the records and holds a destroyed policy left behind; a copy keeps the holds). `FlowRecord`
+  carries `flow_id`, `policy_id`, the endpoints as sets, `admission`, `entry_id` (the program entry
+  a T1, T2 or Pinned record carries), `route` (a `PredecessorDAG`), `min_route_cost`, `offered`
+  (Lossy only), `delivered`, `edge_flows`, `edge_drops` and `edge_reservations`; counters are
+  128-bit (exact Python ints). Policies place, hold and remove; holds never police traffic.
+- **Route allocations**: `RouteAllocation` (`EQUAL`, `WEIGHTED`, `OPTIMIZED`) and `Admission`
+  (`LOSSLESS`, `LOSSY`). `EQUAL` splits equally by round robin from the lowest EdgeId; `WEIGHTED`
+  splits by highest averages (D'Hondt, EdgeId ties) over integer weights frozen when the program
+  is prepared, from a `WeightBasis` (`CAPACITY`, `EXPLICIT` with `edge_weights`,
+  `RESIDUAL_SNAPSHOT`); `OPTIMIZED` re-solves the flow with the flow core on its route over the
+  free capacity plus its own allocation; Lossy splits each offer per call and records the drops on
+  each edge and what is lost at a source.
+- **Configuration**: `FlowPolicyConfig(*, routing, admission=LOSSLESS)` holds the routing model
+  and the admission; every other option belongs to the model that reads it:
+  `ShortestPaths(*, allocation=EQUAL, source_allocation=None, weight_basis=None,
+  edge_weights=None, tie_break=FEWER_HOPS, multipath=True, parallel_edges=True)` (ECMP by
+  default; `WEIGHTED` is WCMP; `OPTIMIZED` a controller restricted to the shortest routes),
+  `DistributedTE(tunnel_count, *, cost_ceiling=None, min_unreserved_bandwidth=0,
+  tie_break=FEWER_HOPS, parallel_edges=True)` (T1), `CentralizedTE(*, source_allocation,
+  support=None, tunnel_count=None, prefer_headroom=False)` (the source allocation is required;
+  with `tunnel_count`, T2) and `Pinned(program, *, black_holes=None)`; `TunnelCount(per_head, *,
+  up_to=False)`. `SourceAllocation` (`EQUAL`, `OPTIMIZED`) says how a demand's total enters at its
+  sources. Every configuration value is immutable (read-only fields; a model's `edge_weights` is
+  one shared array) and validated in two stages: construction raises `TypeError` for an unknown
+  keyword (every field of another model included), a missing required argument, `None` where none
+  is allowed, a bool field given anything but a `bool` or `numpy.bool_`, and an integer field
+  given a non-integer (`TunnelCount per_head must be an integer (got bool)`); a policy or an
+  evaluator raises `ValueError` for the rest, in a stated order: the endpoints, the ownership of
+  the mask, program, support, cache and black holes, the enumeration values, the model matrix
+  (route and source allocation, admission, the route-choice rules including the pooled
+  single-path rule, `prefer_headroom requires tunnel_count`, the weight combinations, and last a
+  cache on a model that does not read it), then the models' own fields, the tunnel limit and
+  Pinned's endpoints. A policy's `config` is the configuration it was built with,
+  `ShortestPaths`' absent source allocation and weight basis resolved.
+- **Policies**: `FlowPolicy(ledger, sources, destinations, config, eligibility=None, cache=None)`
+  is the one placement engine. `place(offer, outputs=None)` forwards `ShortestPaths`' pooled
+  program or re-solves the controllers (`CentralizedTE` and `ShortestPaths` `OPTIMIZED`: the
+  cumulative minimum-cost flow on the residual plus the policy's own allocation, under either
+  source allocation); T1 and T2 have no `place`. `evaluate(offer, *, design_demand=None)` computes
+  a whole new offer on the policy's released view and publishes nothing, `replace(offer, *,
+  design_demand=None)` publishes it (new records, a new epoch; `design_demand` is the tunnel
+  models' design, `None` meaning the offer), `forward(offer, *, black_holes=None)` sends a whole
+  new offer over the installed program (no route computation; T1's holds and T2's plan kept), and
+  `remove()`, `records()`, `record(flow_id)`, `delivered()`, `config` and `program` complete the
+  policy. Every call returns `PlacementResult`: this call's `call_delivered`,
+  `call_undelivered`, `delivery_delta`, `call_edge_drops`, `call_source_drops`, `termination`
+  (`COMPLETE`, `NO_ROUTE`, `EXHAUSTED`, `NO_ACTIVE_WEIGHT`) and the flags `routes_changed`,
+  `weights_changed` and `reservations_changed`; the demand's `requested`, `offered`, `admitted`,
+  `delivered`, `unadmitted`, `source_drops`, `edge_drops`, `by_source` (`SourceFlow` rows),
+  `by_tunnel` (`TunnelFlow` rows), `total_cost`, `marginal_cost_curve`, `program` and `plan` (the
+  tunnel models' `TunnelPlan`); and `edge_flows`, `residual`, `saturated_boundary_edges`,
+  `edge_reservations` and `min_cut` when requested through `OutputOptions`. An offer of 0 is
+  validated like any other.
+- **Pooled sources**: a demand with several sources is one demand. `ShortestPaths` with `EQUAL`
+  or `WEIGHTED` prepares one program per epoch at its first positive call (each roster source's
+  selected route on the residual at that call's entry; their union), splits the traffic of all
+  sources once at every router they share, and gives each source its part by highest averages
+  (records sum exactly to the totals); Lossless admits the largest equal total that fits with no
+  drop, so a source that cannot pass anything holds the demand at the number of sources before it.
+  `ShortestPaths` `OPTIMIZED` is one controller on the union of the sources' routes, as
+  `CentralizedTE` is on the whole graph. With several sources, `multipath=False` requires
+  `tie_break=FEWER_HOPS` (`ShortestPaths with multiple input sources requires tie_break=FEWER_HOPS
+  when multipath=False`).
+- **T1 tunnels**: `DistributedTE(TunnelCount(N))` models distributed RSVP-TE head ends, with no
   controller. A design volume D is split by round robin over the roster heads and each head's
-  share over its N tunnels; in round order (round `j`, heads ascending: entry index `j * H + i`)
-  each tunnel runs CSPF on the unreserved capacity (the ledger's, this policy's own holds
-  released, minus this setup's earlier tunnels): the allowed links with at least `max(request,
-  min_unreserved_bandwidth)` units (no filter for a request of 0 with a minimum of 0), then the
-  member rule with `multi_edge=False`, then the canonical single path on static costs with
-  priorities read on that view, then the cost ceiling (`Absolute` inclusive; `Stretch` relative to
-  the smallest static shortest cost over all roster heads, one pool baseline). A tunnel is `UP`
-  and holds its request on every link of its path, or down (`TunnelStatus.NO_BANDWIDTH`,
-  `COST_CEILING`) with no path and weight 0. Traffic enters by round robin over the heads and
-  then over each head's up tunnels; a head with no up tunnel loses its share. Its program lists
-  the tunnels with `status`, `requested` and `reserved` (`destination`, `edges` and `route_cost`
-  are `None` for a down tunnel); one record per entry; a `Pinned` replay keeps setup-down tunnels
-  down and books no hold. Evaluators require a finite `QueryOptions.design_demand` for T1
-  (`capacity` evaluates the tunnels set up for it; `sensitivity` sets up again under each
-  deletion). Validation: `tunnel count must be in [1, 10000]`, `T1 requires an exact tunnel
-  count`, `T1 requires multipath=False`, `min_unreserved_bandwidth must be an integer in [0,
-  2^62)`, `tunnel limit exceeded: <H> heads x <N> tunnels > 1073741823`, `T1 requires a finite
-  design demand`, `<model> does not accept design_demand` and `T1 capacity requires
-  design_demand`.
-- **T2 tunnels**: `Global(tunnels=Tunnels(N))` models a central controller: every live head
-  (one reaching a destination over links with free capacity of at least one unit; the others are
-  dead, keep their roster position and lose their share) gets N single-path tunnels with one
-  common whole-unit planned bandwidth. The largest common size U comes from quota flows (K = live
-  heads times N path units, a maximum flow per tested size), with the exact fluid optimum as a
-  `Fraction`; a finite design lowers it to the largest live design share per tunnel; then, among
-  the count vectors at that size, the smallest route-cost sum, then with `prefer_headroom=True` the
-  smallest headroom penalty (each tunnel on a link pays `floor(2^32 (B - V + j u) / B)` for its
-  slot j), then one canonical unit-by-unit augmentation (fewest arcs, smallest arc keys, reverse
-  arcs allowed); tunnels in round order with index `j * H + i` (dead heads leave holes), weight 1,
-  `Tunnel.planned` = u, never held. `Tunnels(L, up_to=True)` chooses the smallest common count up
-  to L whose program carries the live part of the design (else the best, then the smallest),
-  skipping a count only by two proved bounds. No live head, or no whole unit per tunnel
-  (`insufficient_resolution`), installs a program without tunnels that keeps the roster. Origin
-  `EQUAL`, or `OPTIMIZED` with one input source; admission Lossless or Lossy; `design_demand`
-  (`None`: the offer; `float('inf')`: unlimited). Evaluators take an unlimited design when none is
-  given (Lossless) or the offered amount (Lossy: finite; without one, the design if finite).
-  `Global(prefer_headroom=True)` (False by default) switches the headroom objective on; every
-  `Global`, with or without tunnels, rejects a selection (`Global does not accept selection`,
-  first), and a selection's `priority` never enables a controller objective. Validation: `Global does not accept selection`, `Global support and tunnels are
-  mutually exclusive`, `prefer_headroom requires tunnels`, `T2 with several sources requires
-  origin=EQUAL`, `T2 LOSSY capacity requires finite offered`.
+  share over its N tunnels; in round order (round `j`, heads ascending: entry identifier
+  `j * H + i`) each tunnel runs CSPF on the unreserved capacity (the ledger's, this policy's own
+  holds released, minus this setup's earlier tunnels): the allowed links with at least
+  `max(request, min_unreserved_bandwidth)` units, then the member rule with
+  `parallel_edges=False`, then the canonical single path on static costs with the tie scores read
+  on that view, then the cost ceiling (`AbsoluteCost` inclusive; `CostStretch` relative to the
+  smallest static shortest cost over all roster heads, one pool baseline). A tunnel is `UP` and
+  holds its request on every link of its path, or down (`INSUFFICIENT_BANDWIDTH`,
+  `COST_CEILING_EXCEEDED`) with no path and weight 0. Traffic enters by round robin over the heads
+  and then over each head's up tunnels; a head with no up tunnel loses its share.
+- **Exact cost stretch**: `CostStretch(factor)` is one exact reduced fraction: a `Fraction` as it
+  is, an integer as `n/1`, a float (Python or NumPy) as `Fraction(str(f))`, the decimal it prints,
+  so `CostStretch(1.2)` is exactly 6/5; a bool or another type raises `TypeError`, a NaN or an
+  infinity `ValueError`. `factor` returns the `Fraction`; equality, hash and `repr` follow it. A
+  ceiling compares `cost * d <= n * c0` exactly in 128 bits. A factor below 1 is refused where the
+  ceiling is used (`cost_ceiling CostStretch factor must be >= 1 (got <n>/<d>)`); a ceiling of
+  another type is `TypeError("cost_ceiling must be AbsoluteCost, CostStretch or None")` in
+  `DistributedTE` and `ksp` alike.
+- **T2 tunnels**: `CentralizedTE(source_allocation=..., tunnel_count=TunnelCount(N))` models a
+  central controller: every live head (one reaching a destination over links with free capacity
+  of at least one unit; the others are dead, keep their roster position and lose their share) gets
+  N single-path tunnels with one common whole-unit planned bandwidth. The largest common size U
+  comes from quota flows, with the exact fluid optimum as a `Fraction`; a finite design lowers it
+  to the largest live design share per tunnel; then, among the count vectors at that size, the
+  smallest route-cost sum, then with `prefer_headroom=True` the smallest headroom penalty, then one
+  canonical unit-by-unit augmentation; tunnels in round order with identifier `j * H + i` (dead
+  heads leave holes), weight 1, `planned_bandwidth` u, never held. `TunnelCount(L, up_to=True)`
+  chooses the smallest common count up to L whose program carries the live part of the design.
+  No live head, or no whole unit per tunnel (`insufficient_resolution`), installs a program
+  without tunnels that keeps the roster. `OPTIMIZED` source allocation only with one input source.
+  With a `support`, T2 uses only the support's edges allowed by the policy's mask, in every step,
+  and gives what the same configuration gives with those edges composed into the mask.
 - **Forwarding programs**: `ForwardingProgram`, the routes and integer weights of one demand
   (tunnels `Tunnel`, split routes) with its injection (equal sources, or the captured source
-  weights of an optimized controller). CostOnly, Global, T1 and T2 produce one (`policy.program`,
-  `result.program`; the controllers decompose their solved flow into paths, also with one
-  source); `ForwardingProgram.from_routes(graph, sources, destinations, routes, *, placement,
-  weights, edge_weights, residual)` builds one from `Route(head, Path or PredDAG, *, weight=1)`
-  (order and duplicates kept, every split route its own split context). `Pinned(program)`
-  forwards one: replayed under the policy's Eligibility (a tunnel touching an excluded element
-  is `FAILED`, its head splits over the survivors) and, with `black_holes`, stale (the program
-  unchanged, traffic reaching a black hole dropped there, `BLACKHOLED`; `TunnelStatus`). Lossy
-  forwarding divides a shared edge by nested highest averages (heads, then entries), evaluates
-  the program as a whole, and recalculates edges that wait on each other in a cycle in rounds
-  (a period-2 or round-limit `ValueError`; an independent check before publication). Pinned has
-  no endpoint-count limit, rejects `placement`, `selection`, `origin` and `weights`, and keeps
-  one record per entry.
+  weights of an optimized controller). Every computing model produces one (`policy.program`,
+  `result.program`); `ForwardingProgram.from_routes(graph, sources, destinations, routes, *,
+  allocation, weight_basis, edge_weights, residual)` builds one from `RouteDefinition(head, route,
+  *, weight=1)` (order and duplicates kept, every split route its own split context), and
+  `ForwardingProgram.from_dag(graph, sources, destinations, dag, *, allocation, weight_basis,
+  edge_weights, residual)` builds one shared hop-by-hop program on a supplied DAG, its sources
+  pooled exactly as `ShortestPaths` pools them (one builder serves both). `Pinned(program)`
+  forwards one: replayed under the policy's Eligibility (a tunnel touching an excluded element is
+  `FAILED`, its head splits over the survivors) and, with `black_holes`, stale (the program
+  unchanged, traffic reaching a black hole dropped there, `BLACKHOLED`). Lossy forwarding divides a
+  shared edge by nested highest averages (heads, then entries), evaluates the program as a whole,
+  and recalculates edges that wait on each other in a cycle in rounds (a period-2 or round-limit
+  `ValueError`; an independent check before publication).
 - **Failure guarantee**: every public call either completes or raises and changes nothing, also
   when memory runs out, a worker thread fails or the Python result cannot be built. Two limits:
   running out of memory inside pybind11's own object construction (outside the library's checked
-  result construction) may crash the process; a `DagCache` passed to the call: a building cache
-  keeps the complete entries and statistics of the lookups that succeeded before the failure, and
-  a frozen cache keeps its entries and changes none of its statistics, except one miss when the
-  call raised `DagCacheMiss`.
-- **Search**: `spf(graph, roots, SpfOptions(direction, selection, targets=None, residual=None,
-  min_residual=1, elig=None))` returns `SpfResult`. It searches from a root set (every root at
-  distance 0), `Direction.FORWARD` or `REVERSE`. Without targets it finds the distance of every reachable
-  node and returns `costs` (`UNREACHABLE` for the nodes not reached) and the full DAG of tight edges,
-  the edges on some shortest path. With targets it stops at the nearest targets' cost and
-  returns `target_cost` and the DAG of the walks between the roots and a nearest target (for a
-  reverse search, from the target to a root). With
-  `multipath=False` it returns the canonical single path: the walk of lowest cost, then (under
-  `PREFER_HIGHER_PRIORITY` only) of highest bottleneck, the smallest priority value along it,
-  then of fewest hops, then of lexicographically smallest edge-id sequence; with
-  `multi_edge=False` each node pair is first reduced to one parallel member. A
-  residual adds residual gating, which keeps only the edges with at least `min_residual`
-  residual units. Every search runs on one traversal core, with a bucket queue (nodes grouped by
-  distance) when the largest edge cost is at most 65,535 times the costs' greatest common
-  divisor, and a binary heap otherwise.
-- **KSP and paths**: `ksp(graph, src, dst, KspOptions(k, selection, max_path_cost=None,
-  residual=None, elig=None))` returns the K shortest simple paths as `(cost, Path)` pairs. They
-  come in increasing (cost, -bottleneck under `PREFER_HIGHER_PRIORITY`, hops, edge ids) order,
-  truncated at `k` and at an inclusive `Absolute` or `Stretch` ceiling. The selection's
-  `multi_edge` lists parallel members as separate paths (`True`) or keeps one per node pair.
-  `resolve_to_paths(graph, dag, src, dst, split_parallel_edges=False, max_paths=None)` lists a
-  DAG's walks in (cost, hops, edge ids) order.
-- **DagCache**: `DagCache(graph)` is keyed by the root set, the direction and the Eligibility.
-  Its values are the full static shortest-path DAGs (immutable, shared, valid after `clear()`), and
-  `stats()` reports `hits`, `misses`, `entries`, `bytes` and `live_values`.
+  result construction) may crash the process; a `ShortestPathCache` passed to the call: a building
+  cache keeps the complete entries and statistics of the lookups that succeeded before the
+  failure, and a frozen cache keeps its entries and changes none of its statistics, except one
+  miss when the call raised `ShortestPathCacheMiss`.
+- **Search**: `spf(graph, roots, SpfOptions(direction, *, targets=None, tie_break=FEWER_HOPS,
+  multipath=True, parallel_edges=True, residual=None, min_residual=1, eligibility=None))` returns
+  `SpfResult`. It searches from a root set (every root at distance 0), `Direction.FORWARD` or
+  `REVERSE`. Without targets it returns `costs` (`UNREACHABLE` for the nodes not reached) and the
+  full DAG of tight edges; with targets it stops at the nearest targets' cost and returns
+  `target_cost` and the DAG of the walks between the roots and a nearest target. With
+  `multipath=False` it returns the canonical single path. A residual keeps only the edges with at
+  least `min_residual` residual units. Every search runs on one traversal core, with a bucket queue
+  when the largest edge cost is at most 65,535 times the costs' greatest common divisor, and a
+  binary heap otherwise.
+- **KSP and paths**: `ksp(graph, source, destination, KspOptions(k, *, tie_break=FEWER_HOPS,
+  parallel_edges=True, cost_ceiling=None, residual=None, eligibility=None))` returns the K shortest
+  simple paths as `(cost, Path)` pairs in the single-path order, truncated at `k` and at an
+  inclusive ceiling. `resolve_to_paths(graph, dag, source, destination, split_parallel_edges=False,
+  max_paths=None)` lists a DAG's walks in (cost, hops, edge ids) order.
+- **ShortestPathCache**: `ShortestPathCache(graph)` is keyed by the root set, the direction and
+  the Eligibility. Its values are the full static shortest-path DAGs (immutable, shared, valid
+  after `clear()`), and `stats()` reports `hits`, `misses`, `entries`, `bytes` and `live_values`.
   - **Building mode:** one writer; a miss searches and inserts.
   - **Frozen mode:** `freeze()` makes the cache read-only and shareable by every worker of an
-    evaluator. A frozen lookup miss raises `DagCacheMiss`, an exception the evaluators pass on
-    unchanged. `clear()` raises when frozen, and `thaw()` returns to building mode after the
-    caller has joined every reader.
-- **Evaluators**: one options type, `QueryOptions(config, *, elig=None, cache=None, outputs=None,
-  design_demand=None, offered=None)` (`design_demand`: T1's design, required and finite, or T2's;
-  `offered`: the finite offer T1, T2 and Pinned Lossy capacity require, T2 taking a finite design
-  instead);
-  `capacity(graph, sources, destinations, opts)` (with `Global()` the exact maximum flow, its
-  marginal cost curve and its minimum cut), `batch_capacity(graph, pairs, opts, per_pair_elig=None,
-  workers=None)` (pair order; the lowest failing index raises; Pinned is rejected) and `sensitivity(graph, sources,
-  destinations, opts, workers=None)` (every candidate edge and its signed unthresholded loss in
-  units; a failed deletion fails the call). A supplied building cache needs `workers == 1`; a frozen
-  cache is shared by every worker. With `workers=None` the count is 1 when a cache is supplied,
-  otherwise `NGRAPH_CORE_BATCH_THREADS` and `NGRAPH_CORE_SENSITIVITY_THREADS` (an integer in [1,
-  4096]; 1 when unset or invalid).
+    evaluator. A frozen lookup miss raises `ShortestPathCacheMiss`, an exception the evaluators
+    pass on unchanged. `clear()` raises when frozen, and `thaw()` returns to building mode after
+    the caller has joined every reader.
+- **Evaluators**: one options type, `EvaluationOptions(config, *, eligibility=None, cache=None,
+  outputs=None, design_demand=None, offer=None)`, the design and the offer kept as given and
+  checked by the evaluator; `evaluate_demand(graph, sources, destinations, options)` (with
+  `CentralizedTE(source_allocation=OPTIMIZED)` the exact maximum flow, its marginal cost curve and
+  its minimum cut), `evaluate_pairs(graph, pairs, options, per_pair_eligibility=None,
+  workers=None)` (pair order; the lowest failing index raises; Pinned is rejected) and
+  `evaluate_edge_failures(graph, sources, destinations, options, workers=None)` (every candidate
+  edge and its signed `delivery_reduction`; a failed deletion fails the call). A finite `offer` is
+  accepted for every model under each admission it supports, in all three evaluators, and every
+  pair, baseline and failed network answers that same offer; an absent offer is the uncapped
+  Lossless question or the first-hop experiment of `ShortestPaths` Lossy. T1 always names a finite
+  design; T2 takes the offer as its design when none is given. A supplied building cache needs
+  `workers == 1`; a frozen cache is shared by every worker. With `workers=None` the count is 1 when
+  a cache is supplied, otherwise `NGRAPH_CORE_BATCH_THREADS` and
+  `NGRAPH_CORE_SENSITIVITY_THREADS` (an integer in [1, 4096]; 1 when unset or invalid).
 - **Flow core**: one exact integer minimum-cost flow solver (successive shortest paths with
   potentials, then Dinic phases for each cost level; each edge is its own arc, visited in
-  ascending EdgeId) serves Global routing, the `MAX_FLOW` kernel, T2's sizing (every cost taken as
-  0: a maximum flow) and the evaluators (sensitivity
-  repairs the baseline's solution for each removed edge instead of solving again); the private
-  entry `_netgraph_core._place_global_units` returns the value, the marginal cost curve, the edge
-  flows, the minimum cut, the potentials and six operation counters. The solver numbers its
-  network in `int32`, so a solve raises `ValueError`, before it sizes anything, on a network of
-  more than `INT32_MAX - 2` nodes or with more than `2^30 - 1` edges, sources and destinations
-  together; graphs of every accepted size still build and can be searched.
+  ascending EdgeId) serves `CentralizedTE`, the `OPTIMIZED` allocation, T2's sizing (every cost
+  taken as 0: a maximum flow) and the evaluators (`evaluate_edge_failures` of an unrestricted
+  optimized `CentralizedTE` deletes only the edges its baseline loads, and when that baseline is a
+  maximum flow, with no offer or an offer above it, repairs the baseline's solution for each removed
+  edge instead of solving again; at an offer that binds it solves each deletion at the offer); the
+  private entry
+  `_netgraph_core._solve_min_cost_flow` returns the value, the marginal cost curve, the edge flows,
+  the minimum cut, the potentials and six operation counters. The solver numbers its network in
+  `int32`, so a solve raises `ValueError`, before it sizes anything, on a network of more than
+  `INT32_MAX - 2` nodes or with more than `2^30 - 1` edges, sources and destinations together.
+- **Zero-capacity links stay in routing**: `spf`, `ksp`, the cached supports, the `ShortestPaths`
+  routes, every roster and the stretch baselines keep edges below one unit of capacity; only a
+  supplied residual (or an `Eligibility`) filters. Without a residual, `HIGHER_HEADROOM` reads 1 on
+  an edge of positive capacity and 0 on an edge of capacity 0. `EQUAL` keeps a zero-capacity
+  member and its round-robin share; `WEIGHTED` gives it weight 0 and drops a branch left without a
+  member, without routing around it; `OPTIMIZED` keeps it and never bypasses it.
 - **C++ headers** (under `netgraph/core/`): `types.hpp`, `graph.hpp` (`Graph`, `to_units`,
-  `as_float`; it includes `eligibility.hpp`), `eligibility.hpp`, `options.hpp` (the selection
-  axes, `FlowPlacement`, `Admission`, `Origin`, `WeightBasis`), `pred_dag.hpp`, `program.hpp`
-  (`ForwardingProgram`, `Tunnel`, `TunnelStatus`, `Route`, `RouteOptions`), `flow_record.hpp` (`FlowId`,
-  `Counter128`, `FlowRecord`), `flow_ledger.hpp`, `flow_policy.hpp`, `dag_cache.hpp`,
+  `as_float`; it includes `eligibility.hpp`), `eligibility.hpp`, `options.hpp` (`Direction`,
+  `AbsoluteCost`, `CostStretch`, `RouteTieBreak`, `RouteAllocation`, `WeightBasis`, `Admission`,
+  `SourceAllocation`), `route_structures.hpp`, `forwarding_program.hpp` (`ForwardingProgram`,
+  `Tunnel`, `TunnelStatus`, `RouteDefinition`, `RouteOptions`), `flow_record.hpp` (`FlowId`,
+  `Counter128`, `FlowRecord`), `flow_ledger.hpp`, `flow_policy.hpp`, `shortest_path_cache.hpp`,
   `evaluators.hpp` and `search.hpp` (`spf`, `ksp`, `resolve_to_paths` and their options; the
   queue choice `SpfQueue { Auto, Heap }` is a C++-only trailing parameter of `spf`); each
   compiles alone and includes no `detail/` header.
 - **Typing**: the package ships `__init__.pyi`, a type stub generated from the compiled module
-  (pybind11-stubgen with reviewed overrides: exact integer and array types, NumPy result
-  dtypes, optional values, and no constructor for the result classes the module refuses to
-  construct), next to `py.typed`. The stub carries the binding docstrings. `bash dev/stubs/run.sh
-  generate` regenerates it; `make stubs-check` checks it against a fresh generation, the wheel
-  and sdist contents, and typed client programs.
-- **Error messages**: the error for a finite request after `float('inf')` within an epoch reads
-  `finite placement after infinite placement requires a new epoch` (it no longer cites a rule
-  number).
-- **Zero-capacity links stay in routing**: `spf`, `ksp`, the `DagCache` supports, the CostOnly
-  routes, every roster and the `Stretch` baselines no longer skip edges below one unit of
-  capacity; only a supplied residual (or an `Eligibility`) filters. Without a residual, `HEADROOM`
-  reads 1 on an edge of positive capacity and 0 on an edge of capacity 0 (it read the capacity
-  before), and `HEADROOM` of an edge of capacity 0 is 0 everywhere. `EQUAL_BALANCED` keeps a
-  zero-capacity member and its round-robin share (Lossless then admits nothing on that branch;
-  Lossy drops the share there); `WEIGHTED` gives it weight 0 and drops a branch left without a
-  member, without routing around it; `MAX_FLOW` keeps it and never bypasses it. A `Pinned` bundle
-  keeps its zero-capacity edges. `sensitivity` lists every allowed edge (its loss can be
-  negative), and Global's `min_cut` lists every edge leaving the sources' residual closure, an
-  edge with nothing free included (the cut's value is unchanged). Results change on graphs with
-  zero-capacity edges: distances, DAGs, path lists, routes, rosters, records, amounts, drops,
-  sensitivity entries and cuts.
-- **Pooled sources and the origin**: a demand with several sources is one demand. CostOnly with
-  `EQUAL_BALANCED` or `WEIGHTED` prepares one program per epoch at its first positive call (each
-  roster source's route on the residual at that call's entry; their union), splits the traffic of
-  all sources once at every router they share, and gives each source its part by highest averages
-  (records sum exactly to the totals); Lossless admits the largest equal total that fits with no
-  drop, so a source that cannot pass anything holds the demand at the number of sources before it.
-  CostOnly `MAX_FLOW` is now one controller on the union of the sources' routes, as Global is on the
-  whole graph. New `Origin` (`EQUAL`, `OPTIMIZED`): the controllers default to `OPTIMIZED` (the
-  previous behaviour) and with `EQUAL` deliver the largest total whose equal shares all fit (exact
-  binary search, then one solve from zero); split CostOnly is always `EQUAL`. `FlowPolicyConfig`
-  takes keywords only, `placement` and `selection` are optional (Global takes neither), `admission`
-  defaults to `LOSSLESS`, and `PathSelection` has defaults. `PlacementResult` drops `local_outcomes`
-  and gains the accounting of the demand (`requested`, `offered`, `admitted`, `delivered`,
-  `unadmitted`, `source_loss`, epoch `drops`, `by_source`, `total_cost`, `delivery_delta`,
-  `call_drops`, `call_source_loss`); its `drops` is now the epoch total per edge (this call's drops
-  are `call_drops`). New `Termination.NO_ACTIVE_WEIGHT` (the program has an entry with a path but no
-  head can use one: no member or entry of positive weight; a program whose tunnels are all down is
-  not this case); a controller whose maximum is 0 over existing routes ends `EXHAUSTED`, and a Lossy finite
-  request `COMPLETE`. `min_cut` is requested by `OutputOptions(min_cut=True)` (no longer by
-  `bottleneck`) and exists for optimized Global only; `cost_distribution` is `None` for equal Global
-  and before an epoch's first positive call. CostOnly with several sources rejects `multipath=False`
-  with `PREFER_HIGHER_PRIORITY`; only CostOnly accepts a `DagCache`. `FlowRecord.placement` is
-  removed (the kernel is the policy's configuration). `QueryOptions` replaces `CapacityOptions` and
-  `SensitivityOptions` (the same fields, one type for the three evaluators). Validation reports the
-  first defect in the order endpoints, ownership, enum values, the model table, the cache, the
-  routing's own fields, the endpoint counts; new error texts for the table, for every rejected offer
-  (`offer must be an integer in [0, 2^62) or permitted +inf`), for a finite request after an
-  infinite one, for counters at their limit and for the flow solver's size limits.
+  (pybind11-stubgen with reviewed overrides: exact integer and array types, NumPy result dtypes,
+  optional values, and no constructor for the result classes the module refuses to construct),
+  next to `py.typed`. The stub carries the binding docstrings. `bash dev/stubs/run.sh generate`
+  regenerates it; `make stubs-check` checks it against a fresh generation, the wheel and sdist
+  contents, and typed client programs.
 
 ### Removed
 
@@ -270,14 +253,279 @@ engine. It replaces the 0.11 API.
   `kEpsilon`, `constants.hpp`, and the profiling facility (the Python accessors, the C++ scopes
   and `NGRAPH_CORE_PROFILE`).
 - The hand-written typing module `netgraph_core/_docs.py`, replaced by the generated stub.
-- The growth model of `CapacityAware` (replaced by T1's tunnels): its fields `flow_count`,
-  `max_flow_count`, `min_flow_bandwidth`, `reoptimize` and `diminishing`, `DiminishingReturns`,
-  the per-call creation cap `MAX_FLOWS_PER_CALL` (C++ `kMaxFlowsPerCall`), the terminations
-  `LIMIT_FLOWS` and `LIMIT_DIMINISHING` and the per-source reduction of outcomes; CapacityAware
-  takes no placement and no `WEIGHTED` priority weights any more.
+- The growth model of the earlier capacity-aware routing (replaced by T1's tunnels): its fields
+  `flow_count`, `max_flow_count`, `min_flow_bandwidth`, `reoptimize` and `diminishing`,
+  `DiminishingReturns`, the per-call creation cap `MAX_FLOWS_PER_CALL` (C++ `kMaxFlowsPerCall`),
+  the terminations `LIMIT_FLOWS` and `LIMIT_DIMINISHING` and the per-source reduction of outcomes.
 - The sensitivity entry status (`SensitivityStatus`, `SensitivityEntry.status` and `.reason`):
-  Successful entries were always `EVALUATED`;
-  `SensitivityEntry.loss` is now always an int, and a failed deletion fails the call.
+  successful entries were always `EVALUATED`; a failed deletion fails the call.
+- The names of this release's earlier development snapshots. Nothing old survives as an alias, a
+  warning or an error that names a replacement; each name below is simply gone. Public names:
+
+| Name | Replacement |
+| --- | --- |
+| `PredDAG` | `PredecessorDAG` |
+| `EdgeTieBreak` | `RouteTieBreak` |
+| `EdgePriority` | removed: the score is part of the `RouteTieBreak` value (`HIGHER_CAPACITY`, `HIGHER_AVAILABLE_CAPACITY`, `HIGHER_HEADROOM`) |
+| `PathSelection` | removed: `tie_break`, `multipath`, `parallel_edges` on `ShortestPaths`, `DistributedTE`, `SpfOptions`, `KspOptions` |
+| `SpfOptions` | same name; `selection` replaced by `tie_break`, `multipath`, `parallel_edges` |
+| `KspOptions` | same name; `selection` replaced by `tie_break`, `parallel_edges` (no multipath) |
+| `Absolute` | `AbsoluteCost` |
+| `Stretch` | `CostStretch` |
+| `DagCache` | `ShortestPathCache` |
+| `DagCacheMiss` | `ShortestPathCacheMiss` |
+| `DagCacheStats` | `ShortestPathCacheStats` |
+| `FlowPlacement` | `RouteAllocation` |
+| `Origin` | `SourceAllocation` |
+| `Tunnels` | `TunnelCount` |
+| `CostOnly` | `ShortestPaths` |
+| `CapacityAware` | `DistributedTE` |
+| `Global` | `CentralizedTE` |
+| `FlowPolicyConfig` | same name; only `routing` and `admission` remain |
+| `ForwardingProgram` | same name; new `from_dag` |
+| `Route` | `RouteDefinition` |
+| `QueryOptions` | `EvaluationOptions` |
+| `capacity` | `evaluate_demand` |
+| `batch_capacity` | `evaluate_pairs` |
+| `sensitivity` | `evaluate_edge_failures` |
+
+  Members, parameters and enum values:
+
+| Kind | Name | Replacement |
+| --- | --- | --- |
+| parameter | `batch_capacity:opts` | `evaluate_pairs:options` |
+| parameter | `batch_capacity:per_pair_elig` | `evaluate_pairs:per_pair_eligibility` |
+| parameter | `capacity:opts` | `evaluate_demand:options` |
+| parameter | `CapacityAware.__init__:max_path_cost` | `DistributedTE.__init__:cost_ceiling` |
+| parameter | `CapacityAware.__init__:tunnels` | `DistributedTE.__init__:tunnel_count` |
+| property | `CapacityAware.max_path_cost` | `DistributedTE.cost_ceiling` |
+| property | `CapacityAware.tunnels` | `DistributedTE.tunnel_count` |
+| field | `EdgePriority.RESIDUAL` | removed; `RouteTieBreak.HIGHER_AVAILABLE_CAPACITY` |
+| field | `EdgeTieBreak.DETERMINISTIC` | `RouteTieBreak.FEWER_HOPS` |
+| field | `EdgeTieBreak.PREFER_HIGHER_PRIORITY` | removed; `RouteTieBreak.HIGHER_CAPACITY`, `HIGHER_AVAILABLE_CAPACITY` or `HIGHER_HEADROOM`, by the old priority |
+| parameter | `FlowLedger.__init__:residual` | `FlowLedger.__init__:service_baseline` |
+| parameter | `FlowLedger.__init__:unreserved` | `FlowLedger.__init__:reservation_baseline` |
+| method | `FlowLedger.allocated` | `FlowLedger.carried` |
+| method | `FlowLedger.bottleneck` | `FlowLedger.saturated_boundary_edges` |
+| parameter | `FlowLedger.bottleneck:elig` | `FlowLedger.saturated_boundary_edges:eligibility` |
+| method | `FlowLedger.capacity_units` | `FlowLedger.edge_capacity_units` |
+| parameter | `FlowLedger.reset:residual` | `FlowLedger.reset:service_baseline` |
+| parameter | `FlowLedger.reset:unreserved` | `FlowLedger.reset:reservation_baseline` |
+| field | `FlowPlacement.EQUAL_BALANCED` | `RouteAllocation.EQUAL` |
+| field | `FlowPlacement.MAX_FLOW` | `RouteAllocation.OPTIMIZED` |
+| parameter | `FlowPolicy.__init__:elig` | `FlowPolicy.__init__:eligibility` |
+| parameter | `FlowPolicy.place:volume` | `FlowPolicy.place:offer` |
+| method | `FlowPolicy.placed_demand` | `FlowPolicy.delivered` |
+| parameter | `FlowPolicyConfig.__init__:origin` | `ShortestPaths(source_allocation=...)`, `CentralizedTE(source_allocation=...)` (required there); none on `DistributedTE` or `Pinned` |
+| parameter | `FlowPolicyConfig.__init__:placement` | `ShortestPaths(allocation=...)` (`from_routes` and `from_dag` have their own `allocation`) |
+| parameter | `FlowPolicyConfig.__init__:weights` | `ShortestPaths(weight_basis=...)` |
+| property | `FlowPolicyConfig.origin` | `ShortestPaths.source_allocation`, `CentralizedTE.source_allocation` |
+| property | `FlowPolicyConfig.placement` | `ShortestPaths.allocation` |
+| property | `FlowPolicyConfig.weights` | `ShortestPaths.weight_basis` |
+| property | `FlowRecord.bundle` | `FlowRecord.route` |
+| property | `FlowRecord.drops` | `FlowRecord.edge_drops` |
+| property | `FlowRecord.edges` | `FlowRecord.edge_flows` |
+| property | `FlowRecord.entry` | `FlowRecord.entry_id` |
+| property | `FlowRecord.owner` | `FlowRecord.policy_id` |
+| field | `FlowRecord.reserved_edges` | `FlowRecord.edge_reservations` |
+| property | `FlowRecord.route_cost` | `FlowRecord.min_route_cost` |
+| parameter | `ForwardingProgram.from_routes:placement` | `ForwardingProgram.from_routes:allocation` |
+| parameter | `ForwardingProgram.from_routes:weights` | `ForwardingProgram.from_routes:weight_basis` |
+| parameter | `Global.__init__:tunnels` | `CentralizedTE.__init__:tunnel_count` |
+| property | `Global.tunnels` | `CentralizedTE.tunnel_count` |
+| parameter | `Graph.__init__:capacity_units` | `Graph.__init__:edge_capacity_units` |
+| parameter | `Graph.__init__:cost` | `Graph.__init__:edge_costs` |
+| parameter | `Graph.__init__:dst` | `Graph.__init__:edge_destinations` |
+| parameter | `Graph.__init__:src` | `Graph.__init__:edge_sources` |
+| method | `Graph.capacity_units` | `Graph.edge_capacity_units` |
+| method | `Graph.cost` | `Graph.edge_costs` |
+| method | `Graph.cost_gcd` | `Graph.edge_cost_gcd` |
+| method | `Graph.edge_dst` | `Graph.edge_destinations` |
+| method | `Graph.edge_src` | `Graph.edge_sources` |
+| method | `Graph.in_adj_edge_index` | `Graph.incoming_edges` |
+| method | `Graph.in_row_offsets` | `Graph.incoming_offsets` |
+| method | `Graph.input_index` | `Graph.input_positions` |
+| method | `Graph.max_cost` | `Graph.max_edge_cost` |
+| method | `Graph.row_offsets` | `Graph.outgoing_offsets` |
+| parameter | `ksp:dst` | `ksp:destination` |
+| parameter | `ksp:opts` | `ksp:options` |
+| parameter | `ksp:src` | `ksp:source` |
+| parameter | `KspOptions.__init__:elig` | `KspOptions.__init__:eligibility` |
+| parameter | `KspOptions.__init__:max_path_cost` | `KspOptions.__init__:cost_ceiling` |
+| property | `KspOptions.elig` | `KspOptions.eligibility` |
+| property | `KspOptions.max_path_cost` | `KspOptions.cost_ceiling` |
+| parameter | `OutputOptions.__init__:bottleneck` | `OutputOptions.__init__:saturated_boundary_edges` |
+| parameter | `OutputOptions.__init__:reservation_edge_flows` | `OutputOptions.__init__:edge_reservations` |
+| property | `OutputOptions.bottleneck` | `OutputOptions.saturated_boundary_edges` |
+| property | `OutputOptions.reservation_edge_flows` | `OutputOptions.edge_reservations` |
+| method | `Path.dst` | `Path.destination` |
+| method | `Path.src` | `Path.source` |
+| parameter | `PathSelection.__init__:multi_edge` | `parallel_edges=` on `ShortestPaths`, `DistributedTE`, `SpfOptions`, `KspOptions` |
+| property | `PathSelection.multi_edge` | the model's or the search options' `parallel_edges` |
+| property | `PlacementResult.bottleneck` | `PlacementResult.saturated_boundary_edges` |
+| property | `PlacementResult.call_drops` | `PlacementResult.call_edge_drops` |
+| property | `PlacementResult.call_source_loss` | `PlacementResult.call_source_drops` |
+| property | `PlacementResult.cost_distribution` | `PlacementResult.marginal_cost_curve` |
+| property | `PlacementResult.drops` | `PlacementResult.edge_drops` |
+| property | `PlacementResult.placed` | `PlacementResult.call_delivered` |
+| property | `PlacementResult.remaining` | `PlacementResult.call_undelivered` |
+| field | `PlacementResult.reservation_edge_flows` | `PlacementResult.edge_reservations` |
+| property | `PlacementResult.source_loss` | `PlacementResult.source_drops` |
+| parameter | `PredDAG.from_csr:offsets` | `PredecessorDAG.from_csr:parent_offsets` |
+| parameter | `PredDAG.from_csr:via` | `PredecessorDAG.from_csr:via_edges` |
+| parameter | `QueryOptions.__init__:elig` | `EvaluationOptions.__init__:eligibility` |
+| parameter | `QueryOptions.__init__:offered` | `EvaluationOptions.__init__:offer` |
+| property | `QueryOptions.elig` | `EvaluationOptions.eligibility` |
+| property | `QueryOptions.offered` | `EvaluationOptions.offer` |
+| parameter | `resolve_to_paths:dst` | `resolve_to_paths:destination` |
+| parameter | `resolve_to_paths:src` | `resolve_to_paths:source` |
+| parameter | `Route.__init__:bundle` | `RouteDefinition.__init__:route` |
+| property | `Route.bundle` | `RouteDefinition.route` |
+| parameter | `sensitivity:opts` | `evaluate_edge_failures:options` |
+| property | `SensitivityEntry.loss` | `SensitivityEntry.delivery_reduction` |
+| property | `SourceFlow.dropped` | `SourceFlow.total_edge_drops` |
+| property | `SourceFlow.source_loss` | `SourceFlow.source_drops` |
+| parameter | `spf:opts` | `spf:options` |
+| parameter | `SpfOptions.__init__:elig` | `SpfOptions.__init__:eligibility` |
+| property | `SpfOptions.elig` | `SpfOptions.eligibility` |
+| property | `Tunnel.index` | `Tunnel.entry_id` |
+| field | `Tunnel.planned` | `Tunnel.planned_bandwidth` |
+| field | `Tunnel.requested` | `Tunnel.requested_bandwidth` |
+| field | `Tunnel.reserved` | `Tunnel.reserved_bandwidth` |
+| property | `Tunnel.route_cost` | `Tunnel.path_cost` |
+| property | `TunnelFlow.dropped` | `TunnelFlow.total_edge_drops` |
+| property | `TunnelFlow.index` | `TunnelFlow.entry_id` |
+| field | `TunnelPlan.common_share` | `TunnelPlan.max_bandwidth_per_tunnel` |
+| field | `TunnelPlan.count` | `TunnelPlan.tunnels_per_head` |
+| field | `TunnelPlan.fluid_share` | `TunnelPlan.max_fractional_bandwidth_per_tunnel` |
+| field | `TunnelPlan.forwarding_bound` | `TunnelPlan.max_lossless_offer` |
+| field | `TunnelPlan.head_design` | `TunnelPlan.design_by_head` |
+| field | `TunnelPlan.live_heads` | `TunnelPlan.heads_with_capacity` |
+| field | `TunnelPlan.planned_per_tunnel` | `TunnelPlan.planned_bandwidth_per_tunnel` |
+| field | `TunnelPlan.planned_total` | `TunnelPlan.total_planned_bandwidth` |
+| field | `TunnelPlan.reserved_total` | `TunnelPlan.total_reserved_bandwidth` |
+| field | `TunnelPlan.route_cost` | `TunnelPlan.total_tunnel_cost` |
+| parameter | `Tunnels.__init__:count` | `TunnelCount.__init__:per_head` |
+| property | `Tunnels.count` | `TunnelCount.per_head` |
+| field | `TunnelStatus.COST_CEILING` | `TunnelStatus.COST_CEILING_EXCEEDED` |
+| field | `TunnelStatus.NO_BANDWIDTH` | `TunnelStatus.INSUFFICIENT_BANDWIDTH` |
+| parameter | `FlowPolicyConfig.__init__:edge_weights` | `ShortestPaths(edge_weights=...)` |
+| property | `FlowPolicyConfig.edge_weights` | `ShortestPaths.edge_weights` |
+| parameter | `FlowPolicyConfig.__init__:selection` | removed; its fields became `tie_break`, `multipath`, `parallel_edges` of the model |
+| property | `FlowPolicyConfig.selection` | removed |
+| parameter | `PathSelection.__init__:tie_break`, `priority` | one `tie_break: RouteTieBreak` |
+| parameter | `PathSelection.__init__:multipath` (bool or None) | `multipath: bool = True` on `ShortestPaths` and `SpfOptions` only |
+| parameter | `SpfOptions.__init__:selection`, `KspOptions.__init__:selection` | removed; `tie_break`, `parallel_edges` (and `multipath` for `SpfOptions`) as keywords |
+| parameter | `Global.__init__:support` + `tunnels` together (rejected before) | `CentralizedTE(source_allocation=..., support=dag, tunnel_count=...)` allowed |
+| parameter | `Global.__init__` without an origin | `CentralizedTE(source_allocation=...)` required |
+| property | `Stretch.factor` (float) | `CostStretch.factor` (a `fractions.Fraction`) |
+| parameter | `Stretch.__init__:factor` float | a `Fraction`, an integer or a float read as `Fraction(str(f))` |
+| parameter | `QueryOptions.__init__:offered` (some models only) | `EvaluationOptions(offer=...)`, finite, every model |
+
+  C++ declarations and headers (C++ enum values are the Python words in PascalCase):
+
+| Kind | C++ name | Replacement |
+| --- | --- | --- |
+| file | `include/netgraph/core/dag_cache.hpp` | `include/netgraph/core/shortest_path_cache.hpp` |
+| file | `include/netgraph/core/pred_dag.hpp` | `include/netgraph/core/route_structures.hpp` |
+| file | `include/netgraph/core/program.hpp` | `include/netgraph/core/forwarding_program.hpp` |
+| type | `Absolute` | `AbsoluteCost` |
+| function | `batch_capacity` | `evaluate_pairs` |
+| parameter | `batch_capacity:g` | `evaluate_pairs:graph` |
+| function | `capacity` | `evaluate_demand` |
+| parameter | `capacity:g` | `evaluate_demand:graph` |
+| type | `CapacityAware` | `DistributedTE` |
+| field | `CapacityAware::max_path_cost` | `DistributedTE::cost_ceiling` |
+| type | `CostOnly` | `ShortestPaths` |
+| type | `DagCache` | `ShortestPathCache` |
+| constructor_or_destructor | `DagCache::DagCache` | `ShortestPathCache::ShortestPathCache` |
+| parameter | `DagCache::lookup:elig` | `ShortestPathCache::lookup:eligibility` |
+| parameter | `DagCache::lookup:g` | `ShortestPathCache::lookup:graph` |
+| constructor_or_destructor | `DagCache::~DagCache` | `ShortestPathCache::~ShortestPathCache` |
+| type | `DagCacheMiss` | `ShortestPathCacheMiss` |
+| constructor_or_destructor | `DagCacheMiss::DagCacheMiss` | `ShortestPathCacheMiss::ShortestPathCacheMiss` |
+| enum-value | `EdgePriority::Residual` | removed with `EdgePriority` |
+| type | `EdgeTieBreak` | `RouteTieBreak` |
+| enum-value | `EdgeTieBreak::Deterministic` | `RouteTieBreak::FewerHops` |
+| enum-value | `EdgeTieBreak::PreferHigherPriority` | removed; `RouteTieBreak::HigherCapacity`, `HigherAvailableCapacity` or `HigherHeadroom` |
+| function | `Eligibility::edge_ok` | `Eligibility::allows_edge` |
+| function | `Eligibility::node_ok` | `Eligibility::allows_node` |
+| function | `FlowLedger::allocated` | `FlowLedger::carried` |
+| function | `FlowLedger::bottleneck` | `FlowLedger::saturated_boundary_edges` |
+| parameter | `FlowLedger::bottleneck:elig` | `FlowLedger::saturated_boundary_edges:eligibility` |
+| function | `FlowLedger::capacity_units` | `FlowLedger::edge_capacity_units` |
+| parameter | `FlowLedger::FlowLedger:residual` | `FlowLedger::FlowLedger:service_baseline` |
+| parameter | `FlowLedger::reset:residual` | `FlowLedger::reset:service_baseline` |
+| type | `FlowPlacement` | `RouteAllocation` |
+| enum-value | `FlowPlacement::EqualBalanced` | `RouteAllocation::Equal` |
+| enum-value | `FlowPlacement::MaxFlow` | `RouteAllocation::Optimized` |
+| parameter | `FlowPolicy::FlowPolicy:elig` | `FlowPolicy::FlowPolicy:eligibility` |
+| parameter | `FlowPolicy::place:volume` | `FlowPolicy::place:offer` |
+| function | `FlowPolicy::placed_demand` | `FlowPolicy::delivered` |
+| field | `FlowPolicyConfig::origin` | `ShortestPaths::source_allocation`, `CentralizedTE::source_allocation` |
+| field | `FlowPolicyConfig::placement` | `ShortestPaths::allocation` (the option lives in the model) |
+| field | `FlowPolicyConfig::weights` | `ShortestPaths::weight_basis` |
+| field | `FlowRecord::bundle` | `FlowRecord::route` |
+| field | `FlowRecord::drops` | `FlowRecord::edge_drops` |
+| field | `FlowRecord::edges` | `FlowRecord::edge_flows` |
+| field | `FlowRecord::entry` | `FlowRecord::entry_id` |
+| field | `FlowRecord::owner` | `FlowRecord::policy_id` |
+| field | `FlowRecord::route_cost` | `FlowRecord::min_route_cost` |
+| parameter | `ForwardingProgram::from_routes:g` | `ForwardingProgram::from_routes:graph` |
+| type | `Global` | `CentralizedTE` |
+| function | `Graph::capacity_units` | `Graph::edge_capacity_units` |
+| function | `Graph::cost` | `Graph::edge_costs` |
+| function | `Graph::cost_gcd` | `Graph::edge_cost_gcd` |
+| function | `Graph::edge_dst` | `Graph::edge_destinations` |
+| function | `Graph::edge_src` | `Graph::edge_sources` |
+| parameter | `Graph::Graph:capacity_units` | `Graph::Graph:edge_capacity_units` |
+| parameter | `Graph::Graph:cost` | `Graph::Graph:edge_costs` |
+| parameter | `Graph::Graph:dst` | `Graph::Graph:edge_destinations` |
+| parameter | `Graph::Graph:src` | `Graph::Graph:edge_sources` |
+| function | `Graph::in_adj_edge_index` | `Graph::incoming_edges` |
+| function | `Graph::in_row_offsets` | `Graph::incoming_offsets` |
+| function | `Graph::input_index` | `Graph::input_positions` |
+| function | `Graph::max_cost` | `Graph::max_edge_cost` |
+| function | `Graph::row_offsets` | `Graph::outgoing_offsets` |
+| parameter | `ksp:g` | `ksp:graph` |
+| field | `KspOptions::elig` | `KspOptions::eligibility` |
+| field | `KspOptions::max_path_cost` | `KspOptions::cost_ceiling` |
+| type | `Origin` | `SourceAllocation` |
+| field | `OutputOptions::bottleneck` | `OutputOptions::saturated_boundary_edges` |
+| function | `Path::dst` | `Path::destination` |
+| parameter | `Path::Path:g` | `Path::Path:graph` |
+| function | `Path::src` | `Path::source` |
+| field | `PathSelection::multi_edge` | `parallel_edges` of the model or the search options (`PathSelection` removed) |
+| field | `PlacementResult::bottleneck` | `PlacementResult::saturated_boundary_edges` |
+| field | `PlacementResult::call_drops` | `PlacementResult::call_edge_drops` |
+| field | `PlacementResult::call_source_loss` | `PlacementResult::call_source_drops` |
+| field | `PlacementResult::cost_distribution` | `PlacementResult::marginal_cost_curve` |
+| field | `PlacementResult::drops` | `PlacementResult::edge_drops` |
+| field | `PlacementResult::placed` | `PlacementResult::call_delivered` |
+| field | `PlacementResult::remaining` | `PlacementResult::call_undelivered` |
+| field | `PlacementResult::source_loss` | `PlacementResult::source_drops` |
+| type | `PredDAG` | `PredecessorDAG` |
+| parameter | `PredDAG::from_csr:g` | `PredecessorDAG::from_csr:graph` |
+| type | `QueryOptions` | `EvaluationOptions` |
+| field | `QueryOptions::elig` | `EvaluationOptions::eligibility` |
+| field | `QueryOptions::offered` | `EvaluationOptions::offer` |
+| parameter | `resolve_to_paths:g` | `resolve_to_paths:graph` |
+| type | `Route` | `RouteDefinition` |
+| field | `Route::bundle` | `RouteDefinition::route` |
+| field | `RouteOptions::placement` | `RouteOptions::allocation` |
+| field | `RouteOptions::weights` | `RouteOptions::weight_basis` |
+| function | `sensitivity` | `evaluate_edge_failures` |
+| parameter | `sensitivity:g` | `evaluate_edge_failures:graph` |
+| field | `SensitivityEntry::loss` | `SensitivityEntry::delivery_reduction` |
+| field | `SourceFlow::dropped` | `SourceFlow::total_edge_drops` |
+| field | `SourceFlow::source_loss` | `SourceFlow::source_drops` |
+| parameter | `spf:g` | `spf:graph` |
+| field | `SpfOptions::elig` | `SpfOptions::eligibility` |
+| type | `Stretch` | `CostStretch` |
+| field | `Tunnel::index` | `Tunnel::entry_id` |
+| field | `Tunnel::route_cost` | `Tunnel::path_cost` |
+| field | `TunnelFlow::dropped` | `TunnelFlow::total_edge_drops` |
+| field | `TunnelFlow::index` | `TunnelFlow::entry_id` |
 
 ### Fixed
 

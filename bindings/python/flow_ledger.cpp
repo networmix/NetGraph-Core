@@ -23,43 +23,43 @@ void register_flow_ledger(py::module_& m) {
   [[maybe_unused]] auto ledger_class = py::class_<FlowLedger, std::shared_ptr<FlowLedger>>(
       m, "FlowLedger",
       "The integer ledger of one graph, in two projections that are never added: carried traffic (the\n"
-      "service baseline; allocated() is the sum of every record's edges and residual() = baseline -\n"
-      "allocated()) and the strict holds of T1 tunnels (the reservation baseline; reserved() is the sum of\n"
-      "every record's reserved_edges and unreserved() = reservation baseline - reserved()), all int64[E]\n"
+      "service baseline; carried() is the sum of every record's edge_flows and residual() = baseline -\n"
+      "carried()) and the strict holds of T1 tunnels (the reservation baseline; reserved() is the sum of\n"
+      "every record's edge_reservations and unreserved() = reservation baseline - reserved()), all int64[E]\n"
       "snapshots. Traffic may use bandwidth that is held: holds never police. The baselines are replaced\n"
       "only by reset(); the records are the flows placed on it by policies (the ledger has no public\n"
       "placement, removal or reservation). reset() and copy() are rejected while a policy is bound (a\n"
       "FlowPolicy built on this ledger still exists).")
-      .def(py::init([](const std::shared_ptr<Graph>& graph, const py::object& residual, const py::object& unreserved) {
+      .def(py::init([](const std::shared_ptr<Graph>& graph, const py::object& service_baseline, const py::object& reservation_baseline) {
              if (!graph) throw py::value_error("graph must be a Graph");
-             const auto caps = graph->capacity_units();
-             const auto r = residual.is_none() ? std::vector<Amount>(caps.begin(), caps.end())
-                                               : edge_units(residual, *graph, "residual");
-             const auto u = unreserved.is_none() ? std::vector<Amount>(caps.begin(), caps.end())
-                                                 : edge_units(unreserved, *graph, "unreserved");
+             const auto caps = graph->edge_capacity_units();
+             const auto r = service_baseline.is_none() ? std::vector<Amount>(caps.begin(), caps.end())
+                                               : edge_units(service_baseline, *graph, "service_baseline");
+             const auto u = reservation_baseline.is_none() ? std::vector<Amount>(caps.begin(), caps.end())
+                                                 : edge_units(reservation_baseline, *graph, "reservation_baseline");
              return std::make_shared<FlowLedger>(graph, r, u);
            }),
-           py::arg("graph"), py::arg("residual") = py::none(), py::kw_only(), py::arg("unreserved") = py::none(),
-           "residual and unreserved: the service and reservation baselines as integer units, one entry per\n"
-           "edge in [0, capacity_units[e]] (a physical baseline goes through to_units first; residual checked\n"
-           "first); None: the capacities. ValueError otherwise.")
+           py::arg("graph"), py::arg("service_baseline") = py::none(), py::kw_only(), py::arg("reservation_baseline") = py::none(),
+           "service_baseline and reservation_baseline: the baselines as integer units, one entry per edge in\n"
+           "[0, the edge's capacity] (a physical baseline goes through to_units first; service_baseline\n"
+           "checked first); None: the capacities. ValueError otherwise.")
       .def("uid", &FlowLedger::uid, "process-unique ledger uid (the first half of every FlowId)")
       .def(
           "graph", [](const FlowLedger& fg) { return typed_shared(fg.graph()); },
           "the ledger's graph")
       .def(
-          "capacity_units",
-          [](const py::object& self) { return readonly_view(self.cast<const FlowLedger&>().capacity_units(), self); },
+          "edge_capacity_units",
+          [](const py::object& self) { return readonly_view(self.cast<const FlowLedger&>().edge_capacity_units(), self); },
           "int64[E] the graph's capacities in units (read-only view)")
       .def(
           "residual", [](const FlowLedger& fg) { return int64_array(fg.residual()); },
-          "int64[E] snapshot: baseline - allocated")
+          "int64[E] snapshot: service_baseline - carried()")
       .def(
-          "allocated", [](const FlowLedger& fg) { return int64_array(fg.allocated()); },
-          "int64[E] snapshot: the sum of every record's edges")
+          "carried", [](const FlowLedger& fg) { return int64_array(fg.carried()); },
+          "int64[E] snapshot: the sum of every record's edge_flows")
       .def(
           "reserved", [](const FlowLedger& fg) { return int64_array(fg.reserved()); },
-          "int64[E] snapshot: strict holds per edge (T1), the sum of every record's reserved_edges")
+          "int64[E] snapshot: strict holds per edge (T1), the sum of every record's edge_reservations")
       .def(
           "unreserved", [](const FlowLedger& fg) { return int64_array(fg.unreserved()); },
           "int64[E] snapshot: reservation baseline minus strict holds, per edge")
@@ -73,26 +73,26 @@ void register_flow_ledger(py::module_& m) {
           py::arg("flow_id"),
           "one record by FlowId (ValueError for a FlowId of another ledger, a retired or an unknown id)")
       .def(
-          "bottleneck",
+          "saturated_boundary_edges",
           [](const FlowLedger& fg, const py::object& sources, const std::shared_ptr<Eligibility>& elig) {
             const auto s = node_ids(sources, fg.graph()->num_nodes(), "sources");
-            return fg.bottleneck(s, elig.get());
+            return fg.saturated_boundary_edges(s, elig.get());
           },
-          py::arg("sources"), py::arg("elig") = nullptr,
+          py::arg("sources"), py::arg("eligibility") = nullptr,
           "Saturation report: the eligible edges with capacity >= 1 unit that leave the set of nodes the\n"
           "allowed sources can reach (following eligible edges forward with residual >= 1 unit), in\n"
           "ascending EdgeId. It ignores the destinations, so it is not a source-destination cut.")
       .def(
           "reset",
-          [](FlowLedger& fg, const py::object& residual, const py::object& unreserved) {
-            const auto caps = fg.capacity_units();
-            const auto r = residual.is_none() ? std::vector<Amount>(caps.begin(), caps.end())
-                                              : edge_units(residual, *fg.graph(), "residual");
-            const auto u = unreserved.is_none() ? std::vector<Amount>(caps.begin(), caps.end())
-                                                : edge_units(unreserved, *fg.graph(), "unreserved");
+          [](FlowLedger& fg, const py::object& service_baseline, const py::object& reservation_baseline) {
+            const auto caps = fg.edge_capacity_units();
+            const auto r = service_baseline.is_none() ? std::vector<Amount>(caps.begin(), caps.end())
+                                              : edge_units(service_baseline, *fg.graph(), "service_baseline");
+            const auto u = reservation_baseline.is_none() ? std::vector<Amount>(caps.begin(), caps.end())
+                                                : edge_units(reservation_baseline, *fg.graph(), "reservation_baseline");
             fg.reset(r, u);
           },
-          py::arg("residual") = py::none(), py::kw_only(), py::arg("unreserved") = py::none(),
+          py::arg("service_baseline") = py::none(), py::kw_only(), py::arg("reservation_baseline") = py::none(),
           "New baselines (None: the capacities); orphaned records with their allocations and holds are\n"
           "cleared and their ids retired (ids are never reused). ValueError while a policy is bound.")
       .def(
@@ -108,9 +108,9 @@ void register_flow_ledger(py::module_& m) {
           "_state",
           [](const FlowLedger& fg) {
             py::dict out;
-            out["next_flow_id"] = detail::LedgerAccess::next_flow_id(fg);
-            out["bound"] = detail::LedgerAccess::bound_owners(fg);
-            out["orphans"] = detail::LedgerAccess::orphan_owners(fg);
+            out["next_flow_id"] = detail::LedgerAccess::next_record_counter(fg);
+            out["bound"] = detail::LedgerAccess::bound_policy_ids(fg);
+            out["orphans"] = detail::LedgerAccess::orphan_policy_ids(fg);
             return out;
           },
           "private: {next_flow_id, bound, orphans} (owner ids)");

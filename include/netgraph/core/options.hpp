@@ -1,9 +1,11 @@
-/* The shared small option types: the selection axes of the searches and the policies and the
-   placement kinds of the kernels. Component configurations and result statuses stay with their
+/* The shared small option types: the tie rule of the searches and the policies, the route
+   allocations of the kernels, their weight bases and the admissions. Component configurations and result statuses stay with their
    component. */
 #pragma once
 
-#include <optional>
+#include <cstdint>
+#include <numeric>
+#include <stdexcept>
 #include <variant>
 
 #include "netgraph/core/types.hpp"
@@ -14,83 +16,80 @@ namespace netgraph::core {
 // The returned DAG (a directed graph with no cycles) keeps the edges' original orientation.
 enum class Direction { Forward, Reverse };
 
-// Inclusive cost ceiling: Absolute gives a budget >= 0; Stretch multiplies the static shortest
-// cost under the given Eligibility by a factor in [1, inf). Use the double's exact stored
-// value, a dyadic rational (an integer divided by a power of two), with no comparison rounding.
-struct Absolute {
+// Inclusive cost ceiling: AbsoluteCost gives a budget >= 0; CostStretch multiplies the static
+// shortest cost under the given Eligibility by an exact factor n/d >= 1: a path of cost c
+// qualifies when c * d <= n * base, compared exactly. Both are checked where they are used.
+struct AbsoluteCost {
   Cost cost {0};
-  friend bool operator==(const Absolute&, const Absolute&) = default;
-};
-struct Stretch {
-  double factor {1.0};
-  friend bool operator==(const Stretch&, const Stretch&) = default;
-};
-using CostCeiling = std::variant<Absolute, Stretch>;
-
-// Break equal-cost ties first between parallel edges, then between walks.
-// For one (u, v) pair, Deterministic picks the lowest EdgeId; PreferHigherPriority picks the
-// higher priority, then lowest EdgeId. For a single path (multipath = false),
-// PreferHigherPriority first maximises the smallest edge priority along the walk (bottleneck);
-// Deterministic ignores capacities. Both then prefer fewer hops, then the lexicographically
-// smallest EdgeId sequence: compare at the first differing edge. Choose parallel members
-// first (multi_edge = false), then choose the walk among the remaining members.
-enum class EdgeTieBreak { Deterministic, PreferHigherPriority };
-
-// Per-edge priority for PreferHigherPriority (single-path and parallel-edge choices):
-// Residual is unused capacity in units on the search's view; Capacity is static capacity in
-// units; Headroom is the exact ratio residual / capacity, 0 on an edge of capacity 0. Without a
-// supplied residual, a search reads the static capacity as the unused capacity: Residual and
-// Capacity read the capacity, Headroom 1 (0 on an edge of capacity 0). T1's CSPF reads the
-// unreserved view U: Residual U, Headroom U / C, Capacity C. It is a search and T1 comparison
-// only and never enables a controller objective (T2's is Global::prefer_headroom).
-enum class EdgePriority { Residual, Capacity, Headroom };
-
-// `multipath`: absent (the default) is the model's natural shape, all equal-cost walks as a
-// shortest-path DAG for the searches and CostOnly, one path for a tunnel model; true is the DAG,
-// false the canonical single path (a tunnel model rejects true). `multi_edge` keeps all eligible
-// parallel edges between each (u, v) pair; false keeps one by (minimum cost, higher priority under
-// PreferHigherPriority, lowest EdgeId). Every field has a default: Deterministic, Capacity,
-// multipath absent, multi_edge true. Invalid enum values throw std::invalid_argument naming the
-// field. Fields remain assignable, so every entry point that uses a selection validates it again.
-struct PathSelection {
-  PathSelection(EdgeTieBreak tie_break_ = EdgeTieBreak::Deterministic, EdgePriority priority_ = EdgePriority::Capacity,
-                std::optional<bool> multipath_ = std::nullopt, bool multi_edge_ = true);
-  EdgeTieBreak tie_break;
-  EdgePriority priority;
-  std::optional<bool> multipath;
-  bool multi_edge;
-  // multipath = false: the canonical single path (absent and true are the DAG for a search).
-  [[nodiscard]] bool single_path() const noexcept { return multipath == false; }
-  friend bool operator==(const PathSelection&, const PathSelection&) = default;
+  friend bool operator==(const AbsoluteCost&, const AbsoluteCost&) = default;
 };
 
-// A placement kernel assigns one flow's amounts to its usable route edges (its split graph).
-// MaxFlow replaces its allocation with a minimum-cost flow on the split graph over
-// V = W + own, where W is unused capacity and own is this flow's current allocation. Weighted
-// splits at each node using weights fixed at creation: give each next unit to the edge with
-// largest w / (a + 1), where w is its weight and a its share so far; ties use lower EdgeId.
-// EqualBalanced splits equally at each node, giving leftover units to edges in ascending
-// EdgeId order.
-enum class FlowPlacement { MaxFlow, Weighted, EqualBalanced };
+// The factor as one reduced fraction numerator / denominator with a denominator in [1, 2^63);
+// any numerator is a valid value (below 1 is refused where the ceiling is used).
+class CostStretch {
+ public:
+  // Reduces numerator / denominator; a denominator <= 0 throws std::invalid_argument.
+  explicit CostStretch(std::int64_t numerator, std::int64_t denominator = 1) : numerator_(numerator), denominator_(denominator) {
+    if (denominator < 1) throw std::invalid_argument("CostStretch fraction denominator must be in [1, 2^63)");
+    // The magnitude as unsigned: -2^63 has no int64 negation.
+    const std::uint64_t magnitude =
+        numerator < 0 ? std::uint64_t {0} - static_cast<std::uint64_t>(numerator) : static_cast<std::uint64_t>(numerator);
+    const std::uint64_t g = std::gcd(magnitude, static_cast<std::uint64_t>(denominator));
+    if (g > 1) {
+      // g divides the denominator (< 2^63), so g < 2^63 and the quotients fit int64.
+      numerator_ = numerator < 0 ? -static_cast<std::int64_t>(magnitude / g) : static_cast<std::int64_t>(magnitude / g);
+      denominator_ = static_cast<std::int64_t>(static_cast<std::uint64_t>(denominator) / g);
+    }
+  }
+  [[nodiscard]] std::int64_t numerator() const noexcept { return numerator_; }
+  [[nodiscard]] std::int64_t denominator() const noexcept { return denominator_; }
+  friend bool operator==(const CostStretch&, const CostStretch&) = default;
 
-// Where the Weighted kernel's member weights come from (CostOnly Weighted and supplied split
+ private:
+  std::int64_t numerator_;
+  std::int64_t denominator_;
+};
+using CostCeiling = std::variant<AbsoluteCost, CostStretch>;
+
+// How a route choice breaks a cost tie; cost always comes first. FewerHops: then fewer hops, then the
+// lexicographically smallest EdgeId sequence (compared at the first differing edge). The other three
+// first prefer the larger bottleneck (the smallest value along the path) of an edge score, then
+// fewer hops, then the EdgeId sequence: HigherCapacity scores static capacity, HigherAvailableCapacity
+// the availability of the search's view, HigherHeadroom availability / static capacity as an exact
+// ratio (0 on an edge of static capacity 0). Availability is the unreserved capacity for
+// DistributedTE's CSPF, the service view for ShortestPaths, the supplied residual for spf and ksp,
+// and the static capacity where no view is supplied (HigherHeadroom then reads 1 on a positive edge).
+// The same order chooses among parallel edges of one (u, v) pair when parallel_edges is false (the
+// cheapest member, then the higher score, then the lowest EdgeId). The tie rule never supplies
+// weights and never enables a controller objective (CentralizedTE::prefer_headroom is T2's).
+enum class RouteTieBreak { FewerHops, HigherCapacity, HigherAvailableCapacity, HigherHeadroom };
+
+// A route allocation (a kernel) assigns one flow's amounts to its usable route edges (its split graph).
+// Equal splits equally at each node, giving leftover units to edges in ascending EdgeId order.
+// Weighted splits at each node using weights fixed at creation: give each next unit to the edge
+// with largest w / (a + 1), where w is its weight and a its share so far; ties use lower EdgeId.
+// Optimized replaces its allocation with a minimum-cost flow on the split graph over
+// V = W + own, where W is unused capacity and own is this flow's current allocation.
+enum class RouteAllocation { Equal, Weighted, Optimized };
+
+// Where the Weighted kernel's member weights come from (ShortestPaths Weighted and supplied split
 // routes): Capacity, each member's static capacity; Explicit, one integer per edge given with the
 // configuration (edge_weights; a positive weight on an edge of capacity 0 becomes 0);
 // ResidualSnapshot, each member's free capacity read once when the routes are prepared, against
 // one common view, and frozen for the epoch. A member of weight 0 is pruned, together with the
 // branches it leaves without a destination, inside the route only (no longer bypass is created).
-// The selection's priority never chooses weights.
+// The tie rule's edge score never chooses weights.
 enum class WeightBasis { Capacity, Explicit, ResidualSnapshot };
 
 // Lossless admits only the largest total that the routes carry with no loss at all; Lossy
-// forwards the whole finite offer hop by hop and records where it is lost (EqualBalanced and
-// Weighted only).
+// forwards the whole finite offer hop by hop and records where it is lost (every model except the
+// optimizing ones: ShortestPaths Optimized and CentralizedTE without a tunnel count).
 enum class Admission { Lossless, Lossy };
 
 // How a demand's traffic enters at its sources, separately from how it is routed. Equal: a total
 // x enters as round robin over the roster (ascending NodeId, the first x mod H sources one unit
 // more); a source whose share cannot go anywhere keeps it and loses it, it never moves to another
 // source. Optimized: the controller chooses the integer injections (one virtual source).
-enum class Origin { Equal, Optimized };
+enum class SourceAllocation { Equal, Optimized };
 
 } // namespace netgraph::core

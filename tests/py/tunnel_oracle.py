@@ -1,6 +1,8 @@
-"""An independent reference for T1 (CapacityAware(Tunnels(N)), contract 6.2 to 6.5, 8.3,
-8.4) and T2 (Global(tunnels=Tunnels(N)), 7.2 to 7.8), the property tests of test_tunnels_t1.py and
-test_tunnels_t2.py. It restates the contract in plain Python and calls nothing of the library: for
+"""An independent reference for T1 (DistributedTE(TunnelCount(N))) and T2
+(CentralizedTE(tunnel_count=TunnelCount(N))) as docs/semantics.md states them ("T1: tunnels set up
+by their heads", "T2: the controller's equal tunnels", "Forwarding programs"), for the property
+tests of test_distributed_te.py and test_centralized_te_tunnels.py. It restates those rules in plain
+Python and calls nothing of the library: for
 T1 the requests in round order, every attempt a brute force over the simple paths (a path stops at
 the first destination) with the bandwidth filter, the collapse of parallel members and the
 single-path order, the cost ceilings with the pool baseline c0; for T2 the live heads by simple
@@ -27,15 +29,15 @@ import program_oracle
 
 UP, NB, CC, FAILED, BLACKHOLED = (
     "UP",
-    "NO_BANDWIDTH",
-    "COST_CEILING",
+    "INSUFFICIENT_BANDWIDTH",
+    "COST_CEILING_EXCEEDED",
     "FAILED",
     "BLACKHOLED",
 )
 
 
 def rr(x, k, i):
-    """RR(x, k, i) = x // k + [i < x % k] (2.3)."""
+    """RR(x, k, i) = x // k + [i < x % k]."""
     return x // k + (1 if i < x % k else 0)
 
 
@@ -70,22 +72,26 @@ def cost_of(edges, path):
     return sum(edges[e][3] for e in path)
 
 
-def priority(edges, sel_priority, U, e, service):
-    """The priority view of 6.4: RESIDUAL reads U, HEADROOM U / C (0 when C = 0), CAPACITY C;
-    `service` (the service residual) is not read."""
+def priority(edges, tie_break, U, e, service):
+    """The tie rule's edge score on T1's view: HIGHER_AVAILABLE_CAPACITY reads U,
+    HIGHER_HEADROOM U / C (0 when C = 0), HIGHER_CAPACITY C; `service` (the service residual)
+    is not read."""
     cap = edges[e][2]
-    if sel_priority == "RESIDUAL":
+    if tie_break == "HIGHER_AVAILABLE_CAPACITY":
         return Fraction(U[e])
-    if sel_priority == "HEADROOM":
+    if tie_break == "HIGHER_HEADROOM":
         return Fraction(U[e], cap) if cap > 0 else Fraction(0)
     return Fraction(cap)
 
 
 @dataclass
 class Selection:
-    php: bool = False
-    priority: str = "CAPACITY"
-    multi_edge: bool = True
+    tie_break: str = "FEWER_HOPS"
+    parallel_edges: bool = True
+
+    @property
+    def higher(self):
+        return self.tie_break != "FEWER_HOPS"
 
 
 @dataclass
@@ -118,7 +124,7 @@ class Setup:
 
 
 def roster_of(edges, sources, dests, mask=None):
-    """The sources whose node is allowed that statically reach an allowed destination (2.2)."""
+    """The sources whose node is allowed that statically reach an allowed destination."""
     ok = allowed(edges, mask)
     xn = set(mask[0]) if mask else set()
     live = [d for d in dests if d not in xn]
@@ -139,14 +145,14 @@ def choose(edges, U, candidate_ok, sel, src, dests, threshold, service):
     # The filter U >= max(b, minimum); a threshold of 0 keeps every allowed edge.
     filtered = [ok and U[e] >= threshold for e, ok in enumerate(candidate_ok)]
     kept = list(filtered)
-    if not sel.multi_edge:
+    if not sel.parallel_edges:
         best = {}
         for e, (u, v, _, c) in enumerate(edges):
             if not filtered[e]:
                 continue
             key = (
                 c,
-                -priority(edges, sel.priority, U, e, service) if sel.php else 0,
+                -priority(edges, sel.tie_break, U, e, service) if sel.higher else 0,
                 e,
             )
             if (u, v) not in best or key < best[(u, v)][0]:
@@ -158,15 +164,19 @@ def choose(edges, U, candidate_ok, sel, src, dests, threshold, service):
         return None
 
     def order(p):
-        bottleneck = min(priority(edges, sel.priority, U, e, service) for e in p)
+        bottleneck = min(priority(edges, sel.tie_break, U, e, service) for e in p)
         cost, hops = cost_of(edges, p), len(p)
-        return (cost, -bottleneck if sel.php else 0, hops, tuple(p))
+        return (cost, -bottleneck if sel.higher else 0, hops, tuple(p))
 
     return min(paths, key=order)
 
 
 def exact_fraction(f):
-    return Fraction(f) if not isinstance(f, Fraction) else f
+    """A CostStretch factor as the library reads it: a Fraction as it is, a float as the decimal it prints
+    (Fraction(str(f)): 1.2 is 6/5), an integer n/1."""
+    if isinstance(f, Fraction):
+        return f
+    return Fraction(str(f)) if isinstance(f, float) else Fraction(f)
 
 
 def setup(
@@ -185,7 +195,7 @@ def setup(
     held=None,
     service=None,
 ):
-    """T1's setup (6.2 to 6.4). unreserved: the reservation baseline R0 (default: the
+    """T1's setup. unreserved: the reservation baseline R0 (default: the
     capacities); held: other owners' holds per edge (default 0); U = R0 - held. service: the
     service residual (default: the capacities), which setup never reads (rule 7's misreading
     does)."""
@@ -198,7 +208,7 @@ def setup(
     base = list(unreserved) if unreserved is not None else [c for _, _, c, _ in edges]
     U = [r - (held[e] if held else 0) for e, r in enumerate(base)]
     service = list(service) if service is not None else [c for _, _, c, _ in edges]
-    # Stretch: c0 is the smallest static shortest cost over the roster (before any filter).
+    # CostStretch: c0 is the smallest static shortest cost over the roster (before any filter).
     c0 = min((static_cost(edges, ok, h, live) for h in roster), default=None)
     tunnels = []
     for j in range(N):
@@ -228,7 +238,7 @@ def setup(
     return Setup(roster, tunnels, holds, c0)
 
 
-# ---------------------------------------------------------------- forwarding (6.5, 8.3)
+# ---------------------------------------------------------------- forwarding
 
 
 def entry_shares(x, roster, tunnels, alive=None):
@@ -264,7 +274,8 @@ def loads(edges, tunnels, amounts):
 
 
 def lossless_bound(edges, roster, tunnels, V, alive=None, top=None):
-    """8.3: the largest total whose no-drop loads fit V with no share lost at a head."""
+    """The lossless bound: the largest total whose no-drop loads fit V with no share lost at a
+    head."""
     top = top if top is not None else sum(V) + 1
 
     def fits(x):
@@ -320,7 +331,7 @@ def lossy(edges, roster, tunnels, x, V, alive=None):
     return delivered, lost, per, drops
 
 
-# ---------------------------------------------------------------- replay (8.4) and records (10.4)
+# ---------------------------------------------------------------- replay and records
 
 
 def replay(edges, program_roster, tunnels, dests, mask, producer_mask=None):
@@ -353,7 +364,7 @@ def replay(edges, program_roster, tunnels, dests, mask, producer_mask=None):
 
 
 def records(tunnels, amounts=None):
-    """One record per program entry, in index order: (entry, delivered, holds) (10.4)."""
+    """One record per program entry, in index order: (entry, delivered, holds)."""
     amounts = amounts or [0] * len(tunnels)
     out = []
     for t, a in zip(tunnels, amounts, strict=True):
@@ -368,7 +379,8 @@ def records(tunnels, amounts=None):
 
 
 def termination(offer, roster, tunnels, alive, lossy_admission, admitted):
-    """14.2 as amended: zero offer, empty roster, rule (3) only for a program with an up tunnel."""
+    """The termination rule: zero offer, empty roster, rule (3) only for a program with an up
+    tunnel."""
     if offer == 0:
         return "COMPLETE"
     if not roster:
@@ -382,13 +394,13 @@ def termination(offer, roster, tunnels, alive, lossy_admission, admitted):
     return "COMPLETE" if admitted == offer else "EXHAUSTED"
 
 
-# ---------------------------------------------------------------- T2 (7.2 to 7.8)
+# ---------------------------------------------------------------- T2
 
 SCALE = 2**32
 
 
 def t2_live(edges, roster, dests, V, mask=None):
-    """The live heads: those with a simple path whose every link has V >= 1 (7.2)."""
+    """The live heads: those with a simple path whose every link has V >= 1."""
     ok = allowed(edges, mask)
     xn = set(mask[0]) if mask else set()
     live_dests = [d for d in dests if d not in xn]
@@ -434,7 +446,7 @@ def _max_flow(n, arcs, s, t):
 
 
 def t2_fits(edges, ok, roster, live, dests, k, size, V):
-    """Do k tunnels of the common size `size` fit at every live head? The quota flow of 7.2: link
+    """Do k tunnels of the common size `size` fit at every live head? The quota flow: link
     capacity min(K, floor(V / size)), an arc of k from a root to each live head, K from each
     destination to a sink; links leaving a destination are not in it."""
     heads = live
@@ -465,7 +477,7 @@ def t2_common(edges, ok, roster, live, dests, k, V):
 
 
 def t2_fluid(edges, ok, roster, live, dests, k, V):
-    """s*: the largest fraction V[e] / j (j <= K) that fits (7.2)."""
+    """s*: the largest fraction V[e] / j (j <= K) that fits."""
     K = len(live) * k
     candidates = sorted(
         {Fraction(v, j) for v in V if v for j in range(1, K + 1)}, reverse=True
@@ -477,7 +489,7 @@ def t2_fluid(edges, ok, roster, live, dests, k, V):
 
 
 def t2_working(U, roster, live, k, D):
-    """u (7.2): for a finite design, min(U, max(1, max over live heads of ceil(RR(D, H, i) / k))),
+    """u: for a finite design, min(U, max(1, max over live heads of ceil(RR(D, H, i) / k))),
     the shares over the whole roster; unlimited: U."""
     if D is None:
         return U
@@ -487,7 +499,7 @@ def t2_working(U, roster, live, k, D):
 
 
 def slot_price(B, V, j, u):
-    """The headroom price of slot j of an edge (7.3)."""
+    """The headroom price of slot j of an edge."""
     return SCALE * (B - V + j * u) // B
 
 
@@ -530,7 +542,7 @@ def t2_best_objectives(edges, ok, live, dests, k, u, V, headroom):
 
 
 def t2_canonical(edges, ok, live, dests, k, u, V, headroom):
-    """The canonical unit augmentation (7.3): K single units from zero, each on the residual path
+    """The canonical unit augmentation: K single units from zero, each on the residual path
     from the root to the sink of minimum (J, Phi) price, then the fewest arcs, then the smallest
     sequence of arc keys: (0, EdgeId, direction) for links, (1, head, direction) for root arcs,
     (2, destination, direction) for sink arcs (forward 0, reverse 1). Bellman-Ford distances."""
@@ -613,7 +625,7 @@ def t2_canonical(edges, ok, live, dests, k, u, V, headroom):
 
 
 def t2_program(edges, roster, live, dests, k, x, u):
-    """The tunnels (7.3): x cut, live head by live head in ascending NodeId, into unit walks along
+    """The tunnels: x cut, live head by live head in ascending NodeId, into unit walks along
     the smallest positive EdgeId to a destination; each head's walks sorted by EdgeId sequence;
     in round order (local index j, then roster position i), index j * H + i."""
     rem = list(x)
@@ -666,7 +678,7 @@ class T2Plan:
 
 
 def t2_bound(edges, plan, V):
-    """F (7.6): the program's 8.3 lossless maximum: every roster head's share counts, a dead head's
+    """F: the program's lossless maximum: every roster head's share counts, a dead head's
     included (it blocks every total that gives it a unit)."""
     if not plan.roster:
         return 0
@@ -696,7 +708,7 @@ def live_share(roster, live, z):
 
 
 def live_budget(edges, plan, V):
-    """F'(k) (7.7): the largest total whose live shares fit on the program (dead shares
+    """F'(k): the largest total whose live shares fit on the program (dead shares
     ignored)."""
     roster = plan.roster
 
@@ -717,7 +729,7 @@ def live_budget(edges, plan, V):
 def t2(
     edges, sources, dests, N, D=None, *, up_to=False, V=None, mask=None, headroom=False
 ):
-    """T2 for Tunnels(N) or Tunnels(N, up_to=True) on the free capacity V (default: the
+    """T2 for TunnelCount(N) or TunnelCount(N, up_to=True) on the free capacity V (default: the
     capacities). Returns the T2Plan with its forwarding bound, and for "up to" the per-count
     scores."""
     V = list(V) if V is not None else [c for _, _, c, _ in edges]
@@ -751,5 +763,5 @@ def t2(
 
 
 def program_roster(plan):
-    """The roster a T2 program installs (7.8): the policy's whole roster, also without tunnels."""
+    """The roster a T2 program installs: the policy's whole roster, also without tunnels."""
     return plan.roster

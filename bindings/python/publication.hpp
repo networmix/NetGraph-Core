@@ -27,7 +27,7 @@ namespace netgraph::core::bindings {
 // generic move-cast (type_caster_generic::cast) but with the object allocation checked:
 // pybind11's make_new_instance uses the result of tp_alloc unchecked, so a failed Python
 // allocation there is a crash rather than a MemoryError. Holder is the class's holder type
-// (std::unique_ptr<T> by default, std::shared_ptr<T> for PredDAG and Path); another type is
+// (std::unique_ptr<T> by default, std::shared_ptr<T> for PredecessorDAG and Path); another type is
 // refused before anything is made.
 // The steps, in order (new_object and object_from both use them): (1) allocate the object and
 // check for null; (2) hold it in `obj` at once, so any later failure releases it; (3) allocate
@@ -76,9 +76,7 @@ static_assert(std::is_nothrow_move_assignable_v<py::object>);
 
 template <class T>
 py::object object_of(T value) {
-  auto [obj, slot] = new_object<T>();
-  *slot = std::move(value);
-  return std::move(obj);
+  return emplace_object<T, std::unique_ptr<T>>(std::move(value)).first;
 }
 
 // A tuple of new Python objects of the bound class T, one per row (object_of each): a failed
@@ -96,7 +94,7 @@ py::tuple tuple_of(const std::vector<T>& rows) {
 }
 
 // A new Python object of the bound class T (held by std::shared_ptr) owning `value`, through the
-// same checked allocation as new_object: for the values without a default constructor (PredDAG,
+// same checked allocation as new_object: for the values without a default constructor (PredecessorDAG,
 // Path) that a search returns. A failure raises and releases everything made so far.
 template <class T>
 py::object object_from(T value) {
@@ -140,11 +138,11 @@ py::object shared_object(std::shared_ptr<const T> holder) {
 // A py::object known to be a T, for signatures: pybind11 names it as T (the specialization of
 // handle_type_name below), so a binding that returns shared_object's result keeps its type.
 template <class T>
-class Typed : public py::object {
+class TypedPythonObject : public py::object {
 public:
-  Typed() = default;
-  Typed(py::handle h, py::object::stolen_t) : py::object(h, py::object::stolen_t {}) {}
-  Typed(py::handle h, py::object::borrowed_t) : py::object(h, py::object::borrowed_t {}) {}
+  TypedPythonObject() = default;
+  TypedPythonObject(py::handle h, py::object::stolen_t) : py::object(h, py::object::stolen_t {}) {}
+  TypedPythonObject(py::handle h, py::object::borrowed_t) : py::object(h, py::object::borrowed_t {}) {}
   static bool check_(py::handle h) { return py::isinstance<T>(h); }
 };
 
@@ -152,8 +150,8 @@ public:
 // value or None. pybind11's cast of a bound value, a vector or an optional of them allocates the
 // object unchecked.
 template <class T>
-Typed<T> typed_object(T value) {
-  return py::reinterpret_steal<Typed<T>>(object_of<T>(std::move(value)).release());
+TypedPythonObject<T> typed_object(T value) {
+  return py::reinterpret_steal<TypedPythonObject<T>>(object_of<T>(std::move(value)).release());
 }
 template <class T>
 py::typing::List<T> list_of(const std::vector<T>& rows) {
@@ -173,23 +171,41 @@ py::typing::Optional<T> optional_of(const std::optional<T>& value) {
 
 // shared_object(holder) as a T (holder not null) or as T | None.
 template <class T>
-Typed<std::remove_const_t<T>> typed_shared(std::shared_ptr<T> holder) {
-  return py::reinterpret_steal<Typed<std::remove_const_t<T>>>(shared_object(std::move(holder)).release());
+TypedPythonObject<std::remove_const_t<T>> typed_shared(std::shared_ptr<T> holder) {
+  return py::reinterpret_steal<TypedPythonObject<std::remove_const_t<T>>>(shared_object(std::move(holder)).release());
 }
 template <class T>
 py::typing::Optional<std::remove_const_t<T>> optional_shared(std::shared_ptr<T> holder) {
   return py::reinterpret_steal<py::typing::Optional<std::remove_const_t<T>>>(shared_object(std::move(holder)).release());
 }
 
+// The getters of read-only fields whose values are Python objects of bound classes or
+// enumerations: def_readonly casts them through pybind11's unchecked allocation (a failed Python
+// allocation is a crash); these make them through the checked one above. A field of a bound value
+// or enumeration, an optional one, a shared one (its registered object, or None) and a vector of
+// bound values (a list).
+template <class C, class D>
+auto field_object(D C::*member) {
+  return [member](const C& c) { return typed_object(c.*member); };
+}
+template <class C, class D>
+auto optional_field(std::optional<D> C::*member) {
+  return [member](const C& c) { return optional_of(c.*member); };
+}
+template <class C, class D>
+auto shared_field(std::shared_ptr<D> C::*member) {
+  return [member](const C& c) { return optional_shared(c.*member); };
+}
+template <class C, class D>
+auto list_field(std::vector<D> C::*member) {
+  return [member](const C& c) { return list_of(c.*member); };
+}
+
 } // namespace netgraph::core::bindings
 
 namespace pybind11::detail {
 template <class T>
-struct handle_type_name<netgraph::core::bindings::Typed<T>> {
+struct handle_type_name<netgraph::core::bindings::TypedPythonObject<T>> {
   static constexpr auto name = make_caster<T>::name;
 };
 } // namespace pybind11::detail
-
-namespace netgraph::core::bindings {
-
-} // namespace netgraph::core::bindings

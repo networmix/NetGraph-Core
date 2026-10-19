@@ -9,13 +9,13 @@
 #include <variant>
 #include <vector>
 
-#include "netgraph/core/dag_cache.hpp"
+#include "netgraph/core/shortest_path_cache.hpp"
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/flow_record.hpp"
 #include "netgraph/core/graph.hpp"
 #include "netgraph/core/options.hpp"
-#include "netgraph/core/pred_dag.hpp"
-#include "netgraph/core/program.hpp"
+#include "netgraph/core/route_structures.hpp"
+#include "netgraph/core/forwarding_program.hpp"
 #include "netgraph/core/types.hpp"
 
 namespace netgraph::core {
@@ -23,45 +23,50 @@ namespace netgraph::core {
 namespace detail {
 struct PolicyEngine;
 struct PolicyAccess;
-class FrozenTally;
+class FrozenCacheHitTally;
 } // namespace detail
 
-// The tunnel count of the tunnel models, per head: `count` in [1, 10000] (checked where a policy
-// or an evaluator uses it); `up_to` (T2 only; T1 rejects it): one common count k in 1..count for
+// The tunnel count of the tunnel models, per head: `per_head` in [1, 10000] (checked where a policy
+// or an evaluator uses it); `up_to` (T2 only; T1 rejects it): one common count k in 1..per_head for
 // every head, the smallest sufficient one.
-struct Tunnels {
-  std::int64_t count {1};
+struct TunnelCount {
+  std::int64_t per_head {1};
   bool up_to {false};
-  friend bool operator==(const Tunnels&, const Tunnels&) = default;
+  friend bool operator==(const TunnelCount&, const TunnelCount&) = default;
 };
 
 // Each routing mode has only the fields it uses.
-// CostOnly: hop-by-hop routing on each roster source's static shortest routes (all shortest
+// ShortestPaths: hop-by-hop routing on each roster source's static shortest routes (all shortest
 //   paths, with no directed cycles, edges of capacity 0 included, or the canonical single
 //   path), prepared once per epoch and fixed for it. The sources of the demand are pooled: a
-//   router shared by several sources adds their traffic and splits it once. EqualBalanced and Weighted forward the equal origin; MaxFlow is a controller
+//   router shared by several sources adds their traffic and splits it once. Equal and Weighted forward the equal source allocation; Optimized is a controller
 //   restricted to the union of those routes. Its program: one split route per roster source,
-//   pooled into one split context (EqualBalanced, Weighted), or the controller's paths (MaxFlow).
-// CapacityAware (T1): every roster head sets up its own tunnels.count strict tunnels by CSPF, no
+//   pooled into one split context (Equal, Weighted), or the controller's paths (Optimized). Its
+//   route choice: tie_break (RouteTieBreak), multipath (false: the canonical single path) and
+//   parallel_edges (false: one member of each (u, v) pair).
+// DistributedTE (T1): every roster head sets up its own tunnel_count.per_head strict tunnels by CSPF, no
 //   controller. A design volume D is split RR(D, H, h) over the heads and each head's share
 //   RR(d, N, j) over its tunnels; in round order (round j, heads ascending: index j * H + i) each
 //   tunnel keeps the allowed links whose unreserved capacity U (the ledger's, this policy's own
 //   holds released, minus this setup's earlier up tunnels) is at least max(request,
 //   min_unreserved_bandwidth) (a request of 0 with a minimum of 0 has no filter), collapses
-//   parallel links (multi_edge = false), and takes the single path in the selection's order on
-//   static costs (priorities read U: Residual U, Headroom U / C, Capacity C); it is Up, holding its
-//   request on every link, unless no path passes the filter (NoBandwidth) or the cheapest exceeds
-//   max_path_cost (CostCeiling): Absolute inclusive, Stretch(f) times c0, the smallest static
+//   parallel links (parallel_edges = false), and takes the single path in the order of tie_break
+//   on static costs (scores read U: HigherAvailableCapacity U, HigherHeadroom U / C, HigherCapacity
+//   C); it is Up, holding its
+//   request on every link, unless no path passes the filter (InsufficientBandwidth) or the cheapest
+//   exceeds cost_ceiling (CostCeilingExceeded): AbsoluteCost inclusive, CostStretch(f) times c0, the
+//   smallest static
 //   shortest cost over the roster heads under the mask, zero-capacity links included. Forwarding
 //   is the program's: round robin over the heads, then over a head's up tunnels; a head without
 //   one loses its share. Its program: those tunnels, weight 1 up and 0 down.
-// Global: the ideal controller, a minimum-cost maximum flow over the whole eligible graph, or
+// CentralizedTE: the ideal controller, a minimum-cost maximum flow over the whole eligible graph, or
 //   exactly over `support` (a DAG of the policy's graph, trimmed to the walks from the sources to
 //   the allowed destinations under the Eligibility), of what the policy already delivers plus this
-//   call's request (placed_demand() + volume: what an earlier call could not place is not
+//   call's request (what the policy delivers plus the offer: what an earlier call could not place is not
 //   requested again). Its program: the solved flow cut into paths per source, each path a tunnel
 //   weighted by its amount.
-// Global with `tunnels` (T2; `support` must then be absent): a controller lays out, for every live
+// CentralizedTE with `tunnel_count` (T2; with `support`, the allowed links are the support's edges
+//   intersected with the Eligibility, in every step below): a controller lays out, for every live
 //   roster head (one reaching an allowed destination over links with free capacity V >= 1, V the
 //   residual with this policy's own traffic released; the other heads are dead: they keep their
 //   roster position and lose their share), k single-path tunnels with one common whole-unit planned
@@ -70,7 +75,7 @@ struct Tunnels {
 //   (unlimited: U), then the cheapest routes (the route-cost sum J), then with prefer_headroom
 //   the smallest headroom penalty (each tunnel on a link pays floor(2^32 (B - V + j u) / B) for its
 //   slot j, B the static capacity), then one fixed unit-by-unit augmentation (fewest arcs, then the
-//   smallest arc keys). k = tunnels.count, or with up_to the smallest count in 1..count whose
+//   smallest arc keys). k = tunnel_count.per_head, or with up_to the smallest count in 1..per_head whose
 //   program carries the live part of D (else the best, then the smallest count). U = 0 with live
 //   heads, or no live head, gives a program without tunnels that keeps the roster. Forwarding is
 //   the program's: round robin over the heads, then over a head's tunnels. Its program: the
@@ -80,78 +85,81 @@ struct Tunnels {
 //   split route loses its excluded members, the roster is rebuilt from the program's basis); the
 //   nodes and edges `black_holes` excludes are black holes (stale forwarding: the program is
 //   forwarded unchanged and traffic reaching one is dropped there). One record per program entry.
-struct CostOnly {};
-struct CapacityAware {
-  Tunnels tunnels {};
-  std::optional<CostCeiling> max_path_cost {};
-  Amount min_unreserved_bandwidth {0};
+struct ShortestPaths {
+  RouteAllocation allocation {RouteAllocation::Equal};
+  std::optional<SourceAllocation> source_allocation {};
+  std::optional<WeightBasis> weight_basis {};
+  std::shared_ptr<const std::vector<Amount>> edge_weights {};
+  RouteTieBreak tie_break {RouteTieBreak::FewerHops};
+  bool multipath {true};
+  bool parallel_edges {true};
 };
-struct Global {
-  std::shared_ptr<const PredDAG> support {};
-  std::optional<Tunnels> tunnels {};
+struct DistributedTE {
+  TunnelCount tunnel_count {};
+  std::optional<CostCeiling> cost_ceiling {};
+  Amount min_unreserved_bandwidth {0};
+  RouteTieBreak tie_break {RouteTieBreak::FewerHops};
+  bool parallel_edges {true};
+};
+// CentralizedTE requires its source allocation: there is no default constructor.
+struct CentralizedTE {
+  explicit CentralizedTE(SourceAllocation source_allocation_) : source_allocation(source_allocation_) {}
+  SourceAllocation source_allocation;
+  std::shared_ptr<const PredecessorDAG> support {};
+  std::optional<TunnelCount> tunnel_count {};
   bool prefer_headroom {false};
+  friend bool operator==(const CentralizedTE&, const CentralizedTE&) = default;
 };
 struct Pinned {
   std::shared_ptr<const ForwardingProgram> program {};
   std::shared_ptr<const Eligibility> black_holes {};
 };
-using Routing = std::variant<CostOnly, CapacityAware, Global, Pinned>;
+using Routing = std::variant<ShortestPaths, DistributedTE, CentralizedTE, Pinned>;
 
-// One demand's settings. A field that does not apply to the routing mode stays absent; a policy
-// or an evaluator checks the combination when it uses the configuration (the fields remain
-// assignable), in this order: the enumeration values, then the model's row of the matrix below
-// (Global: any selection first, then support and tunnels together, they decide the row, then
-// prefer_headroom without tunnels; T1: an "up to" count, it is not T1's row), its columns left to
-// right (placement, origin, admission, selection, weights with
-// edge_weights), then the DagCache, then the tunnel models' own parameters (the tunnel count; T1's
-// max_path_cost and min_unreserved_bandwidth), then edge_weights' length and entries, then the
-// roster and count rules (the pooled single-path rule, T2's several-sources rule, the tunnel
-// limit).
+// One demand's settings: the routing model, which holds every option it reads, and the admission.
+// A policy or an evaluator checks the configuration when it uses it (the fields remain
+// assignable), in this order: the enumeration values; then the model matrix below, in the order
+// route and source allocation (ShortestPaths EQUAL or WEIGHTED takes only the equal source
+// allocation; T2 with several input sources only the equal one), admission, the route-choice
+// controls (the ineffective tie rule, then the pooled single-path rule), prefer_headroom, the
+// weight combinations and, last, a ShortestPathCache on a model that does not read it; then the
+// tunnel count, an "up to" count for DistributedTE, the ceilings, min_unreserved_bandwidth and
+// edge_weights' length and entries; then the tunnel limit; then a Pinned program's endpoints.
 //
-// | routing           | placement            | origin (default / allowed) | admission       | selection                          | weights |
-// | CostOnly          | EqualBalanced        | Equal / Equal              | Lossless, Lossy | all four fields                    | none |
-// | CostOnly          | Weighted             | Equal / Equal              | Lossless, Lossy | all four fields                    | Capacity (default), Explicit, ResidualSnapshot |
-// | CostOnly          | MaxFlow              | Optimized / both           | Lossless        | all four fields                    | none |
-// | Global            | none                 | Optimized / both           | Lossless        | none                               | none |
-// | T1: CapacityAware | none                 | Equal / Equal              | Lossless, Lossy | tie_break, priority, multi_edge    | none |
-// | T2: Global tunnels| none                 | Equal / Equal; Optimized with one source | Lossless, Lossy | none          | none |
-// | Pinned            | none                 | none (the program has it)  | Lossless, Lossy | none                               | none |
+// | model                             | allocation    | source allocation (default / allowed)  | admission       | route choice                            | weights |
+// | ShortestPaths                     | Equal         | Equal / Equal                          | Lossless, Lossy | tie_break, multipath, parallel_edges    | none |
+// | ShortestPaths                     | Weighted      | Equal / Equal                          | Lossless, Lossy | tie_break, multipath, parallel_edges    | Capacity (default), Explicit, ResidualSnapshot |
+// | ShortestPaths                     | Optimized     | Optimized / both                       | Lossless        | tie_break, multipath, parallel_edges    | none |
+// | CentralizedTE                     | optimal       | required / both                        | Lossless        | none                                    | none |
+// | DistributedTE (T1)                | tunnels       | Equal, fixed                           | Lossless, Lossy | tie_break, parallel_edges (single path) | none |
+// | CentralizedTE with tunnels (T2)   | tunnels       | required; Optimized only with one source | Lossless, Lossy | none                                  | none |
+// | Pinned                            | the program's | the program's                          | Lossless, Lossy | none                                    | none |
 //
-// An absent origin resolves to the default and an absent selection to PathSelection() in the
-// policy's snapshot (config()); an absent weights of CostOnly Weighted resolves to Capacity. Only
-// CostOnly reads a DagCache; another model rejects one. edge_weights (one integer per edge in
-// [0, 2^62), shared by every configuration copied from this one) is given exactly when weights is
-// Explicit. T1 rejects multipath = true (a tunnel is one path; absent and false are accepted).
-// Every Global, with or without tunnels, rejects any selection: T2's headroom objective is the
-// model's prefer_headroom (true needs tunnels), and a selection's priority never enables a
-// controller objective.
-// Pooled single-path rule: CostOnly with more than one input source (normalized, before any
-// Eligibility) rejects multipath = false together with PreferHigherPriority, whose bottleneck
-// choice would differ per source at a shared router. T2 with the optimized origin takes one input
-// source (normalized, before any Eligibility): it is the same calculation as the equal origin. The
-// tunnel limit (T1, T2): roster heads times the tunnel count (the largest count for up_to) at
-// most 2^30 - 1.
+// A Higher* tie_break of ShortestPaths with multipath and parallel_edges both true has nothing to
+// choose and is rejected. The policy's snapshot (config()) resolves ShortestPaths' absent
+// source_allocation (Optimized for Optimized, else Equal) and an absent weight_basis of Weighted
+// (Capacity). edge_weights (one integer per edge in [0, 2^62), shared by every configuration
+// copied from this one) is given exactly when weight_basis is Explicit. T2's headroom objective is
+// CentralizedTE's prefer_headroom (true needs tunnels); a tie rule never enables a controller
+// objective. Pooled single-path rule: ShortestPaths with more than one input source (normalized,
+// before any Eligibility) and multipath = false requires tie_break = FewerHops. The tunnel limit
+// (T1, T2): roster heads times the tunnel count (the largest count for up_to) at most 2^30 - 1.
 struct FlowPolicyConfig {
-  Routing routing {CostOnly {}};
-  std::optional<FlowPlacement> placement {};
+  Routing routing {ShortestPaths {}};
   Admission admission {Admission::Lossless};
-  std::optional<PathSelection> selection {};
-  std::optional<Origin> origin {};
-  std::optional<WeightBasis> weights {};
-  std::shared_ptr<const std::vector<Amount>> edge_weights {};
 };
 
 // Optional outputs of a placement (absent unless requested): edge_flows (this policy's own
-// allocation per edge after the call), residual and bottleneck (the ledger's after the call),
-// min_cut (Global with the optimized origin; see PlacementResult::min_cut) and
-// reservation_edge_flows (this policy's strict holds per edge after the call, zeros for a model
-// without holds).
+// allocation per edge after the call), residual and saturated_boundary_edges (the ledger's after
+// the call), min_cut (CentralizedTE with the optimized source allocation; see
+// PlacementResult::min_cut) and edge_reservations (this policy's strict holds per edge after the
+// call, zeros for a model without holds).
 struct OutputOptions {
   bool edge_flows {false};
   bool residual {false};
-  bool bottleneck {false};
+  bool saturated_boundary_edges {false};
   bool min_cut {false};
-  bool reservation_edge_flows {false};
+  bool edge_reservations {false};
 };
 
 // The call's outcome, the first that applies: Complete for a zero request; NoRoute for a
@@ -168,98 +176,100 @@ enum class Termination { Complete, NoRoute, Exhausted, NoActiveWeight };
 
 // One normalized input source's forwarding in the epoch (zero rows included: a masked or
 // unreachable source): offered (Lossy only: its injections), admitted (Lossless: what it
-// delivers; Lossy: offered), delivered, source_loss (offered shares lost at the source for lack of
-// a usable route) and dropped (its losses on links). Lossy: offered = delivered + source_loss +
-// dropped.
+// delivers; Lossy: offered), delivered, source_drops (offered shares lost at the source for lack
+// of a usable route) and total_edge_drops (its losses on links). Lossy: offered = delivered +
+// source_drops + total_edge_drops.
 struct SourceFlow {
   NodeId source {0};
   std::optional<Counter128> offered {};
   Counter128 admitted {};
   Amount delivered {0};
-  Counter128 source_loss {};
-  Counter128 dropped {};
+  Counter128 source_drops {};
+  Counter128 total_edge_drops {};
   friend bool operator==(const SourceFlow&, const SourceFlow&) = default;
 };
 
 // One program tunnel's forwarding in the epoch: its entry identifier and head, its status in this
 // forwarding (Up, Failed, Blackholed), assigned (its share of the injections: Lossy the shares sent
-// to it, Lossless what it carries), delivered and dropped (its losses on links).
+// to it, Lossless what it carries), delivered and total_edge_drops (its losses on links).
 struct TunnelFlow {
-  std::int32_t index {0};
+  std::int32_t entry_id {0};
   NodeId head {0};
   TunnelStatus status {TunnelStatus::Up};
   Counter128 assigned {};
   Amount delivered {0};
-  Counter128 dropped {};
+  Counter128 total_edge_drops {};
   friend bool operator==(const TunnelFlow&, const TunnelFlow&) = default;
 };
 
-// The tunnel models' setup summary (PlacementResult::plan): count (the tunnels per head; T2 up
-// to: the chosen count), design_demand (nullopt: unlimited), head_design ((head, RR(D, H, i)) for
-// every roster head in ascending NodeId; empty for an unlimited design) and reserved_total (T1's
-// strict holds, counted once per up tunnel: the sum of their requests; 0 for T2). T2 only (nullopt
-// for T1): live_heads (ascending), insufficient_resolution (live heads exist but U = 0: the program
-// has no tunnels), fluid_share (the exact fluid optimum s* as a reduced fraction (numerator,
-// denominator); 0 / 1 without a live head), common_share (U), planned_per_tunnel (u),
-// planned_total (K u), route_cost (J, below 2^92), headroom_penalty (Phi, below 2^94; with
-// prefer_headroom only) and forwarding_bound (F: the program's lossless maximum on the call's view, a
-// dead head's share blocking).
+// The tunnel models' setup summary (PlacementResult::plan): tunnels_per_head (T2 up to: the
+// chosen count), design_demand (nullopt: unlimited), design_by_head ((head, RR(D, H, i)) for every
+// roster head in ascending NodeId; empty for an unlimited design) and total_reserved_bandwidth
+// (T1's strict holds, counted once per up tunnel: the sum of their requests; 0 for T2). T2 only
+// (nullopt for T1): heads_with_capacity (ascending), insufficient_resolution (heads with capacity
+// exist but U = 0: the program has no tunnels), max_fractional_bandwidth_per_tunnel (the exact
+// fluid optimum s* as a reduced fraction (numerator, denominator); 0 / 1 without such a head),
+// max_bandwidth_per_tunnel (U), planned_bandwidth_per_tunnel (u), total_planned_bandwidth (K u),
+// total_tunnel_cost (J, below 2^92), headroom_penalty (Phi, below 2^94; with prefer_headroom only)
+// and max_lossless_offer (F: the program's lossless maximum on the call's view, a dead head's
+// share blocking).
 struct TunnelPlan {
-  std::int64_t count {0};
+  std::int64_t tunnels_per_head {0};
   std::optional<Amount> design_demand {};
-  std::vector<std::pair<NodeId, Amount>> head_design {};
-  Amount reserved_total {0};
-  std::optional<std::vector<NodeId>> live_heads {};
+  std::vector<std::pair<NodeId, Amount>> design_by_head {};
+  Amount total_reserved_bandwidth {0};
+  std::optional<std::vector<NodeId>> heads_with_capacity {};
   std::optional<bool> insufficient_resolution {};
-  std::optional<std::pair<Amount, Amount>> fluid_share {};
-  std::optional<Amount> common_share {};
-  std::optional<Amount> planned_per_tunnel {};
-  std::optional<Amount> planned_total {};
-  std::optional<Counter128> route_cost {};
+  std::optional<std::pair<Amount, Amount>> max_fractional_bandwidth_per_tunnel {};
+  std::optional<Amount> max_bandwidth_per_tunnel {};
+  std::optional<Amount> planned_bandwidth_per_tunnel {};
+  std::optional<Amount> total_planned_bandwidth {};
+  std::optional<Counter128> total_tunnel_cost {};
   std::optional<Counter128> headroom_penalty {};
-  std::optional<Amount> forwarding_bound {};
+  std::optional<Amount> max_lossless_offer {};
   friend bool operator==(const TunnelPlan&, const TunnelPlan&) = default;
 };
 
 // The result of one call: this call's values, then the demand's state after it (totals of the
 // epoch), then the optional outputs.
-// This call: placed (units delivered by the call; replace, forward and evaluate: the full new
-// delivery), remaining = request - placed (nullopt for +inf), delivery_delta (new minus old
-// delivery; placed for a placement, may be negative for replace), call_drops (this call's drops
-// per edge, ascending EdgeId), call_source_loss, termination and the change flags, which compare
+// This call: call_delivered (units delivered by the call; replace, forward and evaluate: the full
+// new delivery), call_undelivered = request - call_delivered (nullopt for +inf), delivery_delta
+// (new minus old delivery; call_delivered for a placement, may be negative for replace),
+// call_edge_drops (this call's drops per edge, ascending EdgeId), call_source_drops, termination
+// and the change flags, which compare
 // the program before and after the call ("no program" is the empty program; two programs without
 // an entry are equal): routes_changed the ordered heads, paths, split tables and duplicates;
 // weights_changed the injection (the source weights) and every entry and split-table weight (an
 // absent entry weighs 0); reservations_changed every tunnel's requested and reserved amounts by
 // index (an absent tunnel holds (0, 0); only T1 sets it: T2's planned bandwidth is no
 // reservation). An offer-only change to a program that
-// is not recomputed (forward, Pinned, CostOnly increments) sets none of them; a controller's
+// is not recomputed (forward, Pinned, ShortestPaths increments) sets none of them; a controller's
 // re-solve that changes a path's amount is a weight change; an identical replace sets none.
 // State: program (the installed program after the call; evaluate: the computed one; null before
 // the epoch's first preparation), plan (T1 and T2: the setup of that program; nullopt for every
 // other model, Pinned over a tunnel program too), requested (the sum of the requests;
 // nullopt after +inf), offered (Lossy only: the traffic actually sent; the first-hop injection of a
 // Lossy +inf), admitted (Lossless: the total carried; Lossy: offered), delivered, unadmitted
-// (Lossless: requested - delivered, nullopt after +inf; Lossy: 0), source_loss and drops (per
-// edge). Lossy: offered = source_loss + sum(drops) + delivered. by_source has one row per
+// (Lossless: requested - delivered, nullopt after +inf; Lossy: 0), source_drops and edge_drops
+// (per edge). Lossy: offered = source_drops + sum(edge_drops) + delivered. by_source has one row per
 // normalized input source in ascending NodeId; the rows sum to the totals except for Lossy with an
 // empty roster, where the whole offer is source loss of the demand and every row is zero.
 // by_tunnel has one row per program tunnel in ascending index (empty without tunnels); it is an
-// alternative view of the same traffic, never added to by_source. total_cost (controllers: Global
-// and CostOnly MaxFlow) is the exact sum of cost * flow over the policy's allocation (below 2^124;
+// alternative view of the same traffic, never added to by_source. total_cost (controllers: CentralizedTE
+// and ShortestPaths Optimized) is the exact sum of cost * flow over the policy's allocation (below 2^124;
 // nullopt for the tunnel models and Pinned).
-// cost_distribution: unrestricted Global with the optimized origin only, the cumulative marginal
+// marginal_cost_curve: unrestricted CentralizedTE with the optimized source allocation only, the cumulative marginal
 // cost curve: (cost, units) pairs in ascending cost, where delivering `units` more units raised the
 // minimum total cost of the flow by `cost` per unit (more delivery can reroute flow already placed,
 // so the pairs are not the costs of the paths in the final allocation); empty for an empty roster,
 // and absent before the epoch's first positive call. Optional outputs describe the same state as
 // the rest of the result (evaluate: the evaluated state).
 struct PlacementResult {
-  Amount placed {0};
-  std::optional<Amount> remaining {};
+  Amount call_delivered {0};
+  std::optional<Amount> call_undelivered {};
   Amount delivery_delta {0};
-  std::vector<std::pair<EdgeId, Amount>> call_drops {};
-  Amount call_source_loss {0};
+  std::vector<std::pair<EdgeId, Amount>> call_edge_drops {};
+  Amount call_source_drops {0};
   Termination termination {Termination::Complete};
   bool routes_changed {false};
   bool weights_changed {false};
@@ -271,38 +281,38 @@ struct PlacementResult {
   Counter128 admitted {};
   Amount delivered {0};
   std::optional<Counter128> unadmitted {};
-  Counter128 source_loss {};
-  std::vector<std::pair<EdgeId, Counter128>> drops {};
+  Counter128 source_drops {};
+  std::vector<std::pair<EdgeId, Counter128>> edge_drops {};
   std::vector<SourceFlow> by_source {};
   std::vector<TunnelFlow> by_tunnel {};
   std::optional<Counter128> total_cost {};
-  std::optional<std::vector<std::pair<Cost, Amount>>> cost_distribution {};
+  std::optional<std::vector<std::pair<Cost, Amount>>> marginal_cost_curve {};
   std::optional<std::vector<Amount>> edge_flows {};
   std::optional<std::vector<Amount>> residual {};
-  std::optional<std::vector<EdgeId>> bottleneck {};
-  std::optional<std::vector<Amount>> reservation_edge_flows {};
-  // Requested by OutputOptions::min_cut; unrestricted Global with the optimized origin only, when
+  std::optional<std::vector<EdgeId>> saturated_boundary_edges {};
+  std::optional<std::vector<Amount>> edge_reservations {};
+  // Requested by OutputOptions::min_cut; unrestricted CentralizedTE with the optimized source allocation only, when
   // the solve reached the maximum flow: the edges leaving the set of nodes the roster sources reach
   // through residual arcs (free capacity plus this policy's own load, reverse arcs that cancel flow
   // included), whatever their free capacity (an allowed edge of capacity 0 is listed; an excluded
   // edge is not an edge here), ascending EdgeId. That is the minimum cut closest to the sources; an
-  // empty roster returns an empty cut. nullopt otherwise (another model, the equal origin, a
+  // empty roster returns an empty cut. nullopt otherwise (another model, the equal source allocation, a
   // support, a call below the maximum, a zero call, forward).
   std::optional<std::vector<EdgeId>> min_cut {};
 };
 
 // A policy binds to its ledger at construction. Every call validates, then computes on working
 // copies and publishes all changes together, or none.
-// place(v) adds v to the epoch: CostOnly prepares its program at the epoch's first positive call
+// place(offer) adds offer to the epoch: ShortestPaths prepares its program at the epoch's first positive call
 // (every roster source's shortest routes on the ledger's residual at that call's entry) and keeps
-// it for the epoch; EqualBalanced and Weighted forward the equal origin over the pooled routes:
-// Lossless admits the largest total a in [admitted, admitted + volume] whose no-drop forwarding fits
+// it for the epoch; Equal and Weighted forward the equal source allocation over the pooled routes:
+// Lossless admits the largest total a in [admitted, admitted + offer] whose no-drop forwarding fits
 // the residual plus the policy's own load (a refused unit is not offered again), Lossy forwards
 // the new round-robin injections on the residual at call entry (earlier drops are not offered
-// again). The controllers (Global, CostOnly MaxFlow) re-solve admitted + volume from zero on the
-// residual plus their own allocation and export the solve as their program; the equal origin admits
+// again). The controllers (CentralizedTE, ShortestPaths Optimized) re-solve admitted + offer from zero on the
+// residual plus their own allocation and export the solve as their program; the equal source allocation admits
 // the largest total whose round-robin supplies are all carried. Pinned forwards its program the
-// same way (Lossless: the largest total in [admitted, admitted + volume]; Lossy: the round-robin
+// same way (Lossless: the largest total in [admitted, admitted + offer]; Lossy: the round-robin
 // or captured-weight increments of the injection, each head splitting its increment afresh).
 // T1 and T2 have no place (rejected, also for 0).
 // evaluate(offer, design_demand) is a full, independent computation and forwarding of the offer
@@ -317,7 +327,7 @@ struct PlacementResult {
 // fixed program's lossless bound; Lossy: the offer's injections) on the released view, starts a
 // new epoch like replace, and keeps the program, its plan and T1's holds; with black_holes, the nodes and
 // edges it excludes are black holes for that call. A Lossy replace, forward or evaluate needs a
-// finite offer; a Lossy +inf is CostOnly place's first-hop experiment only. remove() releases
+// finite offer; a Lossy +inf is ShortestPaths place's first-hop experiment only. remove() releases
 // every policy flow and hold, retires their ids, clears the program and starts a new epoch: the
 // period since construction, the last remove(), replace() or forward() over which requests and
 // flows accumulate. Destroying a policy without remove() leaves its records and holds in the
@@ -325,20 +335,20 @@ struct PlacementResult {
 //
 // Validation (std::invalid_argument, before anything binds), in this order: the endpoint sets
 // (non-empty, ids in range, disjoint), the ownership of the Eligibility, the program, the support,
-// the DagCache and the black holes by the ledger's graph, the configuration (FlowPolicyConfig's
+// the ShortestPathCache and the black holes by the ledger's graph, the configuration (FlowPolicyConfig's
 // order), then the roster and count rules (the pooled single-path rule; T2's several-sources
 // rule; the tunnel limit; a Pinned program's endpoints equal to the policy's). A call validates the
 // operation for the model (T1's and T2's place), an installed program (forward), the request ([0,
 // 2^62) units or +inf), a Lossy full offer's finiteness, the design demand (the model accepts one,
 // [0, 2^62) or +inf, T1 finite), a finite place after +inf in the epoch (rejected, also 0) and the black holes' graph
-// (forward) before any change. A solve of the flow core (Global, CostOnly MaxFlow, a MaxFlow flow) whose
+// (forward) before any change. A solve of the flow core (CentralizedTE, ShortestPaths Optimized, a Optimized flow) whose
 // network exceeds the core's int32 numbering throws std::invalid_argument, and the call changes
 // nothing: more than INT32_MAX - 2 nodes, or more than 2^30 - 1 edges, sources and destinations
 // together. A Lossy forwarding whose losses wait on each other in a cycle that alternates between
 // two states or does not settle within its round limit throws std::invalid_argument; a failed
 // check of an iterated forwarding throws std::runtime_error; neither publishes anything.
 //
-// Lifetime: the ledger, the Eligibility and the DagCache outlive the policy (the policy holds
+// Lifetime: the ledger, the Eligibility and the ShortestPathCache outlive the policy (the policy holds
 // pointers to them); a Pinned policy shares its program and black holes. The roster (the eligible
 // sources that statically reach an allowed destination, over allowed edges whatever their
 // capacity, the tunnel models' heads; Pinned: the program's roster heads that reach an allowed destination over
@@ -346,16 +356,16 @@ struct PlacementResult {
 class FlowPolicy {
 public:
   FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
-             FlowPolicyConfig config, const Eligibility* elig = nullptr, DagCache* cache = nullptr);
+             FlowPolicyConfig config, const Eligibility* eligibility = nullptr, ShortestPathCache* cache = nullptr);
   FlowPolicy(const FlowPolicy&) = delete;
   FlowPolicy& operator=(const FlowPolicy&) = delete;
   FlowPolicy(FlowPolicy&&) = delete;
   FlowPolicy& operator=(FlowPolicy&&) = delete;
   ~FlowPolicy();
 
-  // volume, offer and an inner design_demand: units, nullopt is +inf; an absent design_demand is
+  // offer and an inner design_demand: units, nullopt is +inf; an absent design_demand is
   // the offer.
-  PlacementResult place(std::optional<Amount> volume, const OutputOptions& outputs = {});
+  PlacementResult place(std::optional<Amount> offer, const OutputOptions& outputs = {});
   [[nodiscard]] PlacementResult evaluate(std::optional<Amount> offer,
                                          const std::optional<std::optional<Amount>>& design_demand = std::nullopt,
                                          const OutputOptions& outputs = {}) const;
@@ -368,7 +378,7 @@ public:
                           const OutputOptions& outputs = {});
   void remove();
   // The sum of delivered over this policy's live records.
-  [[nodiscard]] Amount placed_demand() const;
+  [[nodiscard]] Amount delivered() const;
   // This policy's live records as snapshots in FlowId order.
   [[nodiscard]] std::vector<FlowRecord> records() const;
   // One of this policy's live records; a FlowId of another ledger or policy, a retired or an
@@ -376,8 +386,8 @@ public:
   [[nodiscard]] FlowRecord record(const FlowId& flow_id) const;
   // The installed program: null before the epoch's first preparation and after remove().
   [[nodiscard]] std::shared_ptr<const ForwardingProgram> program() const noexcept;
-  // The configuration as validated at construction: a copy whose absent origin, selection and
-  // weights are resolved to the model's defaults (FlowPolicyConfig).
+  // The configuration as validated at construction: a copy whose absent source_allocation and
+  // weight_basis are resolved to the model's defaults (FlowPolicyConfig).
   [[nodiscard]] const FlowPolicyConfig& config() const noexcept;
 
 private:
@@ -385,7 +395,7 @@ private:
   // Construction inside another public call (an evaluator): a supplied frozen cache's hits are
   // recorded in that call's tally.
   FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
-             FlowPolicyConfig config, const Eligibility* elig, DagCache* cache, detail::FrozenTally& tally);
+             FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache, detail::FrozenCacheHitTally& tally);
   std::unique_ptr<detail::PolicyEngine> engine_;
 };
 

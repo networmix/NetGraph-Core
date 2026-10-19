@@ -23,24 +23,24 @@ namespace {
 // The unit-value step on the capacity argument whatever its shape (the shape step comes next):
 // every integer entry it holds must lie in [0, 2^62). A NumPy array is read flattened; nested
 // entries of a Python sequence and a non-integer non-sequence are left to the shape step.
-void check_unit_values(const py::handle& capacity_units) {
+void check_unit_values(const py::handle& edge_capacity_units) {
   const auto out_of_domain = [](const std::string& what, const std::string& value) {
     return py::value_error(what + " = " + value + " is outside the units domain [0, 2^62)");
   };
-  if (py::isinstance<py::array>(capacity_units)) {
-    py::object flat = capacity_units.attr("ravel")();
-    const auto w = wide_integers(flat, "capacity_units");
+  if (py::isinstance<py::array>(edge_capacity_units)) {
+    py::object flat = edge_capacity_units.attr("ravel")();
+    const auto w = wide_integers(flat, "edge_capacity_units");
     for (std::size_t i = 0; i < w.size(); ++i) {
-      if (!w.in(i, 0, kDomainLimit - 1)) throw out_of_domain("capacity_units[" + std::to_string(i) + "]", w.text(i));
+      if (!w.in(i, 0, kDomainLimit - 1)) throw out_of_domain("edge_capacity_units[" + std::to_string(i) + "]", w.text(i));
     }
     return;
   }
-  if (!not_a_sequence(capacity_units)) {
-    auto seq = py::reinterpret_borrow<py::sequence>(capacity_units);
+  if (!is_invalid_sequence(edge_capacity_units)) {
+    auto seq = py::reinterpret_borrow<py::sequence>(edge_capacity_units);
     for (std::size_t i = 0; i < seq.size(); ++i) {
       py::object item = seq[i];
       if (is_nested(item)) continue;
-      const std::string what = "capacity_units[" + std::to_string(i) + "]";
+      const std::string what = "edge_capacity_units[" + std::to_string(i) + "]";
       py::object idx = python_int(item, what);
       int overflow = 0;
       const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
@@ -48,46 +48,46 @@ void check_unit_values(const py::handle& capacity_units) {
     }
     return;
   }
-  if (!is_bool(capacity_units) && PyIndex_Check(capacity_units.ptr())) {
-    py::object idx = python_int(capacity_units, "capacity_units");
+  if (!is_bool(edge_capacity_units) && PyIndex_Check(edge_capacity_units.ptr())) {
+    py::object idx = python_int(edge_capacity_units, "edge_capacity_units");
     int overflow = 0;
     const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
-    if (overflow != 0 || v < 0 || v >= kDomainLimit) throw out_of_domain("capacity_units", std::string(py::str(idx)));
+    if (overflow != 0 || v < 0 || v >= kDomainLimit) throw out_of_domain("edge_capacity_units", std::string(py::str(idx)));
   }
 }
 
-std::shared_ptr<Graph> make_graph(const py::object& num_nodes, const py::object& src,
-                                  const py::object& dst, const py::object& capacity_units,
+std::shared_ptr<Graph> make_graph(const py::object& num_nodes, const py::object& source,
+                                  const py::object& destination, const py::object& edge_capacity_units,
                                   const py::object& cost, double resolution) {
   // The constructor's validation order: the resolution, the unit values, the shapes, zero or
   // negative costs, the remaining bounds (ids in range, then the sums); every value is read
   // without narrowing, and the messages are the C++ constructor's, which re-checks the same order.
   (void)resolution_exponent(resolution);
-  check_unit_values(capacity_units);
+  check_unit_values(edge_capacity_units);
   // The shapes: num_nodes, then every array argument rank 1 (in signature order), then equal
-  // lengths; no entry of src, dst or cost is read before the cost step.
+  // lengths; no entry of source, destination or cost is read before the cost step.
   const auto n = integer_value(num_nodes, 0, std::numeric_limits<std::int32_t>::max(), "num_nodes");
-  const std::size_t m = sequence_length(src, "src");
-  const std::size_t md = sequence_length(dst, "dst");
-  const std::size_t mu = sequence_length(capacity_units, "capacity_units");
-  const std::size_t mc = sequence_length(cost, "cost");
+  const std::size_t m = sequence_length(source, "edge_sources");
+  const std::size_t md = sequence_length(destination, "edge_destinations");
+  const std::size_t mu = sequence_length(edge_capacity_units, "edge_capacity_units");
+  const std::size_t mc = sequence_length(cost, "edge_costs");
   if (md != m || mu != m || mc != m) {
-    throw py::value_error("src, dst, capacity_units and cost must have the same length (got " +
+    throw py::value_error("edge_sources, edge_destinations, edge_capacity_units and edge_costs must have the same length (got " +
                           std::to_string(m) + ", " + std::to_string(md) + ", " + std::to_string(mu) + ", " +
                           std::to_string(mc) + ")");
   }
-  const auto cap = wide_integers(capacity_units, "capacity_units");  // rank 1, values checked
+  const auto cap = wide_integers(edge_capacity_units, "edge_capacity_units");  // rank 1, values checked
   if (m > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
     throw py::value_error("the number of edges exceeds INT32_MAX (array length)");
   }
-  const auto w = wide_integers(cost, "cost");
+  const auto w = wide_integers(cost, "edge_costs");
   for (std::size_t i = 0; i < m; ++i) {
     if (w.sign(i) < 0 || (w.sign(i) == 0 && w.value[i] < 1)) {
-      throw py::value_error("cost[" + std::to_string(i) + "] = " + w.text(i) + ": costs must be positive (cost >= 1)");
+      throw py::value_error("edge_costs[" + std::to_string(i) + "] = " + w.text(i) + ": costs must be positive (edge_costs >= 1)");
     }
   }
-  const auto s = wide_integers(src, "src");
-  const auto d = wide_integers(dst, "dst");
+  const auto s = wide_integers(source, "edge_sources");
+  const auto d = wide_integers(destination, "edge_destinations");
   for (std::size_t i = 0; i < m; ++i) {
     if (!s.in(i, 0, n - 1) || !d.in(i, 0, n - 1)) {
       throw py::value_error("edge " + std::to_string(i) + ": endpoint (" + s.text(i) + ", " + d.text(i) +
@@ -121,13 +121,13 @@ void register_graph(py::module_& m) {
   py::class_<Graph, std::shared_ptr<Graph>>(
       m, "Graph",
       "Immutable directed multigraph on integer units (parallel edges and self-loops allowed). Edges are\n"
-      "given in input order and numbered by sorting on (src, cost, dst), ties kept in input order: that\n"
-      "number is the public EdgeId. input_index()[e] is the input position of edge e. Per-edge values\n"
-      "use EdgeId order; in_adj_edge_index() instead lists EdgeIds in incoming-slot order. Costs are\n"
-      "positive integers; capacities are int64 units of the explicit resolution q (a power of two in\n"
-      "[2^-32, 2^32]); physical capacities enter through to_units.")
-      .def(py::init(&make_graph), py::arg("num_nodes"), py::arg("src"), py::arg("dst"),
-           py::arg("capacity_units"), py::arg("cost"), py::arg("resolution"),
+      "given in input order and numbered by sorting on (source, cost, destination), ties kept in input\n"
+      "order: that number is the public EdgeId. input_positions()[e] is the input position of edge e.\n"
+      "Per-edge values use EdgeId order; incoming_edges() instead lists EdgeIds in incoming-slot order.\n"
+      "Costs are positive integers; capacities are int64 units of the explicit resolution q (a power of\n"
+      "two in [2^-32, 2^32]); physical capacities enter through to_units.")
+      .def(py::init(&make_graph), py::arg("num_nodes"), py::arg("edge_sources"), py::arg("edge_destinations"),
+           py::arg("edge_capacity_units"), py::arg("edge_costs"), py::arg("resolution"),
            "Validates, in order, and reports the first defect as ValueError: the resolution (a power of\n"
            "two in [2^-32, 2^32]), the unit values (every capacity in [0, 2^62)), the array shapes,\n"
            "zero or negative costs, the remaining bounds (endpoints in range, then the\n"
@@ -137,56 +137,56 @@ void register_graph(py::module_& m) {
       .def("resolution", &Graph::resolution, "the resolution q (units of capacity)")
       .def("num_nodes", &Graph::num_nodes, "N: node ids are 0 .. N - 1")
       .def("num_edges", &Graph::num_edges, "E: EdgeIds are 0 .. E - 1")
-      .def("max_cost", &Graph::max_cost, "largest edge cost (0 without edges)")
-      .def("cost_gcd", &Graph::cost_gcd, "gcd of the edge costs (0 without edges)")
+      .def("max_edge_cost", &Graph::max_edge_cost, "largest edge cost (0 without edges)")
+      .def("edge_cost_gcd", &Graph::edge_cost_gcd, "gcd of the edge costs (0 without edges)")
       .def(
-          "capacity_units", [](const py::object& self) {
+          "edge_capacity_units", [](const py::object& self) {
             const auto& g = self.cast<const Graph&>();
-            return readonly_view(g.capacity_units(), self);
+            return readonly_view(g.edge_capacity_units(), self);
           },
           "int64[E] capacities in units, id order (read-only view)")
       .def(
-          "cost", [](const py::object& self) {
+          "edge_costs", [](const py::object& self) {
             const auto& g = self.cast<const Graph&>();
-            return readonly_view(g.cost(), self);
+            return readonly_view(g.edge_costs(), self);
           },
           "int64[E] costs, id order (read-only view)")
       .def(
-          "edge_src", [](const py::object& self) {
+          "edge_sources", [](const py::object& self) {
             const auto& g = self.cast<const Graph&>();
-            return readonly_view(g.edge_src(), self);
+            return readonly_view(g.edge_sources(), self);
           },
           "int32[E] source node per edge (read-only view)")
       .def(
-          "edge_dst", [](const py::object& self) {
+          "edge_destinations", [](const py::object& self) {
             const auto& g = self.cast<const Graph&>();
-            return readonly_view(g.edge_dst(), self);
+            return readonly_view(g.edge_destinations(), self);
           },
           "int32[E] destination node per edge (read-only view)")
       .def(
-          "input_index", [](const py::object& self) {
+          "input_positions", [](const py::object& self) {
             const auto& g = self.cast<const Graph&>();
-            return readonly_view(g.input_index(), self);
+            return readonly_view(g.input_positions(), self);
           },
           "int32[E]: EdgeId -> input position (read-only view); build the inverse yourself if needed")
       .def(
-          "row_offsets", [](const py::object& self) {
+          "outgoing_offsets", [](const py::object& self) {
             const auto& g = self.cast<const Graph&>();
-            return readonly_view(g.row_offsets(), self);
+            return readonly_view(g.outgoing_offsets(), self);
           },
-          "int32[N + 1]: the out-edges of u are the ids [row_offsets[u], row_offsets[u + 1])")
+          "int32[N + 1]: the out-edges of u are the ids [outgoing_offsets()[u], outgoing_offsets()[u + 1])")
       .def(
-          "in_row_offsets", [](const py::object& self) {
+          "incoming_offsets", [](const py::object& self) {
             const auto& g = self.cast<const Graph&>();
-            return readonly_view(g.in_row_offsets(), self);
+            return readonly_view(g.incoming_offsets(), self);
           },
-          "int32[N + 1]: the in-edges of v are in_adj_edge_index()[in_row_offsets[v] : in_row_offsets[v + 1]]")
+          "int32[N + 1]: the in-edges of v are incoming_edges()[incoming_offsets()[v] : incoming_offsets()[v + 1]]")
       .def(
-          "in_adj_edge_index", [](const py::object& self) {
+          "incoming_edges", [](const py::object& self) {
             const auto& g = self.cast<const Graph&>();
-            return readonly_view(g.in_adj_edge_index(), self);
+            return readonly_view(g.incoming_edges(), self);
           },
-          "int32[E]: the in-edges of v in (cost, src, input) order, as EdgeIds")
+          "int32[E]: the in-edges of v in (cost, source, input) order, as EdgeIds")
       .def(
           "eligibility",
           [](const Graph& g, const py::object& excluded_nodes, const py::object& excluded_edges) {

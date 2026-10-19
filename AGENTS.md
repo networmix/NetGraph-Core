@@ -13,7 +13,7 @@
 
 Confirm defects with a reproducer. Max-flow tests need feasibility, conservation
 and optimality/cut checks with nonuniform costs, excluded nodes and edges, and
-cost ceilings (Absolute, Stretch).
+cost ceilings (AbsoluteCost, CostStretch).
 A binding signature or docstring change needs the regenerated type stub
 (`bash dev/stubs/run.sh generate`; `make stubs-check` checks drift, package
 contents and typed clients). Performance claims need correctness checks and

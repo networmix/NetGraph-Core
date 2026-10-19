@@ -4,7 +4,7 @@
 // published immutable graph and on its copy, each thread with its own options, compared with a
 // serial reference; every array of the graph is unchanged after. One batch path builds its own
 // reverse support in its workers (no prepopulated frozen cache), so the reverse-source copy is read
-// by worker threads. One PredDAG and one Path are read by every thread. The tests' own threads
+// by worker threads. One PredecessorDAG and one Path are read by every thread. The tests' own threads
 // start their work together once all of them run (a start latch), so the calls overlap as far as
 // the scheduler allows; ThreadSanitizer reports a race between unordered accesses whether or not
 // they happened to overlap in time.
@@ -22,10 +22,10 @@
 
 #include "graph_inputs.hpp"
 #include "graph_reference.hpp"
-#include "netgraph/core/detail/pred_dag_builder.hpp"
+#include "netgraph/core/detail/route_builders.hpp"
 #include "netgraph/core/evaluators.hpp"
 #include "netgraph/core/graph.hpp"
-#include "netgraph/core/pred_dag.hpp"
+#include "netgraph/core/route_structures.hpp"
 #include "netgraph/core/search.hpp"
 #include "test_utils.hpp"
 
@@ -35,8 +35,8 @@ using namespace netgraph::core::test;
 namespace {
 
 // m random edges of 1 to 4 units (no zero capacity).
-Input random_input(std::int32_t n, std::size_t m, Cost max_cost, std::uint64_t seed) {
-  return test::random_input("", n, m, max_cost, seed, 1, 4);
+Input random_input(std::int32_t n, std::size_t m, Cost max_edge_cost, std::uint64_t seed) {
+  return test::random_input("", n, m, max_edge_cost, seed, 1, 4);
 }
 
 } // namespace
@@ -63,8 +63,8 @@ TEST(GraphConcurrency, IndependentConstructionsAtTheSameTime) {
       const auto& in = inputs[static_cast<std::size_t>(t)];
       start.arrive_and_wait();
       const Graph g = build(in);
-      got[static_cast<std::size_t>(t)].assign(g.input_index().begin(), g.input_index().end());
-      got_rev[static_cast<std::size_t>(t)].assign(g.in_adj_edge_index().begin(), g.in_adj_edge_index().end());
+      got[static_cast<std::size_t>(t)].assign(g.input_positions().begin(), g.input_positions().end());
+      got_rev[static_cast<std::size_t>(t)].assign(g.incoming_edges().begin(), g.incoming_edges().end());
       uids[static_cast<std::size_t>(t)] = g.uid();
     });
   }
@@ -77,8 +77,8 @@ TEST(GraphConcurrency, IndependentConstructionsAtTheSameTime) {
   for (int t = 0; t < kThreads; ++t) {
     const auto& in = inputs[static_cast<std::size_t>(t)];
     const auto r = reference_graph(in.n, in.src, in.dst, in.cap, in.cost, 1.0);
-    EXPECT_EQ(got[static_cast<std::size_t>(t)], r.input_index) << t;
-    EXPECT_EQ(got_rev[static_cast<std::size_t>(t)], r.in_adj_edge_index) << t;
+    EXPECT_EQ(got[static_cast<std::size_t>(t)], r.input_positions) << t;
+    EXPECT_EQ(got_rev[static_cast<std::size_t>(t)], r.incoming_edges) << t;
   }
 }
 
@@ -104,7 +104,7 @@ TEST(GraphConcurrency, SharedGraphSearchesBothDirectionsBothQueues) {
   auto run = [](const Job& j) {
     const std::vector<NodeId> roots {j.root};
     // A full search keeping every tight edge (multipath, every parallel member).
-    const SpfOptions o(j.direction, PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Capacity));
+    const SpfOptions o(j.direction);
     return spf(*j.graph, roots, o, j.queue);
   };
   std::vector<SpfResult> serial;
@@ -131,7 +131,7 @@ TEST(GraphConcurrency, SharedGraphSearchesBothDirectionsBothQueues) {
   EXPECT_TRUE(arrays_of(copy) == before);
 }
 
-// The immutable route values shared by threads: every thread reads every member of one PredDAG
+// The immutable route values shared by threads: every thread reads every member of one PredecessorDAG
 // (its sparse storage and its ascending edge list too, through the internal read access) and of
 // one Path (its DAG included) 20 times, and compares each read with the values read before the
 // threads started (the DAG also with a copy taken then). ThreadSanitizer reports any write racing
@@ -140,12 +140,12 @@ TEST(GraphConcurrency, SharedRouteValuesAreReadByEveryThread) {
   const auto in = random_input(200, 2000, 9, 7);
   const Graph g = build(in);
   const std::vector<NodeId> roots {0};
-  const auto search = spf(g, roots, SpfOptions(Direction::Forward, PathSelection(EdgeTieBreak::Deterministic, EdgePriority::Capacity)));
-  const PredDAG& dag = search.dag;
-  const PredDAG dag_before = dag;
+  const auto search = spf(g, roots, SpfOptions(Direction::Forward));
+  const PredecessorDAG& dag = search.dag;
+  const PredecessorDAG dag_before = dag;
   ASSERT_FALSE(dag.via_edges().empty());
   // A walk of single-member hops from the root: the first entry of each node, followed back.
-  NodeId v = static_cast<NodeId>(g.edge_dst()[static_cast<std::size_t>(dag.via_edges().back())]);
+  NodeId v = static_cast<NodeId>(g.edge_destinations()[static_cast<std::size_t>(dag.via_edges().back())]);
   std::vector<std::vector<EdgeId>> hops;
   const auto offsets = dag.parent_offsets();
   while (v != 0) {
@@ -155,7 +155,7 @@ TEST(GraphConcurrency, SharedRouteValuesAreReadByEveryThread) {
   }
   ASSERT_FALSE(hops.empty());
   const Path path(g, hops);
-  using Builder = detail::PredDAGBuilder;
+  using Builder = detail::PredecessorDAGBuilder;
   struct Read {
     std::uint64_t graph_uid;
     std::vector<std::int32_t> offsets;
@@ -173,7 +173,7 @@ TEST(GraphConcurrency, SharedRouteValuesAreReadByEveryThread) {
     bool path_dag_equal;
     bool operator==(const Read&) const = default;
   };
-  const PredDAG path_dag = path.to_dag();
+  const PredecessorDAG path_dag = path.to_dag();
   auto read = [&] {
     const auto nodes = Builder::member_nodes(dag);
     const auto node_offsets = Builder::member_offsets(dag);
@@ -187,8 +187,8 @@ TEST(GraphConcurrency, SharedRouteValuesAreReadByEveryThread) {
                  {ascending.begin(), ascending.end()},
                  path.graph_uid(),
                  path.hops(),
-                 path.src(),
-                 path.dst(),
+                 path.source(),
+                 path.destination(),
                  path.cost(),
                  dag == dag_before,
                  path.to_dag() == path_dag};
@@ -212,30 +212,30 @@ TEST(GraphConcurrency, SharedRouteValuesAreReadByEveryThread) {
   for (int t = 0; t < kThreads; ++t) EXPECT_EQ(wrong[static_cast<std::size_t>(t)], 0) << t;
 }
 
-// Workers of batch_capacity without a supplied cache each build their own reverse static support
-// (the CostOnly policy's DAG toward the destinations) on the shared graph.
+// Workers of evaluate_pairs without a supplied cache each build their own reverse static support
+// (the ShortestPaths policy's DAG toward the destinations) on the shared graph.
 TEST(GraphConcurrency, BatchWorkersBuildTheirOwnReverseSupport) {
   const auto in = random_input(400, 4000, 9, 5);
   const Graph g = build(in);
   const auto before = arrays_of(g);
   std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs;
   for (NodeId s = 0; s < 32; ++s) pairs.push_back({{s}, {static_cast<NodeId>(399 - s)}});
-  // CostOnly routing: each policy's DAG is the reverse static support toward its destination.
+  // ShortestPaths routing: each policy's DAG is the reverse static support toward its destination.
   // Every output is requested, so the per-edge flows and the residuals are compared too.
-  const QueryOptions opts {cost_only_config(), nullptr, nullptr, OutputOptions {true, true, true}};
-  const auto serial = batch_capacity(g, pairs, opts, {}, 1);
-  const auto parallel = batch_capacity(g, pairs, opts, {}, 4);
+  const EvaluationOptions opts {cost_only_config(), nullptr, nullptr, OutputOptions {true, true, true}};
+  const auto serial = evaluate_pairs(g, pairs, opts, {}, 1);
+  const auto parallel = evaluate_pairs(g, pairs, opts, {}, 4);
   ASSERT_EQ(serial.size(), pairs.size());
   ASSERT_EQ(parallel.size(), pairs.size());
   int placing = 0;
   for (std::size_t i = 0; i < serial.size(); ++i) {
     ASSERT_TRUE(serial[i].edge_flows.has_value() && parallel[i].edge_flows.has_value()) << i;
     ASSERT_TRUE(serial[i].residual.has_value() && parallel[i].residual.has_value()) << i;
-    EXPECT_EQ(serial[i].placed, parallel[i].placed) << i;
+    EXPECT_EQ(serial[i].call_delivered, parallel[i].call_delivered) << i;
     EXPECT_EQ(serial[i].edge_flows, parallel[i].edge_flows) << i;
     EXPECT_EQ(serial[i].residual, parallel[i].residual) << i;
-    EXPECT_EQ(serial[i].bottleneck, parallel[i].bottleneck) << i;
-    placing += serial[i].placed > 0 ? 1 : 0;
+    EXPECT_EQ(serial[i].saturated_boundary_edges, parallel[i].saturated_boundary_edges) << i;
+    placing += serial[i].call_delivered > 0 ? 1 : 0;
   }
   EXPECT_GT(placing, 16);  // not vacuous: most pairs place something
   EXPECT_TRUE(arrays_of(g) == before);

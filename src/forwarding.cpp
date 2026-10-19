@@ -9,7 +9,7 @@
   split route's member), and per split route its routers. Each occurrence belongs to one source
   and one entry, so the loss rule at a link is two levels of highest averages.
 
-  The evaluation (A+, 9.2): the no-drop loads U0 first; serial normalization marks the second link
+  The evaluation (A+): the no-drop loads U0 first; serial normalization marks the second link
   of every transparent pair (equal free capacity, every occurrence of the first continuing on the
   second and every occurrence of the second coming from the first, with nothing injected, absorbed,
   merged or split between them) as a pass-through; every other link with U0 > V is a barrier. The
@@ -18,7 +18,7 @@
   previous one). Tarjan's algorithm groups them into strongly connected components (SCCs), which
   run in dependency order, the smallest key first among the ready ones ((0, smallest barrier
   EdgeId) for a group with a barrier, else (1, its first event)). A cyclic group of b barriers is
-  iterated from zero carried (9.4): one round replays the group's private forwarding from the
+  iterated from zero carried: one round replays the group's private forwarding from the
   previous carried state x, then computes every new carry with the loss rule into a separate state;
   equal states solve it, a state equal to the one two rounds before raises the period-two error, and
   64 b rounds without either raise the round-limit error. Once every group is solved, a call that
@@ -39,7 +39,7 @@
 #include <utility>
 
 #include "netgraph/core/detail/int128.hpp"
-#include "netgraph/core/detail/pred_dag_builder.hpp"
+#include "netgraph/core/detail/route_builders.hpp"
 
 namespace netgraph::core::detail {
 
@@ -59,17 +59,17 @@ bool has_black_holes(const Eligibility* dark) noexcept { return dark != nullptr 
 // The roster slots that reach an allowed destination over their basis under the mask: one
 // reverse search from the allowed destinations over every allowed edge (topology), or per slot a
 // forward search over its own allowed basis edges.
-std::vector<std::uint8_t> replay_roster(const Graph& g, const ProgramData& p, const std::vector<std::uint8_t>& edge_ok,
-                                        const std::vector<std::uint8_t>& node_ok,
+std::vector<std::uint8_t> replay_roster(const Graph& graph, const ProgramData& p, const std::vector<std::uint8_t>& edge_allowed,
+                                        const std::vector<std::uint8_t>& node_allowed,
                                         const std::vector<std::uint8_t>& is_dst) {
-  const std::size_t k = p.roster.size();
+  const std::size_t k = p.reachable_sources.size();
   std::vector<std::uint8_t> keep(k, 0);
-  const auto edge_src = g.edge_src();
-  const auto edge_dst = g.edge_dst();
-  if (p.topology) {
-    const auto in_row = g.in_row_offsets();
-    const auto in_adj = g.in_adj_edge_index();
-    std::vector<std::uint8_t> seen(static_cast<std::size_t>(g.num_nodes()), 0);
+  const auto edge_sources = graph.edge_sources();
+  const auto edge_destinations = graph.edge_destinations();
+  if (p.uses_topology_basis) {
+    const auto in_row = graph.incoming_offsets();
+    const auto in_adj = graph.incoming_edges();
+    std::vector<std::uint8_t> seen(static_cast<std::size_t>(graph.num_nodes()), 0);
     std::vector<NodeId> stack;
     for (std::size_t v = 0; v < is_dst.size(); ++v) {
       if (is_dst[v] != 0) {
@@ -82,8 +82,8 @@ std::vector<std::uint8_t> replay_roster(const Graph& g, const ProgramData& p, co
       stack.pop_back();
       for (auto i = in_row[v]; i < in_row[v + 1]; ++i) {
         const auto e = static_cast<std::size_t>(in_adj[static_cast<std::size_t>(i)]);
-        if (edge_ok[e] == 0) continue;
-        const auto u = static_cast<std::size_t>(edge_src[e]);
+        if (edge_allowed[e] == 0) continue;
+        const auto u = static_cast<std::size_t>(edge_sources[e]);
         // A path stops at the first destination: a destination is not passed through.
         if (seen[u] != 0 || is_dst[u] != 0) continue;
         seen[u] = 1;
@@ -91,19 +91,19 @@ std::vector<std::uint8_t> replay_roster(const Graph& g, const ProgramData& p, co
       }
     }
     for (std::size_t s = 0; s < k; ++s) {
-      const auto h = static_cast<std::size_t>(p.roster[s]);
-      keep[s] = node_ok[h] != 0 && seen[h] != 0 ? 1 : 0;
+      const auto h = static_cast<std::size_t>(p.reachable_sources[s]);
+      keep[s] = node_allowed[h] != 0 && seen[h] != 0 ? 1 : 0;
     }
     return keep;
   }
-  std::vector<std::uint8_t> seen(static_cast<std::size_t>(g.num_nodes()), 0);
+  std::vector<std::uint8_t> seen(static_cast<std::size_t>(graph.num_nodes()), 0);
   std::vector<NodeId> touched;
   std::vector<NodeId> stack;
   std::vector<std::pair<std::span<const EdgeId>, bool>> parts;
-  const auto row = g.row_offsets();
+  const auto row = graph.outgoing_offsets();
   for (std::size_t s = 0; s < k; ++s) {
-    const NodeId h = p.roster[s];
-    if (node_ok[static_cast<std::size_t>(h)] == 0) continue;
+    const NodeId h = p.reachable_sources[s];
+    if (node_allowed[static_cast<std::size_t>(h)] == 0) continue;
     parts.clear();
     p.basis_parts(s, parts);
     // A forward search over the slot's allowed basis edges (an ascending part's edges of one tail
@@ -114,8 +114,8 @@ std::vector<std::uint8_t> replay_roster(const Graph& g, const ProgramData& p, co
     bool reached = false;
     auto visit = [&](EdgeId x) {
       const auto e = static_cast<std::size_t>(x);
-      if (edge_ok[e] == 0) return;
-      const auto v = static_cast<std::size_t>(edge_dst[e]);
+      if (edge_allowed[e] == 0) return;
+      const auto v = static_cast<std::size_t>(edge_destinations[e]);
       if (is_dst[v] != 0) {
         reached = true;
         return;
@@ -146,39 +146,39 @@ std::vector<std::uint8_t> replay_roster(const Graph& g, const ProgramData& p, co
   return keep;
 }
 
-// An edge set under the mask, pruned to the walks from `src` to the allowed destinations, as a
-// record bundle with its cost (an empty DAG and kUnreachable when nothing remains).
-std::pair<std::shared_ptr<const PredDAG>, Cost> masked_route(const Graph& g, std::span<const EdgeId> edges, NodeId src,
-                                                             std::span<const NodeId> dests, const Eligibility* elig) {
-  const PredDAG dag = PredDAGBuilder::of_edges(g, edges);
-  auto kept = prune(g, dag, src, dests, elig);
-  if (kept.empty()) return {std::make_shared<const PredDAG>(PredDAGBuilder::empty(g)), kUnreachable};
-  auto out = std::make_shared<const PredDAG>(PredDAGBuilder::of_edges(g, kept));
-  return {out, route_cost(g, *out, src, dests)};
+// An edge set under the mask, pruned to the walks from `source` to the allowed destinations, as a
+// record route with its cost (an empty DAG and kUnreachable when nothing remains).
+std::pair<std::shared_ptr<const PredecessorDAG>, Cost> masked_route(const Graph& graph, std::span<const EdgeId> edges, NodeId source,
+                                                             std::span<const NodeId> destinations, const Eligibility* eligibility) {
+  const PredecessorDAG dag = PredecessorDAGBuilder::of_edges(graph, edges);
+  auto kept = prune(graph, dag, source, destinations, eligibility);
+  if (kept.empty()) return {std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::empty(graph)), kUnreachable};
+  auto out = std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::of_edges(graph, kept));
+  return {out, min_route_cost(graph, *out, source, destinations)};
 }
 
 void finish_view(ForwardingView& v) {
   const ProgramData& p = *v.data;
   // The surviving entries per view head, ascending index.
-  v.head_begin_.assign(v.slots_.size() + 1, 0);
-  v.head_entries_.clear();
-  for (std::size_t h = 0; h < v.slots_.size(); ++h) {
-    for (std::int32_t e : p.entries_of(static_cast<std::size_t>(v.slots_[h]))) {
-      if (v.status_[static_cast<std::size_t>(e)] != TunnelStatus::Failed) v.head_entries_.push_back(e);
+  v.source_entry_offsets_.assign(v.source_indices_.size() + 1, 0);
+  v.source_entry_positions_.clear();
+  for (std::size_t h = 0; h < v.source_indices_.size(); ++h) {
+    for (std::int32_t e : p.entries_for_source(static_cast<std::size_t>(v.source_indices_[h]))) {
+      if (v.status_[static_cast<std::size_t>(e)] != TunnelStatus::Failed) v.source_entry_positions_.push_back(e);
     }
-    v.head_begin_[h + 1] = static_cast<std::int32_t>(v.head_entries_.size());
+    v.source_entry_offsets_[h + 1] = static_cast<std::int32_t>(v.source_entry_positions_.size());
   }
   // Black holes: the black-holed heads, and every up tunnel whose path reaches one.
-  v.dark_head_.clear();
-  if (v.dark != nullptr) {
-    v.dark_head_.assign(v.slots_.size(), 0);
-    for (std::size_t h = 0; h < v.slots_.size(); ++h) v.dark_head_[h] = v.dark->node_ok(v.head(h)) ? 0 : 1;
+  v.blackholed_sources_.clear();
+  if (v.black_holes != nullptr) {
+    v.blackholed_sources_.assign(v.source_indices_.size(), 0);
+    for (std::size_t h = 0; h < v.source_indices_.size(); ++h) v.blackholed_sources_[h] = v.black_holes->allows_node(v.source(h)) ? 0 : 1;
     for (std::size_t t = 0; t < p.tunnels.size(); ++t) {
-      const auto e = static_cast<std::size_t>(p.tunnel_entry[t]);
+      const auto e = static_cast<std::size_t>(p.tunnel_entry_positions[t]);
       if (v.status_[e] != TunnelStatus::Up) continue;
       // An edge is black-holed when the Eligibility disallows it (itself or an endpoint).
       for (EdgeId x : path_of(p.tunnels[t])) {
-        if (!v.dark->edge_ok(x)) {
+        if (!v.black_holes->allows_edge(x)) {
           v.status_[e] = TunnelStatus::Blackholed;
           break;
         }
@@ -193,66 +193,66 @@ void materialize(ForwardingView& v) {
   if (!v.borrowed) return;
   const ProgramData& p = *v.data;
   const std::size_t n = p.entries.size();
-  v.slots_.resize(p.roster.size());
-  for (std::size_t s = 0; s < p.roster.size(); ++s) v.slots_[s] = static_cast<std::int32_t>(s);
-  v.weights_ = p.head_weight;
+  v.source_indices_.resize(p.reachable_sources.size());
+  for (std::size_t s = 0; s < p.reachable_sources.size(); ++s) v.source_indices_[s] = static_cast<std::int32_t>(s);
+  v.source_weights_ = p.source_weight_values;
   v.status_.resize(n);
-  v.bundles_.resize(n);
-  v.costs_.resize(n);
-  v.root_of_.resize(n);
+  v.routes_.resize(n);
+  v.min_route_costs_.resize(n);
+  v.context_source_indices_.resize(n);
   for (std::size_t e = 0; e < n; ++e) {
     v.status_[e] = v.status(e);
-    v.bundles_[e] = p.entries[e].bundle;
-    v.costs_[e] = p.entries[e].cost;
-    v.root_of_[e] = v.root_of(e);
+    v.routes_[e] = p.entries[e].route;
+    v.min_route_costs_[e] = p.entries[e].min_route_cost;
+    v.context_source_indices_[e] = v.context_source_index(e);
   }
-  v.plans_.clear();
-  for (const auto& c : p.contexts) v.plans_.push_back(c.plan);
+  v.prepared_routes_.clear();
+  for (const auto& c : p.split_contexts) v.prepared_routes_.push_back(c.prepared_route);
   v.borrowed = false;
 }
 
 } // namespace
 
-ForwardingView make_view(const Graph& g, std::shared_ptr<const ForwardingProgram> program, const Eligibility* mask,
-                         std::span<const NodeId> dests, const Eligibility* dark, bool records) {
+ForwardingView make_forwarding_view(const Graph& graph, std::shared_ptr<const ForwardingProgram> program, const Eligibility* mask,
+                         std::span<const NodeId> destinations, const Eligibility* dark, bool records) {
   ForwardingView v;
   v.data = &ProgramAccess::data(*program);
   v.program = std::move(program);
-  v.dark = has_black_holes(dark) ? dark : nullptr;
+  v.black_holes = has_black_holes(dark) ? dark : nullptr;
   const ProgramData& p = *v.data;
   const std::size_t n = p.entries.size();
-  v.pooled = p.pooled;
+  v.pooled = p.pools_source_inflows;
   if (mask == nullptr || mask->uid() == 0) {
     // The program's own state: its roster, its routes and plans, borrowed from the program (a
-    // tunnel's record bundle is made here; black holes change the statuses).
+    // tunnel's record route is made here; black holes change the statuses).
     v.borrowed = true;
-    if (v.dark == nullptr && !(records && !p.tunnels.empty())) return v;
+    if (v.black_holes == nullptr && !(records && !p.tunnels.empty())) return v;
     materialize(v);
     for (std::size_t e = 0; records && e < n; ++e) {
-      if (p.entries[e].tunnel < 0) continue;
-      const auto path = path_of(p.tunnels[static_cast<std::size_t>(p.entries[e].tunnel)]);
-      v.bundles_[e] = std::make_shared<const PredDAG>(path.empty() ? PredDAGBuilder::empty(g) : PredDAGBuilder::of_edges(g, path));
+      if (p.entries[e].tunnel_position < 0) continue;
+      const auto path = path_of(p.tunnels[static_cast<std::size_t>(p.entries[e].tunnel_position)]);
+      v.routes_[e] = std::make_shared<const PredecessorDAG>(path.empty() ? PredecessorDAGBuilder::empty(graph) : PredecessorDAGBuilder::of_edges(graph, path));
     }
     finish_view(v);
     return v;
   }
   v.status_.assign(n, TunnelStatus::Up);
-  v.bundles_.resize(n);
-  v.costs_.assign(n, kUnreachable);
-  v.root_of_.assign(n, -1);
-  // The replay (8.4): the mask and the program's own exclusions together.
-  const auto num_nodes = static_cast<std::size_t>(g.num_nodes());
-  const auto num_edges = static_cast<std::size_t>(g.num_edges());
-  std::vector<std::uint8_t> node_ok(num_nodes, 0);
-  std::vector<std::uint8_t> edge_ok(num_edges, 0);
-  for (std::size_t x = 0; x < num_nodes; ++x) node_ok[x] = mask->node_ok(static_cast<NodeId>(x)) ? 1 : 0;
-  for (NodeId x : p.excluded_nodes) node_ok[static_cast<std::size_t>(x)] = 0;
-  for (std::size_t e = 0; e < num_edges; ++e) edge_ok[e] = mask->edge_ok(static_cast<EdgeId>(e)) ? 1 : 0;
-  for (EdgeId e : p.excluded_edges) edge_ok[static_cast<std::size_t>(e)] = 0;
+  v.routes_.resize(n);
+  v.min_route_costs_.assign(n, kUnreachable);
+  v.context_source_indices_.assign(n, -1);
+  // The replay: the mask and the program's own exclusions together.
+  const auto num_nodes = static_cast<std::size_t>(graph.num_nodes());
+  const auto num_edges = static_cast<std::size_t>(graph.num_edges());
+  std::vector<std::uint8_t> node_allowed(num_nodes, 0);
+  std::vector<std::uint8_t> edge_allowed(num_edges, 0);
+  for (std::size_t x = 0; x < num_nodes; ++x) node_allowed[x] = mask->allows_node(static_cast<NodeId>(x)) ? 1 : 0;
+  for (NodeId x : p.excluded_nodes) node_allowed[static_cast<std::size_t>(x)] = 0;
+  for (std::size_t e = 0; e < num_edges; ++e) edge_allowed[e] = mask->allows_edge(static_cast<EdgeId>(e)) ? 1 : 0;
+  for (EdgeId e : p.excluded_edges) edge_allowed[static_cast<std::size_t>(e)] = 0;
   std::vector<NodeId> live_dests;
   std::vector<std::uint8_t> is_dst(num_nodes, 0);
-  for (NodeId d : dests) {
-    if (node_ok[static_cast<std::size_t>(d)] == 0) continue;
+  for (NodeId d : destinations) {
+    if (node_allowed[static_cast<std::size_t>(d)] == 0) continue;
     live_dests.push_back(d);
     is_dst[static_cast<std::size_t>(d)] = 1;
   }
@@ -260,65 +260,65 @@ ForwardingView make_view(const Graph& g, std::shared_ptr<const ForwardingProgram
   std::optional<Eligibility> both;
   const Eligibility* replay = mask;
   if (!p.excluded_nodes.empty() || !p.excluded_edges.empty()) {
-    both = Eligibility::intersect(*mask, g.eligibility(p.excluded_nodes, p.excluded_edges));
+    both = Eligibility::intersect(*mask, graph.eligibility(p.excluded_nodes, p.excluded_edges));
     replay = &*both;
   }
-  const auto keep = replay_roster(g, p, edge_ok, node_ok, is_dst);
-  for (std::size_t s = 0; s < p.roster.size(); ++s) {
+  const auto keep = replay_roster(graph, p, edge_allowed, node_allowed, is_dst);
+  for (std::size_t s = 0; s < p.reachable_sources.size(); ++s) {
     if (keep[s] == 0) continue;
-    v.slots_.push_back(static_cast<std::int32_t>(s));
-    if (!p.head_weight.empty()) v.weights_.push_back(p.head_weight[s]);
+    v.source_indices_.push_back(static_cast<std::int32_t>(s));
+    if (!p.source_weight_values.empty()) v.source_weights_.push_back(p.source_weight_values[s]);
   }
-  std::vector<std::int32_t> view_head(p.roster.size(), -1);
-  for (std::size_t h = 0; h < v.slots_.size(); ++h) view_head[static_cast<std::size_t>(v.slots_[h])] = static_cast<std::int32_t>(h);
+  std::vector<std::int32_t> view_head(p.reachable_sources.size(), -1);
+  for (std::size_t h = 0; h < v.source_indices_.size(); ++h) view_head[static_cast<std::size_t>(v.source_indices_[h])] = static_cast<std::int32_t>(h);
   // Entries: a tunnel fails when it touches an excluded node or edge (an edge is excluded with its
   // endpoints); a split route keeps its allowed edges on the walks from its head to an allowed
   // destination and fails when none remains. Every entry of a head outside the replay roster fails.
   // A tunnel that setup left down stays down with its status (replay never brings one up).
   for (std::size_t e = 0; e < n; ++e) {
     const auto& entry = p.entries[e];
-    bool failed = view_head[static_cast<std::size_t>(entry.slot)] < 0;
-    if (entry.tunnel >= 0) {
-      const auto& t = p.tunnels[static_cast<std::size_t>(entry.tunnel)];
+    bool failed = view_head[static_cast<std::size_t>(entry.roster_index)] < 0;
+    if (entry.tunnel_position >= 0) {
+      const auto& t = p.tunnels[static_cast<std::size_t>(entry.tunnel_position)];
       if (t.status != TunnelStatus::Up) {
         v.status_[e] = t.status;
-        if (records) v.bundles_[e] = std::make_shared<const PredDAG>(PredDAGBuilder::empty(g));
+        if (records) v.routes_[e] = std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::empty(graph));
         continue;
       }
-      for (EdgeId x : path_of(t)) failed = failed || edge_ok[static_cast<std::size_t>(x)] == 0;
+      for (EdgeId x : path_of(t)) failed = failed || edge_allowed[static_cast<std::size_t>(x)] == 0;
       if (!failed) {
-        if (records) v.bundles_[e] = std::make_shared<const PredDAG>(PredDAGBuilder::of_edges(g, path_of(t)));
-        v.costs_[e] = entry.cost;
+        if (records) v.routes_[e] = std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::of_edges(graph, path_of(t)));
+        v.min_route_costs_[e] = entry.min_route_cost;
       }
     } else if (!failed) {
-      // A split route's route: its bundle (its edges before weight pruning).
-      const auto edges = PredDAGBuilder::ascending(*entry.bundle);
-      auto [bundle, cost] = masked_route(g, edges, entry.head, live_dests, replay);
+      // A split route's route under the mask (its edges before weight pruning).
+      const auto edges = PredecessorDAGBuilder::ascending(*entry.route);
+      auto [route, cost] = masked_route(graph, edges, entry.head, live_dests, replay);
       failed = cost == kUnreachable;
-      v.bundles_[e] = std::move(bundle);
-      v.costs_[e] = cost;
+      v.routes_[e] = std::move(route);
+      v.min_route_costs_[e] = cost;
     }
     if (failed) {
       v.status_[e] = TunnelStatus::Failed;
-      v.bundles_[e] = records ? std::make_shared<const PredDAG>(PredDAGBuilder::empty(g)) : nullptr;
-      v.costs_[e] = kUnreachable;
+      v.routes_[e] = records ? std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::empty(graph)) : nullptr;
+      v.min_route_costs_[e] = kUnreachable;
     }
   }
   // The split contexts restricted to the mask, rooted at their surviving entries' heads.
-  v.plans_.reserve(p.contexts.size());
+  v.prepared_routes_.reserve(p.split_contexts.size());
   std::vector<NodeId> roots;
   std::vector<std::int32_t> entries;
-  for (const auto& c : p.contexts) {
+  for (const auto& c : p.split_contexts) {
     roots.clear();
     entries.clear();
-    for (std::size_t r = 0; r < c.root_entry.size(); ++r) {
-      const auto e = static_cast<std::size_t>(c.root_entry[r]);
+    for (std::size_t r = 0; r < c.source_entry_positions.size(); ++r) {
+      const auto e = static_cast<std::size_t>(c.source_entry_positions[r]);
       if (v.status_[e] == TunnelStatus::Failed) continue;
-      roots.push_back(c.plan->roots[r]);
-      entries.push_back(c.root_entry[r]);
+      roots.push_back(c.prepared_route->sources[r]);
+      entries.push_back(c.source_entry_positions[r]);
     }
-    v.plans_.push_back(std::make_shared<const KernelPlan>(restrict_plan(g, *c.plan, roots, live_dests, replay)));
-    for (std::size_t r = 0; r < entries.size(); ++r) v.root_of_[static_cast<std::size_t>(entries[r])] = static_cast<std::int32_t>(r);
+    v.prepared_routes_.push_back(std::make_shared<const PreparedRoute>(restrict_prepared_route(graph, *c.prepared_route, roots, live_dests, replay)));
+    for (std::size_t r = 0; r < entries.size(); ++r) v.context_source_indices_[static_cast<std::size_t>(entries[r])] = static_cast<std::int32_t>(r);
   }
   finish_view(v);
   return v;
@@ -326,12 +326,12 @@ ForwardingView make_view(const Graph& g, std::shared_ptr<const ForwardingProgram
 
 ForwardingView with_black_holes(const ForwardingView& view, const Eligibility* dark) {
   ForwardingView v = view;
-  v.dark = has_black_holes(dark) ? dark : nullptr;
-  if (v.borrowed && v.dark == nullptr) return v;
+  v.black_holes = has_black_holes(dark) ? dark : nullptr;
+  if (v.borrowed && v.black_holes == nullptr) return v;
   materialize(v);
   // The statuses again from the replay's (a black hole never fails a tunnel; a mask does).
   for (std::size_t t = 0; t < v.data->tunnels.size(); ++t) {
-    const auto e = static_cast<std::size_t>(v.data->tunnel_entry[t]);
+    const auto e = static_cast<std::size_t>(v.data->tunnel_entry_positions[t]);
     if (v.status_[e] == TunnelStatus::Blackholed) v.status_[e] = TunnelStatus::Up;
   }
   finish_view(v);
@@ -350,21 +350,21 @@ std::uint64_t mod_u128(const Counter128& x, std::uint64_t d) noexcept {
 
 } // namespace
 
-void head_shares(const ForwardingView& view, Amount x, std::span<Amount> out) {
+void source_shares(const ForwardingView& view, Amount x, std::span<Amount> out) {
   std::fill(out.begin(), out.end(), 0);
   if (out.empty()) return;
-  if (view.weights().empty()) {
+  if (view.source_weights().empty()) {
     (void)round_robin(x, out);
   } else {
-    highest_averages(x, view.weights(), out);
+    highest_averages(x, view.source_weights(), out);
   }
 }
 
-void head_increments(const ForwardingView& view, const Counter128& X, Amount v, std::span<Amount> out) {
+void source_offer_increments(const ForwardingView& view, const Counter128& X, Amount v, std::span<Amount> out) {
   const std::size_t k = out.size();
   std::fill(out.begin(), out.end(), 0);
   if (k == 0) return;
-  const auto weights = view.weights();
+  const auto weights = view.source_weights();
   if (weights.empty()) {
     // RR(X + v) - RR(X) depends only on r = X mod k: floor((r + v) / k) + [i < (r + v) mod k] - [i < r].
     const auto kk = static_cast<std::uint64_t>(k);
@@ -396,20 +396,20 @@ namespace {
 
 // Each head's share over its surviving entries (highest averages by weight) into `share` (per
 // program entry); what a head cannot place (black-holed, no surviving entry of positive weight)
-// goes to `head_lost`.
+// goes to `source_drops_by_source`.
 void entry_shares(const ForwardingView& view, std::span<const Amount> heads, std::vector<Amount>& share,
-                  std::vector<Amount>& head_lost, std::vector<Amount>& w, std::vector<Amount>& part) {
+                  std::vector<Amount>& source_drops_by_source, std::vector<Amount>& w, std::vector<Amount>& part) {
   const ProgramData& p = *view.data;
   share.assign(p.entries.size(), 0);
-  head_lost.assign(heads.size(), 0);
+  source_drops_by_source.assign(heads.size(), 0);
   for (std::size_t h = 0; h < heads.size(); ++h) {
     const Amount x = heads[h];
     if (x == 0) continue;
-    if (view.dark_head(h)) {
-      head_lost[h] = x;
+    if (view.is_blackholed_source(h)) {
+      source_drops_by_source[h] = x;
       continue;
     }
-    const auto entries = view.head_entries(h);
+    const auto entries = view.entries_for_source(h);
     w.resize(entries.size());
     bool positive = false;  // a weight sum may exceed 2^63: only whether one weight is positive
     for (std::size_t i = 0; i < entries.size(); ++i) {
@@ -417,7 +417,7 @@ void entry_shares(const ForwardingView& view, std::span<const Amount> heads, std
       positive = positive || w[i] > 0;
     }
     if (!positive) {
-      head_lost[h] = x;
+      source_drops_by_source[h] = x;
       continue;
     }
     part.resize(entries.size());
@@ -445,87 +445,87 @@ void sort_pairs(std::vector<std::pair<EdgeId, Amount>>& v) {
 ProgramFlow empty_flow(const ForwardingView& view, bool lossy) {
   ProgramFlow out;
   out.entries.resize(view.data->entries.size());
-  out.head_offered.assign(view.num_heads(), 0);
-  if (lossy) out.head_lost.assign(view.num_heads(), 0);
+  out.offered_by_source.assign(view.num_sources(), 0);
+  if (lossy) out.source_drops_by_source.assign(view.num_sources(), 0);
   return out;
 }
 
 // ================================================================ the pooled form
 
 // The free capacity of the pooled plan's members with the black holes at 0.
-void pooled_view(const KernelPlan& plan, const ForwardingView& view, const FreeFn& free, std::vector<Amount>& out) {
-  out.resize(plan.members.size());
-  free(plan.members, out);
-  if (view.dark == nullptr) return;
-  for (std::size_t m = 0; m < plan.members.size(); ++m) {
-    if (!view.dark->edge_ok(plan.members[m])) out[m] = 0;
+void pooled_view(const PreparedRoute& plan, const ForwardingView& view, const AvailableCapacityFn& free, std::vector<Amount>& out) {
+  out.resize(plan.forwarding_edges.size());
+  free(plan.forwarding_edges, out);
+  if (view.black_holes == nullptr) return;
+  for (std::size_t m = 0; m < plan.forwarding_edges.size(); ++m) {
+    if (!view.black_holes->allows_edge(plan.forwarding_edges[m])) out[m] = 0;
   }
 }
 
-// The pooled form's per-root amounts as entry flows (root r carries entry root_entry).
-void pooled_entries(const ForwardingView& view, const KernelPlan& plan, const Attribution* attr,
+// The pooled form's per-root amounts as entry flows (root r carries entry source_entry_positions[r]).
+void pooled_entries(const ForwardingView& view, const PreparedRoute& plan, const Attribution* attr,
                     std::span<const Amount> alloc, std::span<const Amount> drops, ProgramFlow& out) {
   const ProgramData& p = *view.data;
-  for (std::size_t h = 0; h < view.num_heads(); ++h) {
-    const auto e = static_cast<std::size_t>(view.head_entries(h).front());
+  for (std::size_t h = 0; h < view.num_sources(); ++h) {
+    const auto e = static_cast<std::size_t>(view.entries_for_source(h).front());
     auto& f = out.entries[e];
     (void)p;
     if (attr == nullptr) {
       // One root holds the whole forwarding (the attribution's degenerate form).
-      f.carried = positive_pairs(plan.members, alloc);
-      if (!drops.empty()) f.dropped = positive_pairs(plan.members, drops);
+      f.edge_flows = positive_pairs(plan.forwarding_edges, alloc);
+      if (!drops.empty()) f.edge_drops = positive_pairs(plan.forwarding_edges, drops);
       continue;
     }
     for (const auto& x : attr->entries[h]) {
-      const EdgeId edge = plan.members[static_cast<std::size_t>(x.member)];
-      if (x.carried != 0) f.carried.emplace_back(edge, x.carried);
-      if (x.dropped != 0) f.dropped.emplace_back(edge, x.dropped);
+      const EdgeId edge = plan.forwarding_edges[static_cast<std::size_t>(x.edge_position)];
+      if (x.carried != 0) f.edge_flows.emplace_back(edge, x.carried);
+      if (x.drops != 0) f.edge_drops.emplace_back(edge, x.drops);
     }
   }
 }
 
 // The first black-holed head's index (the equal injection gives head i a unit from total i + 1),
 // or the number of heads.
-Amount first_dark(const ForwardingView& view) {
-  for (std::size_t h = 0; h < view.num_heads(); ++h) {
-    if (view.dark_head(h)) return static_cast<Amount>(h);
+Amount black_hole_offer_cap(const ForwardingView& view) {
+  for (std::size_t h = 0; h < view.num_sources(); ++h) {
+    if (view.is_blackholed_source(h)) return static_cast<Amount>(h);
   }
   return std::numeric_limits<Amount>::max();
 }
 
-ProgramFlow pooled_lossless(const Graph& g, const ForwardingView& view, const FreeFn& free, Amount lo,
+ProgramFlow pooled_lossless(const Graph& graph, const ForwardingView& view, const AvailableCapacityFn& free, Amount lo,
                             std::optional<Amount> hi) {
-  const KernelPlan& plan = *view.plan(0);
+  const PreparedRoute& plan = *view.prepared_route(0);
   ProgramFlow out = empty_flow(view, false);
-  const std::size_t k = view.num_heads();
+  const std::size_t k = view.num_sources();
   // A black-holed head may receive nothing: the total stays at most its index.
-  const Amount cap = std::min(hi.value_or(std::numeric_limits<Amount>::max()), first_dark(view));
+  const Amount cap = std::min(hi.value_or(std::numeric_limits<Amount>::max()), black_hole_offer_cap(view));
   std::vector<Amount> V;
   pooled_view(plan, view, free, V);
-  std::vector<Amount> own(plan.members.size(), 0);
+  std::vector<Amount> own(plan.forwarding_edges.size(), 0);
   if (lo != 0 && !allocate(plan, lo, own)) throw std::logic_error("forwarding: the admitted total does not fit");
   Amount total = lo;
-  if (cap > lo && !plan.members.empty()) {
+  if (cap > lo && !plan.forwarding_edges.empty()) {
     const std::optional<Amount> request =
         cap == std::numeric_limits<Amount>::max() ? std::nullopt : std::optional<Amount>(cap - lo);
-    auto step = lossless_step(g, plan, lo, V, own, request);
-    total = step.total;
-    own = std::move(step.alloc);
+    auto step = lossless_step(graph, plan, lo, V, own, request);
+    total = step.admitted;
+    own = std::move(step.edge_flows);
   }
-  out.total = total;
-  head_shares(view, total, out.head_offered);
+  out.admitted = total;
+  source_shares(view, total, out.offered_by_source);
   out.offered = total;
   out.delivered = total;
   for (std::size_t h = 0; h < k; ++h) {
-    const auto e = static_cast<std::size_t>(view.head_entries(h).front());
-    out.entries[e].assigned = out.head_offered[h];
-    out.entries[e].delivered = out.head_offered[h];
+    const auto e = static_cast<std::size_t>(view.entries_for_source(h).front());
+    out.entries[e].assigned = out.offered_by_source[h];
+    out.entries[e].delivered = out.offered_by_source[h];
   }
   if (k > 1 && total > 0) {
     // Several roots: forward the total again to attribute it.
     Attribution attr;
-    const auto fw = forward(plan, Injection {out.head_offered, false}, {}, &attr);
-    if (fw.carried != own) throw std::logic_error("forwarding: the attributed loads differ from the admitted ones");
+    const auto fw = forward(plan, Injection {out.offered_by_source, false}, {}, &attr);
+    if (fw.edge_flows != own) throw std::logic_error("forwarding: the attributed loads differ from the admitted ones");
     pooled_entries(view, plan, &attr, {}, {}, out);
   } else if (k == 1) {
     pooled_entries(view, plan, nullptr, own, {}, out);
@@ -533,41 +533,41 @@ ProgramFlow pooled_lossless(const Graph& g, const ForwardingView& view, const Fr
   return out;
 }
 
-ProgramFlow pooled_lossy(const ForwardingView& view, const FreeFn& free, std::span<const Amount> injections) {
-  const KernelPlan& plan = *view.plan(0);
+ProgramFlow pooled_lossy(const ForwardingView& view, const AvailableCapacityFn& free, std::span<const Amount> injections) {
+  const PreparedRoute& plan = *view.prepared_route(0);
   ProgramFlow out = empty_flow(view, true);
-  const std::size_t k = view.num_heads();
+  const std::size_t k = view.num_sources();
   std::vector<Amount> inject(injections.begin(), injections.end());
   for (std::size_t h = 0; h < k; ++h) {
-    out.head_offered[h] = injections[h];
+    out.offered_by_source[h] = injections[h];
     out.offered += injections[h];
-    if (view.dark_head(h)) {
+    if (view.is_blackholed_source(h)) {
       // A black-holed head loses its own share at the source.
-      out.head_lost[h] = injections[h];
-      out.source_loss += injections[h];
+      out.source_drops_by_source[h] = injections[h];
+      out.source_drops += injections[h];
       inject[h] = 0;
     }
   }
-  out.total = out.offered;
+  out.admitted = out.offered;
   std::vector<Amount> V;
   pooled_view(plan, view, free, V);
   Attribution attr;
   const auto fw = forward(plan, Injection {inject, false}, V, k > 1 ? &attr : nullptr);
-  out.source_loss += fw.source_loss;
+  out.source_drops += fw.source_drops;
   out.delivered = fw.delivered;
   for (std::size_t h = 0; h < k; ++h) {
-    const auto e = static_cast<std::size_t>(view.head_entries(h).front());
+    const auto e = static_cast<std::size_t>(view.entries_for_source(h).front());
     auto& f = out.entries[e];
     f.assigned = inject[h];
     if (k > 1) {
       f.delivered = attr.delivered[h];
-      f.lost = attr.source_loss[h];
+      f.source_drops = attr.source_drops_by_source[h];
     } else {
       f.delivered = fw.delivered;
-      f.lost = fw.source_loss;
+      f.source_drops = fw.source_drops;
     }
   }
-  pooled_entries(view, plan, k > 1 ? &attr : nullptr, fw.carried, fw.drops, out);
+  pooled_entries(view, plan, k > 1 ? &attr : nullptr, fw.edge_flows, fw.edge_drops, out);
   return out;
 }
 
@@ -575,143 +575,143 @@ ProgramFlow pooled_lossy(const ForwardingView& view, const FreeFn& free, std::sp
 
 // The live entries of one call (surviving, positive weight, a usable route) and the union of their
 // links. A tunnel's occurrences are its hops in path order, a split route's its plan's members.
-struct Net {
+struct ForwardingNetwork {
   struct Item {
-    std::int32_t entry {0};
-    std::int32_t head {0};      // view head
-    std::int32_t tunnel {-1};
-    const KernelPlan* plan {nullptr};
-    std::int32_t root_pos {-1};
-    std::int32_t occ0 {0};      // its first occurrence
-    std::int32_t nocc {0};
-    std::int32_t pos0 {0};      // its first router (split routes: one per plan position)
+    std::int32_t entry_position {0};
+    std::int32_t source_index {0};      // view head
+    std::int32_t tunnel_position {-1};
+    const PreparedRoute* prepared_route {nullptr};
+    std::int32_t source_position {-1};
+    std::int32_t first_occurrence {0};      // its first occurrence
+    std::int32_t num_occurrences {0};
+    std::int32_t first_router_position {0};      // its first router (split routes: one per plan position)
   };
-  std::vector<Item> items;
-  std::vector<std::int32_t> item_of;  // per program entry: its item, or -1 (or -2: a routeless entry)
-  std::vector<EdgeId> links;          // ascending
-  std::vector<Amount> V;              // per link
-  std::vector<std::int32_t> occ_link; // per occurrence
-  std::vector<std::int32_t> occ_item;
-  std::vector<std::int32_t> occ_pos;  // tunnel: hop; split route: member
-  std::vector<std::int32_t> link_begin;  // per link + 1 into by_link
-  std::vector<std::int32_t> by_link;     // occurrences, by (head NodeId, entry index)
-  std::int32_t num_pos {0};
-  std::vector<std::int32_t> pos_item;    // per router position: its item
-  std::vector<std::int32_t> in_member;   // per router position: its one in-member, -1 none, -2 several
+  std::vector<Item> entry_occurrences;
+  std::vector<std::int32_t> entry_occurrence_positions;  // per program entry: its item, or -1 (or -2: a routeless entry)
+  std::vector<EdgeId> edges;          // ascending
+  std::vector<Amount> available_capacity;              // per link
+  std::vector<std::int32_t> occurrence_edge_positions; // per occurrence
+  std::vector<std::int32_t> occurrence_entry_positions;
+  std::vector<std::int32_t> occurrence_route_positions;  // tunnel: hop; split route: member
+  std::vector<std::int32_t> edge_occurrence_offsets;  // per link + 1 into occurrences_by_edge
+  std::vector<std::int32_t> occurrences_by_edge;     // occurrences, by (head NodeId, entry index)
+  std::int32_t num_router_positions {0};
+  std::vector<std::int32_t> router_entry_positions;    // per router position: its item
+  std::vector<std::int32_t> incoming_edge_positions;   // per router position: its one in-member, -1 none, -2 several
 };
 
-std::int32_t link_index(const Net& net, EdgeId e) {
-  return static_cast<std::int32_t>(std::lower_bound(net.links.begin(), net.links.end(), e) - net.links.begin());
+std::int32_t edge_position(const ForwardingNetwork& net, EdgeId e) {
+  return static_cast<std::int32_t>(std::lower_bound(net.edges.begin(), net.edges.end(), e) - net.edges.begin());
 }
 
-Net build_net(const ForwardingView& view, const FreeFn& free) {
+ForwardingNetwork build_forwarding_network(const ForwardingView& view, const AvailableCapacityFn& free) {
   const ProgramData& p = *view.data;
-  Net net;
-  net.item_of.assign(p.entries.size(), -1);
-  for (std::size_t h = 0; h < view.num_heads(); ++h) {
-    for (const std::int32_t ei : view.head_entries(h)) {
+  ForwardingNetwork net;
+  net.entry_occurrence_positions.assign(p.entries.size(), -1);
+  for (std::size_t h = 0; h < view.num_sources(); ++h) {
+    for (const std::int32_t ei : view.entries_for_source(h)) {
       const auto e = static_cast<std::size_t>(ei);
       const auto& entry = p.entries[e];
       if (entry.weight == 0) continue;
-      Net::Item it;
-      it.entry = static_cast<std::int32_t>(e);
-      it.head = static_cast<std::int32_t>(h);
-      if (entry.tunnel >= 0) {
-        it.tunnel = entry.tunnel;
-        it.nocc = static_cast<std::int32_t>(path_of(p.tunnels[static_cast<std::size_t>(entry.tunnel)]).size());
+      ForwardingNetwork::Item it;
+      it.entry_position = static_cast<std::int32_t>(e);
+      it.source_index = static_cast<std::int32_t>(h);
+      if (entry.tunnel_position >= 0) {
+        it.tunnel_position = entry.tunnel_position;
+        it.num_occurrences = static_cast<std::int32_t>(path_of(p.tunnels[static_cast<std::size_t>(entry.tunnel_position)]).size());
       } else {
-        it.plan = view.plan(static_cast<std::size_t>(entry.context)).get();
-        const auto r = view.root_of(e);
-        it.root_pos = r < 0 ? -1 : it.plan->root_pos[static_cast<std::size_t>(r)];
-        if (it.root_pos < 0) {
-          net.item_of[e] = -2;  // its share has no route: lost at the source
+        it.prepared_route = view.prepared_route(static_cast<std::size_t>(entry.split_context_position)).get();
+        const auto r = view.context_source_index(e);
+        it.source_position = r < 0 ? -1 : it.prepared_route->source_positions[static_cast<std::size_t>(r)];
+        if (it.source_position < 0) {
+          net.entry_occurrence_positions[e] = -2;  // its share has no route: lost at the source
           continue;
         }
-        it.nocc = static_cast<std::int32_t>(it.plan->members.size());
-        it.pos0 = net.num_pos;
-        net.num_pos += static_cast<std::int32_t>(it.plan->topo.size());
+        it.num_occurrences = static_cast<std::int32_t>(it.prepared_route->forwarding_edges.size());
+        it.first_router_position = net.num_router_positions;
+        net.num_router_positions += static_cast<std::int32_t>(it.prepared_route->topological_order.size());
       }
-      net.item_of[e] = static_cast<std::int32_t>(net.items.size());
-      net.items.push_back(it);
+      net.entry_occurrence_positions[e] = static_cast<std::int32_t>(net.entry_occurrences.size());
+      net.entry_occurrences.push_back(it);
     }
   }
   std::int32_t nocc = 0;
-  for (auto& it : net.items) {
-    it.occ0 = nocc;
-    nocc += it.nocc;
-    if (it.tunnel >= 0) {
-      const auto edges = path_of(p.tunnels[static_cast<std::size_t>(it.tunnel)]);
-      net.links.insert(net.links.end(), edges.begin(), edges.end());
+  for (auto& it : net.entry_occurrences) {
+    it.first_occurrence = nocc;
+    nocc += it.num_occurrences;
+    if (it.tunnel_position >= 0) {
+      const auto edges = path_of(p.tunnels[static_cast<std::size_t>(it.tunnel_position)]);
+      net.edges.insert(net.edges.end(), edges.begin(), edges.end());
     } else {
-      net.links.insert(net.links.end(), it.plan->members.begin(), it.plan->members.end());
+      net.edges.insert(net.edges.end(), it.prepared_route->forwarding_edges.begin(), it.prepared_route->forwarding_edges.end());
     }
   }
-  std::sort(net.links.begin(), net.links.end());
-  net.links.erase(std::unique(net.links.begin(), net.links.end()), net.links.end());
-  net.V.resize(net.links.size());
-  free(net.links, net.V);
-  for (std::size_t l = 0; view.dark != nullptr && l < net.links.size(); ++l) {
-    if (!view.dark->edge_ok(net.links[l])) net.V[l] = 0;
+  std::sort(net.edges.begin(), net.edges.end());
+  net.edges.erase(std::unique(net.edges.begin(), net.edges.end()), net.edges.end());
+  net.available_capacity.resize(net.edges.size());
+  free(net.edges, net.available_capacity);
+  for (std::size_t l = 0; view.black_holes != nullptr && l < net.edges.size(); ++l) {
+    if (!view.black_holes->allows_edge(net.edges[l])) net.available_capacity[l] = 0;
   }
   const auto n = static_cast<std::size_t>(nocc);
-  net.occ_link.resize(n);
-  net.occ_item.resize(n);
-  net.occ_pos.resize(n);
-  for (std::size_t i = 0; i < net.items.size(); ++i) {
-    const auto& it = net.items[i];
-    for (std::int32_t j = 0; j < it.nocc; ++j) {
-      const auto o = static_cast<std::size_t>(it.occ0 + j);
-      const EdgeId e = it.tunnel >= 0 ? path_of(p.tunnels[static_cast<std::size_t>(it.tunnel)])[static_cast<std::size_t>(j)]
-                                      : it.plan->members[static_cast<std::size_t>(j)];
-      net.occ_link[o] = link_index(net, e);
-      net.occ_item[o] = static_cast<std::int32_t>(i);
-      net.occ_pos[o] = j;
+  net.occurrence_edge_positions.resize(n);
+  net.occurrence_entry_positions.resize(n);
+  net.occurrence_route_positions.resize(n);
+  for (std::size_t i = 0; i < net.entry_occurrences.size(); ++i) {
+    const auto& it = net.entry_occurrences[i];
+    for (std::int32_t j = 0; j < it.num_occurrences; ++j) {
+      const auto o = static_cast<std::size_t>(it.first_occurrence + j);
+      const EdgeId e = it.tunnel_position >= 0 ? path_of(p.tunnels[static_cast<std::size_t>(it.tunnel_position)])[static_cast<std::size_t>(j)]
+                                      : it.prepared_route->forwarding_edges[static_cast<std::size_t>(j)];
+      net.occurrence_edge_positions[o] = edge_position(net, e);
+      net.occurrence_entry_positions[o] = static_cast<std::int32_t>(i);
+      net.occurrence_route_positions[o] = j;
     }
   }
-  net.pos_item.resize(static_cast<std::size_t>(net.num_pos));
-  net.in_member.assign(static_cast<std::size_t>(net.num_pos), -1);
-  for (std::size_t i = 0; i < net.items.size(); ++i) {
-    const auto& it = net.items[i];
-    if (it.tunnel >= 0) continue;
-    for (std::size_t pos = 0; pos < it.plan->topo.size(); ++pos) net.pos_item[static_cast<std::size_t>(it.pos0) + pos] = static_cast<std::int32_t>(i);
-    for (std::int32_t m = 0; m < it.nocc; ++m) {
-      auto& slot = net.in_member[static_cast<std::size_t>(it.pos0 + it.plan->head_pos[static_cast<std::size_t>(m)])];
+  net.router_entry_positions.resize(static_cast<std::size_t>(net.num_router_positions));
+  net.incoming_edge_positions.assign(static_cast<std::size_t>(net.num_router_positions), -1);
+  for (std::size_t i = 0; i < net.entry_occurrences.size(); ++i) {
+    const auto& it = net.entry_occurrences[i];
+    if (it.tunnel_position >= 0) continue;
+    for (std::size_t pos = 0; pos < it.prepared_route->topological_order.size(); ++pos) net.router_entry_positions[static_cast<std::size_t>(it.first_router_position) + pos] = static_cast<std::int32_t>(i);
+    for (std::int32_t m = 0; m < it.num_occurrences; ++m) {
+      auto& slot = net.incoming_edge_positions[static_cast<std::size_t>(it.first_router_position + it.prepared_route->edge_destination_positions[static_cast<std::size_t>(m)])];
       slot = slot == -1 ? m : -2;
     }
   }
-  net.link_begin.assign(net.links.size() + 1, 0);
-  for (auto l : net.occ_link) ++net.link_begin[static_cast<std::size_t>(l) + 1];
-  for (std::size_t l = 0; l < net.links.size(); ++l) net.link_begin[l + 1] += net.link_begin[l];
-  net.by_link.resize(n);
-  std::vector<std::int32_t> fill(net.link_begin.begin(), net.link_begin.end() - 1);
+  net.edge_occurrence_offsets.assign(net.edges.size() + 1, 0);
+  for (auto l : net.occurrence_edge_positions) ++net.edge_occurrence_offsets[static_cast<std::size_t>(l) + 1];
+  for (std::size_t l = 0; l < net.edges.size(); ++l) net.edge_occurrence_offsets[l + 1] += net.edge_occurrence_offsets[l];
+  net.occurrences_by_edge.resize(n);
+  std::vector<std::int32_t> fill(net.edge_occurrence_offsets.begin(), net.edge_occurrence_offsets.end() - 1);
   // Occurrences are numbered by item, items by (head, entry index): each link's list comes out in
   // the loss rule's order (sources ascending, then entries ascending).
-  for (std::size_t o = 0; o < n; ++o) net.by_link[static_cast<std::size_t>(fill[static_cast<std::size_t>(net.occ_link[o])]++)] = static_cast<std::int32_t>(o);
+  for (std::size_t o = 0; o < n; ++o) net.occurrences_by_edge[static_cast<std::size_t>(fill[static_cast<std::size_t>(net.occurrence_edge_positions[o])]++)] = static_cast<std::int32_t>(o);
   return net;
 }
 
 // The no-drop loads of the entries' shares per link (and per occurrence when `occ` is given).
 // A split route allocates its share over its plan from its root.
-void no_drop(const Net& net, const ProgramData& p, std::span<const Amount> share, std::vector<Amount>& load,
+void no_drop(const ForwardingNetwork& net, const ProgramData& p, std::span<const Amount> share, std::vector<Amount>& load,
              std::vector<Amount>* occ, std::vector<Amount>& scratch) {
-  load.assign(net.links.size(), 0);
-  if (occ != nullptr) occ->assign(net.occ_link.size(), 0);
-  for (const auto& it : net.items) {
-    const Amount s = share[static_cast<std::size_t>(it.entry)];
+  load.assign(net.edges.size(), 0);
+  if (occ != nullptr) occ->assign(net.occurrence_edge_positions.size(), 0);
+  for (const auto& it : net.entry_occurrences) {
+    const Amount s = share[static_cast<std::size_t>(it.entry_position)];
     if (s == 0) continue;
-    if (it.tunnel >= 0) {
-      for (std::int32_t j = 0; j < it.nocc; ++j) {
-        const auto o = static_cast<std::size_t>(it.occ0 + j);
-        load[static_cast<std::size_t>(net.occ_link[o])] += s;
+    if (it.tunnel_position >= 0) {
+      for (std::int32_t j = 0; j < it.num_occurrences; ++j) {
+        const auto o = static_cast<std::size_t>(it.first_occurrence + j);
+        load[static_cast<std::size_t>(net.occurrence_edge_positions[o])] += s;
         if (occ != nullptr) (*occ)[o] = s;
       }
       continue;
     }
-    scratch.resize(it.plan->members.size());
-    (void)allocate(*it.plan, s, scratch);
-    for (std::int32_t j = 0; j < it.nocc; ++j) {
-      const auto o = static_cast<std::size_t>(it.occ0 + j);
-      load[static_cast<std::size_t>(net.occ_link[o])] += scratch[static_cast<std::size_t>(j)];
+    scratch.resize(it.prepared_route->forwarding_edges.size());
+    (void)allocate(*it.prepared_route, s, scratch);
+    for (std::int32_t j = 0; j < it.num_occurrences; ++j) {
+      const auto o = static_cast<std::size_t>(it.first_occurrence + j);
+      load[static_cast<std::size_t>(net.occurrence_edge_positions[o])] += scratch[static_cast<std::size_t>(j)];
       if (occ != nullptr) (*occ)[o] = scratch[static_cast<std::size_t>(j)];
     }
   }
@@ -720,12 +720,12 @@ void no_drop(const Net& net, const ProgramData& p, std::span<const Amount> share
 
 // The router split of a split route's plan position p: round robin or highest averages over
 // its out-members.
-void split_at(const KernelPlan& plan, std::size_t pos, Amount amount, std::span<Amount> out) {
-  const auto b = static_cast<std::size_t>(plan.out_begin[pos]);
-  const auto e = static_cast<std::size_t>(plan.out_end[pos]);
+void split_at(const PreparedRoute& plan, std::size_t pos, Amount amount, std::span<Amount> out) {
+  const auto b = static_cast<std::size_t>(plan.outgoing_begin[pos]);
+  const auto e = static_cast<std::size_t>(plan.outgoing_end[pos]);
   std::fill(out.begin(), out.end(), 0);
   if (amount == 0 || e == b) return;
-  if (plan.placement == FlowPlacement::Weighted) {
+  if (plan.allocation == RouteAllocation::Weighted) {
     highest_averages(amount, std::span<const Amount>(plan.weights.data() + b, e - b), out);
   } else {
     (void)round_robin(amount, out);
@@ -735,7 +735,7 @@ void split_at(const KernelPlan& plan, std::size_t pos, Amount amount, std::span<
 // The loss rule at one link: T = min(V, sum of the arrivals); highest averages over the sources'
 // arrivals, then within a source over its entries'. `occs` lists the link's occurrences by
 // (source, entry); writes their carried amounts.
-void loss_rule(const Net& net, std::span<const std::int32_t> occs, Amount V, std::span<const Amount> arrival,
+void loss_rule(const ForwardingNetwork& net, std::span<const std::int32_t> occs, Amount V, std::span<const Amount> arrival,
                std::span<Amount> carried, std::vector<Amount>& wa, std::vector<Amount>& wb) {
   Amount sum = 0;
   for (auto o : occs) sum += arrival[static_cast<std::size_t>(o)];
@@ -747,8 +747,8 @@ void loss_rule(const Net& net, std::span<const std::int32_t> occs, Amount V, std
   wa.clear();
   std::vector<std::size_t> run;  // the first index of each source's run
   for (std::size_t i = 0; i < occs.size(); ++i) {
-    const auto head = net.items[static_cast<std::size_t>(net.occ_item[static_cast<std::size_t>(occs[i])])].head;
-    if (i == 0 || head != net.items[static_cast<std::size_t>(net.occ_item[static_cast<std::size_t>(occs[i - 1])])].head) {
+    const auto head = net.entry_occurrences[static_cast<std::size_t>(net.occurrence_entry_positions[static_cast<std::size_t>(occs[i])])].source_index;
+    if (i == 0 || head != net.entry_occurrences[static_cast<std::size_t>(net.occurrence_entry_positions[static_cast<std::size_t>(occs[i - 1])])].source_index) {
       run.push_back(i);
       wa.push_back(0);
     }
@@ -772,33 +772,33 @@ void loss_rule(const Net& net, std::span<const std::int32_t> occs, Amount V, std
 
 // ---------------------------------------------------------------- the general lossless bound
 
-ProgramFlow general_lossless(const ForwardingView& view, const FreeFn& free, Amount lo, std::optional<Amount> hi) {
+ProgramFlow general_lossless(const ForwardingView& view, const AvailableCapacityFn& free, Amount lo, std::optional<Amount> hi) {
   const ProgramData& p = *view.data;
-  const Net net = build_net(view, free);
-  const std::size_t k = view.num_heads();
+  const ForwardingNetwork net = build_forwarding_network(view, free);
+  const std::size_t k = view.num_sources();
   std::vector<Amount> heads(k);
   std::vector<Amount> share;
-  std::vector<Amount> head_lost;
+  std::vector<Amount> source_drops_by_source;
   std::vector<Amount> w;
   std::vector<Amount> part;
   std::vector<Amount> load;
   std::vector<Amount> scratch;
   auto fits = [&](Amount t) {
-    head_shares(view, t, heads);
+    source_shares(view, t, heads);
     // Units no head receives (every captured weight 0) have no route.
     Amount given = 0;
     for (Amount x : heads) given += x;
     if (given != t) return false;
-    entry_shares(view, heads, share, head_lost, w, part);
-    for (Amount x : head_lost) {
+    entry_shares(view, heads, share, source_drops_by_source, w, part);
+    for (Amount x : source_drops_by_source) {
       if (x != 0) return false;
     }
     for (std::size_t e = 0; e < share.size(); ++e) {
-      if (share[e] != 0 && net.item_of[e] == -2) return false;  // a share with no route
+      if (share[e] != 0 && net.entry_occurrence_positions[e] == -2) return false;  // a share with no route
     }
     no_drop(net, p, share, load, nullptr, scratch);
     for (std::size_t l = 0; l < load.size(); ++l) {
-      if (load[l] > net.V[l]) return false;
+      if (load[l] > net.available_capacity[l]) return false;
     }
     return true;
   };
@@ -806,19 +806,19 @@ ProgramFlow general_lossless(const ForwardingView& view, const FreeFn& free, Amo
   // with no head, nothing enters.
   Amount top = 0;
   {
-    std::vector<std::uint8_t> first(net.links.size(), 0);
-    for (const auto& it : net.items) {
-      if (it.tunnel >= 0) {
-        first[static_cast<std::size_t>(net.occ_link[static_cast<std::size_t>(it.occ0)])] = 1;
+    std::vector<std::uint8_t> first(net.edges.size(), 0);
+    for (const auto& it : net.entry_occurrences) {
+      if (it.tunnel_position >= 0) {
+        first[static_cast<std::size_t>(net.occurrence_edge_positions[static_cast<std::size_t>(it.first_occurrence)])] = 1;
       } else {
-        const auto rp = static_cast<std::size_t>(it.root_pos);
-        for (auto m = it.plan->out_begin[rp]; m < it.plan->out_end[rp]; ++m) {
-          first[static_cast<std::size_t>(net.occ_link[static_cast<std::size_t>(it.occ0 + m)])] = 1;
+        const auto rp = static_cast<std::size_t>(it.source_position);
+        for (auto m = it.prepared_route->outgoing_begin[rp]; m < it.prepared_route->outgoing_end[rp]; ++m) {
+          first[static_cast<std::size_t>(net.occurrence_edge_positions[static_cast<std::size_t>(it.first_occurrence + m)])] = 1;
         }
       }
     }
     for (std::size_t l = 0; l < first.size(); ++l) {
-      if (first[l] != 0) top += net.V[l];
+      if (first[l] != 0) top += net.available_capacity[l];
     }
   }
   Amount upper = hi.has_value() ? std::min(*hi, std::max(top, lo)) : std::max(top, lo);
@@ -843,51 +843,51 @@ ProgramFlow general_lossless(const ForwardingView& view, const FreeFn& free, Amo
   }
   // The loads of the admitted total.
   ProgramFlow out = empty_flow(view, false);
-  out.total = best;
-  head_shares(view, best, out.head_offered);
-  entry_shares(view, out.head_offered, share, head_lost, w, part);
+  out.admitted = best;
+  source_shares(view, best, out.offered_by_source);
+  entry_shares(view, out.offered_by_source, share, source_drops_by_source, w, part);
   std::vector<Amount> occ;
   no_drop(net, p, share, load, &occ, scratch);
   for (std::size_t l = 0; l < load.size(); ++l) {
-    if (load[l] > net.V[l]) throw std::logic_error("forwarding: the admitted total does not fit");
+    if (load[l] > net.available_capacity[l]) throw std::logic_error("forwarding: the admitted total does not fit");
   }
-  for (Amount x : out.head_offered) out.offered += x;
+  for (Amount x : out.offered_by_source) out.offered += x;
   out.delivered = out.offered;
-  for (const auto& it : net.items) {
-    auto& f = out.entries[static_cast<std::size_t>(it.entry)];
-    f.assigned = share[static_cast<std::size_t>(it.entry)];
+  for (const auto& it : net.entry_occurrences) {
+    auto& f = out.entries[static_cast<std::size_t>(it.entry_position)];
+    f.assigned = share[static_cast<std::size_t>(it.entry_position)];
     f.delivered = f.assigned;
-    for (std::int32_t j = 0; j < it.nocc; ++j) {
-      const auto o = static_cast<std::size_t>(it.occ0 + j);
-      if (occ[o] != 0) f.carried.emplace_back(net.links[static_cast<std::size_t>(net.occ_link[o])], occ[o]);
+    for (std::int32_t j = 0; j < it.num_occurrences; ++j) {
+      const auto o = static_cast<std::size_t>(it.first_occurrence + j);
+      if (occ[o] != 0) f.edge_flows.emplace_back(net.edges[static_cast<std::size_t>(net.occurrence_edge_positions[o])], occ[o]);
     }
-    if (it.tunnel >= 0) sort_pairs(f.carried);
+    if (it.tunnel_position >= 0) sort_pairs(f.edge_flows);
   }
   return out;
 }
 
 // ---------------------------------------------------------------- the general loss rule (A+)
 
-class Lossy {
+class LossyForwardingEvaluator {
 public:
-  Lossy(const ForwardingView& view, const Net& net) : view_(view), p_(*view.data), net_(net) {}
+  LossyForwardingEvaluator(const ForwardingView& view, const ForwardingNetwork& net) : view_(view), p_(*view.data), net_(net) {}
 
   ProgramFlow run(std::span<const Amount> injections);
 
 private:
   // Event ids: barriers [0, nb), routers [nb, nb + num_pos).
-  [[nodiscard]] std::int32_t router(const Net::Item& it, std::int32_t pos) const noexcept {
-    return nb_ + it.pos0 + pos;
+  [[nodiscard]] std::int32_t router(const ForwardingNetwork::Item& it, std::int32_t pos) const noexcept {
+    return num_barriers_ + it.first_router_position + pos;
   }
   [[nodiscard]] std::int32_t event_of_occ(std::int32_t o) const noexcept {
-    return barrier_[static_cast<std::size_t>(net_.occ_link[static_cast<std::size_t>(o)])];
+    return barrier_[static_cast<std::size_t>(net_.occurrence_edge_positions[static_cast<std::size_t>(o)])];
   }
   // A push into event `ev` is suppressed while a group iterates and ev lies outside it.
-  [[nodiscard]] bool blocked(std::int32_t ev) const noexcept { return iterating_ && scc_[static_cast<std::size_t>(ev)] != current_; }
+  [[nodiscard]] bool blocked(std::int32_t ev) const noexcept { return iterating_ && scc_[static_cast<std::size_t>(ev)] != current_component_; }
 
-  void normalize(std::span<const Amount> U0);
+  void normalize_serial_links(std::span<const Amount> U0);
   void build_events();
-  void tarjan();
+  void find_strong_components();
   void carry(std::int32_t o, Amount c);
   void split(std::int32_t ev);
   void evaluate_barrier(std::int32_t ev);
@@ -896,31 +896,31 @@ private:
 
   const ForwardingView& view_;
   const ProgramData& p_;
-  const Net& net_;
-  std::vector<std::int32_t> tail_;         // per occurrence of a split route: its member's tail position
+  const ForwardingNetwork& net_;
+  std::vector<std::int32_t> occurrence_source_positions_;         // per occurrence of a split route: its member's tail position
   std::vector<std::uint8_t> transparent_;  // per link: the second link of a transparent pair
   std::vector<std::int32_t> barrier_;      // per link: its event, or -1 (a pass-through)
   std::vector<std::int32_t> barrier_link_;
-  std::int32_t nb_ {0};
+  std::int32_t num_barriers_ {0};
   std::int32_t num_events_ {0};
-  std::vector<std::int32_t> adj_begin_;
-  std::vector<std::int32_t> adj_;
+  std::vector<std::int32_t> dependency_offsets_;
+  std::vector<std::int32_t> dependencies_;
   std::vector<std::int32_t> scc_;
   std::int32_t num_scc_ {0};
   bool iterating_ {false};
-  std::int32_t current_ {-1};
+  std::int32_t current_component_ {-1};
   std::vector<Amount> arrival_;
   std::vector<Amount> carried_;
   std::vector<Amount> inflow_;    // per router position
   std::vector<Amount> delivered_; // per item
-  std::vector<Amount> part_;
-  std::vector<Amount> wa_;
-  std::vector<Amount> wb_;
+  std::vector<Amount> outgoing_shares_;
+  std::vector<Amount> source_arrivals_;
+  std::vector<Amount> source_carries_;
   bool iterated_ {false};
 };
 
-void Lossy::normalize(std::span<const Amount> U0) {
-  const std::size_t L = net_.links.size();
+void LossyForwardingEvaluator::normalize_serial_links(std::span<const Amount> U0) {
+  const std::size_t L = net_.edges.size();
   transparent_.assign(L, 0);
   // Per link: the one link every occurrence continues on, and the one every occurrence comes from
   // (-1: none yet; -2: they differ, or an occurrence is injected, absorbed, merged or split there).
@@ -933,29 +933,29 @@ void Lossy::normalize(std::span<const Amount> U0) {
       slot = -2;
     }
   };
-  for (std::size_t o = 0; o < net_.occ_link.size(); ++o) {
-    const auto l = static_cast<std::size_t>(net_.occ_link[o]);
-    const auto& it = net_.items[static_cast<std::size_t>(net_.occ_item[o])];
-    const std::int32_t j = net_.occ_pos[o];
+  for (std::size_t o = 0; o < net_.occurrence_edge_positions.size(); ++o) {
+    const auto l = static_cast<std::size_t>(net_.occurrence_edge_positions[o]);
+    const auto& it = net_.entry_occurrences[static_cast<std::size_t>(net_.occurrence_entry_positions[o])];
+    const std::int32_t j = net_.occurrence_route_positions[o];
     std::int32_t succ = -2;
     std::int32_t pred = -2;
-    if (it.tunnel >= 0) {
-      if (j + 1 < it.nocc) succ = net_.occ_link[static_cast<std::size_t>(it.occ0 + j + 1)];
-      if (j > 0) pred = net_.occ_link[static_cast<std::size_t>(it.occ0 + j - 1)];
+    if (it.tunnel_position >= 0) {
+      if (j + 1 < it.num_occurrences) succ = net_.occurrence_edge_positions[static_cast<std::size_t>(it.first_occurrence + j + 1)];
+      if (j > 0) pred = net_.occurrence_edge_positions[static_cast<std::size_t>(it.first_occurrence + j - 1)];
     } else {
-      const auto& plan = *it.plan;
+      const auto& plan = *it.prepared_route;
       // Continues: its head is no destination and no root, holds this member alone as its
       // in-member and has one out-member.
-      const auto q = static_cast<std::size_t>(plan.head_pos[static_cast<std::size_t>(j)]);
-      if (plan.terminal[q] == 0 && static_cast<std::int32_t>(q) != it.root_pos &&
-          plan.out_end[q] - plan.out_begin[q] == 1 && net_.in_member[static_cast<std::size_t>(it.pos0) + q] == j) {
-        succ = net_.occ_link[static_cast<std::size_t>(it.occ0 + plan.out_begin[q])];
+      const auto q = static_cast<std::size_t>(plan.edge_destination_positions[static_cast<std::size_t>(j)]);
+      if (plan.is_destination[q] == 0 && static_cast<std::int32_t>(q) != it.source_position &&
+          plan.outgoing_end[q] - plan.outgoing_begin[q] == 1 && net_.incoming_edge_positions[static_cast<std::size_t>(it.first_router_position) + q] == j) {
+        succ = net_.occurrence_edge_positions[static_cast<std::size_t>(it.first_occurrence + plan.outgoing_begin[q])];
       }
       // Comes from: its tail is no root, has one in-member and this one out-member.
-      const auto t = static_cast<std::size_t>(tail_[static_cast<std::size_t>(it.occ0 + j)]);
-      const auto in = net_.in_member[static_cast<std::size_t>(it.pos0) + t];
-      if (static_cast<std::int32_t>(t) != it.root_pos && in >= 0 && plan.out_end[t] - plan.out_begin[t] == 1) {
-        pred = net_.occ_link[static_cast<std::size_t>(it.occ0 + in)];
+      const auto t = static_cast<std::size_t>(occurrence_source_positions_[static_cast<std::size_t>(it.first_occurrence + j)]);
+      const auto in = net_.incoming_edge_positions[static_cast<std::size_t>(it.first_router_position) + t];
+      if (static_cast<std::int32_t>(t) != it.source_position && in >= 0 && plan.outgoing_end[t] - plan.outgoing_begin[t] == 1) {
+        pred = net_.occurrence_edge_positions[static_cast<std::size_t>(it.first_occurrence + in)];
       }
     }
     merge(next[l], succ);
@@ -965,40 +965,40 @@ void Lossy::normalize(std::span<const Amount> U0) {
     const auto n = next[l];
     if (n < 0) continue;
     const auto ni = static_cast<std::size_t>(n);
-    if (prev[ni] != static_cast<std::int32_t>(l) || net_.V[l] != net_.V[ni]) continue;
+    if (prev[ni] != static_cast<std::int32_t>(l) || net_.available_capacity[l] != net_.available_capacity[ni]) continue;
     transparent_[ni] = 1;
   }
   barrier_.assign(L, -1);
   barrier_link_.clear();
   for (std::size_t l = 0; l < L; ++l) {
-    if (transparent_[l] == 0 && U0[l] > net_.V[l]) {
+    if (transparent_[l] == 0 && U0[l] > net_.available_capacity[l]) {
       barrier_[l] = static_cast<std::int32_t>(barrier_link_.size());
       barrier_link_.push_back(static_cast<std::int32_t>(l));
     }
   }
-  nb_ = static_cast<std::int32_t>(barrier_link_.size());
-  num_events_ = nb_ + net_.num_pos;
+  num_barriers_ = static_cast<std::int32_t>(barrier_link_.size());
+  num_events_ = num_barriers_ + net_.num_router_positions;
 }
 
-void Lossy::build_events() {
+void LossyForwardingEvaluator::build_events() {
   std::vector<std::pair<std::int32_t, std::int32_t>> edges;
-  for (const auto& it : net_.items) {
-    if (it.tunnel >= 0) {
+  for (const auto& it : net_.entry_occurrences) {
+    if (it.tunnel_position >= 0) {
       std::int32_t last = -1;
-      for (std::int32_t j = 0; j < it.nocc; ++j) {
-        const auto ev = event_of_occ(it.occ0 + j);
+      for (std::int32_t j = 0; j < it.num_occurrences; ++j) {
+        const auto ev = event_of_occ(it.first_occurrence + j);
         if (ev < 0) continue;
         if (last >= 0) edges.emplace_back(last, ev);
         last = ev;
       }
       continue;
     }
-    const auto& plan = *it.plan;
-    for (std::size_t pos = 0; pos < plan.topo.size(); ++pos) {
-      for (auto m = plan.out_begin[pos]; m < plan.out_end[pos]; ++m) {
-        const auto o = it.occ0 + m;
+    const auto& plan = *it.prepared_route;
+    for (std::size_t pos = 0; pos < plan.topological_order.size(); ++pos) {
+      for (auto m = plan.outgoing_begin[pos]; m < plan.outgoing_end[pos]; ++m) {
+        const auto o = it.first_occurrence + m;
         const auto from = router(it, static_cast<std::int32_t>(pos));
-        const auto to = router(it, plan.head_pos[static_cast<std::size_t>(m)]);
+        const auto to = router(it, plan.edge_destination_positions[static_cast<std::size_t>(m)]);
         const auto ev = event_of_occ(o);
         if (ev >= 0) {
           edges.emplace_back(from, ev);
@@ -1009,16 +1009,16 @@ void Lossy::build_events() {
       }
     }
   }
-  adj_begin_.assign(static_cast<std::size_t>(num_events_) + 1, 0);
-  for (const auto& [a, b] : edges) ++adj_begin_[static_cast<std::size_t>(a) + 1];
-  for (std::size_t v = 0; v < static_cast<std::size_t>(num_events_); ++v) adj_begin_[v + 1] += adj_begin_[v];
-  adj_.resize(edges.size());
-  std::vector<std::int32_t> fill(adj_begin_.begin(), adj_begin_.end() - 1);
-  for (const auto& [a, b] : edges) adj_[static_cast<std::size_t>(fill[static_cast<std::size_t>(a)]++)] = b;
+  dependency_offsets_.assign(static_cast<std::size_t>(num_events_) + 1, 0);
+  for (const auto& [a, b] : edges) ++dependency_offsets_[static_cast<std::size_t>(a) + 1];
+  for (std::size_t v = 0; v < static_cast<std::size_t>(num_events_); ++v) dependency_offsets_[v + 1] += dependency_offsets_[v];
+  dependencies_.resize(edges.size());
+  std::vector<std::int32_t> fill(dependency_offsets_.begin(), dependency_offsets_.end() - 1);
+  for (const auto& [a, b] : edges) dependencies_[static_cast<std::size_t>(fill[static_cast<std::size_t>(a)]++)] = b;
 }
 
 // Tarjan's strongly connected components, iterative (no recursion depth).
-void Lossy::tarjan() {
+void LossyForwardingEvaluator::find_strong_components() {
   const auto n = static_cast<std::size_t>(num_events_);
   scc_.assign(n, -1);
   std::vector<std::int32_t> index(n, -1);
@@ -1030,21 +1030,21 @@ void Lossy::tarjan() {
   num_scc_ = 0;
   for (std::size_t s = 0; s < n; ++s) {
     if (index[s] >= 0) continue;
-    work.emplace_back(static_cast<std::int32_t>(s), adj_begin_[s]);
+    work.emplace_back(static_cast<std::int32_t>(s), dependency_offsets_[s]);
     index[s] = low[s] = counter++;
     stack.push_back(static_cast<std::int32_t>(s));
     on[s] = 1;
     while (!work.empty()) {
       auto& [v, k] = work.back();
       const auto vi = static_cast<std::size_t>(v);
-      if (k < adj_begin_[vi + 1]) {
-        const auto w = static_cast<std::size_t>(adj_[static_cast<std::size_t>(k)]);
+      if (k < dependency_offsets_[vi + 1]) {
+        const auto w = static_cast<std::size_t>(dependencies_[static_cast<std::size_t>(k)]);
         ++k;
         if (index[w] < 0) {
           index[w] = low[w] = counter++;
           stack.push_back(static_cast<std::int32_t>(w));
           on[w] = 1;
-          work.emplace_back(static_cast<std::int32_t>(w), adj_begin_[w]);
+          work.emplace_back(static_cast<std::int32_t>(w), dependency_offsets_[w]);
         } else if (on[w] != 0) {
           low[vi] = std::min(low[vi], index[w]);
         }
@@ -1072,23 +1072,23 @@ void Lossy::tarjan() {
 
 // Occurrence o now carries c: forward it to what it feeds (a split route's head router, a
 // tunnel's next hops up to its next barrier or its end).
-void Lossy::carry(std::int32_t o, Amount c) {
+void LossyForwardingEvaluator::carry(std::int32_t o, Amount c) {
   carried_[static_cast<std::size_t>(o)] = c;
-  const auto& it = net_.items[static_cast<std::size_t>(net_.occ_item[static_cast<std::size_t>(o)])];
-  const std::int32_t j = net_.occ_pos[static_cast<std::size_t>(o)];
-  if (it.tunnel < 0) {
-    const auto q = it.plan->head_pos[static_cast<std::size_t>(j)];
+  const auto& it = net_.entry_occurrences[static_cast<std::size_t>(net_.occurrence_entry_positions[static_cast<std::size_t>(o)])];
+  const std::int32_t j = net_.occurrence_route_positions[static_cast<std::size_t>(o)];
+  if (it.tunnel_position < 0) {
+    const auto q = it.prepared_route->edge_destination_positions[static_cast<std::size_t>(j)];
     const auto ev = router(it, q);
-    if (!blocked(ev)) inflow_[static_cast<std::size_t>(it.pos0 + q)] += c;
+    if (!blocked(ev)) inflow_[static_cast<std::size_t>(it.first_router_position + q)] += c;
     return;
   }
   for (std::int32_t h = j + 1;; ++h) {
-    if (h == it.nocc) {
+    if (h == it.num_occurrences) {
       // The tunnel's end is no event of a group.
-      if (!iterating_) delivered_[static_cast<std::size_t>(net_.occ_item[static_cast<std::size_t>(o)])] = c;
+      if (!iterating_) delivered_[static_cast<std::size_t>(net_.occurrence_entry_positions[static_cast<std::size_t>(o)])] = c;
       return;
     }
-    const auto o2 = it.occ0 + h;
+    const auto o2 = it.first_occurrence + h;
     const auto ev = event_of_occ(o2);
     if (ev >= 0) {
       if (!blocked(ev)) arrival_[static_cast<std::size_t>(o2)] = c;
@@ -1101,19 +1101,19 @@ void Lossy::carry(std::int32_t o, Amount c) {
 
 // A router splits what it holds once over its out-members; a pass-through member carries its
 // whole arrival on at once.
-void Lossy::split(std::int32_t ev) {
-  const auto pos_global = ev - nb_;
-  const auto& it = net_.items[static_cast<std::size_t>(net_.pos_item[static_cast<std::size_t>(pos_global)])];
-  const auto& plan = *it.plan;
-  const auto pos = static_cast<std::size_t>(pos_global - it.pos0);
-  if (plan.terminal[pos] != 0) return;
-  const auto b = static_cast<std::size_t>(plan.out_begin[pos]);
-  const auto e = static_cast<std::size_t>(plan.out_end[pos]);
-  part_.resize(e - b);
-  split_at(plan, pos, inflow_[static_cast<std::size_t>(pos_global)], part_);
+void LossyForwardingEvaluator::split(std::int32_t ev) {
+  const auto pos_global = ev - num_barriers_;
+  const auto& it = net_.entry_occurrences[static_cast<std::size_t>(net_.router_entry_positions[static_cast<std::size_t>(pos_global)])];
+  const auto& plan = *it.prepared_route;
+  const auto pos = static_cast<std::size_t>(pos_global - it.first_router_position);
+  if (plan.is_destination[pos] != 0) return;
+  const auto b = static_cast<std::size_t>(plan.outgoing_begin[pos]);
+  const auto e = static_cast<std::size_t>(plan.outgoing_end[pos]);
+  outgoing_shares_.resize(e - b);
+  split_at(plan, pos, inflow_[static_cast<std::size_t>(pos_global)], outgoing_shares_);
   for (std::size_t m = b; m < e; ++m) {
-    const auto o = it.occ0 + static_cast<std::int32_t>(m);
-    const Amount x = part_[m - b];
+    const auto o = it.first_occurrence + static_cast<std::int32_t>(m);
+    const Amount x = outgoing_shares_[m - b];
     const auto bev = event_of_occ(o);
     if (bev >= 0) {
       if (!blocked(bev)) arrival_[static_cast<std::size_t>(o)] = x;
@@ -1124,31 +1124,31 @@ void Lossy::split(std::int32_t ev) {
   }
 }
 
-void Lossy::evaluate_barrier(std::int32_t ev) {
+void LossyForwardingEvaluator::evaluate_barrier(std::int32_t ev) {
   const auto l = static_cast<std::size_t>(barrier_link_[static_cast<std::size_t>(ev)]);
-  const auto occs = std::span<const std::int32_t>(net_.by_link).subspan(
-      static_cast<std::size_t>(net_.link_begin[l]), static_cast<std::size_t>(net_.link_begin[l + 1] - net_.link_begin[l]));
-  loss_rule(net_, occs, net_.V[l], arrival_, carried_, wa_, wb_);
+  const auto occs = std::span<const std::int32_t>(net_.occurrences_by_edge).subspan(
+      static_cast<std::size_t>(net_.edge_occurrence_offsets[l]), static_cast<std::size_t>(net_.edge_occurrence_offsets[l + 1] - net_.edge_occurrence_offsets[l]));
+  loss_rule(net_, occs, net_.available_capacity[l], arrival_, carried_, source_arrivals_, source_carries_);
   for (auto o : occs) carry(o, carried_[static_cast<std::size_t>(o)]);
 }
 
-// A cyclic group (9.4): rounds from zero carried at its barriers.
-void Lossy::iterate(std::int32_t scc) {
+// A cyclic group: rounds from zero carried at its barriers.
+void LossyForwardingEvaluator::iterate(std::int32_t scc) {
   iterated_ = true;
-  current_ = scc;
+  current_component_ = scc;
   std::vector<std::int32_t> barriers;
   std::vector<std::int32_t> routers;
   for (std::int32_t ev = 0; ev < num_events_; ++ev) {
     if (scc_[static_cast<std::size_t>(ev)] != scc) continue;
-    (ev < nb_ ? barriers : routers).push_back(ev);
+    (ev < num_barriers_ ? barriers : routers).push_back(ev);
   }
   // The group's routers in an order that respects router -> router edges (barriers cut).
   {
     std::vector<std::int32_t> indeg(static_cast<std::size_t>(num_events_), 0);
     for (auto r : routers) {
-      for (auto k = adj_begin_[static_cast<std::size_t>(r)]; k < adj_begin_[static_cast<std::size_t>(r) + 1]; ++k) {
-        const auto w = adj_[static_cast<std::size_t>(k)];
-        if (w >= nb_ && scc_[static_cast<std::size_t>(w)] == scc) ++indeg[static_cast<std::size_t>(w)];
+      for (auto k = dependency_offsets_[static_cast<std::size_t>(r)]; k < dependency_offsets_[static_cast<std::size_t>(r) + 1]; ++k) {
+        const auto w = dependencies_[static_cast<std::size_t>(k)];
+        if (w >= num_barriers_ && scc_[static_cast<std::size_t>(w)] == scc) ++indeg[static_cast<std::size_t>(w)];
       }
     }
     std::vector<std::int32_t> order;
@@ -1160,9 +1160,9 @@ void Lossy::iterate(std::int32_t scc) {
       const auto r = ready.back();
       ready.pop_back();
       order.push_back(r);
-      for (auto k = adj_begin_[static_cast<std::size_t>(r)]; k < adj_begin_[static_cast<std::size_t>(r) + 1]; ++k) {
-        const auto w = adj_[static_cast<std::size_t>(k)];
-        if (w >= nb_ && scc_[static_cast<std::size_t>(w)] == scc && --indeg[static_cast<std::size_t>(w)] == 0) ready.push_back(w);
+      for (auto k = dependency_offsets_[static_cast<std::size_t>(r)]; k < dependency_offsets_[static_cast<std::size_t>(r) + 1]; ++k) {
+        const auto w = dependencies_[static_cast<std::size_t>(k)];
+        if (w >= num_barriers_ && scc_[static_cast<std::size_t>(w)] == scc && --indeg[static_cast<std::size_t>(w)] == 0) ready.push_back(w);
       }
     }
     routers.swap(order);
@@ -1172,16 +1172,16 @@ void Lossy::iterate(std::int32_t scc) {
   std::vector<std::int32_t> occs;
   for (auto b : barriers) {
     const auto l = static_cast<std::size_t>(barrier_link_[static_cast<std::size_t>(b)]);
-    for (auto i = net_.link_begin[l]; i < net_.link_begin[l + 1]; ++i) occs.push_back(net_.by_link[static_cast<std::size_t>(i)]);
+    for (auto i = net_.edge_occurrence_offsets[l]; i < net_.edge_occurrence_offsets[l + 1]; ++i) occs.push_back(net_.occurrences_by_edge[static_cast<std::size_t>(i)]);
   }
   std::vector<Amount> inflow0(routers.size());
-  for (std::size_t i = 0; i < routers.size(); ++i) inflow0[i] = inflow_[static_cast<std::size_t>(routers[i] - nb_)];
+  for (std::size_t i = 0; i < routers.size(); ++i) inflow0[i] = inflow_[static_cast<std::size_t>(routers[i] - num_barriers_)];
   std::vector<Amount> x(occs.size(), 0);
   std::vector<Amount> next(occs.size(), 0);
   std::vector<Amount> before(occs.size(), 0);  // x(r - 2)
   const auto limit = static_cast<std::int64_t>(64) * static_cast<std::int64_t>(barriers.size());
   auto replay = [&]() {
-    for (std::size_t i = 0; i < routers.size(); ++i) inflow_[static_cast<std::size_t>(routers[i] - nb_)] = inflow0[i];
+    for (std::size_t i = 0; i < routers.size(); ++i) inflow_[static_cast<std::size_t>(routers[i] - num_barriers_)] = inflow0[i];
     for (std::size_t i = 0; i < occs.size(); ++i) carry(occs[i], x[i]);
     for (auto r : routers) split(r);
   };
@@ -1195,9 +1195,9 @@ void Lossy::iterate(std::int32_t scc) {
     // Every new carry into a separate state.
     for (auto b : barriers) {
       const auto l = static_cast<std::size_t>(barrier_link_[static_cast<std::size_t>(b)]);
-      const auto span = std::span<const std::int32_t>(net_.by_link).subspan(
-          static_cast<std::size_t>(net_.link_begin[l]), static_cast<std::size_t>(net_.link_begin[l + 1] - net_.link_begin[l]));
-      loss_rule(net_, span, net_.V[l], arrival_, carried_, wa_, wb_);
+      const auto span = std::span<const std::int32_t>(net_.occurrences_by_edge).subspan(
+          static_cast<std::size_t>(net_.edge_occurrence_offsets[l]), static_cast<std::size_t>(net_.edge_occurrence_offsets[l + 1] - net_.edge_occurrence_offsets[l]));
+      loss_rule(net_, span, net_.available_capacity[l], arrival_, carried_, source_arrivals_, source_carries_);
     }
     for (std::size_t i = 0; i < occs.size(); ++i) next[i] = carried_[static_cast<std::size_t>(occs[i])];
     if (next == x) {
@@ -1217,28 +1217,28 @@ void Lossy::iterate(std::int32_t scc) {
   }
   // The solved state's forwarding, now also into the group's successors.
   iterating_ = false;
-  current_ = -1;
-  for (std::size_t i = 0; i < routers.size(); ++i) inflow_[static_cast<std::size_t>(routers[i] - nb_)] = inflow0[i];
+  current_component_ = -1;
+  for (std::size_t i = 0; i < routers.size(); ++i) inflow_[static_cast<std::size_t>(routers[i] - num_barriers_)] = inflow0[i];
   for (std::size_t i = 0; i < occs.size(); ++i) carry(occs[i], x[i]);
   for (auto r : routers) split(r);
 }
 
-// The independent check of an iterated result (9.4 step 5): every entry's injection, every
-// router's split of what reaches it, every link's loss rule and capacity, every continuation, and
-// each entry's conservation (delivered + drops = its share).
-void Lossy::verify(std::span<const Amount> share) const {
+// The independent check of an iterated result (docs/semantics.md, "Losses inside one program"):
+// every entry's injection, every router's split of what reaches it, every link's loss rule and
+// capacity, every continuation, and each entry's conservation (delivered + drops = its share).
+void LossyForwardingEvaluator::verify(std::span<const Amount> share) const {
   const auto fail = [] { throw std::runtime_error("lossy forwarding fixed-point verification failed"); };
   // Continuations and splits.
-  std::vector<Amount> in(static_cast<std::size_t>(net_.num_pos), 0);
+  std::vector<Amount> in(static_cast<std::size_t>(net_.num_router_positions), 0);
   std::vector<Amount> part;
-  for (std::size_t i = 0; i < net_.items.size(); ++i) {
-    const auto& it = net_.items[i];
-    const Amount s = share[static_cast<std::size_t>(it.entry)];
-    if (it.tunnel >= 0) {
+  for (std::size_t i = 0; i < net_.entry_occurrences.size(); ++i) {
+    const auto& it = net_.entry_occurrences[i];
+    const Amount s = share[static_cast<std::size_t>(it.entry_position)];
+    if (it.tunnel_position >= 0) {
       Amount prev = s;
       Amount dropped = 0;
-      for (std::int32_t j = 0; j < it.nocc; ++j) {
-        const auto o = static_cast<std::size_t>(it.occ0 + j);
+      for (std::int32_t j = 0; j < it.num_occurrences; ++j) {
+        const auto o = static_cast<std::size_t>(it.first_occurrence + j);
         if (arrival_[o] != prev || carried_[o] > arrival_[o] || carried_[o] < 0) fail();
         dropped += arrival_[o] - carried_[o];
         prev = carried_[o];
@@ -1246,25 +1246,25 @@ void Lossy::verify(std::span<const Amount> share) const {
       if (delivered_[i] != prev || delivered_[i] + dropped != s) fail();
       continue;
     }
-    const auto& plan = *it.plan;
-    in[static_cast<std::size_t>(it.pos0 + it.root_pos)] += s;
+    const auto& plan = *it.prepared_route;
+    in[static_cast<std::size_t>(it.first_router_position + it.source_position)] += s;
     Amount dropped = 0;
     Amount reached = 0;
-    for (std::size_t pos = 0; pos < plan.topo.size(); ++pos) {
-      const Amount amount = in[static_cast<std::size_t>(it.pos0) + pos];
-      if (plan.terminal[pos] != 0) {
+    for (std::size_t pos = 0; pos < plan.topological_order.size(); ++pos) {
+      const Amount amount = in[static_cast<std::size_t>(it.first_router_position) + pos];
+      if (plan.is_destination[pos] != 0) {
         reached += amount;
         continue;
       }
-      const auto b = static_cast<std::size_t>(plan.out_begin[pos]);
-      const auto e = static_cast<std::size_t>(plan.out_end[pos]);
+      const auto b = static_cast<std::size_t>(plan.outgoing_begin[pos]);
+      const auto e = static_cast<std::size_t>(plan.outgoing_end[pos]);
       part.resize(e - b);
       split_at(plan, pos, amount, part);
       for (std::size_t m = b; m < e; ++m) {
-        const auto o = static_cast<std::size_t>(it.occ0) + m;
+        const auto o = static_cast<std::size_t>(it.first_occurrence) + m;
         if (arrival_[o] != part[m - b] || carried_[o] > arrival_[o] || carried_[o] < 0) fail();
         dropped += arrival_[o] - carried_[o];
-        in[static_cast<std::size_t>(it.pos0 + plan.head_pos[m])] += carried_[o];
+        in[static_cast<std::size_t>(it.first_router_position + plan.edge_destination_positions[m])] += carried_[o];
       }
     }
     if (delivered_[i] != reached || reached + dropped != s) fail();
@@ -1274,78 +1274,78 @@ void Lossy::verify(std::span<const Amount> share) const {
   std::vector<Amount> expect(carried_.size(), 0);
   std::vector<Amount> wa;
   std::vector<Amount> wb;
-  for (std::size_t l = 0; l < net_.links.size(); ++l) {
-    const auto occs = std::span<const std::int32_t>(net_.by_link).subspan(
-        static_cast<std::size_t>(net_.link_begin[l]), static_cast<std::size_t>(net_.link_begin[l + 1] - net_.link_begin[l]));
+  for (std::size_t l = 0; l < net_.edges.size(); ++l) {
+    const auto occs = std::span<const std::int32_t>(net_.occurrences_by_edge).subspan(
+        static_cast<std::size_t>(net_.edge_occurrence_offsets[l]), static_cast<std::size_t>(net_.edge_occurrence_offsets[l + 1] - net_.edge_occurrence_offsets[l]));
     Amount sum = 0;
     for (auto o : occs) sum += carried_[static_cast<std::size_t>(o)];
-    if (sum > net_.V[l]) fail();
+    if (sum > net_.available_capacity[l]) fail();
     if (transparent_[l] != 0) {
       for (auto o : occs) {
         if (carried_[static_cast<std::size_t>(o)] != arrival_[static_cast<std::size_t>(o)]) fail();
       }
       continue;
     }
-    loss_rule(net_, occs, net_.V[l], arrival_, expect, wa, wb);
+    loss_rule(net_, occs, net_.available_capacity[l], arrival_, expect, wa, wb);
     for (auto o : occs) {
       if (expect[static_cast<std::size_t>(o)] != carried_[static_cast<std::size_t>(o)]) fail();
     }
   }
 }
 
-ProgramFlow Lossy::run(std::span<const Amount> injections) {
-  const std::size_t k = view_.num_heads();
+ProgramFlow LossyForwardingEvaluator::run(std::span<const Amount> injections) {
+  const std::size_t k = view_.num_sources();
   ProgramFlow out = empty_flow(view_, true);
   for (std::size_t h = 0; h < k; ++h) {
-    out.head_offered[h] = injections[h];
+    out.offered_by_source[h] = injections[h];
     out.offered += injections[h];
   }
-  out.total = out.offered;
+  out.admitted = out.offered;
   std::vector<Amount> share;
-  std::vector<Amount> head_lost;
+  std::vector<Amount> source_drops_by_source;
   std::vector<Amount> w;
   std::vector<Amount> part;
-  entry_shares(view_, injections, share, head_lost, w, part);
+  entry_shares(view_, injections, share, source_drops_by_source, w, part);
   for (std::size_t h = 0; h < k; ++h) {
-    out.head_lost[h] = head_lost[h];
-    out.source_loss += head_lost[h];
+    out.source_drops_by_source[h] = source_drops_by_source[h];
+    out.source_drops += source_drops_by_source[h];
   }
   for (std::size_t e = 0; e < share.size(); ++e) {
     out.entries[e].assigned = share[e];
-    if (share[e] != 0 && net_.item_of[e] == -2) {
-      out.entries[e].lost = share[e];
-      out.source_loss += share[e];
+    if (share[e] != 0 && net_.entry_occurrence_positions[e] == -2) {
+      out.entries[e].source_drops = share[e];
+      out.source_drops += share[e];
     }
   }
   // A+: the no-drop loads first, then the barriers.
   std::vector<Amount> U0;
   std::vector<Amount> scratch;
   no_drop(net_, p_, share, U0, nullptr, scratch);
-  tail_.assign(net_.occ_link.size(), -1);
-  for (const auto& it : net_.items) {
-    if (it.tunnel >= 0) continue;
-    for (std::size_t pos = 0; pos < it.plan->topo.size(); ++pos) {
-      for (auto m = it.plan->out_begin[pos]; m < it.plan->out_end[pos]; ++m) tail_[static_cast<std::size_t>(it.occ0 + m)] = static_cast<std::int32_t>(pos);
+  occurrence_source_positions_.assign(net_.occurrence_edge_positions.size(), -1);
+  for (const auto& it : net_.entry_occurrences) {
+    if (it.tunnel_position >= 0) continue;
+    for (std::size_t pos = 0; pos < it.prepared_route->topological_order.size(); ++pos) {
+      for (auto m = it.prepared_route->outgoing_begin[pos]; m < it.prepared_route->outgoing_end[pos]; ++m) occurrence_source_positions_[static_cast<std::size_t>(it.first_occurrence + m)] = static_cast<std::int32_t>(pos);
     }
   }
-  normalize(U0);
-  const auto n = net_.occ_link.size();
+  normalize_serial_links(U0);
+  const auto n = net_.occurrence_edge_positions.size();
   arrival_.assign(n, 0);
   carried_.assign(n, 0);
-  inflow_.assign(static_cast<std::size_t>(net_.num_pos), 0);
-  delivered_.assign(net_.items.size(), 0);
+  inflow_.assign(static_cast<std::size_t>(net_.num_router_positions), 0);
+  delivered_.assign(net_.entry_occurrences.size(), 0);
   build_events();
-  tarjan();
+  find_strong_components();
   // The injections: a tunnel's share enters its first hop, a split route's its root router.
-  for (std::size_t i = 0; i < net_.items.size(); ++i) {
-    const auto& it = net_.items[i];
-    const Amount s = share[static_cast<std::size_t>(it.entry)];
-    if (it.tunnel >= 0) {
-      const auto o = it.occ0;
+  for (std::size_t i = 0; i < net_.entry_occurrences.size(); ++i) {
+    const auto& it = net_.entry_occurrences[i];
+    const Amount s = share[static_cast<std::size_t>(it.entry_position)];
+    if (it.tunnel_position >= 0) {
+      const auto o = it.first_occurrence;
       arrival_[static_cast<std::size_t>(o)] = s;
       if (event_of_occ(o) < 0) carry(o, s);
     } else {
-      inflow_[static_cast<std::size_t>(it.pos0 + it.root_pos)] += s;
+      inflow_[static_cast<std::size_t>(it.first_router_position + it.source_position)] += s;
     }
   }
   // The groups in dependency order, the smallest key first among the ready ones.
@@ -1356,8 +1356,8 @@ ProgramFlow Lossy::run(std::span<const Amount> injections) {
   std::vector<std::uint8_t> cyclic(ns, 0);
   for (std::int32_t ev = 0; ev < num_events_; ++ev) {
     const auto a = scc_[static_cast<std::size_t>(ev)];
-    for (auto kk = adj_begin_[static_cast<std::size_t>(ev)]; kk < adj_begin_[static_cast<std::size_t>(ev) + 1]; ++kk) {
-      const auto b = scc_[static_cast<std::size_t>(adj_[static_cast<std::size_t>(kk)])];
+    for (auto kk = dependency_offsets_[static_cast<std::size_t>(ev)]; kk < dependency_offsets_[static_cast<std::size_t>(ev) + 1]; ++kk) {
+      const auto b = scc_[static_cast<std::size_t>(dependencies_[static_cast<std::size_t>(kk)])];
       if (a == b) {
         cyclic[static_cast<std::size_t>(a)] = 1;
       } else {
@@ -1370,7 +1370,7 @@ ProgramFlow Lossy::run(std::span<const Amount> injections) {
     const auto& m = members[static_cast<std::size_t>(s)];
     std::int64_t edge = std::numeric_limits<std::int64_t>::max();
     for (auto ev : m) {
-      if (ev < nb_) edge = std::min<std::int64_t>(edge, net_.links[static_cast<std::size_t>(barrier_link_[static_cast<std::size_t>(ev)])]);
+      if (ev < num_barriers_) edge = std::min<std::int64_t>(edge, net_.edges[static_cast<std::size_t>(barrier_link_[static_cast<std::size_t>(ev)])]);
     }
     if (edge != std::numeric_limits<std::int64_t>::max()) return {0, edge, s};
     return {1, m.front(), s};
@@ -1388,25 +1388,25 @@ ProgramFlow Lossy::run(std::span<const Amount> injections) {
       ++thread_lossy_counters().groups;
 #endif
       iterate(s);
-    } else if (m.front() < nb_) {
+    } else if (m.front() < num_barriers_) {
       evaluate_barrier(m.front());
     } else {
       split(m.front());
     }
     for (auto ev : m) {
-      for (auto kk = adj_begin_[static_cast<std::size_t>(ev)]; kk < adj_begin_[static_cast<std::size_t>(ev) + 1]; ++kk) {
-        const auto b = scc_[static_cast<std::size_t>(adj_[static_cast<std::size_t>(kk)])];
+      for (auto kk = dependency_offsets_[static_cast<std::size_t>(ev)]; kk < dependency_offsets_[static_cast<std::size_t>(ev) + 1]; ++kk) {
+        const auto b = scc_[static_cast<std::size_t>(dependencies_[static_cast<std::size_t>(kk)])];
         if (b != s && --indeg[static_cast<std::size_t>(b)] == 0) ready.push(key(b));
       }
     }
   }
   // Split routes deliver what reaches their destinations.
-  for (std::size_t i = 0; i < net_.items.size(); ++i) {
-    const auto& it = net_.items[i];
-    if (it.tunnel >= 0) continue;
+  for (std::size_t i = 0; i < net_.entry_occurrences.size(); ++i) {
+    const auto& it = net_.entry_occurrences[i];
+    if (it.tunnel_position >= 0) continue;
     Amount d = 0;
-    for (std::size_t pos = 0; pos < it.plan->topo.size(); ++pos) {
-      if (it.plan->terminal[pos] != 0) d += inflow_[static_cast<std::size_t>(it.pos0) + pos];
+    for (std::size_t pos = 0; pos < it.prepared_route->topological_order.size(); ++pos) {
+      if (it.prepared_route->is_destination[pos] != 0) d += inflow_[static_cast<std::size_t>(it.first_router_position) + pos];
     }
     delivered_[i] = d;
   }
@@ -1424,20 +1424,20 @@ ProgramFlow Lossy::run(std::span<const Amount> injections) {
 #endif
     verify(share);
   }
-  for (std::size_t i = 0; i < net_.items.size(); ++i) {
-    const auto& it = net_.items[i];
-    auto& f = out.entries[static_cast<std::size_t>(it.entry)];
+  for (std::size_t i = 0; i < net_.entry_occurrences.size(); ++i) {
+    const auto& it = net_.entry_occurrences[i];
+    auto& f = out.entries[static_cast<std::size_t>(it.entry_position)];
     f.delivered = delivered_[i];
     out.delivered += delivered_[i];
-    for (std::int32_t j = 0; j < it.nocc; ++j) {
-      const auto o = static_cast<std::size_t>(it.occ0 + j);
-      const EdgeId e = net_.links[static_cast<std::size_t>(net_.occ_link[o])];
-      if (carried_[o] != 0) f.carried.emplace_back(e, carried_[o]);
-      if (arrival_[o] != carried_[o]) f.dropped.emplace_back(e, arrival_[o] - carried_[o]);
+    for (std::int32_t j = 0; j < it.num_occurrences; ++j) {
+      const auto o = static_cast<std::size_t>(it.first_occurrence + j);
+      const EdgeId e = net_.edges[static_cast<std::size_t>(net_.occurrence_edge_positions[o])];
+      if (carried_[o] != 0) f.edge_flows.emplace_back(e, carried_[o]);
+      if (arrival_[o] != carried_[o]) f.edge_drops.emplace_back(e, arrival_[o] - carried_[o]);
     }
-    if (it.tunnel >= 0) {
-      sort_pairs(f.carried);
-      sort_pairs(f.dropped);
+    if (it.tunnel_position >= 0) {
+      sort_pairs(f.edge_flows);
+      sort_pairs(f.edge_drops);
     }
   }
   return out;
@@ -1445,21 +1445,21 @@ ProgramFlow Lossy::run(std::span<const Amount> injections) {
 
 } // namespace
 
-ProgramFlow lossless(const Graph& g, const ForwardingView& view, const FreeFn& free, Amount lo, std::optional<Amount> hi) {
-  if (view.pooled) return pooled_lossless(g, view, free, lo, hi);
+ProgramFlow lossless(const Graph& graph, const ForwardingView& view, const AvailableCapacityFn& free, Amount lo, std::optional<Amount> hi) {
+  if (view.pooled) return pooled_lossless(graph, view, free, lo, hi);
   return general_lossless(view, free, lo, hi);
 }
 
-ProgramFlow lossy(const Graph& g, const ForwardingView& view, const FreeFn& free, std::span<const Amount> injections) {
-  (void)g;
-  if (injections.size() != view.num_heads()) throw std::logic_error("forwarding: the injections are not head-aligned");
+ProgramFlow lossy(const Graph& graph, const ForwardingView& view, const AvailableCapacityFn& free, std::span<const Amount> injections) {
+  (void)graph;
+  if (injections.size() != view.num_sources()) throw std::logic_error("forwarding: the injections are not head-aligned");
 #if NETGRAPH_CORE_PRIVATE_HOOKS
   thread_lossy_counters().groups = 0;
   thread_lossy_counters().rounds = 0;
 #endif
   if (view.pooled) return pooled_lossy(view, free, injections);
-  const Net net = build_net(view, free);
-  Lossy run(view, net);
+  const ForwardingNetwork net = build_forwarding_network(view, free);
+  LossyForwardingEvaluator run(view, net);
   return run.run(injections);
 }
 

@@ -1,5 +1,5 @@
 // Allocation-failure atomicity of the graph's construction and copy, the allocation-free move,
-// and the calls that build a new Eligibility, PredDAG or Path from const inputs. Runs in the
+// and the calls that build a new Eligibility, PredecessorDAG or Path from const inputs. Runs in the
 // fault-injection executable (fault_injection.hpp), whose
 // replacement operator new fails the chosen allocation and counts the live allocations
 // (g_live, in fault_injection.cpp's replacement functions).
@@ -11,8 +11,8 @@
 // (graph_inputs.hpp): an empty graph, isolated nodes, the hash path from creation through growth
 // and collisions, the K-limit transition into the fallback, the probe-budget fallbacks during
 // collection and during a table growth; and the copy constructor. Each factory call (the
-// Eligibility of a graph and of an intersection, PredDAG::from_csr and parent_offsets, a Path and
-// its PredDAG) fails at every allocation without building anything or leaking, and the completing
+// Eligibility of a graph and of an intersection, PredecessorDAG::from_csr and parent_offsets, a Path and
+// its PredecessorDAG) fails at every allocation without building anything or leaking, and the completing
 // call equals the reference.
 // No branch counter is read here: graph_layout_tests.cpp observes the probe-budget paths of the
 // same shapes.
@@ -31,7 +31,7 @@
 #include "layout_checker.hpp"
 #include "netgraph/core/detail/graph_access.hpp"
 #include "netgraph/core/graph.hpp"
-#include "netgraph/core/pred_dag.hpp"
+#include "netgraph/core/route_structures.hpp"
 
 using namespace netgraph::core;
 using namespace netgraph::core::test;
@@ -52,8 +52,8 @@ std::vector<Input> paths() {
 
 void expect_built(const Graph& g, const Input& in, const std::string& where) {
   const auto r = reference_graph(in.n, in.src, in.dst, in.cap, in.cost, 1.0);
-  EXPECT_EQ(std::vector<std::int32_t>(g.input_index().begin(), g.input_index().end()), r.input_index) << where;
-  EXPECT_EQ(std::vector<EdgeId>(g.in_adj_edge_index().begin(), g.in_adj_edge_index().end()), r.in_adj_edge_index)
+  EXPECT_EQ(std::vector<std::int32_t>(g.input_positions().begin(), g.input_positions().end()), r.input_positions) << where;
+  EXPECT_EQ(std::vector<EdgeId>(g.incoming_edges().begin(), g.incoming_edges().end()), r.incoming_edges)
       << where;
   const auto bad = check_layout(spans_of(g), view(in));
   EXPECT_TRUE(bad.empty()) << where << ": " << (bad.empty() ? "" : bad.front());
@@ -147,7 +147,7 @@ TEST(GraphFaults, MoveIsAllocationFreeUnderAnArmedFailure) {
         const bool untouched = g_countdown.load() == 0;  // no allocation was attempted
         g_countdown = -1;
         const bool ok = untouched && g_live.load() == live && m.uid() == uid && m.num_edges() == edges &&
-                        g.num_edges() == 0 && g.row_offsets().size() == 1 &&  // NOLINT(bugprone-use-after-move)
+                        g.num_edges() == 0 && g.outgoing_offsets().size() == 1 &&  // NOLINT(bugprone-use-after-move)
                         g.resolution() == m.resolution();
         std::_Exit(ok ? 0 : 3);
       },
@@ -188,7 +188,7 @@ TEST(GraphFaults, EveryFactoryAllocationFailsWithoutALeak) {
   const auto edge = [&](NodeId u, NodeId v, Cost c) {
     for (EdgeId e = 0; e < g.num_edges(); ++e) {
       const auto i = static_cast<std::size_t>(e);
-      if (g.edge_src()[i] == u && g.edge_dst()[i] == v && g.cost()[i] == c) return e;
+      if (g.edge_sources()[i] == u && g.edge_destinations()[i] == v && g.edge_costs()[i] == c) return e;
     }
     ADD_FAILURE() << "no edge " << u << " -> " << v;
     return EdgeId {0};
@@ -214,11 +214,11 @@ TEST(GraphFaults, EveryFactoryAllocationFailsWithoutALeak) {
   const auto same = [](const auto& a, const auto& b) { return a == b; };
   sweep_factory<Path>("Path", [&] { return Path(g, hops); }, same);
   const Path path(g, hops);
-  sweep_factory<PredDAG>("Path::to_dag", [&] { return path.to_dag(); }, same);
-  const PredDAG dag = path.to_dag();
-  sweep_factory<std::vector<std::int32_t>>("PredDAG::parent_offsets", [&] { return dag.parent_offsets(); }, same);
+  sweep_factory<PredecessorDAG>("Path::to_dag", [&] { return path.to_dag(); }, same);
+  const PredecessorDAG dag = path.to_dag();
+  sweep_factory<std::vector<std::int32_t>>("PredecessorDAG::parent_offsets", [&] { return dag.parent_offsets(); }, same);
   const auto offsets = dag.parent_offsets();
-  sweep_factory<PredDAG>("PredDAG::from_csr", [&] { return PredDAG::from_csr(g, offsets, dag.parents(), dag.via_edges()); },
+  sweep_factory<PredecessorDAG>("PredecessorDAG::from_csr", [&] { return PredecessorDAG::from_csr(g, offsets, dag.parents(), dag.via_edges()); },
                          same);
 }
 

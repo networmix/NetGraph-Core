@@ -39,8 +39,8 @@ TEST(Eligibility, ExcludedNodeExcludesIncidentEdges) {
   EXPECT_EQ(flags(el.node_allowed()), (std::vector<int>{1, 0, 1, 1}));
   auto allowed_in = to_input(g, std::vector<std::uint8_t>(el.edge_allowed().begin(), el.edge_allowed().end()));
   EXPECT_EQ(std::vector<int>(allowed_in.begin(), allowed_in.end()), (std::vector<int>{0, 0, 1, 0, 1}));
-  EXPECT_FALSE(el.edge_ok(inv[0]));
-  EXPECT_TRUE(el.edge_ok(inv[2]));
+  EXPECT_FALSE(el.allows_edge(inv[0]));
+  EXPECT_TRUE(el.allows_edge(inv[2]));
 }
 
 TEST(Eligibility, ExcludedEdgesDuplicatesAndOrder) {
@@ -52,8 +52,8 @@ TEST(Eligibility, ExcludedEdgesDuplicatesAndOrder) {
   EXPECT_EQ(flags(el.node_allowed()), (std::vector<int>{1, 1, 0, 1}));
   int allowed = 0;
   for (EdgeId e = 0; e < 4; ++e) {
-    const bool excluded = e == 0 || e == 2 || g.edge_dst()[static_cast<std::size_t>(e)] == 2;
-    EXPECT_EQ(el.edge_ok(e), !excluded) << e;
+    const bool excluded = e == 0 || e == 2 || g.edge_destinations()[static_cast<std::size_t>(e)] == 2;
+    EXPECT_EQ(el.allows_edge(e), !excluded) << e;
     allowed += excluded ? 0 : 1;
   }
   EXPECT_EQ(allowed, 1);  // both answers are expected

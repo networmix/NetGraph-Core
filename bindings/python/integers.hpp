@@ -20,31 +20,47 @@
 #include "netgraph/core/detail/endpoints.hpp"
 #include "netgraph/core/graph.hpp"
 #include "netgraph/core/types.hpp"
+#include "strict_bool.hpp"
 
 namespace py = pybind11;
 
 namespace netgraph::core::bindings {
 
+// A Python bool or a numpy.bool_, by type identity (as StrictBool reads them).
 inline bool is_bool(const py::handle& obj) {
-  return PyBool_Check(obj.ptr()) || py::isinstance(obj, py::module_::import("numpy").attr("bool_"));
+  return PyBool_Check(obj.ptr()) || reinterpret_cast<PyObject*>(Py_TYPE(obj.ptr())) == numpy_bool_type();
+}
+
+// Where an integer argument is given: a configuration value's constructor (FlowPolicyConfig's
+// models, TunnelCount, AbsoluteCost, RouteDefinition) or a search option or call argument.
+enum class IntegerArgument { Configuration, Call };
+
+// The one place that decides the class of a wrong-type integer (an open owner question, R3):
+// a configuration value raises TypeError at construction, a search option or a
+// call argument keeps today's ValueError; the text is the same.
+[[noreturn]] inline void throw_not_an_integer(const py::handle& item, const std::string& what, IntegerArgument where) {
+  const std::string text =
+      what + " must be an integer (got " + std::string(py::str(py::type::of(item).attr("__name__"))) + ")";
+  if (where == IntegerArgument::Configuration) throw py::type_error(text);
+  throw py::value_error(text);
 }
 
 // The Python int of an integer-like object (a Python int or a NumPy integer scalar); bools and
-// everything else are rejected, and an exception of the object's own __index__ propagates as
-// raised. The result is an exact int, so PyLong_AsLongLongAndOverflow cannot fail on it.
-inline py::object python_int(const py::handle& item, const std::string& what) {
-  if (is_bool(item) || !PyIndex_Check(item.ptr())) {
-    throw py::value_error(what + " must be an integer (got " +
-                          std::string(py::str(py::type::of(item).attr("__name__"))) + ")");
-  }
+// everything else are rejected (throw_not_an_integer), and an exception of the object's own
+// __index__ propagates as raised. The result is an exact int, so PyLong_AsLongLongAndOverflow
+// cannot fail on it.
+inline py::object python_int(const py::handle& item, const std::string& what,
+                             IntegerArgument where = IntegerArgument::Call) {
+  if (is_bool(item) || !PyIndex_Check(item.ptr())) throw_not_an_integer(item, what, where);
   py::object idx = py::reinterpret_steal<py::object>(PyNumber_Index(item.ptr()));
   if (!idx) throw py::error_already_set();
   return idx;
 }
 
 // One integer of [lo, hi] (scalar arguments).
-inline std::int64_t integer_value(const py::handle& item, std::int64_t lo, std::int64_t hi, const std::string& what) {
-  py::object idx = python_int(item, what);
+inline std::int64_t integer_value(const py::handle& item, std::int64_t lo, std::int64_t hi, const std::string& what,
+                                  IntegerArgument where = IntegerArgument::Call) {
+  py::object idx = python_int(item, what, where);
   int overflow = 0;
   const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
   if (overflow != 0 || v < lo || v > hi) {
@@ -59,7 +75,7 @@ inline std::int64_t integer_value(const py::handle& item, std::int64_t lo, std::
 // defects raise here (a non-integer, a bool, a float array, a non-sequence); every value bound
 // is checked by the caller in the C++ constructor's order, so the reported error does not depend
 // on the representation of the input.
-struct WideInts {
+struct CheckedIntegerVector {
   py::object source;
   std::vector<std::int64_t> value;
   std::vector<std::int8_t> overflow;  // empty when no entry overflows
@@ -87,23 +103,31 @@ struct WideInts {
   }
 };
 
-inline bool not_a_sequence(const py::handle& obj) {
+inline bool is_invalid_sequence(const py::handle& obj) {
   return py::isinstance<py::str>(obj) || py::isinstance<py::bytes>(obj) || !py::isinstance<py::sequence>(obj);
 }
 
-inline WideInts wide_integers(const py::handle& obj, const char* name) {
-  WideInts out;
+// A type or shape defect of a sequence argument: TypeError for a configuration value's vector,
+// ValueError for a call or search argument (as for the scalars: throw_not_an_integer).
+[[noreturn]] inline void throw_vector_defect(const std::string& text, IntegerArgument where) {
+  if (where == IntegerArgument::Configuration) throw py::type_error(text);
+  throw py::value_error(text);
+}
+
+inline CheckedIntegerVector wide_integers(const py::handle& obj, const char* name,
+                                          IntegerArgument where = IntegerArgument::Call) {
+  CheckedIntegerVector out;
   out.source = py::reinterpret_borrow<py::object>(obj);
   if (py::isinstance<py::array>(obj)) {
     auto arr = py::reinterpret_borrow<py::array>(obj);
     if (arr.ndim() != 1) {
-      throw py::value_error(std::string(name) + " must be a 1-D array (got " + std::to_string(arr.ndim()) +
-                            " dimensions)");
+      throw_vector_defect(std::string(name) + " must be a 1-D array (got " + std::to_string(arr.ndim()) + " dimensions)",
+                          where);
     }
     const char kind = arr.dtype().kind();
     if (kind != 'i' && kind != 'u') {
-      throw py::value_error(std::string(name) + " entries must be integers (got dtype " +
-                            std::string(py::str(arr.dtype())) + ")");
+      throw_vector_defect(std::string(name) + " entries must be integers (got dtype " + std::string(py::str(arr.dtype())) + ")",
+                          where);
     }
     out.value.reserve(static_cast<std::size_t>(arr.size()));
     if (kind == 'u' && arr.itemsize() == 8) {
@@ -126,12 +150,12 @@ inline WideInts wide_integers(const py::handle& obj, const char* name) {
     for (py::ssize_t i = 0; i < r.shape(0); ++i) out.value.push_back(r(i));
     return out;
   }
-  if (not_a_sequence(obj)) throw py::value_error(std::string(name) + " must be a sequence of integers");
+  if (is_invalid_sequence(obj)) throw_vector_defect(std::string(name) + " must be a sequence of integers", where);
   auto seq = py::reinterpret_borrow<py::sequence>(obj);
   const std::size_t n = seq.size();
   out.value.reserve(n);
   for (std::size_t i = 0; i < n; ++i) {
-    py::object idx = python_int(seq[i], std::string(name) + "[" + std::to_string(i) + "]");
+    py::object idx = python_int(seq[i], std::string(name) + "[" + std::to_string(i) + "]", where);
     int overflow = 0;
     const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
     if (overflow != 0) {
@@ -155,61 +179,63 @@ inline bool is_nested(const py::handle& item) {
 // The shape step: the length of a rank-1 integer sequence argument. A NumPy array of another
 // rank (0-D included), a nested sequence or a non-sequence is a shape defect. Entry types and
 // values are not read here; their steps come later.
-inline std::size_t sequence_length(const py::handle& obj, const char* name) {
+inline std::size_t sequence_length(const py::handle& obj, const char* name, IntegerArgument where = IntegerArgument::Call) {
   if (py::isinstance<py::array>(obj)) {
     auto arr = py::reinterpret_borrow<py::array>(obj);
     if (arr.ndim() != 1) {
-      throw py::value_error(std::string(name) + " must be a 1-D array (got " + std::to_string(arr.ndim()) +
-                            " dimensions)");
+      throw_vector_defect(std::string(name) + " must be a 1-D array (got " + std::to_string(arr.ndim()) + " dimensions)",
+                          where);
     }
     return static_cast<std::size_t>(arr.size());
   }
-  if (not_a_sequence(obj)) {
-    throw py::value_error(std::string(name) + " must be a 1-D sequence of integers (got " +
-                          std::string(py::str(py::type::of(obj).attr("__name__"))) + ")");
+  if (is_invalid_sequence(obj)) {
+    throw_vector_defect(std::string(name) + " must be a 1-D sequence of integers (got " +
+                            std::string(py::str(py::type::of(obj).attr("__name__"))) + ")",
+                        where);
   }
   auto seq = py::reinterpret_borrow<py::sequence>(obj);
   const std::size_t n = seq.size();
   for (std::size_t i = 0; i < n; ++i) {
     if (is_nested(seq[i])) {
-      throw py::value_error(std::string(name) + " must be a 1-D sequence of integers (entry " + std::to_string(i) +
-                            " is a sequence)");
+      throw_vector_defect(std::string(name) + " must be a 1-D sequence of integers (entry " + std::to_string(i) +
+                              " is a sequence)",
+                          where);
     }
   }
   return n;
 }
 
-// A per-edge integer array in [0, capacity_units[e]] (a ledger baseline, a search residual,
-// the capacities `view` of _place_global_units), validated on the unnarrowed values: the length
+// A per-edge integer array in [0, the edge's capacity] (a ledger baseline, a search residual,
+// the capacities `view` of _solve_min_cost_flow), validated on the unnarrowed values: the length
 // (shape step), then every entry in EdgeId order. `label` names the entries in a type error
 // ("residual (units)", "view (capacity units)"). The checked values come back unnarrowed: a
-// caller narrows them later (_place_global_units, inside its call).
-inline WideInts edge_amounts(const py::object& obj, const Graph& g, const char* name, const char* label) {
-  const auto num_edges = static_cast<std::size_t>(g.num_edges());
+// caller narrows them later (_solve_min_cost_flow, inside its call).
+inline CheckedIntegerVector edge_amounts(const py::object& obj, const Graph& graph, const char* name, const char* label) {
+  const auto num_edges = static_cast<std::size_t>(graph.num_edges());
   const std::size_t len = sequence_length(obj, name);
   if (len != num_edges) {
     throw py::value_error(std::string(name) + " has length " + std::to_string(len) + ", expected " +
                           std::to_string(num_edges) + " (one entry per edge)");
   }
   auto v = wide_integers(obj, label);
-  const auto capacity = g.capacity_units();
+  const auto capacity = graph.edge_capacity_units();
   for (std::size_t e = 0; e < num_edges; ++e) {
     if (!v.in(e, 0, capacity[e])) {
-      throw py::value_error(std::string(name) + "[" + std::to_string(e) + "] = " + v.text(e) + " is outside [0, capacity_units[" +
+      throw py::value_error(std::string(name) + "[" + std::to_string(e) + "] = " + v.text(e) + " is outside [0, edge_capacity_units[" +
                             std::to_string(e) + "] = " + std::to_string(capacity[e]) + "]");
     }
   }
   return v;
 }
 
-// A per-edge integer array in [0, capacity_units[e]] (a ledger baseline, a search residual),
+// A per-edge integer array in [0, the edge's capacity] (a ledger baseline, a search residual),
 // validated on the unnarrowed values: the length (shape step), then every entry.
-inline std::vector<Amount> edge_units(const py::object& obj, const Graph& g, const char* name) {
-  return edge_amounts(obj, g, name, (std::string(name) + " (units)").c_str()).narrow<Amount>();
+inline std::vector<Amount> edge_units(const py::object& obj, const Graph& graph, const char* name) {
+  return edge_amounts(obj, graph, name, (std::string(name) + " (units)").c_str()).narrow<Amount>();
 }
 
 // A node set's ids, non-empty and range-checked before narrowing (detail::node_set's messages).
-inline std::vector<NodeId> checked_ids(const WideInts& ids, std::int32_t num_nodes, const char* name) {
+inline std::vector<NodeId> checked_ids(const CheckedIntegerVector& ids, std::int32_t num_nodes, const char* name) {
   if (ids.size() == 0) throw py::value_error(detail::empty_set_error(name));
   for (std::size_t i = 0; i < ids.size(); ++i) {
     if (!ids.in(i, 0, static_cast<std::int64_t>(num_nodes) - 1)) {

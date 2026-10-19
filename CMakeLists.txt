@@ -68,18 +68,18 @@ endif()
 add_library(netgraph_core STATIC
   src/graph.cpp
   src/eligibility.cpp
-  src/flow_core.cpp
-  src/pred_dag.cpp
+  src/min_cost_flow.cpp
+  src/route_structures.cpp
   src/search.cpp
-  src/kernels.cpp
+  src/route_kernels.cpp
   src/flow_ledger.cpp
-  src/dag_cache.cpp
+  src/shortest_path_cache.cpp
   src/flow_policy.cpp
   src/evaluators.cpp
-  src/program.cpp
+  src/forwarding_program.cpp
   src/forwarding.cpp
-  src/tunnels_t1.cpp
-  src/tunnels_t2.cpp
+  src/distributed_te.cpp
+  src/centralized_te_tunnels.cpp
 )
 target_include_directories(netgraph_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -93,23 +93,23 @@ target_compile_features(netgraph_core PUBLIC cxx_std_20)
 # order the entry calls them; the shared helpers are headers there.
 pybind11_add_module(_netgraph_core
   bindings/python/module.cpp
-  bindings/python/axes.cpp
+  bindings/python/options.cpp
   bindings/python/units.cpp
   bindings/python/eligibility.cpp
   bindings/python/graph.cpp
-  bindings/python/recorder.cpp
-  bindings/python/pred_dag.cpp
+  bindings/python/flow_solver_hook.cpp
+  bindings/python/predecessor_dag.cpp
   bindings/python/path.cpp
   bindings/python/flow_record.cpp
   bindings/python/flow_ledger.cpp
-  bindings/python/program.cpp
-  bindings/python/routing.cpp
-  bindings/python/policy_config.cpp
+  bindings/python/forwarding_program.cpp
+  bindings/python/routing_models.cpp
+  bindings/python/flow_policy_config.cpp
   bindings/python/placement_result.cpp
-  bindings/python/dag_cache.cpp
+  bindings/python/shortest_path_cache.cpp
   bindings/python/flow_policy.cpp
   bindings/python/evaluators.cpp
-  bindings/python/paths.cpp
+  bindings/python/path_enumeration.cpp
   bindings/python/search.cpp
   bindings/python/hooks.cpp
 )
@@ -147,23 +147,25 @@ if(NETGRAPH_CORE_BUILD_TESTS)
     tests/cpp/graph_tests.cpp
     tests/cpp/graph_layout_tests.cpp
     tests/cpp/graph_concurrency_tests.cpp
-    tests/cpp/flow_core_tests.cpp
-    tests/cpp/flow_core_deletion_tests.cpp
+    tests/cpp/min_cost_flow_tests.cpp
+    tests/cpp/min_cost_flow_deletion_tests.cpp
     tests/cpp/eligibility_tests.cpp
-    tests/cpp/pred_dag_tests.cpp
+    tests/cpp/route_structures_tests.cpp
     tests/cpp/search_tests.cpp
     tests/cpp/ksp_tests.cpp
-    tests/cpp/dag_cache_tests.cpp
-    tests/cpp/kernels_tests.cpp
-    tests/cpp/cost_only_creation_tests.cpp
+    tests/cpp/shortest_path_cache_tests.cpp
+    tests/cpp/route_kernels_tests.cpp
+    tests/cpp/shortest_paths_creation_tests.cpp
     tests/cpp/flow_ledger_tests.cpp
     tests/cpp/flow_policy_fixture_tests.cpp
     tests/cpp/flow_policy_tests.cpp
     tests/cpp/zero_capacity_tests.cpp
-    tests/cpp/pooled_origin_tests.cpp
+    tests/cpp/pooled_source_allocation_tests.cpp
     tests/cpp/program_tests.cpp
-    tests/cpp/tunnels_t1_tests.cpp
-    tests/cpp/tunnels_t2_tests.cpp
+    tests/cpp/distributed_te_tests.cpp
+    tests/cpp/centralized_te_tunnels_tests.cpp
+    tests/cpp/contract_examples_tests.cpp
+    tests/cpp/public_names_tests.cpp
   )
   target_compile_definitions(netgraph_core_tests PRIVATE NETGRAPH_CORE_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
   # Allocation-failure tests replace the global operator new: a separate executable.
@@ -171,7 +173,7 @@ if(NETGRAPH_CORE_BUILD_TESTS)
     tests/cpp/fault_injection.cpp
     tests/cpp/flow_ledger_fault_tests.cpp
     tests/cpp/flow_policy_fault_tests.cpp
-    tests/cpp/flow_core_deletion_fault_tests.cpp
+    tests/cpp/min_cost_flow_deletion_fault_tests.cpp
     tests/cpp/search_fault_tests.cpp
     tests/cpp/graph_fault_tests.cpp
   )
@@ -317,7 +319,7 @@ endif()
 if(NETGRAPH_CORE_TSAN)
   message(STATUS "Enabling ThreadSanitizer (without the extra optimizations)")
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    # The data-race check of the evaluators' worker threads and the shared DagCache. A CMake
+    # The data-race check of the evaluators' worker threads and the shared ShortestPathCache. A CMake
     # list, as SAN_FLAGS above. A report makes the process exit non-zero (TSan's exit code 66,
     # or an abort under the halt_on_error=1 of dev/cpp-tests.sh), so ctest fails on any race. -O1
     # as the TSan documentation advises (the Debug build type adds -g); the instrumented

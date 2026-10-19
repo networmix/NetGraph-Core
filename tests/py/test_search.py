@@ -11,15 +11,15 @@ import traceback
 import numpy as np
 import pytest
 from helpers import (
-    DET,
+    FEWER,
+    HIGHER_AVAIL,
+    HIGHER_CAP,
     L62,
-    PREFER,
-    RES,
+    assert_read_only,
     build,
     exact,
     ids,
     plain,
-    sel,
     sweep_python_allocation,
     to_ids,
 )
@@ -35,8 +35,8 @@ def via(dag):
     return sorted(int(e) for e in dag.via_edges())
 
 
-def opts(direction=FWD, selection=None, **kw):
-    return ngc.SpfOptions(direction, selection or sel(), **kw)
+def opts(direction=FWD, **kw):
+    return ngc.SpfOptions(direction, **kw)
 
 
 ANYCAST = [(0, 1, 1, 1), (1, 2, 1, 1), (0, 3, 1, 2), (3, 2, 1, 5), (1, 4, 1, 5)]
@@ -83,23 +83,26 @@ def test_reverse_full_search_is_forward_oriented():
 
 def test_staged_single_path_with_a_shared_bottleneck_takes_the_fewest_hops():
     # s -> v (1, prio 1), v -> t (3, prio 1), v -> a -> b -> t (1 + 1 + 1, prio 2): the
-    # bottleneck of every walk is 1, so the two-hop walk wins under both tie modes.
+    # bottleneck of every walk is 1, so the two-hop walk wins under FEWER_HOPS and
+    # HIGHER_CAPACITY.
     g = build(5, [(0, 1, 1, 1), (1, 4, 1, 3), (1, 2, 2, 1), (2, 3, 2, 1), (3, 4, 2, 1)])
-    for tie in (DET, PREFER):
-        s = sel(tie, mp=False)
-        f = ngc.spf(g, 0, opts(selection=s, targets=4))
+    for tie in (FEWER, HIGHER_CAP):
+        f = ngc.spf(g, 0, opts(tie_break=tie, multipath=False, targets=4))
         assert via(f.dag) == ids(g, {0, 1})
         assert f.target_cost == 4
-        r = ngc.spf(g, 4, opts(REV, selection=s, targets=0))
+        r = ngc.spf(g, 4, opts(REV, tie_break=tie, multipath=False, targets=0))
         assert r.dag == f.dag
 
 
-def test_residual_gating_and_priority():
+def test_residual_gating_and_tie_scores():
     # Capacities 5; residuals by input [5, 4, 1, 3, 2]: 0->1->3 has bottleneck 4.
     g = build(4, [(0, 1, 5, 1), (1, 3, 5, 1), (0, 2, 5, 1), (2, 3, 5, 1), (0, 3, 5, 2)])
     residual = np.array(to_ids(g, [5, 4, 1, 3, 2]), dtype=np.int64)
-    s = sel(PREFER, RES, mp=False)
-    r = ngc.spf(g, 0, opts(selection=s, targets=3, residual=residual))
+    r = ngc.spf(
+        g,
+        0,
+        opts(tie_break=HIGHER_AVAIL, multipath=False, targets=3, residual=residual),
+    )
     assert via(r.dag) == ids(g, {0, 1})
     # Gated at 4 units: only 0->1 (5) and 1->3 (4) are routable on that walk; the direct edge
     # (residual 2) is gated out, so the cost-2 walk is the two-hop one through node 1.
@@ -135,7 +138,21 @@ def test_validation_order_on_unnarrowed_values():
         "multipath = false requires targets (the single path joins a root to a target)"
     )
     with pytest.raises(ValueError, match=exact(single)):
-        ngc.spf(g, 0, opts(selection=sel(mp=False)))
+        ngc.spf(g, 0, opts(multipath=False))
+    ineffective = "spf tie_break requires multipath=False or parallel_edges=False"
+    with pytest.raises(ValueError, match=exact(ineffective)):
+        ngc.spf(g, 0, opts(tie_break=HIGHER_CAP))
+    for multipath, parallel_edges in ((False, True), (True, False), (False, False)):
+        ngc.spf(
+            g,
+            0,
+            opts(
+                tie_break=HIGHER_CAP,
+                multipath=multipath,
+                parallel_edges=parallel_edges,
+                targets=None if multipath else 2,
+            ),
+        )
     with pytest.raises(
         ValueError, match=exact("min_residual must be at least 1 unit (got 0)")
     ):
@@ -149,9 +166,9 @@ def test_validation_order_on_unnarrowed_values():
     ):
         ngc.spf(g, 0, opts(min_residual=1.5))
     with pytest.raises(ValueError, match="^foreign Eligibility"):
-        ngc.spf(g, 0, opts(elig=other.eligibility([], [0])))
+        ngc.spf(g, 0, opts(eligibility=other.eligibility([], [0])))
     # Several defects: the first in the documented order (roots, targets, overlap, single
-    # path, residual, min_residual, Eligibility).
+    # path, the ineffective tie rule, residual, min_residual, Eligibility).
     with pytest.raises(ValueError, match=exact("roots: the node set is empty")):
         ngc.spf(g, [], opts(targets=[], residual=[1], min_residual=0))
     with pytest.raises(ValueError, match=rf"^targets: node {big} out of node range"):
@@ -159,15 +176,13 @@ def test_validation_order_on_unnarrowed_values():
     with pytest.raises(ValueError, match="both endpoint sets"):
         ngc.spf(g, 0, opts(targets=0, residual=[]))
     with pytest.raises(ValueError, match=exact(single)):
-        ngc.spf(
-            g,
-            0,
-            opts(selection=sel(mp=False), residual=[]),
-        )
+        ngc.spf(g, 0, opts(multipath=False, tie_break=HIGHER_CAP, residual=[]))
+    with pytest.raises(ValueError, match=exact(ineffective)):
+        ngc.spf(g, 0, opts(tie_break=HIGHER_CAP, residual=[], min_residual=0))
     with pytest.raises(ValueError, match="^residual"):
         ngc.spf(g, 0, opts(residual=[1, 9], min_residual=0))
     with pytest.raises(ValueError, match="^min_residual"):
-        ngc.spf(g, 0, opts(min_residual=0, elig=other.eligibility([], [0])))
+        ngc.spf(g, 0, opts(min_residual=0, eligibility=other.eligibility([], [0])))
     # A min_residual above INT64_MAX is no error and acts as INT64_MAX does: it gates every
     # residual edge, even one whose residual is the largest unit value 2^62 - 1, which
     # min_residual = 2^62 - 1 itself admits.
@@ -186,21 +201,27 @@ def test_options_types_and_enumerations():
     g = build(2, [(0, 1, 1, 1)])
     o = opts(targets=[1], min_residual=3)
     assert o.direction == FWD and o.targets == [1] and o.min_residual == 3
-    assert o.residual is None and o.elig is None
+    assert o.residual is None and o.eligibility is None
     with pytest.raises(
         ValueError, match=exact("direction: 7 is not a value of Direction")
     ):
-        ngc.SpfOptions(ngc.Direction(7), sel())
+        ngc.SpfOptions(ngc.Direction(7))
     with pytest.raises(TypeError):
-        ngc.SpfOptions(FWD, sel(), fanout_edges=[0])
+        ngc.SpfOptions(FWD, fanout_edges=[0])
     with pytest.raises(TypeError, match=r"^spf\(\): incompatible function arguments"):
         ngc.spf(g, 0, opts(), fanout_edges=[0])
-    with pytest.raises(
-        TypeError, match=exact("SpfOptions expected (got PathSelection)")
-    ):
-        ngc.spf(g, 0, sel())
+    with pytest.raises(TypeError, match=exact("SpfOptions expected (got KspOptions)")):
+        ngc.spf(g, 0, ngc.KspOptions(1))
     with pytest.raises(TypeError):
-        ngc.SpfOptions(FWD)
+        ngc.SpfOptions()
+    # The route choice: keywords only, bools strictly (None and 1 are no bool).
+    with pytest.raises(TypeError):
+        ngc.SpfOptions(FWD, None)
+    for bad in (None, 1, "yes"):
+        for name in ("multipath", "parallel_edges"):
+            with pytest.raises(TypeError):
+                ngc.SpfOptions(FWD, **{name: bad})
+    assert ngc.SpfOptions(FWD, multipath=np.bool_(False)).multipath is False
     # Roots as a NumPy array, with duplicates.
     r = ngc.spf(g, np.array([0, 0], dtype=np.int32), opts())
     assert list(r.costs) == [0, 1]
@@ -210,7 +231,8 @@ def test_options_types_and_enumerations():
     targets, residual, low = [1, 1], [9], -(2**70)
     o = opts(targets=targets, residual=residual, min_residual=low)
     assert o.targets is targets and o.residual is residual and o.min_residual is low
-    assert o.selection == sel()
+    assert (o.tie_break, o.multipath, o.parallel_edges) == (FEWER, True, True)
+    assert_read_only(o, "direction", "tie_break", "multipath", "parallel_edges")
     with pytest.raises(ValueError, match=r"^residual\[0\] = 9 is outside"):
         ngc.spf(g, 0, o)
 
@@ -222,7 +244,7 @@ def test_python_result_construction_is_all_or_nothing():
     g = build(5, ANYCAST)
     for o in (opts(targets=[2, 4]), opts()):
         failures = sweep_python_allocation(lambda o=o: (ngc.spf, (g, 0, o), list), 200)
-        assert failures >= 3, o.targets
+        assert failures >= 2, o.targets
 
 
 @needs_hooks
@@ -356,3 +378,83 @@ def test_the_python_allocation_sweep_rejects_a_wrong_call():
     with pytest.raises(pytest.fail.Exception) as info:
         sweep_python_allocation(lambda: (ngc.spf, (g, 0, opts()), list), 2)
     assert str(info.value) == "spf never completed"
+
+
+# The route choice. TRI: three parallel cost-1 links 0 -> 1 of capacities 4, 10,
+# 100 and a cost-2 link of 50; availability (the residual) 4, 8, 5, 50.
+TRI = [(0, 1, 4, 1), (0, 1, 10, 1), (0, 1, 100, 1), (0, 1, 50, 2)]
+TRI_AVAILABLE = [4, 8, 5, 50]
+TIE = ngc.RouteTieBreak
+# The scores: HIGHER_CAPACITY 4, 10, 100; HIGHER_AVAILABLE_CAPACITY 4, 8, 5; HIGHER_HEADROOM
+# 4/4 = 1, 8/10 = 4/5, 5/100 = 1/20. The costlier e3 never wins.
+TRI_WINNER = {
+    TIE.FEWER_HOPS: 0,
+    TIE.HIGHER_CAPACITY: 2,
+    TIE.HIGHER_AVAILABLE_CAPACITY: 1,
+    TIE.HIGHER_HEADROOM: 0,
+}
+
+
+def test_tie_parallel():
+    # TIE-parallel: the single path takes one link per rule.
+    g = build(2, TRI)
+    for tie, want in TRI_WINNER.items():
+        options = opts(
+            targets=[1], multipath=False, tie_break=tie, residual=TRI_AVAILABLE
+        )
+        assert via(ngc.spf(g, 0, options).dag) == [want], tie
+
+
+def test_parallel_collapse():
+    # Multipath with one member per (u, v) pair: the DAG keeps one link of the cost-1 class,
+    # chosen by the same rule.
+    g = build(2, TRI)
+    for tie, want in TRI_WINNER.items():
+        options = opts(parallel_edges=False, tie_break=tie, residual=TRI_AVAILABLE)
+        assert via(ngc.spf(g, 0, options).dag) == [want], tie
+
+
+def test_tie_routes():
+    # TIE-routes: a direct link of capacity 3 (e1, cost 2) against two hops of capacity 10 (e0,
+    # e2, cost 1 each). Without a residual every score reads static capacity, and HEADROOM reads
+    # 1 on every positive link, so its bottlenecks tie and hops decide. TIE-bottleneck: with e2
+    # at capacity 1 the two-hop bottleneck is 1 and every rule takes the direct link, although
+    # the two-hop route's first link is the larger one.
+    for e2, want in (
+        (10, {TIE.FEWER_HOPS: [1], TIE.HIGHER_CAPACITY: [0, 2]}),
+        (1, {TIE.FEWER_HOPS: [1], TIE.HIGHER_CAPACITY: [1]}),
+    ):
+        g = build(3, [(0, 1, 10, 1), (0, 2, 3, 2), (1, 2, e2, 1)])
+        want[TIE.HIGHER_AVAILABLE_CAPACITY] = want[TIE.HIGHER_CAPACITY]
+        want[TIE.HIGHER_HEADROOM] = [1]
+        for tie in TIE.__members__.values():
+            r = ngc.spf(g, 0, opts(targets=[2], multipath=False, tie_break=tie))
+            assert via(r.dag) == want[tie], (e2, tie)
+
+
+def test_headroom_zero_capacity():
+    # Without a residual HIGHER_HEADROOM reads 0 on a zero-capacity link and 1 on a positive
+    # one, so it takes e1; FEWER_HOPS takes the lower EdgeId e0.
+    g = build(2, [(0, 1, 0, 1), (0, 1, 5, 1)])
+    for tie, want in ((TIE.HIGHER_HEADROOM, [1]), (TIE.FEWER_HOPS, [0])):
+        r = ngc.spf(g, 0, opts(targets=[1], multipath=False, tie_break=tie))
+        assert via(r.dag) == want, tie
+
+
+def test_tie_rule_validation():
+    # spf's entry: the ineffective tie rule after the single-path rule and before the residual.
+    g = build(3, [(0, 1, 2, 1), (1, 2, 2, 1)])
+    ineffective = "spf tie_break requires multipath=False or parallel_edges=False"
+    single = (
+        "multipath = false requires targets (the single path joins a root to a target)"
+    )
+    with pytest.raises(ValueError, match=exact(ineffective)):
+        ngc.spf(g, 0, opts(tie_break=TIE.HIGHER_CAPACITY))
+    with pytest.raises(ValueError, match=exact(ineffective)):
+        ngc.spf(g, 0, opts(tie_break=TIE.HIGHER_CAPACITY, residual=[1]))
+    with pytest.raises(ValueError, match=exact(single)):
+        ngc.spf(g, 0, opts(tie_break=TIE.HIGHER_CAPACITY, multipath=False))
+    assert ngc.spf(
+        g, 0, opts(tie_break=TIE.HIGHER_CAPACITY, parallel_edges=False)
+    ).costs.tolist() == [0, 1, 2]
+    assert ngc.spf(g, 0, opts()).costs.tolist() == [0, 1, 2]

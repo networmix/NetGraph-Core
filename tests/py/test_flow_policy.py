@@ -1,4 +1,4 @@
-"""The policy engine, the DagCache and the evaluators through the bindings (docs/semantics.md):
+"""The policy engine, the ShortestPathCache and the evaluators through the bindings (docs/semantics.md):
 configuration objects and their structural validation, PlacementResult fields and outputs,
 lifetimes, the evaluators with workers, and the cache statistics. The fixtures of the reference
 (``tests/reference/policy/``) replay in ``test_flow_policy_fixtures.py``."""
@@ -6,20 +6,18 @@ lifetimes, the evaluators with workers, and the cache statistics. The fixtures o
 from __future__ import annotations
 
 import gc
-import math
-import sys
 import weakref
 
 import numpy as np
 import pytest
 from helpers import (
     ALL_OUT,
-    CAP,
     COSTONLY,
     GLOBAL,
+    HIGHER_AVAIL,
     INF,
     L62,
-    RES,
+    assert_read_only,
     build,
     config,
     dag_of,
@@ -27,7 +25,6 @@ from helpers import (
     full_ledger_state,
     ids,
     plain,
-    sel,
     sweep_python_allocation,
     t1_config,
     to_ids,
@@ -46,69 +43,82 @@ def diamond(a=5, b=3, c=1):
 
 def test_configurations_are_structural_and_explicit():
     with pytest.raises(TypeError):
-        ngc.FlowPolicyConfig(
-            ngc.CostOnly(), ngc.FlowPlacement.MAX_FLOW, ngc.Admission.LOSSLESS, sel()
-        )
-    # Keyword-only; every field but the routing has a default: placement, selection and origin
-    # None, admission LOSSLESS (contract 3.1). A wrong class is TypeError.
-    plain = ngc.FlowPolicyConfig(routing=ngc.CostOnly())
-    assert (plain.placement, plain.admission, plain.selection, plain.origin) == (
-        None,
-        ngc.Admission.LOSSLESS,
-        None,
-        None,
-    )
+        ngc.FlowPolicyConfig(ngc.ShortestPaths(), ngc.Admission.LOSSLESS)
+    # Keyword-only; the routing is required, admission LOSSLESS by default. The
+    # allocations, the weights and the route choice are the model's: no keyword of the config.
+    # A wrong class is TypeError.
+    plain = ngc.FlowPolicyConfig(routing=ngc.ShortestPaths())
+    assert plain.admission == ngc.Admission.LOSSLESS
     with pytest.raises(TypeError):
-        ngc.FlowPolicyConfig(placement=ngc.FlowPlacement.MAX_FLOW)
+        ngc.FlowPolicyConfig(admission=ngc.Admission.LOSSLESS)
+    for kw in (
+        "selection",
+        "placement",
+        "origin",
+        "weights",
+        "edge_weights",
+        "bundles",
+    ):
+        with pytest.raises(TypeError):
+            ngc.FlowPolicyConfig(routing=ngc.ShortestPaths(), **{kw: None})
     with pytest.raises(TypeError):
-        ngc.FlowPolicyConfig(routing=ngc.CostOnly(), origin="EQUAL")
+        ngc.ShortestPaths(allocation=1)
     with pytest.raises(TypeError):
-        ngc.FlowPolicyConfig(routing=ngc.CostOnly(), placement=1)
+        ngc.ShortestPaths(source_allocation="EQUAL")
     with pytest.raises(TypeError):
-        ngc.FlowPolicyConfig(routing=ngc.Global(), bundles=None)  # an unknown keyword
-    with pytest.raises(TypeError):
-        ngc.FlowPolicyConfig(routing=ngc.CostOnly(), weights="EXPLICIT")
+        ngc.ShortestPaths(weight_basis="EXPLICIT")
     with pytest.raises(TypeError, match="incompatible"):
-        ngc.CostOnly(
-            tunnels=ngc.Tunnels(2)
+        ngc.ShortestPaths(
+            tunnels=ngc.TunnelCount(2)
         )  # a field outside its routing variant: TypeError
     with pytest.raises(TypeError, match="incompatible"):
-        ngc.Global(max_path_cost=ngc.Absolute(4))
+        ngc.CentralizedTE(
+            source_allocation=ngc.SourceAllocation.OPTIMIZED,
+            cost_ceiling=ngc.AbsoluteCost(4),
+        )
     with pytest.raises(TypeError, match="routing"):
-        config("CostOnly")
+        config("ShortestPaths")
     # T1: the tunnel count (a Tunnels), the ceiling and the search minimum, every field as built.
-    ca = ngc.CapacityAware(
-        ngc.Tunnels(2), max_path_cost=ngc.Stretch(1.5), min_unreserved_bandwidth=3
+    ca = ngc.DistributedTE(
+        ngc.TunnelCount(2),
+        cost_ceiling=ngc.CostStretch(1.5),
+        min_unreserved_bandwidth=3,
     )
-    assert (ca.tunnels, ca.max_path_cost, ca.min_unreserved_bandwidth) == (
-        ngc.Tunnels(2),
-        ngc.Stretch(1.5),
+    assert (ca.tunnel_count, ca.cost_ceiling, ca.min_unreserved_bandwidth) == (
+        ngc.TunnelCount(2),
+        ngc.CostStretch(1.5),
         3,
     )
-    assert (ca.tunnels.count, ca.tunnels.up_to) == (2, False)
-    assert ngc.Tunnels(3, up_to=True).up_to is True
-    d = ngc.CapacityAware(ngc.Tunnels(1))
-    assert (d.max_path_cost, d.min_unreserved_bandwidth) == (None, 0)
-    assert ngc.CapacityAware(
-        ngc.Tunnels(1), max_path_cost=ngc.Absolute(7)
-    ).max_path_cost == ngc.Absolute(7)
+    assert (ca.tunnel_count.per_head, ca.tunnel_count.up_to) == (2, False)
+    assert ngc.TunnelCount(3, up_to=True).up_to is True
+    d = ngc.DistributedTE(ngc.TunnelCount(1))
+    assert (d.cost_ceiling, d.min_unreserved_bandwidth) == (None, 0)
+    assert ngc.DistributedTE(
+        ngc.TunnelCount(1), cost_ceiling=ngc.AbsoluteCost(7)
+    ).cost_ceiling == ngc.AbsoluteCost(7)
     with pytest.raises(TypeError):
-        ngc.CapacityAware()  # the tunnel count is required
+        ngc.DistributedTE()  # the tunnel count is required
     with pytest.raises(TypeError):
-        ngc.CapacityAware(2)  # a Tunnels, not an int
+        ngc.DistributedTE(2)  # a Tunnels, not an int
     with pytest.raises(TypeError):
-        ngc.CapacityAware(ngc.Tunnels(1), ngc.Absolute(1))  # keyword-only after tunnels
+        ngc.DistributedTE(
+            ngc.TunnelCount(1), ngc.AbsoluteCost(1)
+        )  # keyword-only after tunnels
     with pytest.raises(TypeError):
-        ngc.Tunnels(2, True)  # up_to is keyword-only
-    for bad, message in (
-        (2**70, "tunnel count = 1180591620717411303424 is out of range"),
-        (True, "tunnel count must be an integer (got bool)"),
-        (1.5, "tunnel count must be an integer (got float)"),
+        ngc.TunnelCount(2, True)  # up_to is keyword-only
+    for bad, error, message in (
+        (
+            2**70,
+            ValueError,
+            "TunnelCount per_head = 1180591620717411303424 is out of range",
+        ),
+        (True, TypeError, "TunnelCount per_head must be an integer (got bool)"),
+        (1.5, TypeError, "TunnelCount per_head must be an integer (got float)"),
     ):
         with pytest.raises(
-            ValueError, match=message.replace("(", r"\(").replace(")", r"\)")
+            error, match=message.replace("(", r"\(").replace(")", r"\)")
         ):
-            ngc.Tunnels(bad)
+            ngc.TunnelCount(bad)
     with pytest.raises(
         ValueError,
         match=exact(
@@ -116,33 +126,35 @@ def test_configurations_are_structural_and_explicit():
             "[-9223372036854775808, 9223372036854775807]"
         ),
     ):
-        ngc.CapacityAware(ngc.Tunnels(1), min_unreserved_bandwidth=2**80)
+        ngc.DistributedTE(ngc.TunnelCount(1), min_unreserved_bandwidth=2**80)
     with pytest.raises(TypeError):
         ngc.Pinned([[0, 1]])
     cfg = ngc.FlowPolicyConfig(routing=ca)
-    assert isinstance(cfg.routing, ngc.CapacityAware)
-    assert cfg.routing.tunnels.count == 2
-    s = sel(ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY, RES, False, True)
+    assert isinstance(cfg.routing, ngc.DistributedTE)
+    assert cfg.routing.tunnel_count.per_head == 2
     cfg = ngc.FlowPolicyConfig(
-        routing=ngc.Global(),
-        placement=ngc.FlowPlacement.MAX_FLOW,
+        routing=ngc.ShortestPaths(
+            allocation=ngc.RouteAllocation.EQUAL,
+            source_allocation=ngc.SourceAllocation.OPTIMIZED,
+        ),
         admission=ngc.Admission.LOSSY,
-        selection=s,
-        origin=ngc.Origin.EQUAL,
     )  # a plain value: the combination is checked where it is used
-    assert cfg.placement == ngc.FlowPlacement.MAX_FLOW
+    assert cfg.routing.allocation == ngc.RouteAllocation.EQUAL
     assert cfg.admission == ngc.Admission.LOSSY
-    assert cfg.selection == s
-    assert cfg.origin == ngc.Origin.EQUAL
-    assert ngc.PathSelection() == sel(ngc.EdgeTieBreak.DETERMINISTIC, CAP, None, True)
-    assert ngc.PathSelection().multipath is None
-    assert ngc.PathSelection() != sel(ngc.EdgeTieBreak.DETERMINISTIC, CAP, True, True)
+    assert cfg.routing.source_allocation == ngc.SourceAllocation.OPTIMIZED
+    # The ineffective tie rule is checked where the model is used, not at construction.
+    tie = ngc.ShortestPaths(tie_break=HIGHER_AVAIL)
+    assert (tie.tie_break, tie.multipath, tie.parallel_edges) == (
+        HIGHER_AVAIL,
+        True,
+        True,
+    )
     o = ngc.OutputOptions()
     names = (
         "edge_flows",
         "residual",
-        "bottleneck",
-        "reservation_edge_flows",
+        "saturated_boundary_edges",
+        "edge_reservations",
         "min_cut",
     )
     assert tuple(getattr(o, n) for n in names) == (False,) * 5
@@ -154,61 +166,67 @@ def test_configurations_are_structural_and_explicit():
     g = diamond()
     a, b = dag_of(g, ids(g, [0, 1])), dag_of(g, ids(g, [2, 3]))
     program = ngc.ForwardingProgram.from_routes(
-        g, 0, 3, [ngc.Route(0, b), ngc.Route(0, a)]
+        g, 0, 3, [ngc.RouteDefinition(0, b), ngc.RouteDefinition(0, a)]
     )
     dark = g.eligibility(excluded_edges=ids(g, [0]))
     pinned = ngc.Pinned(program, black_holes=dark)
     assert pinned.program is program and pinned.black_holes is dark
     assert ngc.Pinned(program).black_holes is None
-    # A policy's config is the configuration it was built with, its absent origin and selection
-    # resolved to the model's defaults (Pinned takes none).
+    # A policy's config is the configuration it was built with, ShortestPaths' absent source
+    # allocation and weight basis resolved to the allocation's defaults (Pinned has neither).
     pol = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, ngc.FlowPolicyConfig(routing=pinned))
-    assert pol.config.placement is None and pol.config.selection is None
     assert pol.config.routing.program is program
-    assert pol.config.origin is None
-    for routing, placement, origin in (
-        (ngc.CostOnly(), ngc.FlowPlacement.EQUAL_BALANCED, ngc.Origin.EQUAL),
-        (ngc.CostOnly(), ngc.FlowPlacement.WEIGHTED, ngc.Origin.EQUAL),
-        (ngc.CostOnly(), ngc.FlowPlacement.MAX_FLOW, ngc.Origin.OPTIMIZED),
-        (ngc.Global(), None, ngc.Origin.OPTIMIZED),
+    for allocation, source_allocation, weight_basis in (
+        (ngc.RouteAllocation.EQUAL, ngc.SourceAllocation.EQUAL, None),
+        (
+            ngc.RouteAllocation.WEIGHTED,
+            ngc.SourceAllocation.EQUAL,
+            ngc.WeightBasis.CAPACITY,
+        ),
+        (ngc.RouteAllocation.OPTIMIZED, ngc.SourceAllocation.OPTIMIZED, None),
     ):
         got = ngc.FlowPolicy(
             ngc.FlowLedger(g),
             0,
             3,
-            ngc.FlowPolicyConfig(routing=routing, placement=placement),
+            ngc.FlowPolicyConfig(routing=ngc.ShortestPaths(allocation=allocation)),
         ).config
-        assert got.origin == origin
-        assert got.selection == (None if placement is None else ngc.PathSelection())
+        assert (got.routing.source_allocation, got.routing.weight_basis) == (
+            source_allocation,
+            weight_basis,
+        )
+    got = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, GLOBAL).config
+    assert got.routing.source_allocation == ngc.SourceAllocation.OPTIMIZED
     got = ngc.FlowPolicy(
         ngc.FlowLedger(g),
         0,
         3,
-        ngc.FlowPolicyConfig(routing=ngc.CapacityAware(ngc.Tunnels(1))),
+        ngc.FlowPolicyConfig(routing=ngc.DistributedTE(ngc.TunnelCount(1))),
     ).config
-    assert (got.origin, got.selection, got.placement) == (
-        ngc.Origin.EQUAL,
-        ngc.PathSelection(),
-        None,
+    assert (got.routing.tie_break, got.routing.parallel_edges) == (
+        ngc.RouteTieBreak.FEWER_HOPS,
+        True,
     )
     # The constructors' own checks: an integer field outside its C++ type raises ValueError; a
     # field of the wrong class and an unknown keyword raise TypeError.
-    assert ngc.Absolute(2**63 - 1).cost == 2**63 - 1
-    assert ngc.Absolute(-(2**63)).cost == -(2**63)
+    assert ngc.AbsoluteCost(2**63 - 1).cost == 2**63 - 1
+    assert ngc.AbsoluteCost(-(2**63)).cost == -(2**63)
     for bad in (2**63, -(2**63) - 1):
         with pytest.raises(
             ValueError,
             match=exact(
-                f"Absolute cost = {bad} is out of range [-9223372036854775808, 9223372036854775807]"
+                f"AbsoluteCost cost = {bad} is out of range [-9223372036854775808, 9223372036854775807]"
             ),
         ):
-            ngc.Absolute(bad)
+            ngc.AbsoluteCost(bad)
     with pytest.raises(
-        TypeError, match=exact("max_path_cost must be Absolute, Stretch or None")
+        TypeError, match=exact("cost_ceiling must be AbsoluteCost, CostStretch or None")
     ):
-        ngc.CapacityAware(ngc.Tunnels(1), max_path_cost=3)
+        ngc.DistributedTE(ngc.TunnelCount(1), cost_ceiling=3)
     with pytest.raises(TypeError):
-        ngc.CapacityAware(ngc.Tunnels(1), min_flow_bandwidth=2)  # T0's field is gone
+        ngc.DistributedTE(
+            ngc.TunnelCount(1), min_flow_bandwidth=2
+        )  # T0's field is gone
 
 
 class _ConversionFailed(Exception):
@@ -227,24 +245,8 @@ class _FailingIndex:
         raise _ConversionFailed("own index")
 
 
-class _BigInt(int):
-    pass
-
-
-class _OwnFloat(int):
-    # An int subclass whose own __float__ gives 2.5, whatever its integer value.
-    def __float__(self):
-        return 2.5
-
-
 class _OverflowingFloat(np.float32):
     # A NumPy floating scalar whose own __float__ raises OverflowError.
-    def __float__(self):
-        raise OverflowError("own conversion")
-
-
-class _OverflowingIntFloat(int):
-    # An int subclass whose own __float__ raises OverflowError.
     def __float__(self):
         raise OverflowError("own conversion")
 
@@ -255,38 +257,6 @@ class _OverflowingIndex:
         raise OverflowError("own conversion")
 
 
-def test_float_fields_hold_only_finite_floats():
-    # Stretch's factor is a C++ double. An integer with no finite
-    # double (at either sign, as a Python int or through __index__) is outside the field's domain:
-    # ValueError naming the field. The last integer that rounds to the largest finite double is
-    # kept as that double; the next one rounds past it.
-    top = sys.float_info.max
-    last = 2**1024 - 2**970 - 1
-    assert ngc.Stretch(last).factor == top
-    assert ngc.Stretch(-last).factor == -top
-
-    class Index:
-        def __index__(self):
-            return 10**400
-
-    too_large = "must be a number in the float range (got an integer beyond the largest finite float)"
-    for bad in (last + 1, -(last + 1), 10**400, Index()):
-        with pytest.raises(ValueError, match=exact("Stretch factor " + too_large)):
-            ngc.Stretch(bad)
-    # So is an int subclass that keeps int's own conversion; one with its own __float__ is
-    # converted by that first, as float() does.
-    with pytest.raises(ValueError, match=exact("Stretch factor " + too_large)):
-        ngc.Stretch(_BigInt(10**400))
-    assert ngc.Stretch(_OwnFloat(10**400)).factor == 2.5
-    # Any other failure of the object's own conversion reaches the caller unchanged, an
-    # OverflowError raised by its own __float__ or __index__ too: no integer was returned.
-    with pytest.raises(_ConversionFailed):
-        ngc.Stretch(_FailingFloat(2.0))
-    for bad in (_OverflowingFloat(2.0), _OverflowingIndex(), _OverflowingIntFloat(2)):
-        with pytest.raises(OverflowError, match=exact("own conversion")):
-            ngc.Stretch(bad)
-
-
 def test_validation_messages_before_binding():
     g = diamond()
     fg = ngc.FlowLedger(g)
@@ -295,39 +265,26 @@ def test_validation_messages_before_binding():
         with pytest.raises(ValueError, match=exact(msg)):
             ngc.FlowPolicy(fg, src, 3, cfg)
 
-    stretch = "max_path_cost Stretch factor must be finite and in [1, inf) (got {})"
+    stretch = "cost_ceiling CostStretch factor must be >= 1 (got {})"
     rejects(
-        config(ngc.CostOnly(), ngc.FlowPlacement.MAX_FLOW, ngc.Admission.LOSSY),
+        config(ngc.ShortestPaths(), ngc.RouteAllocation.OPTIMIZED, ngc.Admission.LOSSY),
         LOSSY_KERNEL,
     )
-    rejects(
-        ngc.FlowPolicyConfig(
-            routing=ngc.Global(), placement=ngc.FlowPlacement.MAX_FLOW
-        ),
-        "Global does not accept placement",
-    )
-    rejects(ngc.FlowPolicyConfig(routing=ngc.CostOnly()), "CostOnly requires placement")
+    rejects(config(GLOBAL.routing, admission=ngc.Admission.LOSSY), CTE_LOSSY)
     rejects(t1_config(0), "tunnel count must be in [1, 10000]")
     rejects(t1_config(10001), "tunnel count must be in [1, 10000]")
     rejects(
-        ngc.FlowPolicyConfig(routing=ngc.CapacityAware(ngc.Tunnels(2, up_to=True))),
-        "T1 requires an exact tunnel count",
+        ngc.FlowPolicyConfig(routing=ngc.DistributedTE(ngc.TunnelCount(2, up_to=True))),
+        "DistributedTE requires an exact tunnel count",
     )
-    rejects(t1_config(1, max_path_cost=ngc.Stretch(0.5)), stretch.format("0.500000"))
-    rejects(t1_config(1, max_path_cost=ngc.Stretch(math.nan)), stretch.format("nan"))
+    rejects(t1_config(1, cost_ceiling=ngc.CostStretch(0.5)), stretch.format("1/2"))
     for bad in (-1, 2**62):
         rejects(
             t1_config(1, min_unreserved_bandwidth=bad),
             "min_unreserved_bandwidth must be an integer in [0, 2^62)",
         )
     b = dag_of(g, ids(g, [0, 1]))
-    program = ngc.ForwardingProgram.from_routes(g, 0, 3, [ngc.Route(0, b)])
-    rejects(
-        ngc.FlowPolicyConfig(
-            routing=ngc.Pinned(program), placement=ngc.FlowPlacement.MAX_FLOW
-        ),
-        "Pinned does not accept placement",
-    )
+    program = ngc.ForwardingProgram.from_routes(g, 0, 3, [ngc.RouteDefinition(0, b)])
     rejects(
         ngc.FlowPolicyConfig(routing=ngc.Pinned(program)),
         "program endpoints do not match policy endpoints",
@@ -345,11 +302,11 @@ def test_validation_messages_before_binding():
     ):
         ngc.FlowPolicy(fg, 0, 3, COSTONLY, diamond().eligibility(excluded_edges=[0]))
     with pytest.raises(
-        ValueError, match=exact("foreign DagCache: bound to another graph")
+        ValueError, match=exact("foreign ShortestPathCache: bound to another graph")
     ):
-        ngc.FlowPolicy(fg, 0, 3, COSTONLY, None, ngc.DagCache(diamond()))
+        ngc.FlowPolicy(fg, 0, 3, COSTONLY, None, ngc.ShortestPathCache(diamond()))
     # Arguments of the wrong kind: a ledger of None and non-integer node ids are ValueError; a
-    # ledger, config, elig or cache of the wrong class and an unknown keyword are TypeError.
+    # ledger, config, eligibility or cache of the wrong class and an unknown keyword are TypeError.
     with pytest.raises(ValueError, match=exact("ledger must be a FlowLedger")):
         ngc.FlowPolicy(None, 0, 3, COSTONLY)
     with pytest.raises(
@@ -362,8 +319,8 @@ def test_validation_messages_before_binding():
         ngc.FlowPolicy(fg, 0, 3.0, COSTONLY)
     for wrong in (
         lambda: ngc.FlowPolicy(g, 0, 3, COSTONLY),
-        lambda: ngc.FlowPolicy(fg, 0, 3, ngc.CostOnly()),
-        lambda: ngc.FlowPolicy(fg, 0, 3, COSTONLY, ngc.DagCache(g)),
+        lambda: ngc.FlowPolicy(fg, 0, 3, ngc.ShortestPaths()),
+        lambda: ngc.FlowPolicy(fg, 0, 3, COSTONLY, ngc.ShortestPathCache(g)),
         lambda: ngc.FlowPolicy(fg, 0, 3, COSTONLY, None, g.eligibility()),
         lambda: ngc.FlowPolicy(fg, 0, 3, COSTONLY, cash=None),
     ):
@@ -372,144 +329,164 @@ def test_validation_messages_before_binding():
     fg.reset()  # nothing bound
     pol = ngc.FlowPolicy(fg, 0, 3, COSTONLY)
     with pytest.raises(
-        TypeError, match=exact("outputs must be an OutputOptions (got CostOnly)")
+        TypeError, match=exact("outputs must be an OutputOptions (got ShortestPaths)")
     ):
-        pol.place(1, ngc.CostOnly())
+        pol.place(1, ngc.ShortestPaths())
     assert pol.records() == []
 
 
-LOSSY_KERNEL = "MAX_FLOW requires admission=LOSSLESS"
-P = ngc.FlowPlacement
+LOSSY_KERNEL = "ShortestPaths OPTIMIZED requires admission=LOSSLESS"
+CTE_LOSSY = "CentralizedTE without tunnel_count requires admission=LOSSLESS"
+P = ngc.RouteAllocation
 A = ngc.Admission
-ORIGIN = ngc.Origin
+ORIGIN = ngc.SourceAllocation
+HC = ngc.RouteTieBreak.HIGHER_CAPACITY
 
 
 def T1():
-    return ngc.CapacityAware(ngc.Tunnels(1))
+    return ngc.DistributedTE(ngc.TunnelCount(1))
+
+
+INEFFECTIVE = "ShortestPaths tie_break requires multipath=False or parallel_edges=False"
 
 
 @pytest.mark.parametrize(
-    ("routing", "placement", "admission", "selection", "origin", "msg"),
+    ("routing", "admission", "msg"),
     [
-        # The rows of the matrix, their columns left to right: placement, origin, admission,
-        # selection (contract 3.2, 14.3, 14.4).
-        # Global rejects any selection before its row.
+        # The rows of the matrix, their checks in order: the source allocation, admission, the
+        # ineffective tie rule (a HIGHER_* tie_break over every route and parallel edge),
+        # prefer_headroom, the weights, the tunnel count.
         (
-            ngc.Global,
-            P.MAX_FLOW,
+            lambda: ngc.CentralizedTE(
+                source_allocation=ORIGIN.EQUAL, prefer_headroom=True
+            ),
             A.LOSSY,
-            True,
-            ORIGIN.EQUAL,
-            "Global does not accept selection",
+            CTE_LOSSY,
         ),
         (
-            ngc.Global,
-            P.MAX_FLOW,
+            lambda: ngc.ShortestPaths(
+                allocation=P.EQUAL, source_allocation=ORIGIN.OPTIMIZED, tie_break=HC
+            ),
             A.LOSSY,
-            False,
-            ORIGIN.EQUAL,
-            "Global does not accept placement",
+            "ShortestPaths with EQUAL or WEIGHTED requires source_allocation=EQUAL",
         ),
-        (ngc.Global, None, A.LOSSY, False, ORIGIN.EQUAL, LOSSY_KERNEL),
         (
-            ngc.Global,
-            None,
+            lambda: ngc.ShortestPaths(allocation=P.OPTIMIZED, tie_break=HC),
+            A.LOSSY,
+            LOSSY_KERNEL,
+        ),
+        (
+            lambda: ngc.ShortestPaths(
+                allocation=P.OPTIMIZED, source_allocation=ORIGIN.EQUAL, tie_break=HC
+            ),
             A.LOSSLESS,
-            True,
-            ORIGIN.EQUAL,
-            "Global does not accept selection",
+            INEFFECTIVE,
+        ),
+        (lambda: ngc.ShortestPaths(tie_break=HC), A.LOSSY, INEFFECTIVE),
+        (
+            lambda: ngc.ShortestPaths(
+                tie_break=HC, weight_basis=ngc.WeightBasis.CAPACITY
+            ),
+            A.LOSSLESS,
+            INEFFECTIVE,
         ),
         (
-            ngc.CostOnly,
-            None,
+            lambda: ngc.ShortestPaths(edge_weights=[1, 1, 1, 1, 1]),
             A.LOSSY,
-            True,
-            ORIGIN.OPTIMIZED,
-            "CostOnly requires placement",
+            "edge_weights require weight_basis=EXPLICIT",
         ),
         (
-            ngc.CostOnly,
-            P.EQUAL_BALANCED,
+            lambda: ngc.DistributedTE(
+                ngc.TunnelCount(1, up_to=True), cost_ceiling=ngc.CostStretch(0.5)
+            ),
             A.LOSSY,
-            True,
-            ORIGIN.OPTIMIZED,
-            "CostOnly with EQUAL_BALANCED or WEIGHTED requires origin=EQUAL",
+            "DistributedTE requires an exact tunnel count",
         ),
-        (ngc.CostOnly, P.MAX_FLOW, A.LOSSY, True, ORIGIN.EQUAL, LOSSY_KERNEL),
-        (
-            T1,
-            P.MAX_FLOW,
-            A.LOSSY,
-            True,
-            ORIGIN.OPTIMIZED,
-            "T1 does not accept placement",
-        ),
-        (T1, None, A.LOSSY, True, ORIGIN.OPTIMIZED, "T1 requires origin=EQUAL"),
     ],
 )
 def test_several_defects_report_the_first_in_the_contract_order(
-    routing, placement, admission, selection, origin, msg
+    routing, admission, msg
 ):
     # Several defects at once: one exact ValueError text, the first in the matrix's order, at
-    # construction and at the three evaluators (batch_capacity's precheck included); nothing is
+    # construction and at the three evaluators (evaluate_pairs's precheck included); nothing is
     # bound.
     g = diamond()
     fg = ngc.FlowLedger(g)
-    cfg = ngc.FlowPolicyConfig(
-        routing=routing(),
-        placement=placement,
-        admission=admission,
-        selection=sel() if selection else None,
-        origin=origin,
-    )
+    cfg = ngc.FlowPolicyConfig(routing=routing(), admission=admission)
     with pytest.raises(ValueError) as e:
         ngc.FlowPolicy(fg, 0, 3, cfg)
     assert str(e.value) == msg
     with pytest.raises(ValueError) as e:
-        ngc.capacity(g, 0, 3, ngc.QueryOptions(cfg))
+        ngc.evaluate_demand(g, 0, 3, ngc.EvaluationOptions(cfg))
     assert str(e.value) == msg
     with pytest.raises(ValueError) as e:
-        ngc.batch_capacity(g, [(0, 3)], ngc.QueryOptions(cfg))
+        ngc.evaluate_pairs(g, [(0, 3)], ngc.EvaluationOptions(cfg))
     assert str(e.value) == msg
     with pytest.raises(ValueError) as e:
-        ngc.sensitivity(g, 0, 3, ngc.QueryOptions(cfg), 1)
+        ngc.evaluate_edge_failures(g, 0, 3, ngc.EvaluationOptions(cfg), 1)
     assert str(e.value) == msg
     fg.reset()  # nothing bound
 
 
 def test_enum_values_outside_their_enumeration_are_rejected():
     # An enum built from an integer outside the enumeration is a domain error named by its field:
-    # at PathSelection's constructor, and for FlowPolicyConfig (a plain value) wherever it is used,
-    # first among its checks, so it never reaches a policy or record.
-    with pytest.raises(
-        ValueError, match="tie_break: 99 is not a value of EdgeTieBreak"
+    # FlowPolicyConfig and the models are plain values, checked wherever they are used, first
+    # among their checks, so it never reaches a policy or record; the searches check their own.
+    bad_tie = ngc.RouteTieBreak(99)
+    for options, search in (
+        (ngc.SpfOptions(ngc.Direction.FORWARD, tie_break=bad_tie), ngc.spf),
+        (ngc.KspOptions(1, tie_break=bad_tie), lambda g, s, o: ngc.ksp(g, s, 3, o)),
     ):
-        ngc.PathSelection(ngc.EdgeTieBreak(99), ngc.EdgePriority.CAPACITY)
-    with pytest.raises(ValueError, match="priority: 99 is not a value of EdgePriority"):
-        ngc.PathSelection(ngc.EdgeTieBreak.DETERMINISTIC, ngc.EdgePriority(99))
+        with pytest.raises(
+            ValueError, match=exact("tie_break: 99 is not a value of RouteTieBreak")
+        ):
+            search(diamond(), 0, options)
     g = diamond()
-    for routing in (ngc.CostOnly(), T1(), ngc.Global()):
-        for cfg, message in (
-            (
-                ngc.FlowPolicyConfig(routing=routing, placement=ngc.FlowPlacement(99)),
-                "placement: 99 is not a value of FlowPlacement",
-            ),
+    bad_source = "source_allocation: 99 is not a value of SourceAllocation"
+    cases = [
+        (
+            ngc.ShortestPaths(allocation=ngc.RouteAllocation(99)),
+            "allocation: 99 is not a value of RouteAllocation",
+        ),
+        (ngc.ShortestPaths(source_allocation=ORIGIN(99)), bad_source),
+        (
+            ngc.ShortestPaths(allocation=P.WEIGHTED, weight_basis=ngc.WeightBasis(99)),
+            "weight_basis: 99 is not a value of WeightBasis",
+        ),
+        (ngc.CentralizedTE(source_allocation=ORIGIN(99)), bad_source),
+    ]
+    for routing in (ngc.ShortestPaths(), T1(), GLOBAL.routing):
+        cases.append(
             (
                 ngc.FlowPolicyConfig(routing=routing, admission=ngc.Admission(99)),
                 "admission: 99 is not a value of Admission",
-            ),
-            (
-                ngc.FlowPolicyConfig(routing=routing, origin=ngc.Origin(99)),
-                "origin: 99 is not a value of Origin",
-            ),
+            )
+        )
+    for cfg, message in cases:
+        if not isinstance(cfg, ngc.FlowPolicyConfig):
+            cfg = ngc.FlowPolicyConfig(routing=cfg)
+        with pytest.raises(ValueError, match=exact(message)):
+            ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, cfg)
+        with pytest.raises(ValueError, match=exact(message)):
+            ngc.evaluate_demand(g, 0, 3, ngc.EvaluationOptions(cfg))
+    for routing in (
+        ngc.ShortestPaths(tie_break=bad_tie),
+        ngc.DistributedTE(ngc.TunnelCount(1), tie_break=bad_tie),
+    ):
+        cfg = ngc.FlowPolicyConfig(routing=routing, admission=ngc.Admission(98))
+        message = (
+            "admission: 98 is not a value of Admission"  # the config's own enums first
+        )
+        with pytest.raises(ValueError, match=exact(message)):
+            ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, cfg)
+        cfg = ngc.FlowPolicyConfig(routing=routing)
+        with pytest.raises(
+            ValueError, match=exact("tie_break: 99 is not a value of RouteTieBreak")
         ):
-            with pytest.raises(ValueError, match=exact(message)):
-                ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, cfg)
-            with pytest.raises(ValueError, match=exact(message)):
-                ngc.capacity(g, 0, 3, ngc.QueryOptions(cfg))
-    assert len(ngc.FlowPlacement.__members__) == 3  # the loop below is not empty
-    for valid in ngc.FlowPlacement.__members__.values():
-        assert config(ngc.CostOnly(), valid).placement == valid
+            ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, cfg)
+    assert len(ngc.RouteAllocation.__members__) == 3  # the loop below is not empty
+    for valid in ngc.RouteAllocation.__members__.values():
+        assert config(ngc.ShortestPaths(), valid).routing.allocation == valid
 
 
 def test_placement_result_fields_and_outputs():
@@ -517,11 +494,11 @@ def test_placement_result_fields_and_outputs():
     fg = ngc.FlowLedger(g)
     pol = ngc.FlowPolicy(fg, [0], [3], COSTONLY)
     r = pol.place(4)
-    assert (r.placed, r.remaining, r.termination) == (4, 0, T.COMPLETE)
+    assert (r.call_delivered, r.call_undelivered, r.termination) == (4, 0, T.COMPLETE)
     assert not hasattr(r, "local_outcomes")
     # The epoch's first call installs the program: its routes and weights.
-    assert (r.routes_changed, r.weights_changed, r.call_drops) == (True, True, [])
-    assert (r.delivery_delta, r.call_source_loss, r.drops, r.source_loss) == (
+    assert (r.routes_changed, r.weights_changed, r.call_edge_drops) == (True, True, [])
+    assert (r.delivery_delta, r.call_source_drops, r.edge_drops, r.source_drops) == (
         4,
         0,
         [],
@@ -537,36 +514,39 @@ def test_placement_result_fields_and_outputs():
     row = r.by_source[0]
     assert isinstance(r.by_source, tuple) and len(r.by_source) == 1
     assert (row.source, row.offered, row.admitted, row.delivered) == (0, None, 4, 4)
-    assert (row.source_loss, row.dropped) == (0, 0)
+    assert (row.source_drops, row.total_edge_drops) == (0, 0)
     with pytest.raises(TypeError):
         ngc.SourceFlow()
-    with pytest.raises(AttributeError):
-        row.delivered = 1
-    assert r.cost_distribution is None and r.total_cost is None
+    assert_read_only(row, "delivered")
+    assert r.marginal_cost_curve is None and r.total_cost is None
     assert (
         r.edge_flows is None
         and r.residual is None
-        and r.bottleneck is None
+        and r.saturated_boundary_edges is None
         and r.min_cut is None
     )
     r = pol.place(INF, ALL_OUT)
-    assert (r.placed, r.remaining, r.termination) == (3, INF, T.EXHAUSTED)
+    assert (r.call_delivered, r.call_undelivered, r.termination) == (
+        3,
+        INF,
+        T.EXHAUSTED,
+    )
     assert r.edge_flows.dtype == np.int64 and r.residual.dtype == np.int64
     assert list(r.residual) == list(fg.residual())
     own = [0] * 4
     for rec in pol.records():
-        for e, x in rec.edges:
+        for e, x in rec.edge_flows:
             own[e] += x
     assert list(r.edge_flows) == own
-    assert r.bottleneck == fg.bottleneck(0)
+    assert r.saturated_boundary_edges == fg.saturated_boundary_edges(0)
     # By hand: the flow's 7 units split equally at node 0, the leftover unit to the lower
     # EdgeId: 4 on 0 -> 1 -> 3 and 3 on 0 -> 2 -> 3, the most that keeps 0 -> 2 within its 3.
     # Only 0 -> 2 is saturated where it leaves what the source still reaches.
     assert r.edge_flows.tolist() == to_ids(g, [4, 4, 3, 3])
     assert r.residual.tolist() == to_ids(g, [1, 1, 0, 0])
-    assert r.bottleneck == ids(g, [2])
-    assert r.min_cut is None  # Global only
-    assert pol.placed_demand() == 7
+    assert r.saturated_boundary_edges == ids(g, [2])
+    assert r.min_cut is None  # CentralizedTE only
+    assert pol.delivered() == 7
     with pytest.raises(
         ValueError,
         match=exact("offer must be an integer in [0, 2^62) or permitted +inf"),
@@ -583,13 +563,13 @@ def test_placement_result_fields_and_outputs():
     ):
         pol.place(np.int64(1))
     pol.remove()
-    assert pol.records() == [] and list(fg.allocated()) == [0, 0, 0, 0]
-    assert pol.place(np.int64(2)).placed == 2
-    # Global: the marginal curve; min_cut with bottleneck.
+    assert pol.records() == [] and list(fg.carried()) == [0, 0, 0, 0]
+    assert pol.place(np.int64(2)).call_delivered == 2
+    # CentralizedTE: the marginal curve; min_cut with bottleneck.
     fg2 = ngc.FlowLedger(diamond(5, 3, 2))
     gl = ngc.FlowPolicy(fg2, 0, 3, GLOBAL)
-    r = gl.place(INF, ngc.OutputOptions(bottleneck=True))
-    assert r.cost_distribution == [(2, 5), (4, 3)] and r.min_cut is None
+    r = gl.place(INF, ngc.OutputOptions(saturated_boundary_edges=True))
+    assert r.marginal_cost_curve == [(2, 5), (4, 3)] and r.min_cut is None
     gl.remove()
     r = gl.place(INF, ngc.OutputOptions(min_cut=True))
     assert r.min_cut == sorted(ids(diamond(5, 3, 2), [0, 2]))
@@ -600,14 +580,14 @@ def test_lifetimes_keep_alive_and_orphans():
     g = diamond()
     fg = ngc.FlowLedger(g)
     el = g.eligibility(excluded_edges=ids(g, [2]))
-    cache = ngc.DagCache(g)
+    cache = ngc.ShortestPathCache(g)
     pol = ngc.FlowPolicy(fg, 0, 3, COSTONLY, el, cache)
     held = [weakref.ref(x) for x in (fg, el, cache)]
     del fg, el, cache
     gc.collect()
     assert all(r() is not None for r in held)
     assert (
-        pol.place(10).placed == 5
+        pol.place(10).call_delivered == 5
     )  # the ledger, the Eligibility and the cache are alive
     del pol
     gc.collect()
@@ -632,22 +612,22 @@ def test_lifetimes_keep_alive_and_orphans():
 @needs_hooks
 def test_owner_hook_is_the_owner_of_the_records():
     # The private hook FlowPolicy._owner reads the ledger-local owner id: one per policy of a
-    # ledger, known before the policy has a record, and carried by its records as FlowRecord.owner.
+    # ledger, known before the policy has a record, and carried by its records as FlowRecord.policy_id.
     g = diamond()
     fg = ngc.FlowLedger(g)
     policies = [ngc.FlowPolicy(fg, 0, 3, COSTONLY) for _ in range(3)]
     owners = [p._owner() for p in policies]
     assert len(set(owners)) == 3
     for p in reversed(policies):
-        assert p.place(1).placed == 1
+        assert p.place(1).call_delivered == 1
     for p, owner in zip(policies, owners, strict=True):
-        assert [r.owner for r in p.records()] == [owner]
+        assert [r.policy_id for r in p.records()] == [owner]
 
 
 def pinned_over(g, *dags):
     """Pinned over a program of the split routes `dags` of head 0 to node 3."""
     program = ngc.ForwardingProgram.from_routes(
-        g, 0, 3, [ngc.Route(0, d) for d in dags]
+        g, 0, 3, [ngc.RouteDefinition(0, d) for d in dags]
     )
     return ngc.FlowPolicyConfig(routing=ngc.Pinned(program))
 
@@ -658,13 +638,13 @@ def test_pinned_records():
     r1, r2 = dag_of(g, ids(g, [0, 1])), dag_of(g, ids(g, [2, 3]))
     el = g.eligibility(excluded_edges=ids(g, [3]))
     # The replay fails the second route (its last edge excluded): the head's share goes to the
-    # first; one record per program entry, the failed one with an empty bundle.
+    # first; one record per program entry, the failed one with an empty route.
     pol = ngc.FlowPolicy(fg, 0, 3, pinned_over(g, r1, r2), el)
     r = pol.place(9)
-    assert (r.placed, r.termination) == (5, T.EXHAUSTED)
+    assert (r.call_delivered, r.termination) == (5, T.EXHAUSTED)
     rec, failed = pol.records()
-    assert rec.bundle == r1 and pol.record(rec.flow_id).delivered == 5
-    assert (rec.entry, failed.entry, failed.route_cost) == (0, 1, None)
+    assert rec.route == r1 and pol.record(rec.flow_id).delivered == 5
+    assert (rec.entry_id, failed.entry_id, failed.min_route_cost) == (0, 1, None)
     # record() reads the policy's own records only, not another policy's on the same ledger.
     other = ngc.FlowPolicy(fg, 0, 3, pinned_over(g, r1))
     other.place(1)
@@ -691,12 +671,16 @@ def test_pinned_records():
         fg, 0, 3, pinned_over(g, r2), g.eligibility(excluded_edges=ids(g, [3]))
     )
     r = all_down.place(1)
-    assert (r.placed, r.termination, r.by_source[0].admitted) == (0, T.NO_ROUTE, 0)
+    assert (r.call_delivered, r.termination, r.by_source[0].admitted) == (
+        0,
+        T.NO_ROUTE,
+        0,
+    )
 
 
 def test_dag_cache_statistics_and_projection():
     g = diamond()
-    cache = ngc.DagCache(g)
+    cache = ngc.ShortestPathCache(g)
     fg = ngc.FlowLedger(g)
     a = ngc.FlowPolicy(fg, 0, 3, COSTONLY, None, cache)
     b = ngc.FlowPolicy(
@@ -704,13 +688,9 @@ def test_dag_cache_statistics_and_projection():
         0,
         3,
         config(
-            ngc.CostOnly(),
-            selection=sel(
-                ngc.EdgeTieBreak.PREFER_HIGHER_PRIORITY,
-                RES,
-                False,
-                False,
-            ),
+            ngc.ShortestPaths(
+                tie_break=HIGHER_AVAIL, multipath=False, parallel_edges=False
+            )
         ),
         None,
         cache,
@@ -718,7 +698,7 @@ def test_dag_cache_statistics_and_projection():
     s = cache.stats()
     assert (s.hits, s.misses, s.entries, s.live_values) == (1, 1, 1, 1)
     assert s.bytes > 0
-    assert a.place(2).placed == 2 and b.place(2).placed == 2
+    assert a.place(2).call_delivered == 2 and b.place(2).call_delivered == 2
     cache.clear()
     s = cache.stats()
     assert (s.hits, s.misses, s.entries, s.bytes) == (1, 1, 0, 0)
@@ -728,87 +708,114 @@ def test_dag_cache_statistics_and_projection():
 
 def test_capacity_batch_and_workers(monkeypatch):
     g = diamond(5, 3)
-    opts = ngc.QueryOptions(GLOBAL, outputs=ngc.OutputOptions(edge_flows=True))
-    r = ngc.capacity(g, 0, 3, opts)
-    assert (r.placed, r.termination, r.cost_distribution) == (8, T.EXHAUSTED, [(2, 8)])
+    opts = ngc.EvaluationOptions(GLOBAL, outputs=ngc.OutputOptions(edge_flows=True))
+    r = ngc.evaluate_demand(g, 0, 3, opts)
+    assert (r.call_delivered, r.termination, r.marginal_cost_curve) == (
+        8,
+        T.EXHAUSTED,
+        [(2, 8)],
+    )
     assert int(np.sum(r.edge_flows)) == 16
     common = g.eligibility(excluded_edges=ids(g, [3]))
     pairs = [(0, 3), ([0], [3]), (1, 3), (0, [1, 2])]
     per = [None, g.eligibility(excluded_edges=ids(g, [0])), None, None]
     want = [5, 0, 5, 8]
     for workers in (1, 3, None):
-        got = ngc.batch_capacity(
-            g, pairs, ngc.QueryOptions(GLOBAL, elig=common), per, workers
+        got = ngc.evaluate_pairs(
+            g, pairs, ngc.EvaluationOptions(GLOBAL, eligibility=common), per, workers
         )
-        assert [x.placed for x in got] == want
+        assert [x.call_delivered for x in got] == want
     # workers=None reads NGRAPH_CORE_BATCH_THREADS. The count changes only how many threads run,
     # never a result, so this checks only that the default path with the variable set gives the
     # same results (its parsing: the C++ test Evaluators.DefaultWorkersParseTheEnvironment).
     monkeypatch.setenv("NGRAPH_CORE_BATCH_THREADS", "4")
-    got = ngc.batch_capacity(g, pairs, ngc.QueryOptions(GLOBAL, elig=common), per)
-    assert [x.placed for x in got] == want
-    assert ngc.batch_capacity(g, [], ngc.QueryOptions(GLOBAL)) == []
+    got = ngc.evaluate_pairs(
+        g, pairs, ngc.EvaluationOptions(GLOBAL, eligibility=common), per
+    )
+    assert [x.call_delivered for x in got] == want
+    assert ngc.evaluate_pairs(g, [], ngc.EvaluationOptions(GLOBAL)) == []
     with pytest.raises(ValueError, match="node 7"):
-        ngc.batch_capacity(
-            g, [(0, 3), (0, 7), (0, 8)], ngc.QueryOptions(GLOBAL), workers=4
+        ngc.evaluate_pairs(
+            g, [(0, 3), (0, 7), (0, 8)], ngc.EvaluationOptions(GLOBAL), workers=4
         )
     with pytest.raises(
-        ValueError, match=exact("per_pair_elig has 1 entries for 4 pairs")
+        ValueError, match=exact("per_pair_eligibility has 1 entries for 4 pairs")
     ):
-        ngc.batch_capacity(g, pairs, ngc.QueryOptions(GLOBAL), [None])
+        ngc.evaluate_pairs(g, pairs, ngc.EvaluationOptions(GLOBAL), [None])
     with pytest.raises(
-        ValueError, match=exact("batch_capacity does not accept Pinned")
+        ValueError, match=exact("evaluate_pairs does not accept Pinned")
     ):
-        ngc.batch_capacity(
+        ngc.evaluate_pairs(
             g,
             pairs,
-            ngc.QueryOptions(pinned_over(g, dag_of(g, ids(g, [0, 1])))),
+            ngc.EvaluationOptions(pinned_over(g, dag_of(g, ids(g, [0, 1])))),
         )
-    cache = ngc.DagCache(g)
-    eb = ngc.QueryOptions(COSTONLY, cache=cache)
+    cache = ngc.ShortestPathCache(g)
+    eb = ngc.EvaluationOptions(COSTONLY, cache=cache)
     with pytest.raises(ValueError, match="workers == 1"):
-        ngc.batch_capacity(g, pairs, eb, workers=2)
-    got = ngc.batch_capacity(
+        ngc.evaluate_pairs(g, pairs, eb, workers=2)
+    got = ngc.evaluate_pairs(
         g, pairs, eb
     )  # None with a cache: 1 worker, even with the env set
-    assert [x.placed for x in got] == [7, 7, 5, 7]  # EB: [4, 3] over links of 5 and 3
+    assert [x.call_delivered for x in got] == [
+        7,
+        7,
+        5,
+        7,
+    ]  # EB: [4, 3] over links of 5 and 3
     with pytest.raises(ValueError, match="workers"):
-        ngc.batch_capacity(g, pairs, ngc.QueryOptions(GLOBAL), workers=0)
+        ngc.evaluate_pairs(g, pairs, ngc.EvaluationOptions(GLOBAL), workers=0)
 
 
-def test_sensitivity_candidates_and_signed_losses(monkeypatch):
-    # Global: an unsaturated critical edge appears.
+def test_edge_failures_candidates_and_signed_reductions(monkeypatch):
+    # CentralizedTE: an unsaturated critical edge appears.
     g = build(3, [(0, 1, 9, 1), (1, 2, 4, 1), (0, 2, 2, 5)])
-    s = ngc.sensitivity(g, 0, 2, ngc.QueryOptions(GLOBAL))
-    assert s.baseline.placed == 6
-    pos = g.input_index()
-    assert {int(pos[e.edge]): e.loss for e in s.entries} == {0: 4, 1: 4, 2: 2}
+    s = ngc.evaluate_edge_failures(g, 0, 2, ngc.EvaluationOptions(GLOBAL))
+    assert s.baseline.call_delivered == 6
+    pos = g.input_positions()
+    assert {int(pos[e.edge]): e.delivery_reduction for e in s.entries} == {
+        0: 4,
+        1: 4,
+        2: 2,
+    }
     # workers=None reads NGRAPH_CORE_SENSITIVITY_THREADS: the same results on 3 workers (only that
     # the default path with the variable set works; its parsing is tested in C++).
     monkeypatch.setenv("NGRAPH_CORE_SENSITIVITY_THREADS", "3")
-    assert plain(ngc.sensitivity(g, 0, 2, ngc.QueryOptions(GLOBAL))) == plain(s)
+    assert plain(
+        ngc.evaluate_edge_failures(g, 0, 2, ngc.EvaluationOptions(GLOBAL))
+    ) == plain(s)
     # A policy model: every allowed edge is a candidate, a zero-capacity one too. Equal splitting
     # over parallel links of 1, 10 and 0 fits 2 units (a third would cross the zero link);
     # without the thin link 1 fits, without the wide link 1, without the zero link 2.
     p = build(2, [(0, 1, 1, 1), (0, 1, 10, 1), (0, 1, 0, 1)])
-    opts = ngc.QueryOptions(COSTONLY)
-    s = ngc.sensitivity(p, 0, 1, opts, workers=2)
-    assert s.baseline.placed == 2
-    pos = p.input_index()
-    assert {int(pos[e.edge]): e.loss for e in s.entries} == {0: 1, 1: 1, 2: 0}
+    opts = ngc.EvaluationOptions(COSTONLY)
+    s = ngc.evaluate_edge_failures(p, 0, 1, opts, workers=2)
+    assert s.baseline.call_delivered == 2
+    pos = p.input_positions()
+    assert {int(pos[e.edge]): e.delivery_reduction for e in s.entries} == {
+        0: 1,
+        1: 1,
+        2: 0,
+    }
     # A negative loss on a zero-capacity link (the search graph S): the only shortest route 0 -> 1 has capacity
     # 0, so equal splitting carries 0; without it the route 0 -> 2 -> 1 carries 5.
     g8 = build(3, [(0, 1, 0, 1), (0, 2, 5, 1), (2, 1, 5, 1)])
-    s8 = ngc.sensitivity(g8, 0, 1, opts)
-    assert s8.baseline.placed == 0
-    pos8 = g8.input_index()
-    assert {int(pos8[e.edge]): e.loss for e in s8.entries} == {0: -5, 1: 0, 2: 0}
+    s8 = ngc.evaluate_edge_failures(g8, 0, 1, opts)
+    assert s8.baseline.call_delivered == 0
+    pos8 = g8.input_positions()
+    assert {int(pos8[e.edge]): e.delivery_reduction for e in s8.entries} == {
+        0: -5,
+        1: 0,
+        2: 0,
+    }
     with pytest.raises(ValueError, match="both endpoint sets"):
-        ngc.sensitivity(p, 0, 0, opts)
-    # The baseline is capacity() with the requested outputs.
+        ngc.evaluate_edge_failures(p, 0, 0, opts)
+    # The baseline is evaluate_demand() with the requested outputs.
     for cfg in (GLOBAL, COSTONLY):
-        s = ngc.sensitivity(g, 0, 2, ngc.QueryOptions(cfg, outputs=ALL_OUT))
-        want = ngc.capacity(g, 0, 2, ngc.QueryOptions(cfg, outputs=ALL_OUT))
+        s = ngc.evaluate_edge_failures(
+            g, 0, 2, ngc.EvaluationOptions(cfg, outputs=ALL_OUT)
+        )
+        want = ngc.evaluate_demand(g, 0, 2, ngc.EvaluationOptions(cfg, outputs=ALL_OUT))
         assert want.edge_flows is not None and want.residual is not None
         assert plain(s.baseline) == plain(want)
 
@@ -818,17 +825,32 @@ def test_evaluator_options_and_results():
     # output); the results have no public constructor.
     g = diamond()
     el = g.eligibility(excluded_edges=ids(g, [0]))
-    cache = ngc.DagCache(g)
-    for cls in (ngc.QueryOptions, ngc.QueryOptions):
-        o = cls(GLOBAL, elig=el, cache=cache, outputs=ngc.OutputOptions(residual=True))
+    cache = ngc.ShortestPathCache(g)
+    for cls in (ngc.EvaluationOptions, ngc.EvaluationOptions):
+        o = cls(
+            GLOBAL,
+            eligibility=el,
+            cache=cache,
+            outputs=ngc.OutputOptions(residual=True),
+        )
         assert (
-            o.config.placement == GLOBAL.placement and o.elig is el and o.cache is cache
+            o.config.routing.source_allocation == GLOBAL.routing.source_allocation
+            and o.eligibility is el
+            and o.cache is cache
         )
         out = o.outputs
-        assert (out.edge_flows, out.residual, out.bottleneck) == (False, True, False)
+        assert (out.edge_flows, out.residual, out.saturated_boundary_edges) == (
+            False,
+            True,
+            False,
+        )
         d = cls(COSTONLY)
-        assert d.elig is None and d.cache is None
-        assert (d.outputs.edge_flows, d.outputs.residual, d.outputs.bottleneck) == (
+        assert d.eligibility is None and d.cache is None
+        assert (
+            d.outputs.edge_flows,
+            d.outputs.residual,
+            d.outputs.saturated_boundary_edges,
+        ) == (
             False,
             False,
             False,
@@ -844,22 +866,27 @@ def test_explicit_workers_win_over_the_environment(monkeypatch):
     monkeypatch.setenv("NGRAPH_CORE_BATCH_THREADS", "4")
     monkeypatch.setenv("NGRAPH_CORE_SENSITIVITY_THREADS", "4")
     g = diamond(5, 3)
-    building = ngc.DagCache(g)
-    bopts = ngc.QueryOptions(COSTONLY, cache=building)
-    sopts = ngc.QueryOptions(COSTONLY, cache=building)
-    want = [r.placed for r in ngc.batch_capacity(g, [(0, 3), (1, 3)], bopts, workers=1)]
+    building = ngc.ShortestPathCache(g)
+    bopts = ngc.EvaluationOptions(COSTONLY, cache=building)
+    sopts = ngc.EvaluationOptions(COSTONLY, cache=building)
+    want = [
+        r.call_delivered
+        for r in ngc.evaluate_pairs(g, [(0, 3), (1, 3)], bopts, workers=1)
+    ]
     assert want == [7, 5]
-    assert [r.placed for r in ngc.batch_capacity(g, [(0, 3), (1, 3)], bopts)] == want
-    base = plain(ngc.sensitivity(g, 0, 3, sopts, workers=1))
-    assert plain(ngc.sensitivity(g, 0, 3, sopts)) == base
+    assert [
+        r.call_delivered for r in ngc.evaluate_pairs(g, [(0, 3), (1, 3)], bopts)
+    ] == want
+    base = plain(ngc.evaluate_edge_failures(g, 0, 3, sopts, workers=1))
+    assert plain(ngc.evaluate_edge_failures(g, 0, 3, sopts)) == base
     for call in (
-        lambda: ngc.batch_capacity(g, [(0, 3)], bopts, workers=2),
-        lambda: ngc.sensitivity(g, 0, 3, sopts, workers=2),
+        lambda: ngc.evaluate_pairs(g, [(0, 3)], bopts, workers=2),
+        lambda: ngc.evaluate_edge_failures(g, 0, 3, sopts, workers=2),
     ):
         with pytest.raises(ValueError, match="unless workers == 1"):
             call()
     with pytest.raises(ValueError, match=exact("workers must be >= 1 (got 0)")):
-        ngc.sensitivity(g, 0, 3, ngc.QueryOptions(GLOBAL), workers=0)
+        ngc.evaluate_edge_failures(g, 0, 3, ngc.EvaluationOptions(GLOBAL), workers=0)
 
 
 def test_python_keeps_what_a_policy_and_an_option_need_alive():
@@ -867,29 +894,37 @@ def test_python_keeps_what_a_policy_and_an_option_need_alive():
     # the ledger still reads its graph, and a policy still places on its ledger. Graphs of the
     # same shape are built in between, so the memory of a released value would be reused.
     g = diamond()
-    want = [g.capacity_units().tolist(), g.cost().tolist(), g.edge_dst().tolist()]
+    want = [
+        g.edge_capacity_units().tolist(),
+        g.edge_costs().tolist(),
+        g.edge_destinations().tolist(),
+    ]
     ledger = ngc.FlowLedger(g)
     policy = ngc.FlowPolicy(ledger, 0, 3, COSTONLY)
-    opts = ngc.QueryOptions(
-        COSTONLY, elig=g.eligibility(excluded_edges=ids(g, [2])), cache=ngc.DagCache(g)
+    opts = ngc.EvaluationOptions(
+        COSTONLY,
+        eligibility=g.eligibility(excluded_edges=ids(g, [2])),
+        cache=ngc.ShortestPathCache(g),
     )
     gc.collect()
     reused = [diamond(7, 9, 2) for _ in range(64)]
-    assert ngc.capacity(g, 0, 3, opts).placed == 5  # without the edge 0 -> 2
+    assert (
+        ngc.evaluate_demand(g, 0, 3, opts).call_delivered == 5
+    )  # without the edge 0 -> 2
     assert opts.cache.stats().misses == 1  # the call's lookup
     del g, opts
     gc.collect()
     reused += [diamond(7, 9, 2) for _ in range(64)]
     kept = ledger.graph()
     assert [
-        kept.capacity_units().tolist(),
-        kept.cost().tolist(),
-        kept.edge_dst().tolist(),
+        kept.edge_capacity_units().tolist(),
+        kept.edge_costs().tolist(),
+        kept.edge_destinations().tolist(),
     ] == want
     del kept, ledger
     gc.collect()
     reused += [diamond(7, 9, 2) for _ in range(64)]
-    assert policy.place(10).placed == 7  # EqualBalanced over routes of 5 and 3: [4, 3]
+    assert policy.place(10).call_delivered == 7  # Equal over routes of 5 and 3: [4, 3]
     assert len(reused) == 192
 
 
@@ -915,7 +950,7 @@ def test_exception_classes_of_conversions():
     # An index's own failure (a float's: test_placement_result_fields_and_outputs).
     with pytest.raises(_ConversionFailed):
         p.place(_FailingIndex())
-    assert p.placed_demand() == 0
+    assert p.delivered() == 0
 
 
 @needs_hooks
@@ -932,7 +967,7 @@ def test_python_publication_is_all_or_nothing(routing, traced):
     def make():
         ledger = ngc.FlowLedger(g)
         policy = ngc.FlowPolicy(ledger, 0, 1, cfg)
-        assert policy.place(1).placed == 1
+        assert policy.place(1).call_delivered == 1
 
         def snapshot():
             return [full_ledger_state(ledger), repr(policy._state())]
@@ -949,72 +984,79 @@ def test_evaluator_results_survive_python_allocation_failures():
     # completes returns what a clean call returns.
     g = diamond(5, 3)
     calls = [
-        (ngc.capacity, (g, 0, 3, ngc.QueryOptions(GLOBAL))),
-        (ngc.batch_capacity, (g, [(0, 3), (1, 3)], ngc.QueryOptions(GLOBAL))),
-        (ngc.sensitivity, (g, 0, 3, ngc.QueryOptions(GLOBAL))),
+        (ngc.evaluate_demand, (g, 0, 3, ngc.EvaluationOptions(GLOBAL))),
+        (ngc.evaluate_pairs, (g, [(0, 3), (1, 3)], ngc.EvaluationOptions(GLOBAL))),
+        (ngc.evaluate_edge_failures, (g, 0, 3, ngc.EvaluationOptions(GLOBAL))),
     ]
     for fn, args in calls:
         # An evaluator keeps no state between calls: nothing to snapshot.
         failures = sweep_python_allocation(lambda fn=fn, args=args: (fn, args, list))
-        assert failures >= 3, fn.__name__  # not vacuous: every result object allocates
+        # Not vacuous: the result objects allocate (their fields convert when read).
+        assert failures >= 1, fn.__name__
 
 
 def test_batch_reports_the_lowest_failing_pair():
     # The arguments first, then each pair completely in pair order, across the
     # Python/C++ boundary.
     g = build(2, [(0, 1, 3, 7)])
-    opts = ngc.QueryOptions(GLOBAL)
+    opts = ngc.EvaluationOptions(GLOBAL)
     overlap = (
         "node 0 is in both endpoint sets: sources and destinations must not overlap"
     )
     out_of_range = "sources: node 2 out of node range [0, 2)"
     with pytest.raises(ValueError, match=exact(overlap)):
-        ngc.batch_capacity(g, [(0, 0), (2, 1)], opts, workers=2)
+        ngc.evaluate_pairs(g, [(0, 0), (2, 1)], opts, workers=2)
     with pytest.raises(ValueError, match=exact(out_of_range)):
-        ngc.batch_capacity(g, [(0, 1), (2, 1), (0, 0)], opts)
+        ngc.evaluate_pairs(g, [(0, 1), (2, 1), (0, 0)], opts)
     other = build(2, [(0, 1, 3, 7)]).eligibility()
     with pytest.raises(
         ValueError,
-        match=exact("foreign Eligibility: per_pair_elig[0] built for another graph"),
+        match=exact(
+            "foreign Eligibility: per_pair_eligibility[0] built for another graph"
+        ),
     ):
-        ngc.batch_capacity(g, [(0, 1), (2, 1)], opts, per_pair_elig=[other, None])
+        ngc.evaluate_pairs(
+            g, [(0, 1), (2, 1)], opts, per_pair_eligibility=[other, None]
+        )
     with pytest.raises(
-        TypeError, match=exact("per_pair_elig entries must be Eligibility or None")
+        TypeError,
+        match=exact("per_pair_eligibility entries must be Eligibility or None"),
     ):
-        ngc.batch_capacity(g, [(0, 1), (2, 1)], opts, per_pair_elig=[3, None])
+        ngc.evaluate_pairs(g, [(0, 1), (2, 1)], opts, per_pair_eligibility=[3, None])
     with pytest.raises(ValueError, match=exact(out_of_range)):
-        ngc.batch_capacity(g, [(0, 1), (2, 1)], opts, per_pair_elig=[None, 3])
+        ngc.evaluate_pairs(g, [(0, 1), (2, 1)], opts, per_pair_eligibility=[None, 3])
     # An argument error comes before every pair error.
     with pytest.raises(ValueError, match=exact("workers must be >= 1 (got 0)")):
-        ngc.batch_capacity(g, [(0, 0)], opts, workers=0)
+        ngc.evaluate_pairs(g, [(0, 0)], opts, workers=0)
 
 
 def test_batch_checks_an_explicit_empty_eligibility_list():
-    # A given per_pair_elig has one entry per pair, also when it is empty.
+    # A given per_pair_eligibility has one entry per pair, also when it is empty.
     g = build(2, [(0, 1, 3, 7)])
-    opts = ngc.QueryOptions(GLOBAL)
+    opts = ngc.EvaluationOptions(GLOBAL)
     with pytest.raises(
-        ValueError, match=exact("per_pair_elig has 0 entries for 1 pairs")
+        ValueError, match=exact("per_pair_eligibility has 0 entries for 1 pairs")
     ):
-        ngc.batch_capacity(g, [(0, 1)], opts, per_pair_elig=[])
-    assert ngc.batch_capacity(g, [], opts, per_pair_elig=[]) == []
+        ngc.evaluate_pairs(g, [(0, 1)], opts, per_pair_eligibility=[])
+    assert ngc.evaluate_pairs(g, [], opts, per_pair_eligibility=[]) == []
     assert [
-        r.placed for r in ngc.batch_capacity(g, [(0, 1)], opts, per_pair_elig=[None])
+        r.call_delivered
+        for r in ngc.evaluate_pairs(g, [(0, 1)], opts, per_pair_eligibility=[None])
     ] == [3]
 
 
 def test_global_zero_call_reports_the_cumulative_curve():
-    # Global's curve is cumulative (its amounts sum to placed_demand()); a zero call
+    # CentralizedTE's curve is cumulative (its amounts sum to delivered()); a zero call
     # reports it (None before the epoch's preparation and after remove()), changes nothing and
     # claims no cut, even when asked for one.
     g = build(2, [(0, 1, 3, 7)])
     ledger = ngc.FlowLedger(g)
     p = ngc.FlowPolicy(ledger, 0, 1, GLOBAL)
-    assert p.place(0).cost_distribution is None
-    assert p.place(2).cost_distribution == [(7, 2)]
+    assert p.place(0).marginal_cost_curve is None
+    assert p.place(2).marginal_cost_curve == [(7, 2)]
     z = p.place(0, ALL_OUT)
-    assert (z.placed, z.cost_distribution, z.min_cut) == (0, [(7, 2)], None)
+    assert (z.call_delivered, z.marginal_cost_curve, z.min_cut) == (0, [(7, 2)], None)
     assert p.place(0, ngc.OutputOptions(min_cut=True)).min_cut is None  # a zero call
-    assert p.placed_demand() == 2 and [int(x) for x in ledger.allocated()] == [2]
+    assert p.delivered() == 2 and [int(x) for x in ledger.carried()] == [2]
     p.remove()
-    assert p.place(0).cost_distribution is None
+    assert p.place(0).marginal_cost_curve is None

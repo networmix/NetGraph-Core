@@ -21,9 +21,9 @@ struct LedgerAccess;
 
 // A ledger tracks the flows placed on one graph in two projections that are never added: the
 // carried traffic (the service baseline B, the available capacity in units before these flows;
-// allocated() L, the exact sum of all records' edge amounts; residual() = B - L) and the strict
+// carried() L, the exact sum of all records' edge_flows; residual() = B - L) and the strict
 // holds of T1 tunnels (the reservation baseline R0; reserved() S, the exact sum of all records'
-// reserved_edges; unreserved() = R0 - S). Each projection keeps its own bound (0 <= L <= B,
+// edge_reservations; unreserved() = R0 - S). Each projection keeps its own bound (0 <= L <= B,
 // 0 <= S <= R0 per edge); max(L, S) is no occupancy, and traffic may use bandwidth that is held.
 // Policies alone place, hold or remove through detail::LedgerAccess; there is no public
 // placement, removal or reservation. All four return int64[E] snapshots in EdgeId order.
@@ -36,12 +36,12 @@ struct LedgerAccess;
 // never changed again) until reset().
 class FlowLedger {
 public:
-  // `residual` and `unreserved`: the service and reservation baselines in units, each one entry
-  // per edge in [0, capacity_units[e]] (std::invalid_argument naming the array, residual checked
-  // first); absent: the capacities.
+  // `service_baseline` and `reservation_baseline`: the baselines in units, each one entry per
+  // edge in [0, the edge's capacity] (std::invalid_argument naming the array, service_baseline
+  // checked first); absent: the capacities.
   explicit FlowLedger(std::shared_ptr<const Graph> graph);
-  FlowLedger(std::shared_ptr<const Graph> graph, std::span<const Amount> residual);
-  FlowLedger(std::shared_ptr<const Graph> graph, std::span<const Amount> residual, std::span<const Amount> unreserved);
+  FlowLedger(std::shared_ptr<const Graph> graph, std::span<const Amount> service_baseline);
+  FlowLedger(std::shared_ptr<const Graph> graph, std::span<const Amount> service_baseline, std::span<const Amount> reservation_baseline);
   FlowLedger(const FlowLedger& other);
   FlowLedger(FlowLedger&& other);
   FlowLedger& operator=(const FlowLedger&) = delete;
@@ -51,9 +51,9 @@ public:
   [[nodiscard]] std::uint64_t uid() const;
   [[nodiscard]] const std::shared_ptr<const Graph>& graph() const;
   // The graph's static capacities (the ledger's view of them).
-  [[nodiscard]] std::span<const Amount> capacity_units() const;
+  [[nodiscard]] std::span<const Amount> edge_capacity_units() const;
   [[nodiscard]] std::vector<Amount> residual() const;
-  [[nodiscard]] std::vector<Amount> allocated() const;
+  [[nodiscard]] std::vector<Amount> carried() const;
   [[nodiscard]] std::vector<Amount> reserved() const;
   [[nodiscard]] std::vector<Amount> unreserved() const;
   // Live records (bound and orphaned) as snapshots in FlowId order.
@@ -65,12 +65,12 @@ public:
   // allowed sources. Return statically eligible edges with capacity >= 1 unit leaving that
   // reachable set, in ascending EdgeId; empty if no such edge remains. This is not a minimum-cut
   // certificate: it does not follow reverse arcs that could cancel existing flow.
-  [[nodiscard]] std::vector<EdgeId> bottleneck(std::span<const NodeId> sources, const Eligibility* elig = nullptr) const;
+  [[nodiscard]] std::vector<EdgeId> saturated_boundary_edges(std::span<const NodeId> sources, const Eligibility* eligibility = nullptr) const;
   // New baselines (the capacities when absent); orphaned records with their allocations and holds
   // are cleared and their ids retired. Rejected (std::invalid_argument) while a policy is bound.
   void reset();
-  void reset(std::span<const Amount> residual);
-  void reset(std::span<const Amount> residual, std::span<const Amount> unreserved);
+  void reset(std::span<const Amount> service_baseline);
+  void reset(std::span<const Amount> service_baseline, std::span<const Amount> reservation_baseline);
 
 private:
   friend struct detail::LedgerAccess;
@@ -81,25 +81,25 @@ private:
   // The reservation projection costs nothing until something holds: an empty reserved_ is all
   // zero, an empty reservation_baseline_ is the static capacity.
   [[nodiscard]] Amount reservation_at(std::size_t e) const noexcept {
-    return reservation_baseline_.empty() ? graph_->capacity_units()[e] : reservation_baseline_[e];
+    return reservation_baseline_.empty() ? graph_->edge_capacity_units()[e] : reservation_baseline_[e];
   }
   [[nodiscard]] Amount reserved_at(std::size_t e) const noexcept { return reserved_.empty() ? 0 : reserved_[e]; }
 
   std::shared_ptr<const Graph> graph_ {};
   std::uint64_t uid_ {0};
   bool usable_ {true};
-  std::vector<Amount> baseline_ {};
-  std::vector<Amount> allocated_ {};
+  std::vector<Amount> service_baseline_ {};
+  std::vector<Amount> carried_ {};
   std::vector<Amount> reservation_baseline_ {};
   std::vector<Amount> reserved_ {};
   std::map<std::int64_t, FlowRecord> records_ {};
-  std::map<std::int64_t, std::vector<std::int64_t>> owner_ids_ {};  // owner -> live ids, ascending
-  std::int64_t next_id_ {0};
-  std::int64_t next_owner_ {0};
+  std::map<std::int64_t, std::vector<std::int64_t>> policy_record_counters_ {};  // owner -> live ids, ascending
+  std::int64_t next_record_counter_ {0};
+  std::int64_t next_policy_id_ {0};
   // Every owner since the last reset: true while bound, false once orphaned (release() flips
   // the flag, so it never allocates).
-  std::map<std::int64_t, bool> owners_ {};
-  std::size_t num_bound_ {0};
+  std::map<std::int64_t, bool> policy_bindings_ {};
+  std::size_t num_bound_policies_ {0};
 };
 
 } // namespace netgraph::core

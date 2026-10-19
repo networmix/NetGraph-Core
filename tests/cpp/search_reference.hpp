@@ -1,5 +1,5 @@
 // An independent reference of the search semantics (docs/semantics.md#4-search) for the tests: the member graph
-// by an explicit per-pair selection, Bellman-Ford distances, the tight-edge DAG and the pruned
+// by an explicit per-pair choice, Bellman-Ford distances, the tight-edge DAG and the pruned
 // DAG by two-sided distances, and the canonical single path by enumerating every simple walk.
 // It shares no code with the traversal core (no queue, no lists, no extractor).
 #pragma once
@@ -37,20 +37,20 @@ struct Query {
   const Eligibility* elig {nullptr};
   const std::vector<Amount>* residual {nullptr};
   Amount min_residual {1};
-  bool multi_edge {true};
-  bool prefer {false};
-  EdgePriority priority {EdgePriority::Capacity};
+  bool parallel_edges {true};
+  RouteTieBreak tie_break {RouteTieBreak::FewerHops};
+  [[nodiscard]] bool prefer() const { return tie_break != RouteTieBreak::FewerHops; }
 };
 
-// Without a residual the free capacity is the static capacity (docs/semantics.md#4-search):
-// Residual and Capacity read the capacity, Headroom capacity / capacity. Headroom is 0 on an edge
-// of capacity 0.
+// Without a residual the availability is the static capacity (docs/semantics.md#4-search):
+// HIGHER_AVAILABLE_CAPACITY and HIGHER_CAPACITY read the capacity, HIGHER_HEADROOM capacity /
+// capacity. HIGHER_HEADROOM is 0 on an edge of capacity 0.
 inline Prio prio_of(const Query& q, EdgeId e) {
   const auto ei = static_cast<std::size_t>(e);
-  const Amount cap = q.g->capacity_units()[ei];
+  const Amount cap = q.g->edge_capacity_units()[ei];
   const Amount r = q.residual == nullptr ? cap : (*q.residual)[ei];
-  if (q.priority == EdgePriority::Capacity) return {cap, 1, false};
-  if (q.priority == EdgePriority::Residual) return {r, 1, false};
+  if (q.tie_break == RouteTieBreak::HigherCapacity) return {cap, 1, false};
+  if (q.tie_break == RouteTieBreak::HigherAvailableCapacity) return {r, 1, false};
   if (cap == 0) return {0, 1, false};
   return {r, cap, false};
 }
@@ -62,17 +62,17 @@ inline std::vector<char> members(const Query& q) {
   const auto m = static_cast<std::size_t>(g.num_edges());
   std::vector<char> cand(m, 0);
   for (std::size_t e = 0; e < m; ++e) {
-    if (q.elig != nullptr && !q.elig->edge_ok(static_cast<EdgeId>(e))) continue;
+    if (q.elig != nullptr && !q.elig->allows_edge(static_cast<EdgeId>(e))) continue;
     if (q.residual != nullptr && (*q.residual)[e] < q.min_residual) continue;
     cand[e] = 1;
   }
-  if (q.multi_edge) return cand;
-  // select_adjacency: the minimum cost, then the higher priority under prefer, then the lower id.
+  if (q.parallel_edges) return cand;
+  // The parallel-member choice (replaces()): the minimum cost, then the higher score under a HIGHER_* tie, then the lower id.
   auto better = [&](EdgeId a, EdgeId b) {
-    const Cost ca = g.cost()[static_cast<std::size_t>(a)];
-    const Cost cb = g.cost()[static_cast<std::size_t>(b)];
+    const Cost ca = g.edge_costs()[static_cast<std::size_t>(a)];
+    const Cost cb = g.edge_costs()[static_cast<std::size_t>(b)];
     if (ca != cb) return ca < cb;
-    if (q.prefer) {
+    if (q.prefer()) {
       const int c = cmp(prio_of(q, a), prio_of(q, b));
       if (c != 0) return c > 0;
     }
@@ -81,7 +81,7 @@ inline std::vector<char> members(const Query& q) {
   std::map<std::pair<NodeId, NodeId>, EdgeId> best;
   for (std::size_t e = 0; e < m; ++e) {
     if (cand[e] == 0) continue;
-    const auto key = std::make_pair(g.edge_src()[e], g.edge_dst()[e]);
+    const auto key = std::make_pair(g.edge_sources()[e], g.edge_destinations()[e]);
     auto it = best.find(key);
     if (it == best.end()) {
       best[key] = static_cast<EdgeId>(e);
@@ -105,10 +105,10 @@ inline std::vector<Cost> distances(const Graph& g, const std::vector<char>& mem,
     changed = false;
     for (std::size_t e = 0; e < mem.size(); ++e) {
       if (mem[e] == 0) continue;
-      const auto a = static_cast<std::size_t>(reverse ? g.edge_dst()[e] : g.edge_src()[e]);
-      const auto b = static_cast<std::size_t>(reverse ? g.edge_src()[e] : g.edge_dst()[e]);
+      const auto a = static_cast<std::size_t>(reverse ? g.edge_destinations()[e] : g.edge_sources()[e]);
+      const auto b = static_cast<std::size_t>(reverse ? g.edge_sources()[e] : g.edge_destinations()[e]);
       if (d[a] == kNone) continue;
-      const Cost nd = d[a] + g.cost()[e];
+      const Cost nd = d[a] + g.edge_costs()[e];
       if (nd < d[b]) {
         d[b] = nd;
         changed = true;
@@ -123,10 +123,10 @@ inline std::set<EdgeId> full_dag(const Graph& g, const std::vector<char>& mem, c
   std::set<EdgeId> out;
   for (std::size_t e = 0; e < mem.size(); ++e) {
     if (mem[e] == 0) continue;
-    const Cost du = d[static_cast<std::size_t>(g.edge_src()[e])];
-    const Cost dv = d[static_cast<std::size_t>(g.edge_dst()[e])];
+    const Cost du = d[static_cast<std::size_t>(g.edge_sources()[e])];
+    const Cost dv = d[static_cast<std::size_t>(g.edge_destinations()[e])];
     if (du == kNone || dv == kNone) continue;
-    if (reverse ? dv + g.cost()[e] == du : du + g.cost()[e] == dv) out.insert(static_cast<EdgeId>(e));
+    if (reverse ? dv + g.edge_costs()[e] == du : du + g.edge_costs()[e] == dv) out.insert(static_cast<EdgeId>(e));
   }
   return out;
 }
@@ -143,9 +143,9 @@ inline std::pair<Cost, std::set<EdgeId>> pruned(const Graph& g, const std::vecto
   if (dstar == kNone) return {dstar, out};
   for (std::size_t e = 0; e < mem.size(); ++e) {
     if (mem[e] == 0) continue;
-    const Cost du = ds[static_cast<std::size_t>(g.edge_src()[e])];
-    const Cost dv = de[static_cast<std::size_t>(g.edge_dst()[e])];
-    if (du != kNone && dv != kNone && du + g.cost()[e] + dv == dstar) out.insert(static_cast<EdgeId>(e));
+    const Cost du = ds[static_cast<std::size_t>(g.edge_sources()[e])];
+    const Cost dv = de[static_cast<std::size_t>(g.edge_destinations()[e])];
+    if (du != kNone && dv != kNone && du + g.edge_costs()[e] + dv == dstar) out.insert(static_cast<EdgeId>(e));
   }
   return {dstar, out};
 }
@@ -158,8 +158,8 @@ inline void walks(const Graph& g, const std::vector<char>& mem, NodeId u, const 
     return;
   }
   for (std::size_t e = 0; e < mem.size(); ++e) {
-    if (mem[e] == 0 || g.edge_src()[e] != u) continue;
-    const NodeId v = g.edge_dst()[e];
+    if (mem[e] == 0 || g.edge_sources()[e] != u) continue;
+    const NodeId v = g.edge_destinations()[e];
     if (on[static_cast<std::size_t>(v)] != 0) continue;
     on[static_cast<std::size_t>(v)] = 1;
     walk.push_back(static_cast<EdgeId>(e));
@@ -186,7 +186,7 @@ inline std::vector<std::vector<EdgeId>> all_walks(const Graph& g, const std::vec
 
 inline Cost walk_cost(const Graph& g, const std::vector<EdgeId>& walk) {
   Cost x = 0;
-  for (EdgeId e : walk) x += g.cost()[static_cast<std::size_t>(e)];
+  for (EdgeId e : walk) x += g.edge_costs()[static_cast<std::size_t>(e)];
   return x;
 }
 
@@ -204,7 +204,7 @@ inline bool key_less(const Query& q, const std::vector<EdgeId>& a, const std::ve
   const Cost ca = walk_cost(*q.g, a);
   const Cost cb = walk_cost(*q.g, b);
   if (ca != cb) return ca < cb;
-  if (q.prefer) {
+  if (q.prefer()) {
     const int c = cmp(bottleneck(q, a), bottleneck(q, b));
     if (c != 0) return c > 0;
   }

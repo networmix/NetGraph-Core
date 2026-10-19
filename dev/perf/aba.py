@@ -935,7 +935,7 @@ def groups_of(rows: dict[str, dict]) -> dict[str, list[str]]:
     return out
 
 
-def plan_selection(rows: dict[str, dict], rows_arg: str) -> dict:
+def choose_rows(rows: dict[str, dict], rows_arg: str) -> dict:
     """Resolve ``--rows`` against the harnesses' row list.
 
     Errors (the run is refused before any block): a text that names no glob; a glob that matches
@@ -991,7 +991,7 @@ def same_rows(rows_old: dict[str, dict], rows_new: dict[str, dict]) -> None:
     )
 
 
-def selection_error_text(sel: dict, rows: dict[str, dict]) -> str:
+def row_choice_error_text(sel: dict, rows: dict[str, dict]) -> str:
     listing = "\n".join(
         f"  {group} ({len(names)}): {', '.join(names)}"
         for group, names in groups_of(rows).items()
@@ -1245,7 +1245,7 @@ def write_report(report: dict, path: Path) -> None:
 
 def run_verdict(report: dict) -> str:
     """``aborted``, else the worst row verdict. A run that did not abort measured every selected
-    row, and a selection has at least one (``plan_selection``)."""
+    row, and a selection has at least one (``choose_rows``)."""
     if "aborted" in report:
         return "aborted"
     verdicts = [r["verdict"] for r in report["rows"] if r["status"] == "measured"]
@@ -1295,10 +1295,10 @@ def start_run(args, old: Side, new: Side):
     env = dict(os.environ)  # the harnesses run with the caller's environment, unchanged
     rows = list_rows(new, env)
     same_rows(list_rows(old, env), rows)
-    selection = plan_selection(rows, args.rows)
-    if selection["errors"]:
-        raise Refused(selection_error_text(selection, rows))
-    names = selection["selected"]
+    chosen = choose_rows(rows, args.rows)
+    if chosen["errors"]:
+        raise Refused(row_choice_error_text(chosen, rows))
+    names = chosen["selected"]
     try:
         pins = pinned_iterations(args.iters, names)
     except ValueError as exc:
@@ -1319,7 +1319,7 @@ def start_run(args, old: Side, new: Side):
             "bootstrap_resamples": args.resamples,
             "bootstrap_seed": args.seed,
         },
-        "selection": selection,
+        "selection": chosen,
         "machine": {
             "platform": platform.platform(),
             "cpu": cpu_name(),
@@ -1780,7 +1780,7 @@ def iters_text(rec: dict) -> str:
     return f"{rec['iterations_a']} / {rec['iterations_b']}"
 
 
-def selection_lines(report: dict) -> list[str]:
+def row_choice_lines(report: dict) -> list[str]:
     """The rows each glob selected and the rows of the groups it did not."""
     sel = report["selection"]
     status = {r["row"]: r["status"] for r in report["rows"]}
@@ -1981,7 +1981,7 @@ def summary_text(report: dict) -> str:
             lines.append(
                 f"* {r['row']}: A1 {peaks['A1']}; B {peaks['B']}; A2 {peaks['A2']}"
             )
-    lines += ["", *plan_lines(report), "", *selection_lines(report)]
+    lines += ["", *plan_lines(report), "", *row_choice_lines(report)]
     return "\n".join(lines) + "\n"
 
 

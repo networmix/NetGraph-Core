@@ -4,14 +4,14 @@
   Validate inputs in the documented order, then build edge ids and CSR arrays. N is the node
   count, E the edge count, and K the number of distinct costs. Stable counting passes group by
   a small integer key while preserving order within each group. A cost's rank is its position
-  among sorted distinct costs. EdgeIds sort by (src, cost, dst, input); u's out-edges occupy
-  [row_offsets[u], row_offsets[u + 1]); v's in-edges sort by (cost, src, input).
+  among sorted distinct costs. EdgeIds sort by (source, cost, destination, input); u's out-edges occupy
+  [outgoing_offsets[u], outgoing_offsets[u + 1]); v's in-edges sort by (cost, source, input).
   An edgeless graph is its validation and two zero-filled offset arrays.
-  * N K >= E: three passes (dst, cost rank, src; least significant first) give the id order, and
-    two over the ids (cost rank, then dst) the reverse lists: within one (dst, cost) group the
-    id order is (src, input).
-  * N K < E (combined keys): a pass by dst, then one by (src, rank), give the id order, and one
-    pass over the ids by (dst, rank) the reverse lists; the two (N K + 1)-entry histograms live
+  * N K >= E: three passes (destination, cost rank, source; least significant first) give the id order, and
+    two over the ids (cost rank, then destination) the reverse lists: within one (destination, cost) group the
+    id order is (source, input).
+  * N K < E (combined keys): a pass by destination, then one by (source, rank), give the id order, and one
+    pass over the ids by (destination, rank) the reverse lists; the two (N K + 1)-entry histograms live
     in the not-yet-filled capacity and cost arrays.
   The offset arrays serve as their own cursors; a pass that advances them is followed by one
   that walks back, so no pass over the nodes restores them.
@@ -108,7 +108,7 @@ constexpr std::size_t kNoSlot = ~std::size_t {0};
 // The distinct-cost table: key 0 marks an empty slot (costs are >= 1 after validation).
 struct CostTable {
   std::span<Cost> key;
-  std::span<std::int32_t> ord;  // the key's first-appearance ordinal
+  std::span<std::int32_t> ordinals;  // the key's first-appearance ordinal
   std::size_t mask {0};
 
   // The slot holding c, or the empty slot where c belongs; kNoSlot when the budget refuses a
@@ -127,30 +127,30 @@ struct CostTable {
 // each), so the table allocates nothing and leaves no freed block behind (a freed block the
 // allocator keeps cached would count in the process's resident peak); only a table larger than E
 // slots gets vectors of its own. A new table is empty: growth rebuilds it from the distinct costs.
-struct TableStore {
-  std::span<Cost> key_room;
-  std::span<std::int32_t> ord_room;
-  std::vector<Cost> key_own {};
-  std::vector<std::int32_t> ord_own {};
+struct CostTableStorage {
+  std::span<Cost> borrowed_keys;
+  std::span<std::int32_t> borrowed_ordinals;
+  std::vector<Cost> owned_keys {};
+  std::vector<std::int32_t> owned_ordinals {};
 
   CostTable make(std::size_t slots) {
-    if (slots <= key_room.size()) {
-      const std::span<Cost> key = key_room.first(slots);
+    if (slots <= borrowed_keys.size()) {
+      const std::span<Cost> key = borrowed_keys.first(slots);
       std::fill(key.begin(), key.end(), Cost {0});
-      return {key, ord_room.first(slots), slots - 1};
+      return {key, borrowed_ordinals.first(slots), slots - 1};
     }
-    key_own.assign(slots, 0);
-    ord_own.resize(slots);
-    return {key_own, ord_own, slots - 1};
+    owned_keys.assign(slots, 0);
+    owned_ordinals.resize(slots);
+    return {owned_keys, owned_ordinals, slots - 1};
   }
 };
 
 // The retained arrays the hash path borrows before they are filled (each E entries, K <= E).
-struct HashRooms {
+struct CostRankBuffers {
   std::span<Cost> keys;             // the table's keys while it has at most E slots
-  std::span<std::int32_t> ords;     // the table's ordinals, the same
+  std::span<std::int32_t> ordinals;     // the table's ordinals, the same
   std::span<Cost> distinct;         // the distinct costs in first-appearance order
-  std::span<std::int32_t> a, b, c;  // the rank step: ordinal -> rank, and its two position arrays
+  std::span<std::int32_t> ordinal_to_rank, sort_positions, sort_scratch;  // the rank step: ordinal -> rank, and its two position arrays
 };
 
 enum class RankPath { Hashed, DistinctLimit, ExhaustedCollection, ExhaustedGrowth };
@@ -172,13 +172,13 @@ struct RankOutcome {
 // collection of positive costs keeps at least one, and the fallback sort of all costs runs only
 // after hashing failed, which needs an edge.
 template <int kBits>
-std::int64_t ranks_by_sort(std::span<const Cost> cost, Cost max_cost, std::span<std::int32_t> rank,
+std::int64_t ranks_by_sort(std::span<const Cost> cost, Cost max_edge_cost, std::span<std::int32_t> rank,
                            std::span<std::int32_t> a, std::span<std::int32_t> b,
                            std::span<std::int32_t> count) {
   const std::size_t m = cost.size();
   constexpr std::uint64_t kMask = (std::uint64_t {1} << kBits) - 1;
   std::iota(a.begin(), a.end(), 0);
-  const auto top = static_cast<std::uint64_t>(max_cost);
+  const auto top = static_cast<std::uint64_t>(max_edge_cost);
   for (int shift = 0; shift < 64 && (top >> shift) != 0; shift += kBits) {
     auto digit = [&](std::int32_t i) {
       const auto c = static_cast<std::uint64_t>(cost[static_cast<std::size_t>(i)]);
@@ -210,7 +210,7 @@ std::int64_t ranks_by_sort(std::span<const Cost> cost, Cost max_cost, std::span<
 // its own, freed on return. Growth rebuilds the bigger table from the distinct costs in their
 // order, counting every probe. Any path other than Hashed leaves `rank` partly written for the
 // caller to overwrite.
-RankOutcome ranks_by_hash(std::span<const Cost> cost, std::span<std::int32_t> rank, const HashRooms& room) {
+RankOutcome ranks_by_hash(std::span<const Cost> cost, std::span<std::int32_t> rank, const CostRankBuffers& room) {
   const std::size_t m = cost.size();
   RankOutcome out;
   ProbeBudget b {0, 8 * static_cast<std::int64_t>(m) + 8 * kMaxHashedCosts};
@@ -218,7 +218,7 @@ RankOutcome ranks_by_hash(std::span<const Cost> cost, std::span<std::int32_t> ra
   if (m == 0) return out;  // no cost, no table
   std::size_t k = 0;       // the distinct costs so far: room.distinct[0, k)
   {
-    TableStore store {room.keys, room.ords};
+    CostTableStorage store {room.keys, room.ordinals};
     CostTable t = store.make(64);
     auto stop = [&](RankPath path) {
       out.path = path;
@@ -244,28 +244,28 @@ RankOutcome ranks_by_hash(std::span<const Cost> cost, std::span<std::int32_t> ra
             const std::size_t d = t.find(room.distinct[j], b);
             if (d == kNoSlot) return stop(RankPath::ExhaustedGrowth);
             t.key[d] = room.distinct[j];
-            t.ord[d] = static_cast<std::int32_t>(j);
+            t.ordinals[d] = static_cast<std::int32_t>(j);
           }
           s = t.find(c, b);
           if (s == kNoSlot) return stop(RankPath::ExhaustedGrowth);
         }
         t.key[s] = c;
-        t.ord[s] = static_cast<std::int32_t>(k);
+        t.ordinals[s] = static_cast<std::int32_t>(k);
         room.distinct[k++] = c;
       }
-      rank[i] = t.ord[s];
+      rank[i] = t.ordinals[s];
       prev = c;
-      prev_ord = t.ord[s];
+      prev_ord = t.ordinals[s];
     }
     out.table_slots = static_cast<std::int64_t>(t.key.size());
   }
   out.probes = b.used;
   // Ordinal -> rank without the table: a radix sort of the K distinct costs.
   const std::span<const Cost> by_ord = room.distinct.first(k);
-  const std::span<std::int32_t> rank_of_ord = room.a.first(k);
+  const std::span<std::int32_t> rank_of_ord = room.ordinal_to_rank.first(k);
   std::array<std::int32_t, std::size_t {1} << 8> count {};
-  ranks_by_sort<8>(by_ord, *std::max_element(by_ord.begin(), by_ord.end()), rank_of_ord, room.b.first(k),
-                   room.c.first(k), count);
+  ranks_by_sort<8>(by_ord, *std::max_element(by_ord.begin(), by_ord.end()), rank_of_ord, room.sort_positions.first(k),
+                   room.sort_scratch.first(k), count);
   for (std::size_t i = 0; i < m; ++i) rank[i] = rank_of_ord[static_cast<std::size_t>(rank[i])];
   out.distinct = static_cast<std::int64_t>(k);
   return out;
@@ -338,17 +338,17 @@ double as_float(Amount x, double resolution) {
 }
 
 Graph::Graph(std::int32_t num_nodes,
-             std::span<const NodeId> src,
-             std::span<const NodeId> dst,
-             std::span<const Amount> capacity_units,
-             std::span<const Cost> cost,
+             std::span<const NodeId> edge_sources,
+             std::span<const NodeId> edge_destinations,
+             std::span<const Amount> edge_capacity_units,
+             std::span<const Cost> edge_costs,
              double resolution) {
   (void)resolution_exponent(resolution);
   // The unit values.
-  for (std::size_t i = 0; i < capacity_units.size(); ++i) {
-    const Amount c = capacity_units[i];
+  for (std::size_t i = 0; i < edge_capacity_units.size(); ++i) {
+    const Amount c = edge_capacity_units[i];
     if (c < 0 || c >= kDomainLimit) {
-      throw std::invalid_argument("capacity_units[" + std::to_string(i) + "] = " + std::to_string(c) +
+      throw std::invalid_argument("edge_capacity_units[" + std::to_string(i) + "] = " + std::to_string(c) +
                                   " is outside the units domain [0, 2^62)");
     }
   }
@@ -356,33 +356,33 @@ Graph::Graph(std::int32_t num_nodes,
   if (num_nodes < 0) {
     throw std::invalid_argument("num_nodes must be >= 0 (got " + std::to_string(num_nodes) + ")");
   }
-  const std::size_t m = src.size();
-  if (dst.size() != m || capacity_units.size() != m || cost.size() != m) {
-    throw std::invalid_argument("src, dst, capacity_units and cost must have the same length (got " +
-                                std::to_string(src.size()) + ", " + std::to_string(dst.size()) + ", " +
-                                std::to_string(capacity_units.size()) + ", " +
-                                std::to_string(cost.size()) + ")");
+  const std::size_t m = edge_sources.size();
+  if (edge_destinations.size() != m || edge_capacity_units.size() != m || edge_costs.size() != m) {
+    throw std::invalid_argument("edge_sources, edge_destinations, edge_capacity_units and edge_costs must have the same length (got " +
+                                std::to_string(edge_sources.size()) + ", " + std::to_string(edge_destinations.size()) + ", " +
+                                std::to_string(edge_capacity_units.size()) + ", " +
+                                std::to_string(edge_costs.size()) + ")");
   }
   if (m > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
     throw std::invalid_argument("the number of edges exceeds INT32_MAX (array length)");
   }
   // Zero or negative costs (costs are positive).
-  Cost max_cost = 0;
-  Cost cost_gcd = 0;
+  Cost max_edge_cost = 0;
+  Cost edge_cost_gcd = 0;
   for (std::size_t i = 0; i < m; ++i) {
-    if (cost[i] < 1) {
-      throw std::invalid_argument("cost[" + std::to_string(i) + "] = " + std::to_string(cost[i]) +
-                                  ": costs must be positive (cost >= 1)");
+    if (edge_costs[i] < 1) {
+      throw std::invalid_argument("edge_costs[" + std::to_string(i) + "] = " + std::to_string(edge_costs[i]) +
+                                  ": costs must be positive (edge_costs >= 1)");
     }
-    max_cost = std::max(max_cost, cost[i]);
+    max_edge_cost = std::max(max_edge_cost, edge_costs[i]);
     // A running GCD of 1 stays 1 (gcd(1, c) = 1): the remaining edges are only checked.
-    if (cost_gcd != 1) cost_gcd = std::gcd(cost_gcd, cost[i]);
+    if (edge_cost_gcd != 1) edge_cost_gcd = std::gcd(edge_cost_gcd, edge_costs[i]);
   }
   // The remaining bounds.
   for (std::size_t i = 0; i < m; ++i) {
-    if (src[i] < 0 || src[i] >= num_nodes || dst[i] < 0 || dst[i] >= num_nodes) {
-      throw std::invalid_argument("edge " + std::to_string(i) + ": endpoint (" + std::to_string(src[i]) +
-                                  ", " + std::to_string(dst[i]) + ") out of node range [0, " +
+    if (edge_sources[i] < 0 || edge_sources[i] >= num_nodes || edge_destinations[i] < 0 || edge_destinations[i] >= num_nodes) {
+      throw std::invalid_argument("edge " + std::to_string(i) + ": endpoint (" + std::to_string(edge_sources[i]) +
+                                  ", " + std::to_string(edge_destinations[i]) + ") out of node range [0, " +
                                   std::to_string(num_nodes) + ")");
     }
   }
@@ -390,11 +390,11 @@ Graph::Graph(std::int32_t num_nodes,
   std::uint64_t cap_sum = 0;
   std::uint64_t cost_sum = 0;
   for (std::size_t i = 0; i < m; ++i) {
-    cap_sum += static_cast<std::uint64_t>(capacity_units[i]);  // each < 2^62: no wrap before the check
+    cap_sum += static_cast<std::uint64_t>(edge_capacity_units[i]);  // each < 2^62: no wrap before the check
     if (cap_sum >= kLimit) {
       throw std::invalid_argument("the sum of all capacities reaches the bound of the units domain (2^62 units)");
     }
-    cost_sum += static_cast<std::uint64_t>(cost[i]);
+    cost_sum += static_cast<std::uint64_t>(edge_costs[i]);
     if (cost_sum >= kLimit) {
       throw std::invalid_argument(
           "the sum of all edge costs reaches the bound 2^62: path costs would overflow int64");
@@ -404,35 +404,35 @@ Graph::Graph(std::int32_t num_nodes,
   uid_ = next_uid();
   resolution_ = resolution;
   num_nodes_ = num_nodes;
-  max_cost_ = max_cost;
-  cost_gcd_ = cost_gcd;
+  max_edge_cost_ = max_edge_cost;
+  edge_cost_gcd_ = edge_cost_gcd;
   const auto n = static_cast<std::size_t>(num_nodes);
 
   // Every retained array first (36 E + 8 (N + 1) bytes); until it is filled, each serves as
   // scratch. The cost ranks go into the copy's array (by input position); the hash table, the
   // distinct costs and the rank step borrow the others, so the hash path allocates nothing of its
   // own while the table has at most E slots (no freed block stays behind in the allocator's cache).
-  capacity_.resize(m);
-  cost_.resize(m);
-  src_.resize(m);
-  dst_.resize(m);
-  input_index_.resize(m);
-  in_adj_edge_index_.resize(m);
-  in_col_indices_.resize(m);
-  row_offsets_.assign(n + 1, 0);
-  in_row_offsets_.assign(n + 1, 0);
-  const std::span<std::int32_t> rank(in_col_indices_);
+  edge_capacity_units_.resize(m);
+  edge_costs_.resize(m);
+  edge_sources_.resize(m);
+  edge_destinations_.resize(m);
+  input_positions_.resize(m);
+  incoming_edges_.resize(m);
+  incoming_edge_sources_.resize(m);
+  outgoing_offsets_.assign(n + 1, 0);
+  incoming_offsets_.assign(n + 1, 0);
+  const std::span<std::int32_t> rank(incoming_edge_sources_);
   const RankOutcome ro =
-      ranks_by_hash(cost, rank, HashRooms {capacity_, src_, cost_, dst_, input_index_, in_adj_edge_index_});
-  const std::span<std::int32_t> order(input_index_);      // forward passes 1 and 3 (final)
-  const std::span<std::int32_t> mid(in_adj_edge_index_);  // forward pass 2
-  const std::span<Amount> bucket(capacity_);              // the K rank cursors (K <= E)
+      ranks_by_hash(edge_costs, rank, CostRankBuffers {edge_capacity_units_, edge_sources_, edge_costs_, edge_destinations_, input_positions_, incoming_edges_});
+  const std::span<std::int32_t> order(input_positions_);      // forward passes 1 and 3 (final)
+  const std::span<std::int32_t> mid(incoming_edges_);  // forward pass 2
+  const std::span<Amount> bucket(edge_capacity_units_);              // the K rank cursors (K <= E)
 
   // Any other path: the ranks from a sort of all costs (the same ranks).
   std::int64_t k = ro.distinct;
   if (ro.path != RankPath::Hashed) {
     std::vector<std::int32_t> count(std::size_t {1} << 16);
-    k = ranks_by_sort<16>(cost, max_cost, rank, input_index_, in_adj_edge_index_, count);
+    k = ranks_by_sort<16>(edge_costs, max_edge_cost, rank, input_positions_, incoming_edges_, count);
   }
   const auto kk = static_cast<std::size_t>(k);
 #if NETGRAPH_CORE_PRIVATE_HOOKS
@@ -452,13 +452,13 @@ Graph::Graph(std::int32_t num_nodes,
   if (m == 0) return;
 
   // The passes. With few nodes times few costs (N K < E), the cost rank rides with an endpoint as
-  // one key: forward by dst, then by (src, rank); reverse by (dst, rank) over the ids.
-  // Otherwise the five single-key passes: forward by dst, rank, src; reverse by rank, then dst.
+  // one key: forward by destination, then by (source, rank); reverse by (destination, rank) over the ids.
+  // Otherwise the five single-key passes: forward by destination, rank, source; reverse by rank, then destination.
   // Both give the same orders. The combined-key passes keep their two (N K + 1)-entry histograms
   // in the not-yet-filled capacity and cost arrays (N K + 1 <= E), so their work is O(E).
   const bool fused = n * kk < m;
-  const std::span<Amount> by_dst_rank(capacity_);  // fused: (dst, rank) histogram, then cursors
-  const std::span<Cost> by_src_rank(cost_);        // fused: (src, rank) histogram, then cursors
+  const std::span<Amount> by_dst_rank(edge_capacity_units_);  // fused: (destination, rank) histogram, then cursors
+  const std::span<Cost> by_src_rank(edge_costs_);        // fused: (source, rank) histogram, then cursors
   if (fused) {
 #if NETGRAPH_CORE_PRIVATE_HOOKS
     ++detail::thread_construction_counts().fused;
@@ -467,47 +467,47 @@ Graph::Graph(std::int32_t num_nodes,
     std::fill(by_dst_rank.begin(), by_dst_rank.begin() + static_cast<std::ptrdiff_t>(nk + 1), 0);
     std::fill(by_src_rank.begin(), by_src_rank.begin() + static_cast<std::ptrdiff_t>(nk + 1), 0);
     // Keep the counter updates in separate loops for speed.
-    for (std::size_t i = 0; i < m; ++i) ++by_dst_rank[static_cast<std::size_t>(dst[i]) * kk + static_cast<std::size_t>(rank[i]) + 1];
-    for (std::size_t i = 0; i < m; ++i) ++by_src_rank[static_cast<std::size_t>(src[i]) * kk + static_cast<std::size_t>(rank[i]) + 1];
+    for (std::size_t i = 0; i < m; ++i) ++by_dst_rank[static_cast<std::size_t>(edge_destinations[i]) * kk + static_cast<std::size_t>(rank[i]) + 1];
+    for (std::size_t i = 0; i < m; ++i) ++by_src_rank[static_cast<std::size_t>(edge_sources[i]) * kk + static_cast<std::size_t>(rank[i]) + 1];
     for (std::size_t x = 0, sum = 0; x <= nk; ++x) sum = static_cast<std::size_t>(by_dst_rank[x] += static_cast<Amount>(sum));
     for (std::size_t x = 0, sum = 0; x <= nk; ++x) sum = static_cast<std::size_t>(by_src_rank[x] += static_cast<Cost>(sum));
     for (std::size_t v = 0; v < n; ++v) {
-      in_row_offsets_[v] = static_cast<std::int32_t>(by_dst_rank[(v + 1) * kk]);  // ends: pass 1's cursors
-      row_offsets_[v] = static_cast<std::int32_t>(by_src_rank[v * kk]);
+      incoming_offsets_[v] = static_cast<std::int32_t>(by_dst_rank[(v + 1) * kk]);  // ends: pass 1's cursors
+      outgoing_offsets_[v] = static_cast<std::int32_t>(by_src_rank[v * kk]);
     }
-    in_row_offsets_[n] = row_offsets_[n] = static_cast<std::int32_t>(m);
+    incoming_offsets_[n] = outgoing_offsets_[n] = static_cast<std::int32_t>(m);
   } else {
-    for (std::size_t i = 0; i < m; ++i) ++in_row_offsets_[static_cast<std::size_t>(dst[i]) + 1];
-    counts_to_starts(std::span<std::int32_t>(in_row_offsets_));
+    for (std::size_t i = 0; i < m; ++i) ++incoming_offsets_[static_cast<std::size_t>(edge_destinations[i]) + 1];
+    counts_to_starts(std::span<std::int32_t>(incoming_offsets_));
   }
 
-  // Forward pass 1, by dst, from input order. The reverse offsets serve as cursors, so no pass
+  // Forward pass 1, by destination, from input order. The reverse offsets serve as cursors, so no pass
   // over the nodes restores them: the combined-key passes walk the input backwards from the ends
   // to the starts; the single-key passes walk it forwards from the starts to the ends, and
   // reverse pass 2 walks back.
   if (fused) {
     for (std::size_t i = m; i-- > 0;) {
-      order[static_cast<std::size_t>(--in_row_offsets_[static_cast<std::size_t>(dst[i])])] = static_cast<std::int32_t>(i);
+      order[static_cast<std::size_t>(--incoming_offsets_[static_cast<std::size_t>(edge_destinations[i])])] = static_cast<std::int32_t>(i);
     }
   } else {
     for (std::size_t i = 0; i < m; ++i) {
-      order[static_cast<std::size_t>(in_row_offsets_[static_cast<std::size_t>(dst[i])]++)] = static_cast<std::int32_t>(i);
+      order[static_cast<std::size_t>(incoming_offsets_[static_cast<std::size_t>(edge_destinations[i])]++)] = static_cast<std::int32_t>(i);
     }
   }
 
   if (fused) {
-    // Forward pass 2, by (src, rank), into `mid`: the final id order; the two arrays trade places.
+    // Forward pass 2, by (source, rank), into `mid`: the final id order; the two arrays trade places.
     for (std::size_t j = 0; j < m; ++j) {
       const auto i = static_cast<std::size_t>(order[j]);
-      const std::size_t key = static_cast<std::size_t>(src[i]) * kk + static_cast<std::size_t>(rank[i]);
+      const std::size_t key = static_cast<std::size_t>(edge_sources[i]) * kk + static_cast<std::size_t>(rank[i]);
       mid[static_cast<std::size_t>(by_src_rank[key]++)] = static_cast<std::int32_t>(i);
     }
-    input_index_.swap(in_adj_edge_index_);
-    // Reverse, the ids by (dst, rank): within a key the id order gives (src, input).
+    input_positions_.swap(incoming_edges_);
+    // Reverse, the ids by (destination, rank): within a key the id order gives (source, input).
     for (std::size_t e = 0; e < m; ++e) {
-      const auto i = static_cast<std::size_t>(input_index_[e]);
-      const std::size_t key = static_cast<std::size_t>(dst[i]) * kk + static_cast<std::size_t>(rank[i]);
-      in_adj_edge_index_[static_cast<std::size_t>(by_dst_rank[key]++)] = static_cast<std::int32_t>(e);
+      const auto i = static_cast<std::size_t>(input_positions_[e]);
+      const std::size_t key = static_cast<std::size_t>(edge_destinations[i]) * kk + static_cast<std::size_t>(rank[i]);
+      incoming_edges_[static_cast<std::size_t>(by_dst_rank[key]++)] = static_cast<std::int32_t>(e);
     }
   } else {
     // Forward pass 2, by cost rank; the cursors stay for reverse pass 1.
@@ -524,16 +524,16 @@ Graph::Graph(std::int32_t num_nodes,
     }
     ends_to_starts(bucket.first(kk));
 
-    // Forward pass 3, by src; the src histogram is the forward offsets.
-    for (std::size_t i = 0; i < m; ++i) ++row_offsets_[static_cast<std::size_t>(src[i])];
-    counts_to_ends(std::span<std::int32_t>(row_offsets_));
+    // Forward pass 3, by source; the source histogram is the forward offsets.
+    for (std::size_t i = 0; i < m; ++i) ++outgoing_offsets_[static_cast<std::size_t>(edge_sources[i])];
+    counts_to_ends(std::span<std::int32_t>(outgoing_offsets_));
     for (std::size_t j = m; j-- > 0;) {
       const auto i = static_cast<std::size_t>(mid[j]);
-      order[static_cast<std::size_t>(--row_offsets_[static_cast<std::size_t>(src[i])])] = static_cast<std::int32_t>(i);
+      order[static_cast<std::size_t>(--outgoing_offsets_[static_cast<std::size_t>(edge_sources[i])])] = static_cast<std::int32_t>(i);
     }
 
-    // Reverse pass 1, by cost rank over the ids (the id order is (src, cost, dst, input)).
-    const std::span<std::int32_t> by_cost(in_adj_edge_index_);  // free again after pass 3
+    // Reverse pass 1, by cost rank over the ids (the id order is (source, cost, destination, input)).
+    const std::span<std::int32_t> by_cost(incoming_edges_);  // free again after pass 3
     for (std::size_t e = 0; e < m; ++e) {
       const auto r = static_cast<std::size_t>(rank[static_cast<std::size_t>(order[e])]);
       by_cost[static_cast<std::size_t>(bucket[r]++)] = static_cast<std::int32_t>(e);
@@ -542,59 +542,59 @@ Graph::Graph(std::int32_t num_nodes,
 
   // The per-edge values, permuted once (the cursors and the ranks are no longer read).
   for (std::size_t e = 0; e < m; ++e) {
-    const auto i = static_cast<std::size_t>(input_index_[e]);
-    capacity_[e] = capacity_units[i];
-    cost_[e] = cost[i];
-    src_[e] = src[i];
-    dst_[e] = dst[i];
+    const auto i = static_cast<std::size_t>(input_positions_[e]);
+    edge_capacity_units_[e] = edge_capacity_units[i];
+    edge_costs_[e] = edge_costs[i];
+    edge_sources_[e] = edge_sources[i];
+    edge_destinations_[e] = edge_destinations[i];
   }
 
   if (!fused) {
-    // Reverse pass 2, by dst, into the ranks' array, walked backwards: the reverse offsets hold
+    // Reverse pass 2, by destination, into the ranks' array, walked backwards: the reverse offsets hold
     // the ends after pass 1 and return to the starts. Then the two slot arrays trade places.
-    const std::span<std::int32_t> slots(in_col_indices_);
-    const std::span<std::int32_t> by_cost(in_adj_edge_index_);
+    const std::span<std::int32_t> slots(incoming_edge_sources_);
+    const std::span<std::int32_t> by_cost(incoming_edges_);
     for (std::size_t j = m; j-- > 0;) {
       const auto e = static_cast<std::size_t>(by_cost[j]);
-      slots[static_cast<std::size_t>(--in_row_offsets_[static_cast<std::size_t>(dst_[e])])] = static_cast<std::int32_t>(e);
+      slots[static_cast<std::size_t>(--incoming_offsets_[static_cast<std::size_t>(edge_destinations_[e])])] = static_cast<std::int32_t>(e);
     }
-    in_adj_edge_index_.swap(in_col_indices_);
+    incoming_edges_.swap(incoming_edge_sources_);
   }
   // The source copy, over the ranks' (or the free) array.
-  for (std::size_t s = 0; s < m; ++s) in_col_indices_[s] = src_[static_cast<std::size_t>(in_adj_edge_index_[s])];
+  for (std::size_t s = 0; s < m; ++s) incoming_edge_sources_[s] = edge_sources_[static_cast<std::size_t>(incoming_edges_[s])];
 }
 
 Graph::Graph(const Graph& other)
     : uid_(next_uid()),
       resolution_(other.resolution_),
       num_nodes_(other.num_nodes_),
-      max_cost_(other.max_cost_),
-      cost_gcd_(other.cost_gcd_),
-      capacity_(other.capacity_),
-      cost_(other.cost_),
-      src_(other.src_),
-      dst_(other.dst_),
-      input_index_(other.input_index_),
-      row_offsets_(other.row_offsets_),
-      in_row_offsets_(other.in_row_offsets_),
-      in_adj_edge_index_(other.in_adj_edge_index_),
-      in_col_indices_(other.in_col_indices_) {}
+      max_edge_cost_(other.max_edge_cost_),
+      edge_cost_gcd_(other.edge_cost_gcd_),
+      edge_capacity_units_(other.edge_capacity_units_),
+      edge_costs_(other.edge_costs_),
+      edge_sources_(other.edge_sources_),
+      edge_destinations_(other.edge_destinations_),
+      input_positions_(other.input_positions_),
+      outgoing_offsets_(other.outgoing_offsets_),
+      incoming_offsets_(other.incoming_offsets_),
+      incoming_edges_(other.incoming_edges_),
+      incoming_edge_sources_(other.incoming_edge_sources_) {}
 
 // No allocation: the source keeps empty vectors, and its offset views read the static zero.
 Graph::Graph(Graph&& other) noexcept
     : uid_(std::exchange(other.uid_, 0)),
       resolution_(other.resolution_),
       num_nodes_(std::exchange(other.num_nodes_, 0)),
-      max_cost_(std::exchange(other.max_cost_, 0)),
-      cost_gcd_(std::exchange(other.cost_gcd_, 0)),
-      capacity_(std::move(other.capacity_)),
-      cost_(std::move(other.cost_)),
-      src_(std::move(other.src_)),
-      dst_(std::move(other.dst_)),
-      input_index_(std::move(other.input_index_)),
-      row_offsets_(std::move(other.row_offsets_)),
-      in_row_offsets_(std::move(other.in_row_offsets_)),
-      in_adj_edge_index_(std::move(other.in_adj_edge_index_)),
-      in_col_indices_(std::move(other.in_col_indices_)) {}
+      max_edge_cost_(std::exchange(other.max_edge_cost_, 0)),
+      edge_cost_gcd_(std::exchange(other.edge_cost_gcd_, 0)),
+      edge_capacity_units_(std::move(other.edge_capacity_units_)),
+      edge_costs_(std::move(other.edge_costs_)),
+      edge_sources_(std::move(other.edge_sources_)),
+      edge_destinations_(std::move(other.edge_destinations_)),
+      input_positions_(std::move(other.input_positions_)),
+      outgoing_offsets_(std::move(other.outgoing_offsets_)),
+      incoming_offsets_(std::move(other.incoming_offsets_)),
+      incoming_edges_(std::move(other.incoming_edges_)),
+      incoming_edge_sources_(std::move(other.incoming_edge_sources_)) {}
 
 } // namespace netgraph::core

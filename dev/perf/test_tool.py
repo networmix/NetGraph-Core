@@ -388,7 +388,7 @@ ROWS = {
 
 class RowResolution(unittest.TestCase):
     def plan(self, rows: str) -> dict:
-        return aba.plan_selection(ROWS, rows)
+        return aba.choose_rows(ROWS, rows)
 
     def test_row_name_group_and_all(self):
         self.assertEqual(self.plan("a.one")["selected"], ["a.one"])
@@ -408,7 +408,7 @@ class RowResolution(unittest.TestCase):
         self.assertEqual(
             sel["errors"], ["--rows glob 'placement.*' matches no row or group"]
         )
-        text = aba.selection_error_text(sel, ROWS)
+        text = aba.row_choice_error_text(sel, ROWS)
         self.assertIn("a (2): a.one, a.two", text)
         self.assertIn("b (1): b.one", text)
         self.assertEqual(self.plan(" , ")["errors"], ["--rows ' , ' names no glob"])
@@ -3121,7 +3121,7 @@ class Harness(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = aba.row_list(proc.stdout.encode(), "aba-list")
         real = {k: v for k, v in rows.items() if not k.startswith("test.")}
-        self.assertEqual(len(real), 63)
+        self.assertEqual(len(real), 65)
         sums = sha256sums(HERE / "queries")
         lists = {}
         for name in sums:
@@ -3155,7 +3155,7 @@ class Harness(unittest.TestCase):
         real = [row for row in listed if not row.startswith("test.")]
         with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 1) as pool:
             procs = list(pool.map(lambda row: self.harness("aba-run", row, "1"), real))
-        self.assertEqual(len(procs), 63)
+        self.assertEqual(len(procs), 65)
         for row, proc in zip(real, procs, strict=True):
             self.assertEqual(proc.returncode, 0, (row, proc.stderr))
             self.assertEqual(

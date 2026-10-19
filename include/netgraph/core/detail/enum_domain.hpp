@@ -16,13 +16,13 @@ namespace netgraph::core::detail {
   throw std::invalid_argument(std::string(field) + ": " + std::to_string(value) + " is not a value of " + enumeration);
 }
 
-inline void check_member(FlowPlacement v, const char* field) {
+inline void check_member(RouteAllocation v, const char* field) {
   switch (v) {
-    case FlowPlacement::MaxFlow:
-    case FlowPlacement::Weighted:
-    case FlowPlacement::EqualBalanced: return;
+    case RouteAllocation::Equal:
+    case RouteAllocation::Weighted:
+    case RouteAllocation::Optimized: return;
   }
-  not_a_member(field, static_cast<int>(v), "FlowPlacement");
+  not_a_member(field, static_cast<int>(v), "RouteAllocation");
 }
 
 inline void check_member(Admission v, const char* field) {
@@ -33,12 +33,12 @@ inline void check_member(Admission v, const char* field) {
   not_a_member(field, static_cast<int>(v), "Admission");
 }
 
-inline void check_member(Origin v, const char* field) {
+inline void check_member(SourceAllocation v, const char* field) {
   switch (v) {
-    case Origin::Equal:
-    case Origin::Optimized: return;
+    case SourceAllocation::Equal:
+    case SourceAllocation::Optimized: return;
   }
-  not_a_member(field, static_cast<int>(v), "Origin");
+  not_a_member(field, static_cast<int>(v), "SourceAllocation");
 }
 
 inline void check_member(WeightBasis v, const char* field) {
@@ -50,21 +50,14 @@ inline void check_member(WeightBasis v, const char* field) {
   not_a_member(field, static_cast<int>(v), "WeightBasis");
 }
 
-inline void check_member(EdgeTieBreak v, const char* field) {
+inline void check_member(RouteTieBreak v, const char* field) {
   switch (v) {
-    case EdgeTieBreak::Deterministic:
-    case EdgeTieBreak::PreferHigherPriority: return;
+    case RouteTieBreak::FewerHops:
+    case RouteTieBreak::HigherCapacity:
+    case RouteTieBreak::HigherAvailableCapacity:
+    case RouteTieBreak::HigherHeadroom: return;
   }
-  not_a_member(field, static_cast<int>(v), "EdgeTieBreak");
-}
-
-inline void check_member(EdgePriority v, const char* field) {
-  switch (v) {
-    case EdgePriority::Residual:
-    case EdgePriority::Capacity:
-    case EdgePriority::Headroom: return;
-  }
-  not_a_member(field, static_cast<int>(v), "EdgePriority");
+  not_a_member(field, static_cast<int>(v), "RouteTieBreak");
 }
 
 inline void check_member(Direction v, const char* field) {
@@ -81,12 +74,6 @@ inline void check_member(SpfQueue v, const char* field) {
     case SpfQueue::Heap: return;
   }
   not_a_member(field, static_cast<int>(v), "SpfQueue");
-}
-
-// The two enum-typed fields of a selection.
-inline void check_selection(const PathSelection& selection) {
-  check_member(selection.tie_break, "selection.tie_break");
-  check_member(selection.priority, "selection.priority");
 }
 
 } // namespace netgraph::core::detail

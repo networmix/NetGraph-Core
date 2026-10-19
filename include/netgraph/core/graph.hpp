@@ -24,11 +24,11 @@ struct GraphAccess;
 [[nodiscard]] double as_float(Amount x, double resolution);
 
 // Edges arrive in input order. Their public EdgeIds are their positions after sorting by
-// (src, cost, dst, input). Node u's out-edges are [row_offsets()[u], row_offsets()[u + 1]),
-// ordered by (cost, dst, input); input_index()[e] gives e's input position. All other per-edge
-// arrays use EdgeId order, except in_adj_edge_index() (reverse-CSR slot order). CSR (compressed
+// (source, cost, destination, input). Node u's out-edges are
+// [outgoing_offsets()[u], outgoing_offsets()[u + 1]), ordered by (cost, destination, input);
+// input_positions()[e] gives e's input position. All other per-edge arrays use EdgeId order, except incoming_edges() (reverse-CSR slot order). CSR (compressed
 // sparse row) stores each node's edges in a flat array and uses offsets to mark its range.
-// Reverse CSR lists v's in-edges in (cost, src, input) order.
+// Reverse CSR lists v's in-edges in (cost, source, input) order.
 //
 // The constructor validates in this order and reports the first defect (std::invalid_argument):
 // the resolution (a power of two in [2^-32, 2^32]); the unit values (every capacity in
@@ -43,8 +43,9 @@ struct GraphAccess;
 //
 // Construction uses N nodes, E edges and K distinct costs. A cost's rank is its position among
 // the sorted distinct costs. Stable counting passes group by each key without changing ties:
-// dst, cost rank, src give EdgeId order; cost rank, dst give reverse CSR. When N K < E, use
-// dst then (src, rank) forward, and (dst, rank) reverse. With no edges, only validation and two
+// destination, cost rank, source give EdgeId order; cost rank, destination give reverse CSR.
+// When N K < E, use destination then (source, rank) forward, and (destination, rank) reverse.
+// With no edges, only validation and two
 // zero-filled offset arrays are needed. Rank costs through a hash table up to 65,536 distinct
 // costs and 8E + 8 x 65,536 examined slots; otherwise sort all costs. Both give the same ranks.
 // Expected O(E + N) for bounded K; O(N + E log(E + 1)) worst case.
@@ -58,10 +59,10 @@ struct GraphAccess;
 class Graph {
 public:
   Graph(std::int32_t num_nodes,
-        std::span<const NodeId> src,
-        std::span<const NodeId> dst,
-        std::span<const Amount> capacity_units,
-        std::span<const Cost> cost,
+        std::span<const NodeId> edge_sources,
+        std::span<const NodeId> edge_destinations,
+        std::span<const Amount> edge_capacity_units,
+        std::span<const Cost> edge_costs,
         double resolution);
   Graph(const Graph& other);
   Graph(Graph&& other) noexcept;
@@ -73,25 +74,25 @@ public:
   [[nodiscard]] double resolution() const noexcept { return resolution_; }
   [[nodiscard]] std::int32_t num_nodes() const noexcept { return num_nodes_; }
   [[nodiscard]] std::int32_t num_edges() const noexcept {
-    return static_cast<std::int32_t>(capacity_.size());
+    return static_cast<std::int32_t>(edge_capacity_units_.size());
   }
-  [[nodiscard]] std::span<const Amount> capacity_units() const noexcept { return capacity_; }
-  [[nodiscard]] std::span<const Cost> cost() const noexcept { return cost_; }
-  [[nodiscard]] std::span<const NodeId> edge_src() const noexcept { return src_; }
-  [[nodiscard]] std::span<const NodeId> edge_dst() const noexcept { return dst_; }
+  [[nodiscard]] std::span<const Amount> edge_capacity_units() const noexcept { return edge_capacity_units_; }
+  [[nodiscard]] std::span<const Cost> edge_costs() const noexcept { return edge_costs_; }
+  [[nodiscard]] std::span<const NodeId> edge_sources() const noexcept { return edge_sources_; }
+  [[nodiscard]] std::span<const NodeId> edge_destinations() const noexcept { return edge_destinations_; }
   // Maximum edge cost and greatest common divisor of all edge costs, computed by full scans
   // at construction; both are 0 on a graph without edges.
-  [[nodiscard]] Cost max_cost() const noexcept { return max_cost_; }
-  [[nodiscard]] Cost cost_gcd() const noexcept { return cost_gcd_; }
+  [[nodiscard]] Cost max_edge_cost() const noexcept { return max_edge_cost_; }
+  [[nodiscard]] Cost edge_cost_gcd() const noexcept { return edge_cost_gcd_; }
   // id -> input position. The inverse permutation is the caller's (one O(E) scatter).
-  [[nodiscard]] std::span<const std::int32_t> input_index() const noexcept { return input_index_; }
+  [[nodiscard]] std::span<const std::int32_t> input_positions() const noexcept { return input_positions_; }
   // Forward CSR offsets (N + 1 entries, [0] = 0, [N] = E): the id ranges of the out-edges.
-  [[nodiscard]] std::span<const std::int32_t> row_offsets() const noexcept { return offsets(row_offsets_); }
-  // Reverse CSR: the in-edges of v are in_adj_edge_index()[in_row_offsets()[v] ..
-  // in_row_offsets()[v + 1]) (public EdgeIds); the reverse column is
-  // edge_src()[in_adj_edge_index()[slot]].
-  [[nodiscard]] std::span<const std::int32_t> in_row_offsets() const noexcept { return offsets(in_row_offsets_); }
-  [[nodiscard]] std::span<const EdgeId> in_adj_edge_index() const noexcept { return in_adj_edge_index_; }
+  [[nodiscard]] std::span<const std::int32_t> outgoing_offsets() const noexcept { return offsets(outgoing_offsets_); }
+  // Reverse CSR: the in-edges of v are incoming_edges()[incoming_offsets()[v] ..
+  // incoming_offsets()[v + 1]) (public EdgeIds); the reverse column is
+  // edge_sources()[incoming_edges()[slot]].
+  [[nodiscard]] std::span<const std::int32_t> incoming_offsets() const noexcept { return offsets(incoming_offsets_); }
+  [[nodiscard]] std::span<const EdgeId> incoming_edges() const noexcept { return incoming_edges_; }
 
   // Static eligibility from excluded ids (duplicates and unsorted lists accepted, out-of-range
   // ids rejected). Empty lists mean all allowed (uid 0). The one public construction of an
@@ -111,19 +112,19 @@ private:
   std::uint64_t uid_ {0};
   double resolution_ {1.0};
   std::int32_t num_nodes_ {0};
-  Cost max_cost_ {0};
-  Cost cost_gcd_ {0};
-  std::vector<Amount> capacity_ {};
-  std::vector<Cost> cost_ {};
-  std::vector<NodeId> src_ {};
-  std::vector<NodeId> dst_ {};
-  std::vector<std::int32_t> input_index_ {};
-  std::vector<std::int32_t> row_offsets_ {};
-  std::vector<std::int32_t> in_row_offsets_ {};
-  std::vector<EdgeId> in_adj_edge_index_ {};
-  // The source of each reverse slot (edge_src()[in_adj_edge_index()[slot]]), stored for the
+  Cost max_edge_cost_ {0};
+  Cost edge_cost_gcd_ {0};
+  std::vector<Amount> edge_capacity_units_ {};
+  std::vector<Cost> edge_costs_ {};
+  std::vector<NodeId> edge_sources_ {};
+  std::vector<NodeId> edge_destinations_ {};
+  std::vector<std::int32_t> input_positions_ {};
+  std::vector<std::int32_t> outgoing_offsets_ {};
+  std::vector<std::int32_t> incoming_offsets_ {};
+  std::vector<EdgeId> incoming_edges_ {};
+  // The source of each reverse slot (edge_sources()[incoming_edges()[slot]]), stored for the
   // reverse search's locality; internal (detail::GraphAccess).
-  std::vector<NodeId> in_col_indices_ {};
+  std::vector<NodeId> incoming_edge_sources_ {};
 };
 
 } // namespace netgraph::core

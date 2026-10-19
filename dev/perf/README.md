@@ -4,7 +4,7 @@ Developer-only tool for timing two builds of NetGraph-Core against each other, a
 asks for every performance claim. Nothing here ships in the wheel or the sdist, and no timing
 runs in CI; only the tool's own tests do (below), and the repository gates (`make check-ci`,
 `make sanitize-test`, `make tsan-test`) stay the acceptance tests. Verify correctness first
-(bit-identical results where the contract is exact, certificates for flows); time second.
+(bit-identical results where the library is exact, certificates for flows); time second.
 
 **A/B/A** means: the reference build A, the candidate build B, then A again, each block in a
 fresh process, repeated seven times; the candidate's time is compared with the mean of the two
@@ -314,25 +314,25 @@ failed.
 | `spf` | `spf.single.canonical16k` | 8 canonical single paths to frozen targets (`queries/canonical16k.json`) on the residual |
 | `construct` | `construct.random65k`, `construct.clos` | graph construction from arrays, unit conversion included |
 | `kernel` | `kernel.{proportional,eb,lossy}.clos`, `kernel.{proportional,eb}.grid`, `kernel.weighted.clos` | placements on fixed cost-only DAGs into one ledger |
-| `capacity` | `capacity.costonly_{eb,prop}.failures` | CostOnly capacity over 32 failure states x 8 pairs |
+| `capacity` | `capacity.costonly_{eb,prop}.failures` | ShortestPaths capacity over 32 failure states x 8 pairs |
 | `maxflow` | `maxflow.exact.{totals,detailed}` | exact maximum flow over 8 failure states x 4 pairs |
-| `sensitivity` | `sens.exact`, `sens.policy_all_edges`, `sens.equal_global` | exact-model sensitivity; policy-model loss for every eligible edge; equal-origin Global, every edge solved afresh |
-| `pooled` | `pooled.{ecmp,lossy}.clos` | 8 demands of 8 pooled sources on one ledger, Lossless / Lossy above capacity |
-| `global` | `global.equal.random` | equal-origin Global capacity, 2 demands of 4 sources |
-| `program` | `program.forward.global`, `program.replay.lossy`, `program.stale.lossy`, `program.replace.costonly` | forwarding programs: a Global program forwarded, replayed under failures (Lossy), stale under black holes, CostOnly re-prepared by replace |
+| `sensitivity` | `sens.exact`, `sens.policy_all_edges`, `sens.equal_global` | exact-model sensitivity; policy-model loss for every eligible edge; equal-source-allocation Global, every edge solved afresh |
+| `pooled` | `pooled.{ecmp,lossy}.clos`, `pooled.from_dag.clos`, `pooled.from_dag_build.clos` | 8 demands of 8 pooled sources on one ledger, Lossless / Lossy above capacity; the same demands by Pinned over prebuilt `from_dag` programs, and building those programs |
+| `global` | `global.equal.random` | equal-source-allocation Global capacity, 2 demands of 4 sources |
+| `program` | `program.forward.global`, `program.replay.lossy`, `program.stale.lossy`, `program.replace.costonly` | forwarding programs: a Global program forwarded, replayed under failures (Lossy), stale under black holes, ShortestPaths re-prepared by replace |
 | `t1` | `t1.setup.fabric`, `t1.forward.fabric` | T1 with 16 tunnels per head, 12 demands on one ledger: the setup with its holds; the installed programs forwarded under 32 offers |
 | `t2` | `t2.exact16.headroom`, `t2.exact16.cost`, `t2.upto256.headroom`, `t2.size.mesh` | T2 on the same fabric and demands: 16 tunnels per head with and without `prefer_headroom`, up to 256 with it; 16 tunnels for 10 heads on a 500-node mesh (2000 links, 5/8 to 8/8 free), sizing-dominated |
 | `msd` | `msd.loop` | the maximum-supported-demand bracket and bisection with a per-series DAG cache |
 | `ksp` | `ksp.fabric3_k8` | k = 8 shortest paths for 8 pairs |
-| `cache` | `cache.cold`, `cache.warm` | DagCache series from a cleared / prepopulated cache |
-| `eligibility` | `elig.build_intersect` | 64 failure states built and intersected |
+| `cache` | `cache.cold`, `cache.warm` | ShortestPathCache series from a cleared / prepopulated cache |
+| `eligibility` | `eligibility.build_intersect` | 64 failure states built and intersected |
 | `construct` | the fourteen storage construction rows (`construct.wgrid256`, `fanout_clos`, `random1m_nat`, `random1m_scat`, `wide65k`, `k65536`, `k65537`, `star1m`, `sparse1m`, `empty1m`, `random65k_bprime`, `random65k_reversed`, `star1m_smallk`, `instar1m_smallk`) | the constructor on prepared input: many short rows, the sort fallback above 65,536 distinct costs and both sides of that limit, very long rows, mostly isolated nodes, an empty graph, input already in or reversed from edge-id order |
 | `spf` | the six storage search rows (`spf.to.{wgrid256,random1m,wide_fallback16k,width65536,width65537}`, `spf.full.random1m`) | 8 full searches each: the bucket queue, a large scattered graph, the heap, and both sides of the bucket-width limit 65,536 |
 
 Every row's `desc` (in `aba-list`) describes its input and its work; the generators, seeds and
 sources are in `aba_rows.hpp`. The row names are fixed (the frozen inputs and earlier reports
-name them): `proportional` and `prop` in a name mean MaxFlow placement, and `lossy` means
-EqualBalanced placement with Lossy admission.
+name them): `proportional` and `prop` in a name mean the OPTIMIZED route allocation, and `lossy`
+means the EQUAL route allocation with LOSSY admission.
 
 **The storage rows** exercise the graph's storage and construction. Every input comes from a
 generator in `aba_rows.hpp` (`storage_inputs()`) with fixed seeds, one random draw per

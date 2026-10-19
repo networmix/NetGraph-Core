@@ -39,9 +39,9 @@ inline Graph build(const Input& in) { return Graph(in.n, in.src, in.dst, in.cap,
 // An input and a graph's stored layout as the layout checker reads them.
 inline LayoutInput view(const Input& in) { return {in.n, in.src, in.dst, in.cap, in.cost}; }
 inline LayoutSpans spans_of(const Graph& g) {
-  return {g.num_nodes(), g.num_edges(), g.capacity_units(), g.cost(), g.edge_src(), g.edge_dst(), g.input_index(),
-          g.row_offsets(), g.in_row_offsets(), g.in_adj_edge_index(), detail::GraphAccess::in_col_indices(g),
-          g.max_cost(), g.cost_gcd()};
+  return {g.num_nodes(), g.num_edges(), g.edge_capacity_units(), g.edge_costs(), g.edge_sources(), g.edge_destinations(), g.input_positions(),
+          g.outgoing_offsets(), g.incoming_offsets(), g.incoming_edges(), detail::GraphAccess::incoming_edge_sources(g),
+          g.max_edge_cost(), g.edge_cost_gcd()};
 }
 
 // The number of distinct costs of an input (K), which decides its construction path.
@@ -57,30 +57,30 @@ struct GraphArrays {
   std::vector<Amount> capacity;
   std::vector<Cost> cost;
   std::vector<NodeId> src, dst;
-  std::vector<std::int32_t> input_index, row_offsets, in_row_offsets;
+  std::vector<std::int32_t> input_positions, outgoing_offsets, incoming_offsets;
   std::vector<EdgeId> in_adj;
   std::vector<NodeId> in_col;
-  Cost max_cost {0}, cost_gcd {0};
+  Cost max_edge_cost {0}, edge_cost_gcd {0};
   bool operator==(const GraphArrays&) const = default;
 };
 
 inline GraphArrays arrays_of(const Graph& g) {
-  const auto col = detail::GraphAccess::in_col_indices(g);
-  return {{g.capacity_units().begin(), g.capacity_units().end()},
-          {g.cost().begin(), g.cost().end()},
-          {g.edge_src().begin(), g.edge_src().end()},
-          {g.edge_dst().begin(), g.edge_dst().end()},
-          {g.input_index().begin(), g.input_index().end()},
-          {g.row_offsets().begin(), g.row_offsets().end()},
-          {g.in_row_offsets().begin(), g.in_row_offsets().end()},
-          {g.in_adj_edge_index().begin(), g.in_adj_edge_index().end()},
+  const auto col = detail::GraphAccess::incoming_edge_sources(g);
+  return {{g.edge_capacity_units().begin(), g.edge_capacity_units().end()},
+          {g.edge_costs().begin(), g.edge_costs().end()},
+          {g.edge_sources().begin(), g.edge_sources().end()},
+          {g.edge_destinations().begin(), g.edge_destinations().end()},
+          {g.input_positions().begin(), g.input_positions().end()},
+          {g.outgoing_offsets().begin(), g.outgoing_offsets().end()},
+          {g.incoming_offsets().begin(), g.incoming_offsets().end()},
+          {g.incoming_edges().begin(), g.incoming_edges().end()},
           {col.begin(), col.end()},
-          g.max_cost(),
-          g.cost_gcd()};
+          g.max_edge_cost(),
+          g.edge_cost_gcd()};
 }
 
-// m random edges over n nodes, costs 1..max_cost, capacities cap_low .. cap_low + cap_span - 1.
-inline Input random_input(std::string name, std::int32_t n, std::size_t m, Cost max_cost, std::uint64_t seed,
+// m random edges over n nodes, costs 1..max_edge_cost, capacities cap_low .. cap_low + cap_span - 1.
+inline Input random_input(std::string name, std::int32_t n, std::size_t m, Cost max_edge_cost, std::uint64_t seed,
                           Amount cap_low = 0, Amount cap_span = 5) {
   std::mt19937_64 rng(seed);
   Input in {std::move(name), n};
@@ -88,7 +88,7 @@ inline Input random_input(std::string name, std::int32_t n, std::size_t m, Cost 
     in.src.push_back(static_cast<NodeId>(rng() % static_cast<std::uint64_t>(n)));
     in.dst.push_back(static_cast<NodeId>(rng() % static_cast<std::uint64_t>(n)));
     in.cap.push_back(cap_low + static_cast<Amount>(rng() % static_cast<std::uint64_t>(cap_span)));
-    in.cost.push_back(static_cast<Cost>(1 + rng() % static_cast<std::uint64_t>(max_cost)));
+    in.cost.push_back(static_cast<Cost>(1 + rng() % static_cast<std::uint64_t>(max_edge_cost)));
   }
   return in;
 }

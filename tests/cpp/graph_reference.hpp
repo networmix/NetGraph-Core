@@ -27,16 +27,16 @@ namespace netgraph::core::test {
 struct ReferenceGraph {
   double resolution {1.0};
   std::int32_t num_nodes {0};
-  Cost max_cost {0};
-  Cost cost_gcd {0};
+  Cost max_edge_cost {0};
+  Cost edge_cost_gcd {0};
   std::vector<Amount> capacity;
   std::vector<Cost> cost;
   std::vector<NodeId> src;
   std::vector<NodeId> dst;
-  std::vector<std::int32_t> input_index;
-  std::vector<std::int32_t> row_offsets;
-  std::vector<std::int32_t> in_row_offsets;
-  std::vector<EdgeId> in_adj_edge_index;
+  std::vector<std::int32_t> input_positions;
+  std::vector<std::int32_t> outgoing_offsets;
+  std::vector<std::int32_t> incoming_offsets;
+  std::vector<EdgeId> incoming_edges;
 };
 
 namespace reference_graph_detail {
@@ -59,16 +59,16 @@ inline int resolution_exponent(double q) {
 inline ReferenceGraph reference_graph(std::int32_t num_nodes,
                                 std::span<const NodeId> src,
                                 std::span<const NodeId> dst,
-                                std::span<const Amount> capacity_units,
+                                std::span<const Amount> edge_capacity_units,
                                 std::span<const Cost> cost,
                                 double resolution) {
   ReferenceGraph r;
   (void)reference_graph_detail::resolution_exponent(resolution);
   // The unit values.
-  for (std::size_t i = 0; i < capacity_units.size(); ++i) {
-    const Amount c = capacity_units[i];
+  for (std::size_t i = 0; i < edge_capacity_units.size(); ++i) {
+    const Amount c = edge_capacity_units[i];
     if (c < 0 || c >= kDomainLimit) {
-      throw std::invalid_argument("capacity_units[" + std::to_string(i) + "] = " + std::to_string(c) +
+      throw std::invalid_argument("edge_capacity_units[" + std::to_string(i) + "] = " + std::to_string(c) +
                                   " is outside the units domain [0, 2^62)");
     }
   }
@@ -77,26 +77,26 @@ inline ReferenceGraph reference_graph(std::int32_t num_nodes,
     throw std::invalid_argument("num_nodes must be >= 0 (got " + std::to_string(num_nodes) + ")");
   }
   const std::size_t m = src.size();
-  if (dst.size() != m || capacity_units.size() != m || cost.size() != m) {
-    throw std::invalid_argument("src, dst, capacity_units and cost must have the same length (got " +
+  if (dst.size() != m || edge_capacity_units.size() != m || cost.size() != m) {
+    throw std::invalid_argument("edge_sources, edge_destinations, edge_capacity_units and edge_costs must have the same length (got " +
                                 std::to_string(src.size()) + ", " + std::to_string(dst.size()) + ", " +
-                                std::to_string(capacity_units.size()) + ", " +
+                                std::to_string(edge_capacity_units.size()) + ", " +
                                 std::to_string(cost.size()) + ")");
   }
   if (m > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
     throw std::invalid_argument("the number of edges exceeds INT32_MAX (array length)");
   }
   // Zero or negative costs.
-  Cost max_cost = 0;
-  Cost cost_gcd = 0;
+  Cost max_edge_cost = 0;
+  Cost edge_cost_gcd = 0;
   for (std::size_t i = 0; i < m; ++i) {
     if (cost[i] < 1) {
-      throw std::invalid_argument("cost[" + std::to_string(i) + "] = " + std::to_string(cost[i]) +
-                                  ": costs must be positive (cost >= 1)");
+      throw std::invalid_argument("edge_costs[" + std::to_string(i) + "] = " + std::to_string(cost[i]) +
+                                  ": costs must be positive (edge_costs >= 1)");
     }
-    max_cost = std::max(max_cost, cost[i]);
+    max_edge_cost = std::max(max_edge_cost, cost[i]);
     // A running GCD of 1 stays 1 (gcd(1, c) = 1): the remaining edges are only checked.
-    if (cost_gcd != 1) cost_gcd = std::gcd(cost_gcd, cost[i]);
+    if (edge_cost_gcd != 1) edge_cost_gcd = std::gcd(edge_cost_gcd, cost[i]);
   }
   // The remaining bounds.
   for (std::size_t i = 0; i < m; ++i) {
@@ -110,7 +110,7 @@ inline ReferenceGraph reference_graph(std::int32_t num_nodes,
   std::uint64_t cap_sum = 0;
   std::uint64_t cost_sum = 0;
   for (std::size_t i = 0; i < m; ++i) {
-    cap_sum += static_cast<std::uint64_t>(capacity_units[i]);  // each < 2^62: no wrap before the check
+    cap_sum += static_cast<std::uint64_t>(edge_capacity_units[i]);  // each < 2^62: no wrap before the check
     if (cap_sum >= kLimit) {
       throw std::invalid_argument("the sum of all capacities reaches the bound of the units domain (2^62 units)");
     }
@@ -123,25 +123,25 @@ inline ReferenceGraph reference_graph(std::int32_t num_nodes,
 
   r.resolution = resolution;
   r.num_nodes = num_nodes;
-  r.max_cost = max_cost;
-  r.cost_gcd = cost_gcd;
+  r.max_edge_cost = max_edge_cost;
+  r.edge_cost_gcd = edge_cost_gcd;
   const auto n = static_cast<std::size_t>(num_nodes);
 
   // Ids: rank in (src, cost, dst, input).
-  r.row_offsets.assign(n + 1, 0);
-  for (std::size_t i = 0; i < m; ++i) ++r.row_offsets[static_cast<std::size_t>(src[i]) + 1];
-  for (std::size_t u = 0; u < n; ++u) r.row_offsets[u + 1] += r.row_offsets[u];
-  r.input_index.resize(m);
+  r.outgoing_offsets.assign(n + 1, 0);
+  for (std::size_t i = 0; i < m; ++i) ++r.outgoing_offsets[static_cast<std::size_t>(src[i]) + 1];
+  for (std::size_t u = 0; u < n; ++u) r.outgoing_offsets[u + 1] += r.outgoing_offsets[u];
+  r.input_positions.resize(m);
   {
-    std::vector<std::int32_t> cursor(r.row_offsets.begin(), r.row_offsets.end() - 1);
+    std::vector<std::int32_t> cursor(r.outgoing_offsets.begin(), r.outgoing_offsets.end() - 1);
     for (std::size_t i = 0; i < m; ++i) {
-      r.input_index[static_cast<std::size_t>(cursor[static_cast<std::size_t>(src[i])]++)] =
+      r.input_positions[static_cast<std::size_t>(cursor[static_cast<std::size_t>(src[i])]++)] =
           static_cast<std::int32_t>(i);
     }
   }
   for (std::size_t u = 0; u < n; ++u) {
-    auto first = r.input_index.begin() + r.row_offsets[u];
-    auto last = r.input_index.begin() + r.row_offsets[u + 1];
+    auto first = r.input_positions.begin() + r.outgoing_offsets[u];
+    auto last = r.input_positions.begin() + r.outgoing_offsets[u + 1];
     if (last - first < 2) continue;
     std::sort(first, last, [&](std::int32_t a, std::int32_t b) {
       const auto ia = static_cast<std::size_t>(a);
@@ -156,28 +156,28 @@ inline ReferenceGraph reference_graph(std::int32_t num_nodes,
   r.src.resize(m);
   r.dst.resize(m);
   for (std::size_t e = 0; e < m; ++e) {
-    const auto i = static_cast<std::size_t>(r.input_index[e]);
-    r.capacity[e] = capacity_units[i];
+    const auto i = static_cast<std::size_t>(r.input_positions[e]);
+    r.capacity[e] = edge_capacity_units[i];
     r.cost[e] = cost[i];
     r.src[e] = src[i];
     r.dst[e] = dst[i];
   }
 
   // Reverse CSR in (cost, src, input) order.
-  r.in_row_offsets.assign(n + 1, 0);
-  for (std::size_t e = 0; e < m; ++e) ++r.in_row_offsets[static_cast<std::size_t>(r.dst[e]) + 1];
-  for (std::size_t v = 0; v < n; ++v) r.in_row_offsets[v + 1] += r.in_row_offsets[v];
-  r.in_adj_edge_index.resize(m);
+  r.incoming_offsets.assign(n + 1, 0);
+  for (std::size_t e = 0; e < m; ++e) ++r.incoming_offsets[static_cast<std::size_t>(r.dst[e]) + 1];
+  for (std::size_t v = 0; v < n; ++v) r.incoming_offsets[v + 1] += r.incoming_offsets[v];
+  r.incoming_edges.resize(m);
   {
-    std::vector<std::int32_t> cursor(r.in_row_offsets.begin(), r.in_row_offsets.end() - 1);
+    std::vector<std::int32_t> cursor(r.incoming_offsets.begin(), r.incoming_offsets.end() - 1);
     for (std::size_t e = 0; e < m; ++e) {
-      r.in_adj_edge_index[static_cast<std::size_t>(cursor[static_cast<std::size_t>(r.dst[e])]++)] =
+      r.incoming_edges[static_cast<std::size_t>(cursor[static_cast<std::size_t>(r.dst[e])]++)] =
           static_cast<EdgeId>(e);
     }
   }
   for (std::size_t v = 0; v < n; ++v) {
-    auto first = r.in_adj_edge_index.begin() + r.in_row_offsets[v];
-    auto last = r.in_adj_edge_index.begin() + r.in_row_offsets[v + 1];
+    auto first = r.incoming_edges.begin() + r.incoming_offsets[v];
+    auto last = r.incoming_edges.begin() + r.incoming_offsets[v + 1];
     if (last - first < 2) continue;
     std::sort(first, last, [&](EdgeId a, EdgeId b) {
       const auto ia = static_cast<std::size_t>(a);
@@ -193,8 +193,8 @@ inline ReferenceGraph reference_graph(std::int32_t num_nodes,
 // The internal reverse-source column the current graph stores, derived from the reference (it has no
 // stored copy): edge_src[in_adj_edge_index[slot]].
 inline std::vector<NodeId> reference_in_col_indices(const ReferenceGraph& r) {
-  std::vector<NodeId> out(r.in_adj_edge_index.size());
-  for (std::size_t s = 0; s < out.size(); ++s) out[s] = r.src[static_cast<std::size_t>(r.in_adj_edge_index[s])];
+  std::vector<NodeId> out(r.incoming_edges.size());
+  for (std::size_t s = 0; s < out.size(); ++s) out[s] = r.src[static_cast<std::size_t>(r.incoming_edges[s])];
   return out;
 }
 

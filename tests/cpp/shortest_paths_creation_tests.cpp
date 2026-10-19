@@ -1,0 +1,647 @@
+// The ShortestPaths creation products in one pass: prepare_shortest_paths
+// against the general path the policy takes wherever the one pass declines (support_route's route,
+// the record route of record_route_of, prepare_route's plan and cost on that route), on random graphs for
+// every source, route choice and kernel: it answers exactly where that path's members are the whole
+// route, with the same record route (the support itself when the route is all of it), plan and cost. On
+// crafted supports that break its preconditions (edges leaving a destination, dead ends, members
+// below one unit, a cycle) it answers nothing or the general path's own result. Also
+// lower_bound_from against std::lower_bound from every hint, the plan's one block under copy
+// and move, and the plan comparison of test_utils.hpp against a plan changed in each field. The
+// general path is production code, not an independent reference: its parts are
+// checked independently elsewhere (support_route against search_reference.hpp, also under
+// residual priority views, in Search.InternalEntriesMatchThePublicSearch; prepare_route against the
+// walk definition for every kernel in route_kernels_tests.cpp).
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <numeric>
+#include <optional>
+#include <random>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "netgraph/core/detail/route_kernels.hpp"
+#include "netgraph/core/detail/route_builders.hpp"
+#include "netgraph/core/detail/search_detail.hpp"
+#include "test_utils.hpp"
+
+using namespace netgraph::core;
+using namespace netgraph::core::test;
+using namespace netgraph::core::detail;
+
+namespace {
+
+// Every field of two plans equal (plan_differences, test_utils.hpp).
+void expect_same_plan(const PreparedRoute& got, const PreparedRoute& want, const std::string& where) {
+  EXPECT_EQ(plan_differences(got, want), std::vector<std::string> {}) << where;
+}
+
+// The policy's general ShortestPaths creation (flow_policy.cpp: shortest_path_support, record_route_of and the
+// plan on the route, capacity weights), taken wherever the one pass declines; where the one pass
+// answers, it must equal this.
+struct GeneralPath {
+  std::vector<EdgeId> route;
+  std::shared_ptr<const PredecessorDAG> record_route;
+  PreparedRoute plan;
+  Cost cost {kUnreachable};
+};
+
+GeneralPath general_path(const Graph& g, const std::shared_ptr<const PredecessorDAG>& support, NodeId src,
+                    const std::vector<NodeId>& dsts, const RouteChoice& sel, PriorityReader view,
+                    const std::vector<Amount>& W, RouteAllocation placement, Admission admission) {
+  GeneralPath out;
+  auto r = support_route(g, PredecessorDAGBuilder::ascending(*support), src, dsts, sel, view);
+  out.route = r.edges;
+  Cost cost = sel.single_path() && !r.edges.empty() ? r.cost : kUnreachable;
+  out.record_route = PredecessorDAGBuilder::ascending(*support).size() == r.edges.size() ? support : dag_of(g, r.edges);
+  (void)W;
+  const bool computed = cost == kUnreachable;
+  out.plan = prepare_route(g, placement, admission, WeightSource {}, src, dsts, *out.record_route, computed ? &cost : nullptr);
+  out.cost = cost;
+  return out;
+}
+
+struct Kernel {
+  RouteAllocation placement;
+  Admission admission;
+};
+
+const Kernel kKernels[] = {{RouteAllocation::Optimized, Admission::Lossless},
+                           {RouteAllocation::Equal, Admission::Lossless},
+                           {RouteAllocation::Equal, Admission::Lossy},
+                           {RouteAllocation::Weighted, Admission::Lossless},
+                           {RouteAllocation::Weighted, Admission::Lossy}};
+
+// The 13 route choices a ShortestPaths configuration accepts: every tie_break with multipath and
+// parallel_edges, but no HIGHER_* tie_break with both true.
+std::vector<RouteChoice> choices() {
+  std::vector<RouteChoice> out;
+  for (auto tie : {RouteTieBreak::FewerHops, RouteTieBreak::HigherCapacity, RouteTieBreak::HigherAvailableCapacity,
+                   RouteTieBreak::HigherHeadroom}) {
+    for (bool mp : {true, false}) {
+      for (bool me : {true, false}) {
+        if (tie != RouteTieBreak::FewerHops && mp && me) continue;
+        out.push_back(RouteChoice {tie, mp, me});
+      }
+    }
+  }
+  return out;
+}
+
+// Random edges with many ties (costs 1 to 3, times `factor`), parallel bursts, capacities 0 to 4
+// units.
+Graph tied_graph(std::mt19937& rng, int n, int m, Cost factor = 1) {
+  std::vector<InEdge> edges;
+  while (static_cast<int>(edges.size()) < m) {
+    const auto u = static_cast<NodeId>(rng() % static_cast<unsigned>(n));
+    const auto v = static_cast<NodeId>(rng() % static_cast<unsigned>(n));
+    const int copies = rng() % 4 == 0 ? 1 + static_cast<int>(rng() % 3) : 1;
+    for (int c = 0; c < copies; ++c) {
+      edges.push_back({u, v, static_cast<Amount>(rng() % 5), static_cast<Cost>(1 + rng() % 3) * factor});
+    }
+  }
+  return make_graph(n, edges);
+}
+
+// What the comparison below counts.
+struct Tally {
+  long made {0};
+  long shared {0};
+  long collapsed {0};  // answers whose route Collapse changed (one edge per node pair)
+  long weighted {0};
+  long anycast {0};
+  long unrouted {0};  // declined although the route choice and kernel qualify: the general path has no route
+  long zero_weight {0};  // declined: a Weighted route with an edge of capacity 0 (weight 0, no member)
+  long beyond_int32 {0};  // answers whose route cost exceeds INT32_MAX
+};
+
+// The comparison on `trials` random graphs whose edge costs are 1 to 3 times `factor`: for every
+// source, every one of the 13 route choices and every legal kernel, the one pass answers exactly where
+// the general path's members are its whole multipath route, with the same record route (the support itself
+// when the route is all of it), every plan array and the exact cost.
+Tally compare_with_general_path(std::mt19937& rng, int trials, Cost factor) {
+  const auto sels = choices();
+  Tally t;
+  for (int trial = 0; trial < trials; ++trial) {
+    const int n = 2 + static_cast<int>(rng() % 10);
+    const Graph g = tied_graph(rng, n, static_cast<int>(rng() % 40), factor);
+    std::optional<Eligibility> elig;
+    if (rng() % 3 == 0) {
+      std::vector<NodeId> xn;
+      std::vector<EdgeId> xe;
+      if (rng() % 2 == 0) xn.push_back(static_cast<NodeId>(rng() % static_cast<unsigned>(n)));
+      for (int k = 0; k < 2 && g.num_edges() > 0; ++k) xe.push_back(static_cast<EdgeId>(rng() % static_cast<unsigned>(g.num_edges())));
+      elig = g.eligibility(xn, xe);
+    }
+    const Eligibility* el = elig ? &*elig : nullptr;
+    std::vector<NodeId> D;
+    for (std::size_t k = 1 + rng() % 3; k > 0; --k) D.push_back(static_cast<NodeId>(rng() % static_cast<unsigned>(n)));
+    const auto dset = allowed_nodes(D, nullptr);
+    const auto dsts = allowed_nodes(D, el);
+    if (dsts.empty()) continue;
+    const auto support = std::make_shared<const PredecessorDAG>(static_support(g, dset, Direction::Reverse, el));
+    std::vector<Amount> W(static_cast<std::size_t>(g.num_edges()));
+    for (std::size_t e = 0; e < W.size(); ++e) {
+      const Amount cap = g.edge_capacity_units()[e];
+      W[e] = cap == 0 ? 0 : static_cast<Amount>(rng() % static_cast<std::uint32_t>(cap + 1));
+    }
+    for (NodeId src = 0; src < n; ++src) {
+      if (std::binary_search(dset.begin(), dset.end(), src)) continue;
+      for (const auto& sel : sels) {
+        const PriorityValues values {&g, sel.tie_break, W};
+        const PriorityReader view = PriorityReader::of(values);
+        for (const auto& k : kKernels) {
+          const std::string where = "factor " + std::to_string(factor) + " trial " + std::to_string(trial) + " src " + std::to_string(src) + " kernel " +
+                                    std::to_string(static_cast<int>(k.placement)) + "/" +
+                                    std::to_string(static_cast<int>(k.admission)) + " sel " +
+                                    std::to_string(static_cast<int>(sel.tie_break)) + std::to_string(!sel.single_path()) +
+                                    std::to_string(sel.parallel_edges);
+          const auto want = general_path(g, support, src, dsts, sel, view, W, k.placement, k.admission);
+          const auto got = prepare_shortest_paths(g, support, src, dsts, sel, view, k.placement, k.admission, WeightSource {});
+          // It answers exactly where the general path's members are its whole multipath route under a
+          // kernel of static membership (on a valid support: every route that exists, except a
+          // Weighted route with an edge of capacity 0, which has weight 0 and is no member).
+          // Capacity weights (ShortestPaths's default basis) are static whatever the tie_break: every
+          // multipath route choice qualifies.
+          const bool qualifies = !sel.single_path();
+          const bool applies = qualifies && !want.route.empty() && want.plan.forwarding_edges == want.route;
+          EXPECT_EQ(got.has_value(), applies) << where;
+          if (got.has_value() != applies) return t;
+          if (!got.has_value()) {
+            t.unrouted += qualifies && want.route.empty() ? 1 : 0;
+            t.zero_weight += qualifies && !want.route.empty() ? 1 : 0;
+            if (qualifies && !want.route.empty()) EXPECT_EQ(k.placement, RouteAllocation::Weighted) << where;
+            continue;
+          }
+          EXPECT_EQ(want.plan.forwarding_edges, want.route) << where;  // the precondition the shortcut checks
+          EXPECT_TRUE(got->route) << where;
+          if (!got->route) return t;
+          EXPECT_TRUE(*got->route == *want.record_route) << where;
+          EXPECT_EQ(ascending_edges(*got->route), want.route) << where;
+          EXPECT_EQ(got->route == support, want.record_route == support) << where;  // the same shared value
+          expect_same_plan(got->prepared_route, want.plan, where);
+          EXPECT_EQ(got->min_route_cost, want.cost) << where;
+          ++t.made;
+          if (want.record_route == support) ++t.shared;
+          if (!sel.parallel_edges) {
+            // Collapse ran when the route differs from the one the same tie_break takes with every
+            // parallel edge kept.
+            RouteChoice all_edges = sel;
+            all_edges.parallel_edges = true;
+            if (support_route(g, PredecessorDAGBuilder::ascending(*support), src, dsts, all_edges, view).edges != want.route) ++t.collapsed;
+          }
+          if (k.placement == RouteAllocation::Weighted) ++t.weighted;
+          if (dsts.size() > 1) ++t.anycast;
+          if (want.cost > std::numeric_limits<std::int32_t>::max()) ++t.beyond_int32;
+          if (::testing::Test::HasFailure()) return t;
+        }
+      }
+    }
+  }
+  return t;
+}
+
+} // namespace
+
+TEST(CostOnlyCreation, LowerBoundFromEveryHintIsStdLowerBound) {
+  std::mt19937 rng(20261007);
+  int forward = 0;   // the answer above the hint
+  int backward = 0;  // the answer below the hint
+  for (int trial = 0; trial < 400; ++trial) {
+    const auto n = static_cast<std::size_t>(rng() % 140);
+    std::vector<EdgeId> a(n);
+    EdgeId x = static_cast<EdgeId>(rng() % 3);
+    for (auto& v : a) {
+      v = x;
+      x += 1 + static_cast<EdgeId>(rng() % 4);
+    }
+    const EdgeId top = n == 0 ? 3 : a.back() + 3;
+    for (EdgeId key = -2; key <= top; ++key) {
+      const auto want = static_cast<std::size_t>(std::lower_bound(a.begin(), a.end(), key) - a.begin());
+      for (std::size_t hint = 0; hint <= n + 3; ++hint) {
+        ASSERT_EQ(lower_bound_from(a, hint, key), want) << "n " << n << " key " << key << " hint " << hint;
+        forward += want > hint ? 1 : 0;
+        backward += want < hint ? 1 : 0;
+      }
+    }
+  }
+  EXPECT_GT(forward, 1000000);
+  EXPECT_GT(backward, 1000000);
+}
+
+TEST(CostOnlyCreation, EqualsTheGeneralPathForEverySourceSelectionAndKernel) {
+  std::mt19937 rng(1007);
+  const Tally t = compare_with_general_path(rng, 300, 1);
+  // Not vacuous: every branch of the one pass was compared, and the declined inputs too.
+  EXPECT_GT(t.made, 12000);  // this seed: 17,046 (13 route choices)
+  EXPECT_GT(t.shared, 500);
+  EXPECT_GT(t.collapsed, 2000);  // this seed: 2,838
+  EXPECT_GT(t.weighted, 4000);
+  EXPECT_GT(t.anycast, 4000);
+  EXPECT_GT(t.unrouted, 10000);
+  EXPECT_GT(t.zero_weight, 1000);
+}
+
+TEST(CostOnlyCreation, WideCostsEqualTheGeneralPath) {
+  // Repeat the general-path comparison with factors 3, 64 and 2^35. These cases catch the
+  // int32 output truncation; with 2^35 every answered cost exceeds INT32_MAX.
+  // They do not catch every narrower representation: an output cut to 48 bits would pass here
+  // (ChainCostsBeyondInt32AreExact catches it).
+  for (const Cost factor : {Cost {3}, Cost {64}, Cost {1} << 35}) {
+    std::mt19937 rng(static_cast<std::uint32_t>(2000 + factor % 997));
+    const Tally t = compare_with_general_path(rng, 120, factor);
+    if (::testing::Test::HasFailure()) return;
+    EXPECT_GT(t.made, 5000) << "factor " << factor;  // factor 3: 6,695
+    EXPECT_GT(t.shared, 150) << "factor " << factor;
+    EXPECT_GT(t.collapsed, 700) << "factor " << factor;  // these seeds: 1,452, 946 and 1,210
+    EXPECT_GT(t.unrouted, 4000) << "factor " << factor;
+    if (factor == (Cost {1} << 35)) EXPECT_EQ(t.beyond_int32, t.made);
+  }
+}
+
+TEST(CostOnlyCreation, ChainCostsBeyondInt32AreExact) {
+  // A chain of two edges beyond int32 (0 -> 1 -> 2, two edges of 2^35: the cost 2^36 =
+  // 68,719,476,736), a chain whose total 2,500,000,000 exceeds INT32_MAX without being a power of
+  // two, a diamond of 2^35 edges with a parallel pair, and a full-width chain of two edges of
+  // 2^60 + 1 (the cost 2^61 + 2, below the graph's 2^62 bound; a 48-bit output mask gives 2): the
+  // exact cost and every array, for every legal kernel, both parallel_edges settings.
+  struct Chain {
+    std::int32_t n;
+    std::vector<InEdge> edges;
+    NodeId dst;
+    Cost cost;
+  };
+  const Cost big = Cost {1} << 35;
+  const std::vector<Chain> chains = {
+      {3, {{0, 1, 3, big}, {1, 2, 3, big}}, 2, Cost {68719476736}},
+      {3, {{0, 1, 5, 1500000000}, {1, 2, 5, 1000000000}}, 2, Cost {2500000000}},
+      {4, {{0, 1, 4, big}, {0, 2, 3, big}, {1, 3, 2, big}, {2, 3, 1, big}, {2, 3, 2, big}}, 3, 2 * big},
+      {3, {{0, 1, 2, (Cost {1} << 60) + 1}, {1, 2, 2, (Cost {1} << 60) + 1}}, 2, Cost {2305843009213693954}},
+  };
+  for (const auto& c : chains) {
+    ASSERT_GT(c.cost, std::numeric_limits<std::int32_t>::max());
+    const Graph g = make_graph(c.n, c.edges);
+    const std::vector<NodeId> dsts = {c.dst};
+    const auto support = std::make_shared<const PredecessorDAG>(static_support(g, dsts, Direction::Reverse, nullptr));
+    const std::vector<Amount> W(g.edge_capacity_units().begin(), g.edge_capacity_units().end());
+    for (bool me : {true, false}) {
+      const RouteChoice sel {me ? RouteTieBreak::FewerHops : RouteTieBreak::HigherCapacity, true, me};
+      const PriorityValues values {&g, sel.tie_break, W};
+      for (const auto& k : kKernels) {
+        const std::string where = "chain cost " + std::to_string(c.cost) + " kernel " +
+                                  std::to_string(static_cast<int>(k.placement)) + "/" +
+                                  std::to_string(static_cast<int>(k.admission)) + " parallel_edges " + std::to_string(me);
+        const auto want = general_path(g, support, 0, dsts, sel, PriorityReader::of(values), W, k.placement, k.admission);
+        const auto got =
+            prepare_shortest_paths(g, support, 0, dsts, sel, PriorityReader::of(values), k.placement, k.admission, WeightSource {});
+        ASSERT_TRUE(got.has_value()) << where;
+        EXPECT_EQ(want.cost, c.cost) << where;
+        EXPECT_EQ(got->min_route_cost, c.cost) << where;
+        EXPECT_TRUE(*got->route == *want.record_route) << where;
+        EXPECT_EQ(ascending_edges(*got->route), want.route) << where;
+        EXPECT_EQ(got->route == support, want.record_route == support) << where;
+        expect_same_plan(got->prepared_route, want.plan, where);
+      }
+    }
+  }
+}
+
+TEST(CostOnlyCreation, LargerGraphsEqualTheGeneralPath) {
+  // Larger fabrics (Clos and random) where the walk crosses many ranges: every source of the two
+  // Clos fabrics and every 7th source of the two 200-node random graphs, to one and to two
+  // destinations, the EB and Optimized kernels, with and without Collapse. A record route shares the
+  // support only when the general path's does (a record route equal to the support is met by the
+  // two general-path comparisons above, which count it).
+  std::mt19937 rng(7);
+  for (int shape = 0; shape < 4; ++shape) {
+    long made = 0;
+    long anycast = 0;  // answers to two destinations
+    Graph g = [&] {
+      if (shape < 2) {
+        std::vector<InEdge> edges;
+        const int leaves = shape == 0 ? 12 : 20;
+        const int spines = shape == 0 ? 6 : 8;
+        for (int u = 0; u < leaves; ++u) {
+          for (int s = 0; s < spines; ++s) {
+            const Amount cap = static_cast<Amount>(1 + rng() % 9);
+            for (int copy = 0; copy < (rng() % 5 == 0 ? 2 : 1); ++copy) {
+              edges.push_back({u, leaves + s, cap, 1});
+              edges.push_back({leaves + s, u, cap, 1});
+            }
+          }
+        }
+        return make_graph(leaves + spines, edges);
+      }
+      return tied_graph(rng, 200, 2400);
+    }();
+    const int n = g.num_nodes();
+    std::vector<Amount> W(g.edge_capacity_units().begin(), g.edge_capacity_units().end());
+    for (int q = 0; q < 6; ++q) {
+      std::vector<NodeId> D = {static_cast<NodeId>(rng() % static_cast<unsigned>(n))};
+      if (q % 2 == 1) D.push_back(static_cast<NodeId>(rng() % static_cast<unsigned>(n)));
+      const auto dsts = allowed_nodes(D, nullptr);
+      const auto support = std::make_shared<const PredecessorDAG>(static_support(g, dsts, Direction::Reverse, nullptr));
+      for (NodeId src = 0; src < n; src += (n > 50 ? 7 : 1)) {
+        if (std::binary_search(dsts.begin(), dsts.end(), src)) continue;
+        for (bool me : {true, false}) {
+          const RouteChoice sel {me ? RouteTieBreak::FewerHops : RouteTieBreak::HigherCapacity, true, me};
+          const PriorityValues values {&g, sel.tie_break, W};
+          for (auto placement : {RouteAllocation::Equal, RouteAllocation::Optimized}) {
+            const auto want = general_path(g, support, src, dsts, sel, PriorityReader::of(values), W, placement,
+                                        Admission::Lossless);
+            const auto got = prepare_shortest_paths(g, support, src, dsts, sel, PriorityReader::of(values), placement,
+                                                Admission::Lossless, WeightSource {});
+            ASSERT_EQ(got.has_value(), !want.route.empty());
+            if (!got) continue;
+            EXPECT_TRUE(*got->route == *want.record_route);
+            EXPECT_EQ(got->route == support, want.record_route == support);
+            expect_same_plan(got->prepared_route, want.plan, "shape " + std::to_string(shape) + " src " + std::to_string(src));
+            EXPECT_EQ(got->min_route_cost, want.cost);
+            ++made;
+            anycast += dsts.size() > 1 ? 1 : 0;
+          }
+        }
+      }
+    }
+    EXPECT_GT(made, 150) << "shape " << shape;
+    EXPECT_GT(anycast, 80) << "shape " << shape;
+  }
+}
+
+TEST(CostOnlyCreation, CraftedSupportsGiveNothingOrTheGeneralPath) {
+  // Acyclic edge sets that are no static support: edges leaving a destination, nodes that reach no
+  // destination, members below one unit. The one pass declines them or equals the general path.
+  std::mt19937 rng(99);
+  long made = 0;
+  long trimmed = 0;  // answers whose record route is not the support itself
+  long declined = 0;
+  for (int trial = 0; trial < 1500; ++trial) {
+    const int n = 3 + static_cast<int>(rng() % 8);
+    const Graph g = tied_graph(rng, n, 4 + static_cast<int>(rng() % 30));
+    std::vector<NodeId> perm(static_cast<std::size_t>(n));
+    std::iota(perm.begin(), perm.end(), 0);
+    std::shuffle(perm.begin(), perm.end(), rng);
+    std::vector<int> rank(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) rank[static_cast<std::size_t>(perm[static_cast<std::size_t>(i)])] = i;
+    std::vector<EdgeId> chosen;
+    for (EdgeId e = 0; e < g.num_edges(); ++e) {
+      const auto u = g.edge_sources()[static_cast<std::size_t>(e)];
+      const auto v = g.edge_destinations()[static_cast<std::size_t>(e)];
+      if (rank[static_cast<std::size_t>(u)] < rank[static_cast<std::size_t>(v)] && rng() % 4 != 0) chosen.push_back(e);
+    }
+    const auto support = dag_of(g, chosen);
+    const NodeId src = perm.front();
+    std::vector<NodeId> dsts = {perm.back()};
+    if (n > 4 && rng() % 2 == 0) dsts.push_back(perm[static_cast<std::size_t>(n / 2)]);  // may have out-edges
+    std::sort(dsts.begin(), dsts.end());
+    std::vector<Amount> W(g.edge_capacity_units().begin(), g.edge_capacity_units().end());
+    for (bool me : {true, false}) {
+      const RouteChoice sel {RouteTieBreak::FewerHops, true, me};
+      const PriorityValues values {&g, sel.tie_break, W};
+      for (const auto& k : kKernels) {
+        const auto want = general_path(g, support, src, dsts, sel, PriorityReader::of(values), W, k.placement, k.admission);
+        const auto got =
+            prepare_shortest_paths(g, support, src, dsts, sel, PriorityReader::of(values), k.placement, k.admission, WeightSource {});
+        const std::string where = "trial " + std::to_string(trial);
+        if (!got.has_value()) {
+          ++declined;
+          continue;
+        }
+        EXPECT_TRUE(*got->route == *want.record_route) << where;
+        EXPECT_EQ(got->route == support, want.record_route == support) << where;
+        expect_same_plan(got->prepared_route, want.plan, where);
+        EXPECT_EQ(got->min_route_cost, want.cost) << where;
+        ++made;
+        trimmed += *want.record_route == *support ? 0 : 1;
+        if (::testing::Test::HasFailure()) return;
+      }
+    }
+  }
+  EXPECT_GT(made, 1000);
+  EXPECT_GT(trimmed, 800);
+  EXPECT_GT(declined, 1000);
+}
+
+TEST(CostOnlyCreation, DeclinesEachBrokenPrecondition) {
+  // 0 -> 1 -> 3 and 0 -> 2 -> 3, destination 3: the general path keeps the whole route, and so
+  // does the one pass. Each variant breaks one precondition; the one pass then answers nothing (the
+  // general path's members differ from its route, or it throws), except that Optimized and
+  // Equal keep a member below one unit (only Weighted gives it weight 0 and drops it).
+  const Graph g = make_graph(6, {{0, 1, 2, 1}, {0, 2, 2, 1}, {1, 3, 2, 1}, {2, 3, 2, 1}, {3, 4, 2, 1},
+                                 {1, 5, 2, 1}, {2, 1, 2, 1}, {1, 2, 0, 1}});
+  const auto inv = id_of_input(g);
+  const std::vector<NodeId> dsts = {3};
+  const std::vector<Amount> W(g.edge_capacity_units().begin(), g.edge_capacity_units().end());
+  const RouteChoice sel {RouteTieBreak::FewerHops, true, true};
+  const PriorityValues values {&g, sel.tie_break, W};
+  auto run = [&](std::vector<EdgeId> edges, RouteAllocation placement) {
+    for (auto& e : edges) e = inv[static_cast<std::size_t>(e)];
+    std::sort(edges.begin(), edges.end());
+    const auto support = dag_of(g, edges);
+    return std::make_pair(support, prepare_shortest_paths(g, support, 0, dsts, sel, PriorityReader::of(values), placement,
+                                                      Admission::Lossless, WeightSource {}));
+  };
+  {
+    const auto [support, got] = run({0, 1, 2, 3}, RouteAllocation::Equal);
+    ASSERT_TRUE(got.has_value());
+    EXPECT_EQ(got->route, support);  // the route is the whole support
+    EXPECT_EQ(got->min_route_cost, 2);
+    EXPECT_EQ(vec(got->prepared_route.topological_order), (std::vector<NodeId> {0, 1, 2, 3}));
+  }
+  // An edge leaving the destination (3 -> 4).
+  EXPECT_FALSE(run({0, 1, 2, 3, 4}, RouteAllocation::Equal).second.has_value());
+  // A node that reaches no destination (1 -> 5).
+  EXPECT_FALSE(run({0, 1, 2, 3, 5}, RouteAllocation::Equal).second.has_value());
+  // A member below one unit (1 -> 2 has no capacity): declined for Weighted, kept by Optimized and
+  // Equal.
+  EXPECT_FALSE(run({0, 1, 2, 3, 7}, RouteAllocation::Weighted).second.has_value());
+  EXPECT_TRUE(run({0, 1, 2, 3, 7}, RouteAllocation::Optimized).second.has_value());
+  EXPECT_TRUE(run({0, 1, 2, 3, 7}, RouteAllocation::Equal).second.has_value());
+  // A cycle (1 -> 2 -> 1): declined, and the general path throws.
+  {
+    const auto [support, got] = run({0, 1, 2, 3, 6, 7}, RouteAllocation::Optimized);
+    EXPECT_FALSE(got.has_value());
+    EXPECT_THROW((void)general_path(g, support, 0, dsts, sel, PriorityReader::of(values), W, RouteAllocation::Optimized,
+                                 Admission::Lossless),
+                 std::logic_error);
+  }
+  // Not applicable: multipath = false, Weighted with residual-snapshot weights, no destination reached.
+  {
+    std::vector<EdgeId> edges = {inv[0], inv[1], inv[2], inv[3]};
+    std::sort(edges.begin(), edges.end());
+    const auto support = dag_of(g, edges);
+    const RouteChoice single {RouteTieBreak::FewerHops, false, true};
+    EXPECT_FALSE(prepare_shortest_paths(g, support, 0, dsts, single, PriorityReader::of(values), RouteAllocation::Equal,
+                                    Admission::Lossless, WeightSource {})
+                     .has_value());
+    const RouteChoice residual {RouteTieBreak::FewerHops, true, true};
+    EXPECT_FALSE(prepare_shortest_paths(g, support, 0, dsts, residual, PriorityReader::of(values), RouteAllocation::Weighted,
+                                    Admission::Lossless, WeightSource {WeightBasis::ResidualSnapshot, {}})
+                     .has_value());
+    EXPECT_FALSE(prepare_shortest_paths(g, support, 0, std::vector<NodeId> {5}, sel, PriorityReader::of(values),
+                                    RouteAllocation::Equal, Admission::Lossless, WeightSource {})
+                     .has_value());
+  }
+}
+
+TEST(KernelPlanBlock, CopiesAndMovesKeepTheirOwnViews) {
+  const Graph g = make_graph(4, {{0, 1, 3, 1}, {0, 2, 2, 1}, {1, 3, 3, 1}, {2, 3, 2, 1}});
+  const auto dag = PredecessorDAGBuilder::of_edges(g, all_ids(g));
+  const std::vector<NodeId> dsts = {3};
+  const PreparedRoute original =
+      prepare_route(g, RouteAllocation::Weighted, Admission::Lossless, WeightSource {}, 0, dsts, dag);
+  ASSERT_EQ(original.topological_order.size(), 4U);
+  ASSERT_EQ(original.edge_destination_positions.size(), 4U);
+  ASSERT_EQ(vec(original.destinations), dsts);
+  // A copy's views point into its own block (none into the source's), and stay valid once the
+  // source is gone.
+  auto own_block = [](const PreparedRoute& a, const PreparedRoute& b) {
+    return a.sources.data() != b.sources.data() && a.source_positions.data() != b.source_positions.data() &&
+           a.destinations.data() != b.destinations.data() && a.topological_order.data() != b.topological_order.data() &&
+           a.outgoing_begin.data() != b.outgoing_begin.data() && a.outgoing_end.data() != b.outgoing_end.data() &&
+           a.edge_destination_positions.data() != b.edge_destination_positions.data() && a.is_destination.data() != b.is_destination.data();
+  };
+  std::optional<PreparedRoute> source(original);
+  const PreparedRoute copy(*source);
+  EXPECT_TRUE(own_block(copy, *source));
+  source.reset();
+  expect_same_plan(copy, original, "copy");
+  PreparedRoute donor(copy);
+  PreparedRoute moved(std::move(donor));
+  expect_same_plan(moved, original, "move");
+  EXPECT_TRUE(donor.topological_order.empty() && donor.destinations.empty() && donor.edge_destination_positions.empty() && donor.is_destination.empty() &&
+              donor.sources.empty() && donor.source_positions.empty());
+  PreparedRoute assigned;
+  assigned = copy;
+  expect_same_plan(assigned, original, "copy assignment");
+  EXPECT_TRUE(own_block(assigned, copy));
+  PreparedRoute target = prepare_route(g, RouteAllocation::Equal, Admission::Lossless, WeightSource {}, 1, dsts, dag);
+  target = std::move(moved);
+  expect_same_plan(target, original, "move assignment");
+  EXPECT_TRUE(moved.topological_order.empty() && moved.destinations.empty() && moved.edge_destination_positions.empty() && moved.is_destination.empty() &&
+              moved.sources.empty() && moved.source_positions.empty());
+  const PreparedRoute& self = target;
+  target = self;
+  expect_same_plan(target, original, "self assignment");
+  const PreparedRoute empty;
+  const PreparedRoute empty_copy(empty);
+  EXPECT_TRUE(empty_copy.destinations.empty() && empty_copy.topological_order.empty() && empty_copy.forwarding_edges.empty() &&
+              empty_copy.sources.empty() && empty_copy.source_positions.empty());
+}
+
+// A lifetime witness: two identical chains, 0 -> 1 -> 2 and 3 -> 4 -> 5, give plans of one shape
+// (one root, one destination, three positions, two members) and other values. A copy (and a copy
+// assignment) of the first chain's plan keeps its roots, root positions and destinations after the
+// plan it was copied from is destroyed and plans of the same shape for the second chain have been
+// built (they reuse freed blocks of that size): a copy whose views still pointed into the
+// destroyed block would read the second chain's root 3 and destination 5.
+TEST(KernelPlanBlock, ACopyOutlivesItsSource) {
+  const Graph g = make_graph(6, {{0, 1, 2, 1}, {1, 2, 2, 1}, {3, 4, 2, 1}, {4, 5, 2, 1}});
+  auto chain = [&](NodeId src, NodeId dst) {
+    const std::vector<EdgeId> edges = src == 0 ? std::vector<EdgeId> {0, 1} : std::vector<EdgeId> {2, 3};
+    const auto dag = PredecessorDAGBuilder::of_edges(g, edges);
+    return prepare_route(g, RouteAllocation::Equal, Admission::Lossless, WeightSource {}, src,
+                     std::vector<NodeId> {dst}, dag);
+  };
+  for (const bool assign : {false, true}) {
+    std::optional<PreparedRoute> owner(chain(0, 2));
+    ASSERT_EQ(vec(owner->sources), (std::vector<NodeId> {0}));
+    ASSERT_EQ(vec(owner->source_positions), (std::vector<std::int32_t> {0}));
+    std::optional<PreparedRoute> copy;
+    if (assign) {
+      copy.emplace(chain(3, 5));
+      *copy = *owner;
+    } else {
+      copy.emplace(*owner);
+    }
+    owner.reset();
+    std::vector<PreparedRoute> later;
+    for (int i = 0; i < 64; ++i) later.push_back(chain(3, 5));
+    const std::string where = assign ? "copy assignment" : "copy construction";
+    EXPECT_EQ(vec(copy->sources), (std::vector<NodeId> {0})) << where;
+    EXPECT_EQ(vec(copy->source_positions), (std::vector<std::int32_t> {0})) << where;
+    EXPECT_EQ(vec(copy->destinations), (std::vector<NodeId> {2})) << where;
+    EXPECT_EQ(vec(copy->topological_order), (std::vector<NodeId> {0, 1, 2})) << where;
+  }
+}
+
+// The plan comparison names every field that differs: a copy of a real plan with one field changed
+// differs in exactly that field (a vector or view field both by its last entry and by one more
+// entry), and without the route only the route may differ.
+TEST(TestHelpers, PlanDifferencesNameEveryField) {
+  const Graph g = make_graph(4, {{0, 1, 3, 1}, {0, 2, 2, 1}, {1, 3, 3, 1}, {2, 3, 2, 1}});
+  const auto dag = PredecessorDAGBuilder::of_edges(g, all_ids(g));
+  const std::vector<NodeId> dsts = {3};
+  const PreparedRoute plan =
+      prepare_route(g, RouteAllocation::Weighted, Admission::Lossless, WeightSource {}, 0, dsts, dag);
+  ASSERT_EQ(plan.weights.size(), 4U);
+  EXPECT_EQ(plan_differences(plan, plan), std::vector<std::string> {});
+  // The views' changed copies live here, as the plan's own views live in its block.
+  std::vector<NodeId> nodes;
+  std::vector<std::int32_t> positions;
+  std::vector<std::uint8_t> flags;
+  using Change = std::function<void(PreparedRoute&)>;
+  auto nodes_of = [&](std::span<const NodeId> x, bool longer) {
+    nodes.assign(x.begin(), x.end());
+    if (longer) nodes.push_back(0);
+    else ++nodes.back();
+    return std::span<const NodeId>(nodes);
+  };
+  auto positions_of = [&](std::span<const std::int32_t> x, bool longer) {
+    positions.assign(x.begin(), x.end());
+    if (longer) positions.push_back(0);
+    else ++positions.back();
+    return std::span<const std::int32_t>(positions);
+  };
+  const std::vector<std::pair<std::string, Change>> changes = {
+      {"allocation", [](auto& x) { x.allocation = RouteAllocation::Equal; }},
+      {"sources", [&](auto& x) { x.sources = nodes_of(x.sources, false); }},
+      {"sources", [&](auto& x) { x.sources = nodes_of(x.sources, true); }},
+      {"source_positions", [&](auto& x) { x.source_positions = positions_of(x.source_positions, false); }},
+      {"source_positions", [&](auto& x) { x.source_positions = positions_of(x.source_positions, true); }},
+      {"destinations", [&](auto& x) { x.destinations = nodes_of(x.destinations, false); }},
+      {"destinations", [&](auto& x) { x.destinations = nodes_of(x.destinations, true); }},
+      {"support_edges", [](auto& x) { x.support_edges.push_back(0); }},
+      {"support_edges", [](auto& x) { ++x.support_edges.back(); }},
+      {"forwarding_edges", [](auto& x) { x.forwarding_edges.push_back(0); }},
+      {"forwarding_edges", [](auto& x) { ++x.forwarding_edges.back(); }},
+      {"weights", [](auto& x) { x.weights.push_back(1); }},
+      {"weights", [](auto& x) { ++x.weights.back(); }},
+      {"topological_order", [&](auto& x) { x.topological_order = nodes_of(x.topological_order, false); }},
+      {"topological_order", [&](auto& x) { x.topological_order = nodes_of(x.topological_order, true); }},
+      {"outgoing_begin", [&](auto& x) { x.outgoing_begin = positions_of(x.outgoing_begin, false); }},
+      {"outgoing_begin", [&](auto& x) { x.outgoing_begin = positions_of(x.outgoing_begin, true); }},
+      {"outgoing_end", [&](auto& x) { x.outgoing_end = positions_of(x.outgoing_end, false); }},
+      {"outgoing_end", [&](auto& x) { x.outgoing_end = positions_of(x.outgoing_end, true); }},
+      {"edge_destination_positions", [&](auto& x) { x.edge_destination_positions = positions_of(x.edge_destination_positions, false); }},
+      {"edge_destination_positions", [&](auto& x) { x.edge_destination_positions = positions_of(x.edge_destination_positions, true); }},
+      {"is_destination", [&](auto& x) {
+         flags.assign(x.is_destination.begin(), x.is_destination.end());
+         flags.back() = flags.back() == 0 ? 1 : 0;
+         x.is_destination = flags;
+       }},
+      {"is_destination", [&](auto& x) {
+         flags.assign(x.is_destination.begin(), x.is_destination.end());
+         flags.push_back(0);
+         x.is_destination = flags;
+       }},
+  };
+  for (std::size_t k = 0; k < changes.size(); ++k) {
+    PreparedRoute x = plan;
+    changes[k].second(x);
+    EXPECT_EQ(plan_differences(x, plan), std::vector<std::string> {changes[k].first}) << k;
+    const auto without_route = changes[k].first == "support_edges" ? std::vector<std::string> {}
+                                                           : std::vector<std::string> {changes[k].first};
+    EXPECT_EQ(plan_differences(x, plan, false), without_route) << k;
+    // expect_same_plan reports it.
+    EXPECT_EQ(failures_of([&] { expect_same_plan(x, plan, "changed"); }), 1) << k;
+  }
+  EXPECT_EQ(failures_of([&] { expect_same_plan(plan, plan, "same"); }), 0);
+}
