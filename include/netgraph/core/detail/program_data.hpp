@@ -73,7 +73,7 @@ struct ProgramData {
   std::span<const NodeId> reachable_sources {};
   std::vector<Amount> source_weight_values {};
   std::vector<ProgramEntry> entries {};
-  // Per roster slot its entries (entries_of): slot s's are source_entry_positions[source_entry_offsets[s]..source_entry_offsets[s+1]),
+  // Per roster slot its entries (entries_for_source): slot s's are source_entry_positions[source_entry_offsets[s]..source_entry_offsets[s+1]),
   // ascending index; both empty for a pooled program.
   std::span<const std::int32_t> source_entry_offsets {};
   std::span<const std::int32_t> source_entry_positions {};

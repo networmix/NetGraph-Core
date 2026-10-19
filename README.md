@@ -83,8 +83,8 @@ specified in [docs/semantics.md](docs/semantics.md).
   `WEIGHTED`, `EQUAL`; `Admission`: `LOSSLESS`, `LOSSY`): `OPTIMIZED` re-solves the flow with the
   flow core on its route, over the free capacity plus its own allocation; `WEIGHTED` splits at
   every node in proportion to integer weights frozen when the route is prepared, from a
-  `WeightBasis` (`CAPACITY`, `EXPLICIT`, `RESIDUAL_SNAPSHOT`) (highest averages: whole-unit shares
-  as close to proportional as possible); `EQUAL` splits equally (round robin); `LOSSY` forwards hop
+  `WeightBasis` (`CAPACITY`, `EXPLICIT`, `RESIDUAL_SNAPSHOT`) (highest averages (D'Hondt): assign
+  each next unit to the largest weight / (assigned + 1), ties to the lower EdgeId); `EQUAL` splits equally (round robin); `LOSSY` forwards hop
   by hop and records what it drops.
 
 ### Policies
@@ -117,8 +117,9 @@ specified in [docs/semantics.md](docs/semantics.md).
     single-path tunnels with one common whole-unit planned bandwidth: as large as possible, then
     (for a finite design) no larger than needed, then the cheapest routes, then with
     `prefer_headroom=True` the routes that leave the most spare capacity, then one fixed tie;
-    `TunnelCount(L, up_to=True)` chooses the smallest common count up to L that carries the
-    design; a `support` restricts the tunnels to its edges. The planned bandwidth is never held.
+    `TunnelCount(L, up_to=True)` chooses the smallest common count up to L whose program carries
+    the live heads' design shares (if none does, the largest live-share score, then the smallest
+    count; it does not promise whole-demand lossless delivery); a `support` restricts the tunnels to its edges. The planned bandwidth is never held.
     The source allocation is always stated. NetGraph's TE presets map onto it: `TE_ECMP_16_LSP` is
     `CentralizedTE(source_allocation=EQUAL, tunnel_count=TunnelCount(16))` and
     `TE_ECMP_UP_TO_256_LSP` the same with `TunnelCount(256, up_to=True)`, both with

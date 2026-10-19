@@ -293,6 +293,14 @@ def test_python_result_lists_are_all_or_nothing():
             lambda fn=fn, args=args: (fn, args, list), 200
         )
         assert failures >= 3, fn.__name__
+    # Costs beyond the cached small ints, the free lists emptied before each attempt: the
+    # result's cost ints are new objects, and their failures raise MemoryError too.
+    wide = bgraph(
+        4, [(0, 1, 1, 2**30), (1, 2, 1, 2**30), (2, 3, 1, 2**30), (0, 3, 1, 2**32)]
+    )
+    assert [c for c, _ in ngc.ksp(wide, 0, 3, opts)] == [3 * 2**30, 2**32]
+    failures = sweep_python_allocation(lambda: (ngc.ksp, (wide, 0, 3, opts), list), 200)
+    assert failures >= 5
 
 
 def test_tie_order():

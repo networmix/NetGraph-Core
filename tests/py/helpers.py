@@ -83,6 +83,13 @@ def ids(g, positions):
     return sorted(int(e) for e, p in enumerate(g.input_positions()) if int(p) in wanted)
 
 
+def assert_ints(values, optional=False):
+    """Every value is exactly an int: not a bool, not a float equal to it (None too when optional).
+    Equality alone passes 3.0 for 3."""
+    for v in values:
+        assert type(v) is int or (optional and v is None), (v, type(v).__name__)
+
+
 def dag_of(g, edges):
     """The PredecessorDAG of a set of EdgeIds, through the public PredecessorDAG.from_csr."""
     per = [[] for _ in range(g.num_nodes())]
@@ -236,14 +243,18 @@ def full_ledger_state(ledger):
     return [ledger._state(), ledger_state(ledger)]
 
 
-def sweep_python_allocation(make, limit=400):
+def sweep_python_allocation(make, limit=400, collect=True):
     """The all-or-nothing sweep of a call's Python object allocations (private hooks needed).
     make() gives fresh (fn, args, snapshot); attempt k = 0, 1, ... makes the k-th Python object
     allocation of fn(*args) fail, until a call completes. Every reached failure raises
-    MemoryError or RuntimeError with no value and leaves snapshot() as it was, and the same call
+    MemoryError (exactly that class) with no value and leaves snapshot() as it was, and the same call
     then returns the reference (the plain() value of a call on fresh state); the call that
     completes returns the reference after each of its allocations failed exactly once. Returns
-    the number of failures, for the caller's check that the sweep is not vacuous."""
+    the number of failures, for the caller's check that the sweep is not vacuous. collect (the
+    default): a full collection (gc.collect()) before each attempt empties CPython's free lists, so
+    every int, float, list and tuple the call makes is a new allocation that the attempt can fail."""
+    import gc
+
     import _netgraph_core as ext
 
     fn, args, _ = make()
@@ -252,6 +263,8 @@ def sweep_python_allocation(make, limit=400):
     for k in range(limit):
         fn, args, snapshot = make()
         before = snapshot()
+        if collect:
+            gc.collect()
         hit, seen, value, error = ext._fail_python_allocation(fn, args, k)
         where = (getattr(fn, "__name__", fn), k)
         if not hit:
@@ -262,7 +275,7 @@ def sweep_python_allocation(make, limit=400):
         failures += 1
         # A reached failure propagates: a call that absorbed it and returned a value fails here.
         assert value is None, (where, value)
-        assert isinstance(error, (MemoryError, RuntimeError)), (where, repr(error))
+        assert type(error) is MemoryError, (where, repr(error))
         assert snapshot() == before, where
         assert plain(fn(*args)) == want, where
     pytest.fail(f"{getattr(fn, '__name__', fn)} never completed")

@@ -10,6 +10,8 @@
 #include "netgraph/core/flow_ledger.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -242,7 +244,7 @@ void FlowLedger::check_resettable() const {
   }
 }
 
-// The new baselines (an empty reservation: the capacities) and no records; allocated_ keeps its
+// The new baselines (an empty reservation: the capacities) and no records; carried_ keeps its
 // size, so nothing here allocates.
 void FlowLedger::install(std::vector<Amount> baseline, std::vector<Amount> reservation) {
   carried_.assign(baseline.size(), 0);
@@ -332,6 +334,7 @@ static_assert(std::is_nothrow_swappable_v<std::vector<std::int64_t>>);
 
 std::int64_t LedgerAccess::bind(FlowLedger& ledger) {
   ledger.check_usable();
+  if (ledger.next_policy_id_ == std::numeric_limits<std::int64_t>::max()) throw std::runtime_error("policy identity limit exceeded");
   const std::int64_t owner = ledger.next_policy_id_;
   ledger.policy_bindings_.emplace(owner, true);  // the only allocation: nothing changes if it throws
   ++ledger.next_policy_id_;
@@ -342,8 +345,15 @@ std::int64_t LedgerAccess::bind(FlowLedger& ledger) {
 void LedgerAccess::release(FlowLedger& ledger, std::int64_t owner) noexcept {
   const auto it = ledger.policy_bindings_.find(owner);
   if (it == ledger.policy_bindings_.end() || !it->second) return;
-  it->second = false;
   --ledger.num_bound_policies_;
+  // An owner with live records stays as their orphaned owner; one without leaves nothing to keep
+  // (its id is never issued again either way). Neither step allocates.
+  const auto records = ledger.policy_record_counters_.find(owner);
+  if (records != ledger.policy_record_counters_.end() && !records->second.empty()) {
+    it->second = false;
+  } else {
+    ledger.policy_bindings_.erase(it);
+  }
 }
 
 std::vector<std::int64_t> LedgerAccess::detach(FlowLedger& ledger, std::int64_t owner) {
@@ -376,6 +386,13 @@ std::vector<FlowId> LedgerAccess::commit_drafts(FlowLedger& ledger, std::int64_t
                                                 bool retire) {
   ledger.check_usable();
   if (!is_bound(ledger.policy_bindings_, owner)) throw std::logic_error("ledger: commit by an unbound owner");
+  // Every new record's id, checked as one batch before anything changes: ids stay below the
+  // largest int64.
+  const auto num_new = static_cast<std::size_t>(
+      std::count_if(drafts.begin(), drafts.end(), [](const RecordDraft& d) { return !d.record_counter.has_value(); }));
+  if (num_new > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() - ledger.next_record_counter_)) {
+    throw std::runtime_error("record identity limit exceeded");
+  }
   // The drafts carry exactly the owner's live records plus new ones (retire: only new ones, every
   // live record is retired).
   const auto owned = ledger.policy_record_counters_.find(owner);
@@ -422,13 +439,8 @@ std::vector<FlowId> LedgerAccess::commit_drafts(FlowLedger& ledger, std::int64_t
     return created;
   }
   std::vector<std::int64_t> kept;
-  std::size_t num_new = 0;
   for (const auto& d : drafts) {
-    if (d.record_counter.has_value()) {
-      kept.push_back(*d.record_counter);
-    } else {
-      ++num_new;
-    }
+    if (d.record_counter.has_value()) kept.push_back(*d.record_counter);
   }
   std::sort(kept.begin(), kept.end());
   if (retire ? !kept.empty() : (kept.size() != num_current || (num_current != 0 && kept != owned->second))) {
@@ -589,6 +601,11 @@ std::vector<Amount>& LedgerAccess::reserved_storage(FlowLedger& fg) {
   fg.check_usable();
   if (fg.reserved_.empty()) fg.reserved_.assign(fg.carried_.size(), 0);
   return fg.reserved_;
+}
+
+void LedgerAccess::set_next_ids(FlowLedger& ledger, std::int64_t next_record_counter, std::int64_t next_policy_id) {
+  ledger.next_record_counter_ = next_record_counter;
+  ledger.next_policy_id_ = next_policy_id;
 }
 
 std::int64_t LedgerAccess::next_record_counter(const FlowLedger& ledger) {

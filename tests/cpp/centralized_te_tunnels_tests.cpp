@@ -786,7 +786,10 @@ TEST(TunnelValidation, T2CountAndLimit) {
 // T2's operations and the design's domain, with their texts.
 TEST(TunnelOperations, T2CallValidation) {
   auto p = make(one10(), {0}, {1}, t2(2));
-  for (const Amount x : {5, 0}) EXPECT_EQ(error_of([&] { (void)p->place(x); }), "CentralizedTE with tunnel_count does not support incremental placement");
+  // The operation before the offer: also for an offer outside the domain.
+  for (const Amount x : {Amount {5}, Amount {0}, Amount {-1}, kDomainLimit}) {
+    EXPECT_EQ(error_of([&] { (void)p->place(x); }), "CentralizedTE with tunnel_count does not support incremental placement") << x;
+  }
   EXPECT_EQ(error_of([&] { (void)p->forward(Amount {5}); }), "forward requires an installed program");
   for (const Amount d : {Amount {-1}, kL62}) {
     EXPECT_EQ(error_of([&] { (void)p->replace(Amount {5}, d); }),

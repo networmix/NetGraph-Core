@@ -26,16 +26,18 @@ struct RecordDraft {
   FlowRecord record {};
 };
 
-// The saturation diagnostic of FlowLedger::bottleneck on a given residual (the sources already a
+// The saturation diagnostic of FlowLedger::saturated_boundary_edges on a given residual (the sources already a
 // validated set): the edges (statically eligible, capacity >= 1 unit) leaving the set reachable
 // from the allowed sources over eligible forward arcs with residual >= 1 unit, ascending EdgeId.
 [[nodiscard]] std::vector<EdgeId> saturated_boundary_edges_of(const Graph& graph, std::span<const Amount> residual,
                                                 std::span<const NodeId> sources, const Eligibility* eligibility);
 
 struct LedgerAccess {
-  // A new owner id (0, 1, ... per ledger). Throws on a moved-from ledger.
+  // A new owner id (0, 1, ... per ledger, below the largest int64: std::runtime_error `policy
+  // identity limit exceeded` there, nothing changed). Throws on a moved-from ledger.
   [[nodiscard]] static std::int64_t bind(FlowLedger& ledger);
-  // The owner's policy is destroyed without remove(): its records stay as orphans.
+  // The owner's policy is destroyed without remove(): its records stay as orphans (an owner
+  // without records is forgotten).
   static void release(FlowLedger& ledger, std::int64_t owner) noexcept;
   // remove(): the owner's records are deleted (allocations and holds reverted), their ids retired.
   // Throws only before any change (a moved-from ledger, an unbound owner).
@@ -44,7 +46,8 @@ struct LedgerAccess {
   // new ones; the new aggregates must stay within [0, baseline] on every edge (carried loads
   // within the service baseline, holds within the reservation baseline). Throws (and
   // changes nothing) otherwise, an allocation failure included: every allocation happens
-  // before a publication step that cannot throw. Returns the FlowIds of the new records in
+  // before a publication step that cannot throw, and the new ids running past the largest int64
+  // (std::runtime_error `record identity limit exceeded`). Returns the FlowIds of the new records in
   // draft order. The drafts' vectors are moved from.
   static std::vector<FlowId> commit(FlowLedger& ledger, std::int64_t owner, std::span<RecordDraft> drafts);
   // The exchange of replace() and forward(): every live record of the owner is retired (its
@@ -70,6 +73,8 @@ struct LedgerAccess {
   static std::vector<Amount>& reserved_storage(FlowLedger& fg);
   // Diagnostics (the tests and the private bindings).
   [[nodiscard]] static std::int64_t next_record_counter(const FlowLedger& ledger);
+  // The next record and owner ids, set (the tests' checks of the identity limits).
+  static void set_next_ids(FlowLedger& ledger, std::int64_t next_record_counter, std::int64_t next_policy_id);
   [[nodiscard]] static std::vector<std::int64_t> bound_policy_ids(const FlowLedger& ledger);
   [[nodiscard]] static std::vector<std::int64_t> orphan_policy_ids(const FlowLedger& ledger);
 };

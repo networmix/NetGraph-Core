@@ -6,7 +6,7 @@
    roster for its pooled program). The split graph keeps edges allowed by the kernel that lie on
    a walk from a root to a destination; it removes edges leaving destinations. Its edges are the
    plan's members. A router reached by several roots adds their traffic and splits it once.
-   A member-aligned array has one entry per member, in the same order as plan.members. Policies
+   A member-aligned array has one entry per member, in the same order as plan.forwarding_edges. Policies
    combine these allocations; the ledger commits them.
 */
 #pragma once
@@ -21,6 +21,7 @@
 
 #include "netgraph/core/detail/search_detail.hpp"
 #include "netgraph/core/eligibility.hpp"
+#include "netgraph/core/flow_record.hpp"
 #include "netgraph/core/graph.hpp"
 #include "netgraph/core/options.hpp"
 #include "netgraph/core/route_structures.hpp"
@@ -52,6 +53,12 @@ inline std::size_t round_robin(Amount total, std::size_t k, Share&& share) {
   }
   return n;
 }
+
+// The round-robin increments when a cumulative total X (any 128-bit count) grows by v over k =
+// out.size() recipients: out[i] = RR(X + v, k, i) - RR(X, k, i). They depend only on r = X mod k:
+// floor((r + v) / k) + [i < (r + v) mod k] - [i < r] (ShortestPaths' Lossy offers and a program's
+// equal sources).
+void round_robin_increments(const Counter128& total, Amount v, std::span<Amount> out) noexcept;
 
 inline std::size_t round_robin(Amount total, std::span<Amount> out) noexcept {
   return round_robin(total, out.size(), [&](std::size_t i, Amount x) noexcept {
@@ -134,7 +141,7 @@ struct PreparedRoute {
 private:
   // Points the views into store_ for these sizes (the layout's order: sources, source_positions,
   // destinations, topological_order, outgoing_begin, outgoing_end, edge_destination_positions,
-  // then terminal as bytes).
+  // then is_destination as bytes).
   Layout point(std::size_t num_roots, std::size_t num_dsts, std::size_t positions, std::size_t num_members) noexcept;
   std::vector<std::int32_t> store_ {};
 };
@@ -246,25 +253,21 @@ struct LosslessBound {
 };
 [[nodiscard]] LosslessBound max_lossless_offer(const PreparedRoute& plan, std::span<const Amount> view_m);
 
-// One Lossless step of one flow (the amounts stage): T_new = max(T, min(T + request,
-// T_max(V))) on the replacement view V = W + own (member-aligned `view_m`), with `own_m` the
-// flow's committed allocation alloc(T) (member-aligned). Optimized solves the flow core on the
-// split graph with cap T + request (uncapped for +inf) and reports the solve's marginal curve;
-// Weighted and Equal probe T + request first and search T_max (as max_lossless_offer does) only when
-// it does not fit: the result is the same T_new. `request` nullopt is +inf. `alloc` is the new
-// member-aligned allocation (own_m itself when T is unchanged on a Weighted or Equal
-// plan).
+// One Lossless step of one flow on an Equal or Weighted plan (the amounts stage): T_new = max(T,
+// min(T + request, T_max(V))) on the replacement view V = W + own (member-aligned `view_m`), with
+// `own_m` the flow's committed allocation alloc(T) (member-aligned). The step probes T + request
+// first and searches T_max (as max_lossless_offer does) only when it does not fit. `request`
+// nullopt is +inf. `edge_flows` is the new member-aligned allocation (own_m itself when T is
+// unchanged).
 struct LosslessStep {
   Amount admitted {0};
   std::vector<Amount> edge_flows {};
-  std::int32_t probes {0};                                // probes of this step's T_max search (at most 62)
-  std::vector<std::pair<Cost, Amount>> marginal_cost_curve {};  // Optimized: the solve's marginal curve
+  std::int32_t probes {0};  // probes of this step's T_max search (at most 62)
 };
-[[nodiscard]] LosslessStep lossless_step(const Graph& graph, const PreparedRoute& plan, Amount total,
-                                         std::span<const Amount> view_m, std::span<const Amount> own_m,
-                                         std::optional<Amount> request);
+[[nodiscard]] LosslessStep lossless_step(const PreparedRoute& plan, Amount total, std::span<const Amount> view_m,
+                                         std::span<const Amount> own_m, std::optional<Amount> request);
 
-// The injection of one forwarding: per root (aligned with plan.roots), the amount it injects; or
+// The injection of one forwarding: per root (aligned with plan.sources), the amount it injects; or
 // (first_hop, the experiment of a Lossy +inf placement) every root's out-members, each injected
 // with exactly its own view, while traffic reaching a root from another root is split as usual.
 struct Injection {

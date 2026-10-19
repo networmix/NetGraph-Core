@@ -136,9 +136,9 @@ void register_routing(py::module_& m) {
                                          "AbsoluteCost cost")};
            }),
            py::arg("cost"), "AbsoluteCost(cost): a 64-bit integer budget in cost units (checked >= 0 where it is used)")
-      .def_readonly("cost", &AbsoluteCost::cost, "the budget: a path qualifies when its cost is at most this")
+      .def_property_readonly("cost", int_reader(&AbsoluteCost::cost), "the budget: a path qualifies when its cost is at most this")
       .def("__eq__", [](const AbsoluteCost& a, const py::object& b) { return py::isinstance<AbsoluteCost>(b) && a == b.cast<AbsoluteCost>(); })
-      .def("__hash__", [](const AbsoluteCost& a) { return py::hash(py::make_tuple("AbsoluteCost", a.cost)); })
+      .def("__hash__", [](const AbsoluteCost& a) { return hash_int(objects_tuple({str_object("AbsoluteCost"), int_object(a.cost)})); })
       .def("__repr__", [](const AbsoluteCost& a) { return "AbsoluteCost(" + std::to_string(a.cost) + ")"; });
 
   py::class_<CostStretch>(m, "CostStretch",
@@ -155,13 +155,13 @@ void register_routing(py::module_& m) {
       .def_property_readonly(
           "factor",
           [](const CostStretch& a) {
-            return py::module_::import("fractions").attr("Fraction")(a.numerator(), a.denominator());
+            return fraction_object(py::module_::import("fractions").attr("Fraction"), a.numerator(), a.denominator());
           },
           "the factor as a fractions.Fraction (built on each access)")
       .def("__eq__", [](const CostStretch& a, const py::object& b) { return py::isinstance<CostStretch>(b) && a == b.cast<CostStretch>(); })
       .def("__hash__",
            [](const CostStretch& a) {
-             return py::hash(py::module_::import("fractions").attr("Fraction")(a.numerator(), a.denominator()));
+             return hash_int(fraction_object(py::module_::import("fractions").attr("Fraction"), a.numerator(), a.denominator()));
            })
       .def("__repr__", [](const CostStretch& a) {
         return "CostStretch(Fraction(" + std::to_string(a.numerator()) + ", " + std::to_string(a.denominator()) + "))";
@@ -170,7 +170,9 @@ void register_routing(py::module_& m) {
   py::class_<TunnelCount>(m, "TunnelCount",
                       "The tunnel count of T1 (DistributedTE) and T2, per head: per_head in [1, 10000] (checked when a\n"
                       "policy or an evaluator uses it). up_to=True (T2 only; T1 rejects it): one common count k in\n"
-                      "1..per_head for every head, the smallest that delivers the design.")
+                      "1..per_head for every head: the smallest common count whose program carries the live heads'\n"
+                      "design shares; if none does, the largest live-share score, then the smallest count. It does not\n"
+                      "promise whole-demand lossless delivery.")
       .def(py::init([](const py::object& count, StrictBool up_to) {
              return TunnelCount {int_field(count, std::numeric_limits<std::int64_t>::min(),
                                         std::numeric_limits<std::int64_t>::max(), "TunnelCount per_head"),
@@ -180,10 +182,13 @@ void register_routing(py::module_& m) {
            "TunnelCount(per_head, *, up_to=False): a 64-bit integer per_head (a bool, a float or None raises\n"
            "TypeError and an integer outside 64 bits ValueError here; [1, 10000] is checked where it is\n"
            "used) and a bool")
-      .def_readonly("per_head", &TunnelCount::per_head, "the tunnels per head (the largest count for up_to)")
-      .def_readonly("up_to", &TunnelCount::up_to, "True: the smallest sufficient count up to per_head (T2 only)")
+      .def_property_readonly("per_head", int_reader(&TunnelCount::per_head), "the tunnels per head (the largest count for up_to)")
+      .def_readonly("up_to", &TunnelCount::up_to, "True: the smallest count up to per_head whose program carries the live heads' design shares (else the\n"
+                    "best live-share score, then the smallest); T2 only")
       .def("__eq__", [](const TunnelCount& a, const py::object& b) { return py::isinstance<TunnelCount>(b) && a == b.cast<TunnelCount>(); })
-      .def("__hash__", [](const TunnelCount& a) { return py::hash(py::make_tuple("TunnelCount", a.per_head, a.up_to)); })
+      .def("__hash__", [](const TunnelCount& a) {
+        return hash_int(objects_tuple({str_object("TunnelCount"), int_object(a.per_head), py::bool_(a.up_to)}));
+      })
       .def("__repr__", [](const TunnelCount& a) {
         return "TunnelCount(" + std::to_string(a.per_head) + (a.up_to ? ", up_to=True)" : ")");
       });
@@ -237,7 +242,7 @@ void register_routing(py::module_& m) {
           "the explicit weights (one int per edge, a tuple), or None")
       .def_property_readonly("tie_break", field_object(&ShortestPaths::tie_break), "the RouteTieBreak of equal-cost choices")
       .def_readonly("multipath", &ShortestPaths::multipath,
-                    "True: every equal-cost route; False: the one canonical path per destination")
+                    "True: every equal-cost route; False: one canonical path per roster source toward the destination set")
       .def_readonly("parallel_edges", &ShortestPaths::parallel_edges,
                     "True: every eligible parallel edge; False: one per (u, v) pair by the tie rule")
       .def("__repr__", [](const ShortestPaths& sp) {
@@ -294,7 +299,7 @@ void register_routing(py::module_& m) {
             return std::visit([](const auto& x) { return object_of(x); }, *ca.cost_ceiling);
           },
           "the inclusive route cost ceiling (AbsoluteCost or CostStretch); None: no ceiling")
-      .def_readonly("min_unreserved_bandwidth", &DistributedTE::min_unreserved_bandwidth,
+      .def_property_readonly("min_unreserved_bandwidth", int_reader(&DistributedTE::min_unreserved_bandwidth),
                     "units in [0, 2^62): a search minimum only (each attempt keeps the links with at least\n"
                     "max(request, this) unreserved units), never a reservation")
       .def_property_readonly("tie_break", field_object(&DistributedTE::tie_break), "the RouteTieBreak of the CSPF choice")
@@ -330,7 +335,8 @@ void register_routing(py::module_& m) {
                      "whole-unit planned bandwidth: first as large as possible (U), then for a finite design no larger\n"
                      "than needed (u), then the cheapest routes, then with prefer_headroom=True the routes that leave\n"
                      "the most spare capacity, then one fixed unit-by-unit tie. TunnelCount(L, up_to=True): the smallest\n"
-                     "common count k <= L whose program carries the design (else the best, then the smallest).\n"
+                     "common count k <= L whose program carries the live heads' design shares (else the largest\n"
+                     "live-share score, then the smallest count); no promise of whole-demand lossless delivery.\n"
                      "Traffic splits equally over the heads and over each head's tunnels; planned bandwidth is never\n"
                      "held.")
       .def(py::init([](SourceAllocation source_allocation, const py::object& support, const py::object& tunnels,

@@ -235,7 +235,7 @@ for entry in sens.entries:
 assert_type(cache.stats().hits, int)
 routing = global_cfg.routing
 if isinstance(routing, ng.CentralizedTE):
-    print("Global routing:", routing)
+    print("CentralizedTE routing:", routing)
 print(call_delivered, len(batch), len(paths), ng.UNREACHABLE, ng.__version__)
 
 # CostStretch takes a Fraction, a float, a NumPy floating value or an integer; factor is a Fraction.

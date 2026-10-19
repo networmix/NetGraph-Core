@@ -25,13 +25,13 @@
   lookups and growths. On either limit, radix-sort all costs in 16-bit digits.
   Both methods produce identical ranks.
 
-  Allocate all retained arrays at final size, then use them as scratch before filling them.
-  Store ranks in in_col_indices_. While the hash table has <= E slots, capacity_ holds its keys
-  and src_ its ordinals. cost_ holds distinct costs; dst_, input_index_ and in_adj_edge_index_
-  serve their sort. Counting passes use in_adj_edge_index_ for the middle forward pass, and
-  capacity_/cost_ for K rank cursors or combined histograms. The fallback uses input_index_ and
-  in_adj_edge_index_. Extra buffers are limited to tables > E slots (old and new coexist during
-  growth) and the fallback's 2^16 digit counts. Smaller tables free no separate buffer that the
+  Allocate all retained arrays at final size, then use them as scratch before filling them. Store ranks in
+  incoming_edge_sources_. While the hash table has <= E slots, edge_capacity_units_ holds its keys and
+  edge_sources_ its ordinals. edge_costs_ holds distinct costs; edge_destinations_, input_positions_ and
+  incoming_edges_ serve their sort. Counting passes use incoming_edges_ for the middle forward pass, and
+  edge_capacity_units_/edge_costs_ for K rank cursors or combined histograms. The fallback uses
+  input_positions_ and incoming_edges_. Extra buffers are limited to tables > E slots (old and new coexist
+  during growth) and the fallback's 2^16 digit counts. Smaller tables free no separate buffer that the
   allocator could retain.
 */
 #include "netgraph/core/graph.hpp"
@@ -54,9 +54,19 @@ namespace netgraph::core {
 
 namespace detail {
 
-std::uint64_t next_uid() noexcept {
+std::uint64_t take_uid(std::atomic<std::uint64_t>& counter) {
+  std::uint64_t last = counter.load(std::memory_order_relaxed);
+  do {
+    if (last >= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      throw std::runtime_error("object identity limit exceeded");
+    }
+  } while (!counter.compare_exchange_weak(last, last + 1, std::memory_order_relaxed));
+  return last + 1;
+}
+
+std::uint64_t next_uid() {
   static std::atomic<std::uint64_t> counter {0};
-  return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+  return take_uid(counter);
 }
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS

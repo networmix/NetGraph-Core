@@ -279,9 +279,8 @@ def sweep_frozen(cache, fn, args, hits=0, miss=False):
                 assert error is None, repr(error)
                 assert after == plus(before, hits=hits), (k, before, after)
             return inside
-        assert isinstance(error, (MemoryError, RuntimeError)), (k, repr(error))
+        assert type(error) is MemoryError, (k, repr(error))
         if miss and after == plus(before, misses=1):
-            assert isinstance(error, MemoryError), (k, repr(error))
             translated = k if translated is None else translated
             continue
         assert translated is None, (
@@ -355,11 +354,12 @@ def test_frozen_statistics_survive_python_allocation_failures():
 
 @needs_hooks
 def test_the_frozen_sweep_rejects_a_wrong_call():
-    # sweep_frozen rejects a wrong call, each on its own clause: one that absorbs the injected
-    # failure; one that publishes a hit before the call the failure reaches; a hit where a miss
-    # is expected; a miss counted by another cache; a completing call that raises; a hit count
-    # other than expected; a failed translation of the miss reported as RuntimeError; a failure
-    # inside a call after a translation; and a call that never completes.
+    # sweep_frozen rejects a wrong call, each on the clause it breaks: one that absorbs the
+    # injected failure and a failed translation of the miss reported as RuntimeError (both on the
+    # exact class); one that publishes a hit before the call the failure reaches; a hit where a
+    # miss is expected; a miss counted by another cache; a completing call that raises; a hit
+    # count other than expected; a failure inside a call after a translation; and a call that
+    # never completes.
     g = fabric()
     cache = prepopulate(g, [[3]])
     other = prepopulate(g, [[3]])
@@ -401,7 +401,7 @@ def test_the_frozen_sweep_rejects_a_wrong_call():
             absorbs,
             hit,
             {"hits": 2},
-            "assert isinstance(error, (MemoryError, RuntimeError)), (k, repr(error))",
+            "assert type(error) is MemoryError, (k, repr(error))",
         ),
         (hits_first, hit, {"hits": 2}, "assert after == before, (k, before, after)"),
         (
@@ -432,7 +432,7 @@ def test_the_frozen_sweep_rejects_a_wrong_call():
             runtime_error,
             miss,
             {"miss": True},
-            "assert isinstance(error, MemoryError), (k, repr(error))",
+            "assert type(error) is MemoryError, (k, repr(error))",
         ),
         (
             inside_after_translation,

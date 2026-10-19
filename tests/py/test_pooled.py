@@ -332,7 +332,7 @@ def random_case(rng):
 
 def compare(where, r, want, p):
     got = {
-        "placed": r.call_delivered,
+        "call_delivered": r.call_delivered,
         "termination": r.termination.name,
         "call_edge_drops": r.call_edge_drops,
         "call_source_drops": r.call_source_drops,

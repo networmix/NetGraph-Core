@@ -57,7 +57,7 @@ private:
   std::vector<std::int32_t> node_offsets_ {0};  // nodes_.size() + 1: the entries of nodes_[i]
   std::vector<NodeId> parents_ {};
   std::vector<EdgeId> via_edges_ {};
-  std::vector<EdgeId> edges_ {};  // via_ in ascending EdgeId (derived once, at construction)
+  std::vector<EdgeId> edges_ {};  // via_edges_ in ascending EdgeId (derived once, at construction)
 };
 
 // An explicit walk of hops; a hop holds one or more parallel members of one (u, v) pair, in

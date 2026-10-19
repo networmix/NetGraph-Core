@@ -437,8 +437,8 @@ TEST(T1Setup, MaskedSource) {
 }
 
 // CostStretch(2) on X8: c0 = 1 is the pool minimum, through head 0's
-// zero-capacity link (before any filter): head 1's only path costs 3 > 2: COST_CEILING_EXCEEDED (T0 took a
-// per-head baseline of 3 and admitted it). The largest numerator, 2^63 - 1, does not overflow: NB, UP.
+// zero-capacity link (before any filter): head 1's only path costs 3 > 2: COST_CEILING_EXCEEDED (a per-head
+// baseline would be 3 and admit it). The largest numerator, 2^63 - 1, does not overflow: NB, UP.
 TEST(T1Setup, StretchPoolBaseline) {
   constexpr std::int64_t kMax = std::numeric_limits<std::int64_t>::max();
   for (const auto& [f, second] : {std::pair {CostStretch(2), CC}, std::pair {CostStretch(kMax), UP}}) {
@@ -745,11 +745,13 @@ TEST(T1Operations, AbsentTunnelsCountAsZero) {
   EXPECT_TRUE(detail::compare_programs(held1.get(), zero2.get()).reservations);
 }
 
-// T1 has no incremental place (also 0), and forward needs an installed program.
+// T1 has no incremental place (also 0, and before an offer outside the domain), and forward needs
+// an installed program.
 TEST(T1Operations, NoIncrementsAndForwardNeedsAProgram) {
   auto p = make(one10(), {0}, {1}, t1(1));
-  EXPECT_EQ(error_of([&] { (void)p->place(5); }), "DistributedTE does not support incremental placement");
-  EXPECT_EQ(error_of([&] { (void)p->place(0); }), "DistributedTE does not support incremental placement");
+  for (const Amount x : {Amount {5}, Amount {0}, Amount {-1}, kDomainLimit}) {
+    EXPECT_EQ(error_of([&] { (void)p->place(x); }), "DistributedTE does not support incremental placement") << x;
+  }
   EXPECT_EQ(error_of([&] { (void)p->forward(5); }), "forward requires an installed program");
   (void)p->replace(1, 1);
   p->remove();
@@ -1567,7 +1569,7 @@ TEST(CostStretch, CeilingProductsBeyond64Bits) {
   }
 }
 
-// The C++ CostStretch is one reduced fraction (R1): 12/10 is 6/5, the lowest numerator stays as
+// The C++ CostStretch is one reduced fraction: 12/10 is 6/5, the lowest numerator stays as
 // it is (no int64 negation is needed), and a denominator below 1 is an invalid argument.
 TEST(CostStretch, Reduction) {
   EXPECT_EQ(CostStretch(12, 10), CostStretch(6, 5));

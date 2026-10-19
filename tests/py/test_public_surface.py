@@ -333,9 +333,7 @@ RETIRED_MEMBERS = {
 
 # The files that tell a hooks build from a shipped one by probing one private hook.
 HOOK_PROBES = (
-    ".github/workflows/tests.yml",
-    ".github/workflows/release.yml",
-    "dev/run-checks.sh",
+    "dev/pytest_guard.py",
     "dev/stubs/generate.py",
     "tests/py/private_hooks.py",
 )

@@ -1,5 +1,5 @@
 /*
-  The one traversal core of every search (detail/traversal.hpp), the public
+  The one traversal core of every search (detail/search_detail.hpp), the public
   spf, and the constructors of the search options.
 
   Distances are int64 path costs: every cost is positive and the sum of all costs is below 2^62,

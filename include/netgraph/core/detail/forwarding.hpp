@@ -28,9 +28,11 @@
 */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -61,7 +63,7 @@ struct ForwardingView {
   std::vector<std::uint8_t> blackholed_sources_ {};
   // Per program entry: Failed (excluded by the mask, or a head outside the replay roster),
   // Blackholed (a tunnel whose path reaches a black hole), a down tunnel's setup status
-  // (NoBandwidth, CostCeiling) or Up; its route under the mask (the record's route; an empty DAG
+  // (InsufficientBandwidth, CostCeilingExceeded) or Up; its route under the mask (the record's route; an empty DAG
   // when it failed or is down) and that route's cost.
   std::vector<TunnelStatus> status_ {};
   std::vector<std::shared_ptr<const PredecessorDAG>> routes_ {};
@@ -158,6 +160,18 @@ struct ProgramFlow {
   std::vector<EntryFlow> entries {};
 };
 
+// A forwarding's network numbers its positions in 32 bits. Its counts, in the order they are
+// checked: the forwarded entries, the occurrences (every tunnel hop and split-route member), the
+// routers of the split routes, the lossy rule's events (the links that can drop plus the routers)
+// and their dependency arcs. Each is computed exactly in 64 bits: at most kForwardingLimit, else
+// std::invalid_argument `forwarding <counter> limit exceeded: <n> > 2147483647`. The entry,
+// occurrence and router counts are checked after validation and before the network is allocated;
+// the event and dependency counts, known only after the no-drop loads, before the event
+// structures are allocated. Either refusal changes nothing.
+inline constexpr std::int64_t kForwardingLimit = std::numeric_limits<std::int32_t>::max();
+enum class ForwardingCounter { Entry, Occurrence, Router, Event, Dependency };
+void check_forwarding_count(ForwardingCounter counter, std::int64_t n);
+
 // The free capacity of each of `edges` in the forwarding, into `out` (aligned; before black
 // holes, which the engine applies): one call per evaluation, not per edge.
 using AvailableCapacityFn = std::function<void(std::span<const EdgeId> edges, std::span<Amount> out)>;
@@ -171,11 +185,9 @@ void source_offer_increments(const ForwardingView& view, const Counter128& X, Am
 
 // Lossless: the largest total in [lo, hi] (hi nullopt: unbounded) whose no-drop forwarding fits
 // `free`, with its loads; `lo` must fit.
-[[nodiscard]] ProgramFlow lossless(const Graph& graph, const ForwardingView& view, const AvailableCapacityFn& free, Amount lo,
-                                   std::optional<Amount> hi);
+[[nodiscard]] ProgramFlow lossless(const ForwardingView& view, const AvailableCapacityFn& free, Amount lo, std::optional<Amount> hi);
 // Lossy: the loss rule over per-head injections (aligned with the view's heads) on `free`.
-[[nodiscard]] ProgramFlow lossy(const Graph& graph, const ForwardingView& view, const AvailableCapacityFn& free,
-                                std::span<const Amount> injections);
+[[nodiscard]] ProgramFlow lossy(const ForwardingView& view, const AvailableCapacityFn& free, std::span<const Amount> injections);
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
 // Test controls (hooks builds only): how many cyclic groups the last lossy() on this thread
@@ -187,6 +199,9 @@ struct LossyCounters {
   bool corrupt {false};
 };
 LossyCounters& thread_lossy_counters() noexcept;
+// Lower limits for this thread's forwardings, per ForwardingCounter (0: kForwardingLimit), so a
+// test reaches each refusal with a small program.
+std::array<std::int64_t, 5>& thread_forwarding_limits() noexcept;
 #endif
 
 } // namespace netgraph::core::detail

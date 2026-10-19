@@ -137,6 +137,23 @@ separate kind of number: positive integers that are never converted.
   integers in units of `q`. In Python they are `int` (exact, unbounded); per-edge arrays are
   NumPy `int64[E]`. Cumulative counters that are sums over many calls (a Lossy record's
   `offered` and its per-edge `edge_drops`) may exceed 64 bits; Python returns them as exact `int`.
+  Cumulative counters must remain below `2^127`. A call that would reach that limit raises
+  `ValueError('<counter> limit exceeded')` and publishes nothing; the cumulative request is
+  checked before computation.
+- **Internal limits.** A forwarding's network numbers its positions in 32 bits: its forwarded
+  program entries, occurrences (every link visit of every entry: a tunnel's path length, a split
+  route's member links), split-route routers, LOSSY events (the links that can drop plus the
+  routers) and their dependency arcs, checked in that order, are each at most `2^31 - 1`; a call
+  beyond raises `ValueError('forwarding <counter> limit exceeded: <n> > 2147483647')` (`<counter>`
+  one of `entry`, `occurrence`, `router`, `event`, `dependency`; `<n>` the exact count). The
+  entry, occurrence and router limits are checked after validation and before the network is
+  allocated; the event and dependency limits, known only after the no-drop loads, before the
+  event structures are allocated. Either refusal changes nothing. Identities are
+  never reused: a ledger issues at most `2^63 - 1` policy identifiers and `2^63 - 1` FlowId
+  counters, and the process at most `2^63 - 1` identities shared by graphs, ledgers and masks (0,
+  the all-allowed mask's, is never issued); the next one raises `RuntimeError('policy identity
+  limit exceeded')`, `RuntimeError('record identity limit exceeded')` (a publication's new records
+  counted together) or `RuntimeError('object identity limit exceeded')` before anything changes.
 - **Domain.** Every edge capacity, and the sum of all capacities, is below `2^62` units. Edge
   costs are integers of at least 1 and their sum is below `2^62`, so no path cost reaches the
   sentinel `UNREACHABLE` (the largest `int64`). An offer is an integer in `[0, 2^62)` units or
@@ -163,7 +180,14 @@ separate kind of number: positive integers that are never converted.
     `a` plus one), ties to the lower EdgeId. Equal weights give round robin.
 
   Both rules are exact and never lose a unit: a share that rounds down to zero leaves its unit to
-  a sibling. Both are monotone: when `I` grows, no member's share shrinks.
+  a sibling. Both are monotone: when `I` grows, no member's share shrinks. For one split into `k`
+  members, each member's absolute rounding error relative to that split's actual integer input and
+  effective weights is below `k` units (`k * q` physically), and below one unit for equal positive
+  weights. This is a local bound, not an end-to-end delivery bound, and highest averages is not
+  the closest proportional rounding: weights `[100, 1, 1, 1]` and 50 units give `[50, 0, 0, 0]`
+  (total absolute error `300/103` against the exact shares `[5000/103, 50/103, 50/103, 50/103]`,
+  where `[49, 1, 0, 0]` would have `200/103`). With all weights zero, no unit is assigned and a
+  proportional share is undefined.
 - **Conservation.** At every node, inflow plus supply equals outflow plus delivery plus drops,
   exactly. The ledger's totals are exactly the sums of its records.
 
@@ -1423,8 +1447,9 @@ picks the cheapest routes, then (with `prefer_headroom=True`) the routes that le
 capacity, and finally breaks any remaining tie by one fixed unit-by-unit procedure. Real traffic
 then splits equally over the heads and over each head's tunnels; whole-unit remainders may use
 room beyond the plan. A planned bandwidth is metadata: the ledger holds nothing for it.
-`TunnelCount(L, up_to=True)` gives every head one common count `k <= L`, the smallest that
-carries the design. A head that cannot reach a destination over free capacity is dead: it keeps
+`TunnelCount(L, up_to=True)` gives every head one common count `k <= L`: the smallest whose
+program carries the live heads' design shares; if none does, the largest live-share score, then
+the smallest count. It does not promise whole-demand lossless delivery. A head that cannot reach a destination over free capacity is dead: it keeps
 its share and loses it; a weak but live head limits the common size of every tunnel, by design
 (heads that must not limit each other are separate demands). A `support` DAG restricts every step
 to its edges.

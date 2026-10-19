@@ -242,6 +242,13 @@ API.
   next to `py.typed`. The stub carries the binding docstrings. `bash dev/stubs/run.sh generate`
   regenerates it; `make stubs-check` checks it against a fresh generation, the wheel and sdist
   contents, and typed client programs.
+- **Results that change** against this release's earlier development snapshots, on purpose: a
+  zero-capacity link stays in routing, so a direct edge of capacity 0 and cost 1 beside a cost-2
+  route makes the shortest cost 1 (was 2), and an equal LOSSLESS split that sends that edge its
+  share delivers 0 (was 5); pooled sources whose routes meet at a router split there jointly, so
+  two sources reaching two unit-capacity members deliver 2 with LOSSY (was 1); `CostStretch(1.2)`
+  is the exact fraction 6/5, so a baseline cost of 5 admits a path of cost 6 at equality and the
+  tunnel case that delivered 0 now delivers 1.
 
 ### Removed
 
@@ -285,6 +292,8 @@ API.
 | `ForwardingProgram` | same name; new `from_dag` |
 | `Route` | `RouteDefinition` |
 | `QueryOptions` | `EvaluationOptions` |
+| `CapacityOptions` | `EvaluationOptions` |
+| `SensitivityOptions` | `EvaluationOptions` |
 | `capacity` | `evaluate_demand` |
 | `batch_capacity` | `evaluate_pairs` |
 | `sensitivity` | `evaluate_edge_failures` |
@@ -421,6 +430,10 @@ API.
 | property | `Stretch.factor` (float) | `CostStretch.factor` (a `fractions.Fraction`) |
 | parameter | `Stretch.__init__:factor` float | a `Fraction`, an integer or a float read as `Fraction(str(f))` |
 | parameter | `QueryOptions.__init__:offered` (some models only) | `EvaluationOptions(offer=...)`, finite, every model |
+| property | `FlowRecord.placement` | removed: the configuration selects the computation, the program the forwarding |
+| property | `PlacementResult.local_outcomes` | removed: `by_source` carries the per-source accounting (no per-source termination) |
+| method | `FlowPolicy.usable_bundles` | removed: inspect the program (`FlowPolicy.program`) |
+| property | `Pinned.bundles` | `Pinned.program`, built by `ForwardingProgram.from_routes` or `from_dag` |
 
   C++ declarations and headers (C++ enum values are the Python words in PascalCase):
 

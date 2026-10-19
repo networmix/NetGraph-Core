@@ -129,6 +129,9 @@ void check_source_count(const FlowPolicyConfig& config, std::size_t num_sources)
 // The resolved source allocation of a computing model; none for Pinned (its program has one).
 [[nodiscard]] std::optional<SourceAllocation> source_allocation_of(const Routing& r) noexcept;
 void check_tunnel_limit(const FlowPolicyConfig& cfg, std::size_t num_heads);
+// place()'s first check, before its offer is read (the binding runs it before converting it): T1
+// and T2 raise `<model> does not support incremental placement`.
+void check_place_operation(const PolicyEngine& pe);
 // forward()'s first checks, before its offer is read (the binding runs them before converting
 // it): `Pinned forwards with replace`, then `forward requires an installed program`.
 void check_forward_operation(const PolicyEngine& pe);

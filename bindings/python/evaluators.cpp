@@ -131,8 +131,8 @@ void register_evaluators(py::module_& m) {
   py::class_<SensitivityEntry>(m, "SensitivityEntry",
                                 "One candidate edge: edge and delivery_reduction (int units: the baseline's delivery minus the\n"
                                 "delivery without the edge; signed).")
-      .def_readonly("edge", &SensitivityEntry::edge)
-      .def_readonly("delivery_reduction", &SensitivityEntry::delivery_reduction);
+      .def_property_readonly("edge", int_reader(&SensitivityEntry::edge))
+      .def_property_readonly("delivery_reduction", int_reader(&SensitivityEntry::delivery_reduction));
 
   py::class_<SensitivityResult>(m, "SensitivityResult",
                                 "baseline (the PlacementResult of evaluate_demand()) and entries (ascending EdgeId; an\n"
@@ -226,7 +226,7 @@ void register_evaluators(py::module_& m) {
             py::gil_scoped_release release;
             rs = detail::evaluate_pairs_in_call(*graph, ps, c, per, w, tally);
           }
-          py::list out(rs.size());
+          auto out = py::reinterpret_steal<py::list>(checked(PyList_New(static_cast<Py_ssize_t>(rs.size()))).release());
           for (std::size_t i = 0; i < rs.size(); ++i) {
             PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), object_of(std::move(rs[i])).release().ptr());
           }

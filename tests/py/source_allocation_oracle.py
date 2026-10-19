@@ -425,7 +425,7 @@ class PooledReference:
                 "COMPLETE" if offer != INF and call_delivered == offer else "EXHAUSTED"
             )
         return {
-            "placed": call_delivered,
+            "call_delivered": call_delivered,
             "termination": term,
             "call_edge_drops": sorted((e, x) for e, x in call_edge_drops.items() if x),
             "call_source_drops": call_loss,

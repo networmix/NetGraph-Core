@@ -3,7 +3,7 @@
 // rule inside one program (cycles included), replay under a failure mask, stale forwarding with
 // black holes, the operations evaluate, replace and forward with their epochs and flags, the
 // per-entry records, the by_tunnel rows and their 128-bit counters, the evaluators' offer, and
-// the earlier Pinned uses mapped onto programs. Each test checks hand-derived values on small
+// common Pinned setups written as programs. Each test checks hand-derived values on small
 // graphs whose EdgeIds equal their input positions (asserted); none is read from a build. Then the storage of the new layouts (a restricted plan, a forwarding view, an epoch)
 // against borrowing copies, and a property test of random tunnel programs against the
 // independent reference of test_utils.hpp (program_reference).
@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <random>
@@ -1778,9 +1779,9 @@ TEST(QueryOptionsEval, PinnedSensitivity) {
   EXPECT_EQ(w2.baseline.call_delivered, 8);
 }
 
-// ---------------------------------------------------------------- the earlier Pinned uses mapped
+// ---------------------------------------------------------------- common Pinned setups
 
-// Each former Pinned use and its program form.
+// Each common Pinned setup and its program form.
 TEST(PinnedMapping, SingleBundle) {
   // One EB route DAG (DIAM, the four links).
   const auto d = graph(4, kDiam);
@@ -1797,7 +1798,7 @@ TEST(PinnedMapping, SingleBundle) {
                                         .residual = Amounts {100, 50, 100, 50}});
   EXPECT_EQ(pinned(d, ws)->place(INF).call_delivered, 150);
   // Two route DAGs on PAR2(6, 4): separate contexts, RR over the entries: 9; W the same 9;
-  // Optimized becomes CentralizedTE(support) and fills both: 10.
+  // an optimized split is CentralizedTE(support) and fills both: 10.
   const auto p = par2(6, 4);
   const auto two = program(*p, {0}, {1}, {dag_route(*p, 0, {0}), dag_route(*p, 0, {1})});
   EXPECT_EQ(pinned(p, two)->place(INF).call_delivered, 9);
@@ -2301,4 +2302,96 @@ TEST(FromDag, Validation) {
   const auto none = ForwardingProgram::from_dag(*g, v({0, 1}), v({3}), dag_of(*g, {2, 3}));
   EXPECT_TRUE(none->tunnels().empty());
   EXPECT_EQ(pinned(g, none)->place(INF).termination, Termination::NoRoute);
+}
+
+// ---------------------------------------------------------------- the forwarding network's size
+
+// Each count of a forwarding network is checked against 2^31 - 1 inclusively, with its exact value
+// and its name in the text. 10,000 tunnels of 214,749 hops (2,147,490,000
+// occurrences) are refused; exactly 2^31 - 1 passes; 2^31 entries are refused as entries.
+TEST(ForwardingSize, EachCountIsCheckedInclusivelyWithItsExactValue) {
+  using detail::ForwardingCounter;
+  EXPECT_EQ(detail::kForwardingLimit, 2147483647);
+  for (const auto c : {ForwardingCounter::Entry, ForwardingCounter::Occurrence, ForwardingCounter::Router,
+                       ForwardingCounter::Event, ForwardingCounter::Dependency}) {
+    EXPECT_EQ(error_of([&] { detail::check_forwarding_count(c, 2147483647); }), "");
+    EXPECT_EQ(error_of([&] { detail::check_forwarding_count(c, 0); }), "");
+  }
+  EXPECT_EQ(error_of([&] { detail::check_forwarding_count(ForwardingCounter::Occurrence, std::int64_t {10000} * 214749); }),
+            "forwarding occurrence limit exceeded: 2147490000 > 2147483647");
+  EXPECT_EQ(error_of([&] { detail::check_forwarding_count(ForwardingCounter::Entry, std::int64_t {1} << 31); }),
+            "forwarding entry limit exceeded: 2147483648 > 2147483647");
+  EXPECT_EQ(error_of([&] { detail::check_forwarding_count(ForwardingCounter::Router, std::int64_t {1} << 31); }),
+            "forwarding router limit exceeded: 2147483648 > 2147483647");
+  EXPECT_EQ(error_of([&] { detail::check_forwarding_count(ForwardingCounter::Event, std::int64_t {1} << 31); }),
+            "forwarding event limit exceeded: 2147483648 > 2147483647");
+  EXPECT_EQ(error_of([&] { detail::check_forwarding_count(ForwardingCounter::Dependency, std::int64_t {1} << 31); }),
+            "forwarding dependency limit exceeded: 2147483648 > 2147483647");
+}
+
+// A call counts its network and checks the entry, occurrence and router counts before the network
+// is allocated, the event and dependency counts before the event structures: with one counter's
+// limit lowered to its count less one for this thread (a hooks build), the call is refused with
+// that count, nothing changed; at the count it runs; with every limit at 1 the entries are
+// reported first. PAR2(6, 4) with two one-edge route DAGs (two contexts: the general network),
+// LOSSY replace(12): 2 entries, 2 occurrences (one member each), 4 routers (two per route), 6
+// units sent on each link; the 4-unit link can drop (one barrier), so 1 + 4 = 5 events and 3
+// dependencies (router to router on the 6-unit link; router to event to router on the other).
+// LOSSLESS has no events: its entries, occurrences and routers are checked. DIAM's two 2-hop
+// tunnels: 2 entries, 4 occurrences.
+TEST(ForwardingSize, TheCallChecksEachCountInOrder) {
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  using detail::ForwardingCounter;
+  struct Restore {
+    ~Restore() { detail::thread_forwarding_limits() = {}; }
+  } restore;
+  const auto p2 = par2(6, 4);
+  const auto two_dags = program(*p2, {0}, {1}, {dag_route(*p2, 0, {0}), dag_route(*p2, 0, {1})});
+  const auto d = graph(4, kDiam);
+  const auto two_tunnels = tunnels(*d, {0}, {3}, {{0, {0, 2}, 1}, {0, {1, 3}, 1}});
+  struct Count {
+    ForwardingCounter counter;
+    const char* name;
+    std::int64_t n;
+  };
+  struct Case {
+    std::shared_ptr<const Graph> g;
+    std::shared_ptr<const ForwardingProgram> prog;
+    Admission admission;
+    Amount delivered;
+    std::vector<Count> counts;
+  };
+  const std::vector<Case> cases {
+      {p2, two_dags, LOSSY, 10,
+       {{ForwardingCounter::Entry, "entry", 2}, {ForwardingCounter::Occurrence, "occurrence", 2},
+        {ForwardingCounter::Router, "router", 4}, {ForwardingCounter::Event, "event", 5},
+        {ForwardingCounter::Dependency, "dependency", 3}}},
+      {p2, two_dags, LOSSLESS, 9,
+       {{ForwardingCounter::Entry, "entry", 2}, {ForwardingCounter::Occurrence, "occurrence", 2},
+        {ForwardingCounter::Router, "router", 4}}},
+      {d, two_tunnels, LOSSY, 12, {{ForwardingCounter::Entry, "entry", 2}, {ForwardingCounter::Occurrence, "occurrence", 4}}},
+      {d, two_tunnels, LOSSLESS, 12, {{ForwardingCounter::Entry, "entry", 2}, {ForwardingCounter::Occurrence, "occurrence", 4}}},
+  };
+  for (const auto& c : cases) {
+    auto pol = pinned(c.g, c.prog, c.admission);
+    for (const auto& k : c.counts) {
+      const LedgerState before = ledger_state(*pol.ledger);
+      auto& limits = detail::thread_forwarding_limits();
+      limits = {};
+      limits[static_cast<std::size_t>(k.counter)] = k.n - 1;
+      EXPECT_EQ(error_of([&] { (void)pol->replace(12); }), std::string("forwarding ") + k.name + " limit exceeded: " +
+                                                                std::to_string(k.n) + " > " + std::to_string(k.n - 1));
+      expect_same(ledger_state(*pol.ledger), before, k.name);
+      EXPECT_TRUE(pol->records().empty());
+      limits[static_cast<std::size_t>(k.counter)] = k.n;
+      EXPECT_EQ(pol->replace(12).call_delivered, c.delivered) << k.name;
+      pol->remove();
+    }
+    detail::thread_forwarding_limits() = {1, 1, 1, 1, 1};
+    EXPECT_EQ(error_of([&] { (void)pol->replace(12); }), "forwarding entry limit exceeded: 2 > 1");
+    detail::thread_forwarding_limits() = {};
+  }
+#else
+  GTEST_SKIP() << "a lowered limit needs the private hooks";
+#endif
 }

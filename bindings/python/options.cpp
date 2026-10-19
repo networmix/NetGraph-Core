@@ -19,8 +19,9 @@ void register_options(py::module_& m) {
                            "OPTIMIZED: the minimum-cost flow core over the routes (a controller restricted to them), re-solved\n"
                            "over the free capacity plus the policy's own allocation (it may move its own earlier placement,\n"
                            "never another's). WEIGHTED (WCMP, weighted-cost multipath): every node splits in proportion to\n"
-                           "weights fixed when the routes are prepared (highest averages: whole-unit shares as close to\n"
-                           "proportional as possible; the weights come from WeightBasis). EQUAL (ECMP, equal-cost\n"
+                           "weights fixed when the routes are prepared (highest averages (D'Hondt): assign each next unit\n"
+                           "to the largest weight / (assigned + 1), ties to the lower EdgeId; the weights come from\n"
+                           "WeightBasis). EQUAL (ECMP, equal-cost\n"
                            "multipath): every node splits equally, by round robin.")
       .value("EQUAL", RouteAllocation::Equal)
       .value("WEIGHTED", RouteAllocation::Weighted)

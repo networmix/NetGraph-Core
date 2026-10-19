@@ -675,6 +675,34 @@ def test_pinned_in_the_new_shape():
         assert (r.offered, r.source_drops) == (2, want[2])
 
 
+def test_equal_source_increments_beyond_64_bits():
+    # Three equal sources, LOSSY increments: each source's cumulative offer is RR(X) of the
+    # cumulative total X, X // 3 plus one for the first X % 3 sources, also once X passes 2^64;
+    # the same through a ShortestPaths policy and a Pinned policy over its program. The last offer,
+    # 4, after the crossing, is no multiple of 3, so a rule that ignored X's high word would fail.
+    g = ngc.Graph(4, [0, 1, 2], [3, 3, 3], [1, 1, 1], [1, 2, 3], 1.0)
+    lossy = ngc.FlowPolicyConfig(routing=ngc.ShortestPaths(), admission=A.LOSSY)
+    sp = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1, 2], 3, lossy)
+    program = sp.replace(0).program
+    pinned = ngc.FlowPolicy(
+        ngc.FlowLedger(g),
+        [0, 1, 2],
+        3,
+        ngc.FlowPolicyConfig(routing=ngc.Pinned(program), admission=A.LOSSY),
+    )
+    total = 0
+    for offer in [1, 4] + [2**62 - 1] * 5 + [4]:
+        total += offer
+        expected = [total // 3 + (1 if i < total % 3 else 0) for i in range(3)]
+        for policy in (sp, pinned):
+            r = policy.place(offer)
+            assert r.offered == total
+            assert [row.offered for row in r.by_source] == expected
+            assert r.delivered == sum(min(x, 1) for x in expected)  # 1-unit links
+            assert r.source_drops == 0
+    assert total == 23058430092136939524 > 2**64
+
+
 def test_terminations():
     # An empty roster (no edge reaches 1 from 0).
     for config in (glob(), cost_only(), cost_only(admission=A.LOSSY)):

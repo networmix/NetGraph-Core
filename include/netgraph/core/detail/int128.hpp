@@ -77,6 +77,13 @@ inline std::uint64_t div_u128(U128 n, std::uint64_t d) noexcept {
 
 #endif
 
+// x mod d for d > 0 (any 128-bit x): the remainder of (x.hi mod d) * 2^64 + x.lo, whose quotient
+// fits 64 bits.
+inline std::uint64_t mod_u128(U128 x, std::uint64_t d) noexcept {
+  const std::uint64_t q = div_u128(U128 {x.hi % d, x.lo}, d);
+  return x.lo - q * d;
+}
+
 // a + b and a - b (a >= b), exactly; the caller keeps a + b below 2^128.
 inline U128 add(U128 a, U128 b) noexcept {
   U128 r {a.hi + b.hi, a.lo + b.lo};

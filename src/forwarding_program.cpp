@@ -83,7 +83,7 @@ void ProgramData::initialize_storage(std::span<const NodeId> source, std::span<c
     entry.roster_index = static_cast<std::int32_t>(std::lower_bound(ros.begin(), ros.end(), entry.head) - ros.begin());
   }
   if (pools_source_inflows) {
-    // A pooled program's slots carry one entry each (entries_of): no lists, local index 0.
+    // A pooled program's slots carry one entry each (entries_for_source): no lists, local index 0.
     for (auto& entry : entries) entry.local_index = 0;
   } else {
     // A stable counting sort by slot: counted at slot + 2, summed, placed through slot + 1 (which

@@ -71,23 +71,23 @@ void register_program(py::module_& m) {
                      "planned_bandwidth: T2's planned bandwidth\n"
                      "u (metadata, never held; 0 for the other models); weight: its integer share among the head's\n"
                      "entries (T1: 1 up, 0 down; T2: 1; a controller path: its solved amount).")
-      .def_readonly("entry_id", &Tunnel::entry_id)
-      .def_readonly("head", &Tunnel::head)
-      .def_readonly("local_index", &Tunnel::local_index)
-      .def_readonly("destination", &Tunnel::destination)
+      .def_property_readonly("entry_id", int_reader(&Tunnel::entry_id))
+      .def_property_readonly("head", int_reader(&Tunnel::head))
+      .def_property_readonly("local_index", int_reader(&Tunnel::local_index))
+      .def_property_readonly("destination", optional_int_reader(&Tunnel::destination))
       .def_property_readonly(
 
           "edges",
           [](const Tunnel& t) -> py::object {
-            return t.edges.has_value() ? py::object(py::tuple(py::cast(*t.edges))) : py::object(py::none());
+            return t.edges.has_value() ? py::object(ints_tuple(*t.edges)) : py::object(py::none());
           },
           "the path's EdgeIds in path order; None for a tunnel that is down")
-      .def_readonly("path_cost", &Tunnel::path_cost)
+      .def_property_readonly("path_cost", optional_int_reader(&Tunnel::path_cost))
       .def_property_readonly("status", [](const Tunnel& t) { return typed_object(t.status); })
-      .def_readonly("requested_bandwidth", &Tunnel::requested_bandwidth)
-      .def_readonly("reserved_bandwidth", &Tunnel::reserved_bandwidth)
-      .def_readonly("planned_bandwidth", &Tunnel::planned_bandwidth)
-      .def_readonly("weight", &Tunnel::weight)
+      .def_property_readonly("requested_bandwidth", int_reader(&Tunnel::requested_bandwidth))
+      .def_property_readonly("reserved_bandwidth", int_reader(&Tunnel::reserved_bandwidth))
+      .def_property_readonly("planned_bandwidth", int_reader(&Tunnel::planned_bandwidth))
+      .def_property_readonly("weight", int_reader(&Tunnel::weight))
       .def("__repr__", [](const Tunnel& t) {
         return "Tunnel(entry_id=" + std::to_string(t.entry_id) + ", head=" + std::to_string(t.head) +
                ", weight=" + std::to_string(t.weight) + ")";
@@ -117,9 +117,9 @@ void register_program(py::module_& m) {
            py::arg("head"), py::arg("route"), py::kw_only(), py::arg("weight") = 1,
            "RouteDefinition(head, route, *, weight=1): head a NodeId, route a Path or a PredecessorDAG (TypeError\n"
            "otherwise), weight an integer (checked in [0, 2^62) by from_routes).")
-      .def_readonly("head", &RouteDefinition::head, "the route's head (a source of the program)")
+      .def_property_readonly("head", int_reader(&RouteDefinition::head), "the route's head (a source of the program)")
       .def_property_readonly("route", &route_obj, "the Path (a tunnel) or the PredecessorDAG (a split route)")
-      .def_readonly("weight", &RouteDefinition::weight, "the route's integer share among the head's routes")
+      .def_property_readonly("weight", int_reader(&RouteDefinition::weight), "the route's integer share among the head's routes")
       .def("__repr__", [](const RouteDefinition& r) {
         return "RouteDefinition(head=" + std::to_string(r.head) + ", weight=" + std::to_string(r.weight) + ")";
       });
@@ -154,9 +154,7 @@ void register_program(py::module_& m) {
           [](const ForwardingProgram& p) -> py::object {
             const auto& w = p.source_weights();
             if (!w.has_value()) return py::none();
-            py::tuple out(w->size());
-            for (std::size_t i = 0; i < w->size(); ++i) out[i] = py::make_tuple((*w)[i].first, (*w)[i].second);
-            return out;
+            return pairs_tuple(*w);
           },
           "the captured source weights ((source, weight), ascending), or None for equal sources")
       .def_static(

@@ -104,16 +104,16 @@ inline std::vector<std::string> check_layout(const LayoutSpans& g, const LayoutI
   size_is(g.cost.size(), me, "cost");
   size_is(g.src.size(), me, "src");
   size_is(g.dst.size(), me, "dst");
-  size_is(g.input_positions.size(), me, "input_index");
-  size_is(g.outgoing_offsets.size(), np1, "row_offsets");
-  size_is(g.incoming_offsets.size(), np1, "in_row_offsets");
-  size_is(g.incoming_edges.size(), me, "in_adj_edge_index");
+  size_is(g.input_positions.size(), me, "input_positions");
+  size_is(g.outgoing_offsets.size(), np1, "outgoing_offsets");
+  size_is(g.incoming_offsets.size(), np1, "incoming_offsets");
+  size_is(g.incoming_edges.size(), me, "incoming_edges");
   size_is(g.incoming_edge_sources.size(), me, "in_col_indices");
   if (!bad.empty()) return bad;
 
   // 2. Ranges and permutations (values are read, none is used as an index yet).
-  offsets_ok(g.outgoing_offsets, n, m, "row_offsets", bad);
-  offsets_ok(g.incoming_offsets, n, m, "in_row_offsets", bad);
+  offsets_ok(g.outgoing_offsets, n, m, "outgoing_offsets", bad);
+  offsets_ok(g.incoming_offsets, n, m, "incoming_offsets", bad);
   for (std::size_t e = 0; e < me; ++e) {
     if (g.src[e] < 0 || g.src[e] >= n) {
       bad.emplace_back("range:src");
@@ -209,8 +209,8 @@ inline std::vector<std::string> check_layout(const LayoutSpans& g, const LayoutI
     mx = c > mx ? c : mx;
     gcd = std::gcd(gcd, c);
   }
-  if (g.max_edge_cost != mx) bad.emplace_back("scan:max_cost");
-  if (g.edge_cost_gcd != gcd) bad.emplace_back("scan:cost_gcd");
+  if (g.max_edge_cost != mx) bad.emplace_back("scan:max_edge_cost");
+  if (g.edge_cost_gcd != gcd) bad.emplace_back("scan:edge_cost_gcd");
   return bad;
 }
 

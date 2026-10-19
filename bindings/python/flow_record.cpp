@@ -18,7 +18,7 @@ namespace netgraph::core::bindings {
 
 namespace {
 
-py::object cost_or_none(Cost c) { return c == kUnreachable ? py::object(py::none()) : py::object(py::int_(c)); }
+py::object cost_or_none(Cost c) { return c == kUnreachable ? py::object(py::none()) : py::object(int_object(c)); }
 
 } // namespace
 
@@ -34,13 +34,17 @@ void register_flow_record(py::module_& m) {
       "may exceed 64 bits).")
       .def_property_readonly(
 
-          "flow_id", [](const FlowRecord& r) { return py::make_tuple(r.flow_id.first, r.flow_id.second); },
+          "flow_id", [](const FlowRecord& r) { return int_pair(r.flow_id.first, r.flow_id.second); },
           "(ledger uid, id): ids are assigned in creation order and never reused in the ledger")
-      .def_readonly("policy_id", &FlowRecord::policy_id, "the ledger-local id of the policy that created the flow")
-      .def_readonly("sources", &FlowRecord::sources, "the flow's source node ids, ascending")
-      .def_readonly("destinations", &FlowRecord::destinations, "the flow's destination node ids, ascending")
+      .def_property_readonly("policy_id", int_reader(&FlowRecord::policy_id), "the ledger-local id of the policy that created the flow")
+      .def_property_readonly(
+          "sources", [](const FlowRecord& r) { return ints_list(std::span<const NodeId>(r.sources)); },
+          "the flow's source node ids, ascending")
+      .def_property_readonly(
+          "destinations", [](const FlowRecord& r) { return ints_list(std::span<const NodeId>(r.destinations)); },
+          "the flow's destination node ids, ascending")
       .def_property_readonly("admission", field_object(&FlowRecord::admission), "LOSSLESS or LOSSY")
-      .def_readonly("entry_id", &FlowRecord::entry_id,
+      .def_property_readonly("entry_id", optional_int_reader(&FlowRecord::entry_id),
                     "the program entry the record carries (T1, T2 and Pinned: the entry identifier); None for the\n"
                     "records kept per roster source (ShortestPaths, CentralizedTE)")
       .def_property_readonly(
@@ -58,17 +62,13 @@ void register_flow_record(py::module_& m) {
           },
           "Lossy: the units offered to the flow, summed over calls (an exact int, may exceed 64 bits);\n"
           "None for a Lossless flow")
-      .def_readonly("delivered", &FlowRecord::delivered, "the units the flow delivers to its destinations (its total)")
+      .def_property_readonly("delivered", int_reader(&FlowRecord::delivered), "the units the flow delivers to its destinations (its total)")
       .def_property_readonly(
           "edge_flows", [](const FlowRecord& r) { return pairs_list(r.edge_flows); },
           "the flow's allocation [(EdgeId, units)], positive entries in ascending EdgeId")
       .def_property_readonly(
           "edge_drops",
-          [](const FlowRecord& r) {
-            py::list out;
-            for (const auto& [e, x] : r.edge_drops) out.append(py::make_tuple(e, counter_int(x)));
-            return out;
-          },
+          [](const FlowRecord& r) { return pairs_list(r.edge_drops); },
           "Lossy: the units dropped per edge [(EdgeId, units)], summed over calls, positive entries in\n"
           "ascending EdgeId (exact ints); empty for a Lossless flow")
       .def_property_readonly(

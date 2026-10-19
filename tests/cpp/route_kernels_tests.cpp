@@ -3,14 +3,10 @@
 // control, the round-robin callback form, the lower-quota division on both sides of 2^64; the
 // kernel check (the first defect in order, the combination rule alone); plans (membership by
 // kernel and tie score, split-graph pruning, the walk definition for every kernel), alloc(T) at
-// every split, exact T_max against an independent per-node reference, the Lossless
-// steps of Optimized (replacement on V = W + own, the cancellation DAG, the equal-optimum and
-// cancel-upstream controls, the release witness, the mixed-cost route; randomized steps
-// certified on their member subset against an exhaustive optimum or an independent solver, with
-// every cost multiplied, and the step certificate's own controls), Weighted and Equal,
-// and the Lossy steps (drops, +inf injection; on random DAGs against an independent per-node
-// reference). Expected values are the closed forms, the hand derivations given in each test, those
-// independent optima and the per-node references.
+// every split, exact T_max against an independent per-node reference, the Lossless steps of
+// Weighted and Equal, and the Lossy steps (drops, +inf injection; on random DAGs against an
+// independent per-node reference). Expected values are the closed forms, the hand derivations
+// given in each test and the per-node references.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -229,11 +225,10 @@ std::vector<Amount> caps(const Graph& g) {
 }
 
 // One Lossless step on a fresh flow at T = 0.
-LosslessStep first_step(const Graph& g, const PreparedRoute& plan, const std::vector<Amount>& view,
-                        std::optional<Amount> request) {
+LosslessStep first_step(const PreparedRoute& plan, const std::vector<Amount>& view, std::optional<Amount> request) {
   const auto v = on_members(plan, view);
   const std::vector<Amount> own(plan.forwarding_edges.size(), 0);
-  return lossless_step(g, plan, 0, v, own, request);
+  return lossless_step(plan, 0, v, own, request);
 }
 
 // `count` random edges of a DAG whose node ids 0 .. n - 1 are a topological order: each u -> v
@@ -375,6 +370,33 @@ TEST(Apportion, RoundRobinCallbackFormEqualsSpanFormAndStopsEarly) {
   EXPECT_EQ(stop, 1u);
   EXPECT_EQ(seen, (std::vector<std::size_t>{0, 1}));
   EXPECT_EQ(round_robin(7, 3, [](std::size_t, Amount) { return false; }), 0u);
+}
+
+// The round-robin increments of a cumulative total X growing by v: RR(X + v) - RR(X) per
+// recipient. 2^64 = 3q + 1, so RR(2^64) = (q + 1, q, q) and RR(2^64 + 4) = (q + 2, q + 2, q + 1):
+// (1, 2, 1). A small X checks against the definition of round robin (total // k, one more for the
+// first total % k) on both totals; one recipient takes v; v = 0 gives zeros; no recipient,
+// nothing.
+TEST(Apportion, RoundRobinIncrementsOfACumulativeTotal) {
+  std::vector<Amount> out(3, -7);
+  round_robin_increments(Counter128 {1, 0}, 4, out);
+  EXPECT_EQ(out, (std::vector<Amount> {1, 2, 1}));
+  round_robin_increments(Counter128 {1, 0}, 0, out);
+  EXPECT_EQ(out, (std::vector<Amount> {0, 0, 0}));
+  for (Amount x = 0; x < 12; ++x) {
+    for (Amount v = 0; v < 8; ++v) {
+      std::vector<Amount> inc(4);
+      round_robin_increments(Counter128 {0, static_cast<std::uint64_t>(x)}, v, inc);
+      auto share = [](Amount total, Amount i) { return total / 4 + (i < total % 4 ? 1 : 0); };
+      for (Amount i = 0; i < 4; ++i) {
+        EXPECT_EQ(inc[static_cast<std::size_t>(i)], share(x + v, i) - share(x, i)) << x << " + " << v;
+      }
+    }
+  }
+  std::vector<Amount> one(1);
+  round_robin_increments(Counter128 {5, 9}, 11, one);
+  EXPECT_EQ(one, (std::vector<Amount> {11}));
+  round_robin_increments(Counter128 {5, 9}, 11, std::span<Amount> {});
 }
 
 TEST(Apportion, ClosedFormEqualsSequentialAndIsHouseMonotone) {
@@ -842,7 +864,7 @@ TEST(Allocation, SplitAndReconvergeMatchesThePerNodeReferenceAtEveryValue) {
     Amount total = 0;
     int steps = 0;
     while (true) {
-      const auto step = lossless_step(g, plan, total, vm, own, 1);
+      const auto step = lossless_step(plan, total, vm, own, 1);
       if (step.admitted == total) break;
       ++steps;
       for (std::size_t m = 0; m < own.size(); ++m) ASSERT_GE(step.edge_flows[m], own[m]);  // member-monotone
@@ -852,7 +874,7 @@ TEST(Allocation, SplitAndReconvergeMatchesThePerNodeReferenceAtEveryValue) {
     }
     EXPECT_EQ(total, brute);
     EXPECT_EQ(max_lossless_offer(plan, vm).value, brute);
-    const auto one = first_step(g, plan, view, brute);
+    const auto one = first_step(plan, view, brute);
     EXPECT_EQ(one.edge_flows, own);  // one call of T_max equals the calls of 1
     EXPECT_GT(steps, 5);
   }
@@ -868,11 +890,11 @@ TEST(Allocation, EqualBalancedOnePlusTwoEqualsThree) {
   const auto plan = plan_of(g, RouteAllocation::Equal, 0, {7}, all_ids(g), caps(g));
   const auto vm = on_members(plan, caps(g));
   std::vector<Amount> own(plan.forwarding_edges.size(), 0);
-  auto s1 = lossless_step(g, plan, 0, vm, own, 1);
+  auto s1 = lossless_step(plan, 0, vm, own, 1);
   EXPECT_EQ(dense_input(g, plan, s1.edge_flows), (std::vector<Amount>{1, 0, 0, 1, 0, 0, 1, 0, 1, 0}));
-  auto s2 = lossless_step(g, plan, s1.admitted, vm, s1.edge_flows, 2);
+  auto s2 = lossless_step(plan, s1.admitted, vm, s1.edge_flows, 2);
   EXPECT_EQ(dense_input(g, plan, s2.edge_flows), (std::vector<Amount>{1, 1, 1, 1, 1, 1, 2, 1, 2, 1}));
-  EXPECT_EQ(first_step(g, plan, caps(g), 3).edge_flows, s2.edge_flows);
+  EXPECT_EQ(first_step(plan, caps(g), 3).edge_flows, s2.edge_flows);
 }
 
 TEST(Allocation, TMaxExactAgainstBruteForce) {
@@ -985,7 +1007,7 @@ TEST(Allocation, TMaxSearchIsExactAndWithinTheProbeBudgetOnLargeRanges) {
     ASSERT_EQ(tm.value, lo) << "trial " << trial;
     // The Lossless step from T = 0 with a request beyond the maximum lands on the same T.
     const std::vector<Amount> zero(plan.forwarding_edges.size(), 0);
-    const auto step = lossless_step(g, plan, 0, vm, zero, kDomainLimit - 1);
+    const auto step = lossless_step(plan, 0, vm, zero, kDomainLimit - 1);
     EXPECT_EQ(step.admitted, lo);
     EXPECT_LE(step.probes, 62);
     large += lo >= (Amount {1} << 40) ? 1 : 0;
@@ -995,312 +1017,6 @@ TEST(Allocation, TMaxSearchIsExactAndWithinTheProbeBudgetOnLargeRanges) {
   EXPECT_GT(far, 100);
 }
 
-TEST(MaxFlowKernel, CancellationDagGivesTwo) {
-  // A DAG where the second unit needs the first one's edge 1->3 cancelled: place(1) takes
-  // 0-1-3-5, the next place(1) re-solves on V = W + own and returns the unique value-2 flow (1->3
-  // goes to 0).
-  const std::vector<std::pair<NodeId, NodeId>> pairs = {{0, 1}, {0, 2}, {1, 3}, {1, 4}, {2, 3}, {3, 5}, {4, 5}};
-  std::vector<InEdge> edges;
-  for (auto [u, v] : pairs) edges.push_back({u, v, 1, 1});
-  auto g = make_graph(6, edges);
-  const auto plan = plan_of(g, RouteAllocation::Optimized, 0, {5}, all_ids(g), caps(g));
-  auto s1 = first_step(g, plan, caps(g), 1);
-  EXPECT_EQ(dense_input(g, plan, s1.edge_flows), (std::vector<Amount>{1, 0, 1, 0, 0, 1, 0}));
-  // The flow's own allocation is in its view (W + own = capacities here).
-  auto s2 = lossless_step(g, plan, s1.admitted, on_members(plan, caps(g)), s1.edge_flows, 1);
-  EXPECT_EQ(s2.admitted, 2);
-  EXPECT_EQ(dense_input(g, plan, s2.edge_flows), (std::vector<Amount>{1, 1, 0, 1, 1, 1, 1}));
-  auto s3 = lossless_step(g, plan, s2.admitted, on_members(plan, caps(g)), s2.edge_flows, 1);
-  EXPECT_EQ(s3.admitted, 2);
-  EXPECT_EQ(first_step(g, plan, caps(g), 2).edge_flows, s2.edge_flows);
-  EXPECT_EQ(first_step(g, plan, caps(g), std::nullopt).admitted, 2);
-}
-
-namespace {
-
-// A graph whose minimum-cost flow cancels earlier flow: s=0; A=1, B=2, C=3; X=4, Y=5; t=6.
-std::vector<InEdge> cancel_edges(Cost b_to_y = 9) {
-  return {{0, 1, 1, 1}, {0, 2, 1, 1}, {0, 3, 1, 1}, {1, 4, 1, 2}, {1, 5, 1, 9},
-          {2, 4, 1, 1}, {2, 5, 1, b_to_y}, {3, 4, 1, 3}, {4, 6, 2, 1}, {5, 6, 1, 1}};
-}
-
-} // namespace
-
-TEST(MaxFlowKernel, CancelUpstreamMixedCost) {
-  auto g = make_graph(7, cancel_edges());
-  const auto plan = plan_of(g, RouteAllocation::Optimized, 0, {6}, all_ids(g), caps(g));
-  const std::vector<Amount> final_alloc = {1, 1, 1, 0, 1, 1, 0, 1, 2, 1};
-  auto one = first_step(g, plan, caps(g), 3);
-  EXPECT_EQ(dense_input(g, plan, one.edge_flows), final_alloc);
-  // The sequence 1, 1, 1 with the third call cancelling A->X upstream (a signed delta).
-  const std::vector<std::vector<Amount>> seq = {
-      {0, 1, 0, 0, 0, 1, 0, 0, 1, 0}, {1, 1, 0, 1, 0, 1, 0, 0, 2, 0}, final_alloc};
-  std::vector<Amount> own(plan.forwarding_edges.size(), 0);
-  Amount total = 0;
-  for (const auto& want : seq) {
-    auto s = lossless_step(g, plan, total, on_members(plan, caps(g)), own, 1);
-    EXPECT_EQ(s.admitted, total + 1);
-    EXPECT_EQ(dense_input(g, plan, s.edge_flows), want);
-    total = s.admitted;
-    own = s.edge_flows;
-  }
-  // The minimum cost over the route: curve (3, 1), (4, 1), (12, 1) totals 19.
-  Cost cost = 0;
-  const auto a = dense_input(g, plan, own);
-  for (std::size_t i = 0; i < a.size(); ++i) cost += a[i] * cancel_edges()[i].cost;
-  EXPECT_EQ(cost, 19);
-}
-
-TEST(MaxFlowKernel, EqualOptimaFollowTheAscendingEdgeIdOrder) {
-  // Ties between equal optima follow the arc order (ascending EdgeId):
-  // with cost(B->Y) = 8 two value-3 optima cost 19; ascending arcs pick the
-  // flow with Y fed by A, so a later demand on A->X still finds its unit.
-  auto g = make_graph(7, cancel_edges(8));
-  const auto plan = plan_of(g, RouteAllocation::Optimized, 0, {6}, all_ids(g), caps(g));
-  auto s = first_step(g, plan, caps(g), 3);
-  EXPECT_EQ(dense_input(g, plan, s.edge_flows), (std::vector<Amount>{1, 1, 1, 0, 1, 1, 0, 1, 2, 1}));
-}
-
-TEST(MaxFlowKernel, ReleaseWitnessAndMixedCostBundle) {
-  // Release witness: two parallel links of cost 4 and 2; the cheap one is held by another owner
-  // at the first call (the flow takes cost 4); after the release the re-solve on the new view
-  // moves the unit to the cheap link (0 delivered in that call, allocation moved).
-  auto g = make_graph(2, {{0, 1, 1, 4}, {0, 1, 1, 2}});
-  const auto plan = plan_of(g, RouteAllocation::Optimized, 0, {1}, all_ids(g), caps(g));
-  const auto held = to_ids(g, std::vector<Amount> {1, 0});
-  auto s1 = first_step(g, plan, held, 1);
-  EXPECT_EQ(dense_input(g, plan, s1.edge_flows), (std::vector<Amount>{1, 0}));
-  const auto released = to_ids(g, std::vector<Amount> {0, 1});  // W after the release; own adds 1 on cost 4
-  std::vector<Amount> v(plan.forwarding_edges.size());
-  for (std::size_t m = 0; m < v.size(); ++m) v[m] = released[static_cast<std::size_t>(plan.forwarding_edges[m])] + s1.edge_flows[m];
-  auto s2 = lossless_step(g, plan, 1, v, s1.edge_flows, 1);
-  EXPECT_EQ(s2.admitted, 2);
-  // Request 0 more is never sent; a capped re-solve at the same T moves the unit (cost 2).
-  auto s3 = lossless_step(g, plan, 1, v, s1.edge_flows, 0);
-  EXPECT_EQ(s3.admitted, 1);
-  EXPECT_EQ(dense_input(g, plan, s3.edge_flows), (std::vector<Amount>{0, 1}));
-  // On a mixed-cost route the 1 + 1 + 1 chain fills before the cost-4 edge.
-  auto g2 = make_graph(4, {{0, 1, 1, 1}, {1, 2, 1, 1}, {2, 3, 1, 1}, {0, 3, 1, 4}});
-  const auto p2 = plan_of(g2, RouteAllocation::Optimized, 0, {3}, all_ids(g2), caps(g2));
-  EXPECT_EQ(dense_input(g2, p2, first_step(g2, p2, caps(g2), 1).edge_flows), (std::vector<Amount>{1, 1, 1, 0}));
-  EXPECT_EQ(cost_of(g2, p2), 3);
-}
-
-namespace {
-
-// The certificate of one Optimized-kernel step, independent of the solver: the step's member
-// allocation, as a flow on the graph with the members' view and every other edge masked, is
-// feasible and conserved from the plan's source to its destinations, has the value
-// min(total + request, F_max) (the maximum for a request of +inf) and the minimum cost at that
-// value, and its curve has the flow's total and moment and the optimum's cost at every value up
-// to it (the curve clauses shared with certify, test_utils.hpp). The optimum is the exhaustive
-// one (`tier_a`, small graphs) or the independent Bellman-Ford curve (test_utils.hpp). The
-// checker relies on the members lying on walks from the source to its destinations, which end
-// there, so that no member enters the source or leaves a destination: the random test below
-// checks each plan's members against that walk definition first. Returns the failed clauses.
-std::vector<std::string> certify_step(const Graph& g, const PreparedRoute& plan, const std::vector<Amount>& view_m,
-                                      Amount total, std::optional<Amount> request, const LosslessStep& step,
-                                      bool tier_a) {
-  std::vector<std::string> fails;
-  if (step.edge_flows.size() != plan.forwarding_edges.size()) {
-    fails.push_back("shape");
-    return fails;
-  }
-  const auto m = static_cast<std::size_t>(g.num_edges());
-  const auto n = static_cast<std::size_t>(g.num_nodes());
-  std::vector<Amount> view(m, 0);
-  std::vector<Amount> flow(m, 0);
-  std::vector<char> member(m, 0);
-  for (std::size_t k = 0; k < plan.forwarding_edges.size(); ++k) {
-    const auto e = static_cast<std::size_t>(plan.forwarding_edges[k]);
-    member[e] = 1;
-    view[e] = view_m[k];
-    flow[e] = step.edge_flows[k];
-    if (step.edge_flows[k] < 0 || step.edge_flows[k] > view_m[k]) fails.push_back("feasibility at member " + std::to_string(k));
-  }
-  std::vector<EdgeId> outside;
-  for (std::size_t e = 0; e < m; ++e) {
-    if (member[e] == 0) outside.push_back(static_cast<EdgeId>(e));
-  }
-  const auto mask = g.eligibility({}, outside);
-  std::vector<Int128> bal(n, 0);
-  for (std::size_t e = 0; e < m; ++e) {
-    bal[static_cast<std::size_t>(g.edge_sources()[e])] -= flow[e];
-    bal[static_cast<std::size_t>(g.edge_destinations()[e])] += flow[e];
-  }
-  const Int128 moment = flow_cost(g, flow);
-  const std::vector<NodeId> src(plan.sources.begin(), plan.sources.end());
-  const std::vector<NodeId> dsts(plan.destinations.begin(), plan.destinations.end());
-  Int128 inflow = 0;
-  for (std::size_t v = 0; v < n; ++v) {
-    if (static_cast<NodeId>(v) == plan.sources.front()) continue;
-    if (std::find(dsts.begin(), dsts.end(), static_cast<NodeId>(v)) != dsts.end()) {
-      inflow += bal[v];
-    } else if (bal[v] != 0) {
-      fails.push_back("conservation at node " + std::to_string(v));
-    }
-  }
-  if (-bal[static_cast<std::size_t>(plan.sources.front())] != step.admitted || inflow != step.admitted) {
-    fails.push_back("value differs from supply or inflow");
-  }
-  // The optimum's cost at every value up to F_max, as breakpoints.
-  std::vector<std::pair<Amount, Int128>> optimum;
-  if (tier_a) {
-    for (const auto& [x, c] : exhaustive_costs(g, view, src, dsts, &mask)) optimum.emplace_back(x, c);
-  } else {
-    optimum = independent_curve(g, view, src, dsts, &mask);
-  }
-  const Amount fmax = optimum.back().first;
-  const Amount top = request.has_value() ? std::min(total + *request, fmax) : fmax;
-  if (step.admitted != top) fails.push_back("placed differs from min(cap, F_max)");
-  if (step.admitted >= 0 && step.admitted <= fmax && moment != curve_at(optimum, step.admitted)) {
-    fails.push_back("cost differs from the optimum");
-  }
-  const auto pts = curve_shape_clauses(step.marginal_cost_curve, step.admitted, moment, fails);
-  curve_optimum_clause(pts, optimum, std::min(step.admitted, fmax), "the optimum", fails);
-  return fails;
-}
-
-} // namespace
-
-TEST(MaxFlowKernel, StepCertificateRejectsMutatedSteps) {
-  // The step certificate is not vacuous: each clean step certifies, then each mutation is rejected
-  // by the clause it breaks.
-  using Fails = std::vector<std::string>;
-  auto mutated = [](const Graph& g, const PreparedRoute& plan, std::optional<Amount> request,
-                    const std::function<void(LosslessStep&)>& mutate) {
-    const auto vm = on_members(plan, caps(g));
-    auto step = first_step(g, plan, caps(g), request);
-    EXPECT_TRUE(certify_step(g, plan, vm, 0, request, step, true).empty());
-    mutate(step);
-    return certify_step(g, plan, vm, 0, request, step, true);
-  };
-  // The chain 0 -> 1 -> 2 of capacity 2: two units, members in chain order.
-  const auto chain = make_graph(3, {{0, 1, 2, 1}, {1, 2, 2, 1}});
-  const auto cp = plan_of(chain, RouteAllocation::Optimized, 0, {2}, all_ids(chain), caps(chain));
-  ASSERT_EQ(cp.forwarding_edges.size(), 2U);
-  EXPECT_EQ(mutated(chain, cp, std::nullopt, [](auto& s) { s.edge_flows.push_back(0); }), Fails {"shape"});
-  EXPECT_TRUE(has_failure(mutated(chain, cp, std::nullopt, [](auto& s) { s.edge_flows = {3, 3}; }), "feasibility at member 0"));
-  EXPECT_TRUE(has_failure(mutated(chain, cp, std::nullopt, [](auto& s) { s.edge_flows = {-1, -1}; }), "feasibility at member 0"));
-  // One unit less into node 1 lowers the supply only, one unit less out of it the inflow only.
-  for (const std::size_t k : {std::size_t {0}, std::size_t {1}}) {
-    const auto f = mutated(chain, cp, std::nullopt, [&](auto& s) { s.edge_flows[k] = 1; });
-    EXPECT_TRUE(has_failure(f, "conservation at node 1")) << k;
-    EXPECT_TRUE(has_failure(f, "value differs from supply or inflow")) << k;
-  }
-  // A capped step (request 1) certified as if the request were 2: the value alone differs.
-  {
-    const auto vm = on_members(cp, caps(chain));
-    const auto step = first_step(chain, cp, caps(chain), 1);
-    EXPECT_EQ(certify_step(chain, cp, vm, 0, 2, step, true), Fails {"placed differs from min(cap, F_max)"});
-  }
-  // Parallel members of cost 1 and 3 and capacity 1: the first unit on the cheap one, the curve
-  // [(1, 1), (3, 1)] for both. The unit moved to the costly member keeps the value; the curve's
-  // last volume raised breaks its total; its first cost raised breaks its moment; the one tier
-  // [(2, 2)] keeps the total and the moment but not the optimum at 1.
-  const auto par = make_graph(2, {{0, 1, 1, 1}, {0, 1, 1, 3}});
-  const auto pp = plan_of(par, RouteAllocation::Optimized, 0, {1}, all_ids(par), caps(par));
-  ASSERT_EQ(pp.forwarding_edges.size(), 2U);
-  EXPECT_TRUE(has_failure(mutated(par, pp, 1, [](auto& s) { s.edge_flows = {0, 1}; }), "cost differs from the optimum"));
-  EXPECT_TRUE(has_failure(mutated(par, pp, std::nullopt, [](auto& s) { s.marginal_cost_curve = {{1, 1}, {3, 2}}; }),
-                          "curve total differs from placed"));
-  EXPECT_TRUE(has_failure(mutated(par, pp, std::nullopt, [](auto& s) { s.marginal_cost_curve = {{2, 1}, {3, 1}}; }),
-                          "curve moment differs from the flow cost"));
-  EXPECT_EQ(mutated(par, pp, std::nullopt, [](auto& s) { s.marginal_cost_curve = {{2, 2}}; }),
-            Fails {"curve differs from the optimum at 1"});
-  // The curve's shape, each the only failure: an entry of volume 0 between the two (total, moment
-  // and the curve's values unchanged), and the chain's one tier [(2, 2)] split in two at its cost.
-  EXPECT_EQ(mutated(par, pp, std::nullopt, [](auto& s) { s.marginal_cost_curve = {{1, 1}, {2, 0}, {3, 1}}; }),
-            Fails {"curve volume not positive"});
-  EXPECT_EQ(mutated(chain, cp, std::nullopt, [](auto& s) { s.marginal_cost_curve = {{2, 1}, {2, 1}}; }),
-            Fails {"curve costs not strictly increasing"});
-  // The guard of the replacement solve: a committed total beyond what the view can carry.
-  const auto vm = on_members(pp, caps(par));
-  const std::vector<Amount> own(pp.forwarding_edges.size(), 0);
-  try {
-    (void)lossless_step(par, pp, 3, vm, own, 1);
-    ADD_FAILURE() << "no exception";
-  } catch (const std::logic_error& e) {
-    EXPECT_STREQ(e.what(), "Optimized kernel: the replacement solve lost committed flow");
-  }
-}
-
-TEST(MaxFlowKernel, RandomStepsAreCertifiedOnTheirSubset) {
-  // Random DAG plans (nonuniform costs, parallel edges, a route that is a random subset of the
-  // edges, one or two destinations), each placed in three steps on a changing view V = W + own (W
-  // drawn below the capacity left beside the flow's own allocation) with a request of +inf, 0 or
-  // a few units: every step certified on its member subset (the other edges masked), the small
-  // graphs against the exhaustive optimum, the others against the independent solver. The same
-  // steps with every cost multiplied give the same allocations and the curve's costs multiplied.
-  std::mt19937_64 rng(5005);
-  int positive = 0;   // steps that place
-  int capped = 0;     // steps stopped by their request below the maximum
-  int cancelled = 0;  // steps that take back part of the flow's own allocation
-  for (int trial = 0; trial < 400; ++trial) {
-    const bool tier_a = trial % 2 == 0;
-    const int n = tier_a ? 3 + static_cast<int>(rng() % 4) : 6 + static_cast<int>(rng() % 9);
-    const int m = tier_a ? 3 + static_cast<int>(rng() % 5) : n + static_cast<int>(rng() % (2 * n));
-    const Amount max_cap = tier_a ? 2 : 40;
-    const Cost max_edge_cost = tier_a ? 6 : 40;
-    const auto edges = random_dag_edges(
-        rng, n, m, [&] { return static_cast<Amount>(rng() % static_cast<std::uint64_t>(max_cap + 1)); },
-        [&] { return static_cast<Cost>(1 + rng() % static_cast<std::uint64_t>(max_edge_cost)); });
-    const auto g = make_graph(n, edges);
-    auto scaled_edges = edges;
-    for (auto& e : scaled_edges) e.cost *= 1000003;
-    const auto scaled = make_graph(n, scaled_edges);
-    std::vector<EdgeId> route;
-    for (EdgeId e = 0; e < g.num_edges(); ++e) {
-      if (rng() % 5 != 0) route.push_back(e);
-    }
-    std::vector<NodeId> dsts = {n - 1};
-    if (rng() % 2 == 0) dsts.insert(dsts.begin(), n - 2);
-    const auto plan = plan_of(g, RouteAllocation::Optimized, 0, dsts, route, caps(g));
-    ASSERT_EQ(plan.forwarding_edges, walk_members(g, route, 0, dsts)) << "trial " << trial;  // every route edge on a walk
-    const auto scaled_plan = plan_of(scaled, RouteAllocation::Optimized, 0, dsts, route, caps(scaled));
-    ASSERT_EQ(scaled_plan.forwarding_edges, plan.forwarding_edges) << "trial " << trial;  // scaling keeps the EdgeId order
-    std::vector<Amount> own(plan.forwarding_edges.size(), 0);
-    Amount total = 0;
-    for (int k = 0; k < 3; ++k) {
-      std::vector<Amount> vm(plan.forwarding_edges.size());
-      for (std::size_t j = 0; j < vm.size(); ++j) {
-        const Amount cap = g.edge_capacity_units()[static_cast<std::size_t>(plan.forwarding_edges[j])];
-        vm[j] = own[j] + static_cast<Amount>(rng() % static_cast<std::uint64_t>(cap - own[j] + 1));
-      }
-      const std::uint64_t kind = rng() % 4;
-      const std::optional<Amount> request =
-          kind == 0 ? std::nullopt : std::optional<Amount>(static_cast<Amount>(kind == 1 ? 0 : rng() % 4));
-      const auto step = lossless_step(g, plan, total, vm, own, request);
-      const std::string where = "trial " + std::to_string(trial) + " step " + std::to_string(k);
-      const auto fails = certify_step(g, plan, vm, total, request, step, tier_a);
-      ASSERT_TRUE(fails.empty()) << where << ": " << fails.front();
-      const auto other = lossless_step(scaled, scaled_plan, total, vm, own, request);
-      ASSERT_EQ(other.admitted, step.admitted) << where;
-      ASSERT_EQ(other.edge_flows, step.edge_flows) << where;
-      ASSERT_EQ(other.marginal_cost_curve.size(), step.marginal_cost_curve.size()) << where;
-      for (std::size_t i = 0; i < step.marginal_cost_curve.size(); ++i) {
-        ASSERT_EQ(other.marginal_cost_curve[i].first, step.marginal_cost_curve[i].first * 1000003) << where;
-        ASSERT_EQ(other.marginal_cost_curve[i].second, step.marginal_cost_curve[i].second) << where;
-      }
-      positive += step.admitted > 0 ? 1 : 0;
-      const Amount fmax = independent_curve(g, [&] {
-        std::vector<Amount> view(static_cast<std::size_t>(g.num_edges()), 0);
-        for (std::size_t j = 0; j < vm.size(); ++j) view[static_cast<std::size_t>(plan.forwarding_edges[j])] = vm[j];
-        return view;
-      }(), std::vector<NodeId> {0}, dsts, nullptr).back().first;
-      capped += request.has_value() && step.admitted < fmax ? 1 : 0;
-      bool took_back = false;
-      for (std::size_t j = 0; j < own.size(); ++j) took_back = took_back || step.edge_flows[j] < own[j];
-      cancelled += took_back ? 1 : 0;
-      own = step.edge_flows;
-      total = step.admitted;
-    }
-  }
-  EXPECT_GT(positive, 240);
-  EXPECT_GT(capped, 150);
-  EXPECT_GT(cancelled, 30);
-}
-
 TEST(WeightedKernel, CapacityVersusResidualMembershipAfterOccupancy) {
   // Weighted membership by capacity versus a residual snapshot after occupancy: parallel links
   // [4, 4], another owner holds 3 on link 0 (residual [1, 4]).
@@ -1308,7 +1024,7 @@ TEST(WeightedKernel, CapacityVersusResidualMembershipAfterOccupancy) {
   auto run = [&](WeightBasis prio, std::vector<Amount> residual_in, Amount request) {
     const auto w = to_ids(g, residual_in);
     const auto plan = plan_of(g, RouteAllocation::Weighted, 0, {1}, all_ids(g), w, prio);
-    auto s = first_step(g, plan, w, request);
+    auto s = first_step(plan, w, request);
     return std::make_pair(s.admitted, dense_input(g, plan, s.edge_flows));
   };
   EXPECT_EQ(run(WeightBasis::ResidualSnapshot, {1, 4}, 5), std::make_pair(Amount {5}, std::vector<Amount>{1, 4}));
@@ -1319,12 +1035,12 @@ TEST(WeightedKernel, CapacityVersusResidualMembershipAfterOccupancy) {
   const auto held = to_ids(g, std::vector<Amount> {0, 4});
   const auto free = to_ids(g, std::vector<Amount> {4, 4});
   const auto pc = plan_of(g, RouteAllocation::Weighted, 0, {1}, all_ids(g), held, WeightBasis::Capacity);
-  auto c = lossless_step(g, pc, 0, on_members(pc, free), std::vector<Amount>(pc.forwarding_edges.size(), 0), 5);
+  auto c = lossless_step(pc, 0, on_members(pc, free), std::vector<Amount>(pc.forwarding_edges.size(), 0), 5);
   EXPECT_EQ(dense_input(g, pc, c.edge_flows), (std::vector<Amount>{3, 2}));
   const auto pr = plan_of(g, RouteAllocation::Weighted, 0, {1}, all_ids(g), held, WeightBasis::ResidualSnapshot);
-  auto first = first_step(g, pr, held, 5);
+  auto first = first_step(pr, held, 5);
   // After the release V = W + own on the one member is its capacity 4.
-  auto again = lossless_step(g, pr, first.admitted, on_members(pr, free), first.edge_flows, 5);
+  auto again = lossless_step(pr, first.admitted, on_members(pr, free), first.edge_flows, 5);
   EXPECT_EQ(again.admitted, 4);  // the plan has one member; weights never renormalised
 }
 
@@ -1335,9 +1051,9 @@ TEST(WeightedKernel, OnePlusFiveEqualsSix) {
   const auto plan = plan_of(g, RouteAllocation::Weighted, 0, {2}, all_ids(g), caps(g), WeightBasis::Capacity);
   const auto vm = on_members(plan, caps(g));
   std::vector<Amount> zero(plan.forwarding_edges.size(), 0);
-  auto a = lossless_step(g, plan, 0, vm, zero, 1);
-  auto b = lossless_step(g, plan, a.admitted, vm, a.edge_flows, 5);
-  auto c = lossless_step(g, plan, 0, vm, zero, 6);
+  auto a = lossless_step(plan, 0, vm, zero, 1);
+  auto b = lossless_step(plan, a.admitted, vm, a.edge_flows, 5);
+  auto c = lossless_step(plan, 0, vm, zero, 6);
   // By hand, D'Hondt over the source weights [2, 6] (each unit to the larger w / (a + 1), ties to
   // the lower index): the first unit to 0 -> 2; 6 units give [1, 5] (the third unit is the tie
   // 2 / 1 = 6 / 3), and node 1 passes its unit on over 1 -> 2. Every amount fits its capacity,

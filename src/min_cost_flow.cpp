@@ -155,7 +155,7 @@ std::int32_t network_vertices(std::int32_t num_nodes, std::size_t num_edges, std
   return num_nodes + 2;
 }
 
-// The residual network of one solve (Network: real vertices 0..N-1, s* = N, t* = N + 1) with
+// The residual network of one solve (ResidualNetwork: real vertices 0..N-1, s* = N, t* = N + 1) with
 // its flow, potentials and scratch; also the working storage of a deletion re-solve.
 class MinCostFlowSolver {
 public:
@@ -169,7 +169,7 @@ public:
   }
 
   MinCostFlowSolver() = default;
-  // Never copied or moved: net_ may point at own_.
+  // Never copied or moved: network_ may point at owned_network_.
   MinCostFlowSolver(const MinCostFlowSolver&) = delete;
   MinCostFlowSolver& operator=(const MinCostFlowSolver&) = delete;
 
@@ -424,15 +424,15 @@ private:
     }
   }
 
-  // Dijkstra on reduced costs from origin_ to completion over the residual network. Returns
-  // whether target_ was reached; settled_ lists the vertices it settled.
+  // Dijkstra on reduced costs from search_source_ to completion over the residual network. Returns
+  // whether search_target_ was reached; settled_ lists the vertices it settled.
   template <class P>
   bool dijkstra(MinCostFlowCounters& c) {
     auto& pi = potentials<P>();
     auto& dist = distances<P>();
     auto& queue = heap<P>();
     // The network is never resized during a search: raw pointers keep the compiler from
-    // reloading net_ and the vector bases around every store into the solver's own buffers.
+    // reloading network_ and the vector bases around every store into the solver's own buffers.
     const std::int32_t* const off = network_->arc_offsets.data();
     const std::int32_t* const arc_destinations = network_->arc_destinations.data();
     const Cost* const arc_cost = network_->arc_cost.data();
@@ -510,7 +510,7 @@ private:
     for (std::size_t v = 0; v < repair_potentials_.size(); ++v) repair_potentials_[v] += repair_seen_generations_[v] == repair_generation_ ? repair_distances_[v] : top;
   }
 
-  // The Dinic phases from origin_ to target_ over the admissible subgraph (positive residual,
+  // The Dinic phases from search_source_ to search_target_ over the admissible subgraph (positive residual,
   // zero reduced cost) until no admissible path remains or `limit` is reached; on_push(total)
   // after every push.
   template <class P, class OnPush>
@@ -536,8 +536,8 @@ private:
   }
 
   // BFS levels over admissible arcs (positive residual, zero reduced cost). Counts one phase.
-  // Only vertices that can reach target_ over admissible arcs are levelled: every vertex on a
-  // shortest admissible path from origin_ to such a vertex reaches the target too, so their
+  // Only vertices that can reach search_target_ over admissible arcs are levelled: every vertex on a
+  // shortest admissible path from search_source_ to such a vertex reaches the target too, so their
   // levels equal the levels of a full BFS, and the other vertices are dead ends that the DFS
   // would only enter and leave. The forward search also stops once the target's level is
   // complete. The augmenting paths are therefore the ones a full BFS gives.
@@ -601,7 +601,7 @@ private:
     return level_[t] >= 0;
   }
 
-  // One augmenting path origin_ -> target_ in the level graph into path_ (current-arc pointers
+  // One augmenting path search_source_ -> search_target_ in the level graph into path_ (current-arc pointers
   // kept: an arc that is pushed through stays current; a dead end advances its parent's pointer).
   template <class P>
   bool find_path(MinCostFlowCounters& c) {
@@ -717,7 +717,7 @@ private:
 #endif
 
   ResidualNetwork owned_network_ {};              // a solve from zero's network (build())
-  const ResidualNetwork* network_ {&owned_network_};  // the network the searches read: own_, or a captured one (load())
+  const ResidualNetwork* network_ {&owned_network_};  // the network the searches read: owned_network_, or a captured one (load())
   std::int32_t num_vertices_ {0};
   std::int32_t virtual_source_ {0};
   std::int32_t virtual_sink_ {0};

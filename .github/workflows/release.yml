@@ -78,13 +78,11 @@ jobs:
           CIBW_ARCHS: "${{ matrix.cibw_archs }}"
           # The Python suite on every built wheel (the shipped configuration, hooks off; the
           # free-threaded cp314t wheels included): exactly the tests that need a hook skip.
-          # Windows runs pytest without dev/run-checks.sh, after the same check of the hook
-          # setting: the wheel lacks the private hooks.
+          # Windows runs the same guard as dev/run-checks.sh directly (no shell): the wheel lacks
+          # the private hooks and exactly the hook-only tests skip.
           CIBW_TEST_REQUIRES: "pytest==9.1.1"
           CIBW_TEST_COMMAND: "PYTHON=python bash {project}/dev/run-checks.sh pytest off -p no:cacheprovider"
-          CIBW_TEST_COMMAND_WINDOWS: >-
-            python -c "import sys, _netgraph_core as m; sys.exit('the wheel carries the private hooks' if hasattr(m, '_fail_native_allocation') else 0)"
-            && python -m pytest {project}/tests/py -p no:cacheprovider
+          CIBW_TEST_COMMAND_WINDOWS: "python {project}/dev/pytest_guard.py off {project}/tests/py -p no:cacheprovider"
           CIBW_BEFORE_ALL_LINUX: "yum install -y libatomic || (apt-get update && apt-get install -y libatomic1) || apk add libatomic"
 
       - uses: actions/upload-artifact@v4

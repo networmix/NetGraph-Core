@@ -786,11 +786,25 @@ def test_count_range_and_tunnel_limit():
     policy(graph(rows_), list(range(1000)), 1000, 10000, up_to=True)
 
 
+@needs_hooks
+def test_traced_place_checks_the_operation_first():
+    p = policy(one10(), 0, 1, 2)
+    for v in (5, 0, -1, L62, 2**100):
+        with pytest.raises(
+            ValueError,
+            match=exact(
+                "CentralizedTE with tunnel_count does not support incremental placement"
+            ),
+        ):
+            p._place_traced(v)
+
+
 def test_operations_and_design_validation():
     # The operations of T2 and the design's domain, with their texts.
     g = one10()
     p = policy(g, 0, 1, 2)
-    for v in (5, 0):
+    # The operation comes before the offer: also for an offer outside its domain.
+    for v in (5, 0, -1, L62, 2**100):
         with pytest.raises(
             ValueError,
             match=exact(
@@ -1671,7 +1685,7 @@ for k in range(400):
     if not hit:
         assert error is None and repr(value) == expected, (k, error, value)
         break
-    assert value is None and isinstance(error, (MemoryError, RuntimeError)), (k, error)
+    assert value is None and type(error) is MemoryError, (k, error)
 else:
     raise SystemExit("never completed")
 print("failures", k)

@@ -267,7 +267,7 @@ def test_the_python_allocation_sweep_rejects_a_wrong_call():
         try:
             return ngc.spf(g, 0, o)
         except MemoryError:
-            raise LookupError("replaced") from None
+            raise RuntimeError("replaced") from None
 
     def changing():
         log = []
@@ -350,7 +350,7 @@ def test_the_python_allocation_sweep_rejects_a_wrong_call():
         (lambda: (absorbs, (opts(),), list), "assert value is None, (where, value)"),
         (
             lambda: (replaces, (opts(),), list),
-            "assert isinstance(error, (MemoryError, RuntimeError)), (where, repr(error))",
+            "assert type(error) is MemoryError, (where, repr(error))",
         ),
         (changing, "assert snapshot() == before, where"),
         (raising(), "assert error is None, (where, repr(error))"),

@@ -19,7 +19,6 @@
 #include <string>
 
 #include "netgraph/core/detail/enum_domain.hpp"
-#include "netgraph/core/detail/min_cost_flow.hpp"
 #include "netgraph/core/detail/int128.hpp"
 #include "netgraph/core/detail/route_builders.hpp"
 
@@ -85,6 +84,16 @@ void highest_averages(Amount total, std::span<const Amount> weights, std::span<A
     ++out[heap.back()];
     std::push_heap(heap.begin(), heap.end(), later);
   }
+}
+
+void round_robin_increments(const Counter128& total, Amount v, std::span<Amount> out) noexcept {
+  const auto k = static_cast<std::uint64_t>(out.size());
+  if (k == 0) return;
+  const std::uint64_t r = mod_u128(U128 {total.hi, total.lo}, k);
+  const std::uint64_t t = static_cast<std::uint64_t>(v) + r;
+  const auto base = static_cast<Amount>(t / k);
+  const std::uint64_t extra = t % k;
+  for (std::size_t i = 0; i < out.size(); ++i) out[i] = base + (i < extra ? 1 : 0) - (i < r ? 1 : 0);
 }
 
 // ---------------------------------------------------------------- plans
@@ -230,7 +239,7 @@ DagScratch& dag_scratch() {
   return s;
 }
 
-// Build plan.members from the DAG's incoming-edge lists: keep edges accepted by keep(e) that
+// Build plan.forwarding_edges from the DAG's incoming-edge lists: keep edges accepted by keep(e) that
 // lie on a walk from a root to a destination; exclude edges leaving destinations. No node
 // renumbering, extra arc arrays or adjacency offsets are needed. A backward DFS from destinations
 // lists each node after its parents (postorder, also a topological order here).
@@ -1028,21 +1037,9 @@ LosslessBound max_lossless_offer(const PreparedRoute& plan, std::span<const Amou
   return out;
 }
 
-LosslessStep lossless_step(const Graph& graph, const PreparedRoute& plan, Amount total,
-                           std::span<const Amount> view_m, std::span<const Amount> own_m,
-                           std::optional<Amount> request) {
+LosslessStep lossless_step(const PreparedRoute& plan, Amount total, std::span<const Amount> view_m,
+                           std::span<const Amount> own_m, std::optional<Amount> request) {
   LosslessStep out;
-  if (plan.allocation == RouteAllocation::Optimized) {
-    // A fresh solve on the replacement view (own_m is part of view_m, so the flow's own
-    // allocation is cancellable; other owners are not in the view).
-    const std::optional<Amount> cap = request.has_value() ? std::optional<Amount>(total + *request) : std::nullopt;
-    auto r = solve_subset(graph, plan.forwarding_edges, view_m, plan.sources, plan.destinations, cap);
-    if (r.flow_value < total) throw std::logic_error("Optimized kernel: the replacement solve lost committed flow");
-    out.admitted = r.flow_value;
-    out.edge_flows = std::move(r.edge_flows);
-    out.marginal_cost_curve = std::move(r.marginal_cost_curve);
-    return out;
-  }
   if (plan.forwarding_edges.empty()) {
     out.edge_flows.assign(own_m.begin(), own_m.end());
     out.admitted = total;
@@ -1061,7 +1058,7 @@ LosslessStep lossless_step(const Graph& graph, const PreparedRoute& plan, Amount
     return out;
   }
   // T_max in [total, target - 1]: alloc(total) = own_m fits, alloc(target) does not. Every
-  // fitting probe leaves its allocation in out.alloc, so a result above total needs no further
+  // fitting probe leaves its allocation in out.edge_flows, so a result above total needs no further
   // evaluation.
   auto& probe = probe_scratch(plan.forwarding_edges.size());
   const Amount lo = largest_fit(plan, view_m, total, target, probe, &out.edge_flows, out.probes);

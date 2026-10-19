@@ -378,7 +378,7 @@ def test_a_flow_id_read_passes_an_allocation_failure_through():
                 assert str(error) == f"FlowId ({uid}, 0) is retired or unknown"
                 break
             failures += 1
-            assert isinstance(error, (MemoryError, RuntimeError)), (k, repr(error))
+            assert type(error) is MemoryError, (k, repr(error))
         else:
             pytest.fail("the read never completed")
         assert failures > 0

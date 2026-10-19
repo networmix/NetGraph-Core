@@ -11,7 +11,7 @@
   - Graph accessors return read-only NumPy views that keep the graph alive (no per-call copy).
   - Integer inputs (capacities, costs, ids, views, caps) must be integers: Python ints, NumPy
     integer scalars or integer arrays; floats and bools are rejected with ValueError, never
-    truncated. Values are read without narrowing (WideInts) and validated in the C++
+    truncated. Values are read without narrowing and validated in the C++
     constructors' order before any conversion to the C++ types. Physical values
     enter only through to_units; the resolution is validated before anything else.
   - std::invalid_argument from Core maps to ValueError; enumeration values outside their

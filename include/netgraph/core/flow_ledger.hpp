@@ -96,8 +96,8 @@ private:
   std::map<std::int64_t, std::vector<std::int64_t>> policy_record_counters_ {};  // owner -> live ids, ascending
   std::int64_t next_record_counter_ {0};
   std::int64_t next_policy_id_ {0};
-  // Every owner since the last reset: true while bound, false once orphaned (release() flips
-  // the flag, so it never allocates).
+  // The bound owners (true) and the orphaned owners of live records (false), since the last
+  // reset: release() flips the flag, or erases an owner without records, so it never allocates.
   std::map<std::int64_t, bool> policy_bindings_ {};
   std::size_t num_bound_policies_ {0};
 };

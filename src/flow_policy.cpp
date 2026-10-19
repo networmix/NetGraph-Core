@@ -181,21 +181,6 @@ void align(std::span<const EdgeId> members, const std::vector<std::pair<EdgeId, 
   }
 }
 
-// Round robin of a cumulative 128-bit amount (the request, or a Lossy demand's offer): the
-// per-source increment of the share when the cumulative amount goes from R to R + v over k
-// sources, offer(i, increment) for i in [0, k). It depends only on r = R mod k:
-// floor((r + v) / k) + [i < (r + v) mod k] - [i < r].
-template <class Offer>
-void cumulative_offers(const Counter128& requested, Amount v, std::size_t k, Offer&& offer) {
-  const auto kk = static_cast<std::uint64_t>(k);
-  const std::uint64_t two64 = ((std::numeric_limits<std::uint64_t>::max() % kk) + 1) % kk;
-  const std::uint64_t r = ((requested.hi % kk) * two64 % kk + requested.lo % kk) % kk;
-  const auto total = static_cast<std::uint64_t>(v) + r;
-  const auto base = static_cast<Amount>(total / kk);
-  const std::uint64_t extra = total % kk;
-  for (std::size_t i = 0; i < k; ++i) offer(i, base + (i < extra ? 1 : 0) - (i < r ? 1 : 0));
-}
-
 // A ShortestPaths preparation's inputs: the policy, its graph and the call's working residual.
 struct PolicyCallContext {
   const PolicyEngine& engine;
@@ -912,7 +897,7 @@ PendingPolicyUpdate place_pooled(const PolicyEngine& pe, const PolicyEpoch& cur,
     std::vector<Amount> view;
     W.gather(members, view);
     for (std::size_t m = 0; m < members.size(); ++m) view[m] += own[m];
-    auto step = lossless_step(g, plan, admitted, view, own, v);
+    auto step = lossless_step(plan, admitted, view, own, v);
     call_delivered = step.admitted - admitted;
     if (per_source == nullptr) {
       // One source holds the whole admitted allocation (the attribution's degenerate form): it
@@ -940,7 +925,7 @@ PendingPolicyUpdate place_pooled(const PolicyEngine& pe, const PolicyEpoch& cur,
     // The new round-robin injections of the offer (or the first-hop experiment) on W.
     Injection in;
     if (v.has_value()) {
-      cumulative_offers(cur.offered, *v, k, [&](std::size_t i, Amount x) { inject[i] = x; });
+      round_robin_increments(cur.offered, *v, inject);
       in.per_root = inject;
     } else {
       in.first_hop = true;
@@ -1180,7 +1165,7 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
   } else {
     sol = solve(pe, support, V, cap, {});
   }
-  if (sol.flow_value < P) throw std::logic_error("controller: a call reduced placed_demand()");
+  if (sol.flow_value < P) throw std::logic_error("controller: a call reduced delivered()");
   // The program: each source's supply cut into paths; each source's share is the sum of its
   // paths.
   // The solved flows move into the decomposition (a trace reads them afterwards: a copy).
@@ -1332,7 +1317,6 @@ bool view_active(const ForwardingView& v) {
 PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& cur, ServiceCapacityWorkspace& W, const PolicyCall& rq,
                        const ForwardingProgram* before_program, const ForwardingView& view, bool active, bool holds,
                        std::shared_ptr<const TunnelPlan> plan) {
-  const auto& g = *pe.graph;
   const auto v = rq.offer;
   const ProgramData& p = *view.data;
   const std::size_t n = p.entries.size();
@@ -1357,7 +1341,7 @@ PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& c
     }
     if (!created) W.release_records(before);
     const std::optional<Amount> hi = v.has_value() ? std::optional<Amount>(admitted + *v) : std::nullopt;
-    flow = detail::lossless(g, view, available_capacity_reader(W), admitted, hi);
+    flow = detail::lossless(view, available_capacity_reader(W), admitted, hi);
     call_delivered = flow.admitted - admitted;
   } else {
     std::vector<Amount> inject(k, 0);
@@ -1366,7 +1350,7 @@ PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& c
     } else {
       source_offer_increments(view, cur.offered, *v, inject);
     }
-    flow = detail::lossy(g, view, available_capacity_reader(W), inject);
+    flow = detail::lossy(view, available_capacity_reader(W), inject);
     call_delivered = flow.delivered;
     // The whole offer is sent: what no head receives (every remaining captured weight 0) is lost at
     // the sources, outside every row.
@@ -1564,7 +1548,7 @@ PendingPolicyUpdate place_t2(const PolicyEngine& pe, const PolicyEpoch& cur, Ser
   const auto program = distributed_te_program(g, pe.sources, pe.destinations, pe.reachable_sources, std::move(lay.tunnels),
                                       pe.excluded_nodes, pe.excluded_edges);
   const ForwardingView view = make_forwarding_view(g, program, nullptr, pe.allowed_destinations, nullptr, true);
-  const Amount F = detail::lossless(g, view, available_capacity_reader(W), 0, std::nullopt).admitted;
+  const Amount F = detail::lossless(view, available_capacity_reader(W), 0, std::nullopt).admitted;
   return forward_entries(pe, cur, W, rq, before_program, view, view_active(view), false,
                          std::make_shared<const TunnelPlan>(t2_plan(pe, D, lay, program->tunnels().size(), F)));
 }
@@ -1582,11 +1566,11 @@ PendingPolicyUpdate forward_installed(const PolicyEngine& pe, ServiceCapacityWor
   const bool lossy = pe.config.admission == Admission::Lossy;
   ProgramFlow flow;
   if (!lossy) {
-    flow = detail::lossless(g, view, available_capacity_reader(W), 0, v);
+    flow = detail::lossless(view, available_capacity_reader(W), 0, v);
   } else {
     std::vector<Amount> inject(k, 0);
     source_shares(view, *v, inject);
-    flow = detail::lossy(g, view, available_capacity_reader(W), inject);
+    flow = detail::lossy(view, available_capacity_reader(W), inject);
   }
   PendingPolicyUpdate s;
   s.next_epoch = fresh_epoch(pe, true);
@@ -1962,7 +1946,7 @@ FlowPolicy::~FlowPolicy() { LedgerAccess::release(engine_->ledger, engine_->poli
 namespace detail {
 namespace {
 
-// The program a computing model installs for an empty roster (R22): an empty one. Pinned never
+// The program a computing model installs for an empty roster: an empty one. Pinned never
 // comes here: its forwarding with no head is place_pinned's.
 std::shared_ptr<const ForwardingProgram> empty_roster_program(const PolicyEngine& pe) {
   return empty_program(pe.graph->uid(), pe.sources, pe.destinations, uses_optimized_flow(pe) && pe.source_allocation == SourceAllocation::Optimized);
@@ -2037,6 +2021,10 @@ PendingPolicyUpdate empty_roster(const PolicyEngine& pe, const PolicyEpoch& cur,
 
 } // namespace
 
+void check_place_operation(const PolicyEngine& pe) {
+  if (tunnel_model(pe)) invalid(std::string(model_name(pe.config.routing)) + " does not support incremental placement");
+}
+
 void check_forward_operation(const PolicyEngine& pe) {
   if (is<Pinned>(pe)) invalid("Pinned forwards with replace");
   if (!pe.epoch.program) invalid("forward requires an installed program");
@@ -2051,9 +2039,7 @@ namespace {
 void check_call(const PolicyEngine& pe, const PolicyCall& rq) {
   const bool lossy = pe.config.admission == Admission::Lossy;
   const bool t1 = is<DistributedTE>(pe);
-  if (rq.operation == PolicyOperation::Place && tunnel_model(pe)) {
-    invalid(std::string(model_name(pe.config.routing)) + " does not support incremental placement");
-  }
+  if (rq.operation == PolicyOperation::Place) check_place_operation(pe);
   if (rq.operation == PolicyOperation::Forward) check_forward_operation(pe);
   if (rq.offer.has_value() && (*rq.offer < 0 || *rq.offer >= kDomainLimit)) {
     invalid("offer must be an integer in [0, 2^62) or permitted +inf");
@@ -2137,9 +2123,10 @@ void publish(PolicyEngine& pe, PendingPolicyUpdate& s, bool full) {
   pe.epoch = std::move(s.next_epoch);
 }
 
-// `before_publish` (optional) runs once the call's result and trace are final and before anything is
-// published (the ledger commit, the epoch state): an exception from it aborts the call with
-// nothing changed (the Python binding builds its result objects there).
+// A publishing call (place, replace, forward; evaluate computes without it). `before_publish`
+// (optional) runs once the call's result and trace are final and before anything is published (the
+// ledger commit, the epoch state): an exception from it aborts the call with nothing changed (the
+// Python binding builds its result objects there).
 PlacementResult run_call(PolicyEngine& pe, const PolicyCall& rq, const std::function<void()>* before_publish) {
   check_call(pe, rq);
   if (rq.operation == PolicyOperation::Place && rq.offer.has_value() && *rq.offer == 0) {
@@ -2149,7 +2136,6 @@ PlacementResult run_call(PolicyEngine& pe, const PolicyCall& rq, const std::func
   }
   PendingPolicyUpdate s = compute(pe, rq);
   if (before_publish != nullptr && *before_publish) (*before_publish)();
-  if (rq.operation == PolicyOperation::Evaluate) return std::move(s.result);
   PlacementResult out = std::move(s.result);
   publish(pe, s, rq.is_full_offer());
   return out;

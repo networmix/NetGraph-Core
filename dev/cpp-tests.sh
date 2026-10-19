@@ -28,6 +28,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 EXPECTED_OFF_SKIPS="
 FlowCoreDeletion.CheckpointsEqualTheIterativeUpdate
 FlowCoreDeletion.RerunningTheFailedSearchAddsExactlyOneSearch
+ForwardingSize.TheCallChecksEachCountInOrder
 GraphLayout.CombinedKeyPassesOnlyBelowNTimesKEqualsE
 GraphLayout.HashAndFallbackBoundaryAt65536DistinctCosts
 GraphLayout.ProbeBudgetFallbackInCollectionAndGrowth

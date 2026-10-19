@@ -12,6 +12,7 @@
 #include "netgraph/core/route_structures.hpp"
 #include "integers.hpp"
 #include "registration.hpp"
+#include "values.hpp"
 
 namespace py = pybind11;
 
@@ -65,9 +66,12 @@ void register_path(py::module_& m) {
       })
       .def("__hash__",
            [](const Path& a) {
-             py::list hops;
-             for (const auto& hop : a.hops()) hops.append(py::tuple(py::cast(hop)));
-             return py::hash(py::make_tuple(a.graph_uid(), py::tuple(hops)));
+             const auto& path_hops = a.hops();
+             auto hops = py::reinterpret_steal<py::tuple>(checked(PyTuple_New(static_cast<Py_ssize_t>(path_hops.size()))).release());
+             for (std::size_t i = 0; i < path_hops.size(); ++i) {
+               PyTuple_SET_ITEM(hops.ptr(), static_cast<Py_ssize_t>(i), ints_tuple(path_hops[i]).release().ptr());
+             }
+             return hash_int(objects_tuple({int_object(a.graph_uid()), hops}));
            })
       .def("__repr__", [](const Path& a) {
         return "Path(source=" + std::to_string(a.source()) + ", destination=" + std::to_string(a.destination()) +

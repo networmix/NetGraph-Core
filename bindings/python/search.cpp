@@ -180,7 +180,7 @@ void register_search(py::module_& m) {
         }
         slot->dag = object_from<PredecessorDAG>(std::move(result->dag));
         if (result->target_cost.has_value() && *result->target_cost != kUnreachable) {
-          slot->target_cost = py::int_(*result->target_cost);
+          slot->target_cost = int_object(*result->target_cost);
         }
         return std::move(obj);
       },

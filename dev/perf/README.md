@@ -316,10 +316,10 @@ failed.
 | `kernel` | `kernel.{proportional,eb,lossy}.clos`, `kernel.{proportional,eb}.grid`, `kernel.weighted.clos` | placements on fixed cost-only DAGs into one ledger |
 | `capacity` | `capacity.costonly_{eb,prop}.failures` | ShortestPaths capacity over 32 failure states x 8 pairs |
 | `maxflow` | `maxflow.exact.{totals,detailed}` | exact maximum flow over 8 failure states x 4 pairs |
-| `sensitivity` | `sens.exact`, `sens.policy_all_edges`, `sens.equal_global` | exact-model sensitivity; policy-model loss for every eligible edge; equal-source-allocation Global, every edge solved afresh |
+| `sensitivity` | `sens.exact`, `sens.policy_all_edges`, `sens.equal_global` | exact-model sensitivity; policy-model loss for every eligible edge; equal-source-allocation CentralizedTE, every edge solved afresh |
 | `pooled` | `pooled.{ecmp,lossy}.clos`, `pooled.from_dag.clos`, `pooled.from_dag_build.clos` | 8 demands of 8 pooled sources on one ledger, Lossless / Lossy above capacity; the same demands by Pinned over prebuilt `from_dag` programs, and building those programs |
-| `global` | `global.equal.random` | equal-source-allocation Global capacity, 2 demands of 4 sources |
-| `program` | `program.forward.global`, `program.replay.lossy`, `program.stale.lossy`, `program.replace.costonly` | forwarding programs: a Global program forwarded, replayed under failures (Lossy), stale under black holes, ShortestPaths re-prepared by replace |
+| `global` | `global.equal.random` | equal-source-allocation CentralizedTE capacity, 2 demands of 4 sources |
+| `program` | `program.forward.global`, `program.replay.lossy`, `program.stale.lossy`, `program.replace.costonly` | forwarding programs: a CentralizedTE program forwarded, replayed under failures (Lossy), stale under black holes, ShortestPaths re-prepared by replace |
 | `t1` | `t1.setup.fabric`, `t1.forward.fabric` | T1 with 16 tunnels per head, 12 demands on one ledger: the setup with its holds; the installed programs forwarded under 32 offers |
 | `t2` | `t2.exact16.headroom`, `t2.exact16.cost`, `t2.upto256.headroom`, `t2.size.mesh` | T2 on the same fabric and demands: 16 tunnels per head with and without `prefer_headroom`, up to 256 with it; 16 tunnels for 10 heads on a 500-node mesh (2000 links, 5/8 to 8/8 free), sizing-dominated |
 | `msd` | `msd.loop` | the maximum-supported-demand bracket and bisection with a per-series DAG cache |

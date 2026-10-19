@@ -37,15 +37,11 @@ jobs:
       - name: Run CI checks (lint + C++ tests with and without the hooks + Python tests)
         if: runner.os != 'Windows'
         run: make check-ci
-      # Windows runs pytest without dev/run-checks.sh, so this step checks the hook setting that
-      # script would: the editable build carries the private hooks (no test then skips). A step of
-      # its own: PowerShell does not stop at a failing command inside one step.
-      - name: Check the editable build carries the private hooks (Windows)
-        if: runner.os == 'Windows'
-        run: python -c "import sys, _netgraph_core as m; sys.exit(0 if hasattr(m, '_fail_native_allocation') else 'the editable build lacks the private hooks')"
+      # Windows runs the Python tests through the guard dev/run-checks.sh uses, without the shell
+      # script: the editable build must carry the private hooks and no test may skip.
       - name: Run Python tests (Windows)
         if: runner.os == 'Windows'
-        run: python -m pytest tests/py/ -v
+        run: python dev/pytest_guard.py on tests/py -v
       # The timing tool of dev/perf compiles against the library (its adapter uses the public
       # API and two private functions of the queue rule), and nothing else builds it: its own
       # tests, which compile its driver with this checkout's library, run on one job, so a

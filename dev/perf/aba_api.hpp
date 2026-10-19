@@ -523,7 +523,8 @@ inline Masks masks(const Graph& g, const std::vector<std::vector<int>>& states) 
 }
 
 // A status as a fixed code, so a digest does not move when the enum gains or reorders values:
-// Up 0, Failed 1, Blackholed 2 (the codes of every older Core), NoBandwidth 3, CostCeiling 4.
+// Up 0, Failed 1, Blackholed 2 (the codes of every older Core), InsufficientBandwidth 3,
+// CostCeilingExceeded 4.
 inline std::int64_t status_code(nc::TunnelStatus s) {
   switch (s) {
     case nc::TunnelStatus::Up: return 0;

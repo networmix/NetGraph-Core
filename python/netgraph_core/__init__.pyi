@@ -93,8 +93,9 @@ class RouteAllocation:
     OPTIMIZED: the minimum-cost flow core over the routes (a controller restricted to them), re-solved
     over the free capacity plus the policy's own allocation (it may move its own earlier placement,
     never another's). WEIGHTED (WCMP, weighted-cost multipath): every node splits in proportion to
-    weights fixed when the routes are prepared (highest averages: whole-unit shares as close to
-    proportional as possible; the weights come from WeightBasis). EQUAL (ECMP, equal-cost
+    weights fixed when the routes are prepared (highest averages (D'Hondt): assign each next unit
+    to the largest weight / (assigned + 1), ties to the lower EdgeId; the weights come from
+    WeightBasis). EQUAL (ECMP, equal-cost
     multipath): every node splits equally, by round robin.
 
     Members:
@@ -1106,7 +1107,9 @@ class TunnelCount:
     """
     The tunnel count of T1 (DistributedTE) and T2, per head: per_head in [1, 10000] (checked when a
     policy or an evaluator uses it). up_to=True (T2 only; T1 rejects it): one common count k in
-    1..per_head for every head, the smallest that delivers the design.
+    1..per_head for every head: the smallest common count whose program carries the live heads'
+    design shares; if none does, the largest live-share score, then the smallest count. It does not
+    promise whole-demand lossless delivery.
     """
 
     def __eq__(self, arg0: typing.Any) -> bool: ...
@@ -1128,7 +1131,8 @@ class TunnelCount:
     @property
     def up_to(self) -> bool:
         """
-        True: the smallest sufficient count up to per_head (T2 only)
+        True: the smallest count up to per_head whose program carries the live heads' design shares (else the
+        best live-share score, then the smallest); T2 only
         """
 
 class ShortestPaths:
@@ -1184,7 +1188,7 @@ class ShortestPaths:
     @property
     def multipath(self) -> bool:
         """
-        True: every equal-cost route; False: the one canonical path per destination
+        True: every equal-cost route; False: one canonical path per roster source toward the destination set
         """
 
     @property
@@ -1297,7 +1301,8 @@ class CentralizedTE:
     whole-unit planned bandwidth: first as large as possible (U), then for a finite design no larger
     than needed (u), then the cheapest routes, then with prefer_headroom=True the routes that leave
     the most spare capacity, then one fixed unit-by-unit tie. TunnelCount(L, up_to=True): the smallest
-    common count k <= L whose program carries the design (else the best, then the smallest).
+    common count k <= L whose program carries the live heads' design shares (else the largest
+    live-share score, then the smallest count); no promise of whole-demand lossless delivery.
     Traffic splits equally over the heads and over each head's tunnels; planned bandwidth is never
     held.
     """

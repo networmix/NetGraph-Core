@@ -8,14 +8,17 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
+#include <pybind11/typing.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <optional>
 #include <span>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -67,6 +70,109 @@ inline py::object counter_int(const Counter128& c) {
   return checked(PyNumber_Or(high.ptr(), lo.ptr()));
 }
 
+// The readers of fields and properties build every Python value below through the checked C API
+// (a new reference, or the pending MemoryError raised). pybind11's own conversions report a failed
+// allocation as another class: its return conversion of a C++ value as TypeError, its int, float,
+// list and tuple constructors as RuntimeError.
+
+// An integer (any integer type but bool) or a 128-bit counter as a Python int.
+template <class T>
+py::int_ int_object(T v) {
+  static_assert(std::is_integral_v<T> && !std::is_same_v<T, bool>);
+  PyObject* o = nullptr;
+  if constexpr (std::is_signed_v<T>) {
+    o = PyLong_FromLongLong(static_cast<long long>(v));
+  } else {
+    o = PyLong_FromUnsignedLongLong(static_cast<unsigned long long>(v));
+  }
+  return py::reinterpret_steal<py::int_>(checked(o).release());
+}
+inline py::int_ int_object(const Counter128& c) { return py::reinterpret_steal<py::int_>(counter_int(c).release()); }
+
+inline py::float_ float_object(double v) { return py::reinterpret_steal<py::float_>(checked(PyFloat_FromDouble(v)).release()); }
+
+// None, or the value as a Python int.
+template <class T>
+py::typing::Optional<py::int_> optional_int(const std::optional<T>& v) {
+  return py::reinterpret_steal<py::typing::Optional<py::int_>>(v.has_value() ? int_object(*v).release() : py::none().release());
+}
+
+// The reader of an integer field, and of an optional one (None when absent).
+template <class C, class T>
+auto int_reader(T C::*field) {
+  return [field](const C& c) { return int_object(c.*field); };
+}
+template <class C, class T>
+auto optional_int_reader(std::optional<T> C::*field) {
+  return [field](const C& c) { return optional_int(c.*field); };
+}
+
+// (a, b) as a tuple of two Python ints.
+template <class A, class B>
+py::typing::Tuple<py::int_, py::int_> int_pair(const A& a, const B& b) {
+  py::object x = int_object(a);
+  py::object y = int_object(b);
+  PyObject* out = checked(PyTuple_New(2)).release().ptr();
+  PyTuple_SET_ITEM(out, 0, x.release().ptr());
+  PyTuple_SET_ITEM(out, 1, y.release().ptr());
+  return py::reinterpret_steal<py::typing::Tuple<py::int_, py::int_>>(out);
+}
+
+// Integers as a list of Python ints.
+template <class T>
+py::typing::List<py::int_> ints_list(std::span<const T> v) {
+  auto out = py::reinterpret_steal<py::typing::List<py::int_>>(checked(PyList_New(static_cast<Py_ssize_t>(v.size()))).release());
+  for (std::size_t i = 0; i < v.size(); ++i) PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), int_object(v[i]).release().ptr());
+  return out;
+}
+
+// (a, b) pairs as a list (Out: its pybind11 type, which names the stub's type) or a tuple of
+// two-int tuples.
+template <class Out = py::list, class A, class B>
+Out pairs_list(const std::vector<std::pair<A, B>>& v) {
+  auto out = py::reinterpret_steal<Out>(checked(PyList_New(static_cast<Py_ssize_t>(v.size()))).release());
+  for (std::size_t i = 0; i < v.size(); ++i) {
+    PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), int_pair(v[i].first, v[i].second).release().ptr());
+  }
+  return out;
+}
+template <class A, class B>
+py::tuple pairs_tuple(const std::vector<std::pair<A, B>>& v) {
+  auto out = py::reinterpret_steal<py::tuple>(checked(PyTuple_New(static_cast<Py_ssize_t>(v.size()))).release());
+  for (std::size_t i = 0; i < v.size(); ++i) {
+    PyTuple_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), int_pair(v[i].first, v[i].second).release().ptr());
+  }
+  return out;
+}
+
+// A tuple of the given objects (made by the caller), through a checked allocation.
+inline py::tuple objects_tuple(std::initializer_list<py::object> items) {
+  auto out = py::reinterpret_steal<py::tuple>(checked(PyTuple_New(static_cast<Py_ssize_t>(items.size()))).release());
+  Py_ssize_t i = 0;
+  for (const auto& item : items) PyTuple_SET_ITEM(out.ptr(), i++, item.inc_ref().ptr());
+  return out;
+}
+
+// fraction_type(n, d) (fractions.Fraction): the two ints through checked allocations and the call
+// through the C API, so a failure of the call raises as raised.
+inline py::object fraction_object(const py::handle& fraction_type, std::int64_t n, std::int64_t d) {
+  const py::object num = int_object(n);
+  const py::object den = int_object(d);
+  return checked(PyObject_CallFunctionObjArgs(fraction_type.ptr(), num.ptr(), den.ptr(), nullptr));
+}
+
+// A str through a checked allocation.
+inline py::str str_object(const char* text) { return py::reinterpret_steal<py::str>(checked(PyUnicode_FromString(text)).release()); }
+
+// The hash of `key` as a Python int: a failure of the hash raises as raised, and the int is made
+// through a checked allocation (pybind11's return conversion of a hash reports a failed
+// allocation as TypeError).
+inline py::int_ hash_int(const py::handle& key) {
+  const Py_hash_t h = PyObject_Hash(key.ptr());
+  if (h == -1 && PyErr_Occurred() != nullptr) throw py::error_already_set();
+  return int_object(static_cast<long long>(h));
+}
+
 // Integers as a tuple of Python ints.
 inline py::tuple ints_tuple(std::span<const std::int32_t> v) {
   auto out = py::reinterpret_steal<py::tuple>(checked(PyTuple_New(static_cast<Py_ssize_t>(v.size()))).release());
@@ -114,18 +220,6 @@ inline FlowId flow_id_of(const py::object& obj) {
   return FlowId {static_cast<std::uint64_t>(u), static_cast<std::int64_t>(i)};
 }
 
-inline py::list pairs_list(const std::vector<std::pair<EdgeId, Amount>>& v) {
-  py::list out;
-  for (const auto& [e, x] : v) out.append(py::make_tuple(e, x));
-  return out;
-}
-
-// ((id, amount), ...) as a tuple (TunnelPlan.design_by_head).
-inline py::tuple pairs_tuple(const std::vector<std::pair<std::int32_t, Amount>>& v) {
-  py::tuple out(v.size());
-  for (std::size_t i = 0; i < v.size(); ++i) out[i] = py::make_tuple(v[i].first, v[i].second);
-  return out;
-}
 
 // An amount argument: an integer number of units in [0, 2^62) or +inf (float('inf')); nullopt is
 // +inf. Any other value (a bool, another float, a non-integer, an integer out of range) raises the

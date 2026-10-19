@@ -1,5 +1,5 @@
-// The integer ledger FlowLedger: the baseline, snapshots, FlowIds, bottleneck, and
-// every row and transition of the lifetime table, driven through a policy on one route (CentralizedTE
+// The integer ledger FlowLedger: the baseline, snapshots, FlowIds and the identity limits,
+// saturated_boundary_edges, and every row and transition of the lifetime table, driven through a policy on one route (CentralizedTE
 // with the route as its support, or Pinned over it as a supplied split route: test::RoutePolicy,
 // route_policy.hpp); the 128-bit counters of the records;
 // and the commit rule itself (each edge published once, the multi-owner model, the fresh-record
@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -29,6 +30,7 @@
 #include "netgraph/core/detail/int128.hpp"
 #include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/route_builders.hpp"
+#include "netgraph/core/detail/uid.hpp"
 #include "netgraph/core/flow_ledger.hpp"
 #include "route_policy.hpp"
 #include "state_comparators.hpp"
@@ -302,7 +304,8 @@ TEST(FlowLedger, CopyAndMoveCarryTheWholeLedger) {
     // 1-unit link 1 -> 3), carrying nothing.
     FlowPolicy holds(fg, v({0}), v({3}), FlowPolicyConfig {.routing = DistributedTE {TunnelCount {1}}});
     (void)holds.replace(0, 5);
-  }  // four orphaned owners, three records: a copy or a move needs a ledger without bound policies
+  }  // three orphaned owners with three records (owner 1 removed its record: forgotten); a copy or
+     // a move needs a ledger without bound policies
   const LedgerState source = ledger_state(fg);
   const std::vector<Amount> source_baseline = vec(LedgerAccess::baseline(fg));
   const std::vector<Amount> source_reservation = vec(LedgerAccess::reservation_baseline(fg));
@@ -318,7 +321,7 @@ TEST(FlowLedger, CopyAndMoveCarryTheWholeLedger) {
   EXPECT_EQ(source.records[1].flow_id.second, 2);
   EXPECT_EQ(source.next_id, 4);
   EXPECT_TRUE(source.bound.empty());
-  EXPECT_EQ(source.orphans, (std::vector<std::int64_t>{0, 1, 2, 3}));
+  EXPECT_EQ(source.orphans, (std::vector<std::int64_t>{0, 2, 3}));
   EXPECT_NE(source_baseline, vec(g->edge_capacity_units()));
   EXPECT_NE(source.carried, std::vector<Amount>(4, 0));
 
@@ -356,9 +359,9 @@ TEST(FlowLedger, CopyAndMoveCarryTheWholeLedger) {
   const std::vector<std::pair<std::string, std::function<void()>>> calls = {
       {"uid", [&] { (void)fg.uid(); }},
       {"graph", [&] { (void)fg.graph(); }},
-      {"capacity_units", [&] { (void)fg.edge_capacity_units(); }},
+      {"edge_capacity_units", [&] { (void)fg.edge_capacity_units(); }},
       {"residual", [&] { (void)fg.residual(); }},
-      {"allocated", [&] { (void)fg.carried(); }},
+      {"carried", [&] { (void)fg.carried(); }},
       {"reserved", [&] { (void)fg.reserved(); }},
       {"unreserved", [&] { (void)fg.unreserved(); }},
       {"records", [&] { (void)fg.records(); }},
@@ -1237,4 +1240,134 @@ TEST(FlowLedger, FreshSingleRecordCommitsMatchTheGeneralRule) {
   EXPECT_EQ(fg2.records().size(), 1U);
   LedgerAccess::release(fg2, owner);
   LedgerAccess::release(fg2, fresh);
+}
+
+namespace {
+
+// What fn raises: the message when the exception's dynamic type is exactly std::runtime_error (an
+// internal limit), or a description of anything else.
+std::string runtime_error_of(const std::function<void()>& fn) {
+  try {
+    fn();
+  } catch (const std::exception& e) {
+    if (typeid(e) == typeid(std::runtime_error)) return e.what();
+    return std::string("another exception type (") + typeid(e).name() + "): " + e.what();
+  }
+  return "no exception";
+}
+
+constexpr std::int64_t kLastId = std::numeric_limits<std::int64_t>::max() - 1;
+
+} // namespace
+
+// Owner ids run up to the largest int64 less one (2^63 - 1 identities); the next bind is refused
+// before anything changes, and an existing owner keeps working.
+TEST(FlowLedger, PolicyIdentitiesStopBeforeTheLargestInt64) {
+  auto g = shared(make_graph(2, {{0, 1, 5, 1}}));
+  const auto dag = all_edges(*g);
+  FlowLedger fg(g);
+  LedgerAccess::set_next_ids(fg, 0, kLastId);
+  const auto last = LedgerAccess::bind(fg);
+  EXPECT_EQ(last, kLastId);
+  const LedgerState before = ledger_state(fg);
+  EXPECT_EQ(runtime_error_of([&] { (void)LedgerAccess::bind(fg); }), "policy identity limit exceeded");
+  EXPECT_EQ(runtime_error_of([&] { RoutePolicy p(fg, 0, 1, on_support(dag)); }), "policy identity limit exceeded");
+  expect_same(ledger_state(fg), before, "the refused binds");
+  std::vector<detail::RecordDraft> one {draft_on(dag, {{0, 2}})};
+  EXPECT_EQ(LedgerAccess::commit(fg, last, one).size(), 1U);
+  EXPECT_EQ(fg.records()[0].policy_id, kLastId);
+  (void)LedgerAccess::detach(fg, last);
+  LedgerAccess::release(fg, last);
+}
+
+// Record ids run up to the largest int64 less one (2^63 - 1 identities), checked for all of a
+// commit's new records at once, on the fresh-record path and on the general one: the refused
+// commit changes nothing, a commit with no new record still passes.
+TEST(FlowLedger, RecordIdentitiesStopBeforeTheLargestInt64) {
+  auto g = shared(make_graph(2, {{0, 1, 9, 1}}));
+  const auto dag = all_edges(*g);
+  FlowLedger fg(g);
+  const auto a = LedgerAccess::bind(fg);
+  const auto b = LedgerAccess::bind(fg);
+  LedgerAccess::set_next_ids(fg, kLastId - 1, 2);
+  // The general path (an owner with a live record): two new records with two ids left.
+  std::vector<detail::RecordDraft> first {draft_on(dag, {{0, 1}})};
+  const auto ids = LedgerAccess::commit(fg, a, first);
+  EXPECT_EQ(ids[0].second, kLastId - 1);
+  std::vector<detail::RecordDraft> two {draft_on(dag, {{0, 1}}, ids[0].second), draft_on(dag, {{0, 1}}),
+                                        draft_on(dag, {{0, 1}})};
+  const LedgerState one_left = ledger_state(fg);
+  EXPECT_EQ(runtime_error_of([&] { (void)LedgerAccess::commit(fg, a, two); }), "record identity limit exceeded");
+  expect_same(ledger_state(fg), one_left, "two new records, one id left");
+  std::vector<detail::RecordDraft> exchange {draft_on(dag, {{0, 1}}), draft_on(dag, {{0, 1}})};
+  EXPECT_EQ(runtime_error_of([&] { (void)LedgerAccess::exchange(fg, a, exchange); }), "record identity limit exceeded");
+  expect_same(ledger_state(fg), one_left, "an exchange of two new records, one id left");
+  // One new record takes the last id.
+  std::vector<detail::RecordDraft> second {draft_on(dag, {{0, 1}}, ids[0].second), draft_on(dag, {{0, 1}})};
+  EXPECT_EQ(LedgerAccess::commit(fg, a, second)[0].second, kLastId);
+  EXPECT_EQ(LedgerAccess::next_record_counter(fg), std::numeric_limits<std::int64_t>::max());
+  // The fresh-record path (an owner without records): no id left.
+  const LedgerState none_left = ledger_state(fg);
+  std::vector<detail::RecordDraft> fresh {draft_on(dag, {{0, 1}})};
+  EXPECT_EQ(runtime_error_of([&] { (void)LedgerAccess::commit(fg, b, fresh); }), "record identity limit exceeded");
+  expect_same(ledger_state(fg), none_left, "a fresh record, no id left");
+  // A commit that keeps its records and creates none passes.
+  std::vector<detail::RecordDraft> kept {draft_on(dag, {{0, 2}}, kLastId - 1), draft_on(dag, {{0, 1}}, kLastId)};
+  EXPECT_TRUE(LedgerAccess::commit(fg, a, kept).empty());
+  EXPECT_EQ(fg.carried(), (std::vector<Amount> {3}));
+  (void)LedgerAccess::detach(fg, a);
+  LedgerAccess::release(fg, a);
+  LedgerAccess::release(fg, b);
+}
+
+// A uid comes from one counter holding the last uid taken: never 0, at most the largest int64
+// (2^63 - 1 identities); after it the counter is spent and unchanged.
+TEST(FlowLedger, ObjectIdentitiesStopAtTheLargestInt64) {
+  constexpr auto kMax = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+  std::atomic<std::uint64_t> counter {0};
+  EXPECT_EQ(detail::take_uid(counter), 1U);
+  counter = kMax - 1;
+  EXPECT_EQ(detail::take_uid(counter), kMax);
+  EXPECT_EQ(runtime_error_of([&] { (void)detail::take_uid(counter); }), "object identity limit exceeded");
+  EXPECT_EQ(counter.load(), kMax);
+  // The process counter: fresh, distinct uids.
+  const auto u1 = detail::next_uid();
+  const auto u2 = detail::next_uid();
+  EXPECT_NE(u1, 0U);
+  EXPECT_GT(u2, u1);
+}
+
+// An owner released without records leaves no entry (bound and orphaned owners only); an owner
+// released with records stays as their orphaned owner; ids are never reissued.
+TEST(FlowLedger, OwnersWithoutRecordsAreForgotten) {
+  auto g = shared(make_graph(2, {{0, 1, 5, 1}}));
+  const auto dag = all_edges(*g);
+  FlowLedger fg(g);
+  RoutePolicy anchor(fg, 0, 1, on_support(dag));
+  for (int i = 0; i < 1000; ++i) {
+    RoutePolicy q(fg, 0, 1, on_support(dag));
+    if (i % 2 == 0) {
+      EXPECT_EQ(q.place(1).call_delivered, 1);
+      q.remove();
+    }
+  }
+  EXPECT_EQ(LedgerAccess::bound_policy_ids(fg), (std::vector<std::int64_t> {0}));
+  EXPECT_TRUE(LedgerAccess::orphan_policy_ids(fg).empty());
+  {
+    RoutePolicy q(fg, 0, 1, on_support(dag));
+    EXPECT_EQ(q.place(2).call_delivered, 2);
+  }
+  EXPECT_EQ(LedgerAccess::orphan_policy_ids(fg), (std::vector<std::int64_t> {1001}));
+  ASSERT_EQ(fg.records().size(), 1U);
+  EXPECT_EQ(fg.records()[0].policy_id, 1001);
+  RoutePolicy next(fg, 0, 1, on_support(dag));
+  EXPECT_EQ(LedgerAccess::bound_policy_ids(fg), (std::vector<std::int64_t> {0, 1002}));
+  // The direct entry points: release of an owner that removed its records forgets it.
+  const auto owner = LedgerAccess::bind(fg);
+  std::vector<detail::RecordDraft> one {draft_on(dag, {{0, 1}})};
+  (void)LedgerAccess::commit(fg, owner, one);
+  (void)LedgerAccess::detach(fg, owner);
+  LedgerAccess::release(fg, owner);
+  EXPECT_EQ(LedgerAccess::bound_policy_ids(fg), (std::vector<std::int64_t> {0, 1002}));
+  EXPECT_EQ(LedgerAccess::orphan_policy_ids(fg), (std::vector<std::int64_t> {1001}));
 }

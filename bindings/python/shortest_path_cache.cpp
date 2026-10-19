@@ -8,6 +8,7 @@
 #include "netgraph/core/shortest_path_cache.hpp"
 #include "netgraph/core/graph.hpp"
 #include "registration.hpp"
+#include "values.hpp"
 
 namespace py = pybind11;
 
@@ -17,12 +18,12 @@ void register_shortest_path_cache(py::module_& m) {
   py::class_<ShortestPathCache::Stats>(m, "ShortestPathCacheStats",
                               "ShortestPathCache statistics (atomic per field, not a consistent snapshot): hits, misses,\n"
                               "entries, bytes (the entries' retained payload), live_values (values alive anywhere).")
-      .def_readonly("hits", &ShortestPathCache::Stats::hits, "lookups answered from an entry (they persist across clear())")
-      .def_readonly("misses", &ShortestPathCache::Stats::misses,
+      .def_property_readonly("hits", int_reader(&ShortestPathCache::Stats::hits), "lookups answered from an entry (they persist across clear())")
+      .def_property_readonly("misses", int_reader(&ShortestPathCache::Stats::misses),
                     "lookups without an entry: a building cache searched, a frozen one raised ShortestPathCacheMiss")
-      .def_readonly("entries", &ShortestPathCache::Stats::entries, "the entries held")
-      .def_readonly("bytes", &ShortestPathCache::Stats::bytes, "the retained payload of the entries (their DAGs' stored arrays)")
-      .def_readonly("live_values", &ShortestPathCache::Stats::live_values, "the cached values alive anywhere, entries included");
+      .def_property_readonly("entries", int_reader(&ShortestPathCache::Stats::entries), "the entries held")
+      .def_property_readonly("bytes", int_reader(&ShortestPathCache::Stats::bytes), "the retained payload of the entries (their DAGs' stored arrays)")
+      .def_property_readonly("live_values", int_reader(&ShortestPathCache::Stats::live_values), "the cached values alive anywhere, entries included");
 
   py::register_exception<ShortestPathCacheMiss>(m, "ShortestPathCacheMiss", PyExc_Exception);
   m.attr("ShortestPathCacheMiss").attr("__doc__") =

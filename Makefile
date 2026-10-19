@@ -48,7 +48,7 @@ help:
 	@echo ""
 	@echo "Code Quality & Testing:"
 	@echo "  make check         - Rebuild the editable extension, then everything check-ci runs"
-	@echo "  make check-ci      - Lint, fixture data check, C++ tests (hooks on and off), Python tests"
+	@echo "  make check-ci      - Lint, fixture data check, the pytest guard's rules, C++ tests (hooks on and off), Python tests"
 	@echo "                       (the CI entrypoint)"
 	@echo "                       (check and check-ci only verify: they never edit a file)"
 	@echo "  make lint          - Run only linting (non-mutating: ruff + pyright)"
@@ -142,6 +142,7 @@ check:
 check-ci:
 	@$(MAKE) lint
 	@$(PYTHON) -I -B tests/reference/policy/export_policy_fixtures.py --check
+	@$(PYTHON) -I -B dev/test_pytest_guard.py
 	@$(MAKE) cpp-test
 	@$(MAKE) cpp-test-off
 	@PYTHON=$(PYTHON) bash dev/run-checks.sh pytest on

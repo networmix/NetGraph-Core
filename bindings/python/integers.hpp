@@ -1,6 +1,6 @@
 /*
   Integer arguments from Python: Python ints, NumPy integer scalars and integer arrays, read
-  without narrowing (WideInts) and validated in the C++ constructors' order before any
+  without narrowing (CheckedIntegerVector) and validated in the C++ constructors' order before any
   conversion to the C++ types, so the reported error does not depend on how the input is
   represented; bools and floats are rejected, never truncated. Also the shape step of sequence
   arguments, the per-edge amount arrays and the node sets.
@@ -35,9 +35,8 @@ inline bool is_bool(const py::handle& obj) {
 // models, TunnelCount, AbsoluteCost, RouteDefinition) or a search option or call argument.
 enum class IntegerArgument { Configuration, Call };
 
-// The one place that decides the class of a wrong-type integer (an open owner question, R3):
-// a configuration value raises TypeError at construction, a search option or a
-// call argument keeps today's ValueError; the text is the same.
+// The one place that decides the class of a wrong-type integer: a configuration value raises
+// TypeError at construction, a search option or a call argument ValueError; the text is the same.
 [[noreturn]] inline void throw_not_an_integer(const py::handle& item, const std::string& what, IntegerArgument where) {
   const std::string text =
       what + " must be an integer (got " + std::string(py::str(py::type::of(item).attr("__name__"))) + ")";
@@ -81,10 +80,17 @@ struct CheckedIntegerVector {
   std::vector<std::int8_t> overflow;  // empty when no entry overflows
   [[nodiscard]] std::size_t size() const noexcept { return value.size(); }
   [[nodiscard]] int sign(std::size_t i) const noexcept { return overflow.empty() ? 0 : overflow[i]; }
+  // Entry i of the source as given, through a checked call (pybind11's int index reports a
+  // failed allocation as RuntimeError).
+  [[nodiscard]] py::object item(std::size_t i) const {
+    PyObject* o = PySequence_GetItem(source.ptr(), static_cast<Py_ssize_t>(i));
+    if (o == nullptr) throw py::error_already_set();
+    return py::reinterpret_steal<py::object>(o);
+  }
   // The entry as Python prints it (exact also beyond int64).
   [[nodiscard]] std::string text(std::size_t i) const {
     if (sign(i) == 0) return std::to_string(value[i]);
-    return std::string(py::str(source[py::int_(i)]));
+    return std::string(py::str(item(i)));
   }
   [[nodiscard]] bool in(std::size_t i, std::int64_t lo, std::int64_t hi) const noexcept {
     return sign(i) == 0 && value[i] >= lo && value[i] <= hi;
@@ -92,8 +98,8 @@ struct CheckedIntegerVector {
   // The entry as an exact Python int (an overflowing entry compared with another). The entry is
   // converted again here, so its __index__ may now fail: that exception propagates as raised.
   [[nodiscard]] py::object exact(std::size_t i) const {
-    py::object item = source[py::int_(i)];
-    py::object idx = py::reinterpret_steal<py::object>(PyNumber_Index(item.ptr()));
+    py::object entry = item(i);
+    py::object idx = py::reinterpret_steal<py::object>(PyNumber_Index(entry.ptr()));
     if (!idx) throw py::error_already_set();
     return idx;
   }
@@ -248,8 +254,12 @@ inline std::vector<NodeId> checked_ids(const CheckedIntegerVector& ids, std::int
 // A node set: one NodeId or a sequence of them.
 inline std::vector<NodeId> node_ids(const py::object& obj, std::int32_t num_nodes, const char* name) {
   if (!is_bool(obj) && PyIndex_Check(obj.ptr()) && !py::isinstance<py::array>(obj)) {
-    py::list one;
-    one.append(obj);
+    // A one-entry list made through a checked allocation (pybind11's list constructor reports a
+    // failed allocation as RuntimeError).
+    PyObject* raw = PyList_New(1);
+    if (raw == nullptr) throw py::error_already_set();
+    auto one = py::reinterpret_steal<py::list>(raw);
+    PyList_SET_ITEM(raw, 0, obj.inc_ref().ptr());
     return checked_ids(wide_integers(one, name), num_nodes, name);
   }
   return checked_ids(wide_integers(obj, name), num_nodes, name);

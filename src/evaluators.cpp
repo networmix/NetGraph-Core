@@ -326,7 +326,7 @@ SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<c
     // reaches an allowed destination (nothing is placed).
     if (capture.state.has_value()) {
       if (capture.state->value() != out.baseline.call_delivered) {
-        throw std::logic_error("sensitivity: the captured state differs from the baseline");
+        throw std::logic_error("evaluate_edge_failures: the captured state differs from the baseline");
       }
       const auto flows = capture.state->edge_flows();
       for (EdgeId e = 0; e < graph.num_edges(); ++e) {

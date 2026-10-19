@@ -28,7 +28,8 @@ class FrozenCacheHitTally;
 
 // The tunnel count of the tunnel models, per head: `per_head` in [1, 10000] (checked where a policy
 // or an evaluator uses it); `up_to` (T2 only; T1 rejects it): one common count k in 1..per_head for
-// every head, the smallest sufficient one.
+// every head, the smallest whose program carries the live heads' design shares (else the largest
+// live-share score, then the smallest count; no promise of whole-demand lossless delivery).
 struct TunnelCount {
   std::int64_t per_head {1};
   bool up_to {false};

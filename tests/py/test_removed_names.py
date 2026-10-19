@@ -1,10 +1,14 @@
-"""One rule for the names this release removed (the old spellings of CHANGELOG's Removed table),
-over every kind of text: the public docstrings (the callable behind a staticmethod or classmethod
-included), the C++ comments of include/, src/, bindings/, tests/cpp/ and dev/perf/ (not the frozen
-fixture replay, whose comments name the frozen data's keys), the comments and docstrings of the
-Python files of tests/py/, python/ and dev/ (not the frozen fixture replay's key mapping), and the
-prose of docs/semantics.md and README.md (fenced code excluded: the docs tests run it against the
-current API).
+"""One rule for the names this release removed (the old spellings of CHANGELOG's Removed tables:
+the two-column table of public names and the three-column tables of members and C++
+declarations), over every kind of text: the public docstrings (the callable behind a staticmethod
+or classmethod included), the C++ comments and string literals of include/, src/, bindings/,
+tests/cpp/ and dev/perf/ (not the frozen fixture replay, whose text names the frozen data's keys),
+the comments, docstrings and string literals of the Python files and stubs (.py, .pyi) of
+python/, tests/ and dev/ (not the frozen reference under tests/reference/ and not the fixture
+replay's key mapping), the comments of the shell scripts, workflows, Makefile, CMake and TOML
+files, and the prose of the Markdown documents (fenced code excluded: the docs tests run it
+against the current API; not CHANGELOG.md, which lists the names, nor the frozen reference's
+README).
 
 1. A removed name that the API no longer has anywhere and that is not an ordinary word of this
    domain's prose is a stale name wherever it stands as a word.
@@ -35,14 +39,50 @@ from __future__ import annotations
 import ast
 import inspect
 import io
+import os
 import re
+import sys
 import tokenize
 from pathlib import Path
+
+import pytest
 
 import netgraph_core as ngc
 
 ROOT = Path(__file__).resolve().parents[2]
 REVIEWED_FILE = Path(__file__).with_name("removed_names_reviewed.txt")
+
+# Planted text for the rule's own controls: {relative path: text read in place of the file's}.
+PLANTED = {}
+
+
+def read(path):
+    """A file's text (a planted text in its place when the controls set one)."""
+    path = Path(path)
+    rel = str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else None
+    return PLANTED[rel] if rel in PLANTED else path.read_text()
+
+
+SKIPPED_DIRS = {
+    ".git",
+    "build",
+    "venv",
+    "design",
+    "_deps",
+    "__pycache__",
+    ".ruff_cache",
+}
+
+
+def tree_files():
+    """Every file of the checkout outside build output, environments and the design tree."""
+    for top, dirs, files in os.walk(ROOT):
+        dirs[:] = sorted(
+            d for d in dirs if d not in SKIPPED_DIRS and not d.endswith(".noindex")
+        )
+        for name in sorted(files):
+            yield Path(top) / name
+
 
 # Removed names that are ordinary words of this domain's prose and common in it (each used more
 # than 16 times across the texts), with the meaning they keep. A rarer one (allocated, placed,
@@ -87,7 +127,7 @@ def _split(spelling):
 def removed():
     """(old owner, leaf, new owners) for every old spelling of CHANGELOG's Removed table (this
     release's section; files excluded)."""
-    text = (ROOT / "CHANGELOG.md").read_text()
+    text = read(ROOT / "CHANGELOG.md")
     start = text.index("## [Unreleased]")
     section = text[start : text.index("\n## [", start + 1)]
     out = []
@@ -95,13 +135,15 @@ def removed():
         cells = [c.strip() for c in row.strip().strip("|").split("|")]
         if (
             not row.startswith("|")
-            or len(cells) < 3
-            or cells[0] in ("Kind", "file")
+            or len(cells) < 2
+            or cells[0] in ("Kind", "file", "Name")
             or set(cells[0]) <= {"-"}
         ):
             continue
-        news = {_split(n)[0] for n in re.findall(r"`([^`]+)`", cells[2])} - {None}
-        for old in re.findall(r"`([^`]+)`", cells[1]):
+        # | Name | Replacement | (public names) or | Kind | Name | Replacement |.
+        old_cell, new_cell = (cells[0], cells[1]) if len(cells) == 2 else cells[1:3]
+        news = {_split(n)[0] for n in re.findall(r"`([^`]+)`", new_cell)} - {None}
+        for old in re.findall(r"`([^`]+)`", old_cell):
             owner, leaf = _split(old)
             if leaf and leaf != "__init__":
                 out.append((owner, leaf, news))
@@ -111,7 +153,7 @@ def removed():
 def api_names():
     """Every name of the installed stub (classes, functions, members, parameters), and per owner
     (a class or a module function) its own names."""
-    tree = ast.parse((Path(ngc.__file__).parent / "__init__.pyi").read_text())
+    tree = ast.parse(read(Path(ngc.__file__).parent / "__init__.pyi"))
     names, per_owner = set(ngc.__all__), {}
     for node in tree.body:
         if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
@@ -201,9 +243,10 @@ def docstring_texts(owners=()):
     return out
 
 
-def _comments_and_code(text):
+def _comments_and_code(text, strings=None):
     """Per line its comment text (// and /* */, string literals skipped) and the file's code
-    identifiers (outside comments and string literals)."""
+    identifiers (outside comments and string literals); per line the string literals' text into
+    `strings` when given."""
     comments, code = {}, []
     i, n, line = 0, len(text), 1
     while i < n:
@@ -223,6 +266,8 @@ def _comments_and_code(text):
             quote, j = text[i], i + 1
             while j < n and text[j] != quote and text[j] != "\n":
                 j += 2 if text[j] == "\\" else 1
+            if strings is not None and quote == '"':
+                strings.setdefault(line, []).append(text[i + 1 : j])
             i = j + 1
         else:
             if text[i] == "\n":
@@ -269,7 +314,7 @@ FIXTURE_REPLAY = "tests/cpp/flow_policy_fixture_tests.cpp"
 
 
 def _cpp_files():
-    for directory in ("include", "src", "bindings", "tests/cpp"):
+    for directory in ("include", "src", "bindings", "tests/cpp", "dev/perf"):
         for path in sorted((ROOT / directory).rglob("*")):
             if (
                 path.suffix in (".hpp", ".cpp", ".h")
@@ -281,20 +326,25 @@ def _cpp_files():
 FIXTURE_KEY_MAPPING = "tests/py/test_flow_policy_fixtures.py"
 
 
-def _python_texts(path, skip_module_docstring=False):
-    """(line number, text) of a Python file's comments and docstrings."""
-    text = path.read_text()
+def _python_texts(path, skip_module_docstring=False, strings=None):
+    """(line number, text) of a Python file's comments and docstrings; its other string constants'
+    lines into `strings` when given."""
+    text = read(path)
     out = [
         (tok.start[0], tok.string[1:])
         for tok in tokenize.generate_tokens(io.StringIO(text).readline)
         if tok.type == tokenize.COMMENT
     ]
     tree = ast.parse(text)
+    docstrings = set()
     for node in ast.walk(tree):
         if not isinstance(
             node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
         ):
             continue
+        body = node.body
+        if body and isinstance(body[0], ast.Expr):
+            docstrings.add(id(body[0].value))
         if isinstance(node, ast.Module) and skip_module_docstring:
             continue
         body = node.body
@@ -309,40 +359,107 @@ def _python_texts(path, skip_module_docstring=False):
                     (first + k, line)
                     for k, line in enumerate(body[0].value.value.splitlines())
                 ]
+    if strings is not None:
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in docstrings
+            ):
+                strings += [
+                    (node.lineno + k, line)
+                    for k, line in enumerate(node.value.splitlines())
+                ]
     return out
 
 
+def _python_files():
+    """The Python files and stubs of python/, tests/ and dev/ (not the design tree, not the frozen
+    reference, not the fixture replay's key mapping)."""
+    for directory in ("python", "tests", "dev"):
+        for path in sorted((ROOT / directory).rglob("*")):
+            rel = path.relative_to(ROOT)
+            if (
+                path.suffix in (".py", ".pyi")
+                and "design" not in rel.parts
+                and not str(rel).startswith("tests/reference/")
+                and str(rel) != FIXTURE_KEY_MAPPING
+            ):
+                yield path
+
+
+# The generated stub: its docstrings are the module's, read at run time with their owners.
+GENERATED_STUB = "python/netgraph_core/__init__.pyi"
+
+
 def python_texts():
-    """The comments and docstrings of the Python files of tests/py/, python/ and dev/ (not the
-    design tree, not the frozen fixture replay's key mapping; the package's own docstring is read
-    at run time)."""
+    """The comments, docstrings and string constants of the Python files and stubs (the package's
+    own docstring is read at run time; of the generated stub only the comments)."""
     out = []
-    for directory in ("tests/py", "python", "dev"):
-        for path in sorted((ROOT / directory).rglob("*.py")):
-            rel = str(path.relative_to(ROOT))
-            if "design" in path.relative_to(ROOT).parts or rel == FIXTURE_KEY_MAPPING:
-                continue
-            skip = rel == "python/netgraph_core/__init__.py"
-            out += [
-                (rel, line, set(), False)
-                for _, line in sorted(_python_texts(path, skip))
+    for path in _python_files():
+        rel = str(path.relative_to(ROOT))
+        strings = []
+        skip = rel == "python/netgraph_core/__init__.py"
+        texts = _python_texts(path, skip, strings)
+        if rel == GENERATED_STUB:
+            text = read(path)
+            texts = [
+                (tok.start[0], tok.string[1:])
+                for tok in tokenize.generate_tokens(io.StringIO(text).readline)
+                if tok.type == tokenize.COMMENT
             ]
+            strings = []
+        out += [(rel, line, set(), False) for _, line in sorted(texts + strings)]
+    return out
+
+
+# The files whose "#" comments are text: shell scripts, workflows, the Makefile, CMake and TOML.
+HASH_COMMENTED = (".sh", ".yml", ".yaml", ".toml", ".cmake")
+HASH_NAMES = ("Makefile", "CMakeLists.txt")
+
+
+def hash_comment_texts():
+    """The "#" comments (from a "#" at the line's start or after a blank) of the shell scripts,
+    workflows, Makefile, CMake and TOML files outside build/, venv/ and the design tree."""
+    out = []
+    for path in tree_files():
+        rel = path.relative_to(ROOT)
+        if path.suffix not in HASH_COMMENTED and path.name not in HASH_NAMES:
+            continue
+        for line in read(path).splitlines():
+            m = re.search(r"(?:^|\s)#(.*)$", line)
+            if m:
+                out.append((str(rel), m.group(1), set(), False))
     return out
 
 
 def comment_texts(owners):
     out = []
-    for path in [*_cpp_files(), *sorted((ROOT / "dev/perf").rglob("*"))]:
-        if path.suffix in (".hpp", ".cpp", ".h"):
-            rel = str(path.relative_to(ROOT))
-            text = path.read_text()
-            comments, _ = _comments_and_code(text)
-            public = rel.startswith("include/netgraph/core/") and "/detail/" not in rel
-            regions = _owner_regions(text.splitlines(), owners) if public else {}
-            out += [
-                (rel, comment, regions.get(n, set()), public)
-                for n, comment in sorted(comments.items())
-            ]
+    for path in _cpp_files():
+        rel = str(path.relative_to(ROOT))
+        text = read(path)
+        comments, _ = _comments_and_code(text)
+        public = rel.startswith("include/netgraph/core/") and "/detail/" not in rel
+        regions = _owner_regions(text.splitlines(), owners) if public else {}
+        out += [
+            (rel, comment, regions.get(n, set()), public)
+            for n, comment in sorted(comments.items())
+        ]
+    return out
+
+
+def cpp_string_texts(docstrings):
+    """The string literals of the C++ files, one text each, but a line of a public docstring
+    (`docstrings`: read at run time with its owners)."""
+    out = []
+    for path in _cpp_files():
+        strings = {}
+        _comments_and_code(read(path), strings)
+        rel = str(path.relative_to(ROOT))
+        for _, literals in sorted(strings.items()):
+            for text in literals:
+                if text.replace("\\n", "").strip() not in docstrings:
+                    out.append((rel, text, set(), False))
     return out
 
 
@@ -366,10 +483,23 @@ def _paragraphs(lines):
         yield paragraph
 
 
+# The documents read: every Markdown file but CHANGELOG.md (it lists the names) and the frozen
+# reference's README.
+def _markdown_files():
+    for path in tree_files():
+        rel = path.relative_to(ROOT)
+        if path.suffix != ".md":
+            continue
+        if str(rel) == "CHANGELOG.md" or str(rel).startswith("tests/reference/"):
+            continue
+        yield path
+
+
 def markdown_texts(owners):
     out = []
-    for rel in ("docs/semantics.md", "README.md"):
-        for paragraph in _paragraphs((ROOT / rel).read_text().splitlines()):
+    for path in _markdown_files():
+        rel = str(path.relative_to(ROOT))
+        for paragraph in _paragraphs(read(path).splitlines()):
             named = _owners_named(paragraph, owners)
             out.extend((rel, line, named, True) for line in paragraph)
     return out
@@ -381,9 +511,8 @@ def code_names():
     parameters and identifier-like strings of python/, tests/ and dev/ (the frozen reference
     included); CMake's targets and options; the API; file stems."""
     out = set(api_names()[0])
-    for path in [*_cpp_files(), *sorted((ROOT / "dev/perf").rglob("*"))]:
-        if path.suffix in (".hpp", ".cpp", ".h"):
-            out |= _comments_and_code(path.read_text())[1]
+    for path in _cpp_files():
+        out |= _comments_and_code(read(path))[1]
     out |= set(re.findall(r"[A-Za-z_]\w*", (ROOT / "CMakeLists.txt").read_text()))
     for directory in ("python", "tests", "dev"):
         for path in sorted((ROOT / directory).rglob("*.py")):
@@ -402,9 +531,8 @@ def code_names():
                     and node.value.isidentifier()
                 ):
                     out.add(node.value)
-    for path in ROOT.rglob("*"):
-        if not {".git", "build", "venv", "__pycache__"} & set(path.parts):
-            out.add(path.stem)
+    for path in tree_files():
+        out.add(path.stem)
     return out
 
 
@@ -449,10 +577,8 @@ def _code_text(text):
 def _code_identifiers():
     """{place: identifiers} of the code clause 4 reads (place: "code:<path>")."""
     out = {}
-    for path in [*_cpp_files(), *sorted((ROOT / "dev/perf").rglob("*"))]:
-        if path.suffix not in (".hpp", ".cpp", ".h"):
-            continue
-        code = _code_text(path.read_text())
+    for path in _cpp_files():
+        code = _code_text(read(path))
         names = set()
         for m in re.finditer(r"[A-Za-z_]\w*", code):
             if code[max(0, m.start() - 5) : m.start()] != "std::":
@@ -519,7 +645,15 @@ def find_stale():
                 owned.setdefault(leaf, set()).add(o)
     owners = sorted({o for os in owned.values() for o in os})
     comments = comment_texts(owners)
-    texts = docstring_texts(owners) + comments + python_texts() + markdown_texts(owners)
+    docstrings = docstring_texts(owners)
+    texts = (
+        docstrings
+        + comments
+        + cpp_string_texts({line.strip() for _, line, _, _ in docstrings})
+        + python_texts()
+        + hash_comment_texts()
+        + markdown_texts(owners)
+    )
     patterns = {name: word(name) for name in dead | set(owned)}
     found = []
     known = code_names()
@@ -547,7 +681,10 @@ def find_stale():
 
 def check(found, rows):
     """The findings no row excuses, and the rows that do not excuse exactly one finding: a row
-    excuses its word on the one line of its place that holds its substring."""
+    excuses its word on the one line of its place that holds its substring (that is the line
+    itself when a line of the place is exactly the substring: a one-word string literal; a code
+    row's substring is always the identifier itself)."""
+    whole = {(p, n, line) for p, n, line in found}
     unreviewed, matched = [], {i: set() for i in range(len(rows))}
     for place, name, line in found:
         match = [
@@ -555,7 +692,11 @@ def check(found, rows):
             for i, (p, n, sub, _) in enumerate(rows)
             if p == place
             and n == name
-            and (sub == line if place.startswith("code:") else sub in line)
+            and (
+                sub == line
+                if place.startswith("code:") or (p, n, sub) in whole
+                else sub in line
+            )
         ]
         for i in match:
             matched[i].add(line)
@@ -601,3 +742,56 @@ def test_the_rule_reads_static_method_texts():
         for place, line in texts
     )
     assert not any("It can be called either on the class" in line for _, line in texts)
+
+
+# One planted stale line per kind of text, (file, appended text with {name} and the tag {tag}, the
+# name it plants): each must be found on its own line. `DagCacheStats` and `Tunnels` come only from the
+# two-column table of public names.
+PLANTS = [
+    (
+        "include/netgraph/core/flow_policy.hpp",
+        "// {name} {tag}",
+        "FlowPlacement",
+    ),
+    ("src/graph.cpp", "// {name} {tag}", "DagCacheStats"),
+    ("src/flow_policy.cpp", "// {name} {tag}", "Tunnels"),
+    (
+        "src/forwarding.cpp",
+        'const char* kPlanted = "{name} {tag}";',
+        "FlowPlacement",
+    ),
+    ("tests/py/helpers.py", "# {name} {tag}", "FlowPlacement"),
+    (
+        "tests/py/helpers.py",
+        'def planted():\n    """{name} {tag}"""',
+        "FlowPlacement",
+    ),
+    ("tests/py/helpers.py", 'PLANTED = "{name} {tag}"', "FlowPlacement"),
+    ("dev/stubs/overrides.pyi", "# {name} {tag}", "FlowPlacement"),
+    ("dev/run-checks.sh", "# {name} {tag}", "FlowPlacement"),
+    (".github/workflows/tests.yml", "# {name} {tag}", "FlowPlacement"),
+    ("Makefile", "# {name} {tag}", "FlowPlacement"),
+    ("CMakeLists.txt", "# {name} {tag}", "FlowPlacement"),
+    ("pyproject.toml", "# {name} {tag}", "FlowPlacement"),
+    ("README.md", "{name} {tag}.", "FlowPlacement"),
+    ("CONTRIBUTING.md", "{name} {tag}.", "FlowPlacement"),
+]
+
+
+def test_a_planted_name_is_found_in_every_kind_of_text(monkeypatch):
+    if not all((ROOT / rel).is_file() for rel, _, _ in PLANTS):
+        pytest.skip("needs a git checkout: the sdist leaves out .github/ and dev/")
+    planted = {}
+    for i, (rel, text, name) in enumerate(PLANTS):
+        planted[rel] = (
+            planted.get(rel, read(ROOT / rel))
+            + "\n"
+            + text.format(name=name, tag=f"plant{i}x")
+            + "\n"
+        )
+    monkeypatch.setattr(sys.modules[__name__], "PLANTED", planted)
+    unreviewed, _ = check(find_stale(), reviewed())
+    for i, (rel, _, name) in enumerate(PLANTS):
+        assert any(
+            u.startswith(f"{rel}: [{name}] ") and f"plant{i}x" in u for u in unreviewed
+        ), PLANTS[i]

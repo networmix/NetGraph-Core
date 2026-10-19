@@ -34,17 +34,11 @@ const char* termination_name(Termination t) {
 }
 
 py::object inf_or(const std::optional<Amount>& r) {
-  return r.has_value() ? py::object(py::int_(*r)) : py::object(py::float_(std::numeric_limits<double>::infinity()));
+  return r.has_value() ? py::object(int_object(*r)) : py::object(float_object(std::numeric_limits<double>::infinity()));
 }
 
 py::object counter_or_none(const std::optional<Counter128>& c) {
   return c.has_value() ? counter_int(*c) : py::object(py::none());
-}
-
-py::list counter_pairs(const std::vector<std::pair<EdgeId, Counter128>>& v) {
-  py::list out;
-  for (const auto& [e, x] : v) out.append(py::make_tuple(e, counter_int(x)));
-  return out;
 }
 
 // fractions.Fraction, imported once when the module is registered: TunnelPlan.max_fractional_bandwidth_per_tunnel only
@@ -79,7 +73,7 @@ void register_placement_result(py::module_& m) {
                          "LOSSLESS), admitted (LOSSLESS: what it delivers; LOSSY: offered), delivered, source_drops\n"
                          "(offered units lost at the source for lack of a usable route) and total_edge_drops (its losses\n"
                          "on links). LOSSY: offered = delivered + source_drops + total_edge_drops. Exact ints.")
-      .def_readonly("source", &SourceFlow::source, "the source node id")
+      .def_property_readonly("source", int_reader(&SourceFlow::source), "the source node id")
       .def_property_readonly(
 
           "offered", [](const SourceFlow& r) { return counter_or_none(r.offered); },
@@ -88,7 +82,7 @@ void register_placement_result(py::module_& m) {
 
           "admitted", [](const SourceFlow& r) { return counter_int(r.admitted); },
           "LOSSLESS: the units it delivers; LOSSY: offered")
-      .def_readonly("delivered", &SourceFlow::delivered, "the units it delivers to the destinations")
+      .def_property_readonly("delivered", int_reader(&SourceFlow::delivered), "the units it delivers to the destinations")
       .def_property_readonly(
           "source_drops", [](const SourceFlow& r) { return counter_int(r.source_drops); },
           "LOSSY: its offered units lost at the source (no usable route); 0 when LOSSLESS")
@@ -106,8 +100,8 @@ void register_placement_result(py::module_& m) {
                          "injections: LOSSY the shares sent to it, LOSSLESS what it carries), delivered and\n"
                          "total_edge_drops (its losses on links). Exact ints (assigned and total_edge_drops may exceed 64\n"
                          "bits).")
-      .def_readonly("entry_id", &TunnelFlow::entry_id, "the tunnel's entry identifier")
-      .def_readonly("head", &TunnelFlow::head, "the tunnel's head")
+      .def_property_readonly("entry_id", int_reader(&TunnelFlow::entry_id), "the tunnel's entry identifier")
+      .def_property_readonly("head", int_reader(&TunnelFlow::head), "the tunnel's head")
       .def_property_readonly("status", field_object(&TunnelFlow::status),
                     "UP, a down tunnel's setup status (INSUFFICIENT_BANDWIDTH, COST_CEILING_EXCEEDED), FAILED or\n"
                     "BLACKHOLED in this forwarding")
@@ -115,7 +109,7 @@ void register_placement_result(py::module_& m) {
 
           "assigned", [](const TunnelFlow& r) { return counter_int(r.assigned); },
           "its share of the injections in the epoch (LOSSY: sent to it; LOSSLESS: what it carries)")
-      .def_readonly("delivered", &TunnelFlow::delivered, "the units it delivers")
+      .def_property_readonly("delivered", int_reader(&TunnelFlow::delivered), "the units it delivers")
       .def_property_readonly(
           "total_edge_drops", [](const TunnelFlow& r) { return counter_int(r.total_edge_drops); }, "its units dropped on links")
       .def("__repr__", [](const TunnelFlow& r) {
@@ -133,7 +127,7 @@ void register_placement_result(py::module_& m) {
                          "total_planned_bandwidth (K*u), total_tunnel_cost (the route-cost sum, can exceed 2^64),\n"
                          "headroom_penalty (with prefer_headroom only) and max_lossless_offer (the program's lossless\n"
                          "maximum; a dead head's share blocks it). Exact ints.")
-      .def_readonly("tunnels_per_head", &TunnelPlan::tunnels_per_head, "the tunnels per head (T2 up to: the chosen count)")
+      .def_property_readonly("tunnels_per_head", int_reader(&TunnelPlan::tunnels_per_head), "the tunnels per head (T2 up to: the chosen count)")
       .def_property_readonly(
 
           "design_demand", [](const TunnelPlan& p) { return inf_or(p.design_demand); },
@@ -141,7 +135,7 @@ void register_placement_result(py::module_& m) {
       .def_property_readonly(
           "design_by_head", [](const TunnelPlan& p) { return pairs_tuple(p.design_by_head); },
           "((head, share), ...): every roster head's share RR(D, H, i), ascending NodeId")
-      .def_readonly("total_reserved_bandwidth", &TunnelPlan::total_reserved_bandwidth,
+      .def_property_readonly("total_reserved_bandwidth", int_reader(&TunnelPlan::total_reserved_bandwidth),
                     "the strict holds of the up tunnels, each tunnel's request counted once")
       .def_property_readonly(
           "heads_with_capacity",
@@ -156,12 +150,13 @@ void register_placement_result(py::module_& m) {
           "max_fractional_bandwidth_per_tunnel",
           [](const TunnelPlan& p) -> py::object {
             if (!p.max_fractional_bandwidth_per_tunnel.has_value()) return py::none();
-            return fraction_class().get_stored()(p.max_fractional_bandwidth_per_tunnel->first, p.max_fractional_bandwidth_per_tunnel->second);
+            const auto& [n, d] = *p.max_fractional_bandwidth_per_tunnel;
+            return fraction_object(fraction_class().get_stored(), n, d);
           },
           "T2: the exact fluid optimum s* (a fractions.Fraction; 0 without a live head); None for T1")
-      .def_readonly("max_bandwidth_per_tunnel", &TunnelPlan::max_bandwidth_per_tunnel, "T2: U, the largest common whole-unit size")
-      .def_readonly("planned_bandwidth_per_tunnel", &TunnelPlan::planned_bandwidth_per_tunnel, "T2: u, every tunnel's planned bandwidth")
-      .def_readonly("total_planned_bandwidth", &TunnelPlan::total_planned_bandwidth, "T2: K*u over the K tunnels")
+      .def_property_readonly("max_bandwidth_per_tunnel", optional_int_reader(&TunnelPlan::max_bandwidth_per_tunnel), "T2: U, the largest common whole-unit size")
+      .def_property_readonly("planned_bandwidth_per_tunnel", optional_int_reader(&TunnelPlan::planned_bandwidth_per_tunnel), "T2: u, every tunnel's planned bandwidth")
+      .def_property_readonly("total_planned_bandwidth", optional_int_reader(&TunnelPlan::total_planned_bandwidth), "T2: K*u over the K tunnels")
       .def_property_readonly(
           "total_tunnel_cost",
           [](const TunnelPlan& p) -> py::object { return p.total_tunnel_cost.has_value() ? counter_int(*p.total_tunnel_cost) : py::none(); },
@@ -174,7 +169,7 @@ void register_placement_result(py::module_& m) {
           },
           "T2 with prefer_headroom: the sum over the links' tunnel slots j of floor(2^32 (B - V + j*u) / B)\n"
           "(B: static capacity; V: free capacity); None without prefer_headroom and for T1")
-      .def_readonly("max_lossless_offer", &TunnelPlan::max_lossless_offer,
+      .def_property_readonly("max_lossless_offer", optional_int_reader(&TunnelPlan::max_lossless_offer),
                     "T2: F, the program's lossless maximum on the call's view (a dead head's share blocks it)")
       .def("__repr__", [](const TunnelPlan& p) {
         return "TunnelPlan(tunnels_per_head=" + std::to_string(p.tunnels_per_head) + ", total_reserved_bandwidth=" + std::to_string(p.total_reserved_bandwidth) + ")";
@@ -200,18 +195,18 @@ void register_placement_result(py::module_& m) {
       "zero. Optional outputs, None unless requested: edge_flows, residual and edge_reservations\n"
       "(int64[E]), saturated_boundary_edges, min_cut (they describe the same\n"
       "state; evaluate: the evaluated one). Amounts that accumulate are exact ints (they may exceed 64 bits).")
-      .def_readonly("call_delivered", &PlacementResult::call_delivered, "the units placed (delivered) by this call")
+      .def_property_readonly("call_delivered", int_reader(&PlacementResult::call_delivered), "the units placed (delivered) by this call")
       .def_property_readonly(
           "call_undelivered", [](const PlacementResult& r) { return inf_or(r.call_undelivered); },
           "the request minus call_delivered, in units (an amount, not a status); float('inf') for an infinite\n"
           "request")
-      .def_readonly("delivery_delta", &PlacementResult::delivery_delta,
+      .def_property_readonly("delivery_delta", int_reader(&PlacementResult::delivery_delta),
                     "the delivery after the call minus before it (call_delivered for a placement; may be negative\n"
                     "for a full-offer call)")
       .def_property_readonly(
           "call_edge_drops", [](const PlacementResult& r) { return pairs_list(r.call_edge_drops); },
           "this call's drops on links [(EdgeId, units)], ascending EdgeId (empty unless LOSSY)")
-      .def_readonly("call_source_drops", &PlacementResult::call_source_drops,
+      .def_property_readonly("call_source_drops", int_reader(&PlacementResult::call_source_drops),
                     "this call's offered units lost at sources without a usable route (LOSSY)")
       .def_property_readonly("termination", field_object(&PlacementResult::termination), "the call's outcome (Termination)")
       .def_readonly("routes_changed", &PlacementResult::routes_changed,
@@ -242,7 +237,7 @@ void register_placement_result(py::module_& m) {
           "requested",
           [](const PlacementResult& r) -> py::object {
             return r.requested.has_value() ? counter_int(*r.requested)
-                                           : py::object(py::float_(std::numeric_limits<double>::infinity()));
+                                           : py::object(float_object(std::numeric_limits<double>::infinity()));
           },
           "the sum of the epoch's requests; float('inf') after an infinite one")
       .def_property_readonly(
@@ -254,7 +249,7 @@ void register_placement_result(py::module_& m) {
 
           "admitted", [](const PlacementResult& r) { return counter_int(r.admitted); },
           "LOSSLESS: the total carried; LOSSY: offered")
-      .def_readonly("delivered", &PlacementResult::delivered, "the units the demand delivers")
+      .def_property_readonly("delivered", int_reader(&PlacementResult::delivered), "the units the demand delivers")
       .def_property_readonly(
 
           "unadmitted", [](const PlacementResult& r) { return counter_or_none(r.unadmitted); },
@@ -263,7 +258,7 @@ void register_placement_result(py::module_& m) {
           "source_drops", [](const PlacementResult& r) { return counter_int(r.source_drops); },
           "LOSSY: the offered units lost at sources (no usable route, or an empty roster); 0 when LOSSLESS")
       .def_property_readonly(
-          "edge_drops", [](const PlacementResult& r) { return counter_pairs(r.edge_drops); },
+          "edge_drops", [](const PlacementResult& r) { return pairs_list(r.edge_drops); },
           "the epoch's drops on links [(EdgeId, units)], ascending EdgeId (empty unless LOSSY)")
       .def_property_readonly(
 
@@ -278,7 +273,13 @@ void register_placement_result(py::module_& m) {
           "total_cost", [](const PlacementResult& r) { return counter_or_none(r.total_cost); },
           "controllers (CentralizedTE, ShortestPaths OPTIMIZED): the exact sum of cost * flow over the policy's\n"
           "allocation; None for the other models (T1, T2, Pinned)")
-      .def_readonly("marginal_cost_curve", &PlacementResult::marginal_cost_curve,
+      .def_property_readonly(
+          "marginal_cost_curve",
+          [](const PlacementResult& r) {
+            using Curve = py::typing::List<py::typing::Tuple<py::int_, py::int_>>;
+            return py::reinterpret_steal<py::typing::Optional<Curve>>(
+                r.marginal_cost_curve ? pairs_list<Curve>(*r.marginal_cost_curve).release() : py::none().release());
+          },
                     "unrestricted CentralizedTE with the optimized source allocation: the marginal cost curve [(cost, units)] of the policy's\n"
                     "cumulative flow (a zero call reports it unchanged; None before the epoch's first positive\n"
                     "call); in ascending cost, delivering `units` more raised the minimum total flow cost by `cost`\n"
@@ -306,11 +307,21 @@ void register_placement_result(py::module_& m) {
           },
           "if requested: the policy's own strict holds per edge after the call (int64[E], EdgeId order; zeros\n"
           "for a model without holds), else None")
-      .def_readonly("saturated_boundary_edges", &PlacementResult::saturated_boundary_edges,
+      .def_property_readonly(
+          "saturated_boundary_edges",
+          [](const PlacementResult& r) {
+            return py::reinterpret_steal<py::typing::Optional<py::typing::List<py::int_>>>(
+                r.saturated_boundary_edges ? ints_list(std::span<const EdgeId>(*r.saturated_boundary_edges)).release() : py::none().release());
+          },
                     "if requested: the ledger's saturation report after the call\n"
                     "(FlowLedger.saturated_boundary_edges of the "
                     "policy's sources and Eligibility), else None")
-      .def_readonly("min_cut", &PlacementResult::min_cut,
+      .def_property_readonly(
+          "min_cut",
+          [](const PlacementResult& r) {
+            return py::reinterpret_steal<py::typing::Optional<py::typing::List<py::int_>>>(
+                r.min_cut ? ints_list(std::span<const EdgeId>(*r.min_cut)).release() : py::none().release());
+          },
                     "if requested (OutputOptions(min_cut=True)), unrestricted CentralizedTE with the optimized source allocation, when the solve\n"
                     "reached the maximum flow: the minimum cut closest to the sources, every allowed edge leaving\n"
                     "the nodes the roster sources reach in the residual network (free capacity plus the policy's\n"

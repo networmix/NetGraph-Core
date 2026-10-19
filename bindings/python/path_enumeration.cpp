@@ -127,15 +127,12 @@ void register_paths(py::module_& m) {
           py::gil_scoped_release release;
           paths = ksp(*graph, s, t, c);
         }
-        // Every object through a checked allocation: a failure raises.
-        py::list out(paths.size());
+        // Every object through a checked allocation: a failure raises MemoryError.
+        auto out = py::reinterpret_steal<py::list>(checked(PyList_New(static_cast<Py_ssize_t>(paths.size()))).release());
         for (std::size_t i = 0; i < paths.size(); ++i) {
-          py::tuple item(2);
-          py::int_ cost(paths[i].first);
+          py::object cost = int_object(paths[i].first);
           py::object path = object_from<Path>(std::move(paths[i].second));
-          PyTuple_SET_ITEM(item.ptr(), 0, cost.release().ptr());
-          PyTuple_SET_ITEM(item.ptr(), 1, path.release().ptr());
-          PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), item.release().ptr());
+          PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), objects_tuple({cost, path}).release().ptr());
         }
         return out;
       },
@@ -168,7 +165,7 @@ void register_paths(py::module_& m) {
           py::gil_scoped_release release;
           paths = resolve_to_paths(*graph, *dag, s, t, split_parallel_edges, mp);
         }
-        py::list out(paths.size());
+        auto out = py::reinterpret_steal<py::list>(checked(PyList_New(static_cast<Py_ssize_t>(paths.size()))).release());
         for (std::size_t i = 0; i < paths.size(); ++i) {
           PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), object_from<Path>(std::move(paths[i])).release().ptr());
         }

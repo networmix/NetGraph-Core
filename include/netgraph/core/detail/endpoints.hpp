@@ -1,6 +1,6 @@
 /* Endpoint and root sets (internal): one normalisation, one
    overlap check and one message for each defect, shared by the flow core, the searches, the
-   ledger's bottleneck, the policies, the evaluators and the bindings (which check unnarrowed
+   ledger's saturation report, the policies, the evaluators and the bindings (which check unnarrowed
    Python integers and report the same texts). */
 #pragma once
 

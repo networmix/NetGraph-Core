@@ -115,8 +115,7 @@ void register_predecessor_dag(py::module_& m) {
         return py::isinstance<PredecessorDAG>(b) && a == b.cast<const PredecessorDAG&>();
       })
       .def("__hash__", [](const PredecessorDAG& a) {
-        return py::hash(py::make_tuple(a.graph_uid(), py::tuple(py::cast(std::vector<EdgeId>(a.via_edges().begin(),
-                                                                                              a.via_edges().end())))));
+        return hash_int(objects_tuple({int_object(a.graph_uid()), ints_tuple(a.via_edges())}));
       })
       .def("__repr__", [](const PredecessorDAG& a) {
         return "PredecessorDAG(graph_uid=" + std::to_string(a.graph_uid()) + ", entries=" +

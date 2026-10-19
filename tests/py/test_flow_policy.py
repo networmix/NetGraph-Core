@@ -78,7 +78,7 @@ def test_configurations_are_structural_and_explicit():
         )
     with pytest.raises(TypeError, match="routing"):
         config("ShortestPaths")
-    # T1: the tunnel count (a Tunnels), the ceiling and the search minimum, every field as built.
+    # T1: the tunnel count (a TunnelCount), the ceiling and the search minimum, every field as built.
     ca = ngc.DistributedTE(
         ngc.TunnelCount(2),
         cost_ceiling=ngc.CostStretch(1.5),
@@ -99,7 +99,7 @@ def test_configurations_are_structural_and_explicit():
     with pytest.raises(TypeError):
         ngc.DistributedTE()  # the tunnel count is required
     with pytest.raises(TypeError):
-        ngc.DistributedTE(2)  # a Tunnels, not an int
+        ngc.DistributedTE(2)  # a TunnelCount, not an int
     with pytest.raises(TypeError):
         ngc.DistributedTE(
             ngc.TunnelCount(1), ngc.AbsoluteCost(1)
@@ -986,6 +986,12 @@ def test_evaluator_results_survive_python_allocation_failures():
     calls = [
         (ngc.evaluate_demand, (g, 0, 3, ngc.EvaluationOptions(GLOBAL))),
         (ngc.evaluate_pairs, (g, [(0, 3), (1, 3)], ngc.EvaluationOptions(GLOBAL))),
+        # Node sets given as lists: the call makes no temporary list, so the result list itself
+        # is a new allocation the sweep reaches.
+        (
+            ngc.evaluate_pairs,
+            (g, [([0], [3]), ([1], [3])], ngc.EvaluationOptions(GLOBAL)),
+        ),
         (ngc.evaluate_edge_failures, (g, 0, 3, ngc.EvaluationOptions(GLOBAL))),
     ]
     for fn, args in calls:

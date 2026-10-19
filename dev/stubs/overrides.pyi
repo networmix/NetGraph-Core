@@ -100,7 +100,7 @@ class PredecessorDAG:
     # reason: no constructor: built by PredecessorDAG.from_csr, Path.to_dag and the searches
     # generated: (none)
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
-    # reason: offsets, parents and via are integers
+    # reason: parent_offsets, parents and via_edges are integers
     # generated: def from_csr(graph: Graph, parent_offsets: typing.Any, parents: typing.Any, via_edges: typing.Any) -> PredecessorDAG:
     @staticmethod
     def from_csr(
@@ -220,7 +220,7 @@ class CostStretch:
     def factor(self) -> fractions.Fraction: ...
 
 class TunnelCount:
-    # reason: count is an integer
+    # reason: per_head is an integer
     # generated: def __init__(self, per_head: typing.Any, *, up_to: bool = False) -> None:
     def __init__(
         self, per_head: typing.SupportsIndex, *, up_to: bool = False
@@ -253,7 +253,7 @@ class Tunnel:
     def edges(self) -> tuple[int, ...] | None: ...
 
 class RouteDefinition:
-    # reason: head and weight are integers (weight checked by from_routes); bundle a Path or a PredecessorDAG (TypeError otherwise)
+    # reason: head and weight are integers (weight checked by from_routes); route a Path or a PredecessorDAG (TypeError otherwise)
     # generated: def __init__(self, head: typing.Any, route: typing.Any, *, weight: typing.Any = 1) -> None:
     def __init__(
         self,
@@ -267,7 +267,7 @@ class ForwardingProgram:
     # reason: no constructor: made by from_routes or from_dag and returned by the policies
     # generated: (none)
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
-    # reason: sources and destinations are node sets; routes a sequence of Route; edge_weights and residual integers or None
+    # reason: sources and destinations are node sets; routes a sequence of RouteDefinition; edge_weights and residual integers or None
     # generated: def from_routes(graph: Graph, sources: typing.Any, destinations: typing.Any, routes: typing.Any, *, allocation: RouteAllocation | None = None, weight_basis: WeightBasis | None = None, edge_weights: typing.Any = None, residual: typing.Any = None) -> ForwardingProgram:
     @staticmethod
     def from_routes(
@@ -527,7 +527,7 @@ class FlowPolicy:
         eligibility: Eligibility | None = None,
         cache: ShortestPathCache | None = None,
     ) -> None: ...
-    # reason: volume is integer units or float('inf') (a NumPy floating +inf too); outputs may be None; the result is a PlacementResult
+    # reason: offer is integer units or float('inf') (a NumPy floating +inf too); outputs may be None; the result is a PlacementResult
     # generated: def place(self, offer: typing.Any, outputs: typing.Any = None) -> typing.Any:
     def place(
         self,
@@ -595,7 +595,7 @@ class SensitivityEntry:
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
 
 class SensitivityResult:
-    # reason: no constructor: returned by sensitivity
+    # reason: no constructor: returned by evaluate_edge_failures
     # generated: (none)
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
 
@@ -709,7 +709,7 @@ def as_float(
     x: typing.SupportsIndex, resolution: typing.SupportsFloat | typing.SupportsIndex
 ) -> float: ...
 
-# reason: pairs of node sets, each pair a length-2 sequence (sources, destinations), an integer array included (so pairs may be an integer array of shape (k, 2), or (k, 2, m) for sets of m nodes); opts is EvaluationOptions; per_pair_eligibility has one Eligibility or None per pair; workers is an integer or None; one PlacementResult per pair
+# reason: pairs of node sets, each pair a length-2 sequence (sources, destinations), an integer array included (so pairs may be an integer array of shape (k, 2), or (k, 2, m) for sets of m nodes); options is EvaluationOptions; per_pair_eligibility has one Eligibility or None per pair; workers is an integer or None; one PlacementResult per pair
 # generated: def evaluate_pairs(graph: Graph, pairs: typing.Any, options: typing.Any, per_pair_eligibility: typing.Any = None, workers: typing.Any = None) -> typing.Any:
 def evaluate_pairs(
     graph: Graph,
@@ -727,7 +727,7 @@ def evaluate_pairs(
     workers: typing.SupportsIndex | None = None,
 ) -> list[PlacementResult]: ...
 
-# reason: sources and destinations are node sets; opts is EvaluationOptions (TypeError otherwise)
+# reason: sources and destinations are node sets; options is EvaluationOptions (TypeError otherwise)
 # generated: def evaluate_demand(graph: Graph, sources: typing.Any, destinations: typing.Any, options: typing.Any) -> typing.Any:
 def evaluate_demand(
     graph: Graph,
@@ -740,7 +740,7 @@ def evaluate_demand(
     options: EvaluationOptions,
 ) -> PlacementResult: ...
 
-# reason: src and dst are integers; opts is KspOptions; a list of (cost, Path)
+# reason: source and destination are integers; options is KspOptions; a list of (cost, Path)
 # generated: def ksp(graph: Graph, source: typing.Any, destination: typing.Any, options: typing.Any) -> list:
 def ksp(
     graph: Graph,
@@ -749,7 +749,7 @@ def ksp(
     options: KspOptions,
 ) -> list[tuple[int, Path]]: ...
 
-# reason: src, dst and max_paths are integers (max_paths may be None); a list of Path
+# reason: source, destination and max_paths are integers (max_paths may be None); a list of Path
 # generated: def resolve_to_paths(graph: Graph, dag: PredecessorDAG, source: typing.Any, destination: typing.Any, split_parallel_edges: bool = False, max_paths: typing.Any = None) -> list:
 def resolve_to_paths(
     graph: Graph,
@@ -760,7 +760,7 @@ def resolve_to_paths(
     max_paths: typing.SupportsIndex | None = None,
 ) -> list[Path]: ...
 
-# reason: sources and destinations are node sets; opts is EvaluationOptions; workers is an integer or None
+# reason: sources and destinations are node sets; options is EvaluationOptions; workers is an integer or None
 # generated: def evaluate_edge_failures(graph: Graph, sources: typing.Any, destinations: typing.Any, options: typing.Any, workers: typing.Any = None) -> typing.Any:
 def evaluate_edge_failures(
     graph: Graph,
@@ -774,7 +774,7 @@ def evaluate_edge_failures(
     workers: typing.SupportsIndex | None = None,
 ) -> SensitivityResult: ...
 
-# reason: roots is a node set; opts is SpfOptions (TypeError otherwise)
+# reason: roots is a node set; options is SpfOptions (TypeError otherwise)
 # generated: def spf(graph: Graph, roots: typing.Any, options: typing.Any) -> typing.Any:
 def spf(
     graph: Graph,

@@ -14,10 +14,10 @@ FlowLedger | placed | only by reset(); the records are the flows placed on it by
 FlowPolicyConfig | edge_weights | for DistributedTE, the ceilings, min_unreserved_bandwidth an | ShortestPaths.edge_weights, where the field now lives
 FlowRecord | entry | sources, destinations, admission, entry_id (a T1, T2 or Pinn | an entry of a program, an array or a CSR list
 FlowRecord.entry_id | entry | the program entry the record carries (T1, T2 and Pinned: the | an entry of a program, an array or a CSR list
-ForwardingProgram | weights | An immutable value: one demand's routes and integer weights. | WEIGHTED's member weights
-ForwardingProgram | weights | highest averages over its entries' weights; identical routes | WEIGHTED's member weights
+ForwardingProgram | weights | An immutable value: one demand's routes and integer weights. | a program entry's integer weight (its share among its head's entries)
+ForwardingProgram | weights | highest averages over its entries' weights; identical routes | a program entry's integer weight (its share among its head's entries)
 ForwardingProgram.from_dag | allocated | allocated equally and pooled at every shared router exactly | allocated memory, storage or amounts
-ForwardingProgram.source_weights | weights | the captured source weights ((source, weight), ascending), o | WEIGHTED's member weights
+ForwardingProgram.source_weights | weights | the captured source weights ((source, weight), ascending), o | the captured source weights of a program's injection
 Graph | cost | Costs are positive integers; capacities are int64 units of t | an edge's or a path's cost (Path.cost is the current name)
 Graph | cost | given in input order and numbered by sorting on (source, cos | an edge's or a path's cost (Path.cost is the current name)
 Graph.__init__ | cost | capacity and cost sums below 2^62). Integers are read withou | an edge's or a path's cost (Path.cost is the current name)
@@ -37,9 +37,9 @@ README.md | Route | ### Route structures | a route or routes (a heading such as 
 README.md | Route | - **Route allocations**, the rules that spread one flow over | a route or routes (a heading such as 'Route structures' or 'Routes')
 README.md | Route | - **Route choice**: one tie rule, `RouteTieBreak` (`FEWER_HO | a route or routes (a heading such as 'Route structures' or 'Routes')
 README.md | cost | fixed order (the resolution, the unit values, the shapes, ze | an edge's or a path's cost (Path.cost is the current name)
-README.md | count | `TunnelCount(L, up_to=True)` chooses the smallest common cou | the tunnel count
-README.md | count | unchanged, except that a call raising `ShortestPathCacheMiss | the tunnel count
-README.md | count | without a tunnel count, an ideal controller: the minimum-cos | the tunnel count
+README.md | count | `TunnelCount(L, up_to=True)` chooses the smallest common cou | the tunnel count (tunnels per head)
+README.md | count | unchanged, except that a call raising `ShortestPathCacheMiss | the verb 'to count' (a tally), not a tunnel count
+README.md | count | without a tunnel count, an ideal controller: the minimum-cos | the tunnel count (tunnels per head)
 README.md | drops | by hop and records what it drops. | losses on links or at a source
 README.md | edge_weights | `allocation=WEIGHTED` is WCMP with its `weight_basis` and `e | ShortestPaths.edge_weights, where the field now lives
 README.md | edge_weights | edge_weights=None, tie_break=FEWER_HOPS, multipath=True, par | ShortestPaths.edge_weights, where the field now lives
@@ -47,7 +47,6 @@ README.md | edges | `saturated_boundary_edges(sources)` lists the full edges lea
 README.md | placed | `edge_flows`, `edge_drops` and `edge_reservations`) are the | traffic placed (delivered) on a ledger
 README.md | placement | placement engine for one demand, bound to its ledger. `FlowP | placing traffic
 README.md | tunnels | and splits equally over their up tunnels; | a model's tunnels (ForwardingProgram.tunnels is the current name)
-README.md | tunnels | design; a `support` restricts the tunnels to its edges. The | a model's tunnels (ForwardingProgram.tunnels is the current name)
 README.md | tunnels | design_demand=None)` publishes it (T1 sets its tunnels up an | a model's tunnels (ForwardingProgram.tunnels is the current name)
 README.md | tunnels | equally over the heads and their tunnels, each tunnel runs C | a model's tunnels (ForwardingProgram.tunnels is the current name)
 README.md | tunnels | nothing; the policy's Eligibility fails the tunnels it touch | a model's tunnels (ForwardingProgram.tunnels is the current name)
@@ -55,20 +54,19 @@ README.md | tunnels | program (T1 keeps its tunnels and holds, T2 its tunnels an
 README.md | tunnels | single-path tunnels with one common whole-unit planned bandw | a model's tunnels (ForwardingProgram.tunnels is the current name)
 README.md | tunnels | strict-bandwidth tunnels, as RSVP-TE head ends do, with no c | a model's tunnels (ForwardingProgram.tunnels is the current name)
 README.md | volume | strict-bandwidth tunnels, as RSVP-TE head ends do, with no c | the design volume D of the tunnel models
-README.md | weights | - **`ForwardingProgram`**: the routes and integer weights of | WEIGHTED's member weights
+README.md | weights | - **`ForwardingProgram`**: the routes and integer weights of | a program entry's integer weight (its share among its head's entries)
 ShortestPaths.edge_weights | weights | the explicit weights (one int per edge, a tuple), or None | WEIGHTED's member weights
 SourceFlow.total_edge_drops | dropped | LOSSY: its units dropped on links; 0 when LOSSLESS | traffic dropped on a link or at a black hole
 Tunnel | planned | planned_bandwidth: T2's planned bandwidth | T2's planned bandwidth
-TunnelCount | count | The tunnel count of T1 (DistributedTE) and T2, per head: per | the tunnel count
-TunnelCount | count | policy or an evaluator uses it). up_to=True (T2 only; T1 rej | the tunnel count
-TunnelCount.per_head | count | the tunnels per head (the largest count for up_to) | the tunnel count
-TunnelCount.up_to | count | True: the smallest sufficient count up to per_head (T2 only) | the tunnel count
+TunnelCount | count | The tunnel count of T1 (DistributedTE) and T2, per head: per | the tunnel count (tunnels per head)
+TunnelCount | count | policy or an evaluator uses it). up_to=True (T2 only; T1 rej | the tunnel count (tunnels per head)
+TunnelCount.per_head | count | the tunnels per head (the largest count for up_to) | the tunnel count (tunnels per head)
 TunnelFlow.total_edge_drops | dropped | its units dropped on links | traffic dropped on a link or at a black hole
-TunnelPlan | count | The tunnel models' setup summary (read-only): tunnels_per_he | the tunnel count
+TunnelPlan | count | The tunnel models' setup summary (read-only): tunnels_per_he | the tunnel count (tunnels per head)
 TunnelPlan | volume | design_demand (the design volume D in units), design_by_head | the design volume D of the tunnel models
 TunnelPlan.design_demand | volume | the design volume D in units; float('inf') when unlimited | the design volume D of the tunnel models
-TunnelPlan.total_tunnel_cost | count | T2: the sum of cost * tunnel count over the links (exact; ca | the tunnel count
-TunnelPlan.tunnels_per_head | count | the tunnels per head (T2 up to: the chosen count) | the tunnel count
+TunnelPlan.total_tunnel_cost | count | T2: the sum of cost * tunnel count over the links (exact; ca | the number of tunnels using each link
+TunnelPlan.tunnels_per_head | count | the tunnels per head (T2 up to: the chosen count) | the tunnel count (tunnels per head)
 bindings/python/hooks.cpp | allocated | are counted, so a test also sees what a failed call left all | allocated memory, storage or amounts
 bindings/python/publication.hpp | allocated | The checked construction of result objects: the Python objec | allocated memory, storage or amounts
 bindings/python/publication.hpp | allocated | value (std::shared_ptr also deletes it when its control bloc | allocated memory, storage or amounts
@@ -89,9 +87,9 @@ code:tests/py/test_centralized_te_tunnels.py | priority | priority | the retired
 code:tests/py/test_configuration.py | origin | origin | the retired keyword passed on purpose: the test checks it is rejected
 code:tests/py/test_configuration.py | selection | selection | the retired keyword passed on purpose: the test checks it is rejected
 code:tests/py/tunnel_oracle.py | priority | priority | the oracle's tie score of an edge (as the library's internal priority_value)
-dev/perf/aba.py | selection | row, and a selection has at least one (``choose_rows``). | the timing report's `selection` record (its JSON key is kept)
-dev/perf/aba.py | selection | selection, ``--iters`` (the pins) and the report's start. Re | the timing report's `selection` record (its JSON key is kept)
-dev/perf/aba.py | selection | their groups it did not, and per group the rows the whole se | the timing report's `selection` record (its JSON key is kept)
+dev/perf/aba.py | selection | row, and a selection has at least one (``choose_rows``). | the timing tool's row selection (--rows)
+dev/perf/aba.py | selection | selection, ``--iters`` (the pins) and the report's start. Re | the timing tool's row selection (--rows)
+dev/perf/aba.py | selection | their groups it did not, and per group the rows the whole se | the timing tool's row selection (--rows)
 dev/perf/aba_api.hpp | dst | * ksp (ksp.fabric3_k8): ksp(g, src, dst, KspOptions(k)) (FEW | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | dst | * spf_dag (spf.dag.*): spf(g, {src}, Forward, targets {dst}) | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | dst | * spf_path (spf.single.canonical16k): spf(g, {src}, Forward, | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
@@ -121,8 +119,8 @@ dev/perf/aba_rows.hpp | src | The full-content digest of an input: n and E, then
 dev/perf/aba_rows.hpp | src | of input positions where src decreases, and whether the inpu | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_rows.hpp | src | recovered from the same draws (1 + k for the generator's 1 + | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/test_tool.py | allocated | the per-iteration bookkeeping is allocated before the setup | allocated memory, storage or amounts
-dev/perf/test_tool.py | selection | main's character check passes '?', '[', ']' and '!' on to th | the timing report's `selection` record (its JSON key is kept)
-dev/perf/test_tool.py | selection | memory rule, the verdicts, the bootstrap interval, the clust | the timing report's `selection` record (its JSON key is kept)
+dev/perf/test_tool.py | selection | main's character check passes '?', '[', ']' and '!' on to th | the timing tool's row selection (--rows)
+dev/perf/test_tool.py | selection | memory rule, the verdicts, the bootstrap interval, the clust | the timing tool's row selection (--rows)
 docs/semantics.md | Residual | - **EdgeId order is the coordinate of every per-edge value.* | the term 'Residual' (an edge's free capacity)
 docs/semantics.md | Residual | - **Residual gating** (only when a `residual` array is suppl | the term 'Residual' (an edge's free capacity)
 docs/semantics.md | Residual | - **Residual gating** at 1 unit when a residual is supplied. | the term 'Residual' (an edge's free capacity)
@@ -145,26 +143,26 @@ docs/semantics.md | cost | bounds (node ids in range, then the capacity and cost
 docs/semantics.md | cost | capacity sum before the cost sum at the same edge). Integers | an edge's or a path's cost (Path.cost is the current name)
 docs/semantics.md | cost | public number, its EdgeId, by sorting the edges by source, c | an edge's or a path's cost (Path.cost is the current name)
 docs/semantics.md | cost | `NodeId`, `EdgeId` (`int32`), the cost and amount aliases (` | an edge's or a path's cost (Path.cost is the current name)
-docs/semantics.md | count | (`DistributedTE requires an exact tunnel count`), then the c | the tunnel count
-docs/semantics.md | count | - **Count outcomes.** An empty roster gives an empty program | the tunnel count
-docs/semantics.md | count | - **Routes.** At u, among the count vectors `x` (the tunnels | the tunnel count
-docs/semantics.md | count | - **Sizing.** `H` roster heads in ascending node id, `N = tu | the tunnel count
-docs/semantics.md | count | 10000]`; `TunnelCount(per_head)` itself takes any 64-bit int | the tunnel count
-docs/semantics.md | count | Admission `LOSSLESS` or `LOSSY`. No path-cost ceiling. The t | the tunnel count
-docs/semantics.md | count | Eligibility. Every step (roster, live heads, sizing, count c | the tunnel count
-docs/semantics.md | count | Then each model's own fields: the tunnel count in `[1, 10000 | the tunnel count
-docs/semantics.md | count | `TunnelCount(L, up_to=True)` gives every head one common cou | the tunnel count
-docs/semantics.md | count | carried loads per edge: summing them counts every hop, not t | the tunnel count
-docs/semantics.md | count | common count that carries the live heads' design shares (or | the tunnel count
-docs/semantics.md | count | for T1 (`L` counts for "up to"). | the tunnel count
-docs/semantics.md | count | is never held. A tunnel count is a number of setup attempts | the tunnel count
-docs/semantics.md | count | never grows with `k` (once it is 0, every later count scores | the tunnel count
-docs/semantics.md | count | partial hold, retry, growth or count reduction; `min_unreser | the tunnel count
-docs/semantics.md | count | result. A failed lookup counts one miss. A frozen cache neve | the tunnel count
-docs/semantics.md | count | sum of cost[e] * x[e]` (`total_tunnel_cost`; idle tunnels co | the tunnel count
-docs/semantics.md | count | the share. `a` live heads, `k` tunnels each (`N`, or the cho | the tunnel count
-docs/semantics.md | count | then roster position `i`, with the entry identifier `j * H + | the tunnel count
-docs/semantics.md | count | without a tunnel count, and `ShortestPaths` with `allocation | the tunnel count
+docs/semantics.md | count | (`DistributedTE requires an exact tunnel count`), then the c | the tunnel count (tunnels per head)
+docs/semantics.md | count | - **Count outcomes.** An empty roster gives an empty program | the tunnel count (tunnels per head)
+docs/semantics.md | count | - **Routes.** At u, among the count vectors `x` (the tunnels | a vector of per-link tunnel counts (the tunnels on each link)
+docs/semantics.md | count | - **Sizing.** `H` roster heads in ascending node id, `N = tu | the tunnel count (tunnels per head)
+docs/semantics.md | count | 10000]`; `TunnelCount(per_head)` itself takes any 64-bit int | the tunnel count (tunnels per head)
+docs/semantics.md | count | Admission `LOSSLESS` or `LOSSY`. No path-cost ceiling. The t | the tunnel count (tunnels per head)
+docs/semantics.md | count | Eligibility. Every step (roster, live heads, sizing, count c | the tunnel count (tunnels per head)
+docs/semantics.md | count | Then each model's own fields: the tunnel count in `[1, 10000 | the tunnel count (tunnels per head)
+docs/semantics.md | count | `TunnelCount(L, up_to=True)` gives every head one common cou | the tunnel count (tunnels per head)
+docs/semantics.md | count | carried loads per edge: summing them counts every hop, not t | the verb 'to count' (a tally), not a tunnel count
+docs/semantics.md | count | common count that carries the live heads' design shares (or | the tunnel count (tunnels per head)
+docs/semantics.md | count | for T1 (`L` counts for "up to"). | the verb 'to count' (a tally), not a tunnel count
+docs/semantics.md | count | is never held. A tunnel count is a number of setup attempts | the tunnel count (tunnels per head)
+docs/semantics.md | count | never grows with `k` (once it is 0, every later count scores | the tunnel count (tunnels per head)
+docs/semantics.md | count | partial hold, retry, growth or count reduction; `min_unreser | reducing the number of tunnels
+docs/semantics.md | count | result. A failed lookup counts one miss. A frozen cache neve | the verb 'to count' (a tally), not a tunnel count
+docs/semantics.md | count | sum of cost[e] * x[e]` (`total_tunnel_cost`; idle tunnels co | the verb 'to count' (a tally), not a tunnel count
+docs/semantics.md | count | the share. `a` live heads, `k` tunnels each (`N`, or the cho | the tunnel count (tunnels per head)
+docs/semantics.md | count | then roster position `i`, with the entry identifier `j * H + | the verb 'to count' (a tally), not a tunnel count
+docs/semantics.md | count | without a tunnel count, and `ShortestPaths` with `allocation | the tunnel count (tunnels per head)
 docs/semantics.md | dropped | carries traffic. Records and `OutputOptions` give the carrie | traffic dropped on a link or at a black hole
 docs/semantics.md | drops | - **The lossless bound.** A Lossless call forwards each entr | losses on links or at a source
 docs/semantics.md | drops | forwards hop by hop and drops what does not fit on each edge | losses on links or at a source
@@ -274,28 +272,28 @@ docs/semantics.md | volume | volume, take whole offers only). `evaluate`, `repla
 docs/semantics.md | weights | (`EQUAL`) or by highest averages over the weights (`WEIGHTED | WEIGHTED's member weights
 docs/semantics.md | weights | (`from_dag allocation must be EQUAL or WEIGHTED`) and the we | WEIGHTED's member weights
 docs/semantics.md | weights | - **EdgeId order is the coordinate of every per-edge value.* | WEIGHTED's member weights
-docs/semantics.md | weights | - **Highest averages `H(x, w)`.** `x` units over members wit | WEIGHTED's member weights
-docs/semantics.md | weights | - **Program.** A `ForwardingProgram`: the routes and integer | WEIGHTED's member weights
+docs/semantics.md | weights | - **Highest averages `H(x, w)`.** `x` units over members wit | the weights of highest averages (members or entries)
+docs/semantics.md | weights | - **Program.** A `ForwardingProgram`: the routes and integer | a program entry's integer weight (its share among its head's entries)
 docs/semantics.md | weights | - **The tie rule never supplies weights** (`ShortestPaths` ` | WEIGHTED's member weights
-docs/semantics.md | weights | - **`Pinned`** forwards its program as given, computing noth | WEIGHTED's member weights
+docs/semantics.md | weights | - **`Pinned`** forwards its program as given, computing noth | a program entry's integer weight (its share among its head's entries)
 docs/semantics.md | weights | - **`WEIGHTED`** splits at every node by highest averages ov | WEIGHTED's member weights
 docs/semantics.md | weights | - The roster is rebuilt from the program's **basis**, ignori | WEIGHTED's member weights
 docs/semantics.md | weights | 6. the weights: `weight_basis requires allocation=WEIGHTED`; | WEIGHTED's member weights
-docs/semantics.md | weights | allocation the program keeps the solved supplies as **captur | WEIGHTED's member weights
+docs/semantics.md | weights | allocation the program keeps the solved supplies as **captur | the captured source weights of a program's injection
 docs/semantics.md | weights | and attribution, in one split context. `allocation` is `EQUA | WEIGHTED's member weights
 docs/semantics.md | weights | chooses weights. Weights are never renormalised; a member wh | WEIGHTED's member weights
 docs/semantics.md | weights | ignoring capacity and weights; an empty roster is allowed (a | WEIGHTED's member weights
 docs/semantics.md | weights | its weights from its weight basis there ([section 5](#5-rout | WEIGHTED's member weights
-docs/semantics.md | weights | robin (**equal sources**) or by highest averages over the ca | WEIGHTED's member weights
+docs/semantics.md | weights | robin (**equal sources**) or by highest averages over the ca | the captured source weights of a program's injection
 docs/semantics.md | weights | routes`); `OPTIMIZED` (`from_routes allocation must be EQUAL | WEIGHTED's member weights
-docs/semantics.md | weights | share and loses it. Captured source weights keep the remaini | WEIGHTED's member weights
+docs/semantics.md | weights | share and loses it. Captured source weights keep the remaini | the captured source weights of a program's injection
 docs/semantics.md | weights | stays `UP`. Weights stay as the program froze them. | WEIGHTED's member weights
-docs/semantics.md | weights | the demand. Equal positive weights give exactly round robin: | WEIGHTED's member weights
+docs/semantics.md | weights | the demand. Equal positive weights give exactly round robin: | the weights of highest averages (members or entries)
 docs/semantics.md | weights | the interior split of the `PredecessorDAG` routes, `EQUAL` ( | WEIGHTED's member weights
-docs/semantics.md | weights | then splits its share by highest averages over its entries' | WEIGHTED's member weights
+docs/semantics.md | weights | then splits its share by highest averages over its entries' | a program entry's integer weight (its share among its head's entries)
 docs/semantics.md | weights | value does not expose per-router effective weights, the spli | WEIGHTED's member weights
 docs/semantics.md | weights | weights), and forwards it hop by hop on the free capacity: e | WEIGHTED's member weights
-docs/semantics.md | weights | route allocation | WEIGHTED's member weights
+docs/semantics.md | weights | route allocation | a table column: the weight options of the models
 evaluate_edge_failures | placed | (NGRAPH_CORE_SENSITIVITY_THREADS). Only ShortestPaths reads | traffic placed (delivered) on a ledger
 include/netgraph/core/detail/min_cost_flow.hpp | allocated | keeps it alive); the working storage is the resolver's own, | allocated memory, storage or amounts
 include/netgraph/core/detail/min_cost_flow.hpp | f_e | repairs the state by three fixed-origin repairs (u -> v for | a math symbol of the comment's formula
@@ -307,28 +305,28 @@ include/netgraph/core/detail/min_cost_flow.hpp | sensitivity | Optimized uses an
 include/netgraph/core/detail/policy_engine.hpp | sensitivity | CentralizedTE: a capture request for the next solve's final | sensitivity analysis, or the env var NGRAPH_CORE_SENSITIVITY_THREADS
 include/netgraph/core/detail/search_detail.hpp | priority | Any source of per-edge priority values (a search's PriorityV | a score's priority order, or a priority queue
 include/netgraph/core/detail/tunnel_setup.hpp | volume | T1's setup for the design volume D (< 2^62) over the roster' | the design volume D of the tunnel models
-include/netgraph/core/evaluators.hpp | selection | T1 sets up again for the same design under each deletion, T2 | T2's count selection
+include/netgraph/core/evaluators.hpp | selection | T1 sets up again for the same design under each deletion, T2 | T2's count selection (the count chosen up to L)
 include/netgraph/core/flow_ledger.hpp | placed | A ledger tracks the flows placed on one graph in two project | traffic placed (delivered) on a ledger
-include/netgraph/core/flow_policy.hpp | count | The tunnel count of the tunnel models, per head: `per_head` | the tunnel count
-include/netgraph/core/flow_policy.hpp | count | chosen count), design_demand (nullopt: unlimited), design_by | the tunnel count
-include/netgraph/core/flow_policy.hpp | count | or an evaluator uses it); `up_to` (T2 only; T1 rejects it): | the tunnel count
+include/netgraph/core/flow_policy.hpp | count | The tunnel count of the tunnel models, per head: `per_head` | the tunnel count (tunnels per head)
+include/netgraph/core/flow_policy.hpp | count | chosen count), design_demand (nullopt: unlimited), design_by | the tunnel count (tunnels per head)
+include/netgraph/core/flow_policy.hpp | count | or an evaluator uses it); `up_to` (T2 only; T1 rejects it): | the tunnel count (tunnels per head)
 include/netgraph/core/flow_policy.hpp | drops | call_edge_drops (this call's drops per edge, ascending EdgeI | losses on links or at a source
 include/netgraph/core/flow_policy.hpp | edge_weights | (Capacity). edge_weights (one integer per edge in [0, 2^62), | ShortestPaths.edge_weights, where the field now lives
 include/netgraph/core/flow_policy.hpp | edge_weights | edge_weights' length and entries; then the tunnel limit; the | ShortestPaths.edge_weights, where the field now lives
 include/netgraph/core/flow_policy.hpp | placed | minimum total cost of the flow by `cost` per unit (more deli | traffic placed (delivered) on a ledger
 include/netgraph/core/flow_policy.hpp | volume | controller. A design volume D is split RR(D, H, h) over the | the design volume D of the tunnel models
-include/netgraph/core/flow_policy.hpp | weights | allocation | WEIGHTED's member weights
+include/netgraph/core/flow_policy.hpp | weights | allocation | a table column: the weight options of the models
 include/netgraph/core/flow_record.hpp | drops | cumulative amount submitted to this flow before any drops. ` | losses on links or at a source
 include/netgraph/core/flow_record.hpp | entry | (T1, T2 and Pinned: one record per entry, the entry identifi | an entry of a program, an array or a CSR list
 include/netgraph/core/flow_record.hpp | entry | that route, or kUnreachable if none exists. `entry_id` is th | an entry of a program, an array or a CSR list
 include/netgraph/core/forwarding_program.hpp | allocated | One shared hop-by-hop program on a supplied DAG of `graph`: | allocated memory, storage or amounts
 include/netgraph/core/forwarding_program.hpp | planned | planned_bandwidth: T2's planned bandwidth u (metadata, | T2's planned bandwidth
 include/netgraph/core/forwarding_program.hpp | weights | Equal (absent) or Weighted, whose weights come from `weight_ | WEIGHTED's member weights
-include/netgraph/core/forwarding_program.hpp | weights | The captured source weights (roster source, saved supply) in | WEIGHTED's member weights
+include/netgraph/core/forwarding_program.hpp | weights | The captured source weights (roster source, saved supply) in | the captured source weights of a program's injection
 include/netgraph/core/forwarding_program.hpp | weights | applies only to PredecessorDAG routes`); allocation Optimize | WEIGHTED's member weights
-include/netgraph/core/forwarding_program.hpp | weights | share by highest averages over its entries' weights. Identic | WEIGHTED's member weights
+include/netgraph/core/forwarding_program.hpp | weights | share by highest averages over its entries' weights. Identic | a program entry's integer weight (its share among its head's entries)
 include/netgraph/core/forwarding_program.hpp | weights | the weights' combination; edge_weights' and residual's lengt | WEIGHTED's member weights
-include/netgraph/core/forwarding_program.hpp | weights | tunnel included) or captured source weights (source_weights( | WEIGHTED's member weights
+include/netgraph/core/forwarding_program.hpp | weights | tunnel included) or captured source weights (source_weights( | the captured source weights of a program's injection
 include/netgraph/core/graph.hpp | cost | (source, cost, destination, input). Node u's out-edges are | an edge's or a path's cost (Path.cost is the current name)
 include/netgraph/core/graph.hpp | cost | Construction uses N nodes, E edges and K distinct costs. A c | an edge's or a path's cost (Path.cost is the current name)
 include/netgraph/core/graph.hpp | cost | Maximum edge cost and greatest common divisor of all edge co | an edge's or a path's cost (Path.cost is the current name)
@@ -380,13 +378,13 @@ src/route_kernels.cpp | w_j | w_i / d_i > w_j / d_j, ties by the lower index: th
 src/route_kernels.cpp | w_j | w_i/d_i and w_j/d_j through w_i*d_j and w_j*d_i (operands < | a math symbol of the comment's formula
 src/search.cpp | priority | (its bottleneck), capped by `cap` for a KSP prefix; call thi | the member `priority` (a PriorityReader) and its values
 src/search.cpp | priority | the minimum priority along the walk (prio given) | the member `priority` (a PriorityReader) and its values
-src/search.cpp | selection | transitions (Expand: the banned edges; Collapse: every edge | T2's count selection
-tests/cpp/centralized_te_tunnels_tests.cpp | selection | Up to N: the unpruned selection over the EXACT(k) programs a | T2's count selection
-tests/cpp/centralized_te_tunnels_tests.cpp | selection | sizing, the objectives and the canonical tie, count selectio | T2's count selection
-tests/cpp/centralized_te_tunnels_tests.cpp | selection | the remainder bound 0 <= F - K U < K; "up to" against an unp | T2's count selection
+src/search.cpp | selection | transitions (Expand: the banned edges; Collapse: every edge | the KSP spur's parallel-member choice
+tests/cpp/centralized_te_tunnels_tests.cpp | selection | Up to N: the unpruned selection over the EXACT(k) programs a | T2's count selection (the count chosen up to L)
+tests/cpp/centralized_te_tunnels_tests.cpp | selection | sizing, the objectives and the canonical tie, count selectio | T2's count selection (the count chosen up to L)
+tests/cpp/centralized_te_tunnels_tests.cpp | selection | the remainder bound 0 <= F - K U < K; "up to" against an unp | T2's count selection (the count chosen up to L)
 tests/cpp/contract_examples_tests.cpp | Route | Routes over abstract links: each abstract link e of capacity | a route or routes (a heading such as 'Route structures' or 'Routes')
 tests/cpp/contract_examples_tests.cpp | placed | zero call placed first: a zero offer skips no validation). | traffic placed (delivered) on a ledger
-tests/cpp/contract_examples_tests.cpp | selection | With a dead head the count-selection scores (its supply budg | T2's count selection
+tests/cpp/contract_examples_tests.cpp | selection | With a dead head the count-selection scores (its supply budg | T2's count selection (the count chosen up to L)
 tests/cpp/distributed_te_tests.cpp | Stretch | A-X8-Stretch-exact: c0 = 5 and the factor exactly 6/5, so th | the worked example ids A-X8-Stretch-* (labels of the examples)
 tests/cpp/distributed_te_tests.cpp | Stretch | equality; A-X8-Stretch-cost7: at cost 7 it exceeds the ceili | the worked example ids A-X8-Stretch-* (labels of the examples)
 tests/cpp/distributed_te_tests.cpp | g | PVIEW (e0 cap 10, e1 cap 8) with FlowLedger(g, reservation_b | the local or parameter `g` of this file's code (a shorthand kept as an ordinary local)
@@ -422,14 +420,11 @@ tests/cpp/program_tests.cpp | dst | Every path from a head to dst (ids of g; des
 tests/cpp/program_tests.cpp | g | Every path from a head to dst (ids of g; destinations are te | the local or parameter `g` of this file's code (a shorthand kept as an ordinary local)
 tests/cpp/route_kernels_tests.cpp | a_i | Boundary property: every selected quotient w_i / a_i outrank | a math symbol of the comment's formula
 tests/cpp/route_kernels_tests.cpp | a_j | w_j / (a_j + 1) (ties by the lower index). | a math symbol of the comment's formula
-tests/cpp/route_kernels_tests.cpp | placed | edges, one or two destinations), each placed in three steps | traffic placed (delivered) on a ledger
 tests/cpp/route_kernels_tests.cpp | placed | so all 6 are placed. | traffic placed (delivered) on a ledger
 tests/cpp/route_kernels_tests.cpp | src | independent of the library: `total` enters at node `src`; no | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
 tests/cpp/route_kernels_tests.cpp | src | on some walk from src to the destination set that leaves no | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
 tests/cpp/route_kernels_tests.cpp | src | residual, the offer enters at `src` (+inf: each arc out of ` | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
 tests/cpp/route_kernels_tests.cpp | src | terminal), ascending; forward from src and backward from the | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
-tests/cpp/route_kernels_tests.cpp | volume | The curve's shape, each the only failure: an entry of volume | a curve entry's volume (its amount)
-tests/cpp/route_kernels_tests.cpp | volume | last volume raised breaks its total; its first cost raised b | a curve entry's volume (its amount)
 tests/cpp/route_kernels_tests.cpp | w_i | Boundary property: every selected quotient w_i / a_i outrank | a math symbol of the comment's formula
 tests/cpp/route_kernels_tests.cpp | w_j | w_j / (a_j + 1) (ties by the lower index). | a math symbol of the comment's formula
 tests/cpp/search_reference.hpp | priority | A walk's bottleneck: its lowest priority value (cmp order). | a score's priority order, or a priority queue
@@ -450,7 +445,7 @@ tests/cpp/zero_capacity_tests.cpp | g | One placement on a fresh ledger of g. | 
 tests/cpp/zero_capacity_tests.cpp | g | T1 with N tunnels per head: one replace(offer, design) on a | the local or parameter `g` of this file's code (a shorthand kept as an ordinary local)
 tests/py/test_centralized_te_tunnels.py | dst | id: (rows, heads, dst, L, D, chosen count, routes, lossless | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
 tests/py/test_centralized_te_tunnels.py | dst | id: (rows, heads, dst, N, D, free capacity or None, prefer_h | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
-tests/py/test_centralized_te_tunnels.py | selection | count selection, operations, programs and replays, records, | T2's count selection
+tests/py/test_centralized_te_tunnels.py | selection | count selection, operations, programs and replays, records, | T2's count selection (the count chosen up to L)
 tests/py/test_configuration.py | placed | The policy is built, and a zero call placed, only when the m | traffic placed (delivered) on a ledger
 tests/py/test_contract_examples.py | Route | Routes of link indices carrying their offers. Each demand of | a route or routes (a heading such as 'Route structures' or 'Routes')
 tests/py/test_distributed_te.py | Stretch | A-X8-Stretch-cost7: a cost-7 path exceeds the ceiling. | the worked example ids A-X8-Stretch-* (labels of the examples)
@@ -489,3 +484,177 @@ tests/py/test_shortest_path_cache.py | placed | and no placed deletion. | traffi
 tests/py/test_source_allocation.py | dst | Pinned over a program of one split route (the edges' DAG) fr | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
 tests/py/test_source_allocation.py | src | Pinned over a program of one split route (the edges' DAG) fr | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
 tests/py/tunnel_oracle.py | src | Every simple path (EdgeIds in walk order) from src that ends | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
+CMakeLists.txt | g | as the TSan documentation advises (the Debug build type adds | the compiler flag -g
+CONTRIBUTING.md | origin | git push origin vX.Y.Z | the git remote origin
+README.md | count | count; it does not promise whole-demand lossless delivery);  | the tunnel count (tunnels per head)
+README.md | tunnels | count; it does not promise whole-demand lossless delivery);  | a model's tunnels (ForwardingProgram.tunnels is the current name)
+TunnelCount | count | 1..per_head for every head: the smallest common count whose  | the tunnel count (tunnels per head)
+TunnelCount | count | design shares; if none does, the largest live-share score, t | the tunnel count (tunnels per head)
+TunnelCount.up_to | count | True: the smallest count up to per_head whose program carrie | the tunnel count (tunnels per head)
+bindings/python/flow_policy.cpp | placed_demand | placed_demand | a key of the frozen reference's trace format (the fixtures' keys)
+bindings/python/flow_policy.cpp | src | src | a key of the frozen reference's trace format (the fixtures' keys)
+code:tests/py/test_programs.py | bundles | bundles | a retired name named on purpose: the test checks it is gone or rejected
+code:tests/py/test_source_allocation.py | bundles | bundles | a retired name named on purpose: the test checks it is gone or rejected
+dev/perf/README.md | allocated | its iteration count: allocated and written before the row's  | allocated memory, storage or amounts
+dev/perf/README.md | placement | | `kernel` | `kernel.{proportional,eb,lossy}.clos`, `kernel. | placing traffic
+dev/perf/README.md | selection | groups it did not, and per group the rows the whole selectio | the timing tool's row selection (--rows)
+dev/perf/README.md | selection | memory rule's boundary, the bootstrap interval, the cluster  | the timing tool's row selection (--rows)
+dev/perf/README.md | selection | the side, mode and row when it comes from a block. A refusal | the timing tool's row selection (--rows)
+dev/perf/README.md | sensitivity | | `sensitivity` | `sens.exact`, `sens.policy_all_edges`, `se | a timing row's frozen group or description (the tool keeps row names)
+dev/perf/README.md | src | `OUT_DIR/src`, so a second attempt needs another or an empti | a directory or a sort key named src, or a path component
+dev/perf/README.md | src | `OUT_DIR/src`. `REV` is required (there is no default refere | a directory or a sort key named src, or a path component
+dev/perf/README.md | tunnels | | `t1` | `t1.setup.fabric`, `t1.forward.fabric` | T1 with 16 | a model's tunnels (ForwardingProgram.tunnels is the current name)
+dev/perf/README.md | tunnels | | `t2` | `t2.exact16.headroom`, `t2.exact16.cost`, `t2.upto2 | a model's tunnels (ForwardingProgram.tunnels is the current name)
+dev/perf/aba.py | selection | * rows the selection did not select, by group: | the timing tool's row selection (--rows)
+dev/perf/aba.py | selection | Selection (`--rows | the timing tool's row selection (--rows)
+dev/perf/aba.py | selection | selection | the timing tool's row selection (--rows)
+dev/perf/aba_rows.hpp | dst | construction, construct.random65k's topology and costs sorte | a directory or a sort key named src, or a path component
+dev/perf/aba_rows.hpp | elig | elig.build_intersect | a timing row's frozen name (the tool keeps row names)
+dev/perf/aba_rows.hpp | max_cost | ,\"max_cost\": | a key of the timing digest's JSON (kept, so digests of earlier builds compare)
+dev/perf/aba_rows.hpp | selection | T2 CentralizedTE(tunnel_count=TunnelCount(256, up_to=True),  | T2's count selection (the count chosen up to L)
+dev/perf/aba_rows.hpp | sensitivity | exact-model sensitivity (candidates: the positive-flow edges | a timing row's frozen group or description (the tool keeps row names)
+dev/perf/aba_rows.hpp | sensitivity | policy-model sensitivity over every eligible edge, ShortestP | a timing row's frozen group or description (the tool keeps row names)
+dev/perf/aba_rows.hpp | sensitivity | sensitivity | a timing row's frozen group or description (the tool keeps row names)
+dev/perf/aba_rows.hpp | src | construction, construct.random65k's topology and costs sorte | a directory or a sort key named src, or a path component
+dev/perf/build.sh | src | `git archive` into OUT_DIR/src. The driver (harness.cpp, aba | a directory or a sort key named src, or a path component
+dev/perf/test_tool.py | g | g | a timing tool test's synthetic group name `g`
+dev/perf/test_tool.py | g | list: row c: unknown key 'x': {"row": "c", "group": "g", "x" | a timing tool test's synthetic group name `g`
+dev/perf/test_tool.py | max_cost | max_cost | a key of the timing digest's JSON (kept, so digests of earlier builds compare)
+dev/perf/test_tool.py | selection | selection | the timing tool's row selection (--rows)
+dev/perf/test_tool.py | src | /src/include | a directory or a sort key named src, or a path component
+dev/perf/test_tool.py | src | src | a directory or a sort key named src, or a path component
+dev/stubs/check_clients.py | g | ng.FlowLedger(g, service_baseline=np.zeros(1, dtype=np.float | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/check_clients.py | g | ng.Path(g, np.zeros((1, 1), dtype=np.float64)) | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/check_clients.py | g | ng.evaluate_demand(g, 0, 1, cfg) | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/check_clients.py | g | ng.evaluate_pairs(g, float_pairs, | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/check_clients.py | g | ng.spf(g, 0, ng.KspOptions(1)) | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/check_clients.py | g | npt.NDArray[np.float64] = g.edge_capacity_units() | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/check_clients.py | g | oops: str = g.num_edges() | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/check_clients.py | g | text: str = g.edge_capacity_units().item(0) | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_checks.py | g | if line == "oops: str = g.num_edges()": | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_checks.py | src | src/__pycache__ | a directory or a sort key named src, or a path component
+dev/stubs/test_checks.py | src | src/__pycache__/m.pyc | a directory or a sort key named src, or a path component
+dev/stubs/test_generate.py | g | # generated: def g() -> None: | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_generate.py | g | def g( | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_generate.py | g | def g() -> None: | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_generate.py | g | def g() -> None: ... | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_generate.py | g | def g(*args: int) -> typing.Any: | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_generate.py | g | def g(*args: int, **kwargs: str) -> int: | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_generate.py | g | g | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_generate.py | g | g(args) | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_generate.py | g | g(kwargs) | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_generate.py | g | g(x) | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_generate.py | g | overrides without a generated declaration: ['g'] | a sample client's or stub's local name `g` in the stub tools' test input
+dev/stubs/test_generate.py | g | typing.Any left in the stub (add a reviewed override): g ->  | a sample client's or stub's local name `g` in the stub tools' test input
+docs/semantics.md | Tunnels | - **Sizing.** Tunnels of a common size `s > 0` exist exactly | the word starting a sentence: actual tunnels
+docs/semantics.md | Tunnels | request `RR(share, N, j)`: the tunnels of one head differ by | the word starting a sentence: actual tunnels
+docs/semantics.md | count | the smallest count. It does not promise whole-demand lossles | the tunnel count (tunnels per head)
+include/netgraph/core/flow_policy.hpp | count | live-share score, then the smallest count; no promise of who | the tunnel count (tunnels per head)
+pyproject.toml | selection | scikit-build-core 1.0 introduced the "explicit" sdist file s | scikit-build-core's sdist file selection
+src/centralized_te_tunnels.cpp | Tunnels | Sizing. Tunnels of a common size s > 0 exist exactly when K  | the word starting a sentence: actual tunnels
+src/flow_policy.cpp | cost_distribution | cost_distribution | a key of the frozen reference's trace format (the fixtures' keys)
+src/flow_policy.cpp | placed | placed | a key of the frozen reference's trace and payload format (the fixtures' keys)
+tests/cpp/flow_policy_fault_tests.cpp | sensitivity | frozen costonly sensitivity | a test case label: sensitivity analysis (the evaluator's subject)
+tests/cpp/flow_policy_fault_tests.cpp | sensitivity | frozen costonly sensitivity miss | a test case label: sensitivity analysis (the evaluator's subject)
+tests/cpp/flow_policy_fault_tests.cpp | sensitivity | frozen costonly sensitivity miss, worker threads, workers | a test case label: sensitivity analysis (the evaluator's subject)
+tests/cpp/flow_policy_fault_tests.cpp | sensitivity | frozen sensitivity | a test case label: sensitivity analysis (the evaluator's subject)
+tests/cpp/flow_policy_fault_tests.cpp | sensitivity | sensitivity | a test case label: sensitivity analysis (the evaluator's subject)
+tests/cpp/flow_policy_tests.cpp | sensitivity | sensitivity baseline with every output | a test case label: sensitivity analysis (the evaluator's subject)
+tests/cpp/flow_policy_tests.cpp | sensitivity | sensitivity baseline, no output | a test case label: sensitivity analysis (the evaluator's subject)
+tests/cpp/graph_layout_tests.cpp | dst | dst negative at 1 | the layout test input's field `dst` (a shorthand kept as an ordinary local)
+tests/cpp/graph_layout_tests.cpp | dst | dst shorter | the layout test input's field `dst` (a shorthand kept as an ordinary local)
+tests/cpp/graph_layout_tests.cpp | dst | input.dst | the layout test input's field `dst` (a shorthand kept as an ordinary local)
+tests/cpp/graph_layout_tests.cpp | dst | property:dst | the layout test input's field `dst` (a shorthand kept as an ordinary local)
+tests/cpp/graph_layout_tests.cpp | dst | range:dst | the layout test input's field `dst` (a shorthand kept as an ordinary local)
+tests/cpp/graph_layout_tests.cpp | dst | size:dst | the layout test input's field `dst` (a shorthand kept as an ordinary local)
+tests/cpp/graph_layout_tests.cpp | src | (src, cost) reverse order | the layout test input's field `src` (a shorthand kept as an ordinary local)
+tests/cpp/graph_layout_tests.cpp | src | property:src | the layout test input's field `src` (a shorthand kept as an ordinary local)
+tests/cpp/graph_layout_tests.cpp | src | range:src | the layout test input's field `src` (a shorthand kept as an ordinary local)
+tests/cpp/graph_layout_tests.cpp | src | size:src | the layout test input's field `src` (a shorthand kept as an ordinary local)
+tests/cpp/graph_layout_tests.cpp | src | src out of range at 2 | the layout test input's field `src` (a shorthand kept as an ordinary local)
+tests/cpp/layout_checker.hpp | dst | dst | the layout test input's field `dst` (a shorthand kept as an ordinary local)
+tests/cpp/layout_checker.hpp | dst | input.dst | the layout test input's field `dst` (a shorthand kept as an ordinary local)
+tests/cpp/layout_checker.hpp | dst | property:dst | the layout test input's field `dst` (a shorthand kept as an ordinary local)
+tests/cpp/layout_checker.hpp | dst | range:dst | the layout test input's field `dst` (a shorthand kept as an ordinary local)
+tests/cpp/layout_checker.hpp | src | property:src | the layout test input's field `src` (a shorthand kept as an ordinary local)
+tests/cpp/layout_checker.hpp | src | range:src | the layout test input's field `src` (a shorthand kept as an ordinary local)
+tests/cpp/layout_checker.hpp | src | src | the layout test input's field `src` (a shorthand kept as an ordinary local)
+tests/cpp/min_cost_flow_tests.cpp | placed | curve total differs from placed | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/cpp/min_cost_flow_tests.cpp | placed | cut value differs from placed | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/cpp/min_cost_flow_tests.cpp | placed | placed differs from min(cap, F_max) | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/cpp/min_cost_flow_tests.cpp | placed | placed outside [0, cap] | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/cpp/min_cost_flow_tests.cpp | volume | curve volume not positive | a curve entry's volume (its amount)
+tests/cpp/program_tests.cpp | Tunnels | Tunnels listed with indices 0 and 2 (the split route takes 1 | the word starting a sentence: actual tunnels
+tests/cpp/search_tests.cpp | elig | elig | a test case label naming the test's local `elig`
+tests/cpp/shortest_paths_creation_tests.cpp | src | src | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
+tests/cpp/test_utils.hpp | placed | curve total differs from placed | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/cpp/test_utils.hpp | placed | cut value differs from placed | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/cpp/test_utils.hpp | placed | placed differs from min(cap, F_max) | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/cpp/test_utils.hpp | placed | placed outside [0, cap] | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/cpp/test_utils.hpp | volume | curve volume not positive | a curve entry's volume (its amount)
+tests/py/flow_oracle.py | placed | curve total differs from placed | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/py/flow_oracle.py | placed | cut value differs from placed | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/py/flow_oracle.py | placed | placed | a key of the frozen reference's trace and payload format (the fixtures' keys)
+tests/py/flow_oracle.py | placed | placed outside [0, cap] | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/py/flow_oracle.py | volume | curve volume not positive | a curve entry's volume (its amount)
+tests/py/test_centralized_te_tunnels.py | g | g = ngc.Graph(4, [0, 0, 1, 2], [1, 2, 3, 3], [8192, 40960, 8 | the local `g` (a Graph) of a script run in a child interpreter
+tests/py/test_centralized_te_tunnels.py | g | p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, cfg) | the local `g` (a Graph) of a script run in a child interpreter
+tests/py/test_centralized_te_tunnels.py | origin | origin | the retired keyword passed on purpose: the test checks it is rejected
+tests/py/test_configuration.py | selection | selection | the retired keyword passed on purpose: the test checks it is rejected
+tests/py/test_contract_examples.py | Stretch | A-X8-Stretch-cost7 | the worked example ids A-X8-Stretch-* (labels of the examples)
+tests/py/test_contract_examples.py | Stretch | A-X8-Stretch-exact | the worked example ids A-X8-Stretch-* (labels of the examples)
+tests/py/test_contract_examples.py | Tunnels | Tunnels from their heads (one program; each head its own sou | the word starting a sentence: actual tunnels
+tests/py/test_contract_examples.py | selection | selection | the retired keyword passed on purpose: the test checks it is rejected
+tests/py/test_distributed_te.py | g | fg = ngc.FlowLedger(g) | the local `g` (a Graph) of a script run in a child interpreter
+tests/py/test_distributed_te.py | g | g = ngc.Graph(3, [0, 1], [2, 2], [2, 10], [1, 1], 1.0) | the local `g` (a Graph) of a script run in a child interpreter
+tests/py/test_distributed_te.py | origin | origin | the retired keyword passed on purpose: the test checks it is rejected
+tests/py/test_flow_policy.py | bundle | bundles | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_flow_policy.py | bundles | bundles | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_flow_policy.py | local_outcomes | local_outcomes | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_flow_policy.py | origin | origin | the retired keyword passed on purpose: the test checks it is rejected
+tests/py/test_flow_policy.py | selection | selection | the retired keyword passed on purpose: the test checks it is rejected
+tests/py/test_min_cost_flow.py | placed | curve total differs from placed | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/py/test_min_cost_flow.py | placed | cut value differs from placed | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/py/test_min_cost_flow.py | placed | placed 1 != min(cap, F_max) | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/py/test_min_cost_flow.py | placed | placed outside [0, cap] | the private solver's placed amount (its flow value), as the certificate clauses name it
+tests/py/test_min_cost_flow.py | volume | curve volume not positive | a curve entry's volume (its amount)
+tests/py/test_native_allocation.py | sensitivity | sensitivity.global | a test id (dev/pytest_guard.py names it)
+tests/py/test_native_allocation.py | sensitivity | sensitivity.pinned | a test id (dev/pytest_guard.py names it)
+tests/py/test_programs.py | bundles | Pinned takes a program: no bundles keyword, a list is not a  | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_programs.py | origin | origin | the retired keyword passed on purpose: the test checks it is rejected
+tests/py/test_public_surface.py | CapacityOptions | CapacityOptions | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_public_surface.py | EdgePriority | EdgePriority | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_public_surface.py | EdgeTieBreak | EdgeTieBreak | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_public_surface.py | PathSelection | PathSelection | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_public_surface.py | SensitivityOptions | SensitivityOptions | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_public_surface.py | Stretch | Stretch-factor-bool | a test id naming the retired Stretch on purpose (CostStretch is checked)
+tests/py/test_public_surface.py | Stretch | Stretch-factor-str | a test id naming the retired Stretch on purpose (CostStretch is checked)
+tests/py/test_public_surface.py | bundle | bundles | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_public_surface.py | bundles | bundles | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_public_surface.py | local_outcomes | local_outcomes | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_public_surface.py | origin | origin | the retired keyword passed on purpose: the test checks it is rejected
+tests/py/test_public_surface.py | selection | selection | the retired keyword passed on purpose: the test checks it is rejected
+tests/py/test_public_surface.py | sensitivity | sensitivity-graph-None | a test id naming the retired function on purpose
+tests/py/test_public_surface.py | usable_bundles | usable_bundles | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_removed_names.py | dst | dst | the rule's own text, naming removed words as its examples
+tests/py/test_removed_names.py | elig | elig | the rule's own text, naming removed words as its examples
+tests/py/test_removed_names.py | g | g | the rule's own text, naming removed words as its examples
+tests/py/test_removed_names.py | opts | opts | the rule's own text, naming removed words as its examples
+tests/py/test_removed_names.py | src | src | the rule's own text, naming removed words as its examples
+tests/py/test_route_structures.py | EdgePriority | EdgePriority | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_route_structures.py | EdgeTieBreak | EdgeTieBreak | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_route_structures.py | PathSelection | PathSelection | a retired name named on purpose: the test checks it is gone or rejected
+tests/py/test_source_allocation.py | origin | origin | the retired keyword passed on purpose: the test checks it is rejected
+tests/typing/invalid_client.py | g | read arr[i] as Any, so "text: str = g.edge_capacity_units()[ | a sample client's or stub's local name `g` in the stub tools' test input
+tests/py/test_removed_names.py | FlowPlacement | FlowPlacement | the rule's own control: the name it plants in each kind of text
+tests/py/test_removed_names.py | DagCacheStats | DagCacheStats | the rule's own control: the name it plants in each kind of text
+tests/py/test_removed_names.py | Tunnels | Tunnels | the rule's own control: the name it plants in each kind of text
+tests/py/test_removed_names.py | DagCacheStats | name it plants): each must be found on its own line. | the rule's own control: the name it plants in each kind of text
+tests/py/test_removed_names.py | Tunnels | name it plants): each must be found on its own line. | the rule's own control: the name it plants in each kind of text
+dev/pytest_guard.py | sensitivity | tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[sensitivity.global] | a test id (dev/pytest_guard.py names it)
+dev/pytest_guard.py | sensitivity | tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[sensitivity.pinned] | a test id (dev/pytest_guard.py names it)
+docs/semantics.md | allocated | allocated; the event and dependency limits, known only after | allocated memory, storage or amounts
+docs/semantics.md | allocated | event structures are allocated. Either refusal changes nothin | allocated memory, storage or amounts
+include/netgraph/core/detail/forwarding.hpp | allocated | before the network is allocated; | allocated memory, storage or amounts
+include/netgraph/core/detail/forwarding.hpp | allocated | structures are allocated. Either refusal changes nothing. | allocated memory, storage or amounts
+tests/cpp/program_tests.cpp | allocated | is allocated, the event and dependency counts before the event | allocated memory, storage or amounts

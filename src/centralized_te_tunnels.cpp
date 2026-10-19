@@ -678,7 +678,7 @@ U128 live_budget(const Base& b, const std::vector<TunnelSetupResult>& tunnels, s
 Amount working_size(const Quota& q, std::int64_t H, std::int64_t k, Amount U, std::optional<Amount> design) {
   if (!design.has_value()) return U;
   Amount need = 1;
-  for (std::int64_t i : q.live_pos) need = std::max(need, (rr(*design, H, i) + k - 1) / k);
+  for (std::int64_t i : q.live_pos) need = std::max(need, (round_robin_share(*design, H, i) + k - 1) / k);
   return std::min(U, need);
 }
 

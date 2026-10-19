@@ -129,6 +129,7 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { x.sources.push_back(1); },
       [](auto& x) { x.destinations.push_back(1); },
       [](auto& x) { x.admission = Admission::Lossy; },
+      [](auto& x) { x.entry_id = 0; },
       [&](auto& x) { x.route = other_route; },
       [](auto& x) { ++x.min_route_cost; },
       [](auto& x) { x.offered = Counter128 {}; },
@@ -144,6 +145,16 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
     records[k](x);
     EXPECT_FALSE(same_record(x, rec)) << "record field " << k;
   }
+  // entry_id both ways (absent against present) and one entry against another.
+  ASSERT_FALSE(rec.entry_id.has_value());
+  FlowRecord with_entry = rec;
+  with_entry.entry_id = 3;
+  EXPECT_TRUE(same_record(with_entry, with_entry));
+  EXPECT_FALSE(same_record(with_entry, rec));
+  EXPECT_FALSE(same_record(rec, with_entry));
+  FlowRecord other_entry = with_entry;
+  other_entry.entry_id = 4;
+  EXPECT_FALSE(same_record(other_entry, with_entry));
   // The uid clause of ledger_state: the records' own uid passes, another fails.
   {
     auto own = fg.records();

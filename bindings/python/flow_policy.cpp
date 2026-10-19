@@ -149,6 +149,8 @@ void register_flow_policy(py::module_& m) {
       .def(
           "place",
           [](FlowPolicy& p, const py::object& offer, const py::object& outputs) {
+            // The operation comes before the offer (the call's order).
+            detail::check_place_operation(detail::PolicyAccess::engine(p));
             const auto v = request_units(offer);
             const auto o = outputs_of(outputs);
             // All or nothing across the boundary: the result's Python object exists before the
@@ -262,13 +264,14 @@ void register_flow_policy(py::module_& m) {
       .def(
           "_place_traced",
           [](FlowPolicy& p, const py::object& offer, const py::object& outputs) {
+            detail::check_place_operation(detail::PolicyAccess::engine(p));
             const auto v = request_units(offer);
             const auto o = outputs_of(outputs);
             // As place(): every Python object exists before anything changes; the engine runs the
             // `staged` callback, which converts the trace, after the work is done and before the
             // commit, so a failed conversion changes nothing.
             auto [obj, slot] = new_object<PlacementResult>();
-            py::tuple pair(2);
+            auto pair = py::reinterpret_steal<py::tuple>(checked(PyTuple_New(2)).release());
             py::object trace_py;
             detail::Trace trace;
             const std::function<void()> staged = [&] { trace_py = trace_obj(trace); };

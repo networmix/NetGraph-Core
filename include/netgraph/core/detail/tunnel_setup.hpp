@@ -18,11 +18,6 @@
 
 namespace netgraph::core::detail {
 
-// RR(x, k, i) = x // k + [i < x % k]: member i's share of x over k members.
-[[nodiscard]] inline Amount rr(Amount x, std::int64_t k, std::int64_t i) noexcept {
-  return x / k + (i < x % k ? 1 : 0);
-}
-
 // T1's setup for the design volume D (< 2^62) over the roster's H heads (ascending)
 // with N = ca.tunnel_count.per_head tunnels each: head i's share RR(D, H, i), its tunnel j's request
 // RR(share, N, j); the attempts in round order (round j, heads ascending), every one even after

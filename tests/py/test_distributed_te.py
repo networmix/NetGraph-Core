@@ -15,6 +15,7 @@ from helpers import (
     GLOBAL,
     INF,
     L62,
+    assert_ints,
     build,
     exact,
     full_ledger_state,
@@ -412,16 +413,43 @@ def test_tunnel_limit():
     policy(fan(107374), list(range(107374)), 107374, 10000)
 
 
+@needs_hooks
+def test_traced_place_checks_the_operation_first():
+    p = policy(one10(), 0, 1, 1)
+    for v in (5, 0, -1, L62, 2**100):
+        with pytest.raises(
+            ValueError,
+            match=exact("DistributedTE does not support incremental placement"),
+        ):
+            p._place_traced(v)
+    sp = ngc.FlowPolicy(ngc.FlowLedger(one10()), 0, 1, COSTONLY)
+    with pytest.raises(
+        ValueError,
+        match=exact("offer must be an integer in [0, 2^62) or permitted +inf"),
+    ):
+        sp._place_traced(-1)
+    assert sp._place_traced(3)[0].delivered == 3
+
+
 def test_operations_and_design_validation():
     # Place rejected (also 0), forward needs a program, design_demand only
     # for T1, in its domain, finite; the offer's checks first.
     p = policy(one10(), 0, 1, 1)
-    for v in (5, 0):
+    # The operation comes before the offer: also for an offer outside its domain (the same offers
+    # raise the offer's error on a model that places).
+    for v in (5, 0, -1, L62, 2**100):
         with pytest.raises(
             ValueError,
             match=exact("DistributedTE does not support incremental placement"),
         ):
             p.place(v)
+    sp = ngc.FlowPolicy(ngc.FlowLedger(one10()), 0, 1, COSTONLY)
+    for v in (-1, L62, 2**100):
+        with pytest.raises(
+            ValueError,
+            match=exact("offer must be an integer in [0, 2^62) or permitted +inf"),
+        ):
+            sp.place(v)
     with pytest.raises(
         ValueError, match=exact("forward requires an installed program")
     ):
@@ -710,6 +738,7 @@ def test_all_down_and_round_order():
         (2, 0, 1),
         (3, 1, 1),
     ]
+    assert_ints(t.local_index for t in r.program.tunnels)
 
 
 def test_by_tunnel_and_stretch():
@@ -809,8 +838,10 @@ def test_rows():
         (3, 1, UP, 3, 3, 0),
     ]
     assert source_rows(r) == [(0, 6, 6, 0, 6, 0), (1, 6, 6, 6, 0, 0)]
+    assert_ints(t.head for t in r.by_tunnel)
     recs = p.records()
     assert [rec.entry_id for rec in recs] == [0, 1, 2, 3]
+    assert_ints(rec.entry_id for rec in recs)
     assert [rec.min_route_cost for rec in recs] == [None, 1, None, 1]
     assert [len(rec.route.via_edges()) for rec in recs] == [0, 1, 0, 1]
     ids = [rec.flow_id for rec in recs]
@@ -870,6 +901,16 @@ def test_no_certificates_and_plan_only_for_t1():
 
 
 # ---------------------------------------------------------------- programs (P)
+
+
+def test_the_exact_int_check_rejects_floats_and_bools():
+    # The controls of assert_ints: a float or a bool equal to the int fails, None only when
+    # optional.
+    assert_ints([0, 3, 2**70])
+    assert_ints([None, 1], optional=True)
+    for bad in ([1.0], [True], [None]):
+        with pytest.raises(AssertionError):
+            assert_ints(bad)
 
 
 def test_program_fields():
@@ -1454,7 +1495,7 @@ for k in range(400):
     if not hit:
         assert error is None and repr(value) == expected, (k, error, value)
         break
-    assert value is None and isinstance(error, (MemoryError, RuntimeError)), (k, error)
+    assert value is None and type(error) is MemoryError, (k, error)
 else:
     raise SystemExit("never completed")
 print("failures", k)

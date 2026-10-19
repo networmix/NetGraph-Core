@@ -7,7 +7,8 @@
 #       private hooks (the editable development build): no test may skip. (make check-ci)
 #   bash dev/run-checks.sh pytest off [PYTEST_ARGS...]
 #       The Python suite against an installed, non-editable netgraph_core without the hooks (a
-#       wheel, or a build from the sdist): exactly the tests that need a hook skip. (release CI)
+#       wheel, or a build from the sdist): exactly the tests that need a hook skip, listed in
+#       dev/pytest_guard.py, which runs and checks both modes. (release CI)
 #   bash dev/run-checks.sh cov
 #       C++ and Python coverage (make cov): a coverage venv of its own (build/coverage-venv, pinned
 #       by .github/ci-constraints.txt; the development venv is not touched), the extension and the
@@ -28,105 +29,7 @@ JOBS=${CMAKE_BUILD_PARALLEL_LEVEL:-4}
 case "$JOBS" in ''|*[!0-9]*|0) echo 'CMAKE_BUILD_PARALLEL_LEVEL must be positive.' >&2; exit 2 ;; esac
 export CMAKE_BUILD_PARALLEL_LEVEL=$JOBS
 
-# The Python tests that need the private hooks and skip without them, by pytest node id, one per
-# line (an id can contain spaces); every replay of the fixtures produced by the reference under
-# tests/reference/policy/ (the parametrizations of test_fixture) skips as well.
-EXPECTED_OFF_SKIPS="
-tests/py/test_apportionment.py::test_apportionment_entries
-tests/py/test_shortest_path_cache.py::test_frozen_statistics_survive_python_allocation_failures
-tests/py/test_shortest_path_cache.py::test_the_frozen_sweep_rejects_a_wrong_call
-tests/py/test_flow_ledger.py::test_a_flow_id_read_passes_an_allocation_failure_through
-tests/py/test_flow_policy.py::test_evaluator_results_survive_python_allocation_failures
-tests/py/test_flow_policy.py::test_owner_hook_is_the_owner_of_the_records
-tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[False-costonly]
-tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[False-global]
-tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[True-costonly]
-tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[True-global]
-tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[ledger]
-tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[policy]
-tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[result]
-tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[trace]
-tests/py/test_flow_policy_fixtures.py::test_an_expected_value_of_another_type_fails[bool as integer]
-tests/py/test_flow_policy_fixtures.py::test_an_expected_value_of_another_type_fails[integer as float]
-tests/py/test_flow_policy_fixtures.py::test_every_other_replay_clause_reports_its_operation
-tests/py/test_getter_allocation.py::test_every_read_survives_python_allocation_failures
-tests/py/test_ksp.py::test_python_result_lists_are_all_or_nothing
-tests/py/test_native_allocation.py::test_allocation_hooks_preserve_exception_identity
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[Eligibility.intersect]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[FlowLedger.reset]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[FlowRecord.route]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[PlacementResult.program]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[evaluate_pairs.global]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[evaluate_pairs.global_equal]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[capacity.frozen_cache]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[capacity.global]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[capacity.pinned_lossy]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[evaluate.global]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[forward.costonly_pooled_lossy_black_holes]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[from_dag]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[from_routes]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[ksp]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.costonly]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.costonly_pooled_lossy]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.global]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.global_equal]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.pinned_split_route]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place_traced.global]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[replace.global_support]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[replace.pinned_tunnels_lossy]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[resolve_to_paths]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[sensitivity.global]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[sensitivity.pinned]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[spf.full]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[spf.single_path]
-tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[spf.targets_residual]
-tests/py/test_native_allocation.py::test_the_row_checks_reject_a_wrong_call
-tests/py/test_programs.py::test_from_routes_and_getters_survive_python_allocation_failures
-tests/py/test_programs.py::test_operations_are_all_or_nothing[costonly forward]
-tests/py/test_programs.py::test_operations_are_all_or_nothing[costonly replace]
-tests/py/test_programs.py::test_operations_are_all_or_nothing[global evaluate]
-tests/py/test_programs.py::test_operations_are_all_or_nothing[pinned replace]
-tests/py/test_search.py::test_python_result_construction_is_all_or_nothing
-tests/py/test_search.py::test_the_python_allocation_sweep_rejects_a_wrong_call
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[ca.tunnel_count]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[fg.record(fid)]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[fg.records()]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[fg.reserved()]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[fg.unreserved()]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[p.record(fid)]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[p.records()]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[r.plan.design_by_head]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[r.plan]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[r.program.tunnels]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[repr(abs3)]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[repr(st2)]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[st2.cost_ceiling.factor]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[st2.cost_ceiling]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[cfg.routing]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[repr(r)]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[repr(sp)]
-tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[t0.status]
-tests/py/test_distributed_te.py::test_t1_results_survive_python_allocation_failures[evaluate]
-tests/py/test_distributed_te.py::test_t1_results_survive_python_allocation_failures[forward]
-tests/py/test_distributed_te.py::test_t1_results_survive_python_allocation_failures[replace]
-tests/py/test_centralized_te_tunnels.py::test_t2_getters_survive_python_allocation_failures[gl.tunnel_count]
-tests/py/test_centralized_te_tunnels.py::test_t2_getters_survive_python_allocation_failures[repr(r)]
-tests/py/test_centralized_te_tunnels.py::test_t2_getters_survive_python_allocation_failures[r.plan.max_fractional_bandwidth_per_tunnel]
-tests/py/test_centralized_te_tunnels.py::test_t2_getters_survive_python_allocation_failures[r.plan.headroom_penalty]
-tests/py/test_centralized_te_tunnels.py::test_t2_getters_survive_python_allocation_failures[r.plan.heads_with_capacity]
-tests/py/test_centralized_te_tunnels.py::test_t2_getters_survive_python_allocation_failures[r.plan.total_tunnel_cost]
-tests/py/test_centralized_te_tunnels.py::test_t2_getters_survive_python_allocation_failures[r.plan]
-tests/py/test_centralized_te_tunnels.py::test_t2_getters_survive_python_allocation_failures[r.program.tunnels]
-tests/py/test_centralized_te_tunnels.py::test_t2_results_survive_python_allocation_failures[evaluate]
-tests/py/test_centralized_te_tunnels.py::test_t2_results_survive_python_allocation_failures[forward]
-tests/py/test_centralized_te_tunnels.py::test_t2_results_survive_python_allocation_failures[replace]
-"
-EXPECTED_OFF_SKIPPED_PREFIX='tests/py/test_flow_policy_fixtures.py::test_fixture['
-
-
 die() { echo "dev/run-checks.sh: $*" >&2; exit 1; }
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
 
 if [[ "$(uname -s)" == Darwin ]]; then
     CC=$(xcrun --find clang)
@@ -135,89 +38,11 @@ if [[ "$(uname -s)" == Darwin ]]; then
     export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
 fi
 
-# run_pytest on|off [PYTEST_ARGS...]: the suite, then the check of what was imported and skipped.
-# A small plugin records the skipped node ids and the imported modules (PYTEST_ADDOPTS and its
-# reports stay the caller's).
+# run_pytest on|off [PYTEST_ARGS...]: the suite, then the check of what was imported and skipped
+# (dev/pytest_guard.py, which the Windows CI jobs run directly; PYTEST_ADDOPTS and its reports stay
+# the caller's).
 run_pytest() {
-    local hooks=$1 tmp=$TMP/pytest; shift
-    rm -rf "$tmp"; mkdir -p "$tmp"
-    cat > "$tmp/ngc_skip_record.py" <<'PY'
-import json
-import os
-import sys
-
-_seen, _skipped = set(), {}
-
-
-def pytest_runtest_logreport(report):
-    _seen.add(report.nodeid)
-    if report.skipped:
-        _skipped[report.nodeid] = str(report.longrepr[-1] if isinstance(report.longrepr, tuple) else report.longrepr)
-
-
-def pytest_sessionfinish(session, exitstatus):
-    ext = sys.modules.get("_netgraph_core")
-    pkg = sys.modules.get("netgraph_core")
-    record = {
-        "seen": sorted(_seen),
-        "skipped": _skipped,
-        "hooks": hasattr(ext, "_fail_native_allocation"),
-        "modules": [getattr(ext, "__file__", None), getattr(pkg, "__file__", None)],
-    }
-    with open(os.environ["NGC_SKIP_RECORD"], "w") as f:
-        json.dump(record, f)
-PY
-    NGC_SKIP_RECORD="$tmp/record.json" PYTHONPATH="$tmp${PYTHONPATH:+:$PYTHONPATH}" \
-        "$PYTHON" -m pytest -p ngc_skip_record "$@"
-    [[ -s "$tmp/record.json" ]] || die "pytest wrote no record of its run"
-    echo "$EXPECTED_OFF_SKIPS" | sed '/^$/d' > "$tmp/expected.txt"
-    "$PYTHON" - "$hooks" "$tmp/record.json" "$tmp/expected.txt" "$EXPECTED_OFF_SKIPPED_PREFIX" "$ROOT" <<'PY'
-import json
-import os
-import sys
-
-hooks, record_path, expected_path, prefix, root = sys.argv[1:]
-record = json.load(open(record_path))
-# One node id per line: an id can hold spaces (a parametrization id such as "[integer as
-# float]"), so the list is never split on other whitespace.
-with open(expected_path) as f:
-    expected = {line.strip() for line in f if line.strip()}
-skipped = record["skipped"]
-problems = []
-if None in record["modules"]:
-    problems.append(f"netgraph_core or _netgraph_core was not imported: {record['modules']}")
-if hooks == "on":
-    if not record["hooks"]:
-        problems.append("the extension lacks the private hooks (expected the editable build)")
-    if skipped:
-        problems.append(f"{len(skipped)} tests skipped in a hooks-on run: {sorted(skipped)}")
-else:
-    if record["hooks"]:
-        problems.append("the extension carries the private hooks (expected a wheel or sdist build)")
-    inside = [m for m in record["modules"] if m and os.path.realpath(m).startswith(os.path.realpath(root) + os.sep)]
-    if inside:
-        problems.append(f"imported from the source tree, not an installation: {inside}")
-    replays = {n for n in record["seen"] if n.startswith(prefix)}
-    if not replays:
-        problems.append(f"no test {prefix}...] ran")
-    want = expected | replays
-    got = set(skipped)
-    for name in sorted(want - got):
-        problems.append(f"expected to skip, did not: {name}")
-    for name in sorted(got - want):
-        problems.append(f"skipped, not a known hook-only test: {name}")
-    for name, reason in sorted(skipped.items()):
-        if "needs the private hooks" not in reason:
-            problems.append(f"skipped for another reason: {name}: {reason}")
-for p in problems:
-    print(f"dev/run-checks.sh: {p}", file=sys.stderr)
-if problems:
-    sys.exit(1)
-if hooks == "off":
-    print(f"hooks off: exactly the {len(skipped)} expected hook-only tests skipped; imported {record['modules'][0]}")
-else:
-    print(f"hooks on: no test skipped; imported {record['modules'][0]}")
-PY
+    "$PYTHON" "$ROOT/dev/pytest_guard.py" "$@"
 }
 
 coverage() {
