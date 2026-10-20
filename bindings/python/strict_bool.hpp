@@ -2,11 +2,15 @@
   The one bool converter of every bool parameter: exactly a Python bool or a numpy.bool_, both by
   type identity. pybind11's own bool caster in no-convert mode recognizes NumPy's bool by the name
   of its type, so a class named "numpy.bool_" passes it; this caster compares the type object.
+  Also NumPy's number types and the check of an object's real type against them: isinstance would
+  honour an object's own __class__, which may claim any class.
 */
 #pragma once
 
 #include <pybind11/gil_safe_call_once.h>
 #include <pybind11/pybind11.h>
+
+#include <utility>
 
 namespace netgraph::core::bindings {
 
@@ -20,6 +24,22 @@ struct StrictBool {
 inline PyObject* numpy_bool_type() {
   PYBIND11_CONSTINIT static pybind11::gil_safe_call_once_and_store<pybind11::object> storage;
   return storage.call_once_and_store_result([] { return pybind11::module_::import("numpy").attr("bool_"); }).get_stored().ptr();
+}
+
+// numpy.integer and numpy.floating, looked up once (a lookup per call would import NumPy each time).
+inline const std::pair<pybind11::object, pybind11::object>& numpy_number_types() {
+  PYBIND11_CONSTINIT static pybind11::gil_safe_call_once_and_store<std::pair<pybind11::object, pybind11::object>> storage;
+  return storage
+      .call_once_and_store_result([] {
+        const auto np = pybind11::module_::import("numpy");
+        return std::make_pair(pybind11::object(np.attr("integer")), pybind11::object(np.attr("floating")));
+      })
+      .get_stored();
+}
+
+// Whether o's real type (never its __class__) is `type` or a subclass of it.
+inline bool has_type(PyObject* o, const pybind11::object& type) {
+  return PyType_IsSubtype(Py_TYPE(o), reinterpret_cast<PyTypeObject*>(type.ptr())) != 0;
 }
 
 } // namespace netgraph::core::bindings

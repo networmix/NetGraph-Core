@@ -160,8 +160,20 @@ def test_resolution_has_no_default():
     ],
 )
 def test_validation_errors(args, message):
-    with pytest.raises(ValueError, match=exact(message)):
+    # A value of a type its position never takes is a TypeError, every other defect a ValueError.
+    cls = TypeError if message in TYPE_DEFECTS else ValueError
+    with pytest.raises((TypeError, ValueError), match=exact(message)) as error:
         ngc.Graph(*args)
+    assert error.type is cls
+
+
+TYPE_DEFECTS = {
+    "edge_capacity_units[0] must be an integer (got float)",
+    "edge_capacity_units entries must be integers (got dtype float64)",
+    "edge_capacity_units[0] must be an integer (got bool)",
+    "num_nodes must be an integer (got float)",
+    "edge_costs[0] must be an integer (got float)",
+}
 
 
 def test_validation_order():
@@ -259,7 +271,7 @@ def test_eligibility():
     ):
         g.eligibility(excluded_edges=[-1])
     with pytest.raises(
-        ValueError, match=exact("excluded_edges[0] must be an integer (got float)")
+        TypeError, match=exact("excluded_edges[0] must be an integer (got float)")
     ):
         g.eligibility(excluded_edges=[0.0])
 
@@ -403,13 +415,14 @@ VALID = {
 @pytest.mark.parametrize("cost", [0, -1])
 def test_array_rank_is_a_shape_defect_before_costs(name, ndim, cost):
     # The shape step checks rank 1 for every array argument before the
-    # cost step, so a 2-D or 0-D array is reported before a zero or negative cost.
+    # cost step, so a 2-D or 0-D array is reported before a zero or negative cost (a rank is a
+    # type: TypeError).
     args = [2, [0], [1], [1], [cost], 1.0]
     value = cost if name == "edge_costs" else VALID[name]
     bad = np.array(value, dtype=np.int64)
     args[ARG_INDEX[name]] = bad.reshape(1, 1) if ndim == 2 else bad
     pattern = exact(f"{name} must be a 1-D array (got {ndim} dimensions)")
-    with pytest.raises(ValueError, match=pattern):
+    with pytest.raises(TypeError, match=pattern):
         ngc.Graph(*args)
 
 
@@ -419,7 +432,7 @@ def test_nested_and_scalar_arguments_are_shape_defects(name):
     nested = [2, [0], [1], [1], [0], 1.0]
     nested[ARG_INDEX[name]] = [[value]]
     with pytest.raises(
-        ValueError,
+        TypeError,
         match=exact(
             f"{name} must be a 1-D sequence of integers (entry 0 is a sequence)"
         ),
@@ -428,7 +441,7 @@ def test_nested_and_scalar_arguments_are_shape_defects(name):
     scalar = [2, [0], [1], [1], [0], 1.0]
     scalar[ARG_INDEX[name]] = value
     with pytest.raises(
-        ValueError, match=exact(f"{name} must be a 1-D sequence of integers (got int)")
+        TypeError, match=exact(f"{name} must be a 1-D sequence of integers (got int)")
     ):
         ngc.Graph(*scalar)
 
@@ -467,13 +480,13 @@ def test_shape_step_keeps_its_place_in_the_order():
         ngc.Graph(2, [0], [1], -5, [0], 1.0)
     # With valid values the misshapen capacity is a shape defect, before the costs.
     with pytest.raises(
-        ValueError,
+        TypeError,
         match=exact("edge_capacity_units must be a 1-D array (got 2 dimensions)"),
     ):
         ngc.Graph(2, [0], [1], np.array([[1]]), [0], 1.0)
-    # Rank before lengths.
+    # Rank (a type) before lengths (a value).
     with pytest.raises(
-        ValueError,
+        TypeError,
         match=exact("edge_destinations must be a 1-D array (got 2 dimensions)"),
     ):
         ngc.Graph(2, [0, 1], np.array([[1, 0]]), [1, 1], [1, 1], 1.0)

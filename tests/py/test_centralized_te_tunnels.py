@@ -1666,7 +1666,9 @@ def test_t2_results_survive_python_allocation_failures(method):
 
         return getattr(p, method), (8192,), snapshot
 
-    assert sweep_python_allocation(make) >= 3
+    assert (
+        sweep_python_allocation(make) >= 1
+    )  # the result object at least (its fields convert when read)
 
 
 GETTER_SWEEP = """

@@ -103,7 +103,7 @@ void register_paths(py::module_& m) {
   m.def(
       "ksp",
       [](const std::shared_ptr<Graph>& graph, const py::object& src, const py::object& dst, const py::object& opts) {
-        if (!graph) throw py::value_error("graph must be a Graph");
+        if (!graph) throw py::type_error("graph must be a Graph");
         const auto o = options_of<PyKspOptions>(opts, "KspOptions");
         const auto n = graph->num_nodes();
         // ksp's validation order on unnarrowed values (Core repeats every check): the tie_break, the
@@ -151,8 +151,8 @@ void register_paths(py::module_& m) {
       "resolve_to_paths",
       [](const std::shared_ptr<Graph>& graph, const std::shared_ptr<PredecessorDAG>& dag, const py::object& src,
          const py::object& dst, StrictBool split_parallel_edges, const py::object& max_paths) {
-        if (!graph) throw py::value_error("graph must be a Graph");
-        if (!dag) throw py::value_error("dag must be a PredecessorDAG");
+        if (!graph) throw py::type_error("graph must be a Graph");
+        if (!dag) throw py::type_error("dag must be a PredecessorDAG");
         if (dag->graph_uid() != graph->uid()) throw py::value_error("foreign PredecessorDAG: built for another graph");
         const auto n = graph->num_nodes();
         const NodeId s = endpoint(src, n, "source");

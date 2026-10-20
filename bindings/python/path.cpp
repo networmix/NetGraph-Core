@@ -25,8 +25,8 @@ void register_path(py::module_& m) {
       "from the same u to the same v, in the caller's order. cost = the sum over hops of the cost of\n"
       "each hop's cheapest member.")
       .def(py::init([](const std::shared_ptr<Graph>& graph, const py::object& hops) {
-             if (!graph) throw py::value_error("graph must be a Graph");
-             if (is_invalid_sequence(hops)) throw py::value_error("Path: hops must be a sequence of hops (sequences of EdgeIds)");
+             if (!graph) throw py::type_error("graph must be a Graph");
+             if (is_invalid_sequence(hops)) throw py::type_error("Path: hops must be a sequence of hops (sequences of EdgeIds)");
              auto seq = py::reinterpret_borrow<py::sequence>(hops);
              std::vector<CheckedIntegerVector> raw;
              for (std::size_t h = 0; h < seq.size(); ++h) {

@@ -40,7 +40,7 @@ void register_eligibility(py::module_& m) {
       .def_static(
           "intersect",
           [](const std::shared_ptr<Eligibility>& a, const std::shared_ptr<Eligibility>& b) {
-            if (!a || !b) throw py::value_error("Eligibility.intersect takes two Eligibility values");
+            if (!a || !b) throw py::type_error("Eligibility.intersect takes two Eligibility values");
             auto r = Eligibility::intersect(*a, *b);
             if (r.uid() == a->uid()) return typed_shared(a);
             if (r.uid() == b->uid()) return typed_shared(b);

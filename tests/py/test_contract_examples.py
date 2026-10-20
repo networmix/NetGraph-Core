@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import itertools
 import math
+from decimal import Decimal
 from fractions import Fraction
 
 import numpy as np
@@ -1345,6 +1346,141 @@ def run_input_texts(cases):
     return out
 
 
+class IndexOnly:
+    """An integer known only through __index__."""
+
+    def __init__(self, n):
+        self.n = n
+
+    def __index__(self):
+        return self.n
+
+
+class FloatOnly:
+    """A number known only through __float__."""
+
+    def __init__(self, x):
+        self.x = x
+
+    def __float__(self):
+        return float(self.x)
+
+
+def input_value(spec):
+    """An example's argument: itself, or ["bool", b], ["float", x] ("inf", "-inf" and "nan" as
+    text), ["str", s], ["none"], ["fraction", n, d], ["decimal", s], ["floatonly", x] (FloatOnly),
+    ["index", n] (IndexOnly), ["pow2", n] (the int 2**n), ["numpy", type name, value], ["list",
+    spec, ...] or ["array", dtype, nested list]."""
+    if not isinstance(spec, list):
+        return spec
+    kind, rest = spec[0], spec[1:]
+    if kind == "list":
+        return [input_value(x) for x in rest]
+    if kind == "array":
+        return np.array(rest[1], dtype=rest[0])
+    if kind == "numpy":
+        return getattr(np, rest[0])(rest[1])
+    return {
+        "bool": lambda: bool(rest[0]),
+        "float": lambda: float(rest[0]),
+        "str": lambda: rest[0],
+        "none": lambda: None,
+        "fraction": lambda: Fraction(rest[0], rest[1]),
+        "decimal": lambda: Decimal(rest[0]),
+        "floatonly": lambda: FloatOnly(rest[0]),
+        "index": lambda: IndexOnly(rest[0]),
+        "pow2": lambda: 2 ** rest[0],
+    }[kind]()
+
+
+def input_class(call, *args):
+    """ "valid", or the input error of call(*args) as "<class>: <text>" (TypeError or ValueError
+    exactly)."""
+    try:
+        call(*args)
+    except (TypeError, ValueError) as e:
+        assert type(e) in (TypeError, ValueError), type(e)
+        return f"{type(e).__name__}: {e}"
+    return "valid"
+
+
+def run_input_classes(cases):
+    """Each value at its position: an spf or ksp search option (read at the call), place's offer
+    (on a fresh policy), a ledger's service baseline over links of capacities `caps`."""
+    g = ngc.Graph(2, [0], [1], [10], [1], 1.0)
+    forward = ngc.Direction.FORWARD
+
+    def baseline(v, caps):
+        k = len(caps)
+        return ngc.FlowLedger(ngc.Graph(2, [0] * k, [1] * k, caps, [1] * k, 1.0), v)
+
+    calls = {
+        "spf min_residual": lambda v, _: ngc.spf(
+            g, 0, ngc.SpfOptions(forward, min_residual=v)
+        ),
+        "ksp k": lambda v, _: ngc.ksp(g, 0, 1, ngc.KspOptions(v)),
+        "place offer": lambda v, _: policy(g, 0, 1, config(ngc.ShortestPaths())).place(
+            v
+        ),
+        "service_baseline": baseline,
+    }
+    out = []
+    for case in cases:
+        call, caps = calls[case["entry"]], case.get("caps")
+        out.append([input_class(call, input_value(v), caps) for v in case["values"]])
+    return out
+
+
+def number_outcome(call, report=False):
+    """ "valid" ("valid <result>" when reported), or the error as "<class>: <text>", pybind11's
+    refusal of an argument's type as "TypeError: pybind11 conversion"."""
+    try:
+        got = call()
+    except (TypeError, ValueError) as e:
+        assert type(e) in (TypeError, ValueError), type(e)
+        if type(e) is TypeError and "incompatible" in str(e):
+            return "TypeError: pybind11 conversion"
+        return f"{type(e).__name__}: {e}"
+    if not report:
+        return "valid"
+    return f"valid {got.tolist() if isinstance(got, np.ndarray) else got}"
+
+
+def run_number_types(cases):
+    """Each value at its position: a resolution (Graph, to_units and as_float, which must agree),
+    to_units' physical value at the case's resolution (reported: the units), as_float's integer
+    amount, or place's offer (on a fresh policy)."""
+    g = ngc.Graph(2, [0], [1], [10], [1], 1.0)
+
+    def resolution(q):
+        outcomes = {
+            number_outcome(lambda: ngc.Graph(2, [0], [1], [1], [1], q)),
+            number_outcome(lambda: ngc.to_units(1.0, q)),
+            number_outcome(lambda: ngc.as_float(1, q)),
+        }
+        assert len(outcomes) == 1, outcomes
+        return outcomes.pop()
+
+    out = []
+    for case in cases:
+        entry = case["entry"]
+        row = []
+        for spec in case["values"]:
+            v = input_value(spec)
+            if entry == "resolution":
+                row.append(resolution(v))
+            elif entry == "to_units":
+                q = input_value(case.get("resolution", 1.0))
+                row.append(number_outcome(lambda v=v, q=q: ngc.to_units(v, q), True))
+            elif entry == "as_float x":
+                row.append(number_outcome(lambda v=v: ngc.as_float(v, 1.0)))
+            else:
+                p = policy(g, 0, 1, config(ngc.ShortestPaths()))
+                row.append(number_outcome(lambda v=v, p=p: p.place(v)))
+        out.append(row)
+    return out
+
+
 ADAPTERS = {
     "ha": run_ha,
     "split_error": run_split_error,
@@ -1380,6 +1516,8 @@ ADAPTERS = {
     "evaluation_validation": run_evaluation_validation,
     "ownership_texts": run_ownership_texts,
     "input_texts": run_input_texts,
+    "input_classes": run_input_classes,
+    "number_types": run_number_types,
 }
 
 
@@ -4614,6 +4752,484 @@ EXAMPLES = [
             [None, None],
         ],
     },
+    {
+        "id": "ERR-class-search",
+        "oracle": "input_classes",
+        "input": {
+            "cases": [
+                {
+                    "entry": "spf min_residual",
+                    "values": [
+                        ["bool", 1],
+                        ["float", 1.0],
+                        ["str", "1"],
+                        ["none"],
+                        ["float", "inf"],
+                        0,
+                        -3,
+                        1,
+                    ],
+                },
+                {
+                    "entry": "ksp k",
+                    "values": [
+                        ["bool", 1],
+                        ["float", "inf"],
+                        ["str", "2"],
+                        0,
+                        -5,
+                        1180591620717411303424,
+                        3,
+                    ],
+                },
+            ]
+        },
+        "expected": [
+            [
+                "TypeError: min_residual must be an integer (got bool)",
+                "TypeError: min_residual must be an integer (got float)",
+                "TypeError: min_residual must be an integer (got str)",
+                "TypeError: min_residual must be an integer (got NoneType)",
+                "TypeError: min_residual must be an integer (got float)",
+                "ValueError: min_residual must be at least 1 unit (got 0)",
+                "ValueError: min_residual must be at least 1 unit (got -3)",
+                "valid",
+            ],
+            [
+                "TypeError: k must be an integer (got bool)",
+                "TypeError: k must be an integer (got float)",
+                "TypeError: k must be an integer (got str)",
+                "ValueError: k must be >= 1 (got 0)",
+                "ValueError: k must be >= 1 (got -5)",
+                "valid",
+                "valid",
+            ],
+        ],
+    },
+    {
+        "id": "ERR-class-call",
+        "oracle": "input_classes",
+        "input": {
+            "cases": [
+                {
+                    "entry": "place offer",
+                    "values": [
+                        ["bool", 1],
+                        ["bool", 0],
+                        ["str", "1"],
+                        ["none"],
+                        ["fraction", 1, 1],
+                        ["float", 1.5],
+                        ["float", 0.0],
+                        ["float", "-inf"],
+                        ["float", "nan"],
+                        -1,
+                        4611686018427387904,
+                        9223372036854775808,
+                        ["float", "inf"],
+                        0,
+                        4611686018427387903,
+                    ],
+                }
+            ]
+        },
+        "expected": [
+            [
+                "TypeError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "TypeError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "TypeError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "TypeError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "TypeError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "valid",
+                "valid",
+                "valid",
+            ]
+        ],
+    },
+    {
+        "id": "ERR-class-vector",
+        "oracle": "input_classes",
+        "input": {
+            "cases": [
+                {
+                    "entry": "service_baseline",
+                    "caps": [10, 10],
+                    "values": [
+                        ["list", ["bool", 1], 0],
+                        ["list", ["float", 1.0], 0],
+                        ["list", 0, ["str", "0"]],
+                        ["str", "ab"],
+                        5,
+                        ["list", ["list", 0], 0],
+                        ["list", 0],
+                        ["list", ["bool", 1]],
+                        ["list", 0, 11],
+                        ["list", -1, 0],
+                        ["list", 1180591620717411303424, 0],
+                        ["list", 3, 10],
+                    ],
+                }
+            ]
+        },
+        "expected": [
+            [
+                "TypeError: service_baseline (units)[0] must be an integer (got bool)",
+                "TypeError: service_baseline (units)[0] must be an integer (got float)",
+                "TypeError: service_baseline (units)[1] must be an integer (got str)",
+                "TypeError: service_baseline must be a 1-D sequence of integers (got str)",
+                "TypeError: service_baseline must be a 1-D sequence of integers (got int)",
+                "TypeError: service_baseline must be a 1-D sequence of integers (entry 0 is a sequence)",
+                "ValueError: service_baseline has length 1, expected 2 (one entry per edge)",
+                "ValueError: service_baseline has length 1, expected 2 (one entry per edge)",
+                "ValueError: service_baseline[1] = 11 is outside [0, edge_capacity_units[1] = 10]",
+                "ValueError: service_baseline[0] = -1 is outside [0, edge_capacity_units[0] = 10]",
+                "ValueError: service_baseline[0] = 1180591620717411303424 is outside [0, edge_capacity_units[0] = 10]",
+                "valid",
+            ]
+        ],
+    },
+    {
+        "id": "ERR-class-numpy",
+        "oracle": "input_classes",
+        "input": {
+            "cases": [
+                {
+                    "entry": "place offer",
+                    "values": [
+                        ["numpy", "bool_", True],
+                        ["numpy", "float64", 1.5],
+                        ["numpy", "float32", "-inf"],
+                        ["numpy", "float64", "inf"],
+                        ["numpy", "int64", 2],
+                        ["numpy", "uint64", 9223372036854775808],
+                    ],
+                },
+                {
+                    "entry": "ksp k",
+                    "values": [
+                        ["numpy", "int64", 1],
+                        ["numpy", "float64", 1.0],
+                        ["numpy", "bool_", True],
+                    ],
+                },
+                {
+                    "entry": "service_baseline",
+                    "caps": [10, 10],
+                    "values": [
+                        ["array", "float64", [1, 1]],
+                        ["array", "int64", [[1, 1]]],
+                        ["array", "float64", [1]],
+                        ["array", "int64", [1, 11]],
+                        ["array", "uint8", [1, 10]],
+                    ],
+                },
+                {
+                    "entry": "apply_actions",
+                    "values": [
+                        {"ledger": "own", "offer": ["numpy", "bool_", True]},
+                        {"ledger": "own", "offer": ["numpy", "float32", 1.5]},
+                        {"ledger": "own", "offer": ["numpy", "int64", 5]},
+                    ],
+                },
+            ]
+        },
+        "expected": [
+            [
+                "TypeError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "valid",
+                "valid",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+            ],
+            [
+                "valid",
+                "TypeError: k must be an integer (got float64)",
+                "TypeError: k must be an integer (got bool)",
+            ],
+            [
+                "TypeError: service_baseline (units) entries must be integers (got dtype float64)",
+                "TypeError: service_baseline must be a 1-D array (got 2 dimensions)",
+                "ValueError: service_baseline has length 1, expected 2 (one entry per edge)",
+                "ValueError: service_baseline[1] = 11 is outside [0, edge_capacity_units[1] = 10]",
+                "valid",
+            ],
+            [
+                "TypeError: offer must be an int or a float (got bool)",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "valid",
+            ],
+        ],
+    },
+    {
+        "id": "ERR-number-resolution",
+        "oracle": "number_types",
+        "input": {
+            "cases": [
+                {
+                    "entry": "resolution",
+                    "values": [
+                        1,
+                        ["float", 0.5],
+                        ["float", 2.3283064365386963e-10],
+                        4294967296,
+                        ["decimal", "1"],
+                        ["fraction", 1, 1],
+                        ["floatonly", 1.0],
+                        ["index", 1],
+                        ["bool", 1],
+                        ["str", "1"],
+                        ["none"],
+                        ["float", 0.75],
+                        ["float", "nan"],
+                        ["float", "inf"],
+                        8589934592,
+                        ["pow2", 1024],
+                        0,
+                        -1,
+                    ],
+                }
+            ]
+        },
+        "expected": [
+            [
+                "valid",
+                "valid",
+                "valid",
+                "valid",
+                "TypeError: pybind11 conversion",
+                "TypeError: pybind11 conversion",
+                "TypeError: pybind11 conversion",
+                "TypeError: pybind11 conversion",
+                "TypeError: pybind11 conversion",
+                "TypeError: pybind11 conversion",
+                "TypeError: pybind11 conversion",
+                "ValueError: resolution must be a power of two in [2^-32, 2^32]",
+                "ValueError: resolution must be a power of two in [2^-32, 2^32]",
+                "ValueError: resolution must be a power of two in [2^-32, 2^32]",
+                "ValueError: resolution must be a power of two in [2^-32, 2^32]",
+                "ValueError: resolution must be a power of two in [2^-32, 2^32]",
+                "ValueError: resolution must be a power of two in [2^-32, 2^32]",
+                "ValueError: resolution must be a power of two in [2^-32, 2^32]",
+            ]
+        ],
+    },
+    {
+        "id": "ERR-number-list",
+        "oracle": "number_types",
+        "input": {
+            "cases": [
+                {
+                    "entry": "to_units",
+                    "resolution": 1.0,
+                    "values": [
+                        ["list", ["pow2", 64], 1.5],
+                        ["list", ["decimal", "1"], 1.5],
+                        ["list", ["fraction", 3, 2], 1],
+                        ["list", ["floatonly", 1.0]],
+                        ["list", ["index", 1], 2],
+                        ["list", ["decimal", "1"], ["pow2", 64]],
+                        ["list", -1.5, ["pow2", 64]],
+                        ["list", ["bool", 1], 1.5],
+                        ["list", ["bool", 1], ["bool", 0]],
+                        ["list", ["list", 1, 2], ["list", 3, 4]],
+                        ["list", ["pow2", 63], 1.5],
+                        ["list", -1, ["pow2", 63]],
+                        ["list", ["float", "nan"], 1],
+                        ["list", 1, 2.5, 0.49],
+                        ["list"],
+                    ],
+                },
+                {
+                    "entry": "to_units",
+                    "resolution": 0.5,
+                    "values": [["list", 1, 2.25], ["list", ["decimal", "1"]]],
+                },
+                {
+                    "entry": "to_units",
+                    "resolution": ["decimal", "1"],
+                    "values": [["list", ["pow2", 64], 1.5], ["list", 1.0]],
+                },
+                {
+                    "entry": "to_units",
+                    "resolution": 0.75,
+                    "values": [["list", ["decimal", "1"]], ["list", ["pow2", 64], 1.5]],
+                },
+            ]
+        },
+        "expected": [
+            [
+                "ValueError: to_units takes physical numbers (got dtype object)",
+                "TypeError: to_units takes physical numbers (got dtype object)",
+                "TypeError: to_units takes physical numbers (got dtype object)",
+                "TypeError: to_units takes physical numbers (got dtype object)",
+                "TypeError: to_units takes physical numbers (got dtype object)",
+                "TypeError: to_units takes physical numbers (got dtype object)",
+                "ValueError: to_units takes physical numbers (got dtype object)",
+                "TypeError: to_units takes physical numbers (a float or an array of floats)",
+                "TypeError: to_units takes physical numbers (got dtype bool)",
+                "TypeError: to_units takes a float or a 1-D array of floats",
+                "ValueError: to_units: the amount is at or above the bound of the units domain (2^62 units)",
+                "ValueError: to_units: a negative amount has no unit value",
+                "ValueError: to_units: NaN has no unit value",
+                "valid [1, 3, 0]",
+                "valid []",
+            ],
+            [
+                "valid [2, 5]",
+                "TypeError: to_units takes physical numbers (got dtype object)",
+            ],
+            ["TypeError: pybind11 conversion", "TypeError: pybind11 conversion"],
+            [
+                "ValueError: resolution must be a power of two in [2^-32, 2^32]",
+                "ValueError: resolution must be a power of two in [2^-32, 2^32]",
+            ],
+        ],
+    },
+    {
+        "id": "ERR-number-scalar",
+        "oracle": "number_types",
+        "input": {
+            "cases": [
+                {
+                    "entry": "to_units",
+                    "resolution": 1.0,
+                    "values": [
+                        ["decimal", "1"],
+                        ["pow2", 64],
+                        ["fraction", 1, 1],
+                        ["floatonly", 1.0],
+                        ["index", 1],
+                        ["bool", 1],
+                        ["str", "1"],
+                        ["none"],
+                        ["float", "-inf"],
+                        4611686018427387904,
+                        4611686018427387903,
+                        9007199254740993,
+                        2.5,
+                        ["float", 0.5],
+                    ],
+                },
+                {
+                    "entry": "place offer",
+                    "values": [
+                        ["index", 3],
+                        ["decimal", "1"],
+                        ["floatonly", 1.0],
+                        ["pow2", 64],
+                        3,
+                    ],
+                },
+                {
+                    "entry": "as_float x",
+                    "values": [
+                        ["index", 3],
+                        ["decimal", "1"],
+                        ["floatonly", 1.0],
+                        ["float", 1.5],
+                        ["pow2", 64],
+                    ],
+                },
+            ]
+        },
+        "expected": [
+            [
+                "TypeError: to_units takes physical numbers (got dtype object)",
+                "ValueError: to_units takes physical numbers (got dtype object)",
+                "TypeError: to_units takes physical numbers (got dtype object)",
+                "TypeError: to_units takes physical numbers (got dtype object)",
+                "TypeError: to_units takes physical numbers (got dtype object)",
+                "TypeError: to_units takes physical numbers (a float or an array of floats)",
+                "TypeError: to_units takes physical numbers (a float or an array of floats)",
+                "TypeError: to_units takes physical numbers (got dtype object)",
+                "ValueError: to_units: an infinite amount is not finite and has no unit value",
+                "ValueError: to_units: the amount is at or above the bound of the units domain (2^62 units)",
+                "ValueError: to_units: the amount is at or above the bound of the units domain (2^62 units)",
+                "valid 9007199254740992",
+                "valid 3",
+                "valid 1",
+            ],
+            [
+                "valid",
+                "TypeError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "TypeError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "valid",
+            ],
+            [
+                "valid",
+                "TypeError: as_float: x must be an integer (got Decimal)",
+                "TypeError: as_float: x must be an integer (got FloatOnly)",
+                "TypeError: as_float: x must be an integer (got float)",
+                "valid",
+            ],
+        ],
+    },
+    {
+        "id": "ERR-number-numpy",
+        "oracle": "number_types",
+        "input": {
+            "cases": [
+                {
+                    "entry": "resolution",
+                    "values": [
+                        ["numpy", "float32", 0.5],
+                        ["numpy", "int64", 2],
+                        ["numpy", "uint64", 1],
+                        ["numpy", "bool_", True],
+                        ["array", "float64", 1.0],
+                        ["numpy", "float64", "nan"],
+                        ["numpy", "float16", 0.75],
+                    ],
+                },
+                {
+                    "entry": "to_units",
+                    "resolution": 1.0,
+                    "values": [
+                        ["array", "float32", [1.5, 2.5]],
+                        ["array", "object", [1, 2]],
+                        ["array", "bool", [True, False]],
+                        ["list", ["numpy", "bool_", True], 1.5],
+                        ["list", ["numpy", "bool_", True], ["numpy", "bool_", False]],
+                        ["array", "int64", [[1, 2]]],
+                        ["array", "float64", 2.5],
+                        ["numpy", "float32", 2.5],
+                        ["list", ["numpy", "uint64", 9223372036854775808], -1],
+                    ],
+                },
+            ]
+        },
+        "expected": [
+            [
+                "valid",
+                "valid",
+                "valid",
+                "TypeError: pybind11 conversion",
+                "TypeError: pybind11 conversion",
+                "ValueError: resolution must be a power of two in [2^-32, 2^32]",
+                "ValueError: resolution must be a power of two in [2^-32, 2^32]",
+            ],
+            [
+                "valid [2, 3]",
+                "TypeError: to_units takes physical numbers (got dtype object)",
+                "TypeError: to_units takes physical numbers (got dtype bool)",
+                "TypeError: to_units takes physical numbers (a float or an array of floats)",
+                "TypeError: to_units takes physical numbers (got dtype bool)",
+                "TypeError: to_units takes a float or a 1-D array of floats",
+                "valid 3",
+                "valid 3",
+                "ValueError: to_units: the amount is at or above the bound of the units domain (2^62 units)",
+            ],
+        ],
+    },
 ]
 
 
@@ -4721,13 +5337,31 @@ def check_outside_the_domain(example):
         assert mismatch(split_offer_on_unit_links(**case), want) is None, case
 
 
+# Positions of an example that wait for an entry this library does not have yet (apply_actions,
+# the list API): their cases and expected rows are left out of the comparison. ERR-class-list, all
+# of whose cases are apply_actions, is not here.
+WAITING_ENTRIES = {"apply_actions"}
+
+
+def without_waiting(example):
+    cases = example["input"].get("cases")
+    if example["oracle"] != "input_classes" or cases is None:
+        return example
+    keep = [i for i, c in enumerate(cases) if c["entry"] not in WAITING_ENTRIES]
+    return {
+        **example,
+        "input": {"cases": [cases[i] for i in keep]},
+        "expected": [example["expected"][i] for i in keep],
+    }
+
+
 def _param(example):
     return pytest.param(example, id=example["id"])
 
 
 def test_every_example_once():
     ids = [e["id"] for e in EXAMPLES]
-    assert len(ids) == len(set(ids)) == 156
+    assert len(ids) == len(set(ids)) == 164
     assert {e["oracle"] for e in EXAMPLES} <= set(ADAPTERS)
 
 
@@ -4736,6 +5370,7 @@ def test_contract_example(example):
     if example["id"] in OUTSIDE_THE_DOMAIN:
         check_outside_the_domain(example)
         return
+    example = without_waiting(example)
     expected = example["expected"]
     left_out = NOT_REPORTED.get(example["id"], {})
     if left_out:

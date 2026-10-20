@@ -305,16 +305,16 @@ def test_validation_messages_before_binding():
         ValueError, match=exact("foreign ShortestPathCache: bound to another graph")
     ):
         ngc.FlowPolicy(fg, 0, 3, COSTONLY, None, ngc.ShortestPathCache(diamond()))
-    # Arguments of the wrong kind: a ledger of None and non-integer node ids are ValueError; a
-    # ledger, config, eligibility or cache of the wrong class and an unknown keyword are TypeError.
-    with pytest.raises(ValueError, match=exact("ledger must be a FlowLedger")):
+    # Arguments of the wrong kind are TypeError: a ledger of None, non-integer node ids, a ledger,
+    # config, eligibility or cache of the wrong class and an unknown keyword.
+    with pytest.raises(TypeError, match=exact("ledger must be a FlowLedger")):
         ngc.FlowPolicy(None, 0, 3, COSTONLY)
     with pytest.raises(
-        ValueError, match=exact("sources[0] must be an integer (got float)")
+        TypeError, match=exact("sources[0] must be an integer (got float)")
     ):
         ngc.FlowPolicy(fg, [0.0], 3, COSTONLY)
     with pytest.raises(
-        ValueError, match=exact("destinations must be a sequence of integers")
+        TypeError, match=exact("destinations must be a sequence of integers")
     ):
         ngc.FlowPolicy(fg, 0, 3.0, COSTONLY)
     for wrong in (
@@ -929,16 +929,20 @@ def test_python_keeps_what_a_policy_and_an_option_need_alive():
 
 
 def test_exception_classes_of_conversions():
-    # An integer beyond the float range where a float is expected: the resolution (a plain float
-    # parameter) cannot be converted, a TypeError; a request (integer units) is outside its
-    # domain, a ValueError. A request's own conversion failure reaches the caller unchanged.
+    # An integer beyond the float range is an accepted type with a value outside the domain, a
+    # ValueError, both where a float is expected (the resolution) and as a request (integer
+    # units). A request's own conversion failure reaches the caller unchanged.
     for call in (
         lambda: ngc.Graph(2, [0], [1], [5], [1], 10**400),
         lambda: ngc.to_units(1.0, 10**400),
         lambda: ngc.as_float(1, 10**400),
     ):
-        with pytest.raises(TypeError, match="incompatible"):
+        with pytest.raises(
+            ValueError,
+            match=exact("resolution must be a power of two in [2^-32, 2^32]"),
+        ) as error:
             call()
+        assert error.type is ValueError
     g = build(2, [(0, 1, 5, 1)])
     p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, COSTONLY)
     for big in (10**400, -(10**400)):
@@ -974,7 +978,9 @@ def test_python_publication_is_all_or_nothing(routing, traced):
 
         return (policy._place_traced if traced else policy.place), (3,), snapshot
 
-    assert sweep_python_allocation(make) >= 3  # not vacuous
+    # Not vacuous: the result object at least (its fields convert when read); traced, also the
+    # pair and the trace.
+    assert sweep_python_allocation(make) >= (3 if traced else 1)
 
 
 @needs_hooks

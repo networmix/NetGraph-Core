@@ -99,9 +99,8 @@ void register_program(py::module_& m) {
                     "(0 allowed: it carries nothing). from_routes validates it.")
       .def(py::init([](const py::object& head, const py::object& route, const py::object& weight) {
              RouteDefinition r;
-             r.head = static_cast<NodeId>(integer_value(head, std::numeric_limits<NodeId>::min(),
-                                                        std::numeric_limits<NodeId>::max(), "head",
-                                                        IntegerArgument::Configuration));
+             r.head = static_cast<NodeId>(
+                 integer_value(head, std::numeric_limits<NodeId>::min(), std::numeric_limits<NodeId>::max(), "head"));
              if (py::isinstance<Path>(route)) {
                r.route = std::shared_ptr<const Path>(route.cast<std::shared_ptr<Path>>());
              } else if (py::isinstance<PredecessorDAG>(route)) {
@@ -110,8 +109,7 @@ void register_program(py::module_& m) {
                throw py::type_error("RouteDefinition route must be a Path or a PredecessorDAG (got " +
                                     std::string(py::str(py::type::of(route).attr("__name__"))) + ")");
              }
-             r.weight = integer_value(weight, std::numeric_limits<Amount>::min(), std::numeric_limits<Amount>::max(),
-                                      "weight", IntegerArgument::Configuration);
+             r.weight = integer_value(weight, std::numeric_limits<Amount>::min(), std::numeric_limits<Amount>::max(), "weight");
              return r;
            }),
            py::arg("head"), py::arg("route"), py::kw_only(), py::arg("weight") = 1,
@@ -162,7 +160,7 @@ void register_program(py::module_& m) {
           [](const std::shared_ptr<Graph>& graph, const py::object& sources, const py::object& destinations,
              const py::object& routes, std::optional<RouteAllocation> allocation, std::optional<WeightBasis> weight_basis,
              const py::object& edge_weights, const py::object& residual) {
-            if (!graph) throw py::value_error("graph must be a Graph");
+            if (!graph) throw py::type_error("graph must be a Graph");
             // Conversion first (TypeError and integer type defects), then the validation order of
             // from_routes; the values beyond int64 are checked here in that order.
             if (is_invalid_sequence(routes)) throw py::type_error("routes must be a sequence of RouteDefinition");
@@ -216,7 +214,7 @@ void register_program(py::module_& m) {
           [](const std::shared_ptr<Graph>& graph, const py::object& sources, const py::object& destinations,
              const py::object& dag, std::optional<RouteAllocation> allocation, std::optional<WeightBasis> weight_basis,
              const py::object& edge_weights, const py::object& residual) {
-            if (!graph) throw py::value_error("graph must be a Graph");
+            if (!graph) throw py::type_error("graph must be a Graph");
             // Conversion first (TypeError and integer type defects), then the validation order of
             // from_dag; the values beyond int64 are checked here in that order.
             if (!py::isinstance<PredecessorDAG>(dag)) {

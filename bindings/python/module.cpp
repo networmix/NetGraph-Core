@@ -10,12 +10,13 @@
 
   - Graph accessors return read-only NumPy views that keep the graph alive (no per-call copy).
   - Integer inputs (capacities, costs, ids, views, caps) must be integers: Python ints, NumPy
-    integer scalars or integer arrays; floats and bools are rejected with ValueError, never
+    integer scalars or integer arrays; floats and bools are rejected with TypeError, never
     truncated. Values are read without narrowing and validated in the C++
     constructors' order before any conversion to the C++ types. Physical values
     enter only through to_units; the resolution is validated before anything else.
-  - std::invalid_argument from Core maps to ValueError; enumeration values outside their
-    enumeration are rejected at construction (ValueError).
+  - One rule for the class of an input error: a type the position never takes TypeError, a value
+    outside its domain ValueError. std::invalid_argument from Core maps to ValueError; enumeration
+    values outside their enumeration are rejected at construction (ValueError).
   - _solve_min_cost_flow is a private entry point for the flow checks: it returns the flow
     core's payload as a dict of Python ints and lists.
   - Amounts and counters cross as Python ints (exact, also beyond 64 bits); per-edge arrays as
@@ -34,6 +35,11 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
       "NetGraph-Core: the graph on integer units, the route structures, the integer ledger, the forwarding\n"
       "programs, the policy engine FlowPolicy, the ShortestPathCache, the evaluators (evaluate_demand,\n"
       "evaluate_pairs, evaluate_edge_failures) and the searches (spf, ksp, resolve_to_paths).\n"
+      "One rule for the class of an input error, at every public entry: a type the position never takes\n"
+      "(a bool at a numeric position, a float where only an integer is taken, a string, None where none\n"
+      "is allowed, another class; for a vector a non-sequence, a nested entry, an array of another rank\n"
+      "or of a non-integer dtype) raises TypeError, a value outside its domain (a range, a length, NaN,\n"
+      "-inf, a finite float where floats are taken only for +inf) ValueError; the text is the same.\n"
       "Every public call either completes or raises and leaves Core state as it was, with two limits:\n"
       "(1) pybind11 does not check every allocation when it constructs a bound object from Python, parses\n"
       "the arguments of a call that passes keywords, or converts an attribute or a returned value into a\n"

@@ -198,9 +198,9 @@ inline py::array_t<std::int64_t> int64_array(const std::vector<std::int64_t>& v)
 }
 
 inline FlowId flow_id_of(const py::object& obj) {
-  if (!py::isinstance<py::tuple>(obj) || py::len(obj) != 2) {
-    throw py::value_error("a FlowId is a tuple (ledger uid, id)");
-  }
+  // Not a tuple is a wrong type, a tuple of another length a wrong value: one text.
+  if (!py::isinstance<py::tuple>(obj)) throw py::type_error("a FlowId is a tuple (ledger uid, id)");
+  if (py::len(obj) != 2) throw py::value_error("a FlowId is a tuple (ledger uid, id)");
   auto t = py::reinterpret_borrow<py::tuple>(obj);
   py::object uid = python_int(t[0], "FlowId ledger uid");
   py::object id = python_int(t[1], "FlowId id");
@@ -222,16 +222,18 @@ inline FlowId flow_id_of(const py::object& obj) {
 
 
 // An amount argument: an integer number of units in [0, 2^62) or +inf (float('inf')); nullopt is
-// +inf. Any other value (a bool, another float, a non-integer, an integer out of range) raises the
-// one ValueError `text`; an exception of the object's own __index__ propagates as raised.
+// +inf. Every other argument raises the one `text`, with the class of its cause: a type the position
+// never takes (a bool, a string, None, another non-number) TypeError; a float other than +inf (NaN,
+// -inf, a finite one) or an integer out of range ValueError. An exception of the object's own
+// __index__ propagates as raised.
 inline std::optional<Amount> units_or_inf(const py::object& value, const char* text) {
-  if (py::isinstance<py::float_>(value) || py::isinstance(value, py::module_::import("numpy").attr("floating"))) {
+  if (PyFloat_Check(value.ptr()) || has_type(value.ptr(), numpy_number_types().second)) {
     const double x = PyFloat_AsDouble(value.ptr());
     if (x == -1.0 && PyErr_Occurred() != nullptr) throw py::error_already_set();
     if (std::isinf(x) && x > 0) return std::nullopt;
     throw py::value_error(text);
   }
-  if (is_bool(value) || !PyIndex_Check(value.ptr())) throw py::value_error(text);
+  if (is_bool(value) || !PyIndex_Check(value.ptr())) throw py::type_error(text);
   const py::object idx = py::reinterpret_steal<py::object>(PyNumber_Index(value.ptr()));
   if (!idx) throw py::error_already_set();
   int overflow = 0;

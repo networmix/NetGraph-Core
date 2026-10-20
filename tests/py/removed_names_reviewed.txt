@@ -20,7 +20,7 @@ ForwardingProgram.from_dag | allocated | allocated equally and pooled at every s
 ForwardingProgram.source_weights | weights | the captured source weights ((source, weight), ascending), o | the captured source weights of a program's injection
 Graph | cost | Costs are positive integers; capacities are int64 units of t | an edge's or a path's cost (Path.cost is the current name)
 Graph | cost | given in input order and numbered by sorting on (source, cos | an edge's or a path's cost (Path.cost is the current name)
-Graph.__init__ | cost | capacity and cost sums below 2^62). Integers are read withou | an edge's or a path's cost (Path.cost is the current name)
+Graph.__init__ | cost | and cost sums below 2^62); a value of a wrong type (a bool or | an edge's or a path's cost (Path.cost is the current name)
 Graph.__init__ | cost | zero or negative costs, the remaining bounds (endpoints in r | an edge's or a path's cost (Path.cost is the current name)
 Graph.edge_cost_gcd | cost | gcd of the edge costs (0 without edges) | an edge's or a path's cost (Path.cost is the current name)
 Graph.edge_costs | cost | int64[E] costs, id order (read-only view) | an edge's or a path's cost (Path.cost is the current name)
@@ -138,7 +138,7 @@ docs/semantics.md | bundle | possibly many equal-cost walks) or a `Path` (one ex
 docs/semantics.md | cost | - **EdgeId.** The EdgeId of an edge is its rank in the stabl | an edge's or a path's cost (Path.cost is the current name)
 docs/semantics.md | cost | `(cost, source, input)` order. Both offset arrays have `N + | an edge's or a path's cost (Path.cost is the current name)
 docs/semantics.md | cost | `outgoing_offsets()[u]` to `outgoing_offsets()[u + 1] - 1`, | an edge's or a path's cost (Path.cost is the current name)
-docs/semantics.md | cost | booleans are rejected, not rounded); the array shapes; a zer | an edge's or a path's cost (Path.cost is the current name)
+docs/semantics.md | cost | are rejected with `TypeError`, not rounded); the array shapes | an edge's or a path's cost (Path.cost is the current name)
 docs/semantics.md | cost | bounds (node ids in range, then the capacity and cost sums b | an edge's or a path's cost (Path.cost is the current name)
 docs/semantics.md | cost | capacity sum before the cost sum at the same edge). Integers | an edge's or a path's cost (Path.cost is the current name)
 docs/semantics.md | cost | public number, its EdgeId, by sorting the edges by source, c | an edge's or a path's cost (Path.cost is the current name)

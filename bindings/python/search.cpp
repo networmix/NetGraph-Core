@@ -128,7 +128,7 @@ void register_search(py::module_& m) {
   m.def(
       "spf",
       [](const std::shared_ptr<Graph>& graph, const py::object& roots, const py::object& opts) {
-        if (!graph) throw py::value_error("graph must be a Graph");
+        if (!graph) throw py::type_error("graph must be a Graph");
         const auto o = options_of<PySpfOptions>(opts, "SpfOptions");
         const auto n = graph->num_nodes();
         // spf's validation order on unnarrowed values (Core repeats every check): the enumerations,

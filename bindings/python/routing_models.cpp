@@ -72,18 +72,12 @@ const char* weight_basis_repr(WeightBasis b) {
 // (ValueError); the policy checks the length against its graph and the range [0, 2^62).
 std::shared_ptr<const std::vector<Amount>> edge_weights_of(const py::object& edge_weights) {
   if (edge_weights.is_none()) return {};
-  (void)sequence_length(edge_weights, "edge_weights", IntegerArgument::Configuration);
-  const auto w = wide_integers(edge_weights, "edge_weights", IntegerArgument::Configuration);
+  (void)sequence_length(edge_weights, "edge_weights");
+  const auto w = wide_integers(edge_weights, "edge_weights");
   for (std::size_t e = 0; e < w.size(); ++e) {
     if (w.sign(e) != 0) throw py::value_error("edge_weights[" + std::to_string(e) + "] must be an integer in [0, 2^62)");
   }
   return std::make_shared<const std::vector<Amount>>(w.narrow<Amount>());
-}
-
-// An integer field of a configuration value, in [lo, hi]: a bool, a float, None or another type is
-// the configuration's wrong-type error (integers.hpp); an integer outside [lo, hi] is a ValueError.
-std::int64_t int_field(const py::object& obj, std::int64_t lo, std::int64_t hi, const std::string& what) {
-  return integer_value(obj, lo, hi, what, IntegerArgument::Configuration);
 }
 
 // A CostStretch factor as its one exact fraction, converted in this order: a bool (Python or
@@ -101,7 +95,7 @@ CostStretch cost_stretch_of(const py::object& factor) {
   py::object fraction;
   if (py::isinstance(factor, fraction_type)) {
     fraction = factor;
-  } else if (PyFloat_Check(factor.ptr()) || py::isinstance(factor, py::module_::import("numpy").attr("floating"))) {
+  } else if (PyFloat_Check(factor.ptr()) || has_type(factor.ptr(), numpy_number_types().second)) {
     const double x = PyFloat_AsDouble(factor.ptr());
     if (x == -1.0 && PyErr_Occurred() != nullptr) throw py::error_already_set();
     if (!std::isfinite(x)) throw py::value_error("CostStretch factor must be finite (got " + std::string(py::str(factor)) + ")");
@@ -132,8 +126,8 @@ CostStretch cost_stretch_of(const py::object& factor) {
 void register_routing(py::module_& m) {
   py::class_<AbsoluteCost>(m, "AbsoluteCost", "Cost ceiling: an absolute, inclusive path-cost budget (cost >= 0).")
       .def(py::init([](const py::object& cost) {
-             return AbsoluteCost {int_field(cost, std::numeric_limits<Cost>::min(), std::numeric_limits<Cost>::max(),
-                                         "AbsoluteCost cost")};
+             return AbsoluteCost {integer_value(cost, std::numeric_limits<Cost>::min(), std::numeric_limits<Cost>::max(),
+                                             "AbsoluteCost cost")};
            }),
            py::arg("cost"), "AbsoluteCost(cost): a 64-bit integer budget in cost units (checked >= 0 where it is used)")
       .def_property_readonly("cost", int_reader(&AbsoluteCost::cost), "the budget: a path qualifies when its cost is at most this")
@@ -174,8 +168,8 @@ void register_routing(py::module_& m) {
                       "design shares; if none does, the largest live-share score, then the smallest count. It does not\n"
                       "promise whole-demand lossless delivery.")
       .def(py::init([](const py::object& count, StrictBool up_to) {
-             return TunnelCount {int_field(count, std::numeric_limits<std::int64_t>::min(),
-                                        std::numeric_limits<std::int64_t>::max(), "TunnelCount per_head"),
+             return TunnelCount {integer_value(count, std::numeric_limits<std::int64_t>::min(),
+                                            std::numeric_limits<std::int64_t>::max(), "TunnelCount per_head"),
                              up_to};
            }),
            py::arg("per_head"), py::kw_only(), py::arg("up_to") = StrictBool {false},
@@ -274,8 +268,8 @@ void register_routing(py::module_& m) {
              ca.tie_break = tie_break;
              ca.parallel_edges = parallel_edges;
              ca.cost_ceiling = cost_ceiling_of(cost_ceiling);
-             ca.min_unreserved_bandwidth = int_field(min_unreserved, std::numeric_limits<Amount>::min(),
-                                                      std::numeric_limits<Amount>::max(), "min_unreserved_bandwidth");
+             ca.min_unreserved_bandwidth = integer_value(min_unreserved, std::numeric_limits<Amount>::min(),
+                                                          std::numeric_limits<Amount>::max(), "min_unreserved_bandwidth");
              return ca;
            }),
            py::arg("tunnel_count"), py::kw_only(), py::arg("cost_ceiling") = py::none(),

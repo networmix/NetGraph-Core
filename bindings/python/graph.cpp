@@ -11,6 +11,7 @@
 #include "netgraph/core/eligibility.hpp"
 #include "netgraph/core/graph.hpp"
 #include "integers.hpp"
+#include "strict_float.hpp"
 #include "values.hpp"
 #include "registration.hpp"
 
@@ -58,7 +59,7 @@ void check_unit_values(const py::handle& edge_capacity_units) {
 
 std::shared_ptr<Graph> make_graph(const py::object& num_nodes, const py::object& source,
                                   const py::object& destination, const py::object& edge_capacity_units,
-                                  const py::object& cost, double resolution) {
+                                  const py::object& cost, StrictFloat resolution) {
   // The constructor's validation order: the resolution, the unit values, the shapes, zero or
   // negative costs, the remaining bounds (ids in range, then the sums); every value is read
   // without narrowing, and the messages are the C++ constructor's, which re-checks the same order.
@@ -128,11 +129,13 @@ void register_graph(py::module_& m) {
       "two in [2^-32, 2^32]); physical capacities enter through to_units.")
       .def(py::init(&make_graph), py::arg("num_nodes"), py::arg("edge_sources"), py::arg("edge_destinations"),
            py::arg("edge_capacity_units"), py::arg("edge_costs"), py::arg("resolution"),
-           "Validates, in order, and reports the first defect as ValueError: the resolution (a power of\n"
-           "two in [2^-32, 2^32]), the unit values (every capacity in [0, 2^62)), the array shapes,\n"
-           "zero or negative costs, the remaining bounds (endpoints in range, then the\n"
-           "capacity and cost sums below 2^62). Integers are read without narrowing, so the error\n"
-           "does not depend on how the input is represented.")
+           "Validates, in order, and reports the first defect: the resolution (a power of two in\n"
+           "[2^-32, 2^32]; a bool is a TypeError), the unit values (every capacity in [0, 2^62)), the array\n"
+           "shapes, zero or negative costs, the remaining bounds (endpoints in range, then the capacity\n"
+           "and cost sums below 2^62); a value of a wrong type (a bool or a float for an integer, a\n"
+           "non-sequence, an array of another rank or dtype) raises TypeError, a value outside its domain\n"
+           "ValueError. Integers are read without narrowing, so the error does not depend on how the\n"
+           "input is represented.")
       .def("uid", &Graph::uid, "process-unique id (never reused)")
       .def("resolution", &Graph::resolution, "the resolution q (units of capacity)")
       .def("num_nodes", &Graph::num_nodes, "N: node ids are 0 .. N - 1")

@@ -162,7 +162,7 @@ def test_validation_order_on_unnarrowed_values():
     ):
         ngc.spf(g, 0, opts(min_residual=-big))
     with pytest.raises(
-        ValueError, match=exact("min_residual must be an integer (got float)")
+        TypeError, match=exact("min_residual must be an integer (got float)")
     ):
         ngc.spf(g, 0, opts(min_residual=1.5))
     with pytest.raises(ValueError, match="^foreign Eligibility"):

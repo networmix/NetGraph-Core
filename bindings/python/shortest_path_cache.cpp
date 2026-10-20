@@ -47,7 +47,7 @@ void register_shortest_path_cache(py::module_& m) {
       "raised ShortestPathCacheMiss. A frozen cache counts its hits only when the call succeeds, Python result\n"
       "included.")
       .def(py::init([](const std::shared_ptr<Graph>& graph) {
-             if (!graph) throw py::value_error("graph must be a Graph");
+             if (!graph) throw py::type_error("graph must be a Graph");
              return std::make_shared<ShortestPathCache>(*graph);
            }),
            py::arg("graph"), "An empty cache in building mode, bound to graph (by its uid).")

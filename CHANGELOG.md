@@ -242,6 +242,24 @@ API.
   next to `py.typed`. The stub carries the binding docstrings. `bash dev/stubs/run.sh generate`
   regenerates it; `make stubs-check` checks it against a fresh generation, the wheel and sdist
   contents, and typed client programs.
+- **Input error classes**: one rule at every public entry. A type the position never takes raises
+  `TypeError`: a bool (Python's or `numpy.bool_`) at any numeric position, a float where only an
+  integer is taken, a string, `None` where none is allowed, an object of another class; for a vector
+  a non-sequence, a nested entry, an array of another rank or of a non-integer dtype. A value
+  outside its domain raises `ValueError`: a range, a length, NaN, `-inf`, a finite float as an offer
+  or a design demand. Texts are unchanged. Against this release's earlier development snapshots,
+  the wrong-type errors of call arguments, search options, graph arrays and node ids, vectors,
+  amounts, `None` for `graph`, `ledger` or `dag`, FlowIds, `evaluate_pairs`' pairs,
+  `Eligibility.intersect`, `Path` hops and `to_units` become `TypeError` (were `ValueError`):
+  `place(True)` and `SpfOptions(FORWARD, min_residual=1.0)` at the call raise `TypeError`, while
+  `place(1.5)` and `min_residual=0` stay `ValueError`. The non-integer number positions (a
+  `resolution` of `Graph`, `to_units` and `as_float`, `to_units`' values) take exactly ints, floats
+  and NumPy numbers, a subclass by its value: a bool (a resolution read as 1.0 or 0.0 before), a
+  `Decimal`, a `Fraction`, an object known by `__float__`, `__index__` or `__array__`, or a 0-d array
+  as a resolution is refused with `TypeError`; an integer beyond the float range as a resolution is now a `ValueError` with the
+  resolution's text (was pybind11's `TypeError`). `to_units` refuses a bool entry beside numbers
+  (`[True, 1.0]`, accepted before) with `TypeError`. Integer positions, `as_float`'s amounts
+  included, keep Python's integer protocol (`__index__`, never a bool).
 - **Results that change** against this release's earlier development snapshots, on purpose: a
   zero-capacity link stays in routing, so a direct edge of capacity 0 and cost 1 beside a cost-2
   route makes the shortest cost 1 (was 2), and an equal LOSSLESS split that sends that edge its

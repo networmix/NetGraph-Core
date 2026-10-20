@@ -49,6 +49,10 @@ EXPECTED_OFF_SKIPS = [
     "tests/py/test_getter_allocation.py::test_every_number_read_raises_memory_error",
     "tests/py/test_getter_allocation.py::test_a_failed_integer_read_raises_memory_error",
     "tests/py/test_ksp.py::test_python_result_lists_are_all_or_nothing",
+    (
+        "tests/py/test_number_types.py::test_the_converter_raises_memory_error_on_every_python_allocation_failure"
+    ),
+    "tests/py/test_number_types.py::test_a_cold_conversion_raises_memory_error",
     "tests/py/test_native_allocation.py::test_allocation_hooks_preserve_exception_identity",
     (
         "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[Eligibility.intersect]"
@@ -118,6 +122,9 @@ EXPECTED_OFF_SKIPS = [
     ),
     (
         "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[resolve_to_paths]"
+    ),
+    (
+        "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[to_units.list]"
     ),
     (
         "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[sensitivity.global]"

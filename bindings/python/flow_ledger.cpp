@@ -31,7 +31,7 @@ void register_flow_ledger(py::module_& m) {
       "placement, removal or reservation). reset() and copy() are rejected while a policy is bound (a\n"
       "FlowPolicy built on this ledger still exists).")
       .def(py::init([](const std::shared_ptr<Graph>& graph, const py::object& service_baseline, const py::object& reservation_baseline) {
-             if (!graph) throw py::value_error("graph must be a Graph");
+             if (!graph) throw py::type_error("graph must be a Graph");
              const auto caps = graph->edge_capacity_units();
              const auto r = service_baseline.is_none() ? std::vector<Amount>(caps.begin(), caps.end())
                                                : edge_units(service_baseline, *graph, "service_baseline");
@@ -42,7 +42,8 @@ void register_flow_ledger(py::module_& m) {
            py::arg("graph"), py::arg("service_baseline") = py::none(), py::kw_only(), py::arg("reservation_baseline") = py::none(),
            "service_baseline and reservation_baseline: the baselines as integer units, one entry per edge in\n"
            "[0, the edge's capacity] (a physical baseline goes through to_units first; service_baseline\n"
-           "checked first); None: the capacities. ValueError otherwise.")
+           "checked first); None: the capacities. A wrong type (not a 1-D sequence of integers, a non-integer\n"
+           "entry) raises TypeError, a wrong length or an entry outside its range ValueError.")
       .def("uid", &FlowLedger::uid, "process-unique ledger uid (the first half of every FlowId)")
       .def(
           "graph", [](const FlowLedger& fg) { return typed_shared(fg.graph()); },

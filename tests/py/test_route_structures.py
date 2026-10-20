@@ -243,15 +243,15 @@ def test_from_csr_passes_a_failed_offset_conversion_through(fail_on, which, erro
 def test_from_csr_type_and_shape_defects():
     g = build(3, G_EDGES)
     with pytest.raises(
-        ValueError, match=exact("parent_offsets must be a 1-D array (got 2 dimensions)")
+        TypeError, match=exact("parent_offsets must be a 1-D array (got 2 dimensions)")
     ):
         ngc.PredecessorDAG.from_csr(g, np.zeros((2, 2), dtype=np.int64), [], [])
     with pytest.raises(
-        ValueError, match=exact("parent_offsets[3] must be an integer (got float)")
+        TypeError, match=exact("parent_offsets[3] must be an integer (got float)")
     ):
         ngc.PredecessorDAG.from_csr(g, [0, 0, 0, 0.0], [], [])
     with pytest.raises(
-        ValueError, match=exact("parent_offsets[3] must be an integer (got bool)")
+        TypeError, match=exact("parent_offsets[3] must be an integer (got bool)")
     ):
         ngc.PredecessorDAG.from_csr(g, [0, 0, 0, True], [], [])
 

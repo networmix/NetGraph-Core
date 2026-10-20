@@ -31,35 +31,27 @@ inline bool is_bool(const py::handle& obj) {
   return PyBool_Check(obj.ptr()) || reinterpret_cast<PyObject*>(Py_TYPE(obj.ptr())) == numpy_bool_type();
 }
 
-// Where an integer argument is given: a configuration value's constructor (FlowPolicyConfig's
-// models, TunnelCount, AbsoluteCost, RouteDefinition) or a search option or call argument.
-enum class IntegerArgument { Configuration, Call };
-
-// The one place that decides the class of a wrong-type integer: a configuration value raises
-// TypeError at construction, a search option or a call argument ValueError; the text is the same.
-[[noreturn]] inline void throw_not_an_integer(const py::handle& item, const std::string& what, IntegerArgument where) {
-  const std::string text =
-      what + " must be an integer (got " + std::string(py::str(py::type::of(item).attr("__name__"))) + ")";
-  if (where == IntegerArgument::Configuration) throw py::type_error(text);
-  throw py::value_error(text);
+// A wrong-type integer argument (a bool, a float, a string, None, another class): TypeError at
+// every position, the value errors of a well-typed integer being ValueError (the library's one rule
+// for the class of an input error).
+[[noreturn]] inline void throw_not_an_integer(const py::handle& item, const std::string& what) {
+  throw py::type_error(what + " must be an integer (got " + std::string(py::str(py::type::of(item).attr("__name__"))) + ")");
 }
 
 // The Python int of an integer-like object (a Python int or a NumPy integer scalar); bools and
 // everything else are rejected (throw_not_an_integer), and an exception of the object's own
 // __index__ propagates as raised. The result is an exact int, so PyLong_AsLongLongAndOverflow
 // cannot fail on it.
-inline py::object python_int(const py::handle& item, const std::string& what,
-                             IntegerArgument where = IntegerArgument::Call) {
-  if (is_bool(item) || !PyIndex_Check(item.ptr())) throw_not_an_integer(item, what, where);
+inline py::object python_int(const py::handle& item, const std::string& what) {
+  if (is_bool(item) || !PyIndex_Check(item.ptr())) throw_not_an_integer(item, what);
   py::object idx = py::reinterpret_steal<py::object>(PyNumber_Index(item.ptr()));
   if (!idx) throw py::error_already_set();
   return idx;
 }
 
 // One integer of [lo, hi] (scalar arguments).
-inline std::int64_t integer_value(const py::handle& item, std::int64_t lo, std::int64_t hi, const std::string& what,
-                                  IntegerArgument where = IntegerArgument::Call) {
-  py::object idx = python_int(item, what, where);
+inline std::int64_t integer_value(const py::handle& item, std::int64_t lo, std::int64_t hi, const std::string& what) {
+  py::object idx = python_int(item, what);
   int overflow = 0;
   const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
   if (overflow != 0 || v < lo || v > hi) {
@@ -113,27 +105,22 @@ inline bool is_invalid_sequence(const py::handle& obj) {
   return py::isinstance<py::str>(obj) || py::isinstance<py::bytes>(obj) || !py::isinstance<py::sequence>(obj);
 }
 
-// A type or shape defect of a sequence argument: TypeError for a configuration value's vector,
-// ValueError for a call or search argument (as for the scalars: throw_not_an_integer).
-[[noreturn]] inline void throw_vector_defect(const std::string& text, IntegerArgument where) {
-  if (where == IntegerArgument::Configuration) throw py::type_error(text);
-  throw py::value_error(text);
-}
+// A type or shape defect of a sequence argument (a non-sequence, a string, a nested entry, an
+// array of another rank or of a non-integer dtype): TypeError, as for the scalars
+// (throw_not_an_integer); its length is a value.
+[[noreturn]] inline void throw_vector_defect(const std::string& text) { throw py::type_error(text); }
 
-inline CheckedIntegerVector wide_integers(const py::handle& obj, const char* name,
-                                          IntegerArgument where = IntegerArgument::Call) {
+inline CheckedIntegerVector wide_integers(const py::handle& obj, const char* name) {
   CheckedIntegerVector out;
   out.source = py::reinterpret_borrow<py::object>(obj);
   if (py::isinstance<py::array>(obj)) {
     auto arr = py::reinterpret_borrow<py::array>(obj);
     if (arr.ndim() != 1) {
-      throw_vector_defect(std::string(name) + " must be a 1-D array (got " + std::to_string(arr.ndim()) + " dimensions)",
-                          where);
+      throw_vector_defect(std::string(name) + " must be a 1-D array (got " + std::to_string(arr.ndim()) + " dimensions)");
     }
     const char kind = arr.dtype().kind();
     if (kind != 'i' && kind != 'u') {
-      throw_vector_defect(std::string(name) + " entries must be integers (got dtype " + std::string(py::str(arr.dtype())) + ")",
-                          where);
+      throw_vector_defect(std::string(name) + " entries must be integers (got dtype " + std::string(py::str(arr.dtype())) + ")");
     }
     out.value.reserve(static_cast<std::size_t>(arr.size()));
     if (kind == 'u' && arr.itemsize() == 8) {
@@ -156,12 +143,12 @@ inline CheckedIntegerVector wide_integers(const py::handle& obj, const char* nam
     for (py::ssize_t i = 0; i < r.shape(0); ++i) out.value.push_back(r(i));
     return out;
   }
-  if (is_invalid_sequence(obj)) throw_vector_defect(std::string(name) + " must be a sequence of integers", where);
+  if (is_invalid_sequence(obj)) throw_vector_defect(std::string(name) + " must be a sequence of integers");
   auto seq = py::reinterpret_borrow<py::sequence>(obj);
   const std::size_t n = seq.size();
   out.value.reserve(n);
   for (std::size_t i = 0; i < n; ++i) {
-    py::object idx = python_int(seq[i], std::string(name) + "[" + std::to_string(i) + "]", where);
+    py::object idx = python_int(seq[i], std::string(name) + "[" + std::to_string(i) + "]");
     int overflow = 0;
     const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
     if (overflow != 0) {
@@ -185,27 +172,24 @@ inline bool is_nested(const py::handle& item) {
 // The shape step: the length of a rank-1 integer sequence argument. A NumPy array of another
 // rank (0-D included), a nested sequence or a non-sequence is a shape defect. Entry types and
 // values are not read here; their steps come later.
-inline std::size_t sequence_length(const py::handle& obj, const char* name, IntegerArgument where = IntegerArgument::Call) {
+inline std::size_t sequence_length(const py::handle& obj, const char* name) {
   if (py::isinstance<py::array>(obj)) {
     auto arr = py::reinterpret_borrow<py::array>(obj);
     if (arr.ndim() != 1) {
-      throw_vector_defect(std::string(name) + " must be a 1-D array (got " + std::to_string(arr.ndim()) + " dimensions)",
-                          where);
+      throw_vector_defect(std::string(name) + " must be a 1-D array (got " + std::to_string(arr.ndim()) + " dimensions)");
     }
     return static_cast<std::size_t>(arr.size());
   }
   if (is_invalid_sequence(obj)) {
     throw_vector_defect(std::string(name) + " must be a 1-D sequence of integers (got " +
-                            std::string(py::str(py::type::of(obj).attr("__name__"))) + ")",
-                        where);
+                        std::string(py::str(py::type::of(obj).attr("__name__"))) + ")");
   }
   auto seq = py::reinterpret_borrow<py::sequence>(obj);
   const std::size_t n = seq.size();
   for (std::size_t i = 0; i < n; ++i) {
     if (is_nested(seq[i])) {
       throw_vector_defect(std::string(name) + " must be a 1-D sequence of integers (entry " + std::to_string(i) +
-                              " is a sequence)",
-                          where);
+                          " is a sequence)");
     }
   }
   return n;

@@ -35,7 +35,7 @@ namespace {
 // bool, a string, ...) raises TypeError here; its domain is the evaluator's check, after the configuration.
 // An __index__ object is kept as its int.
 py::object units_as_given(const py::object& obj, const char* name) {
-  if (obj.is_none() || PyFloat_Check(obj.ptr()) || py::isinstance(obj, py::module_::import("numpy").attr("floating"))) {
+  if (obj.is_none() || PyFloat_Check(obj.ptr()) || has_type(obj.ptr(), numpy_number_types().second)) {
     return obj;
   }
   if (!is_bool(obj) && PyIndex_Check(obj.ptr())) {
@@ -144,7 +144,7 @@ void register_evaluators(py::module_& m) {
       "evaluate_demand",
       [](const std::shared_ptr<Graph>& graph, const py::object& sources, const py::object& destinations,
          const py::object& opts) {
-        if (!graph) throw py::value_error("graph must be a Graph");
+        if (!graph) throw py::type_error("graph must be a Graph");
         const auto o = options_of<PyEvaluationOptions>(opts, "EvaluationOptions");
         const auto s = node_ids(sources, graph->num_nodes(), "sources");
         const auto d = node_ids(destinations, graph->num_nodes(), "destinations");
@@ -175,20 +175,20 @@ void register_evaluators(py::module_& m) {
       "evaluate_pairs",
       [](const std::shared_ptr<Graph>& graph, const py::object& pairs, const py::object& opts,
          const py::object& per_pair_eligibility, const py::object& workers) {
-        if (!graph) throw py::value_error("graph must be a Graph");
+        if (!graph) throw py::type_error("graph must be a Graph");
         // The arguments first, then each pair completely and in pair order (the same two parts
         // as the C++ validation), so the lowest failing pair index is reported.
         const auto o = options_of<PyEvaluationOptions>(opts, "EvaluationOptions");
         const auto w = workers_of(workers, false, static_cast<bool>(o.cache));
         const EvaluationOptions c = o.native();
         detail::check_batch_arguments(*graph, c, w);
-        if (is_invalid_sequence(pairs)) throw py::value_error("pairs must be a sequence of (sources, destinations)");
+        if (is_invalid_sequence(pairs)) throw py::type_error("pairs must be a sequence of (sources, destinations)");
         const auto items = py::reinterpret_borrow<py::sequence>(pairs);
         const auto num_pairs = py::len(items);
         std::optional<py::sequence> eligs;
         if (!per_pair_eligibility.is_none()) {
           // An explicit sequence has one entry per pair (None entries allowed), also when empty.
-          if (is_invalid_sequence(per_pair_eligibility)) throw py::value_error("per_pair_eligibility must be a sequence of Eligibility or None");
+          if (is_invalid_sequence(per_pair_eligibility)) throw py::type_error("per_pair_eligibility must be a sequence of Eligibility or None");
           eligs = py::reinterpret_borrow<py::sequence>(per_pair_eligibility);
           if (py::len(*eligs) != num_pairs) {
             throw py::value_error("per_pair_eligibility has " + std::to_string(py::len(*eligs)) + " entries for " +
@@ -201,9 +201,9 @@ void register_evaluators(py::module_& m) {
         const auto n = graph->num_nodes();
         for (std::size_t i = 0; i < num_pairs; ++i) {
           const py::object item = items[i];
-          if (is_invalid_sequence(item) || py::len(item) != 2) {
-            throw py::value_error("each pair must be (sources, destinations)");
-          }
+          // Not a sequence is a wrong type, a sequence of another length a wrong value: one text.
+          if (is_invalid_sequence(item)) throw py::type_error("each pair must be (sources, destinations)");
+          if (py::len(item) != 2) throw py::value_error("each pair must be (sources, destinations)");
           auto t = py::reinterpret_borrow<py::sequence>(item);
           auto src = node_ids(t[0], n, "sources");
           auto dst = node_ids(t[1], n, "destinations");
@@ -254,7 +254,7 @@ void register_evaluators(py::module_& m) {
       "evaluate_edge_failures",
       [](const std::shared_ptr<Graph>& graph, const py::object& sources, const py::object& destinations,
          const py::object& opts, const py::object& workers) {
-        if (!graph) throw py::value_error("graph must be a Graph");
+        if (!graph) throw py::type_error("graph must be a Graph");
         const auto o = options_of<PyEvaluationOptions>(opts, "EvaluationOptions");
         const auto s = node_ids(sources, graph->num_nodes(), "sources");
         const auto d = node_ids(destinations, graph->num_nodes(), "destinations");

@@ -117,14 +117,14 @@ void register_flow_policy(py::module_& m) {
       "replace and forward start one too. A policy dropped without remove()\n"
       "leaves its records in the ledger as orphans: readable, never changed again, cleared by\n"
       "FlowLedger.reset(). sources and destinations are one NodeId or a sequence; the two sets must not\n"
-      "overlap. ValueError for invalid endpoints, configurations and requests (non-integer node ids and\n"
-      "requests included) and for objects of another graph, ledger or policy; TypeError for a ledger,\n"
-      "config, eligibility, cache or outputs of the wrong class (a ledger of None: ValueError) and for an\n"
-      "unknown keyword.")
+      "overlap. ValueError for invalid endpoints, configurations and requests and for objects of another\n"
+      "graph, ledger or policy; TypeError for a ledger (None included), config, eligibility, cache or\n"
+      "outputs of the wrong class, a node id or a request of a wrong type (a bool, a float node id, a\n"
+      "string) and an unknown keyword.")
       .def(py::init([](const std::shared_ptr<FlowLedger>& ledger, const py::object& sources,
                        const py::object& destinations, const FlowPolicyConfig& config,
                        const std::shared_ptr<Eligibility>& elig, const std::shared_ptr<ShortestPathCache>& cache) {
-             if (!ledger) throw py::value_error("ledger must be a FlowLedger");
+             if (!ledger) throw py::type_error("ledger must be a FlowLedger");
              const auto n = ledger->graph()->num_nodes();
              const auto s = node_ids(sources, n, "sources");
              const auto d = node_ids(destinations, n, "destinations");

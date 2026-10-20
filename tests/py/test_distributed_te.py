@@ -455,10 +455,14 @@ def test_operations_and_design_validation():
     ):
         p.forward(5)
     dom = "design_demand must be an integer in [0, 2^62) or permitted +inf"
-    # 2**63 and -(2**64) overflow int64 in the binding: still the domain's error.
-    for bad in (-1, L62, 2**63, -(2**64), True, 1.5):
-        with pytest.raises(ValueError, match=exact(dom)):
+    # 2**63 and -(2**64) overflow int64 in the binding: still the domain's error. One text, with
+    # the class of its cause: a bool is a wrong type, the rest wrong values.
+    for bad, cls in [(v, ValueError) for v in (-1, L62, 2**63, -(2**64), 1.5)] + [
+        (True, TypeError)
+    ]:
+        with pytest.raises((TypeError, ValueError), match=exact(dom)) as error:
             p.replace(5, design_demand=bad)
+        assert error.type is cls
     with pytest.raises(
         ValueError,
         match=exact("offer must be an integer in [0, 2^62) or permitted +inf"),
@@ -1472,7 +1476,9 @@ def test_t1_results_survive_python_allocation_failures(method):
 
         return getattr(p, method), (8,), snapshot
 
-    assert sweep_python_allocation(make) >= 3
+    assert (
+        sweep_python_allocation(make) >= 1
+    )  # the result object at least (its fields convert when read)
 
 
 GETTER_SWEEP = """

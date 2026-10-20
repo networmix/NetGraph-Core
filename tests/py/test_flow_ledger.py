@@ -91,8 +91,10 @@ def test_baseline_validation_order_and_snapshots():
         ([True, 0], "integer"),
         (np.zeros((1, 2), dtype=np.int64), "1-D"),
     ):
-        with pytest.raises(ValueError, match=msg):
+        # An entry or a rank of a wrong type is a TypeError, a length or a value a ValueError.
+        with pytest.raises((TypeError, ValueError), match=msg) as error:
             ngc.FlowLedger(g, bad)
+        assert error.type is (TypeError if msg in ("integer", "1-D") else ValueError)
     fg2 = ngc.FlowLedger(graph=g, service_baseline=np.array([1, 2], dtype=np.uint64))
     assert list(fg2.residual()) == [1, 2]
     assert fg2.uid() != fg.uid()
@@ -348,8 +350,24 @@ def test_flow_ids_of_other_ledgers_and_bad_shapes():
         match=exact(f"FlowId {flow_id(p)} belongs to another ledger (uid {b.uid()})"),
     ):
         b.record(flow_id(p))
-    with pytest.raises(ValueError, match=exact("a FlowId is a tuple (ledger uid, id)")):
-        a.record(0)
+    # Not a tuple is a wrong type, a tuple of another length a wrong value: one text.
+    for bad, cls in (
+        (0, TypeError),
+        ([a.uid(), 0], TypeError),
+        ((a.uid(),), ValueError),
+    ):
+        with pytest.raises(
+            (TypeError, ValueError), match=exact("a FlowId is a tuple (ledger uid, id)")
+        ) as error:
+            a.record(bad)
+        assert error.type is cls
+    for bad, what in ((True, "ledger uid"), (1.0, "id")):
+        fid = (bad, 0) if what == "ledger uid" else (a.uid(), bad)
+        with pytest.raises(
+            TypeError,
+            match=exact(f"FlowId {what} must be an integer (got {type(bad).__name__})"),
+        ):
+            a.record(fid)
     with pytest.raises(
         ValueError, match=exact(f"FlowId ({a.uid()}, {L62 * 8}) is retired or unknown")
     ):
@@ -404,25 +422,27 @@ def test_rejected_requests_leave_the_policy_and_the_ledger(routing):
 
     def rejected(requests):
         before = state()
-        for value, msg in requests:
-            with pytest.raises(ValueError, match=exact(msg)):
+        for value, cls, msg in requests:
+            with pytest.raises((TypeError, ValueError), match=exact(msg)) as error:
                 p.place(value)
+            assert error.type is cls, value
         assert state() == before
         return before
 
-    # One text for every offer outside the domain.
+    # One text for every offer outside the domain: a type an offer never takes (a bool, a
+    # string) TypeError, a value outside it ValueError.
     offer = "offer must be an integer in [0, 2^62) or permitted +inf"
     bad = [
-        (value, offer)
-        for value in (1.5, -1, L62, True, -INF, float("nan"), np.float64(2.0), "1")
-    ]
+        (value, ValueError, offer)
+        for value in (1.5, -1, L62, -INF, float("nan"), np.float64(2.0))
+    ] + [(value, TypeError, offer) for value in (True, "1")]
     rejected(bad)
     assert fg.records() == []
     assert p.place(np.int64(4)).call_delivered == 4
     rejected(bad)
     p.place(INF)
     after_inf = "finite placement after infinite placement requires a new epoch"
-    before = rejected([(1, after_inf), (0, after_inf), *bad])
+    before = rejected([(1, ValueError, after_inf), (0, ValueError, after_inf), *bad])
     if HOOKS:
         assert (before[2]["requested"], before[2]["infinite"]) == (4, True)
 

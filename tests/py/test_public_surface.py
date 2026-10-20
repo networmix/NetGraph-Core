@@ -389,8 +389,9 @@ def test_policy_takes_its_ledger_first_or_by_the_name_ledger():
     assert ngc.FlowPolicy(ledger, 0, 1, cfg).place(1).call_delivered == 1
     with pytest.raises(TypeError):
         ngc.FlowPolicy(flow_graph=ledger, sources=0, destinations=1, config=cfg)
-    with pytest.raises(ValueError, match=exact("ledger must be a FlowLedger")):
+    with pytest.raises(TypeError, match=exact("ledger must be a FlowLedger")) as info:
         ngc.FlowPolicy(None, 0, 1, cfg)
+    assert type(info.value) is TypeError
     assert "ledger: _netgraph_core.FlowLedger" in ngc.FlowPolicy.__init__.__doc__
 
 
@@ -419,69 +420,70 @@ ROUTING = (
 ROUTES = "routes must be a sequence of RouteDefinition"
 ROUTE_TYPE = "RouteDefinition route must be a Path or a PredecessorDAG (got {})"
 
-# Each wrong argument, the exception class and the whole message it is refused with. A None
-# where a Graph, an Eligibility or a PredecessorDAG is expected reaches the binding as a null value
-# (pybind11 refuses every other wrong type first), so these checks also keep the call from
-# reading it.
+# Each wrong argument, the exception class and the whole message it is refused with: a wrong type
+# (None included) TypeError, a wrong value (a pair of another length, an unknown FlowId)
+# ValueError. A None where a Graph, an Eligibility or a PredecessorDAG is expected reaches the
+# binding as a null value (pybind11 refuses every other wrong type first), so these checks also keep
+# the call from reading it.
 REFUSALS = {
-    "spf-graph-None": (lambda s: ngc.spf(None, 0, s.spf), ValueError, GRAPH),
-    "ksp-graph-None": (lambda s: ngc.ksp(None, 0, 2, s.ksp), ValueError, GRAPH),
+    "spf-graph-None": (lambda s: ngc.spf(None, 0, s.spf), TypeError, GRAPH),
+    "ksp-graph-None": (lambda s: ngc.ksp(None, 0, 2, s.ksp), TypeError, GRAPH),
     "resolve-graph-None": (
         lambda s: ngc.resolve_to_paths(None, s.dag, 0, 2),
-        ValueError,
+        TypeError,
         GRAPH,
     ),
     "resolve-dag-None": (
         lambda s: ngc.resolve_to_paths(s.g, None, 0, 2),
-        ValueError,
+        TypeError,
         "dag must be a PredecessorDAG",
     ),
     "ShortestPathCache-graph-None": (
         lambda s: ngc.ShortestPathCache(None),
-        ValueError,
+        TypeError,
         GRAPH,
     ),
-    "FlowLedger-graph-None": (lambda s: ngc.FlowLedger(None), ValueError, GRAPH),
+    "FlowLedger-graph-None": (lambda s: ngc.FlowLedger(None), TypeError, GRAPH),
     "FlowLedger-graph-None-with-residual": (
         lambda s: ngc.FlowLedger(None, [5, 5]),
-        ValueError,
+        TypeError,
         GRAPH,
     ),
-    "Path-graph-None": (lambda s: ngc.Path(None, [[0]]), ValueError, GRAPH),
+    "Path-graph-None": (lambda s: ngc.Path(None, [[0]]), TypeError, GRAPH),
     "from_csr-graph-None": (
         lambda s: ngc.PredecessorDAG.from_csr(None, [0, 0, 0, 0], [], []),
-        ValueError,
+        TypeError,
         GRAPH,
     ),
     "capacity-graph-None": (
         lambda s: ngc.evaluate_demand(None, 0, 2, s.query),
-        ValueError,
+        TypeError,
         GRAPH,
     ),
     "evaluate_pairs-graph-None": (
         lambda s: ngc.evaluate_pairs(None, [(0, 2)], s.query),
-        ValueError,
+        TypeError,
         GRAPH,
     ),
     "sensitivity-graph-None": (
         lambda s: ngc.evaluate_edge_failures(None, 0, 2, s.query),
-        ValueError,
+        TypeError,
         GRAPH,
     ),
     "intersect-second-None": (
         lambda s: ngc.Eligibility.intersect(s.g.eligibility(), None),
-        ValueError,
+        TypeError,
         INTERSECT,
     ),
     "intersect-first-None": (
         lambda s: ngc.Eligibility.intersect(None, s.g.eligibility()),
-        ValueError,
+        TypeError,
         INTERSECT,
     ),
     # Shapes and types of sequence and field arguments.
     "evaluate_pairs-pairs-not-a-sequence": (
         lambda s: ngc.evaluate_pairs(s.g, 5, s.query),
-        ValueError,
+        TypeError,
         "pairs must be a sequence of (sources, destinations)",
     ),
     "evaluate_pairs-pair-of-one": (
@@ -491,22 +493,22 @@ REFUSALS = {
     ),
     "evaluate_pairs-pair-not-a-sequence": (
         lambda s: ngc.evaluate_pairs(s.g, [5], s.query),
-        ValueError,
+        TypeError,
         PAIR,
     ),
     "evaluate_pairs-per_pair_eligibility-not-a-sequence": (
         lambda s: ngc.evaluate_pairs(s.g, [(0, 2)], s.query, 5),
-        ValueError,
+        TypeError,
         "per_pair_eligibility must be a sequence of Eligibility or None",
     ),
     "Path-hops-not-a-sequence": (
         lambda s: ngc.Path(s.g, 5),
-        ValueError,
+        TypeError,
         "Path: hops must be a sequence of hops (sequences of EdgeIds)",
     ),
     "FlowPolicy-sources-2-D": (
         lambda s: ngc.FlowPolicy(s.ledger, np.array([[0]]), 2, s.cfg),
-        ValueError,
+        TypeError,
         "sources must be a 1-D array (got 2 dimensions)",
     ),
     "FlowLedger-record-unknown-ledger": (
@@ -571,7 +573,7 @@ REFUSALS = {
     ),
     "from_routes-graph-None": (
         lambda s: ngc.ForwardingProgram.from_routes(None, [0], [2], [s.route]),
-        ValueError,
+        TypeError,
         GRAPH,
     ),
     "from_routes-routes-int": (

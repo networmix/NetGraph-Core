@@ -57,55 +57,65 @@ USERS = {
     "view": ("view", "view (capacity units)", view),
 }
 
-# (amounts, later defect, the message with {name} and {label}).
+# (amounts, later defect, the class, the message with {name} and {label}). A shape (an array's
+# rank, a nested entry, a non-sequence) or an entry of a wrong type is a TypeError, a length or a
+# value outside its range a ValueError.
+T, V = TypeError, ValueError
 CASES = [
     # the length (the shape step) before any entry is read
-    ([1.5], False, "{name} has length 1, expected 2 (one entry per edge)"),
-    ([1, 1, 1], False, "{name} has length 3, expected 2 (one entry per edge)"),
+    ([1.5], False, V, "{name} has length 1, expected 2 (one entry per edge)"),
+    ([1, 1, 1], False, V, "{name} has length 3, expected 2 (one entry per edge)"),
     (
         np.zeros((1, 2), dtype=np.int64),
         False,
+        T,
         "{name} must be a 1-D array (got 2 dimensions)",
     ),
     (
         [5, [1]],
         False,
+        T,
         "{name} must be a 1-D sequence of integers (entry 1 is a sequence)",
     ),
-    ("ab", False, "{name} must be a 1-D sequence of integers (got str)"),
+    ("ab", False, T, "{name} must be a 1-D sequence of integers (got str)"),
     # the entries' types, all of them before any value
-    ([1, 2.5], False, "{label}[1] must be an integer (got float)"),
-    ([True, 0], False, "{label}[0] must be an integer (got bool)"),
-    ([6, 2.5], False, "{label}[1] must be an integer (got float)"),
+    ([1, 2.5], False, T, "{label}[1] must be an integer (got float)"),
+    ([True, 0], False, T, "{label}[0] must be an integer (got bool)"),
+    ([6, 2.5], False, T, "{label}[1] must be an integer (got float)"),
     (
         np.array([1.0, 2.0]),
         False,
+        T,
         "{label} entries must be integers (got dtype float64)",
     ),
     # the values: the first entry outside, exact also beyond int64
-    ([-1, 99], False, "{name}[0] = -1 is outside [0, edge_capacity_units[0] = 5]"),
-    ([5, 4], False, "{name}[1] = 4 is outside [0, edge_capacity_units[1] = 3]"),
+    ([-1, 99], False, V, "{name}[0] = -1 is outside [0, edge_capacity_units[0] = 5]"),
+    ([5, 4], False, V, "{name}[1] = 4 is outside [0, edge_capacity_units[1] = 3]"),
     (
         [5, 2**70],
         False,
+        V,
         "{name}[1] = 1180591620717411303424 is outside [0, edge_capacity_units[1] = 3]",
     ),
     (
         [-(2**70), 9],
         False,
+        V,
         "{name}[0] = -1180591620717411303424 is outside [0, edge_capacity_units[0] = 5]",
     ),
     (
         np.array([5, 2**64 - 1], dtype=np.uint64),
         False,
+        V,
         "{name}[1] = 18446744073709551615 is outside [0, edge_capacity_units[1] = 3]",
     ),
     # an amount above its capacity (one above; beyond 64 bits) wins over an argument checked
     # after the amounts
-    ([6, 0], True, "{name}[0] = 6 is outside [0, edge_capacity_units[0] = 5]"),
+    ([6, 0], True, V, "{name}[0] = 6 is outside [0, edge_capacity_units[0] = 5]"),
     (
         [5, 2**70],
         True,
+        V,
         "{name}[1] = 1180591620717411303424 is outside [0, edge_capacity_units[1] = 3]",
     ),
 ]
@@ -123,10 +133,11 @@ PAIRS = [
 @pytest.mark.parametrize(("user", "case"), PAIRS)
 def test_every_user_reports_the_same_first_defect(user, case):
     name, label, call = USERS[user]
-    amounts, later, text = CASES[case]
+    amounts, later, cls, text = CASES[case]
     want = text.format(name=name, label=label)
-    with pytest.raises(ValueError, match=exact(want)):
+    with pytest.raises((TypeError, ValueError), match=exact(want)) as error:
         call(graph(), amounts, later)
+    assert error.type is cls
 
 
 @pytest.mark.parametrize(
@@ -181,8 +192,8 @@ def test_a_failed_reset_leaves_the_ledger_unchanged():
 
     uid, before = fg.uid(), ledger_state(fg)
     assert before[1] == [2, 2] and len(before[4]) == 1
-    for bad in ([1], [1, 2.5], [6, 0], [4, 2**70]):
-        with pytest.raises(ValueError):
+    for bad, cls in (([1], V), ([1, 2.5], T), ([6, 0], V), ([4, 2**70], V)):
+        with pytest.raises(cls):
             fg.reset(bad)
         assert (fg.uid(), ledger_state(fg)) == (uid, before)
     fg.reset([1, 1])

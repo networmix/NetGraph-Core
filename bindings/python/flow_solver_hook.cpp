@@ -37,7 +37,7 @@ void register_flow_solver_hook(py::module_& m) {
       [](const std::shared_ptr<Graph>& graph, const py::object& view, const py::object& sources,
          const py::object& destinations, const std::shared_ptr<Eligibility>& elig,
          const py::object& cap) -> py::dict {
-        if (!graph) throw py::value_error("graph must be a Graph");
+        if (!graph) throw py::type_error("graph must be a Graph");
         // The core's order (view length, view entries, sources, destinations, overlap, cap,
         // Eligibility), every value checked before narrowing; the core re-checks the same order.
         const auto v = edge_amounts(view, *graph, "view", "view (capacity units)");
@@ -48,7 +48,7 @@ void register_flow_solver_hook(py::module_& m) {
         std::optional<Amount> c;
         if (!cap.is_none()) {
           if (is_bool(cap) || !PyIndex_Check(cap.ptr())) {
-            throw py::value_error("cap must be an integer number of units in [0, 2^63 - 2] or None");
+            throw py::type_error("cap must be an integer number of units in [0, 2^63 - 2] or None");
           }
           py::object idx = python_int(cap, "cap");
           int overflow = 0;

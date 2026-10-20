@@ -134,7 +134,7 @@ def test_ksp_validation_order():
         ValueError, match=exact("k must be >= 1 (got -1180591620717411303424)")
     ):
         ksp(g, 0, 2, -(2**70))
-    with pytest.raises(ValueError, match=exact("k must be an integer (got float)")):
+    with pytest.raises(TypeError, match=exact("k must be an integer (got float)")):
         ksp(g, 0, 2, 1.5)
     absolute = "cost_ceiling AbsoluteCost cost must be >= 0 (got -1)"
     stretch = "cost_ceiling CostStretch factor must be >= 1 (got {})"

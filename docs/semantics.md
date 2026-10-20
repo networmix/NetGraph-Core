@@ -217,9 +217,10 @@ values in input order (explicit weights, a residual, exclusions) maps them throu
   edge_costs, resolution)` builds an immutable directed multigraph: parallel edges and self-loops
   are allowed. The arrays are in input order (the caller's). Capacities are already in units; use
   `to_units` for physical values.
-- **Validation order.** When an input has several defects, the first in this order is reported as a
-  `ValueError`: the resolution; the capacity values (each an integer in `[0, 2^62)`; floats and
-  booleans are rejected, not rounded); the array shapes; a zero or negative cost; the remaining
+- **Validation order.** When an input has several defects, the first in this order is reported (a
+  wrong type as a `TypeError`, a value outside its domain as a `ValueError`): the resolution (a
+  bool is a `TypeError`); the capacity values (each an integer in `[0, 2^62)`; floats and booleans
+  are rejected with `TypeError`, not rounded); the array shapes; a zero or negative cost; the remaining
   bounds (node ids in range, then the capacity and cost sums below `2^62`, both added up edge by
   edge in input order: the first edge at which a running sum reaches `2^62` reports that sum, the
   capacity sum before the cost sum at the same edge). Integers are read
@@ -2008,17 +2009,37 @@ threads; ledgers, policies and building caches have one writer at a time.
   `RouteDefinition`) and the search options (`SpfOptions`, `KspOptions`) have read-only fields:
   no option object changes after it is built. A policy validates its configuration once and keeps
   that snapshot (`policy.config`); an evaluator validates and copies its options at call entry.
-- **Exception classes.** `ValueError` for a value outside its domain, an invalid combination, a
-  foreign object (a value of another graph, ledger or policy) or a call in the wrong state;
+- **Exception classes.** One rule for the class of an input error, at every public entry
+  (constructors, search options, call arguments, evaluator options): a Python type the position
+  never takes is a `TypeError` (a bool, Python's or `numpy.bool_`, at any numeric position; a float
+  where only an integer is taken, `k=1.0` and `k=float('inf')` included; a string; `None` where none
+  is allowed; an object of another class; for a vector a non-sequence, a string, a nested entry, a
+  NumPy array of another rank or of a non-integer dtype, or an entry of a wrong type); an accepted
+  type whose value is outside its domain is a `ValueError` (out of range, beyond 64 bits, a wrong
+  length, NaN, `-inf`, a finite float where floats are taken only for `+inf`: an offer, a design
+  demand). The text is the same either way, and a text that covers both causes (`offer must be an
+  integer in [0, 2^62) or permitted +inf`, `a FlowId is a tuple (ledger uid, id)`, `each pair must
+  be (sources, destinations)`) takes the class of its cause. A NumPy integer is an integer, a NumPy
+  floating value a float; an int at or above `2^63` is an integer (a `ValueError` where its range is
+  bounded); a `fractions.Fraction` is taken only by `CostStretch`. `ValueError` also for an invalid
+  combination, a foreign object (a value of another graph, ledger or policy) or a call in the wrong
+  state;
   `TypeError` for a field or option that does not exist (for example
   `ShortestPaths(tunnel_count=ngc.TunnelCount(2))`), a missing required argument, `None` where
   none is allowed, an argument of the wrong type (a bool field given anything but a `bool` or
   `numpy.bool_`; an integer field or `edge_weights` of a configuration value given a non-integer), or an argument
-  that cannot be converted to its parameter's type: an integer beyond the float range where a
-  float is expected (the `resolution` of `Graph`, `to_units` and `as_float`) is a `TypeError`.
-  The call arguments that convert their own values (the offer of `place`, node ids, a search
-  option's integers) raise `ValueError` for a value of the wrong type, and every converted value
-  passes on unchanged any exception raised by the value's own conversion (its `__float__` or
+  that cannot be converted to its parameter's type. The non-integer number positions (a
+  `resolution` of `Graph`, `to_units` and `as_float`; `to_units`' values) take exactly an `int`
+  (not a bool), a `float`, a NumPy integer or a NumPy floating scalar, an `int` or `float` subclass
+  by its value (never through its own `__int__`, `__float__` or `__array__`), and for `to_units`
+  an array of an integer or floating dtype or a sequence of those scalars: a `Decimal`, a
+  `Fraction`, an object known by `__float__`, `__index__` or `__array__`, and a 0-d array as a
+  resolution are a `TypeError`. Every integer position, `as_float`'s amounts included, takes any
+  object with `__index__` (never a bool), read exactly. An integer beyond the float range
+  as a resolution is a value outside its domain (`ValueError: resolution must be a power of two in
+  [2^-32, 2^32]`); `to_units` refuses a bool entry beside numbers (`TypeError`, which NumPy would
+  read as a number; an all-bool sequence keeps its dtype text), and an integer too large for NumPy
+  beside numbers is a value (`ValueError`). Every converted value passes on unchanged any exception raised by the value's own conversion (its `__float__` or
   `__index__`), whatever its class. `ShortestPathCacheMiss` for a miss in a frozen cache (its own
   class, neither a `ValueError` nor a `RuntimeError`); `MemoryError` for an allocation failure
   (everything rolled back); `RuntimeError` for an internal invariant failure.

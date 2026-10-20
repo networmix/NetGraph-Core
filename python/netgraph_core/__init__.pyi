@@ -413,11 +413,13 @@ class Graph:
         resolution: typing.SupportsFloat | typing.SupportsIndex,
     ) -> None:
         """
-        Validates, in order, and reports the first defect as ValueError: the resolution (a power of
-        two in [2^-32, 2^32]), the unit values (every capacity in [0, 2^62)), the array shapes,
-        zero or negative costs, the remaining bounds (endpoints in range, then the
-        capacity and cost sums below 2^62). Integers are read without narrowing, so the error
-        does not depend on how the input is represented.
+        Validates, in order, and reports the first defect: the resolution (a power of two in
+        [2^-32, 2^32]; a bool is a TypeError), the unit values (every capacity in [0, 2^62)), the array
+        shapes, zero or negative costs, the remaining bounds (endpoints in range, then the capacity
+        and cost sums below 2^62); a value of a wrong type (a bool or a float for an integer, a
+        non-sequence, an array of another rank or dtype) raises TypeError, a value outside its domain
+        ValueError. Integers are read without narrowing, so the error does not depend on how the
+        input is represented.
         """
 
     def edge_capacity_units(self) -> numpy.typing.NDArray[numpy.int64]:
@@ -735,7 +737,8 @@ class FlowLedger:
         """
         service_baseline and reservation_baseline: the baselines as integer units, one entry per edge in
         [0, the edge's capacity] (a physical baseline goes through to_units first; service_baseline
-        checked first); None: the capacities. ValueError otherwise.
+        checked first); None: the capacities. A wrong type (not a 1-D sequence of integers, a non-integer
+        entry) raises TypeError, a wrong length or an entry outside its range ValueError.
         """
 
     def carried(self) -> numpy.typing.NDArray[numpy.int64]:
@@ -2018,10 +2021,10 @@ class FlowPolicy:
     replace and forward start one too. A policy dropped without remove()
     leaves its records in the ledger as orphans: readable, never changed again, cleared by
     FlowLedger.reset(). sources and destinations are one NodeId or a sequence; the two sets must not
-    overlap. ValueError for invalid endpoints, configurations and requests (non-integer node ids and
-    requests included) and for objects of another graph, ledger or policy; TypeError for a ledger,
-    config, eligibility, cache or outputs of the wrong class (a ledger of None: ValueError) and for an
-    unknown keyword.
+    overlap. ValueError for invalid endpoints, configurations and requests and for objects of another
+    graph, ledger or policy; TypeError for a ledger (None included), config, eligibility, cache or
+    outputs of the wrong class, a node id or a request of a wrong type (a bool, a float node id, a
+    string) and an unknown keyword.
     """
 
     def __init__(
@@ -2465,7 +2468,9 @@ def as_float(
     """
     Units to physical value(s): x * q, correctly rounded (exact below 2^53 units). An int, of
     any size, gives a float, an integer array a float64 array; a result beyond the finite
-    doubles raises ValueError; q must be a power of two in [2^-32, 2^32].
+    doubles raises ValueError. x is an integer position (any object with __index__, never a bool;
+    anything else is a TypeError); q must be a power of two in [2^-32, 2^32] (a float, a NumPy float
+    or an integer).
     """
 
 @typing.overload
@@ -2625,8 +2630,13 @@ def to_units(
 ) -> int:
     """
     Physical value(s) to units of the resolution q, rounding half up: an int for a scalar, an
-    int64 array for an array. NaN, infinity, negative values and results at or above 2^62
-    units raise ValueError; q must be a power of two in [2^-32, 2^32].
+    int64 array for an array. NaN, infinity, negative values, an integer too large for NumPy and
+    results at or above 2^62 units raise ValueError; a bool (also as an entry), a string or an array
+    of another dtype or rank, or any type but int, float and the NumPy numbers (a Decimal, a
+    Fraction, an object known by __float__, __index__ or __array__) TypeError; an int or float
+    subclass is read by its value. q must be a power of two in [2^-32, 2^32]: a float, a NumPy
+    float or an integer (any other type is a TypeError; an integer beyond the float range a
+    ValueError).
     """
 
 @typing.overload

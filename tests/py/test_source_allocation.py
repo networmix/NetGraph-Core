@@ -232,12 +232,16 @@ def test_endpoints_before_ownership():
 
 def test_amount_texts():
     _, _, p = fresh(ONE, 0, 1, cost_only())
-    for bad in (-1, 2**62, float("nan"), 1.5, -INF, True):
+    # One text, with the class of its cause: a bool is a wrong type, the rest wrong values.
+    for bad, cls in [(v, ValueError) for v in (-1, 2**62, float("nan"), 1.5, -INF)] + [
+        (True, TypeError)
+    ]:
         with pytest.raises(
-            ValueError,
+            (TypeError, ValueError),
             match=exact("offer must be an integer in [0, 2^62) or permitted +inf"),
-        ):
+        ) as error:
             p.place(bad)
+        assert error.type is cls
     p.place(INF)
     for finite in (1, 0):
         with pytest.raises(

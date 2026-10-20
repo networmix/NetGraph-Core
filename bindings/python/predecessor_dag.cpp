@@ -46,7 +46,7 @@ void register_predecessor_dag(py::module_& m) {
           "from_csr",
           [](const std::shared_ptr<Graph>& graph, const py::object& offsets, const py::object& parents,
              const py::object& via) {
-            if (!graph) throw py::value_error("graph must be a Graph");
+            if (!graph) throw py::type_error("graph must be a Graph");
             // from_csr's validation order on unnarrowed values (the shape, then the ranges); the C++
             // constructor re-checks it and adds the structural checks (endpoints, duplicates,
             // acyclic, ascending).

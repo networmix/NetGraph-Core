@@ -29,6 +29,7 @@ if (
     _spec.loader.exec_module(sys.modules["_netgraph_core"])
 
 import _netgraph_core as ext
+import numpy as np
 from helpers import (
     ALL_OUT,
     COSTONLY,
@@ -264,6 +265,10 @@ SCENARIOS = {
         lambda g: (ngc.ksp, (g, 0, 4, ngc.KspOptions(4, residual=caps(g))))
     ),
     "FlowLedger.reset": with_orphan(lambda fg: (fg.reset, (half(fg.graph()),))),
+    # to_units' input converter: a list of numbers of every accepted type, read into one buffer.
+    "to_units.list": stateless(
+        lambda g: (ngc.to_units, ([1.5, 2, np.int64(3), np.float32(4.0)], 1.0))
+    ),
     "resolve_to_paths": stateless(
         lambda g: (ngc.resolve_to_paths, (g, ngc.spf(g, 0, spf_opts()).dag, 0, 4, True))
     ),
@@ -605,13 +610,18 @@ if __name__ != "__main__":
 
     # The scenarios with fewer than ten native allocations, and at least how many they make:
     # reset converts the residual from Python, then builds the new baseline; a getter registers
-    # its new wrapper (intersect first makes the new value).
+    # its new wrapper (intersect first makes the new value); to_units reads its input into one
+    # buffer.
     FEW = {
         "FlowLedger.reset": 3,
         "PlacementResult.program": 1,
         "FlowRecord.route": 1,
         "Eligibility.intersect": 4,
+        "to_units.list": 1,
     }
+    # The scenarios whose result is a plain Python value (no native object): their completing
+    # call holds no native allocation.
+    PLAIN_RESULTS = {"to_units.list"}
 
     def check(name, proc, rows, started):
         """The checks of one scenario's rows."""
@@ -645,7 +655,9 @@ if __name__ != "__main__":
                 # A successful fallback holds exactly the result's native allocations,
                 # not an extra temporary buffer or a leaked staged result.
                 assert row["live"] == done["live"], row
-        if done["returns"]:
+        if name in PLAIN_RESULTS:
+            assert done["live"] == 0, done
+        elif done["returns"]:
             # The probe counts what the result object holds.
             assert done["live"] > 0, done
 

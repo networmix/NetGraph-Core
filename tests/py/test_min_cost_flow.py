@@ -159,6 +159,15 @@ def test_fresh_solve_uses_the_released_cheap_edge():
     assert certify(g, view, [0], [2], 1, p) == []
 
 
+# A type the position never takes (a float or a bool for an integer, None for the graph) is a
+# TypeError, a value outside the domain a ValueError.
+TYPE_DEFECTS = {
+    "sources node ids[0] must be an integer (got float)",
+    "cap must be an integer number of units in [0, 2^63 - 2] or None",
+    "graph must be a Graph",
+}
+
+
 @pytest.mark.parametrize(
     "kwargs, message",
     [
@@ -195,8 +204,9 @@ def test_invalid_inputs(kwargs, message):
         "cap": 3,
     }
     call.update(kwargs)
-    with pytest.raises(ValueError, match=exact(message)):
+    with pytest.raises((TypeError, ValueError), match=exact(message)) as error:
         core._solve_min_cost_flow(**call)
+    assert error.type is (TypeError if message in TYPE_DEFECTS else ValueError)
 
 
 def test_foreign_eligibility_and_largest_cap():
@@ -468,11 +478,11 @@ def test_entry_view_rank_is_checked_with_its_length():
     # A 0-D view (the 2-D and nested views are test_edge_amounts.py's), and a 2-D sources array.
     g = build(3, [(0, 1, 5, 1), (1, 2, 5, 1)])
     with pytest.raises(
-        ValueError, match=exact("view must be a 1-D array (got 0 dimensions)")
+        TypeError, match=exact("view must be a 1-D array (got 0 dimensions)")
     ):
         core._solve_min_cost_flow(g, np.array(5), [0], [2], None, 3)
     with pytest.raises(
-        ValueError,
+        TypeError,
         match=exact("sources node ids must be a 1-D array (got 2 dimensions)"),
     ):
         core._solve_min_cost_flow(g, [5, 5], np.array([[0]]), [2], None, -1)

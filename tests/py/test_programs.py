@@ -2369,7 +2369,9 @@ def test_operations_are_all_or_nothing(case):
 
         return getattr(policy, method), (6,), snapshot
 
-    assert sweep_python_allocation(make) >= 3  # not vacuous
+    assert (
+        sweep_python_allocation(make) >= 1
+    )  # the result object at least (its fields convert when read)
 
 
 @needs_hooks
