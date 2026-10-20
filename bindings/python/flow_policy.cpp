@@ -55,16 +55,6 @@ std::optional<std::optional<Amount>> design_units(const py::object& design) {
   return std::optional<Amount>(overflow != 0 ? Amount {-1} : static_cast<Amount>(v));
 }
 
-// A black-hole set argument: an Eligibility or None (its graph is checked by the call).
-std::shared_ptr<Eligibility> eligibility_or_none(const py::object& obj, const char* name) {
-  if (obj.is_none()) return nullptr;
-  if (!py::isinstance<Eligibility>(obj)) {
-    throw py::type_error(std::string(name) + " must be an Eligibility or None (got " +
-                         std::string(py::str(py::type::of(obj).attr("__name__"))) + ")");
-  }
-  return obj.cast<std::shared_ptr<Eligibility>>();
-}
-
 #if NETGRAPH_CORE_PRIVATE_HOOKS
 
 // The epoch state of a policy (roster, requested, +inf, per roster source the flows).

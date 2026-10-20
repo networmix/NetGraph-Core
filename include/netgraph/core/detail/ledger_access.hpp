@@ -26,6 +26,13 @@ struct RecordDraft {
   FlowRecord record {};
 };
 
+// One owner's part of a batch exchange (LedgerAccess::commit_batch).
+struct OwnerDrafts {
+  std::int64_t owner {0};
+  std::span<RecordDraft> drafts {};
+  bool retire {false};
+};
+
 // The saturation diagnostic of FlowLedger::saturated_boundary_edges on a given residual (the sources already a
 // validated set): the edges (statically eligible, capacity >= 1 unit) leaving the set reachable
 // from the allowed sources over eligible forward arcs with residual >= 1 unit, ascending EdgeId.
@@ -56,6 +63,12 @@ struct LedgerAccess {
   static std::vector<FlowId> exchange(FlowLedger& ledger, std::int64_t owner, std::span<RecordDraft> drafts);
   // commit (retire false) and exchange (retire true).
   static std::vector<FlowId> commit_drafts(FlowLedger& ledger, std::int64_t owner, std::span<RecordDraft> drafts, bool retire);
+  // One atomic exchange for several distinct owners (apply_actions): each owner's drafts with
+  // commit's (retire false) or exchange's (retire true) rule, the aggregates checked once over
+  // every owner, the new ids counted for the whole batch first and assigned in owner order, then
+  // draft order. Throws (and changes nothing) as commit does. `created` (one per owner) receives
+  // each owner's new FlowIds; the drafts' vectors are moved from.
+  static void commit_batch(FlowLedger& ledger, std::span<OwnerDrafts> owners, std::span<std::vector<FlowId>> created);
   // A live record by id (throws std::invalid_argument for an unknown or retired id).
   [[nodiscard]] static const FlowRecord& live(const FlowLedger& ledger, std::int64_t id);
   // The working residual service baseline - carried() into `out` (resized to E).

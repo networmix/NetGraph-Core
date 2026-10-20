@@ -246,3 +246,20 @@ stretches = [
     ng.CostStretch(2),
 ]
 assert_type(stretches[0].factor, Fraction)
+
+# Several policies in one operation: the actions keep their offers as given, the list returns one
+# result per action.
+listed = ng.FlowLedger(g)
+lossy_cfg = ng.FlowPolicyConfig(
+    routing=ng.ShortestPaths(), admission=ng.Admission.LOSSY
+)
+first_policy = ng.FlowPolicy(listed, 0, 3, lossy_cfg)
+second_policy = ng.FlowPolicy(listed, 1, 3, lossy_cfg)
+actions = [ng.Replace(first_policy, 2), ng.Replace(second_policy, np.int64(2))]
+assert_type(actions[0].offer, int | float)
+assert_type(actions[0].design_demand, int | float | None)
+assert_type(ng.Forward(first_policy, 1).black_holes, ng.Eligibility | None)
+together = ng.apply_actions(listed, actions, mode=ng.BatchMode.SIMULTANEOUS)
+assert_type(together, list[ng.PlacementResult])
+in_order = ng.apply_actions(listed, (ng.Place(first_policy, 1),))
+assert_type(in_order[0].call_delivered, int)

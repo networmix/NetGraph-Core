@@ -31,39 +31,6 @@ namespace netgraph::core::bindings {
 
 namespace {
 
-// An amount option as given (Units: an int or a float; None: absent). A value of another type (a
-// bool, a string, ...) raises TypeError here; its domain is the evaluator's check, after the configuration.
-// An __index__ object is kept as its int.
-py::object units_as_given(const py::object& obj, const char* name) {
-  if (obj.is_none() || PyFloat_Check(obj.ptr()) || has_type(obj.ptr(), numpy_number_types().second)) {
-    return obj;
-  }
-  if (!is_bool(obj) && PyIndex_Check(obj.ptr())) {
-    auto idx = py::reinterpret_steal<py::object>(PyNumber_Index(obj.ptr()));
-    if (!idx) throw py::error_already_set();
-    return idx;
-  }
-  throw py::type_error(std::string(name) + " must be an int or a float (got " +
-                       std::string(py::str(py::type::of(obj).attr("__name__"))) + ")");
-}
-
-// The C++ form of an option kept as given: None absent; +inf the inner nullopt; an int in int64 its
-// value; any other value (a float other than +inf, an int beyond int64) -1, which is outside every
-// domain and so raises the option's domain error in its place.
-std::optional<std::optional<Amount>> units_at_use(const py::object& obj) {
-  if (obj.is_none()) return std::nullopt;
-  if (PyLong_Check(obj.ptr())) {
-    int overflow = 0;
-    const long long v = PyLong_AsLongLongAndOverflow(obj.ptr(), &overflow);
-    if (overflow != 0) return Amount {-1};
-    return Amount {v};
-  }
-  const double x = PyFloat_AsDouble(obj.ptr());
-  if (x == -1.0 && PyErr_Occurred() != nullptr) throw py::error_already_set();
-  if (std::isinf(x) && x > 0) return std::optional<std::optional<Amount>> {std::in_place, std::nullopt};
-  return Amount {-1};
-}
-
 // The Python form of EvaluationOptions: the Eligibility and the cache are held by reference count
 // for the call (the C++ structs borrow raw pointers); design_demand and offer as given.
 struct PyEvaluationOptions {

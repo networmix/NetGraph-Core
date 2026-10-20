@@ -1,7 +1,8 @@
 """Native allocation failures in the staged result constructions and in FlowLedger.reset: the
 k-th C++ allocation of spf, ksp, resolve_to_paths, ForwardingProgram.from_routes and from_dag, of the calls
 whose result objects are made before anything is published (place, evaluate, replace, forward,
-evaluate_demand, evaluate_pairs, evaluate_edge_failures) and of reset fails,
+apply_actions in both modes, evaluate_demand, evaluate_pairs, evaluate_edge_failures) and of reset
+fails,
 for every k in turn (the private hook _fail_native_allocation). Every unabsorbed failure
 raises MemoryError, never aborts, leaves nothing it allocated behind and the observable state as
 it was. Standard-library optional buffers may absorb a failure; every successful call, including
@@ -145,6 +146,46 @@ def operation(cfg_of, method, sources=0, prepare="place", **kw):
             ]
 
         return call, (6,), snap
+
+    return make
+
+
+def listed(mode):
+    """One apply_actions list of `mode` (every output) over three policies that already hold
+    records: a pooled LOSSY ShortestPaths demand of sources 0 and 1, a LOSSY Pinned one over an
+    exported program with black holes, and a ShortestPaths one (LOSSLESS in an ORDERED list); the
+    snapshot adds every policy's epoch and program."""
+
+    def make():
+        g = graph()
+        ledger = ngc.FlowLedger(g)
+        lossy = ngc.Admission.LOSSY
+        pinned = pinned_cfg(
+            exported, lossy, lambda g: g.eligibility(excluded_edges=[1])
+        )
+        policies = [
+            ngc.FlowPolicy(ledger, [0, 1], 4, POOLED_LOSSY),
+            ngc.FlowPolicy(ledger, 0, 4, pinned(g)),
+            ngc.FlowPolicy(
+                ledger, 0, 4, COSTONLY if mode == "ORDERED" else POOLED_LOSSY
+            ),
+        ]
+        for policy in policies:
+            policy.replace(2)
+        actions = [ngc.Replace(p, x) for p, x in zip(policies, (6, 4, 3), strict=True)]
+        batch = getattr(ngc.BatchMode, mode)
+
+        def call():
+            return ngc.apply_actions(ledger, actions, mode=batch, outputs=ALL_OUT)
+
+        def snap():
+            return [
+                full_ledger_state(ledger),
+                [epoch_state(p) for p in policies],
+                [plain(p.program) for p in policies],
+            ]
+
+        return call, (), snap
 
     return make
 
@@ -317,6 +358,8 @@ SCENARIOS = {
         "replace",
     ),
     "place.pinned_split_route": operation(pinned_cfg(split_route), "place"),
+    "apply_actions.ordered": listed("ORDERED"),
+    "apply_actions.simultaneous": listed("SIMULTANEOUS"),
     "evaluate.global": operation(lambda g: GLOBAL, "evaluate"),
     "replace.global_support": operation(
         lambda g: ngc.FlowPolicyConfig(

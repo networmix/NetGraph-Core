@@ -16,15 +16,19 @@
    Lossless: the largest total in an interval whose no-drop loads fit the free capacity with
    no share lost at a source or on a black hole; the loads are monotone in the total (round robin
    and highest averages are house-monotone), so integer bisection is exact.
-   Lossy ("Losses inside one program"): the one evaluator of the loss rule. A link that receives
-   more than its free capacity V shares T = min(V, arrivals) by highest averages over the sources' arrivals, then within a
-   source over its entries'; A+ forwards the no-drop loads U0 first, makes every link with
-   U0 <= V a pass-through and evaluates the other links (barriers) and the split routes' routers
-   once each in dependency order; barriers that wait on each other in a cycle are iterated from
-   zero (serial normalization first, then rounds, 64 b rounds for b barriers, the period-two
-   and round-limit errors, the independent check of the whole result before anything is
-   returned). A pooled program (one split context: a ShortestPaths program, one supplied split route)
-   is forwarded by its plan's kernels, which are this rule for one acyclic context.
+   Lossy ("Losses on shared edges", "Several demands at once"): the one evaluator of the loss
+   rule, for one program or several demands at once (a SIMULTANEOUS list). A link that receives
+   more than its free capacity V shares T = min(V, arrivals) by highest averages over the demands'
+   arrivals (in their creation order), then within a demand over its sources', then within a source
+   over its entries'; A+ forwards the no-drop loads U0 first, makes every link with U0 <= V a
+   pass-through and evaluates the other links (barriers) and the split routes' routers once each in
+   dependency order; barriers that wait on each other in a cycle are iterated from zero (serial
+   normalization first, then rounds, 64 b rounds for b barriers, the period-two and round-limit
+   errors, the independent check of the whole result before anything is returned). What reaches a
+   black hole of its own demand is dropped there and makes no barrier (b counts physical links). A
+   pooled program (one split context: a ShortestPaths program, one supplied split route) called
+   alone is forwarded by its plan's kernels, which are this rule for one acyclic context; in a list
+   it joins the evaluator with one amount per source on each member.
 */
 #pragma once
 
@@ -188,15 +192,32 @@ void source_offer_increments(const ForwardingView& view, const Counter128& X, Am
 [[nodiscard]] ProgramFlow lossless(const ForwardingView& view, const AvailableCapacityFn& free, Amount lo, std::optional<Amount> hi);
 // Lossy: the loss rule over per-head injections (aligned with the view's heads) on `free`.
 [[nodiscard]] ProgramFlow lossy(const ForwardingView& view, const AvailableCapacityFn& free, std::span<const Amount> injections);
+// One demand of a joint forwarding (a SIMULTANEOUS list's participant): its view and its per-head
+// injections (aligned with the view's heads).
+struct ForwardingDemand {
+  const ForwardingView* view {nullptr};
+  std::span<const Amount> injections {};
+};
+// Lossy over several demands at once on one shared `free` (the loss rule with its demand level:
+// the demands in the given order, their policies' creation order; the cycle rule across them): one
+// ProgramFlow per demand.
+// Each demand's black holes are its own (dark occurrences). One non-pooled demand is lossy()'s own
+// evaluation; a pooled demand joins as a context with per-head amounts.
+[[nodiscard]] std::vector<ProgramFlow> lossy(std::span<const ForwardingDemand> demands, const AvailableCapacityFn& free);
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
 // Test controls (hooks builds only): how many cyclic groups the last lossy() on this thread
-// iterated and its rounds; a corruption of the iterated result before its check (the check's
-// planted fault: RuntimeError expected).
+// iterated and its rounds; how many times it sized the event structures (after the event and
+// dependency counts passed); two corruptions of the iterated result before its check (the check's
+// planted faults, RuntimeError expected): `corrupt` lowers one carried amount after the rounds,
+// `shift` moves one unit between two occurrences of one barrier before the final forwarding (every
+// continuation consistent, only that link's loss rule wrong).
 struct LossyCounters {
   std::int64_t groups {0};
   std::int64_t rounds {0};
+  std::int64_t event_structures {0};
   bool corrupt {false};
+  bool shift {false};
 };
 LossyCounters& thread_lossy_counters() noexcept;
 // Lower limits for this thread's forwardings, per ForwardingCounter (0: kForwardingLimit), so a

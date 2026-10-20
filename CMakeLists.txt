@@ -108,6 +108,7 @@ pybind11_add_module(_netgraph_core
   bindings/python/placement_result.cpp
   bindings/python/shortest_path_cache.cpp
   bindings/python/flow_policy.cpp
+  bindings/python/apply_actions.cpp
   bindings/python/evaluators.cpp
   bindings/python/path_enumeration.cpp
   bindings/python/search.cpp
@@ -162,6 +163,8 @@ if(NETGRAPH_CORE_BUILD_TESTS)
     tests/cpp/zero_capacity_tests.cpp
     tests/cpp/pooled_source_allocation_tests.cpp
     tests/cpp/program_tests.cpp
+    tests/cpp/joint_forwarding_tests.cpp
+    tests/cpp/apply_actions_tests.cpp
     tests/cpp/distributed_te_tests.cpp
     tests/cpp/centralized_te_tunnels_tests.cpp
     tests/cpp/contract_examples_tests.cpp
@@ -173,6 +176,7 @@ if(NETGRAPH_CORE_BUILD_TESTS)
     tests/cpp/fault_injection.cpp
     tests/cpp/flow_ledger_fault_tests.cpp
     tests/cpp/flow_policy_fault_tests.cpp
+    tests/cpp/apply_actions_fault_tests.cpp
     tests/cpp/min_cost_flow_deletion_fault_tests.cpp
     tests/cpp/search_fault_tests.cpp
     tests/cpp/graph_fault_tests.cpp

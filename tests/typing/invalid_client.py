@@ -81,3 +81,10 @@ total = flows.sum()  # expect: reportOptionalMemberAccess
 best = ng.evaluate_demand(g, 0, 1, ng.EvaluationOptions(cfg))
 cost_total: int = best.total_cost  # expect: reportAssignmentType
 weights = best.program.source_weights  # expect: reportOptionalMemberAccess
+
+# A list takes actions, its mode by keyword only, and an action takes a number.
+lister = ng.FlowLedger(g)
+listed_policy = ng.FlowPolicy(lister, 0, 1, cfg)
+ng.apply_actions(lister, [listed_policy])  # expect: reportArgumentType
+ng.apply_actions(lister, [], ng.BatchMode.ORDERED)  # expect: reportCallIssue
+ng.Replace(listed_policy, "1")  # expect: reportArgumentType

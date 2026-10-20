@@ -567,6 +567,67 @@ class FlowPolicy:
         self, flow_id: tuple[typing.SupportsIndex, typing.SupportsIndex]
     ) -> FlowRecord: ...
 
+class Place:
+    # reason: policy is a FlowPolicy; offer is integer units or a float (a NumPy floating value too), kept as given
+    # generated: def __init__(self, policy: typing.Any, offer: typing.Any) -> None:
+    def __init__(
+        self, policy: FlowPolicy, offer: typing.SupportsIndex | float | numpy.floating
+    ) -> None: ...
+    # reason: the offer as given, an int or a float
+    # generated: def offer(self) -> typing.Any:
+    @property
+    def offer(self) -> int | float: ...
+    # reason: the FlowPolicy given
+    # generated: def policy(self) -> typing.Any:
+    @property
+    def policy(self) -> FlowPolicy: ...
+
+class Replace:
+    # reason: policy is a FlowPolicy; offer and design_demand are integer units or a float (a NumPy floating value too), kept as given; design_demand may be None
+    # generated: def __init__(self, policy: typing.Any, offer: typing.Any, *, design_demand: typing.Any = None) -> None:
+    def __init__(
+        self,
+        policy: FlowPolicy,
+        offer: typing.SupportsIndex | float | numpy.floating,
+        *,
+        design_demand: typing.SupportsIndex | float | numpy.floating | None = None,
+    ) -> None: ...
+    # reason: the design as given, an int or a float, or None
+    # generated: def design_demand(self) -> typing.Any:
+    @property
+    def design_demand(self) -> int | float | None: ...
+    # reason: the offer as given, an int or a float
+    # generated: def offer(self) -> typing.Any:
+    @property
+    def offer(self) -> int | float: ...
+    # reason: the FlowPolicy given
+    # generated: def policy(self) -> typing.Any:
+    @property
+    def policy(self) -> FlowPolicy: ...
+
+class Forward:
+    # reason: policy is a FlowPolicy; offer is integer units or a float (a NumPy floating value too), kept as given; black_holes may be None
+    # generated: def __init__(self, policy: typing.Any, offer: typing.Any, *, black_holes: typing.Any = None) -> None:
+    def __init__(
+        self,
+        policy: FlowPolicy,
+        offer: typing.SupportsIndex | float | numpy.floating,
+        *,
+        black_holes: Eligibility | None = None,
+    ) -> None: ...
+    # reason: the Eligibility given, or None
+    # generated: def black_holes(self) -> typing.Any:
+    @property
+    def black_holes(self) -> Eligibility | None: ...
+    # reason: the offer as given, an int or a float
+    # generated: def offer(self) -> typing.Any:
+    @property
+    def offer(self) -> int | float: ...
+    # reason: the FlowPolicy given
+    # generated: def policy(self) -> typing.Any:
+    @property
+    def policy(self) -> FlowPolicy: ...
+
 class EvaluationOptions:
     # reason: eligibility, cache, outputs, design_demand and offer may be None; design_demand and offer are integer units or a float, kept as given
     # generated: def __init__(self, config: FlowPolicyConfig, *, eligibility: Eligibility = None, cache: ShortestPathCache = None, outputs: typing.Any = None, design_demand: typing.Any = None, offer: typing.Any = None) -> None:
@@ -725,6 +786,16 @@ def evaluate_pairs(
     options: EvaluationOptions,
     per_pair_eligibility: collections.abc.Sequence[Eligibility | None] | None = None,
     workers: typing.SupportsIndex | None = None,
+) -> list[PlacementResult]: ...
+
+# reason: ledger is a FlowLedger; actions a sequence of Place, Replace and Forward; mode a BatchMode; outputs may be None (TypeError otherwise)
+# generated: def apply_actions(ledger: typing.Any, actions: typing.Any, *, mode: typing.Any = ..., outputs: typing.Any = None) -> list[PlacementResult]:
+def apply_actions(
+    ledger: FlowLedger,
+    actions: collections.abc.Sequence[Place | Replace | Forward],
+    *,
+    mode: BatchMode = ...,
+    outputs: OutputOptions | None = None,
 ) -> list[PlacementResult]: ...
 
 # reason: sources and destinations are node sets; options is EvaluationOptions (TypeError otherwise)

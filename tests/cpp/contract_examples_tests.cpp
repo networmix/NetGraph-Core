@@ -12,12 +12,14 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "netgraph/core/detail/forwarding.hpp"
+#include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/detail/route_kernels.hpp"
 #include "netgraph/core/evaluators.hpp"
 #include "netgraph/core/flow_ledger.hpp"
@@ -2276,4 +2278,526 @@ TEST(ContractExamples, STRETCH_numpy) {
   EXPECT_EQ(reduced(CostStretch(3, 10)), "3/10");
   EXPECT_EQ(reduced(CostStretch(2)), "2/1");
   EXPECT_TRUE(CostStretch(6, 5) == CostStretch(6, 5));
+}
+
+// ================================================================ several demands at once (apply_actions)
+
+namespace {
+
+// The list form of the loss examples: each route is its own demand, a Pinned LOSSY policy over one
+// tunnel (created in route order), all in one SIMULTANEOUS list. Each abstract link e gets its own
+// two nodes; each route runs from its own head through its links to one destination, consecutive
+// links joined by a link that never limits anything, except where every occurrence of e continues on
+// f and every occurrence of f comes from e: there e's head is f's tail (no join), so the examples'
+// serial pairs stay pairs. `dark[i]`: the abstract links route i's demand black-holes.
+struct ListOut {
+  std::string error;
+  std::int64_t rounds {-1};  // hooks only
+  Routes arrivals;
+  Routes carried;
+  Routes edge_drops;
+  Amounts delivered;
+  Amounts edge_flows;
+  Texts status;
+};
+ListOut list_lossy(const Amounts& offers, const Routes& routes, const Amounts& cap, const std::vector<Ints>& dark = {}) {
+  const auto L = static_cast<std::int64_t>(cap.size());
+  // Per link its successors and predecessors over every occurrence (-1: an end).
+  std::vector<std::set<std::int64_t>> next(cap.size());
+  std::vector<std::set<std::int64_t>> prev(cap.size());
+  for (const auto& r : routes) {
+    for (std::size_t j = 0; j < r.size(); ++j) {
+      next[static_cast<std::size_t>(r[j])].insert(j + 1 < r.size() ? r[j + 1] : -1);
+      prev[static_cast<std::size_t>(r[j])].insert(j > 0 ? r[j - 1] : -1);
+    }
+  }
+  auto fused = [&](std::int64_t e, std::int64_t f) {
+    return next[static_cast<std::size_t>(e)] == std::set<std::int64_t> {f} && prev[static_cast<std::size_t>(f)] == std::set<std::int64_t> {e};
+  };
+  // Nodes: heads 0..n-1, the destination n, then per link a tail and a head (a fused head is the
+  // next link's tail).
+  const auto n = static_cast<NodeId>(routes.size());
+  const NodeId dest = n;
+  std::vector<NodeId> tail(cap.size());
+  std::vector<NodeId> head(cap.size());
+  NodeId next_node = n + 1;
+  for (std::int64_t e = 0; e < L; ++e) tail[static_cast<std::size_t>(e)] = next_node++;
+  for (std::int64_t e = 0; e < L; ++e) {
+    const auto& s = next[static_cast<std::size_t>(e)];
+    head[static_cast<std::size_t>(e)] = s.size() == 1 && *s.begin() >= 0 && fused(e, *s.begin()) ? tail[static_cast<std::size_t>(*s.begin())] : next_node++;
+  }
+  std::vector<InEdge> rows;
+  for (std::int64_t e = 0; e < L; ++e) rows.push_back({tail[static_cast<std::size_t>(e)], head[static_cast<std::size_t>(e)], cap[static_cast<std::size_t>(e)], 1});
+  std::vector<std::vector<std::size_t>> rows_of(routes.size());
+  for (std::size_t i = 0; i < routes.size(); ++i) {
+    const auto& r = routes[i];
+    rows_of[i].push_back(rows.size());
+    rows.push_back({static_cast<NodeId>(i), tail[static_cast<std::size_t>(r.front())], kBig, 1});
+    for (std::size_t j = 0; j < r.size(); ++j) {
+      rows_of[i].push_back(static_cast<std::size_t>(r[j]));
+      if (j + 1 < r.size() && !fused(r[j], r[j + 1])) {
+        rows_of[i].push_back(rows.size());
+        rows.push_back({head[static_cast<std::size_t>(r[j])], tail[static_cast<std::size_t>(r[j + 1])], kBig, 1});
+      }
+    }
+    rows_of[i].push_back(rows.size());
+    rows.push_back({head[static_cast<std::size_t>(r.back())], dest, kBig, 1});
+  }
+  const Net net(rows, next_node);
+  auto ledger = std::make_shared<FlowLedger>(net.g);
+  std::vector<std::shared_ptr<const Eligibility>> black;
+  std::vector<std::unique_ptr<FlowPolicy>> policies;
+  std::vector<Action> list;
+  for (std::size_t i = 0; i < routes.size(); ++i) {
+    std::vector<std::vector<EdgeId>> hops;
+    for (auto row : rows_of[i]) hops.push_back({net.id[row]});
+    const NodeId s[1] = {static_cast<NodeId>(i)};
+    const NodeId t[1] = {dest};
+    const std::vector<RouteDefinition> defs {RouteDefinition {static_cast<NodeId>(i), std::make_shared<const Path>(*net.g, hops), 1}};
+    const auto prog = ForwardingProgram::from_routes(*net.g, s, t, defs);
+    black.push_back(i < dark.size() ? net.mask({}, dark[i]) : nullptr);
+    policies.push_back(std::make_unique<FlowPolicy>(*ledger, std::vector<NodeId> {static_cast<NodeId>(i)}, std::vector<NodeId> {dest},
+                                                    FlowPolicyConfig {.routing = Pinned {prog, black.back()}, .admission = LY}));
+    list.push_back(Replace {*policies.back(), offers[i]});
+  }
+  ListOut out;
+  std::vector<PlacementResult> res;
+  out.error = error_of([&] { res = apply_actions(*ledger, list, BatchMode::Simultaneous); });
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  out.rounds = detail::thread_lossy_counters().rounds;
+#endif
+  if (!out.error.empty()) return out;
+  for (std::size_t i = 0; i < routes.size(); ++i) {
+    const auto recs = policies[i]->records();
+    Ints a;
+    Ints c;
+    Ints d;
+    for (auto e : routes[i]) {
+      const EdgeId id = net.id[static_cast<std::size_t>(e)];
+      Amount cf = 0;
+      Amount df = 0;
+      for (const auto& rec : recs) {
+        for (const auto& [x, v] : rec.edge_flows) cf += x == id ? v : 0;
+        for (const auto& [x, v] : rec.edge_drops) df += x == id ? lo(v) : 0;
+      }
+      a.push_back(cf + df);
+      c.push_back(cf);
+      d.push_back(df);
+    }
+    out.arrivals.push_back(a);
+    out.carried.push_back(c);
+    out.edge_drops.push_back(d);
+    out.delivered.push_back(res[i].call_delivered);
+    out.status.push_back(name_of(res[i].by_tunnel.front().status));
+  }
+  for (std::int64_t e = 0; e < L; ++e) out.edge_flows.push_back(ledger->carried()[static_cast<std::size_t>(net.id[static_cast<std::size_t>(e)])]);
+  return out;
+}
+
+// The list form of the stale-forwarding cycle examples: each head is its own demand (the reference's
+// labels), a Pinned LOSSY policy over its tunnels with the example's black holes, created in head
+// order, all in one SIMULTANEOUS list; a head's destination is its tunnels' end.
+ListOut stale_list(const StalePathsIn& in) {
+  const Net n(in.edges);
+  auto ledger = std::make_shared<FlowLedger>(n.g);
+  const auto black = n.mask(in.black_nodes, in.black_links);
+  std::vector<std::unique_ptr<FlowPolicy>> policies;
+  std::vector<Action> list;
+  for (const auto& [h, offer] : in.offers) {
+    std::vector<RouteDefinition> defs;
+    NodeId dest = 0;
+    for (const auto& [th, es] : in.tunnels) {
+      if (th != h) continue;
+      const auto p = n.path(es);
+      dest = p->destination();
+      defs.push_back(RouteDefinition {h, p, 1});
+    }
+    const NodeId s[1] = {h};
+    const NodeId t[1] = {dest};
+    const auto prog = ForwardingProgram::from_routes(*n.g, s, t, defs);
+    policies.push_back(std::make_unique<FlowPolicy>(*ledger, std::vector<NodeId> {h}, std::vector<NodeId> {dest},
+                                                    FlowPolicyConfig {.routing = Pinned {prog, black}, .admission = LY}));
+    list.push_back(Replace {*policies.back(), offer});
+  }
+  ListOut out;
+  std::vector<PlacementResult> res;
+  out.error = error_of([&] { res = apply_actions(*ledger, list, BatchMode::Simultaneous); });
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  out.rounds = detail::thread_lossy_counters().rounds;
+#endif
+  // The statuses, from each policy's own view of its program (the same whatever the forwarding).
+  for (const auto& p : policies) {
+    const auto& pe = detail::PolicyAccess::engine(*p);
+    for (std::size_t e = 0; e < pe.view.data->entries.size(); ++e) out.status.push_back(name_of(pe.view.status(e)));
+  }
+  if (!out.error.empty()) return out;
+  for (const auto& r : res) out.delivered.push_back(r.call_delivered);
+  return out;
+}
+
+// The examples' list helper for one-tunnel LOSSY participants on a fresh ledger, created in list
+// order: per entry its delivery, drops, tunnel status, residual and saturated_boundary_edges (from
+// the entry's own source).
+struct ListAction {
+  NodeId source;
+  Ints route;
+  Amount offer;
+  Ints black_holes {};
+};
+struct EntryOut {
+  Amount delivered;
+  std::vector<std::pair<std::int64_t, Amount>> call_edge_drops;
+  std::string status;
+  Amounts residual;
+  Ints saturated_boundary_edges;
+};
+std::vector<EntryOut> action_list(const std::vector<InEdge>& edges, const std::vector<ListAction>& actions, BatchMode mode) {
+  const Net n(edges);
+  auto ledger = std::make_shared<FlowLedger>(n.g);
+  std::vector<std::shared_ptr<const Eligibility>> black;
+  std::vector<std::unique_ptr<FlowPolicy>> policies;
+  std::vector<Action> list;
+  for (const auto& a : actions) {
+    const auto p = n.path(a.route);
+    const NodeId s[1] = {a.source};
+    const NodeId t[1] = {p->destination()};
+    const std::vector<RouteDefinition> defs {RouteDefinition {a.source, p, 1}};
+    black.push_back(n.mask({}, a.black_holes));
+    policies.push_back(std::make_unique<FlowPolicy>(*ledger, std::vector<NodeId> {a.source}, std::vector<NodeId> {p->destination()},
+                                                    FlowPolicyConfig {.routing = Pinned {ForwardingProgram::from_routes(*n.g, s, t, defs), black.back()},
+                                                                      .admission = LY}));
+    list.push_back(Replace {*policies.back(), a.offer});
+  }
+  const auto res = apply_actions(*ledger, list, mode, OutputOptions {.residual = true, .saturated_boundary_edges = true});
+  std::vector<EntryOut> out;
+  for (const auto& r : res) {
+    EntryOut e {r.call_delivered, {}, name_of(r.by_tunnel.front().status), n.in_order(*r.residual), {}};
+    for (const auto& [x, d] : r.call_edge_drops) e.call_edge_drops.emplace_back(n.pos(x), d);
+    std::sort(e.call_edge_drops.begin(), e.call_edge_drops.end());
+    for (EdgeId x : *r.saturated_boundary_edges) e.saturated_boundary_edges.push_back(n.pos(x));
+    std::sort(e.saturated_boundary_edges.begin(), e.saturated_boundary_edges.end());
+    out.push_back(e);
+  }
+  return out;
+}
+
+void expect_entry(const EntryOut& e, Amount delivered, const std::vector<std::pair<std::int64_t, Amount>>& drops, const std::string& status,
+                  const Amounts& residual, const Ints& boundary) {
+  EXPECT_EQ(e.delivered, delivered);
+  EXPECT_EQ(e.call_edge_drops, drops);
+  EXPECT_EQ(e.status, status);
+  EXPECT_EQ(e.residual, residual);
+  EXPECT_EQ(e.saturated_boundary_edges, boundary);
+}
+
+const std::vector<InEdge> kCycleEdges = {{0, 1, 12, 1},     {1, 6, 1000, 1},   {2, 3, 9, 1},      {3, 0, 1000, 1},
+                                         {3, 10, 1000, 1},  {4, 5, 7, 1},      {5, 6, 1000, 1},   {6, 7, 13, 1},
+                                         {7, 2, 1000, 1},   {7, 10, 1000, 1},  {8, 9, 1, 1},      {10, 11, 10, 1},
+                                         {11, 2, 1000, 1},  {12, 4, 1000, 1},  {13, 6, 1000, 1},  {14, 0, 1000, 1}};
+const std::vector<std::pair<NodeId, Ints>> kCycleTunnels = {
+    {12, {13, 5, 6, 7, 8, 2, 4, 11}}, {13, {14, 7, 9, 11, 12, 2, 3, 0}}, {14, {15, 0, 1, 7}}};
+const std::vector<InEdge> kCycleBlackEdges = {
+    {0, 1, 12, 1},    {1, 6, 1000, 1},  {1, 16, 1000, 1}, {2, 3, 9, 1},     {3, 0, 1000, 1},  {3, 10, 1000, 1}, {4, 5, 7, 1},
+    {5, 6, 1000, 1},  {6, 7, 13, 1},    {7, 2, 1000, 1},  {7, 10, 1000, 1}, {8, 9, 1, 1},     {10, 11, 10, 1},  {11, 2, 1000, 1},
+    {12, 4, 1000, 1}, {13, 6, 1000, 1}, {14, 0, 1000, 1}, {15, 0, 1000, 1}, {16, 2, 1000, 1}};
+const std::vector<std::pair<NodeId, Ints>> kCycleBlackTunnels = {
+    {12, {14, 6, 7, 8, 9, 3, 5, 12}}, {13, {15, 8, 10, 12, 13, 3, 4, 0}}, {14, {16, 0, 1, 8}}, {15, {17, 0, 2, 18, 3, 5, 12}}};
+
+const std::string kPeriodTwo = "lossy forwarding iteration entered a period-2 cycle";
+const std::string kRoundLimit = "lossy forwarding iteration did not reach a fixed point within the round limit";
+
+void expect_list(const ListOut& r, const Routes& arrivals, const Routes& carried, const std::optional<Routes>& drops, const Amounts& delivered,
+                 const Amounts& flows) {
+  EXPECT_EQ(r.error, "");
+  EXPECT_EQ(r.arrivals, arrivals);
+  EXPECT_EQ(r.carried, carried);
+  if (drops.has_value()) EXPECT_EQ(r.edge_drops, *drops);
+  EXPECT_EQ(r.delivered, delivered);
+  EXPECT_EQ(r.edge_flows, flows);
+}
+
+// D-no-H-fixed-point's oracle, the test's own: unit-at-a-time highest averages by exact
+// cross-multiplication (ties to the earlier label), sharing nothing with the library.
+Amounts own_h(Amount x, const Amounts& w) {
+  Amounts a(w.size(), 0);
+  for (Amount u = 0; u < x; ++u) {
+    std::size_t best = w.size();
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      if (w[i] <= 0) continue;
+      if (best == w.size() || w[i] * (a[best] + 1) > w[best] * (a[i] + 1)) best = i;
+    }
+    if (best == w.size()) return Amounts(w.size(), 0);
+    ++a[best];
+  }
+  return a;
+}
+
+} // namespace
+
+TEST(ContractExamples, D_crossing) {
+  expect_list(list_lossy({8, 4, 4}, {{0, 1}, {0}, {1}}, {9, 7}), {{8, 6}, {4}, {4}}, {{6, 4}, {3}, {3}}, Routes {{2, 2}, {1}, {1}}, {4, 3, 3},
+              {9, 7});
+}
+TEST(ContractExamples, D_C3) {
+  const auto r = list_lossy({1, 1, 2}, {{0, 1}, {1, 2}, {2, 0}}, {1, 1, 2});
+  EXPECT_EQ(r.error, kPeriodTwo);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(r.rounds, 3);
+#endif
+}
+TEST(ContractExamples, D_cycle_prefix_suffix) {
+  expect_list(list_lossy({8, 4}, {{0, 1, 2}, {2, 1, 3}}, {2, 5, 5, 10}), {{8, 2, 2}, {4, 3, 3}}, {{2, 2, 2}, {3, 3, 3}},
+              Routes {{6, 0, 0}, {1, 0, 0}}, {2, 3}, {2, 5, 5, 3});
+}
+TEST(ContractExamples, D_cycle_subdivision_before) {
+  expect_list(list_lossy({2, 1, 4}, {{1, 0, 2}, {2, 0}, {2, 0, 1}}, {2, 4, 2}), {{2, 2, 1}, {1, 0}, {4, 2, 1}}, {{2, 1, 0}, {0, 0}, {2, 1, 1}},
+              std::nullopt, {0, 0, 1}, {2, 3, 2});
+}
+TEST(ContractExamples, D_cycle_subdivision_after) {
+  expect_list(list_lossy({2, 1, 4}, {{1, 0, 2, 3}, {2, 3, 0}, {2, 3, 0, 1}}, {2, 4, 2, 2}), {{2, 2, 1, 0}, {1, 0, 0}, {4, 2, 2, 1}},
+              {{2, 1, 0, 0}, {0, 0, 0}, {2, 2, 1, 1}}, std::nullopt, {0, 0, 1}, {2, 3, 2, 2});
+}
+// The documented call: two ECMP LOSSY policies on one link of 10.
+TEST(ContractExamples, D_simultaneous) {
+  const Net n({{0, 1, 10, 1}});
+  FlowLedger ledger(n.g);
+  const FlowPolicyConfig ecmp {.routing = ShortestPaths {}, .admission = LY};
+  FlowPolicy a(ledger, v({0}), v({1}), ecmp);
+  FlowPolicy b(ledger, v({0}), v({1}), ecmp);
+  const auto res = apply_actions(ledger, std::vector<Action> {Replace {a, 10}, Replace {b, 10}}, BatchMode::Simultaneous);
+  EXPECT_EQ(res[0].call_delivered, 5);
+  EXPECT_EQ(res[1].call_delivered, 5);
+  EXPECT_EQ(res[0].call_edge_drops, (std::vector<std::pair<EdgeId, Amount>> {{0, 5}}));
+  EXPECT_EQ(res[1].call_edge_drops, (std::vector<std::pair<EdgeId, Amount>> {{0, 5}}));
+  EXPECT_EQ(ledger.carried(), (Amounts {10}));
+}
+// The C3 instance (A: 0, 1; B: 1, 2; C: 2, 0; offers 1, 1, 2; V 1, 1, 2): the test's own enumeration
+// of every integer carried record within the continuation bounds and work conservation finds 5, none
+// meeting the loss rule's link equations (each record's violating links named); the library's highest averages
+// agrees with the test's own on every equation the enumeration evaluates; the list raises the
+// period-2 error.
+TEST(ContractExamples, D_no_H_fixed_point) {
+  const Amounts cap {1, 1, 2};
+  int records = 0;
+  int solutions = 0;
+  std::vector<std::vector<int>> violations;
+  for (Amount a0 = 0; a0 <= 1; ++a0) {
+    for (Amount a1 = 0; a1 <= a0; ++a1) {
+      for (Amount b1 = 0; b1 <= 1; ++b1) {
+        for (Amount b2 = 0; b2 <= b1; ++b2) {
+          for (Amount c2 = 0; c2 <= 2; ++c2) {
+            for (Amount c0 = 0; c0 <= c2; ++c0) {
+              // Arrivals: A 1 then a0; B 1 then b1; C 2 then c2. Links: 0 (A0, C0), 1 (A1, B1), 2 (B2, C2).
+              const Amounts arr0 {1, c2};
+              const Amounts car0 {a0, c0};
+              const Amounts arr1 {a0, 1};
+              const Amounts car1 {a1, b1};
+              const Amounts arr2 {b1, 2};
+              const Amounts car2 {b2, c2};
+              auto conserving = [&](const Amounts& arr, const Amounts& car, Amount v) {
+                return car[0] + car[1] == std::min(v, arr[0] + arr[1]);
+              };
+              if (!conserving(arr0, car0, cap[0]) || !conserving(arr1, car1, cap[1]) || !conserving(arr2, car2, cap[2])) continue;
+              ++records;
+              std::vector<int> bad;
+              const std::vector<std::pair<Amounts, Amounts>> links {{arr0, car0}, {arr1, car1}, {arr2, car2}};
+              for (std::size_t l = 0; l < 3; ++l) {
+                const Amount t = std::min(cap[l], links[l].first[0] + links[l].first[1]);
+                const Amounts mine = own_h(t, links[l].first);
+                Amounts lib(2, 0);
+                detail::highest_averages(t, links[l].first, lib);
+                EXPECT_EQ(lib, mine) << "link " << l;
+                if (mine != links[l].second) bad.push_back(static_cast<int>(l));
+              }
+              solutions += bad.empty() ? 1 : 0;
+              violations.push_back(bad);
+            }
+          }
+        }
+      }
+    }
+  }
+  EXPECT_EQ(records, 5);
+  EXPECT_EQ(solutions, 0);
+  EXPECT_EQ(violations, (std::vector<std::vector<int>> {{2}, {0}, {0, 1, 2}, {1}, {0}}));
+  EXPECT_EQ(list_lossy({1, 1, 2}, {{0, 1}, {1, 2}, {2, 0}}, {1, 1, 2}).error, kPeriodTwo);
+}
+TEST(ContractExamples, STALE_cycle_period_2) {
+  StalePathsIn in {{{0, 1, 768, 1}, {1, 2, 25600, 1}, {2, 3, 768, 1}, {3, 0, 25600, 1}, {4, 2, 25600, 1}, {5, 0, 25600, 1},
+                    {6, 2, 25600, 1}, {7, 8, 25600, 1}},
+                   {{4, {4, 2, 3, 0}}, {5, {5, 0, 1, 2}}, {6, {6, 2}}, {7, {7}}},
+                   {{4, 1024}, {5, 256}, {6, 256}, {7, 512}}};
+  in.black_links = {7};
+  const auto r = stale_list(in);
+  EXPECT_EQ(r.error, kPeriodTwo);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(r.rounds, 8);
+#endif
+}
+TEST(ContractExamples, STALE_cycle_round_limit_baseline) {
+  const StalePathsIn in {kCycleEdges, kCycleTunnels, {{12, 13}, {13, 11}, {14, 10}}};
+  const auto r = stale_list(in);
+  EXPECT_EQ(r.error, "");
+  EXPECT_EQ(r.delivered, (Amounts {3, 4, 4}));
+}
+TEST(ContractExamples, STALE_cycle_round_limit) {
+  StalePathsIn in {kCycleEdges, kCycleTunnels, {{12, 13}, {13, 11}, {14, 10}}};
+  in.black_links = {5};
+  const auto r = stale_list(in);
+  EXPECT_EQ(r.error, kRoundLimit);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(r.rounds, 256);
+#endif
+}
+TEST(ContractExamples, STALE_black_hole_in_cycle) {
+  StalePathsIn in {kCycleBlackEdges, kCycleBlackTunnels, {{12, 13}, {13, 11}, {14, 10}, {15, 5}}};
+  in.black_links = {2, 6, 17};
+  const auto r = stale_list(in);
+  EXPECT_EQ(r.status, (Texts {"BLACKHOLED", "UP", "UP", "BLACKHOLED"}));
+  EXPECT_EQ(r.error, kRoundLimit);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(r.rounds, 256);
+#endif
+}
+TEST(ContractExamples, LIST_black_hole_in_cycle) {
+  std::vector<ListAction> actions;
+  const Amounts offers {13, 11, 10, 5};
+  for (std::size_t i = 0; i < kCycleBlackTunnels.size(); ++i) actions.push_back({kCycleBlackTunnels[i].first, kCycleBlackTunnels[i].second, offers[i], {2, 6, 17}});
+  EXPECT_EQ(error_of([&] { (void)action_list(kCycleBlackEdges, actions, BatchMode::Simultaneous); }), kRoundLimit);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(detail::thread_lossy_counters().rounds, 256);
+#endif
+}
+TEST(ContractExamples, LIST_black_hole_own) {
+  const auto r = action_list({{0, 1, 10, 1}}, {{0, {0}, 10, {0}}, {0, {0}, 10}}, BatchMode::Simultaneous);
+  expect_entry(r[0], 0, {{0, 10}}, "BLACKHOLED", {0}, {0});
+  expect_entry(r[1], 10, {}, "UP", {0}, {0});
+}
+TEST(ContractExamples, LIST_black_hole_upstream) {
+  const auto r = action_list({{0, 1, 10, 1}, {1, 2, 10, 1}}, {{0, {0, 1}, 10, {1}}, {0, {0, 1}, 10}}, BatchMode::Simultaneous);
+  expect_entry(r[0], 0, {{0, 5}, {1, 5}}, "BLACKHOLED", {0, 5}, {0});
+  expect_entry(r[1], 5, {{0, 5}}, "UP", {0, 5}, {0});
+}
+TEST(ContractExamples, LIST_outputs_ordered) {
+  const auto r = action_list({{0, 1, 10, 1}}, {{0, {0}, 7}, {0, {0}, 7}}, BatchMode::Ordered);
+  expect_entry(r[0], 7, {}, "UP", {3}, {});
+  expect_entry(r[1], 3, {{0, 4}}, "UP", {0}, {0});
+}
+TEST(ContractExamples, LIST_outputs_simultaneous) {
+  const auto r = action_list({{0, 2, 5, 1}, {1, 2, 10, 1}, {2, 3, 10, 1}}, {{0, {0, 2}, 5}, {1, {1, 2}, 5}}, BatchMode::Simultaneous);
+  expect_entry(r[0], 5, {}, "UP", {0, 5, 0}, {0});
+  expect_entry(r[1], 5, {}, "UP", {0, 5, 0}, {2});
+}
+// The fourteen lists with real policies (a, b of the list's ledger; x of another; the cycling action
+// is the step-3 cycle's Pinned replace(3)).
+TEST(ContractExamples, LIST_first_error) {
+  const Net n({{0, 1, 10, 1}});
+  const Net other({{0, 1, 10, 1}});
+  const Net cyc({{0, 1, 1, 1}, {1, 2, 1000, 1}, {1, 5, 1000, 1}, {2, 3, 2, 1}, {3, 0, 1000, 1}, {3, 5, 1000, 1}, {4, 0, 1000, 1}, {4, 2, 1000, 1},
+                 {6, 7, 10, 1}});
+  FlowLedger ledger(n.g);
+  FlowLedger foreign(other.g);
+  FlowLedger cl(cyc.g);
+  const FlowPolicyConfig ly {.routing = ShortestPaths {}, .admission = LY};
+  const FlowPolicyConfig ll {.routing = ShortestPaths {}, .admission = LL};
+  FlowPolicy a(ledger, v({0}), v({1}), ly);
+  FlowPolicy x(foreign, v({0}), v({1}), ly);
+  FlowPolicy all(ledger, v({0}), v({1}), ll);
+  FlowPolicy t(ledger, v({0}), v({1}), {.routing = dte_with(1), .admission = LL});
+  FlowPolicy c(ledger, v({0}), v({1}), {.routing = centralized()});
+  (void)c.place(1);
+  const NodeId s4[1] = {4};
+  const NodeId t5[1] = {5};
+  const std::vector<RouteDefinition> two {RouteDefinition {4, cyc.path({6, 0, 1, 3, 5}), 1}, RouteDefinition {4, cyc.path({7, 3, 4, 0, 2}), 2}};
+  const auto pc_prog = ForwardingProgram::from_routes(*cyc.g, s4, t5, two);
+  const NodeId s6[1] = {6};
+  const NodeId t7[1] = {7};
+  const std::vector<RouteDefinition> one {RouteDefinition {6, cyc.path({8}), 1}};
+  const auto pb_prog = ForwardingProgram::from_routes(*cyc.g, s6, t7, one);
+  FlowPolicy pc(cl, v({4}), v({5}), {.routing = Pinned {pc_prog, nullptr}, .admission = LY});
+  FlowPolicy pb(cl, v({6}), v({7}), {.routing = Pinned {pb_prog, nullptr}, .admission = LY});
+  FlowPolicy p(ledger, v({0}), v({1}), {.routing = Pinned {ForwardingProgram::from_routes(*n.g, std::vector<NodeId> {0}, std::vector<NodeId> {1},
+                                                                                          std::vector<RouteDefinition> {RouteDefinition {0, n.path({0}), 1}}),
+                                                           nullptr},
+                                        .admission = LY});
+  FlowPolicy inf(ledger, v({0}), v({1}), ly);
+  (void)inf.place(std::nullopt);
+  FlowPolicy fw(ledger, v({0}), v({1}), ly);
+  (void)fw.replace(1);
+  const auto foreign_black = other.mask({}, {0});
+  const BatchMode O = BatchMode::Ordered;
+  const BatchMode S = BatchMode::Simultaneous;
+  auto first = [&](FlowLedger& l, std::vector<Action> list, BatchMode mode) {
+    const std::string e = error_of([&] { (void)apply_actions(l, list, mode); });
+    return e.empty() ? std::string("valid") : e;
+  };
+  const Texts got {
+      first(ledger, {Replace {a, -1}, Replace {x, 1}}, O),
+      first(ledger, {Replace {a, 1}, Replace {a, -1}}, O),
+      first(ledger, {Forward {fw, std::nullopt}}, S),
+      first(ledger, {Place {all, 1}}, S),
+      first(ledger, {Replace {t, 1}}, S),
+      first(ledger, {Forward {c, std::nullopt}}, S),
+      first(cl, {Replace {pc, 3}, Replace {pb, Amount {1} << 62}}, S),
+      first(cl, {Replace {pc, 3}, Replace {pb, 1}}, S),
+      first(ledger, {Place {t, -1}}, O),
+      first(ledger, {Forward {p, std::nullopt}}, O),
+      first(ledger, {Place {inf, 5}, Replace {x, 1}}, O),
+      first(ledger, {Replace {a, 1, finite(5)}, Replace {x, 1}}, O),
+      first(ledger, {Forward {fw, 1, foreign_black.get()}, Replace {x, 1}}, O),
+      first(ledger, {}, S),
+  };
+  EXPECT_EQ(got, (Texts {"offer must be an integer in [0, 2^62) or permitted +inf", "duplicate policy in list", "SIMULTANEOUS requires finite offers",
+                         "SIMULTANEOUS does not accept Place", "SIMULTANEOUS Replace requires ShortestPaths EQUAL or WEIGHTED, or Pinned",
+                         "SIMULTANEOUS requires admission=LOSSY", "offer must be an integer in [0, 2^62) or permitted +inf", kPeriodTwo,
+                         "DistributedTE does not support incremental placement", "Pinned forwards with replace",
+                         "finite placement after infinite placement requires a new epoch", "ShortestPaths does not accept design_demand",
+                         "black_holes belongs to another graph", "valid"}));
+}
+// The forwarding sizes' counting step on the example's sizes (per participant, groups of tunnels
+// of one path length): the entry count, then the occurrence count, each in wide arithmetic against
+// 2^31 - 1 (the network itself cannot be built at these sizes; the end-to-end refusals run under
+// the hooks' small limits, ForwardingSize and ApplyActions tests).
+TEST(ContractExamples, ERR_forwarding_limit) {
+  using Groups = std::vector<std::pair<std::int64_t, std::int64_t>>;
+  auto check = [](const std::vector<Groups>& participants) {
+    std::int64_t entries = 0;
+    std::int64_t occurrences = 0;
+    for (const auto& g : participants) {
+      for (const auto& [count, length] : g) {
+        entries += count;
+        occurrences += count * length;
+      }
+    }
+    try {
+      detail::check_forwarding_count(detail::ForwardingCounter::Entry, entries);
+      detail::check_forwarding_count(detail::ForwardingCounter::Occurrence, occurrences);
+    } catch (const std::invalid_argument& e) {
+      return std::string(e.what());
+    }
+    return std::string("within the entry and occurrence limits");
+  };
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  detail::thread_forwarding_limits() = {};
+#endif
+  EXPECT_EQ(check({{{10000, 214749}}}), "forwarding occurrence limit exceeded: 2147490000 > 2147483647");
+  EXPECT_EQ(check({{{10000, 214748}, {1, 3647}}}), "within the entry and occurrence limits");
+  EXPECT_EQ(check({{{10000, 214748}, {1, 3648}}}), "forwarding occurrence limit exceeded: 2147483648 > 2147483647");
+  EXPECT_EQ(check({{{1, 1073741824}}}), "within the entry and occurrence limits");
+  EXPECT_EQ(check({{{1, 1073741824}}, {{1, 1073741824}}}), "forwarding occurrence limit exceeded: 2147483648 > 2147483647");
+  EXPECT_EQ(check({{{2147483648, 1}}}), "forwarding entry limit exceeded: 2147483648 > 2147483647");
+}
+// The list's offers as C++ values (the Python conversions, a bool, a string, a fraction, a float or
+// an int beyond 64 bits, have no C++ form): -1 fails the call's domain, 5 and +inf are valid.
+TEST(ContractExamples, ERR_class_list) {
+  const Net n({{0, 1, 10, 1}});
+  auto run = [&](std::optional<Amount> offer) {
+    FlowLedger ledger(n.g);
+    FlowPolicy p(ledger, v({0}), v({1}), {.routing = ShortestPaths {}, .admission = LY});
+    const std::string e = error_of([&] { (void)apply_actions(ledger, std::vector<Action> {Place {p, offer}}, BatchMode::Ordered); });
+    return e.empty() ? std::string("valid") : e;
+  };
+  EXPECT_EQ(run(-1), "offer must be an integer in [0, 2^62) or permitted +inf");
+  EXPECT_EQ(run(5), "valid");
+  EXPECT_EQ(run(std::nullopt), "valid");
 }

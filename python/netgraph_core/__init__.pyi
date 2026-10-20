@@ -16,6 +16,8 @@ to this file (``py.typed`` marks the package as typed).
   ``DistributedTE`` (T1, with ``TunnelCount``), ``CentralizedTE`` (with ``tunnel_count``: T2), ``Pinned``, and
   ``PlacementResult`` (with its ``SourceFlow`` and ``TunnelFlow`` rows and its ``TunnelPlan``),
   ``OutputOptions``, ``Termination``.
+- Several policies in one operation: ``apply_actions`` over ``Place``, ``Replace`` and ``Forward``
+  actions, in a ``BatchMode`` (ORDERED or SIMULTANEOUS).
 - The shortest-path cache: ``ShortestPathCache`` (building and frozen modes), ``ShortestPathCacheMiss``.
 - The evaluators: ``evaluate_demand``, ``evaluate_pairs``, ``evaluate_edge_failures``.
 - The searches: ``spf`` (``Direction``, ``SpfOptions``, ``SpfResult``, ``UNREACHABLE``),
@@ -66,6 +68,11 @@ __all__: list[str] = [
     "TunnelFlow",
     "TunnelPlan",
     "FlowPolicy",
+    "Place",
+    "Replace",
+    "Forward",
+    "BatchMode",
+    "apply_actions",
     "ShortestPathCache",
     "ShortestPathCacheMiss",
     "ShortestPathCacheStats",
@@ -2173,6 +2180,134 @@ class FlowPolicy:
         the installed ForwardingProgram; None before the first preparation and after remove()
         """
 
+class BatchMode:
+    """
+    How apply_actions runs its list. ORDERED: each action as its scalar call, in list order, on the
+    state the earlier actions left (earlier actions are served first). SIMULTANEOUS: every action forwarded at
+    the same time on one view, losses shared on links across the demands.
+
+    Members:
+
+      ORDERED
+
+      SIMULTANEOUS
+    """
+
+    ORDERED: typing.ClassVar[BatchMode]
+    SIMULTANEOUS: typing.ClassVar[BatchMode]
+    __members__: typing.ClassVar[dict[str, BatchMode]]
+
+    @typing.overload
+    def __eq__(self, other: BatchMode, /) -> bool: ...
+    @typing.overload
+    def __eq__(self, other: typing.Any, /) -> bool: ...
+    def __getstate__(self) -> int: ...
+    def __hash__(self) -> int: ...
+    def __index__(self) -> int: ...
+    def __init__(self, value: typing.SupportsInt | typing.SupportsIndex) -> None: ...
+    def __int__(self) -> int: ...
+    @typing.overload
+    def __ne__(self, other: BatchMode, /) -> bool: ...
+    @typing.overload
+    def __ne__(self, other: typing.Any, /) -> bool: ...
+    def __repr__(self) -> str: ...
+    def __setstate__(
+        self, state: typing.SupportsInt | typing.SupportsIndex, /
+    ) -> None: ...
+    def __str__(self) -> str: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+
+class Place:
+    """
+    An incremental place(offer) of policy in an apply_actions list (ORDERED only). An immutable value:
+    policy (a FlowPolicy, kept alive) and offer (int units or a float, kept as given; another type
+    raises TypeError here, a value outside the domain raises the call's ValueError at apply_actions).
+    """
+
+    def __init__(
+        self, policy: FlowPolicy, offer: typing.SupportsIndex | float | numpy.floating
+    ) -> None: ...
+    @property
+    def offer(self) -> int | float:
+        """
+        the offer as given (int units or a float)
+        """
+
+    @property
+    def policy(self) -> FlowPolicy:
+        """
+        the FlowPolicy
+        """
+
+class Replace:
+    """
+    A replace(offer, design_demand) of policy in an apply_actions list; SIMULTANEOUS takes it only for
+    ShortestPaths EQUAL or WEIGHTED and for Pinned. An immutable value: policy (kept alive), offer and
+    design_demand (int units or a float, kept as given; None: absent; another type raises TypeError
+    here, a value outside the domain raises the call's ValueError at apply_actions).
+    """
+
+    def __init__(
+        self,
+        policy: FlowPolicy,
+        offer: typing.SupportsIndex | float | numpy.floating,
+        *,
+        design_demand: typing.SupportsIndex | float | numpy.floating | None = None,
+    ) -> None: ...
+    @property
+    def design_demand(self) -> int | float | None:
+        """
+        the design demand as given (int units or a float); None: absent
+        """
+
+    @property
+    def offer(self) -> int | float:
+        """
+        the offer as given (int units or a float)
+        """
+
+    @property
+    def policy(self) -> FlowPolicy:
+        """
+        the FlowPolicy
+        """
+
+class Forward:
+    """
+    A forward(offer, black_holes) of policy over its installed program in an apply_actions list. An
+    immutable value: policy and black_holes (an Eligibility of the policy's graph or None) kept alive,
+    offer (int units or a float, kept as given; another type raises TypeError here, a value outside
+    the domain raises the call's ValueError at apply_actions).
+    """
+
+    def __init__(
+        self,
+        policy: FlowPolicy,
+        offer: typing.SupportsIndex | float | numpy.floating,
+        *,
+        black_holes: Eligibility | None = None,
+    ) -> None: ...
+    @property
+    def black_holes(self) -> Eligibility | None:
+        """
+        the black holes (an Eligibility); None: none
+        """
+
+    @property
+    def offer(self) -> int | float:
+        """
+        the offer as given (int units or a float)
+        """
+
+    @property
+    def policy(self) -> FlowPolicy:
+        """
+        the FlowPolicy
+        """
+
 class EvaluationOptions:
     """
     The options of every evaluator (evaluate_demand, evaluate_pairs, evaluate_edge_failures): config
@@ -2458,6 +2593,45 @@ class SpfResult:
         with targets: the cost of the nearest targets, None when no target is reached; None for a
         full search
         """
+
+def apply_actions(
+    ledger: FlowLedger,
+    actions: collections.abc.Sequence[Place | Replace | Forward],
+    *,
+    mode: BatchMode = ...,
+    outputs: OutputOptions | None = None,
+) -> list[PlacementResult]:
+    """
+    Run the actions of several policies of ledger (a sequence of Place, Replace and Forward) as one
+    transaction -> list[PlacementResult], one per action in input order, each the scalar call's fields
+    for its policy. The whole list is validated first, then computed, then published once (one exchange
+    of every policy's records, then their epochs): a failed call raises with the ledger and every
+    policy unchanged (with the two limits in the module docstring). A policy appears at most once, and
+    every policy belongs to ledger.
+    mode ORDERED: each action runs in list order on a private working state exactly as its scalar call
+    would on the state the earlier actions left (their carried load and holds); new records take
+    FlowIds in list order. Earlier actions are served first: a reservation gives no protection. mode SIMULTANEOUS:
+    Replace of ShortestPaths EQUAL or WEIGHTED (routes prepared on the view) and of Pinned, Forward of
+    any policy with an installed program, every one LOSSY with a finite offer, forwarded at the same
+    time on one view: the residual plus every participant's old carried load (outside owners and orphans
+    stay; holds are never added). At a link that cannot carry its arrivals the loss is shared by highest
+    averages over the demands (ties by policy creation order, never by list position), then over each
+    demand's sources, then its tunnels; each participant's black holes are its own. Permuting the list
+    changes nothing. outputs (OutputOptions; None: none) as for the scalar calls: residual and
+    saturated_boundary_edges read the state after that action (ORDERED) or after the whole list
+    (SIMULTANEOUS, one residual for every entry, each entry's boundary from its own sources and mask).
+    Checked in this order: the arguments' types (TypeError: `ledger must be a FlowLedger`, `actions must
+    be a sequence of Place, Replace or Forward (got <type>)`, `actions[<i>] must be a Place, Replace or
+    Forward (got <type>)`, `mode must be a BatchMode (got <type>)`, `outputs must be an OutputOptions
+    (got <type>)`); mode's value (`mode: <v> is not a value of BatchMode`); an empty list returns [];
+    then each action in list order, all of its checks before the next action's: `list policy belongs
+    to another ledger`, `duplicate policy in list`, SIMULTANEOUS's own rules (`SIMULTANEOUS does not
+    accept Place`, `SIMULTANEOUS Replace requires ShortestPaths EQUAL or WEIGHTED, or Pinned`,
+    `SIMULTANEOUS requires admission=LOSSY`, `SIMULTANEOUS requires finite offers`), then the scalar
+    call's checks in its order. Only then is anything computed; an error of the computation (a
+    loss-iteration error, a solver or forwarding size limit, the record identity limit counted for the
+    whole list) publishes nothing.
+    """
 
 @typing.overload
 def as_float(

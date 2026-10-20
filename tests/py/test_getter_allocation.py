@@ -234,6 +234,9 @@ def wide_values():
         controller, offer=cap, design_demand=cap
     )
     out["SpfOptions"] = ngc.SpfOptions(ngc.Direction.FORWARD, min_residual=cap)
+    out["Place"] = ngc.Place(sp, cap)
+    out["Replace"] = ngc.Replace(sp, cap, design_demand=cap)
+    out["Forward"] = ngc.Forward(sp, cap)
     return out
 
 

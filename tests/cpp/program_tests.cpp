@@ -1017,6 +1017,104 @@ TEST(ProgramCycles, SubdivisionInvariant) {
   EXPECT_EQ(error_of([&] { (void)p->replace(3); }), kPeriodTwo);
 }
 
+// A scalar call's black holes add no barrier: STALE-black-hole-in-cycle's graph (input rows 0 to
+// 18, the example's EdgeIds there) with one head S = 17 feeding its four tunnels (wide rows 19 to
+// 22) and wide exits from each tunnel's end to one destination 18 (rows 23 to 25), so every tunnel
+// ends at the destination; one Pinned LOSSY program of four tunnels, weights 13, 11, 10, 5, and
+// replace(39) (the heads' amounts 13, 11, 10, 5), black holes on rows 2, 6 and 17. Tunnels 0 and 3
+// reach a black hole (BLACKHOLED); their arrivals there are dropped without a barrier, so the cyclic
+// group keeps its four physical barriers: the round-limit error after 64 * 4 = 256 rounds (the old
+// form, a black-holed link at capacity 0 inside the group, made a fifth barrier: 320). Without the
+// black holes the same call settles. LOSSLESS keeps its bound: a black-holed link serves 0, so the bound is
+// 0 (tunnel 0, on a black hole, takes the first unit).
+TEST(ProgramCycles, BlackHolesAddNoBarrier) {
+  const std::vector<InEdge> rows = {
+      {0, 1, 12, 1},   {1, 6, 1000, 1},  {1, 16, 1000, 1}, {2, 3, 9, 1},     {3, 0, 1000, 1},  {3, 10, 1000, 1},
+      {4, 5, 7, 1},    {5, 6, 1000, 1},  {6, 7, 13, 1},    {7, 2, 1000, 1},  {7, 10, 1000, 1}, {8, 9, 1, 1},
+      {10, 11, 10, 1}, {11, 2, 1000, 1}, {12, 4, 1000, 1}, {13, 6, 1000, 1}, {14, 0, 1000, 1}, {15, 0, 1000, 1},
+      {16, 2, 1000, 1}, {17, 12, 1000, 1}, {17, 13, 1000, 1}, {17, 14, 1000, 1}, {17, 15, 1000, 1},
+      {11, 18, 1000, 1}, {1, 18, 1000, 1},  {7, 18, 1000, 1}};
+  const auto g = shared(make_graph(19, rows));
+  const auto id = id_of_input(*g);
+  auto ids = [&](std::vector<std::int32_t> in) {
+    std::vector<EdgeId> out;
+    for (auto i : in) out.push_back(id[static_cast<std::size_t>(i)]);
+    return out;
+  };
+  const std::vector<Spec> specs = {{17, ids({19, 14, 6, 7, 8, 9, 3, 5, 12, 23}), 13},
+                                   {17, ids({20, 15, 8, 10, 12, 13, 3, 4, 0, 24}), 11},
+                                   {17, ids({21, 16, 0, 1, 8, 25}), 10},
+                                   {17, ids({22, 17, 0, 2, 18, 3, 5, 12, 23}), 5}};
+  const auto prog = tunnels(*g, {17}, {18}, specs);
+  const auto black = no_edges(*g, ids({2, 6, 17}));
+  auto stale = pinned(g, prog, LOSSY, nullptr, black);
+  const auto ledger = ledger_state(*stale.ledger);
+  EXPECT_EQ(error_of([&] { (void)stale->replace(39); }), kRoundLimit);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(detail::thread_lossy_counters().groups, 1);
+  EXPECT_EQ(detail::thread_lossy_counters().rounds, 256);
+#endif
+  expect_same(ledger_state(*stale.ledger), ledger, "the round-limit error");
+  EXPECT_EQ(stale->program(), nullptr);
+  // The statuses of the same program forwarded where it settles (a smaller offer).
+  const auto settled = stale->evaluate(4);
+  ASSERT_EQ(settled.by_tunnel.size(), 4U);
+  EXPECT_EQ(settled.by_tunnel[0].status, BLACKHOLED);
+  EXPECT_EQ(settled.by_tunnel[1].status, UP);
+  EXPECT_EQ(settled.by_tunnel[2].status, UP);
+  EXPECT_EQ(settled.by_tunnel[3].status, BLACKHOLED);
+  // Control: without black holes the call settles.
+  EXPECT_NO_THROW((void)pinned(g, prog, LOSSY)->replace(39));
+  // LOSSLESS: a black-holed link serves 0.
+  EXPECT_EQ(pinned(g, prog, LOSSLESS, nullptr, black)->evaluate(INF).call_delivered, 0);
+}
+
+// A tunnel whose share is 0 adds no wait, in a scalar call too: one Pinned LOSSY program, sources
+// sA, sB; sA's tunnels A (X, L0, L1; weight 100) and Z (L0, X; weight w), sB's tunnel B (L1, L0).
+// replace(4): RR gives each head 2, H(2, [100, 1]) gives Z 0. The period-2 error at round 3 with Z
+// at weight 0 (not forwarded) and at weight 1 (forwarded with share 0) alike.
+TEST(ProgramCycles, ZeroShareTunnelAddsNoWait) {
+  // sA 0, sB 1, n1..n6 2..7, dA 8, dB 9, dZ 10; rows X, L0, L1 first.
+  const auto g = shared(make_graph(11, {{2, 3, 1, 1},   {4, 5, 1, 1},   {6, 7, 2, 1},   {0, 2, 100, 1}, {3, 4, 100, 1},
+                                        {5, 6, 100, 1}, {7, 8, 100, 1}, {1, 6, 100, 1}, {7, 4, 100, 1}, {5, 9, 100, 1},
+                                        {0, 4, 100, 1}, {5, 2, 100, 1}, {3, 10, 100, 1}}));
+  const auto id = id_of_input(*g);
+  auto ids = [&](std::vector<int> in) {
+    std::vector<EdgeId> out;
+    for (int i : in) out.push_back(id[static_cast<std::size_t>(i)]);
+    return out;
+  };
+  for (Amount z : {0, 1}) {
+    const auto prog = tunnels(*g, {0, 1}, {8, 9, 10},
+                              {{0, ids({3, 0, 4, 1, 5, 2, 6}), 100}, {0, ids({10, 1, 11, 0, 12}), z}, {1, ids({7, 2, 8, 1, 9}), 1}});
+    auto p = pinned(g, prog, LOSSY);
+    EXPECT_EQ(error_of([&] { (void)p->replace(4); }), kPeriodTwo) << "Z weight " << z;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    EXPECT_EQ(detail::thread_lossy_counters().rounds, 3) << "Z weight " << z;
+#endif
+  }
+}
+
+// The LOSSLESS search probes totals up to the first links' capacity: here 3 * 2^60 - 1 over two
+// tunnels that share edge 2 (0 -> 1 -> 3 and 0 -> 2 -> 1 -> 3, round robin), so the first probe's
+// link sums take the saturating no-drop pass (a total of 2^61 or more on a link shared twice) and
+// the later probes the plain one; the bound is the shared edge's 10 either way. LOSSY forwarding of
+// a (2^60 and 2^60 - 1 per tunnel): edge 3 (2^40) drops 2^60 - 1 - 2^40 of tunnel 1, edge 2 gives
+// its 10 to tunnel 0 (highest averages over 2^60 and 2^40) and drops the rest.
+TEST(LosslessBound, WideFirstLinksProbeBothSums) {
+  const Amount a = (Amount {1} << 61) - 1;
+  const Amount b = Amount {1} << 60;
+  const auto g = shared(make_graph(4, {{0, 1, a, 1}, {0, 2, b, 1}, {1, 3, 10, 1}, {2, 1, Amount {1} << 40, 1}}));
+  const auto prog = tunnels(*g, {0}, {3}, {{0, {0, 2}, 1}, {0, {1, 3, 2}, 1}});
+  const auto lossless = pinned(g, prog, LOSSLESS)->evaluate(INF);
+  EXPECT_EQ(lossless.call_delivered, 10);
+  EXPECT_EQ(rows(lossless), (Rows {{0, 0, UP, 5, 5, 0}, {1, 0, UP, 5, 5, 0}}));
+  const auto lossy = pinned(g, prog, LOSSY)->replace(a);
+  EXPECT_EQ(lossy.call_delivered, 10);
+  EXPECT_EQ(lossy.call_edge_drops, (std::vector<std::pair<EdgeId, Amount>> {{2, b - 10 + (Amount {1} << 40)}, {3, b - 1 - (Amount {1} << 40)}}));
+  EXPECT_EQ(rows(lossy), (Rows {{0, 0, UP, b, 10, b - 10}, {1, 0, UP, b - 1, 0, b - 1}}));
+}
+
 #if NETGRAPH_CORE_PRIVATE_HOOKS
 // Through the hook: an iterated result corrupted after its rounds fails the independent check
 // with std::runtime_error, and nothing is published.

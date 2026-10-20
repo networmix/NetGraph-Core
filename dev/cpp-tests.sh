@@ -26,6 +26,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # compares no trace, and PolicyFixtures.ACorruptedExpectationFails corrupts only what that replay
 # compares (see flow_policy_fixture_tests.cpp's header).
 EXPECTED_OFF_SKIPS="
+ApplyActions.ForwardingSizesCountEveryParticipant
 FlowCoreDeletion.CheckpointsEqualTheIterativeUpdate
 FlowCoreDeletion.RerunningTheFailedSearchAddsExactlyOneSearch
 ForwardingSize.TheCallChecksEachCountInOrder

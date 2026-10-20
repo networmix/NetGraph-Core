@@ -436,6 +436,126 @@ inline std::uint64_t pooled_place(const Graph& g, const std::vector<std::pair<st
   return d.h;
 }
 
+// Several demands at once: the pooled demands of pooled_place (ShortestPaths Equal Lossy, one
+// ledger per iteration, the policies created in demand order) given a full offer each: as scalar
+// replace(to_units(offer)) calls in demand order, or as one apply_actions list of the same Replace
+// actions (ORDERED: the same work as the scalar calls, the same results; SIMULTANEOUS: forwarded at
+// once). The digest folds every entry as pooled_place folds a call.
+enum class Batch { Scalar, Ordered, Simultaneous };
+inline std::uint64_t batch_place(const Graph& g, const std::vector<std::pair<std::vector<int>, int>>& demands, double offer, Batch mode) {
+  const auto cfg = config(nc::ShortestPaths {}, Kernel::Lossy);
+  nc::FlowLedger fg(g.g);
+  std::vector<std::unique_ptr<nc::FlowPolicy>> policies;
+  const auto units = nc::to_units(offer, kResolution);
+  for (const auto& [srcs, dst] : demands) {
+    const std::vector<nc::NodeId> sv(srcs.begin(), srcs.end());
+    const nc::NodeId tv[1] = {dst};
+    policies.push_back(std::make_unique<nc::FlowPolicy>(fg, sv, tv, cfg));
+  }
+  std::vector<nc::PlacementResult> results;
+  if (mode == Batch::Scalar) {
+    for (auto& p : policies) results.push_back(p->replace(units));
+  } else {
+    std::vector<nc::Action> actions;
+    for (auto& p : policies) actions.push_back(nc::Replace {*p, units});
+    results = nc::apply_actions(fg, actions, mode == Batch::Ordered ? nc::BatchMode::Ordered : nc::BatchMode::Simultaneous);
+  }
+  Digest d;
+  for (const auto& r : results) {
+    d.add_i(r.call_delivered);
+    nc::Amount drops = 0;
+    for (const auto& [e, x] : r.call_edge_drops) drops += x;
+    d.add_i(drops);
+    d.add_i(static_cast<std::int64_t>(r.call_edge_drops.size()));
+    for (const auto& row : r.by_source) {
+      d.add_i(row.source);
+      d.add(row.admitted.lo);
+      d.add_i(row.delivered);
+      d.add(row.source_drops.lo);
+      d.add(row.total_edge_drops.lo);
+    }
+  }
+  return d.h;
+}
+
+// The ring: routers 0..63 with ring links i -> (i + 1) mod 64 of 3 units (EdgeIds 0..63), heads
+// 64..127 with wide feeders head i -> router i, wide exits router i -> 128 (2^40 units each; built
+// in units, not through a resolution). Tunnel i: its feeder, ring links i and i + 1, the exit of
+// router i + 2. Every ring link carries two tunnels of 3 (load 6 > 3): 64 barriers in one cyclic
+// group that settles at round 6, every head delivering 1. As one 64-head Pinned LOSSY program (one
+// policy, replace(192): 3 per head) or as 64 one-tunnel Pinned LOSSY policies created in head
+// order (one SIMULTANEOUS list of Replace(3) each), each on its own ledger, built once.
+struct Ring {
+  std::shared_ptr<const nc::Graph> g;
+  std::unique_ptr<nc::FlowLedger> program_ledger;
+  std::unique_ptr<nc::FlowLedger> list_ledger;
+  std::unique_ptr<nc::FlowPolicy> program;
+  std::vector<std::unique_ptr<nc::FlowPolicy>> policies;
+};
+inline std::shared_ptr<Ring> ring_fixture() {
+  constexpr int n = 64;
+  constexpr nc::Amount wide = nc::Amount {1} << 40;
+  std::vector<std::int32_t> src;
+  std::vector<std::int32_t> dst;
+  std::vector<nc::Amount> units;
+  for (int i = 0; i < n; ++i) src.push_back(i), dst.push_back((i + 1) % n), units.push_back(3);
+  for (int i = 0; i < n; ++i) src.push_back(i), dst.push_back(2 * n), units.push_back(wide);
+  for (int i = 0; i < n; ++i) src.push_back(n + i), dst.push_back(i), units.push_back(wide);
+  auto ring = std::make_shared<Ring>();
+  ring->g = std::make_shared<const nc::Graph>(2 * n + 1, src, dst, units, std::vector<std::int64_t>(src.size(), 1), kResolution);
+  const auto inv = ring->g->input_positions();
+  std::vector<std::int32_t> id(inv.size());
+  for (std::size_t e = 0; e < inv.size(); ++e) id[static_cast<std::size_t>(inv[e])] = static_cast<std::int32_t>(e);
+  auto tunnel = [&](int i) {
+    const std::vector<std::vector<nc::EdgeId>> hops = {{id[static_cast<std::size_t>(2 * n + i)]}, {id[static_cast<std::size_t>(i)]},
+                                                       {id[static_cast<std::size_t>((i + 1) % n)]}, {id[static_cast<std::size_t>(n + (i + 2) % n)]}};
+    return nc::RouteDefinition {n + i, std::make_shared<const nc::Path>(*ring->g, hops), 1};
+  };
+  const nc::NodeId sink[1] = {2 * n};
+  std::vector<nc::NodeId> heads;
+  std::vector<nc::RouteDefinition> all;
+  for (int i = 0; i < n; ++i) heads.push_back(n + i), all.push_back(tunnel(i));
+  ring->program_ledger = std::make_unique<nc::FlowLedger>(ring->g);
+  ring->list_ledger = std::make_unique<nc::FlowLedger>(ring->g);
+  auto pinned = [](std::shared_ptr<const nc::ForwardingProgram> prog) {
+    nc::FlowPolicyConfig cfg;
+    cfg.routing = nc::Pinned {std::move(prog), nullptr};
+    cfg.admission = nc::Admission::Lossy;
+    return cfg;
+  };
+  ring->program = std::make_unique<nc::FlowPolicy>(*ring->program_ledger, heads, sink, pinned(nc::ForwardingProgram::from_routes(*ring->g, heads, sink, all)));
+  for (int i = 0; i < n; ++i) {
+    const nc::NodeId h[1] = {n + i};
+    const std::vector<nc::RouteDefinition> one = {tunnel(i)};
+    ring->policies.push_back(std::make_unique<nc::FlowPolicy>(*ring->list_ledger, h, sink, pinned(nc::ForwardingProgram::from_routes(*ring->g, h, sink, one))));
+  }
+  return ring;
+}
+// The digest of a ring forwarding: per head its delivery, then per ring link its carried load.
+inline std::uint64_t ring_digest(const std::vector<nc::Amount>& delivered, std::span<const nc::Amount> carried) {
+  Digest d;
+  for (auto x : delivered) d.add_i(x);
+  for (int e = 0; e < 64; ++e) d.add_i(carried[static_cast<std::size_t>(e)]);
+  return d.h;
+}
+// One replace(192) of the ring's one program (a replace releases its own load: every iteration
+// starts from the same state).
+inline std::uint64_t ring_program(Ring& r) {
+  const auto res = r.program->replace(192);
+  std::vector<nc::Amount> delivered;
+  for (const auto& t : res.by_tunnel) delivered.push_back(t.delivered);
+  return ring_digest(delivered, r.program_ledger->carried());
+}
+// One SIMULTANEOUS list of the 64 one-tunnel policies, Replace(3) each.
+inline std::uint64_t ring_list(Ring& r) {
+  std::vector<nc::Action> actions;
+  for (auto& p : r.policies) actions.push_back(nc::Replace {*p, 3});
+  const auto res = nc::apply_actions(*r.list_ledger, actions, nc::BatchMode::Simultaneous);
+  std::vector<nc::Amount> delivered;
+  for (const auto& x : res) delivered.push_back(x.call_delivered);
+  return ring_digest(delivered, r.list_ledger->carried());
+}
+
 // Pooled programs from supplied DAGs: per demand, ForwardingProgram::from_dag of its sources over
 // the reverse shortest-path DAG to its destination (trimmed to the sources' walks: their selected
 // supports, the DAG ShortestPaths Equal pools).

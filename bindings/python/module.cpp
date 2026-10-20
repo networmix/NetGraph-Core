@@ -2,7 +2,7 @@
   Pybind11 module `_netgraph_core`: the graph on integer units with Eligibility and the unit
   conversions, the route structures (PredecessorDAG, Path), the route choice and placement axes, the
   ledger with its records, the forwarding programs, the policy engine with its configuration
-  and results, the ShortestPathCache,
+  and results, several policies' actions in one operation (apply_actions), the ShortestPathCache,
   the evaluators (evaluate_demand, evaluate_pairs, evaluate_edge_failures) and the public search (spf, ksp,
   resolve_to_paths); and one private entry: the flow core's _solve_min_cost_flow.
   A build with the private hooks (CMake NETGRAPH_CORE_PRIVATE_HOOKS: the editable development
@@ -33,8 +33,9 @@ using namespace netgraph::core;
 PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
   m.doc() =
       "NetGraph-Core: the graph on integer units, the route structures, the integer ledger, the forwarding\n"
-      "programs, the policy engine FlowPolicy, the ShortestPathCache, the evaluators (evaluate_demand,\n"
-      "evaluate_pairs, evaluate_edge_failures) and the searches (spf, ksp, resolve_to_paths).\n"
+      "programs, the policy engine FlowPolicy and its lists of actions (apply_actions), the ShortestPathCache,\n"
+      "the evaluators (evaluate_demand, evaluate_pairs, evaluate_edge_failures) and the searches (spf, ksp,\n"
+      "resolve_to_paths).\n"
       "One rule for the class of an input error, at every public entry: a type the position never takes\n"
       "(a bool at a numeric position, a float where only an integer is taken, a string, None where none\n"
       "is allowed, another class; for a vector a non-sequence, a nested entry, an array of another rank\n"
@@ -64,6 +65,7 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
   bindings::register_placement_result(m);
   bindings::register_shortest_path_cache(m);
   bindings::register_flow_policy(m);
+  bindings::register_apply_actions(m);
   bindings::register_evaluators(m);
   bindings::register_paths(m);
   bindings::register_search(m);

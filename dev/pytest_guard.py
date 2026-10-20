@@ -235,6 +235,15 @@ EXPECTED_OFF_SKIPS = [
     (
         "tests/py/test_centralized_te_tunnels.py::test_t2_results_survive_python_allocation_failures[replace]"
     ),
+    "tests/py/test_apply_actions.py::test_forwarding_bounds",
+    "tests/py/test_apply_actions.py::test_lists_are_all_or_nothing",
+    "tests/py/test_contract_examples.py::test_contract_example[ERR-forwarding-limit]",
+    (
+        "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[apply_actions.ordered]"
+    ),
+    (
+        "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[apply_actions.simultaneous]"
+    ),
 ]
 EXPECTED_OFF_SKIPPED_PREFIX = "tests/py/test_flow_policy_fixtures.py::test_fixture["
 

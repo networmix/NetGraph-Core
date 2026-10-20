@@ -15,6 +15,8 @@ to this file (``py.typed`` marks the package as typed).
   ``DistributedTE`` (T1, with ``TunnelCount``), ``CentralizedTE`` (with ``tunnel_count``: T2), ``Pinned``, and
   ``PlacementResult`` (with its ``SourceFlow`` and ``TunnelFlow`` rows and its ``TunnelPlan``),
   ``OutputOptions``, ``Termination``.
+- Several policies in one operation: ``apply_actions`` over ``Place``, ``Replace`` and ``Forward``
+  actions, in a ``BatchMode`` (ORDERED or SIMULTANEOUS).
 - The shortest-path cache: ``ShortestPathCache`` (building and frozen modes), ``ShortestPathCacheMiss``.
 - The evaluators: ``evaluate_demand``, ``evaluate_pairs``, ``evaluate_edge_failures``.
 - The searches: ``spf`` (``Direction``, ``SpfOptions``, ``SpfResult``, ``UNREACHABLE``),
@@ -29,6 +31,7 @@ from _netgraph_core import (
     UNREACHABLE,
     AbsoluteCost,
     Admission,
+    BatchMode,
     CentralizedTE,
     CostStretch,
     Direction,
@@ -39,14 +42,17 @@ from _netgraph_core import (
     FlowPolicy,
     FlowPolicyConfig,
     FlowRecord,
+    Forward,
     ForwardingProgram,
     Graph,
     KspOptions,
     OutputOptions,
     Path,
     Pinned,
+    Place,
     PlacementResult,
     PredecessorDAG,
+    Replace,
     RouteAllocation,
     RouteDefinition,
     RouteTieBreak,
@@ -67,6 +73,7 @@ from _netgraph_core import (
     TunnelPlan,
     TunnelStatus,
     WeightBasis,
+    apply_actions,
     as_float,
     evaluate_demand,
     evaluate_edge_failures,
@@ -113,6 +120,11 @@ __all__ = [
     "TunnelFlow",
     "TunnelPlan",
     "FlowPolicy",
+    "Place",
+    "Replace",
+    "Forward",
+    "BatchMode",
+    "apply_actions",
     "ShortestPathCache",
     "ShortestPathCacheMiss",
     "ShortestPathCacheStats",

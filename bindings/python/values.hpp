@@ -1,7 +1,8 @@
 /*
   Small conversions shared by the registration files: read-only NumPy views that
   keep their owner alive, the resolution's check, exact counters, int64 arrays, FlowIds,
-  (EdgeId, units) pairs and the type checks of option arguments.
+  (EdgeId, units) pairs, amounts (checked at once or kept as given) and the type checks of option
+  arguments.
 */
 #pragma once
 
@@ -15,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -22,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "netgraph/core/eligibility.hpp"
 #include "netgraph/core/flow_record.hpp"
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/graph.hpp"
@@ -240,6 +243,49 @@ inline std::optional<Amount> units_or_inf(const py::object& value, const char* t
   const long long v = PyLong_AsLongLongAndOverflow(idx.ptr(), &overflow);
   if (overflow != 0 || v < 0 || v >= kDomainLimit) throw py::value_error(text);
   return static_cast<Amount>(v);
+}
+
+// An amount kept as given (Units: an int or a float; None: absent): an action's offer and design
+// demand, an EvaluationOptions option. A value of another type (a bool, a string, ...) raises
+// TypeError here; its domain is the call's check. An __index__ object is kept as its int.
+inline py::object units_as_given(const py::object& obj, const char* name) {
+  if (obj.is_none() || PyFloat_Check(obj.ptr()) || has_type(obj.ptr(), numpy_number_types().second)) {
+    return obj;
+  }
+  if (!is_bool(obj) && PyIndex_Check(obj.ptr())) {
+    auto idx = py::reinterpret_steal<py::object>(PyNumber_Index(obj.ptr()));
+    if (!idx) throw py::error_already_set();
+    return idx;
+  }
+  throw py::type_error(std::string(name) + " must be an int or a float (got " +
+                       std::string(py::str(py::type::of(obj).attr("__name__"))) + ")");
+}
+
+// The C++ form of an amount kept as given: None absent; +inf the inner nullopt; an int in int64 its
+// value; any other value (a float other than +inf, an int beyond int64) -1, which is outside every
+// domain and so raises the amount's domain error in its place.
+inline std::optional<std::optional<Amount>> units_at_use(const py::object& obj) {
+  if (obj.is_none()) return std::nullopt;
+  if (PyLong_Check(obj.ptr())) {
+    int overflow = 0;
+    const long long v = PyLong_AsLongLongAndOverflow(obj.ptr(), &overflow);
+    if (overflow != 0) return Amount {-1};
+    return Amount {v};
+  }
+  const double x = PyFloat_AsDouble(obj.ptr());
+  if (x == -1.0 && PyErr_Occurred() != nullptr) throw py::error_already_set();
+  if (std::isinf(x) && x > 0) return std::optional<std::optional<Amount>> {std::in_place, std::nullopt};
+  return Amount {-1};
+}
+
+// A black-hole set argument: an Eligibility or None (its graph is checked by the call).
+inline std::shared_ptr<Eligibility> eligibility_or_none(const py::object& obj, const char* name) {
+  if (obj.is_none()) return nullptr;
+  if (!py::isinstance<Eligibility>(obj)) {
+    throw py::type_error(std::string(name) + " must be an Eligibility or None (got " +
+                         std::string(py::str(py::type::of(obj).attr("__name__"))) + ")");
+  }
+  return obj.cast<std::shared_ptr<Eligibility>>();
 }
 
 inline OutputOptions outputs_of(const py::object& obj) {

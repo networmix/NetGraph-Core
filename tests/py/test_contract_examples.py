@@ -2,8 +2,8 @@
 values (copied as written), one adapter per kind of example that builds the input with the library
 and returns what the example names, compared field by field (an expected mapping may name fewer
 fields than the adapter returns; an int is not a float or a bool; a Fraction compares by its exact
-string). The examples whose mechanism needs several demands at once or concurrent publication are
-not here.
+string). The examples of several demands at once run as one apply_actions list (each route or head
+its own demand); the examples of concurrent publication are not here.
 
 Examples given as routes of link indices (no nodes) are laid out as one head, a feeder link to each
 route's first link, a connector between consecutive links and an exit link to one destination;
@@ -19,6 +19,7 @@ import math
 from decimal import Decimal
 from fractions import Fraction
 
+import _netgraph_core as ext
 import numpy as np
 import pytest
 
@@ -1406,13 +1407,22 @@ def input_class(call, *args):
 
 def run_input_classes(cases):
     """Each value at its position: an spf or ksp search option (read at the call), place's offer
-    (on a fresh policy), a ledger's service baseline over links of capacities `caps`."""
+    (on a fresh policy), a ledger's service baseline over links of capacities `caps`, or one Place
+    of a LOSSY ShortestPaths policy of a fresh ledger in an ORDERED apply_actions list, with the
+    case's ledger (the policy's own, or None)."""
     g = ngc.Graph(2, [0], [1], [10], [1], 1.0)
     forward = ngc.Direction.FORWARD
 
     def baseline(v, caps):
         k = len(caps)
         return ngc.FlowLedger(ngc.Graph(2, [0] * k, [1] * k, caps, [1] * k, 1.0), v)
+
+    def listed(v, _):
+        ledger = ngc.FlowLedger(g)
+        p = policy(g, 0, 1, config(ngc.ShortestPaths(), LY), ledger=ledger)
+        action = ngc.Place(p, input_value(v["offer"]))  # its construction comes first
+        own = None if input_value(v["ledger"]) is None else ledger
+        return ngc.apply_actions(own, [action])
 
     calls = {
         "spf min_residual": lambda v, _: ngc.spf(
@@ -1423,6 +1433,7 @@ def run_input_classes(cases):
             v
         ),
         "service_baseline": baseline,
+        "apply_actions": listed,
     }
     out = []
     for case in cases:
@@ -1481,6 +1492,334 @@ def run_number_types(cases):
     return out
 
 
+# -- several demands at once (apply_actions) ---------------------------------------------------
+
+
+def several_demands_layout(cap, routes):
+    """The list layout of routes given as link indices: each route is its own demand from its own
+    head (node i) to one destination (node n); each example link gets its own two nodes, joined to
+    the next link of a route by a link that never limits anything, except where every occurrence
+    of e continues on f and every occurrence of f comes from e: there e's head is f's tail (no
+    join), so the examples' serial pairs stay pairs. Returns the graph, per example link its
+    EdgeId and per route its path of EdgeIds."""
+    nxt = [set() for _ in cap]
+    prv = [set() for _ in cap]
+    for r in routes:
+        for j, e in enumerate(r):
+            nxt[e].add(r[j + 1] if j + 1 < len(r) else -1)
+            prv[e].add(r[j - 1] if j > 0 else -1)
+
+    def fused(e, f):
+        return nxt[e] == {f} and prv[f] == {e}
+
+    n = len(routes)
+    tail = [n + 1 + e for e in range(len(cap))]
+    node = n + 1 + len(cap)
+    head = []
+    for e in range(len(cap)):
+        f = next(iter(nxt[e])) if len(nxt[e]) == 1 else -1
+        if f >= 0 and fused(e, f):
+            head.append(tail[f])
+        else:
+            head.append(node)
+            node += 1
+    rows = [(tail[e], head[e], c, 1) for e, c in enumerate(cap)]
+    positions = []
+    for i, r in enumerate(routes):
+        path = [len(rows)]
+        rows.append((i, tail[r[0]], WIDE, 1))
+        for j, e in enumerate(r):
+            path.append(e)
+            if j + 1 < len(r) and not fused(e, r[j + 1]):
+                path.append(len(rows))
+                rows.append((head[e], tail[r[j + 1]], WIDE, 1))
+        path.append(len(rows))
+        rows.append((head[r[-1]], n, WIDE, 1))
+        positions.append(path)
+    g = ngc.Graph(node, *([row[k] for row in rows] for k in range(4)), 1.0)
+    ids = [0] * len(rows)
+    for e, position in enumerate(g.input_positions().tolist()):
+        ids[position] = e
+    return g, ids, [[ids[k] for k in path] for path in positions]
+
+
+def run_list_lossy(offers, routes, cap):
+    """Each route its own demand: a Pinned LOSSY policy over one tunnel, created in route order,
+    all replaced in one SIMULTANEOUS list. Per demand its arrivals, carried and drops on each link
+    of its route (from its records), its delivery, and per example link the total carried."""
+    g, ids, paths = several_demands_layout(cap, routes)
+    n = len(routes)
+    ledger = ngc.FlowLedger(g)
+    policies = []
+    for i, path in enumerate(paths):
+        program = ngc.ForwardingProgram.from_routes(
+            g, [i], [n], [ngc.RouteDefinition(i, path_of(g, path))]
+        )
+        policies.append(pinned(g, program, LY, ledger=ledger))
+    actions = [ngc.Replace(p, o) for p, o in zip(policies, offers, strict=True)]
+    try:
+        results = ngc.apply_actions(ledger, actions, mode=ngc.BatchMode.SIMULTANEOUS)
+    except ValueError as e:
+        return dict(error=str(e))
+    arrivals, carried, edge_drops = [], [], []
+    for p, route in zip(policies, routes, strict=True):
+        flows, drops = {}, {}
+        for rec in p.records():
+            for e, x in rec.edge_flows:
+                flows[e] = flows.get(e, 0) + x
+            for e, x in rec.edge_drops:
+                drops[e] = drops.get(e, 0) + x
+        carried.append([flows.get(ids[e], 0) for e in route])
+        edge_drops.append([drops.get(ids[e], 0) for e in route])
+        arrivals.append(
+            [c + d for c, d in zip(carried[-1], edge_drops[-1], strict=True)]
+        )
+    total = ledger.carried().tolist()
+    return dict(
+        arrivals=arrivals,
+        carried=carried,
+        edge_drops=edge_drops,
+        delivered=[r.call_delivered for r in results],
+        edge_flows=[total[ids[e]] for e in range(len(cap))],
+    )
+
+
+def run_stale_list(edges, tunnels, offers, black_links=(), black_nodes=()):
+    """Each head its own demand (the examples' labels): a Pinned LOSSY policy over its tunnels with
+    the example's black holes, created in head order, all replaced in one SIMULTANEOUS list. The
+    statuses come from each policy's evaluation of 0 (they depend on the program and the black
+    holes only)."""
+    g = graph_of(edges)
+    ledger = ngc.FlowLedger(g)
+    holes = edge_mask(g, black_links, black_nodes)
+    policies, actions = [], []
+    for h in sorted(offers):
+        mine = [p for th, p in tunnels if th == h]
+        program = ngc.ForwardingProgram.from_routes(
+            g,
+            [h],
+            [edges[mine[0][-1]][1]],
+            [ngc.RouteDefinition(h, path_of(g, p)) for p in mine],
+        )
+        policies.append(pinned(g, program, LY, black_holes=holes, ledger=ledger))
+        actions.append(ngc.Replace(policies[-1], offers[h]))
+    status = [t.status.name for p in policies for t in p.evaluate(0).by_tunnel]
+    try:
+        results = ngc.apply_actions(ledger, actions, mode=ngc.BatchMode.SIMULTANEOUS)
+    except ValueError as e:
+        return dict(error=str(e), status=status)
+    return dict(status=status, delivered=[r.call_delivered for r in results])
+
+
+def run_action_list(edges, actions, mode):
+    """One-tunnel LOSSY Pinned participants created in list order on a fresh ledger, replaced in
+    one list of the mode: per entry its delivery, drops, tunnel status, residual and
+    saturated_boundary_edges (from the entry's own source)."""
+    g = graph_of(edges)
+    ledger = ngc.FlowLedger(g)
+    listed = []
+    for a in actions:
+        route = path_of(g, a["route"])
+        program = ngc.ForwardingProgram.from_routes(
+            g,
+            [a["source"]],
+            [route.destination()],
+            [ngc.RouteDefinition(a["source"], route)],
+        )
+        holes = edge_mask(g, a.get("black_holes", ()))
+        listed.append(
+            ngc.Replace(
+                pinned(g, program, LY, black_holes=holes, ledger=ledger), a["offer"]
+            )
+        )
+    outputs = ngc.OutputOptions(residual=True, saturated_boundary_edges=True)
+    try:
+        results = ngc.apply_actions(
+            ledger, listed, mode=getattr(ngc.BatchMode, mode), outputs=outputs
+        )
+    except ValueError as e:
+        return dict(error=str(e))
+    entries = [
+        dict(
+            delivered=r.call_delivered,
+            call_edge_drops=[list(x) for x in r.call_edge_drops],
+            status=r.by_tunnel[0].status.name,
+            residual=r.residual.tolist(),
+            saturated_boundary_edges=r.saturated_boundary_edges,
+        )
+        for r in results
+    ]
+    return dict(entries=entries)
+
+
+def run_list_validation(cases):
+    """Each case's list with real policies, on one ledger per case over CYC(1, 2) plus a separate
+    link 6 -> 7 of 10: an action's policy (by name, created at its first use) has the case's model
+    and admission on 6 -> 7, a foreign one is of another ledger; a Pinned action that `computes`
+    the period-2 error is the step-3 cycle (two crossing tunnels from 4, weights 1 and 2) with that
+    cycle's offer 3 in place of the case's, another Pinned one a tunnel over 6 -> 7; `program` installs the policy's program first (a replace or a
+    place of 1), `after_infinite` places +inf first, `foreign_black_holes` gives black holes of
+    another graph. The list's first error, or "valid"."""
+    rows = [
+        (0, 1, 1, 1),
+        (1, 2, 1000, 1),
+        (1, 5, 1000, 1),
+        (2, 3, 2, 1),
+        (3, 0, 1000, 1),
+        (3, 5, 1000, 1),
+        (4, 0, 1000, 1),
+        (4, 2, 1000, 1),
+        (6, 7, 10, 1),
+    ]
+    models = {
+        "ShortestPaths": lambda: ngc.ShortestPaths(),
+        "DistributedTE": lambda: ngc.DistributedTE(ngc.TunnelCount(1)),
+        "CentralizedTE": lambda: ngc.CentralizedTE(source_allocation=S.OPTIMIZED),
+    }
+    out = []
+    for case in cases:
+        g = graph_of(rows)
+        ledger = ngc.FlowLedger(g)
+        policies, listed = {}, []
+        for a in case["actions"]:
+            admission = getattr(ngc.Admission, a["admission"])
+            if a["policy"] not in policies:
+                own = ngc.FlowLedger(g) if a.get("foreign") else ledger
+                if a["model"] != "Pinned":
+                    cfg = config(models[a["model"]](), admission)
+                    p = policy(g, 6, 7, cfg, ledger=own)
+                elif a.get("computes"):
+                    cyc = [(4, [6, 0, 1, 3, 5], 1), (4, [7, 3, 4, 0, 2], 2)]
+                    routes = [
+                        ngc.RouteDefinition(h, path_of(g, es), weight=w)
+                        for h, es, w in cyc
+                    ]
+                    program = ngc.ForwardingProgram.from_routes(g, [4], [5], routes)
+                    p = pinned(g, program, admission, ledger=own)
+                else:
+                    program = ngc.ForwardingProgram.from_routes(
+                        g, [6], [7], [ngc.RouteDefinition(6, path_of(g, [8]))]
+                    )
+                    p = pinned(g, program, admission, ledger=own)
+                if a.get("program"):
+                    (p.place if admission == LL else p.replace)(1)
+                if a.get("after_infinite"):
+                    p.place(INF)
+                policies[a["policy"]] = p
+            p = policies[a["policy"]]
+            offer = INF if a["offer"] == "inf" else a["offer"]
+            if a.get("computes"):
+                offer = 3
+            if a["kind"] == "Place":
+                listed.append(ngc.Place(p, offer))
+            elif a["kind"] == "Replace":
+                listed.append(
+                    ngc.Replace(p, offer, design_demand=a.get("design_demand"))
+                )
+            else:
+                holes = None
+                if a.get("foreign_black_holes"):
+                    holes = graph_of(rows).eligibility(excluded_edges=[8])
+                listed.append(ngc.Forward(p, offer, black_holes=holes))
+        try:
+            ngc.apply_actions(ledger, listed, mode=getattr(ngc.BatchMode, case["mode"]))
+            out.append("valid")
+        except ValueError as e:
+            out.append(str(e))
+    return out
+
+
+def run_forwarding_size(cases):
+    """The forwarding sizes' counting step on each case's sizes (per participant, groups of
+    (tunnels, path length)): the entry count, then the occurrence count, each exact against
+    2^31 - 1 (the networks cannot be built at these sizes; test_apply_actions.py shows the same
+    refusals end to end under lowered limits). Needs the private hooks."""
+    if not hasattr(ext, "_check_forwarding_count"):
+        pytest.skip("needs the private hooks (NETGRAPH_CORE_PRIVATE_HOOKS)")
+    out = []
+    for participants in cases:
+        groups = [group for participant in participants for group in participant]
+        entries = sum(count for count, _ in groups)
+        occurrences = sum(count * length for count, length in groups)
+        try:
+            ext._check_forwarding_count(0, entries)
+            ext._check_forwarding_count(1, occurrences)
+            out.append("within the entry and occurrence limits")
+        except ValueError as e:
+            out.append(str(e))
+    return out
+
+
+def own_highest_averages(x, w):
+    """Unit-at-a-time highest averages by exact cross-multiplication, ties to the earlier label:
+    the test's own, sharing nothing with the library."""
+    a = [0] * len(w)
+    for _ in range(x):
+        best = None
+        for i, wi in enumerate(w):
+            if wi > 0 and (best is None or wi * (a[best] + 1) > w[best] * (a[i] + 1)):
+                best = i
+        if best is None:
+            return [0] * len(w)
+        a[best] += 1
+    return a
+
+
+def run_c3(offers, routes, cap):
+    """The C3 instance (A: links 0, 1; B: 1, 2; C: 2, 0): every integer carried record within the
+    continuation bounds (a demand's carried on a link at most its arrival there) and work
+    conservation (each link carries min(capacity, arrivals)), each checked against the link
+    equations with the test's own highest averages; the library's highest averages (private hooks)
+    agrees with it on every equation evaluated; and the list itself raises the period-2 error."""
+    assert offers == [1, 1, 2] and routes == [[0, 1], [1, 2], [2, 0]]
+    records = solutions = 0
+    violations = []
+    for a0, a1, b1, b2, c2, c0 in itertools.product(
+        range(2), range(2), range(2), range(2), range(3), range(3)
+    ):
+        if a1 > a0 or b2 > b1 or c0 > c2:
+            continue
+        # Arrivals: A 1 then a0; B 1 then b1; C 2 then c2. Links: 0 (A, C), 1 (A, B), 2 (B, C).
+        links = [([1, c2], [a0, c0]), ([a0, 1], [a1, b1]), ([b1, 2], [b2, c2])]
+        if any(
+            sum(car) != min(v, sum(arr))
+            for (arr, car), v in zip(links, cap, strict=True)
+        ):
+            continue
+        records += 1
+        bad = []
+        for k, ((arr, car), v) in enumerate(zip(links, cap, strict=True)):
+            t = min(v, sum(arr))
+            mine = own_highest_averages(t, arr)
+            if hasattr(ext, "_highest_averages") and all(arr):
+                assert ext._highest_averages(t, arr) == mine, (arr, t)
+            if mine != car:
+                bad.append(k)
+        solutions += not bad
+        violations.append(bad)
+    assert violations == [[2], [0], [0, 1, 2], [1], [0]], violations
+    assert run_list_lossy(offers, routes, cap) == dict(
+        error="lossy forwarding iteration entered a period-2 cycle"
+    )
+    return dict(feasible_work_conserving_records=records, local_H_solutions=solutions)
+
+
+# The examples of several demands at once that share an oracle with a single program's: each
+# route (or head) is its own demand, all in one SIMULTANEOUS list.
+SEVERAL_DEMANDS = {
+    "D-crossing": run_list_lossy,
+    "D-simultaneous": run_list_lossy,
+    "D-C3": run_list_lossy,
+    "D-cycle-prefix-suffix": run_list_lossy,
+    "D-cycle-subdivision-before": run_list_lossy,
+    "D-cycle-subdivision-after": run_list_lossy,
+    "STALE-cycle-period-2": run_stale_list,
+    "STALE-cycle-round-limit-baseline": run_stale_list,
+    "STALE-cycle-round-limit": run_stale_list,
+    "STALE-black-hole-in-cycle": run_stale_list,
+}
+
+
 ADAPTERS = {
     "ha": run_ha,
     "split_error": run_split_error,
@@ -1517,6 +1856,10 @@ ADAPTERS = {
     "ownership_texts": run_ownership_texts,
     "input_texts": run_input_texts,
     "input_classes": run_input_classes,
+    "action_list": run_action_list,
+    "list_validation": run_list_validation,
+    "forwarding_size": run_forwarding_size,
+    "c3": run_c3,
     "number_types": run_number_types,
 }
 
@@ -5230,6 +5573,704 @@ EXAMPLES = [
             ],
         ],
     },
+    # Several demands at once (apply_actions).
+    {
+        "id": "D-crossing",
+        "oracle": "lossy",
+        "input": {"offers": [8, 4, 4], "routes": [[0, 1], [0], [1]], "cap": [9, 7]},
+        "expected": {
+            "arrivals": [[8, 6], [4], [4]],
+            "carried": [[6, 4], [3], [3]],
+            "edge_drops": [[2, 2], [1], [1]],
+            "delivered": [4, 3, 3],
+            "edge_flows": [9, 7],
+        },
+    },
+    {
+        "id": "D-simultaneous",
+        "oracle": "lossy",
+        "input": {"offers": [10, 10], "routes": [[0], [0]], "cap": [10]},
+        "expected": {
+            "carried": [[5], [5]],
+            "edge_drops": [[5], [5]],
+            "delivered": [5, 5],
+            "edge_flows": [10],
+        },
+    },
+    {
+        "id": "D-C3",
+        "oracle": "lossy",
+        "input": {
+            "offers": [1, 1, 2],
+            "routes": [[0, 1], [1, 2], [2, 0]],
+            "cap": [1, 1, 2],
+        },
+        "expected": {
+            "error": "lossy forwarding iteration entered a period-2 cycle",
+            "rounds": 3,
+        },
+    },
+    {
+        "id": "D-cycle-prefix-suffix",
+        "oracle": "lossy",
+        "input": {
+            "offers": [8, 4],
+            "routes": [[0, 1, 2], [2, 1, 3]],
+            "cap": [2, 5, 5, 10],
+        },
+        "expected": {
+            "arrivals": [[8, 2, 2], [4, 3, 3]],
+            "carried": [[2, 2, 2], [3, 3, 3]],
+            "edge_drops": [[6, 0, 0], [1, 0, 0]],
+            "delivered": [2, 3],
+            "edge_flows": [2, 5, 5, 3],
+        },
+    },
+    {
+        "id": "D-cycle-subdivision-before",
+        "oracle": "lossy",
+        "input": {
+            "offers": [2, 1, 4],
+            "routes": [[1, 0, 2], [2, 0], [2, 0, 1]],
+            "cap": [2, 4, 2],
+        },
+        "expected": {
+            "arrivals": [[2, 2, 1], [1, 0], [4, 2, 1]],
+            "carried": [[2, 1, 0], [0, 0], [2, 1, 1]],
+            "delivered": [0, 0, 1],
+            "edge_flows": [2, 3, 2],
+        },
+    },
+    {
+        "id": "D-cycle-subdivision-after",
+        "oracle": "lossy",
+        "input": {
+            "offers": [2, 1, 4],
+            "routes": [[1, 0, 2, 3], [2, 3, 0], [2, 3, 0, 1]],
+            "cap": [2, 4, 2, 2],
+        },
+        "expected": {
+            "arrivals": [[2, 2, 1, 0], [1, 0, 0], [4, 2, 2, 1]],
+            "carried": [[2, 1, 0, 0], [0, 0, 0], [2, 2, 1, 1]],
+            "delivered": [0, 0, 1],
+            "edge_flows": [2, 3, 2, 2],
+        },
+    },
+    {
+        "id": "D-no-H-fixed-point",
+        "oracle": "c3",
+        "input": {
+            "offers": [1, 1, 2],
+            "routes": [[0, 1], [1, 2], [2, 0]],
+            "cap": [1, 1, 2],
+        },
+        "expected": {"feasible_work_conserving_records": 5, "local_H_solutions": 0},
+    },
+    {
+        "id": "STALE-cycle-period-2",
+        "oracle": "stale_paths",
+        "input": {
+            "edges": [
+                [0, 1, 768, 1],
+                [1, 2, 25600, 1],
+                [2, 3, 768, 1],
+                [3, 0, 25600, 1],
+                [4, 2, 25600, 1],
+                [5, 0, 25600, 1],
+                [6, 2, 25600, 1],
+                [7, 8, 25600, 1],
+            ],
+            "tunnels": [[4, [4, 2, 3, 0]], [5, [5, 0, 1, 2]], [6, [6, 2]], [7, [7]]],
+            "offers": {4: 1024, 5: 256, 6: 256, 7: 512},
+            "black_links": [7],
+        },
+        "expected": {
+            "error": "lossy forwarding iteration entered a period-2 cycle",
+            "rounds": 8,
+        },
+    },
+    {
+        "id": "STALE-cycle-round-limit-baseline",
+        "oracle": "stale_paths",
+        "input": {
+            "edges": [
+                [0, 1, 12, 1],
+                [1, 6, 1000, 1],
+                [2, 3, 9, 1],
+                [3, 0, 1000, 1],
+                [3, 10, 1000, 1],
+                [4, 5, 7, 1],
+                [5, 6, 1000, 1],
+                [6, 7, 13, 1],
+                [7, 2, 1000, 1],
+                [7, 10, 1000, 1],
+                [8, 9, 1, 1],
+                [10, 11, 10, 1],
+                [11, 2, 1000, 1],
+                [12, 4, 1000, 1],
+                [13, 6, 1000, 1],
+                [14, 0, 1000, 1],
+            ],
+            "tunnels": [
+                [12, [13, 5, 6, 7, 8, 2, 4, 11]],
+                [13, [14, 7, 9, 11, 12, 2, 3, 0]],
+                [14, [15, 0, 1, 7]],
+            ],
+            "offers": {12: 13, 13: 11, 14: 10},
+        },
+        "expected": {"delivered": [3, 4, 4]},
+    },
+    {
+        "id": "STALE-cycle-round-limit",
+        "oracle": "stale_paths",
+        "input": {
+            "edges": [
+                [0, 1, 12, 1],
+                [1, 6, 1000, 1],
+                [2, 3, 9, 1],
+                [3, 0, 1000, 1],
+                [3, 10, 1000, 1],
+                [4, 5, 7, 1],
+                [5, 6, 1000, 1],
+                [6, 7, 13, 1],
+                [7, 2, 1000, 1],
+                [7, 10, 1000, 1],
+                [8, 9, 1, 1],
+                [10, 11, 10, 1],
+                [11, 2, 1000, 1],
+                [12, 4, 1000, 1],
+                [13, 6, 1000, 1],
+                [14, 0, 1000, 1],
+            ],
+            "tunnels": [
+                [12, [13, 5, 6, 7, 8, 2, 4, 11]],
+                [13, [14, 7, 9, 11, 12, 2, 3, 0]],
+                [14, [15, 0, 1, 7]],
+            ],
+            "offers": {12: 13, 13: 11, 14: 10},
+            "black_links": [5],
+        },
+        "expected": {
+            "error": "lossy forwarding iteration did not reach a fixed point within the round limit",
+            "rounds": 256,
+        },
+    },
+    {
+        "id": "STALE-black-hole-in-cycle",
+        "oracle": "stale_paths",
+        "input": {
+            "edges": [
+                [0, 1, 12, 1],
+                [1, 6, 1000, 1],
+                [1, 16, 1000, 1],
+                [2, 3, 9, 1],
+                [3, 0, 1000, 1],
+                [3, 10, 1000, 1],
+                [4, 5, 7, 1],
+                [5, 6, 1000, 1],
+                [6, 7, 13, 1],
+                [7, 2, 1000, 1],
+                [7, 10, 1000, 1],
+                [8, 9, 1, 1],
+                [10, 11, 10, 1],
+                [11, 2, 1000, 1],
+                [12, 4, 1000, 1],
+                [13, 6, 1000, 1],
+                [14, 0, 1000, 1],
+                [15, 0, 1000, 1],
+                [16, 2, 1000, 1],
+            ],
+            "tunnels": [
+                [12, [14, 6, 7, 8, 9, 3, 5, 12]],
+                [13, [15, 8, 10, 12, 13, 3, 4, 0]],
+                [14, [16, 0, 1, 8]],
+                [15, [17, 0, 2, 18, 3, 5, 12]],
+            ],
+            "offers": {12: 13, 13: 11, 14: 10, 15: 5},
+            "black_links": [2, 6, 17],
+        },
+        "expected": {
+            "status": ["BLACKHOLED", "UP", "UP", "BLACKHOLED"],
+            "error": "lossy forwarding iteration did not reach a fixed point within the round limit",
+            "rounds": 256,
+        },
+    },
+    {
+        "id": "LIST-black-hole-in-cycle",
+        "oracle": "action_list",
+        "input": {
+            "edges": [
+                [0, 1, 12, 1],
+                [1, 6, 1000, 1],
+                [1, 16, 1000, 1],
+                [2, 3, 9, 1],
+                [3, 0, 1000, 1],
+                [3, 10, 1000, 1],
+                [4, 5, 7, 1],
+                [5, 6, 1000, 1],
+                [6, 7, 13, 1],
+                [7, 2, 1000, 1],
+                [7, 10, 1000, 1],
+                [8, 9, 1, 1],
+                [10, 11, 10, 1],
+                [11, 2, 1000, 1],
+                [12, 4, 1000, 1],
+                [13, 6, 1000, 1],
+                [14, 0, 1000, 1],
+                [15, 0, 1000, 1],
+                [16, 2, 1000, 1],
+            ],
+            "actions": [
+                {
+                    "source": 12,
+                    "route": [14, 6, 7, 8, 9, 3, 5, 12],
+                    "offer": 13,
+                    "black_holes": [2, 6, 17],
+                },
+                {
+                    "source": 13,
+                    "route": [15, 8, 10, 12, 13, 3, 4, 0],
+                    "offer": 11,
+                    "black_holes": [2, 6, 17],
+                },
+                {
+                    "source": 14,
+                    "route": [16, 0, 1, 8],
+                    "offer": 10,
+                    "black_holes": [2, 6, 17],
+                },
+                {
+                    "source": 15,
+                    "route": [17, 0, 2, 18, 3, 5, 12],
+                    "offer": 5,
+                    "black_holes": [2, 6, 17],
+                },
+            ],
+            "mode": "SIMULTANEOUS",
+        },
+        "expected": {
+            "error": "lossy forwarding iteration did not reach a fixed point within the round limit",
+            "rounds": 256,
+        },
+    },
+    {
+        "id": "LIST-black-hole-own",
+        "oracle": "action_list",
+        "input": {
+            "edges": [[0, 1, 10, 1]],
+            "actions": [
+                {"source": 0, "route": [0], "offer": 10, "black_holes": [0]},
+                {"source": 0, "route": [0], "offer": 10},
+            ],
+            "mode": "SIMULTANEOUS",
+        },
+        "expected": {
+            "entries": [
+                {
+                    "delivered": 0,
+                    "call_edge_drops": [[0, 10]],
+                    "status": "BLACKHOLED",
+                    "residual": [0],
+                    "saturated_boundary_edges": [0],
+                },
+                {
+                    "delivered": 10,
+                    "call_edge_drops": [],
+                    "status": "UP",
+                    "residual": [0],
+                    "saturated_boundary_edges": [0],
+                },
+            ]
+        },
+    },
+    {
+        "id": "LIST-black-hole-upstream",
+        "oracle": "action_list",
+        "input": {
+            "edges": [[0, 1, 10, 1], [1, 2, 10, 1]],
+            "actions": [
+                {"source": 0, "route": [0, 1], "offer": 10, "black_holes": [1]},
+                {"source": 0, "route": [0, 1], "offer": 10},
+            ],
+            "mode": "SIMULTANEOUS",
+        },
+        "expected": {
+            "entries": [
+                {
+                    "delivered": 0,
+                    "call_edge_drops": [[0, 5], [1, 5]],
+                    "status": "BLACKHOLED",
+                    "residual": [0, 5],
+                    "saturated_boundary_edges": [0],
+                },
+                {
+                    "delivered": 5,
+                    "call_edge_drops": [[0, 5]],
+                    "status": "UP",
+                    "residual": [0, 5],
+                    "saturated_boundary_edges": [0],
+                },
+            ]
+        },
+    },
+    {
+        "id": "LIST-outputs-ordered",
+        "oracle": "action_list",
+        "input": {
+            "edges": [[0, 1, 10, 1]],
+            "actions": [
+                {"source": 0, "route": [0], "offer": 7},
+                {"source": 0, "route": [0], "offer": 7},
+            ],
+            "mode": "ORDERED",
+        },
+        "expected": {
+            "entries": [
+                {
+                    "delivered": 7,
+                    "call_edge_drops": [],
+                    "residual": [3],
+                    "saturated_boundary_edges": [],
+                },
+                {
+                    "delivered": 3,
+                    "call_edge_drops": [[0, 4]],
+                    "residual": [0],
+                    "saturated_boundary_edges": [0],
+                },
+            ]
+        },
+    },
+    {
+        "id": "LIST-outputs-simultaneous",
+        "oracle": "action_list",
+        "input": {
+            "edges": [[0, 2, 5, 1], [1, 2, 10, 1], [2, 3, 10, 1]],
+            "actions": [
+                {"source": 0, "route": [0, 2], "offer": 5},
+                {"source": 1, "route": [1, 2], "offer": 5},
+            ],
+            "mode": "SIMULTANEOUS",
+        },
+        "expected": {
+            "entries": [
+                {
+                    "delivered": 5,
+                    "call_edge_drops": [],
+                    "residual": [0, 5, 0],
+                    "saturated_boundary_edges": [0],
+                },
+                {
+                    "delivered": 5,
+                    "call_edge_drops": [],
+                    "residual": [0, 5, 0],
+                    "saturated_boundary_edges": [2],
+                },
+            ]
+        },
+    },
+    {
+        "id": "LIST-first-error",
+        "oracle": "list_validation",
+        "input": {
+            "cases": [
+                {
+                    "mode": "ORDERED",
+                    "actions": [
+                        {
+                            "kind": "Replace",
+                            "policy": "a",
+                            "model": "ShortestPaths",
+                            "admission": "LOSSY",
+                            "offer": -1,
+                        },
+                        {
+                            "kind": "Replace",
+                            "policy": "x",
+                            "model": "ShortestPaths",
+                            "admission": "LOSSY",
+                            "offer": 1,
+                            "foreign": True,
+                        },
+                    ],
+                },
+                {
+                    "mode": "ORDERED",
+                    "actions": [
+                        {
+                            "kind": "Replace",
+                            "policy": "a",
+                            "model": "ShortestPaths",
+                            "admission": "LOSSY",
+                            "offer": 1,
+                        },
+                        {
+                            "kind": "Replace",
+                            "policy": "a",
+                            "model": "ShortestPaths",
+                            "admission": "LOSSY",
+                            "offer": -1,
+                        },
+                    ],
+                },
+                {
+                    "mode": "SIMULTANEOUS",
+                    "actions": [
+                        {
+                            "kind": "Forward",
+                            "policy": "a",
+                            "model": "ShortestPaths",
+                            "admission": "LOSSY",
+                            "offer": "inf",
+                        }
+                    ],
+                },
+                {
+                    "mode": "SIMULTANEOUS",
+                    "actions": [
+                        {
+                            "kind": "Place",
+                            "policy": "a",
+                            "model": "ShortestPaths",
+                            "admission": "LOSSLESS",
+                            "offer": 1,
+                        }
+                    ],
+                },
+                {
+                    "mode": "SIMULTANEOUS",
+                    "actions": [
+                        {
+                            "kind": "Replace",
+                            "policy": "t",
+                            "model": "DistributedTE",
+                            "admission": "LOSSLESS",
+                            "offer": 1,
+                        }
+                    ],
+                },
+                {
+                    "mode": "SIMULTANEOUS",
+                    "actions": [
+                        {
+                            "kind": "Forward",
+                            "policy": "c",
+                            "model": "CentralizedTE",
+                            "admission": "LOSSLESS",
+                            "offer": "inf",
+                            "program": True,
+                        }
+                    ],
+                },
+                {
+                    "mode": "SIMULTANEOUS",
+                    "actions": [
+                        {
+                            "kind": "Replace",
+                            "policy": "a",
+                            "model": "Pinned",
+                            "admission": "LOSSY",
+                            "offer": 1,
+                            "computes": "lossy forwarding iteration entered a period-2 cycle",
+                        },
+                        {
+                            "kind": "Replace",
+                            "policy": "b",
+                            "model": "Pinned",
+                            "admission": "LOSSY",
+                            "offer": 4611686018427387904,
+                        },
+                    ],
+                },
+                {
+                    "mode": "SIMULTANEOUS",
+                    "actions": [
+                        {
+                            "kind": "Replace",
+                            "policy": "a",
+                            "model": "Pinned",
+                            "admission": "LOSSY",
+                            "offer": 1,
+                            "computes": "lossy forwarding iteration entered a period-2 cycle",
+                        },
+                        {
+                            "kind": "Replace",
+                            "policy": "b",
+                            "model": "Pinned",
+                            "admission": "LOSSY",
+                            "offer": 1,
+                        },
+                    ],
+                },
+                {
+                    "mode": "ORDERED",
+                    "actions": [
+                        {
+                            "kind": "Place",
+                            "policy": "t",
+                            "model": "DistributedTE",
+                            "admission": "LOSSLESS",
+                            "offer": -1,
+                        }
+                    ],
+                },
+                {
+                    "mode": "ORDERED",
+                    "actions": [
+                        {
+                            "kind": "Forward",
+                            "policy": "p",
+                            "model": "Pinned",
+                            "admission": "LOSSY",
+                            "offer": "inf",
+                        }
+                    ],
+                },
+                {
+                    "mode": "ORDERED",
+                    "actions": [
+                        {
+                            "kind": "Place",
+                            "policy": "a",
+                            "model": "ShortestPaths",
+                            "admission": "LOSSY",
+                            "offer": 5,
+                            "after_infinite": True,
+                        },
+                        {
+                            "kind": "Replace",
+                            "policy": "x",
+                            "model": "ShortestPaths",
+                            "admission": "LOSSY",
+                            "offer": 1,
+                            "foreign": True,
+                        },
+                    ],
+                },
+                {
+                    "mode": "ORDERED",
+                    "actions": [
+                        {
+                            "kind": "Replace",
+                            "policy": "a",
+                            "model": "ShortestPaths",
+                            "admission": "LOSSY",
+                            "offer": 1,
+                            "design_demand": 5,
+                        },
+                        {
+                            "kind": "Replace",
+                            "policy": "x",
+                            "model": "ShortestPaths",
+                            "admission": "LOSSY",
+                            "offer": 1,
+                            "foreign": True,
+                        },
+                    ],
+                },
+                {
+                    "mode": "ORDERED",
+                    "actions": [
+                        {
+                            "kind": "Forward",
+                            "policy": "a",
+                            "model": "ShortestPaths",
+                            "admission": "LOSSY",
+                            "offer": 1,
+                            "program": True,
+                            "foreign_black_holes": True,
+                        },
+                        {
+                            "kind": "Replace",
+                            "policy": "x",
+                            "model": "ShortestPaths",
+                            "admission": "LOSSY",
+                            "offer": 1,
+                            "foreign": True,
+                        },
+                    ],
+                },
+                {"mode": "SIMULTANEOUS", "actions": []},
+            ]
+        },
+        "expected": [
+            "offer must be an integer in [0, 2^62) or permitted +inf",
+            "duplicate policy in list",
+            "SIMULTANEOUS requires finite offers",
+            "SIMULTANEOUS does not accept Place",
+            "SIMULTANEOUS Replace requires ShortestPaths EQUAL or WEIGHTED, or Pinned",
+            "SIMULTANEOUS requires admission=LOSSY",
+            "offer must be an integer in [0, 2^62) or permitted +inf",
+            "lossy forwarding iteration entered a period-2 cycle",
+            "DistributedTE does not support incremental placement",
+            "Pinned forwards with replace",
+            "finite placement after infinite placement requires a new epoch",
+            "ShortestPaths does not accept design_demand",
+            "black_holes belongs to another graph",
+            "valid",
+        ],
+    },
+    {
+        "id": "ERR-forwarding-limit",
+        "oracle": "forwarding_size",
+        "input": {
+            "cases": [
+                [[[10000, 214749]]],
+                [[[10000, 214748], [1, 3647]]],
+                [[[10000, 214748], [1, 3648]]],
+                [[[1, 1073741824]]],
+                [[[1, 1073741824]], [[1, 1073741824]]],
+                [[[2147483648, 1]]],
+            ]
+        },
+        "expected": [
+            "forwarding occurrence limit exceeded: 2147490000 > 2147483647",
+            "within the entry and occurrence limits",
+            "forwarding occurrence limit exceeded: 2147483648 > 2147483647",
+            "within the entry and occurrence limits",
+            "forwarding occurrence limit exceeded: 2147483648 > 2147483647",
+            "forwarding entry limit exceeded: 2147483648 > 2147483647",
+        ],
+    },
+    {
+        "id": "ERR-class-list",
+        "oracle": "input_classes",
+        "input": {
+            "cases": [
+                {
+                    "entry": "apply_actions",
+                    "values": [
+                        {"ledger": "own", "offer": ["bool", 1]},
+                        {"ledger": "own", "offer": ["str", "1"]},
+                        {"ledger": "own", "offer": ["fraction", 3, 2]},
+                        {"ledger": "own", "offer": ["float", 1.5]},
+                        {"ledger": "own", "offer": 9223372036854775808},
+                        {"ledger": "own", "offer": -1},
+                        {"ledger": ["none"], "offer": 5},
+                        {"ledger": ["none"], "offer": ["bool", 1]},
+                        {"ledger": ["none"], "offer": -1},
+                        {"ledger": "own", "offer": ["float", "inf"]},
+                        {"ledger": "own", "offer": 5},
+                    ],
+                }
+            ]
+        },
+        "expected": [
+            [
+                "TypeError: offer must be an int or a float (got bool)",
+                "TypeError: offer must be an int or a float (got str)",
+                "TypeError: offer must be an int or a float (got Fraction)",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "TypeError: ledger must be a FlowLedger",
+                "TypeError: offer must be an int or a float (got bool)",
+                "TypeError: ledger must be a FlowLedger",
+                "valid",
+                "valid",
+            ]
+        ],
+    },
 ]
 
 
@@ -5241,10 +6282,22 @@ NOT_REPORTED = {
     "D-C2": {
         "rounds": "the error names the period-2 cycle, not the round it was found in"
     },
+    "D-C3": {
+        "rounds": "the error names the period-2 cycle, not the round it was found in"
+    },
+    "STALE-cycle-period-2": {
+        "rounds": "the error names the period-2 cycle, not the round it was found in"
+    },
     "R4-refusal": {
         "requeue": "the rejected rule (a refused unit offered again), which the library never applies",
     },
 }
+for _name in (
+    "STALE-cycle-round-limit",
+    "STALE-black-hole-in-cycle",
+    "LIST-black-hole-in-cycle",
+):
+    NOT_REPORTED[_name] = {"rounds": "the error names the round limit, not its value"}
 for _name in (
     "C-G1-UP_TO",
     "T2-UP_TO-common",
@@ -5337,31 +6390,13 @@ def check_outside_the_domain(example):
         assert mismatch(split_offer_on_unit_links(**case), want) is None, case
 
 
-# Positions of an example that wait for an entry this library does not have yet (apply_actions,
-# the list API): their cases and expected rows are left out of the comparison. ERR-class-list, all
-# of whose cases are apply_actions, is not here.
-WAITING_ENTRIES = {"apply_actions"}
-
-
-def without_waiting(example):
-    cases = example["input"].get("cases")
-    if example["oracle"] != "input_classes" or cases is None:
-        return example
-    keep = [i for i, c in enumerate(cases) if c["entry"] not in WAITING_ENTRIES]
-    return {
-        **example,
-        "input": {"cases": [cases[i] for i in keep]},
-        "expected": [example["expected"][i] for i in keep],
-    }
-
-
 def _param(example):
     return pytest.param(example, id=example["id"])
 
 
 def test_every_example_once():
     ids = [e["id"] for e in EXAMPLES]
-    assert len(ids) == len(set(ids)) == 164
+    assert len(ids) == len(set(ids)) == 183
     assert {e["oracle"] for e in EXAMPLES} <= set(ADAPTERS)
 
 
@@ -5370,10 +6405,10 @@ def test_contract_example(example):
     if example["id"] in OUTSIDE_THE_DOMAIN:
         check_outside_the_domain(example)
         return
-    example = without_waiting(example)
     expected = example["expected"]
     left_out = NOT_REPORTED.get(example["id"], {})
     if left_out:
         expected = {k: v for k, v in expected.items() if k not in left_out}
-    got = ADAPTERS[example["oracle"]](**copy.deepcopy(example["input"]))
+    adapter = SEVERAL_DEMANDS.get(example["id"], ADAPTERS[example["oracle"]])
+    got = adapter(**copy.deepcopy(example["input"]))
     assert mismatch(got, expected) is None

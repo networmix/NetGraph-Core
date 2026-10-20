@@ -11,6 +11,29 @@ A rebuilt Core (breaking): one numeric domain (integer units), one flow core, on
 engine with four routing models, forwarding programs and three evaluators. It replaces the 0.11
 API.
 
+### Added
+
+- **Several demands at once**: `apply_actions(ledger, actions, *, mode=BatchMode.ORDERED,
+  outputs=None)` runs `Place(policy, offer)`, `Replace(policy, offer, *, design_demand=None)` and
+  `Forward(policy, offer, *, black_holes=None)` actions of several policies of one ledger as one
+  transaction: validated whole (the argument types, then each action in list order: ownership, a
+  policy at most once, the mode's rules, the scalar call's checks), then computed, then published
+  once, with one `PlacementResult` per action in input order. The actions are immutable values
+  that keep their policy and black holes alive and their offers as given. `BatchMode.ORDERED` runs
+  each action as its scalar call on the state the earlier ones left (earlier actions are served
+  first; a hold protects nothing); new FlowIds follow list order. `BatchMode.SIMULTANEOUS` takes
+  `Replace` of `ShortestPaths` `EQUAL` or `WEIGHTED` and of `Pinned` and `Forward` of any installed
+  program, every one LOSSY with a finite offer, and forwards them at the same time on one view (the
+  residual plus every participant's old traffic; outside owners, orphans and holds stay): a full
+  edge is shared by highest averages over the demands (ties by policy creation order, never list
+  position), then within a demand over its heads, then its entries; a pooled demand's router
+  attributes each member's amount to its sources; each participant's black holes are its own;
+  loss cycles across demands are recalculated in rounds as within one program. Outputs read the
+  state after each action (ORDERED) or after the whole list (SIMULTANEOUS). The forwarding size
+  limits and the record identity limit count the whole list. C++: `apply_actions(FlowLedger&,
+  std::span<const Action>, BatchMode, const OutputOptions&)` with `Action = std::variant<Place,
+  Replace, Forward>`.
+
 ### Changed
 
 - **Graph**: `Graph(num_nodes, edge_sources, edge_destinations, edge_capacity_units, edge_costs,
@@ -161,7 +184,8 @@ API.
   forwards one: replayed under the policy's Eligibility (a tunnel touching an excluded element is
   `FAILED`, its head splits over the survivors) and, with `black_holes`, stale (the program
   unchanged, traffic reaching a black hole dropped there, `BLACKHOLED`). Lossy forwarding divides a
-  shared edge by nested highest averages (heads, then entries), evaluates the program as a whole,
+  shared edge by nested highest averages (demands, heads, then entries; what reaches a black hole
+  takes no part), evaluates the program as a whole,
   and recalculates edges that wait on each other in a cycle in rounds (a period-2 or round-limit
   `ValueError`; an independent check before publication).
 - **Failure guarantee**: every public call either completes or raises and changes nothing, also
@@ -266,7 +290,12 @@ API.
   share delivers 0 (was 5); pooled sources whose routes meet at a router split there jointly, so
   two sources reaching two unit-capacity members deliver 2 with LOSSY (was 1); `CostStretch(1.2)`
   is the exact fraction 6/5, so a baseline cost of 5 admits a path of cost 6 at equality and the
-  tunnel case that delivered 0 now delivers 1.
+  tunnel case that delivered 0 now delivers 1; a black-holed edge no longer waits in a loss cycle,
+  so a cycle that never settles raises its round-limit error after 64 rounds per edge that does
+  wait (a loaded black-holed edge inside such a cycle added 64 more), with every amount, every
+  settling round and every period-2 error unchanged; a tunnel or split-route member whose share is 0
+  no longer makes an edge wait (it can carry nothing), so it no longer joins two edges into one loss
+  cycle.
 
 ### Removed
 

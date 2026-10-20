@@ -6,7 +6,9 @@
 
 #include <initializer_list>
 #include <span>
+#include <concepts>
 #include <type_traits>
+#include <variant>
 #include <vector>
 
 #include "netgraph/core/eligibility.hpp"
@@ -103,6 +105,16 @@ static_assert(requires(const Graph& g, std::span<const NodeId> s, const Evaluati
 static_assert(requires(const Graph& g, std::span<const NodeId> s, std::shared_ptr<const PredecessorDAG> dag) {
   ForwardingProgram::from_dag(g, s, s, dag);
 });
+// The list operation: its actions, their variant and the call.
+static_assert(std::is_aggregate_v<Place> && std::is_aggregate_v<Replace> && std::is_aggregate_v<Forward>);
+static_assert(std::is_same_v<Action, std::variant<Place, Replace, Forward>>);
+static_assert(requires(Place x) { x.policy; x.offer; });
+static_assert(requires(Replace x) { x.policy; x.offer; x.design_demand; });
+static_assert(requires(Forward x) { x.policy; x.offer; x.black_holes; });
+static_assert(requires(FlowLedger& f, std::span<const Action> a, const OutputOptions& o) {
+  { apply_actions(f, a) } -> std::same_as<std::vector<PlacementResult>>;
+  apply_actions(f, a, BatchMode::Simultaneous, o);
+});
 
 }  // namespace
 
@@ -128,6 +140,7 @@ TEST(PublicNames, Enumerations) {
   static_assert(declared_in_order({WeightBasis::Capacity, WeightBasis::Explicit, WeightBasis::ResidualSnapshot}));
   static_assert(declared_in_order({Admission::Lossless, Admission::Lossy}));
   static_assert(declared_in_order({Direction::Forward, Direction::Reverse}));
+  static_assert(declared_in_order({BatchMode::Ordered, BatchMode::Simultaneous}));
   static_assert(static_cast<int>(TunnelStatus::Up) == 0 && static_cast<int>(TunnelStatus::InsufficientBandwidth) == 1 &&
                 static_cast<int>(TunnelStatus::CostCeilingExceeded) == 2 && static_cast<int>(TunnelStatus::Failed) == 3 &&
                 static_cast<int>(TunnelStatus::Blackholed) == 4);

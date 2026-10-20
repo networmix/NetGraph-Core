@@ -1442,6 +1442,111 @@ def test_cycles():
         pinned(lim, prog, LOSSY).replace(3)
 
 
+def test_zero_share_tunnel_adds_no_wait():
+    # One Pinned LOSSY program: sA's tunnels A (X, L0, L1; weight 100) and Z (L0, X; weight w), sB's
+    # tunnel B (L1, L0). replace(4) gives each head 2 and Z H(2, [100, 1]) = 0: the period-2 error
+    # with Z at weight 0 (not forwarded) and at weight 1 (forwarded with share 0) alike.
+    # sA 0, sB 1, n1..n6 2..7, dA 8, dB 9, dZ 10; rows X, L0, L1 first.
+    rows = [
+        (2, 3, 1),
+        (4, 5, 1),
+        (6, 7, 2),
+        (0, 2, 100),
+        (3, 4, 100),
+        (5, 6, 100),
+        (7, 8, 100),
+        (1, 6, 100),
+        (7, 4, 100),
+        (5, 9, 100),
+        (0, 4, 100),
+        (5, 2, 100),
+        (3, 10, 100),
+    ]
+    g = ngc.Graph(11, *([r[k] for r in rows] for k in range(3)), [1] * len(rows), 1.0)
+    ids = [0] * len(rows)
+    for e, position in enumerate(g.input_positions().tolist()):
+        ids[position] = e
+    for z in (0, 1):
+        specs = [
+            (0, [3, 0, 4, 1, 5, 2, 6], 100),
+            (0, [10, 1, 11, 0, 12], z),
+            (1, [7, 2, 8, 1, 9], 1),
+        ]
+        prog = tunnels(
+            g, [0, 1], [8, 9, 10], [(h, [ids[k] for k in p], w) for h, p, w in specs]
+        )
+        with pytest.raises(
+            ValueError,
+            match=exact("lossy forwarding iteration entered a period-2 cycle"),
+        ):
+            pinned(g, prog, LOSSY).replace(4)
+
+
+def test_black_holes_add_no_barrier():
+    # STALE-black-hole-in-cycle's graph (input rows 0 to 18) with one head 17 feeding its four
+    # tunnels (wide rows 19 to 22) and wide exits from each tunnel's end to one destination 18
+    # (rows 23 to 25); one Pinned LOSSY program, weights 13, 11, 10, 5, replace(39), black holes
+    # on rows 2, 6 and 17. Tunnels 0 and 3 reach a black hole; their arrivals there are dropped
+    # without a barrier: the round-limit error, nothing published. Without the black holes the
+    # call settles; LOSSLESS serves 0 on a black-holed link (tunnel 0 takes the first unit).
+    rows = [
+        (0, 1, 12),
+        (1, 6, 1000),
+        (1, 16, 1000),
+        (2, 3, 9),
+        (3, 0, 1000),
+        (3, 10, 1000),
+        (4, 5, 7),
+        (5, 6, 1000),
+        (6, 7, 13),
+        (7, 2, 1000),
+        (7, 10, 1000),
+        (8, 9, 1),
+        (10, 11, 10),
+        (11, 2, 1000),
+        (12, 4, 1000),
+        (13, 6, 1000),
+        (14, 0, 1000),
+        (15, 0, 1000),
+        (16, 2, 1000),
+        (17, 12, 1000),
+        (17, 13, 1000),
+        (17, 14, 1000),
+        (17, 15, 1000),
+        (11, 18, 1000),
+        (1, 18, 1000),
+        (7, 18, 1000),
+    ]
+    g = ngc.Graph(19, *([r[k] for r in rows] for k in range(3)), [1] * len(rows), 1.0)
+    ids = [0] * len(rows)
+    for e, position in enumerate(g.input_positions().tolist()):
+        ids[position] = e
+    specs = [
+        ([19, 14, 6, 7, 8, 9, 3, 5, 12, 23], 13),
+        ([20, 15, 8, 10, 12, 13, 3, 4, 0, 24], 11),
+        ([21, 16, 0, 1, 8, 25], 10),
+        ([22, 17, 0, 2, 18, 3, 5, 12, 23], 5),
+    ]
+    prog = tunnels(g, [17], [18], [(17, [ids[k] for k in p], w) for p, w in specs])
+    black = g.eligibility(excluded_edges=[ids[k] for k in (2, 6, 17)])
+    ledger = ngc.FlowLedger(g)
+    stale = pinned(g, prog, LOSSY, black_holes=black, ledger=ledger)
+    with pytest.raises(
+        ValueError,
+        match=exact(
+            "lossy forwarding iteration did not reach a fixed point within the round limit"
+        ),
+    ):
+        stale.replace(39)
+    assert ledger.records() == [] and ledger.carried().tolist() == [0] * len(rows)
+    assert stale.program is None
+    settled = stale.evaluate(4)
+    assert [t.status for t in settled.by_tunnel] == [BLACKHOLED, UP, UP, BLACKHOLED]
+    assert pinned(g, prog, LOSSY).replace(39).call_delivered > 0
+    lossless = pinned(g, prog, LOSSLESS, black_holes=black)
+    assert lossless.evaluate(float("inf")).call_delivered == 0
+
+
 def test_cycle_subdivision():
     # CYCS: Y split in two in series (e3: 2 -> 6, e8: 6 -> 3).
     def cycs(x, y, z):

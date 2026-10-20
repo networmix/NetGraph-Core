@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -399,5 +400,63 @@ private:
              FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache, detail::FrozenCacheHitTally& tally);
   std::unique_ptr<detail::PolicyEngine> engine_;
 };
+
+// ---------------------------------------------------------------- several demands at once
+
+// How apply_actions runs its list: Ordered, each action as its scalar call on the state the earlier
+// ones left; Simultaneous, every action forwarded at once with the loss rule across demands.
+enum class BatchMode { Ordered, Simultaneous };
+
+// The actions of a list. Offers are as in FlowPolicy::place (nullopt: +inf); Replace's design demand
+// as in FlowPolicy::replace (outer nullopt absent, inner nullopt +inf); Forward's black holes an
+// Eligibility of the policy's graph or null. They borrow the policy and the black holes, which must
+// outlive the call.
+struct Place {
+  std::reference_wrapper<FlowPolicy> policy;
+  std::optional<Amount> offer;
+};
+struct Replace {
+  std::reference_wrapper<FlowPolicy> policy;
+  std::optional<Amount> offer;
+  std::optional<std::optional<Amount>> design_demand {};
+};
+struct Forward {
+  std::reference_wrapper<FlowPolicy> policy;
+  std::optional<Amount> offer;
+  const Eligibility* black_holes {nullptr};
+};
+using Action = std::variant<Place, Replace, Forward>;
+
+// Several policies of one ledger in one operation, validated whole, then computed, then published
+// once (one atomic exchange of every policy's records, then their epochs): an exception leaves the
+// ledger and every policy unchanged. Results in list order, each the scalar call's fields for its
+// policy.
+//
+// Ordered: each action runs in list order on a private working state (the ledger's carried loads and
+// holds as the earlier actions left them) exactly as its scalar call would; its outputs (residual,
+// saturated_boundary_edges) read the state after it; new records take FlowIds in list order, then in
+// each call's draft order. Simultaneous: Replace of ShortestPaths Equal or Weighted (its program
+// prepared on the view) and of Pinned, Forward of any policy with an installed program, every one
+// Lossy with a finite offer, forwarded at once on one view (the ledger's residual plus every
+// participant's old carried load; outside owners and orphans fixed, holds never added) by the loss
+// rule across demands: at a link that cannot carry its arrivals, highest averages over the demands
+// (ties by policy creation order, not list position), then within a demand over its sources, then
+// its entries; a pooled ShortestPaths demand splits once at each router and attributes each member's
+// amount to its sources; each participant's black holes are its own (what reaches one is dropped
+// there); losses that wait on each other in a cycle across demands are iterated as for one program,
+// with its two errors. Every entry reports the one residual after the list and its own
+// saturated_boundary_edges on it. An empty list returns nothing after checking the ledger and mode.
+//
+// Validation (std::invalid_argument, before anything is computed): the ledger (a moved-from one:
+// std::logic_error), `mode` a BatchMode value (`mode: <v> is not a value of BatchMode`); then each
+// action in list order, all of its checks before the next one's: `list policy belongs to another
+// ledger`; `duplicate policy in list` (at the second occurrence); Simultaneous only, in this order,
+// `SIMULTANEOUS does not accept Place`, `SIMULTANEOUS Replace requires ShortestPaths EQUAL or WEIGHTED,
+// or Pinned`, `SIMULTANEOUS requires admission=LOSSY`, `SIMULTANEOUS requires finite offers`; then
+// the scalar call's own checks in their order. A computation error (the loss iteration's errors, a
+// solver or forwarding size, the record identity limit counted for the whole list) also changes
+// nothing.
+std::vector<PlacementResult> apply_actions(FlowLedger& ledger, std::span<const Action> actions,
+                                           BatchMode mode = BatchMode::Ordered, const OutputOptions& outputs = {});
 
 } // namespace netgraph::core

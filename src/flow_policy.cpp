@@ -37,6 +37,11 @@
   * The tunnel models' forward() (forward_tunnels) forwards the installed program the same way,
     keeping its plan and T1's holds.
 
+  apply_actions (several policies of one ledger): the list is validated whole, then computed (ORDERED:
+  each action's call on a working copy of the ledger's totals; SIMULTANEOUS: every participant
+  prepared on one view, forwarded by one joint evaluation, finished as its call), then published
+  as one exchange of every owner's records followed by their epochs.
+
   Work on copies and publish all changes together; an exception leaves ledger and policy intact.
   Store only changes to ledger residual in per-thread slots. Unrestricted CentralizedTE reads a dense
   residual and solves over every edge (its view and flows per EdgeId); the other controllers
@@ -52,6 +57,7 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -80,6 +86,23 @@ namespace {
 
 // ================================================================ working residual
 
+// The ledger's totals a call reads: the ledger's own (a scalar call), or a list's working copy
+// (apply_actions: ORDERED's totals after the earlier actions, SIMULTANEOUS's with every
+// participant's load released), which outlives every reader. `reservation_baseline` is the
+// ledger's (the capacities when it has none); an empty `held` reads as all zero, as the ledger's
+// unstaged holds do.
+struct LedgerTotals {
+  std::span<const Amount> service_baseline;
+  std::span<const Amount> carried;
+  std::span<const Amount> reservation_baseline;
+  std::span<const Amount> held;
+};
+
+LedgerTotals totals_of(const FlowLedger& ledger) {
+  return {LedgerAccess::baseline(ledger), LedgerAccess::carried(ledger), LedgerAccess::reservation_baseline(ledger),
+          LedgerAccess::reserved(ledger)};
+}
+
 // W = service baseline - carried() + delta; delta holds this call's releases and new allocations.
 // Each call advances a scratch epoch (a numeric stamp, separate from the policy epoch).
 // Read a slot only when its stamp matches; later calls ignore stale slots even after a throw.
@@ -88,8 +111,8 @@ namespace {
 // intact.
 class ServiceCapacityWorkspace {
 public:
-  explicit ServiceCapacityWorkspace(const FlowLedger& ledger)
-      : storage_(storage()), service_baseline_(LedgerAccess::baseline(ledger)), carried_(LedgerAccess::carried(ledger)) {
+  explicit ServiceCapacityWorkspace(const LedgerTotals& totals)
+      : storage_(storage()), service_baseline_(totals.service_baseline), carried_(totals.carried) {
     if (storage_.slot.size() < service_baseline_.size()) storage_.slot.resize(service_baseline_.size());
     if (++storage_.generation == 0) {
       for (auto& x : storage_.slot) x.stamp = 0;
@@ -254,11 +277,12 @@ std::optional<PreparedRouteResult> creation_products(const PolicyCallContext& c,
 
 // The optional outputs of a call whose policy records become `after`, computed before the commit
 // (so nothing allocates once the ledger changed): edge_flows = the policy's own allocation after
-// the call, residual = the ledger's after it (now + own before - own after),
-// saturated_boundary_edges on that residual, edge_reservations = the policy's own holds after the
-// call.
-void prepare_outputs(const PolicyEngine& pe, const OutputOptions& outputs, std::span<const FlowRecord* const> after,
-                     PlacementResult& out) {
+// the call, residual = the ledger's after it (the totals' service baseline - carried + own before -
+// own after), saturated_boundary_edges on that residual, edge_reservations = the policy's own holds
+// after the call.
+// `totals`: the totals the call read (nullptr: the ledger's, read only for these two outputs).
+void prepare_outputs(const PolicyEngine& pe, const LedgerTotals* totals, const OutputOptions& outputs,
+                     std::span<const FlowRecord* const> after, PlacementResult& out) {
   const auto m = static_cast<std::size_t>(pe.graph->num_edges());
   if (outputs.edge_reservations) {
     std::vector<Amount> held(m, 0);
@@ -273,8 +297,9 @@ void prepare_outputs(const PolicyEngine& pe, const OutputOptions& outputs, std::
     for (const auto& [e, x] : r->edge_flows) own[static_cast<std::size_t>(e)] += x;
   }
   if (outputs.residual || outputs.saturated_boundary_edges) {
-    std::vector<Amount> res;
-    LedgerAccess::residual_into(pe.ledger, res);
+    const LedgerTotals t = totals != nullptr ? *totals : totals_of(pe.ledger);
+    std::vector<Amount> res(m);
+    for (std::size_t e = 0; e < m; ++e) res[e] = t.service_baseline[e] - t.carried[e];
     for (const auto& cohort : pe.epoch.record_groups) {
       for (const auto& s : cohort) {
         for (const auto& [e, x] : LedgerAccess::live(pe.ledger, s.record_counter).edge_flows) res[static_cast<std::size_t>(e)] += x;
@@ -448,8 +473,11 @@ struct PolicyCall {
   const Eligibility* black_holes {nullptr};   // forward's black holes
   const OutputOptions* outputs {nullptr};
   Trace* trace {nullptr};
+  const LedgerTotals* totals {nullptr};  // the totals the call reads (nullptr: the ledger's)
   [[nodiscard]] bool is_full_offer() const noexcept { return operation != PolicyOperation::Place; }
 };
+
+LedgerTotals totals_of(const PolicyEngine& pe, const PolicyCall& rq) { return rq.totals != nullptr ? *rq.totals : totals_of(pe.ledger); }
 
 // A computed call, published or discarded whole: its result, the drafts of its commit (a place:
 // every live record plus the new ones; a full-offer call: only new ones, the live ones retired),
@@ -1313,10 +1341,11 @@ bool view_active(const ForwardingView& v) {
 // call; T1: its own program, after setup or installed): place, evaluate, replace and T1's
 // forward. `active`: some head can place traffic (view_active). With `holds` (a T1 policy's own
 // program), each up tunnel's record holds its request on every edge of its path; `plan` is the
-// result's and the epoch's.
+// result's and the epoch's. `given` (Lossy, a full offer): the forwarding already computed with the
+// heads' shares of the offer (a SIMULTANEOUS list's joint evaluation), moved from.
 PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& cur, ServiceCapacityWorkspace& W, const PolicyCall& rq,
                        const ForwardingProgram* before_program, const ForwardingView& view, bool active, bool holds,
-                       std::shared_ptr<const TunnelPlan> plan) {
+                       std::shared_ptr<const TunnelPlan> plan, ProgramFlow* given = nullptr) {
   const auto v = rq.offer;
   const ProgramData& p = *view.data;
   const std::size_t n = p.entries.size();
@@ -1343,6 +1372,11 @@ PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& c
     const std::optional<Amount> hi = v.has_value() ? std::optional<Amount>(admitted + *v) : std::nullopt;
     flow = detail::lossless(view, available_capacity_reader(W), admitted, hi);
     call_delivered = flow.admitted - admitted;
+  } else if (given != nullptr) {
+    flow = std::move(*given);
+    call_delivered = flow.delivered;
+    flow.source_drops += *v - flow.offered;
+    accumulate(offered, c128(*v), "offered");
   } else {
     std::vector<Amount> inject(k, 0);
     if (rq.is_full_offer()) {
@@ -1462,9 +1496,9 @@ PendingPolicyUpdate place_pinned(const PolicyEngine& pe, const PolicyEpoch& cur,
 
 // T1's setup view U: the reservation baseline minus every hold, this policy's own holds released
 // (never above static capacity: R0 <= capacity and the own holds are part of S).
-std::vector<Amount> reservation_view(const PolicyEngine& pe) {
-  const auto r0 = LedgerAccess::reservation_baseline(pe.ledger);
-  const auto held = LedgerAccess::reserved(pe.ledger);
+std::vector<Amount> reservation_view(const PolicyEngine& pe, const LedgerTotals& totals) {
+  const auto r0 = totals.reservation_baseline;
+  const auto held = totals.held;
   std::vector<Amount> U(r0.begin(), r0.end());
   if (!held.empty()) {
     for (std::size_t e = 0; e < U.size(); ++e) U[e] -= held[e];
@@ -1507,7 +1541,7 @@ PendingPolicyUpdate apply_distributed_te_call(const PolicyEngine& pe, const Poli
   const auto& g = *pe.graph;
   const Amount D = *design_of(rq);
   const auto& ca = std::get<DistributedTE>(pe.config.routing);
-  auto tunnels = setup_distributed_te_tunnels(g, pe.eligibility, pe.reachable_sources, pe.allowed_destinations, ca, pe.c0, D, reservation_view(pe));
+  auto tunnels = setup_distributed_te_tunnels(g, pe.eligibility, pe.reachable_sources, pe.allowed_destinations, ca, pe.c0, D, reservation_view(pe, totals_of(pe, rq)));
   const auto program = distributed_te_program(g, pe.sources, pe.destinations, pe.reachable_sources, std::move(tunnels),
                                       pe.excluded_nodes, pe.excluded_edges);
   const ForwardingView view = make_forwarding_view(g, program, nullptr, pe.allowed_destinations, nullptr, true);
@@ -1553,27 +1587,35 @@ PendingPolicyUpdate place_t2(const PolicyEngine& pe, const PolicyEpoch& cur, Ser
                          std::make_shared<const TunnelPlan>(t2_plan(pe, D, lay, program->tunnels().size(), F)));
 }
 
-// forward(): a computing model's installed program forwarded with no route computation, on the
-// released view, records per roster source (ShortestPaths and CentralizedTE).
-PendingPolicyUpdate forward_installed(const PolicyEngine& pe, ServiceCapacityWorkspace& W, const PolicyCall& rq) {
+// The view forward() forwards a computing model's installed program on (its roster, the call's
+// black holes).
+ForwardingView installed_view(const PolicyEngine& pe, const PolicyCall& rq) {
+  return make_forwarding_view(*pe.graph, pe.epoch.program, nullptr, pe.allowed_destinations, rq.black_holes);
+}
+
+// A SIMULTANEOUS ShortestPaths replace (EQUAL or WEIGHTED): its program prepared on the list's view,
+// its per-source flows (routes and costs, new ids) and the program installed before, for the flags.
+struct PreparedReplace {
+  std::shared_ptr<const ForwardingProgram> program {};
+  std::vector<LiveFlow> flows {};
+  const ForwardingProgram* before {nullptr};
+};
+
+// A forwarding of a computing model's program as `view` (its roster) sees it, finished into records
+// per roster source: forward() of the installed program, or (`replaced`) a SIMULTANEOUS ShortestPaths
+// replace of its newly prepared one (its routes and costs, its flags, its termination).
+PendingPolicyUpdate finish_by_source(const PolicyEngine& pe, const PolicyCall& rq, const ForwardingView& view, ProgramFlow& flow,
+                                     const PreparedReplace* replaced) {
   const auto& g = *pe.graph;
   const auto v = rq.offer;
-  const auto& program = pe.epoch.program;
-  const ForwardingView view = make_forwarding_view(g, program, nullptr, pe.allowed_destinations, rq.black_holes);
+  const auto& program = replaced != nullptr ? replaced->program : pe.epoch.program;
   const ProgramData& p = *view.data;
   const std::size_t k = pe.reachable_sources.size();
   const std::size_t n = p.entries.size();
   const bool lossy = pe.config.admission == Admission::Lossy;
-  ProgramFlow flow;
-  if (!lossy) {
-    flow = detail::lossless(view, available_capacity_reader(W), 0, v);
-  } else {
-    std::vector<Amount> inject(k, 0);
-    source_shares(view, *v, inject);
-    flow = detail::lossy(view, available_capacity_reader(W), inject);
-  }
   PendingPolicyUpdate s;
-  s.next_epoch = fresh_epoch(pe, true);
+  s.next_epoch = fresh_epoch(pe, replaced == nullptr);
+  s.next_epoch.program = program;
   std::vector<LiveFlow> flows(k);
   // Per roster source: its entries' carried, drops and deliveries summed (the view's heads are the
   // roster: nothing is replayed).
@@ -1588,7 +1630,7 @@ PendingPolicyUpdate forward_installed(const PolicyEngine& pe, ServiceCapacityWor
     got[slot] += f.delivered;
   }
   for (std::size_t i = 0; i < k; ++i) {
-    flows[i] = pe.epoch.record_groups[i].front();
+    flows[i] = replaced != nullptr ? replaced->flows[i] : pe.epoch.record_groups[i].front();
     flows[i].record_counter = -1;
     carried[i] = merged(std::move(carried[i]));
     drops[i] = merged(std::move(drops[i]));
@@ -1634,6 +1676,12 @@ PendingPolicyUpdate forward_installed(const PolicyEngine& pe, ServiceCapacityWor
   }
   if (p.pools_source_inflows) active = !view.prepared_route(0)->forwarding_edges.empty();
   out.termination = forwarding_termination(active, p.has_path(), lossy, v, out.call_delivered);
+  if (replaced != nullptr) {
+    // A replace's own rule (place_pooled's): no member, no active weight; else the Lossy offer
+    // is sent whole.
+    out.termination = view.prepared_route(0)->forwarding_edges.empty() ? Termination::NoActiveWeight : Termination::Complete;
+    set_flags(out, replaced->before, program.get(), false);
+  }
   out.program = program;
   out.by_tunnel = tunnel_rows(view, assigned, delivered, dropped);
   const auto after = draft_records(s.drafts);
@@ -1645,6 +1693,22 @@ PendingPolicyUpdate forward_installed(const PolicyEngine& pe, ServiceCapacityWor
   s.next_epoch.prepared = true;
   s.next_epoch.infinite = !v.has_value();
   return s;
+}
+
+// forward(): a computing model's installed program forwarded with no route computation, on the
+// released view, records per roster source (ShortestPaths and CentralizedTE).
+PendingPolicyUpdate forward_installed(const PolicyEngine& pe, ServiceCapacityWorkspace& W, const PolicyCall& rq) {
+  const auto v = rq.offer;
+  const ForwardingView view = installed_view(pe, rq);
+  ProgramFlow flow;
+  if (pe.config.admission != Admission::Lossy) {
+    flow = detail::lossless(view, available_capacity_reader(W), 0, v);
+  } else {
+    std::vector<Amount> inject(pe.reachable_sources.size(), 0);
+    source_shares(view, *v, inject);
+    flow = detail::lossy(view, available_capacity_reader(W), inject);
+  }
+  return finish_by_source(pe, rq, view, flow, nullptr);
 }
 
 // ---------------------------------------------------------------- construction
@@ -1955,7 +2019,7 @@ std::shared_ptr<const ForwardingProgram> empty_roster_program(const PolicyEngine
 // The current state of a zero call: its records, its program and rows, every flag false; before
 // the epoch's first preparation all zeros (no records, no program, no curve). A zero call solves
 // nothing, so it claims no cut.
-PlacementResult zero_state(const PolicyEngine& pe, const OutputOptions& outputs) {
+PlacementResult zero_state(const PolicyEngine& pe, const LedgerTotals* totals, const OutputOptions& outputs) {
   PlacementResult out;
   out.call_undelivered = 0;
   const auto& ep = pe.epoch;
@@ -1969,7 +2033,7 @@ PlacementResult zero_state(const PolicyEngine& pe, const OutputOptions& outputs)
   if (is_unrestricted_centralized_te(pe) && pe.source_allocation == SourceAllocation::Optimized && ep.prepared && ep.marginal_cost_curve.has_value()) out.marginal_cost_curve = *ep.marginal_cost_curve;
   out.program = ep.program;
   out.by_tunnel = ep.by_tunnel;
-  prepare_outputs(pe, outputs, records, out);
+  prepare_outputs(pe, totals, outputs, records, out);
   return out;
 }
 
@@ -2073,7 +2137,8 @@ void check_call(const PolicyEngine& pe, const PolicyCall& rq) {
 // The computation of a call: nothing published. A full-offer call works on the residual with
 // the policy's own load released, from a fresh epoch.
 PendingPolicyUpdate compute(const PolicyEngine& pe, const PolicyCall& rq) {
-  ServiceCapacityWorkspace W(pe.ledger);
+  const LedgerTotals totals = totals_of(pe, rq);
+  ServiceCapacityWorkspace W(totals);
   if (rq.is_full_offer()) W.release_records(current_records(pe));
   const PolicyEpoch fresh = rq.is_full_offer() ? fresh_epoch(pe, rq.operation == PolicyOperation::Forward) : PolicyEpoch {};
   const PolicyEpoch& cur = rq.is_full_offer() ? fresh : pe.epoch;
@@ -2110,7 +2175,7 @@ PendingPolicyUpdate compute(const PolicyEngine& pe, const PolicyCall& rq) {
   // The first termination row: a request of 0 is COMPLETE, also for a full-offer call, which
   // still prepared and publishes what it computed.
   if (rq.offer == Amount {0}) s.result.termination = Termination::Complete;
-  if (rq.outputs != nullptr && any_output(*rq.outputs)) prepare_outputs(pe, *rq.outputs, draft_records(s.drafts), s.result);
+  if (rq.outputs != nullptr && any_output(*rq.outputs)) prepare_outputs(pe, rq.totals, *rq.outputs, draft_records(s.drafts), s.result);
   return s;
 }
 
@@ -2130,7 +2195,7 @@ void publish(PolicyEngine& pe, PendingPolicyUpdate& s, bool full) {
 PlacementResult run_call(PolicyEngine& pe, const PolicyCall& rq, const std::function<void()>* before_publish) {
   check_call(pe, rq);
   if (rq.operation == PolicyOperation::Place && rq.offer.has_value() && *rq.offer == 0) {
-    PlacementResult out = zero_state(pe, *rq.outputs);
+    PlacementResult out = zero_state(pe, rq.totals, *rq.outputs);
     if (before_publish != nullptr && *before_publish) (*before_publish)();
     return out;
   }
@@ -2139,6 +2204,257 @@ PlacementResult run_call(PolicyEngine& pe, const PolicyCall& rq, const std::func
   PlacementResult out = std::move(s.result);
   publish(pe, s, rq.is_full_offer());
   return out;
+}
+
+// ================================================================ lists (apply_actions)
+
+// One action of a list, validated: its policy's engine and the scalar call it stands for.
+struct ListAction {
+  PolicyEngine* engine {nullptr};
+  PolicyCall call {};
+};
+
+// The list's validation, before anything is computed: the ledger, the mode, then each
+// action in list order, all of its checks before the next one's (ownership, the duplicate rule,
+// the SIMULTANEOUS rules, the scalar call's own checks).
+std::vector<ListAction> validate_list(FlowLedger& ledger, std::span<const Action> actions, BatchMode mode, const OutputOptions& outputs) {
+  (void)LedgerAccess::baseline(ledger);  // a moved-from ledger: std::logic_error
+  switch (mode) {
+    case BatchMode::Ordered:
+    case BatchMode::Simultaneous: break;
+    default: not_a_member("mode", static_cast<int>(mode), "BatchMode");
+  }
+  std::vector<ListAction> out;
+  out.reserve(actions.size());
+  std::set<std::int64_t> seen;
+  for (const Action& a : actions) {
+    ListAction x;
+    FlowPolicy* policy = nullptr;
+    std::visit(
+        [&](const auto& act) {
+          using T = std::decay_t<decltype(act)>;
+          policy = &act.policy.get();
+          x.call.offer = act.offer;
+          x.call.outputs = &outputs;
+          if constexpr (std::is_same_v<T, Place>) {
+            x.call.operation = PolicyOperation::Place;
+          } else if constexpr (std::is_same_v<T, Replace>) {
+            x.call.operation = PolicyOperation::Replace;
+            x.call.design = act.design_demand;
+          } else {
+            x.call.operation = PolicyOperation::Forward;
+            x.call.black_holes = act.black_holes;
+          }
+        },
+        a);
+    PolicyEngine& pe = PolicyAccess::engine(*policy);
+    x.engine = &pe;
+    if (&pe.ledger != &ledger) invalid("list policy belongs to another ledger");
+    if (!seen.insert(pe.policy_id).second) invalid("duplicate policy in list");
+    if (mode == BatchMode::Simultaneous) {
+      if (x.call.operation == PolicyOperation::Place) invalid("SIMULTANEOUS does not accept Place");
+      if (x.call.operation == PolicyOperation::Replace && !is<Pinned>(pe) &&
+          !(is<ShortestPaths>(pe) && std::get<ShortestPaths>(pe.config.routing).allocation != RouteAllocation::Optimized)) {
+        invalid("SIMULTANEOUS Replace requires ShortestPaths EQUAL or WEIGHTED, or Pinned");
+      }
+      if (pe.config.admission != Admission::Lossy) invalid("SIMULTANEOUS requires admission=LOSSY");
+      if (!x.call.offer.has_value()) invalid("SIMULTANEOUS requires finite offers");
+    }
+    check_call(pe, x.call);
+    out.push_back(x);
+  }
+  return out;
+}
+
+// The list's one publication: one atomic exchange of every publishing policy's records (new ids in
+// list order, then draft order), then their epochs (nothing after the exchange throws).
+void publish_list(FlowLedger& ledger, std::span<ListAction> list, std::span<PendingPolicyUpdate> pending, const std::vector<std::uint8_t>& publishes) {
+  std::vector<OwnerDrafts> owners;
+  std::vector<std::size_t> which;
+  for (std::size_t i = 0; i < list.size(); ++i) {
+    if (publishes[i] == 0) continue;
+    owners.push_back({list[i].engine->policy_id, pending[i].drafts, list[i].call.is_full_offer()});
+    which.push_back(i);
+  }
+  std::vector<std::vector<FlowId>> created(owners.size());
+  LedgerAccess::commit_batch(ledger, owners, created);
+  for (std::size_t k = 0; k < which.size(); ++k) {
+    PendingPolicyUpdate& s = pending[which[k]];
+    for (std::size_t n = 0; n < s.fresh.size(); ++n) s.next_epoch.record_groups[s.fresh[n].first][s.fresh[n].second].record_counter = created[k][n].second;
+    list[which[k]].engine->epoch = std::move(s.next_epoch);
+  }
+}
+
+// ORDERED: each action as its scalar call on the working totals the earlier ones left (their
+// carried loads and holds exchanged for the drafts), its outputs after it.
+std::vector<PlacementResult> run_ordered(FlowLedger& ledger, std::span<ListAction> list, const OutputOptions& outputs) {
+  const auto c = LedgerAccess::carried(ledger);
+  const auto h = LedgerAccess::reserved(ledger);
+  std::vector<Amount> carried(c.begin(), c.end());
+  std::vector<Amount> held(h.begin(), h.end());
+  LedgerTotals totals {LedgerAccess::baseline(ledger), carried, LedgerAccess::reservation_baseline(ledger), held};
+  std::vector<PendingPolicyUpdate> pending(list.size());
+  std::vector<std::uint8_t> publishes(list.size(), 0);
+  std::vector<PlacementResult> results(list.size());
+  for (std::size_t i = 0; i < list.size(); ++i) {
+    PolicyEngine& pe = *list[i].engine;
+    PolicyCall& rq = list[i].call;
+    rq.totals = &totals;
+    if (rq.operation == PolicyOperation::Place && rq.offer == Amount {0}) {
+      results[i] = zero_state(pe, &totals, outputs);
+      continue;
+    }
+    pending[i] = compute(pe, rq);
+    publishes[i] = 1;
+    // The working totals after it: the policy's live records out, its drafts in.
+    auto exchange = [&](const FlowRecord& r, Amount sign) {
+      for (const auto& [e, x] : r.edge_flows) carried[static_cast<std::size_t>(e)] += sign * x;
+      if (r.edge_reservations.empty()) return;
+      if (held.empty()) {
+        held.assign(carried.size(), 0);
+        totals.held = held;
+      }
+      for (const auto& [e, x] : r.edge_reservations) held[static_cast<std::size_t>(e)] += sign * x;
+    };
+    for (const FlowRecord* r : current_records(pe)) exchange(*r, -1);
+    for (const auto& d : pending[i].drafts) exchange(d.record, 1);
+    results[i] = std::move(pending[i].result);
+  }
+  publish_list(ledger, list, pending, publishes);
+  return results;
+}
+
+// SIMULTANEOUS: every participant prepared and forwarded on one view (the ledger's residual plus
+// every participant's old carried load) by one joint evaluation, demands in creation order; each
+// finished as its scalar call finishes; the outputs after the whole list.
+std::vector<PlacementResult> run_simultaneous(FlowLedger& ledger, std::span<ListAction> list, const OutputOptions& outputs) {
+  const std::size_t n = list.size();
+  const auto c = LedgerAccess::carried(ledger);
+  std::vector<Amount> carried(c.begin(), c.end());
+  for (const auto& x : list) {
+    for (const FlowRecord* r : current_records(*x.engine)) {
+      for (const auto& [e, a] : r->edge_flows) carried[static_cast<std::size_t>(e)] -= a;
+    }
+  }
+  const LedgerTotals totals {LedgerAccess::baseline(ledger), carried, LedgerAccess::reservation_baseline(ledger), LedgerAccess::reserved(ledger)};
+  // One workspace for the whole computation: a second one on this thread would void its deltas.
+  ServiceCapacityWorkspace W(totals);
+  enum class Kind { EmptyRoster, Entries, BySource, ShortestPathsReplace };
+  struct Participant {
+    Kind kind {Kind::EmptyRoster};
+    PolicyEpoch fresh {};
+    std::optional<ForwardingView> view {};  // its own (a Pinned replace forwards the policy's)
+    PreparedShortestPaths prep {};
+    std::vector<Amount> inject {};
+    ProgramFlow flow {};
+    [[nodiscard]] const ForwardingView* forwarded(const PolicyEngine& pe) const noexcept { return view ? &*view : &pe.view; }
+  };
+  std::vector<Participant> parts(n);
+  std::vector<std::size_t> forwarding;
+  for (std::size_t i = 0; i < n; ++i) {
+    PolicyEngine& pe = *list[i].engine;
+    const PolicyCall& rq = list[i].call;
+    auto& part = parts[i];
+    part.fresh = fresh_epoch(pe, rq.operation == PolicyOperation::Forward);
+    if (pe.reachable_sources.empty() && !is<Pinned>(pe)) continue;
+    if (rq.operation == PolicyOperation::Replace && is<Pinned>(pe)) {
+      part.kind = Kind::Entries;
+    } else if (rq.operation == PolicyOperation::Replace) {
+      PolicyCallContext ctx {pe, *pe.graph, W};
+      part.prep = prepare_shortest_path_program(ctx);
+      part.view.emplace(make_forwarding_view(*pe.graph, part.prep.program, nullptr, pe.allowed_destinations, nullptr));
+      part.kind = Kind::ShortestPathsReplace;
+    } else if (tunnel_model(pe)) {
+      part.view.emplace(make_forwarding_view(*pe.graph, pe.epoch.program, nullptr, pe.allowed_destinations, rq.black_holes, true));
+      part.kind = Kind::Entries;
+    } else {
+      part.view.emplace(installed_view(pe, rq));
+      part.kind = Kind::BySource;
+    }
+    const ForwardingView& view = *part.forwarded(pe);
+    part.inject.assign(view.num_sources(), 0);
+    source_shares(view, *rq.offer, part.inject);
+    forwarding.push_back(i);
+  }
+  // The joint forwarding: the demands in their policies' creation order.
+  std::sort(forwarding.begin(), forwarding.end(),
+            [&](std::size_t a, std::size_t b) { return list[a].engine->policy_id < list[b].engine->policy_id; });
+  std::vector<ForwardingDemand> demands;
+  demands.reserve(forwarding.size());
+  for (auto i : forwarding) demands.push_back({parts[i].forwarded(*list[i].engine), parts[i].inject});
+  auto flows = detail::lossy(demands, available_capacity_reader(W));
+  for (std::size_t k = 0; k < forwarding.size(); ++k) parts[forwarding[k]].flow = std::move(flows[k]);
+  // Each participant finished as its scalar call finishes.
+  std::vector<PendingPolicyUpdate> pending(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    PolicyEngine& pe = *list[i].engine;
+    const PolicyCall& rq = list[i].call;
+    auto& part = parts[i];
+    const ForwardingProgram* before = pe.epoch.program.get();
+    PendingPolicyUpdate& s = pending[i];
+    switch (part.kind) {
+      case Kind::EmptyRoster: s = empty_roster(pe, part.fresh, rq, before); break;
+      case Kind::Entries:
+        if (rq.operation == PolicyOperation::Replace) {
+          s = forward_entries(pe, part.fresh, W, rq, before, pe.view, pe.can_forward, false, nullptr, &part.flow);
+        } else {
+          s = forward_entries(pe, part.fresh, W, rq, before, *part.view, view_active(*part.view), is<DistributedTE>(pe), pe.epoch.plan,
+                              &part.flow);
+        }
+        break;
+      case Kind::BySource: s = finish_by_source(pe, rq, *part.view, part.flow, nullptr); break;
+      case Kind::ShortestPathsReplace: {
+        const PreparedReplace replaced {part.prep.program, part.prep.flows, before};
+        s = finish_by_source(pe, rq, *part.view, part.flow, &replaced);
+        break;
+      }
+    }
+    // A full-offer call: its call_delivered is the whole new delivery, compared with the old one.
+    Amount old = 0;
+    for (const FlowRecord* r : current_records(pe)) old += r->delivered;
+    s.result.call_delivered = s.result.delivered;
+    s.result.delivery_delta = s.result.delivered - old;
+    s.result.call_undelivered = *rq.offer - s.result.call_delivered;
+    if (*rq.offer == 0) s.result.termination = Termination::Complete;
+  }
+  // The outputs after the whole list: one residual for every entry, each entry's boundary from its
+  // own sources and mask on it.
+  if (any_output(outputs)) {
+    std::vector<Amount> after(carried);
+    for (const auto& s : pending) {
+      for (const auto& d : s.drafts) {
+        for (const auto& [e, x] : d.record.edge_flows) after[static_cast<std::size_t>(e)] += x;
+      }
+    }
+    const auto baseline = LedgerAccess::baseline(ledger);
+    std::vector<Amount> residual(after.size());
+    for (std::size_t e = 0; e < residual.size(); ++e) residual[e] = baseline[e] - after[e];
+    for (std::size_t i = 0; i < n; ++i) {
+      const PolicyEngine& pe = *list[i].engine;
+      PlacementResult& out = pending[i].result;
+      const auto m = residual.size();
+      if (outputs.edge_reservations) {
+        std::vector<Amount> held(m, 0);
+        for (const auto& d : pending[i].drafts) {
+          for (const auto& [e, x] : d.record.edge_reservations) held[static_cast<std::size_t>(e)] += x;
+        }
+        out.edge_reservations = std::move(held);
+      }
+      if (outputs.edge_flows) {
+        std::vector<Amount> own(m, 0);
+        for (const auto& d : pending[i].drafts) {
+          for (const auto& [e, x] : d.record.edge_flows) own[static_cast<std::size_t>(e)] += x;
+        }
+        out.edge_flows = std::move(own);
+      }
+      if (outputs.saturated_boundary_edges) out.saturated_boundary_edges = saturated_boundary_edges_of(*pe.graph, residual, pe.sources, pe.eligibility);
+      if (outputs.residual) out.residual = residual;
+    }
+  }
+  std::vector<PlacementResult> results(n);
+  for (std::size_t i = 0; i < n; ++i) results[i] = std::move(pending[i].result);
+  publish_list(ledger, list, pending, std::vector<std::uint8_t>(n, 1));
+  return results;
 }
 
 } // namespace
@@ -2174,6 +2490,12 @@ PlacementResult detail::place_traced(FlowPolicy& policy, std::optional<Amount> o
   return run_call(PolicyAccess::engine(policy), PolicyCall {PolicyOperation::Place, offer, {}, nullptr, &outputs, &trace}, before_publish);
 }
 #endif
+
+std::vector<PlacementResult> apply_actions(FlowLedger& ledger, std::span<const Action> actions, BatchMode mode, const OutputOptions& outputs) {
+  auto list = detail::validate_list(ledger, actions, mode, outputs);
+  if (list.empty()) return {};
+  return mode == BatchMode::Ordered ? detail::run_ordered(ledger, list, outputs) : detail::run_simultaneous(ledger, list, outputs);
+}
 
 void FlowPolicy::remove() {
   auto& pe = *engine_;

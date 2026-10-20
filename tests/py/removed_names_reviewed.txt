@@ -658,3 +658,15 @@ docs/semantics.md | allocated | event structures are allocated. Either refusal c
 include/netgraph/core/detail/forwarding.hpp | allocated | before the network is allocated; | allocated memory, storage or amounts
 include/netgraph/core/detail/forwarding.hpp | allocated | structures are allocated. Either refusal changes nothing. | allocated memory, storage or amounts
 tests/cpp/program_tests.cpp | allocated | is allocated, the event and dependency counts before the event | allocated memory, storage or amounts
+bindings/python/hooks.cpp | allocated | allocated). | allocated memory, storage or amounts
+dev/perf/README.md | tunnels | the ring's 64 tunnels as 64 policies in one SIMULTANEOUS list | a model's tunnels (ForwardingProgram.tunnels is the current name)
+src/forwarding.cpp | allocated | A pooled context's counts before anything of the network is allocated | allocated memory, storage or amounts
+tests/cpp/apply_actions_fault_tests.cpp | allocated | epoch are as before the call, the aggregate is balanced, nothing is left allocated | allocated memory, storage or amounts
+tests/cpp/apply_actions_fault_tests.cpp | allocated | of the call, a publication that allocated after the ledger's exchange | allocated memory, storage or amounts
+tests/cpp/joint_forwarding_tests.cpp | dst | A ShortestPaths program of `sources` to `dst` | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
+tests/cpp/joint_forwarding_tests.cpp | dst | A random simple walk from h over inner nodes | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
+tests/cpp/joint_forwarding_tests.cpp | dst | One or two tunnels from a random head to dst | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
+tests/cpp/joint_forwarding_tests.cpp | g | ledger of g. | the local or parameter `g` of this file's code (a shorthand kept as an ordinary local)
+tests/cpp/program_tests.cpp | Tunnels | black holes on rows 2, 6 and 17. Tunnels 0 and 3 | a model's tunnels (ForwardingProgram.tunnels is the current name)
+tests/py/test_apply_actions.py | g | alike). g: the first copy's graph | the local or parameter `g` of this file's code (a shorthand kept as an ordinary local)
+tests/py/test_programs.py | Tunnels | on rows 2, 6 and 17. Tunnels 0 and 3 reach a black hole | a model's tunnels (ForwardingProgram.tunnels is the current name)

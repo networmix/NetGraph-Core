@@ -3121,7 +3121,7 @@ class Harness(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = aba.row_list(proc.stdout.encode(), "aba-list")
         real = {k: v for k, v in rows.items() if not k.startswith("test.")}
-        self.assertEqual(len(real), 65)
+        self.assertEqual(len(real), 70)
         sums = sha256sums(HERE / "queries")
         lists = {}
         for name in sums:
@@ -3155,12 +3155,31 @@ class Harness(unittest.TestCase):
         real = [row for row in listed if not row.startswith("test.")]
         with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 1) as pool:
             procs = list(pool.map(lambda row: self.harness("aba-run", row, "1"), real))
-        self.assertEqual(len(procs), 65)
+        self.assertEqual(len(procs), 70)
         for row, proc in zip(real, procs, strict=True):
             self.assertEqual(proc.returncode, 0, (row, proc.stderr))
             self.assertEqual(
                 aba.parse_block(proc.stdout.encode(), row, row)["iterations"], 1
             )
+
+    def test_list_rows_equal_their_references(self):
+        # an ORDERED list does the scalar calls' work (the same digest), and the ring's list gives
+        # the one program's amounts (64 policies against one: not the same work, the same digest);
+        # the eight Clos demands share no link (their own
+        # sources, destination and spine links), so the SIMULTANEOUS list's joint evaluation of
+        # pooled demands gives the kernel's amounts too
+        def digest(row):
+            proc = self.harness("aba-run", row, "1")
+            self.assertEqual(proc.returncode, 0, (row, proc.stderr))
+            return aba.parse_block(proc.stdout.encode(), row, row)["digest"]
+
+        self.assertEqual(digest("batch.ordered.clos"), digest("batch.scalar.clos"))
+        self.assertEqual(
+            digest("batch.simultaneous.ring"), digest("program.ring.lossy")
+        )
+        self.assertEqual(
+            digest("batch.simultaneous.clos"), digest("batch.ordered.clos")
+        )
 
     def test_memory_does_not_grow_with_the_count(self):
         # the per-iteration bookkeeping is allocated before the setup and does not grow: the

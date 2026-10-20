@@ -5,7 +5,8 @@ C++ graph engine for network flow analysis, traffic engineering simulation, and 
 > **Unreleased, breaking.** This version replaces the 0.11 API (see the Unreleased section of
 > [CHANGELOG.md](CHANGELOG.md)): the graph on integer units, the minimum-cost flow core, the route
 > structures (`PredecessorDAG`, `Path`), the integer ledger `FlowLedger` with the route allocations, the
-> policy engine `FlowPolicy` with its four routing models, forwarding programs, the searches (`spf`,
+> policy engine `FlowPolicy` with its four routing models and its lists of several policies' actions
+> (`apply_actions`), forwarding programs, the searches (`spf`,
 > `ksp`, `resolve_to_paths`), the `ShortestPathCache` in building and frozen modes, and the evaluators
 > `evaluate_demand`, `evaluate_pairs` and `evaluate_edge_failures`.
 > The previous API (0.11 and earlier) is in git history and on PyPI.
@@ -150,6 +151,16 @@ specified in [docs/semantics.md](docs/semantics.md).
   program (T1 keeps its tunnels and holds, T2 its tunnels and plan); `remove()` reverts the
   policy's flows and holds; `records()`, `record(flow_id)`, `delivered()`, `config` and `program`
   read its state.
+- **`apply_actions(ledger, actions, *, mode=BatchMode.ORDERED, outputs=None)`**: the actions of
+  several policies of one ledger (`Place(policy, offer)`, `Replace(policy, offer, *,
+  design_demand=None)`, `Forward(policy, offer, *, black_holes=None)`, immutable values) as one
+  transaction, validated whole and published once, one `PlacementResult` per action in input
+  order. `BatchMode.ORDERED` runs each as its scalar call on the state the earlier ones left
+  (earlier actions are served first); `BatchMode.SIMULTANEOUS` forwards LOSSY `Replace` actions of
+  `ShortestPaths` `EQUAL` or `WEIGHTED` and `Pinned` and `Forward` actions of installed programs at
+  the same time on one view (the residual plus every participant's old traffic), a full edge
+  shared by highest averages over the demands, then their heads, then their entries
+  ([docs/semantics.md](docs/semantics.md#several-demands-at-once)).
 - **Failure guarantee**: every public call either completes or raises one exception and leaves
   every ledger, policy, cache and scratch buffer as it was, whatever fails (validation, memory, a
   worker thread, building the Python result). Two limits: pybind11 does not check every

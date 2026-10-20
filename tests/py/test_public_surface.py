@@ -50,6 +50,11 @@ PUBLIC = {
     "PlacementResult",
     "SourceFlow",
     "FlowPolicy",
+    "Place",
+    "Replace",
+    "Forward",
+    "BatchMode",
+    "apply_actions",
     "ShortestPathCache",
     "ShortestPathCacheMiss",
     "ShortestPathCacheStats",
@@ -77,6 +82,8 @@ PRIVATE = {"_solve_min_cost_flow"}
 HOOK_FUNCTIONS = {
     "_fail_python_allocation",
     "_fail_native_allocation",
+    "_with_forwarding_limits",
+    "_check_forwarding_count",
     "_round_robin",
     "_highest_averages",
 }
@@ -97,8 +104,8 @@ def test_public_surface():
     for name in PUBLIC:
         assert getattr(ngc, name) is getattr(_netgraph_core, name), name
     assert isinstance(ngc.__version__, str)
-    # 50 entries with __version__ (RouteTieBreak replaces the three earlier route-choice types).
-    assert len(ngc.__all__) == 50
+    # 55 entries with __version__ (RouteTieBreak replaces the three earlier route-choice types).
+    assert len(ngc.__all__) == 55
 
 
 def test_enum_values_are_pinned():
@@ -773,7 +780,8 @@ def _stub_members():
 
 def _runtime_default(cls, method, param):
     # The stub prints an enum default as `...`; pybind11's runtime signature names the value.
-    doc = getattr(getattr(ngc, cls), method).__doc__ or ""
+    owner = getattr(ngc, cls)
+    doc = (owner if method == "__call__" else getattr(owner, method)).__doc__ or ""
     found = re.search(rf"\b{param}: [\w.]+ = ([\w.]+)", doc)
     return found.group(1) if found else None
 
@@ -832,8 +840,8 @@ def test_runtime_signatures_match_the_contract():
 
 
 def test_api_matches_the_contract():
-    # Every public name of the interface listing (contract_api.py; the batch operations, not yet in
-    # the library, excepted), every member, and every parameter's name, kind and default; no other public member.
+    # Every public name of the interface listing (contract_api.py), every member, and every
+    # parameter's name, kind and default; no other public member.
     from contract_api import CONTRACT_API
 
     stub = _stub_members()

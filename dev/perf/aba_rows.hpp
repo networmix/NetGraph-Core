@@ -953,6 +953,50 @@ inline std::vector<Row> rows() {
                  }
                  return Iter([g, demands] { return abaapi::pooled_dag_build(*g, demands); });
                }});
+  // ---- several demands at once (apply_actions): the eight pooled Lossy demands above given 4,000
+  // each, as eight scalar replace() calls (the reference), as one ORDERED list (the same work: an
+  // equal digest, budget +3 %) and as one SIMULTANEOUS list (every pooled demand forwarded by the
+  // joint evaluator at once, budget 2x the ORDERED list; the demands share no link, so its digest
+  // equals too).
+  auto batch_row = [](abaapi::Batch mode) {
+    auto g = std::make_shared<Graph>(abaapi::build(gen_clos(64, 32, 22)));
+    std::vector<std::pair<std::vector<int>, int>> demands;
+    for (int j = 0; j < 8; ++j) {
+      std::vector<int> srcs;
+      for (int i = 0; i < 8; ++i) srcs.push_back(8 * j + i);
+      demands.push_back({srcs, (8 * j + 36) % 64});
+    }
+    return Iter([g, demands, mode] { return abaapi::batch_place(*g, demands, 4000.0, mode); });
+  };
+  r.push_back({"batch.scalar.clos", "batch",
+               "the eight pooled Lossy demands of pooled.lossy.clos on a fresh ledger, then eight scalar replace(4000) "
+               "calls (the reference of the list rows)",
+               [=] { return batch_row(abaapi::Batch::Scalar); }});
+  r.push_back({"batch.ordered.clos", "batch",
+               "the same construction, then one ORDERED apply_actions of the eight Replace(4000): the scalar calls' work "
+               "on a working state, one publication (digest equal to batch.scalar.clos)",
+               [=] { return batch_row(abaapi::Batch::Ordered); }});
+  r.push_back({"batch.simultaneous.clos", "batch",
+               "the same construction, then one SIMULTANEOUS apply_actions of the eight Replace(4000): every program "
+               "prepared on one view and forwarded at once by the joint loss evaluator (the demands share no link)",
+               [=] { return batch_row(abaapi::Batch::Simultaneous); }});
+  // The ring (abaapi::ring_fixture): 64 barriers in one cyclic group settling at round 6, as one
+  // program (the reference) and as a SIMULTANEOUS list of its 64 tunnels (equal traffic amounts and
+  // digests; the list has 64 publishing policies rather than one, with a 2x operating budget).
+  r.push_back({"program.ring.lossy", "program",
+               "one Pinned Lossy replace(192) of a 64-head program on a ring of 64 links of 3 units, each tunnel over two "
+               "consecutive links: 64 barriers in one cyclic group, 6 rounds",
+               [] {
+                 auto ring = abaapi::ring_fixture();
+                 return Iter([ring] { return abaapi::ring_program(*ring); });
+               }});
+  r.push_back({"batch.simultaneous.ring", "batch",
+               "the same ring as 64 one-tunnel Pinned Lossy policies, one SIMULTANEOUS apply_actions of Replace(3) each: "
+               "the same 64 barriers and 6 rounds across 64 demands (digest equal to program.ring.lossy)",
+               [] {
+                 auto ring = abaapi::ring_fixture();
+                 return Iter([ring] { return abaapi::ring_list(*ring); });
+               }});
   r.push_back({"global.equal.random", "global",
                "evaluate_demand() of CentralizedTE with the equal source allocation, random 1024 x6, 2 demands of 4 sources (the bisection's "
                "probe solves and the final solve)",

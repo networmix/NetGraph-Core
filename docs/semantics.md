@@ -148,12 +148,14 @@ separate kind of number: positive integers that are never converted.
   one of `entry`, `occurrence`, `router`, `event`, `dependency`; `<n>` the exact count). The
   entry, occurrence and router limits are checked after validation and before the network is
   allocated; the event and dependency limits, known only after the no-drop loads, before the
-  event structures are allocated. Either refusal changes nothing. Identities are
+  event structures are allocated. Either refusal changes nothing. A list of several demands
+  ([several demands at once](#several-demands-at-once)) counts its one joint network, every
+  participant together. Identities are
   never reused: a ledger issues at most `2^63 - 1` policy identifiers and `2^63 - 1` FlowId
   counters, and the process at most `2^63 - 1` identities shared by graphs, ledgers and masks (0,
   the all-allowed mask's, is never issued); the next one raises `RuntimeError('policy identity
   limit exceeded')`, `RuntimeError('record identity limit exceeded')` (a publication's new records
-  counted together) or `RuntimeError('object identity limit exceeded')` before anything changes.
+  counted together, a list's included) or `RuntimeError('object identity limit exceeded')` before anything changes.
 - **Domain.** Every edge capacity, and the sum of all capacities, is below `2^62` units. Edge
   costs are integers of at least 1 and their sum is below `2^62`, so no path cost reaches the
   sentinel `UNREACHABLE` (the largest `int64`). An offer is an integer in `[0, 2^62)` units or
@@ -586,8 +588,8 @@ not fit.
 - **Lossy forwarding** (`ShortestPaths` with `WEIGHTED` or `EQUAL`, T1, T2 and `Pinned`). Each
   call's offer is split at every node by the allocation's rule; each edge carries the smaller of
   what reaches it and its residual, and the rest is dropped on that edge (where several routes of
-  one program meet on an edge, [the loss rule](#losses-inside-one-program) divides what it
-  carries). The delivery is what reaches the destination set. A share that has no edge to go on (a
+  one program, or of several demands forwarded together, meet on an edge, [the loss
+  rule](#losses-on-shared-edges) divides what it carries). The delivery is what reaches the destination set. A share that has no edge to go on (a
   `WEIGHTED` node whose members all have weight 0) is lost where it is: at a source it is a source
   drop (`source_drops`). Records keep `offered`, `delivered` and per-edge `edge_drops`. Lossy calls
   are independent: nothing is offered again and two calls are not equivalent to one. An infinite
@@ -770,7 +772,9 @@ volume, take whole offers only). `evaluate`, `replace` and `forward` ask for a w
 instead (only computed, published, or forwarded over the routes already installed). `remove()`
 takes all of its traffic back out. A demand with several sources is one demand, not several: how
 its traffic enters at the sources is its **source allocation**, and where the routes of its
-sources meet, their traffic is added and split once.
+sources meet, their traffic is added and split once. Several policies of one ledger can act in one
+operation, `apply_actions`: one after another, or all at the same time with their losses shared
+([several demands at once](#several-demands-at-once)).
 
 ### Configuration
 
@@ -1194,8 +1198,9 @@ means none). Nothing is pruned, re-split or reweighted: every router keeps its m
 weights and applies the program's whole-unit rule to the traffic that actually arrives. A
 black-holed edge carries nothing (all that arrives is dropped there); a black-holed node acts the
 same on every edge entering it; a black-holed source loses its own share as a source drop. Lossy
-runs the loss rule below with those edges serving 0; Lossless admits only totals that put nothing
-on a black hole. A tunnel that is up but whose path reaches a black hole is `BLACKHOLED` in
+drops what reaches a black hole where it arrives: it takes no part in sharing an edge (the loss
+rule below) and makes no edge wait. Lossless admits only totals that put nothing on a black hole
+(a black-holed edge serves 0). A tunnel that is up but whose path reaches a black hole is `BLACKHOLED` in
 `by_tunnel`, its traffic dropped at the first black hole on its path. The policy's Eligibility
 applies first: an element both excluded and black-holed is excluded. A down tunnel keeps its
 setup status. A program forwarded by `Pinned` books no hold, whatever its producer.
@@ -1273,19 +1278,24 @@ another policy's mask; on a shared ledger, the old owner is removed or replaced 
 replacement is modelled, since a new policy is a different demand that does not release the old
 one's traffic or holds.
 
-### Losses inside one program
+### Losses on shared edges
 
-Where several entries of one program meet on an edge that cannot carry them all (Lossy), the
-edge carries `T = min(free capacity, sum of arrivals)` and divides it by highest averages: first
-over the heads by what each head's traffic brings, then within a head over its entries by their
-arrivals. Each part continues with its share; the rest is dropped on that edge. The whole program
-is evaluated at once: forwarded first without drops, an edge whose load fits can never drop and
-waits for nothing; every other shared edge waits for all its possible arrivals, and the edges are
-evaluated in dependency order (the order of independent edges does not change the result).
-Splitting an edge into two in series with the same capacity changes nothing.
+Where traffic meets on an edge that cannot carry it all (Lossy), the edge carries `T = min(free
+capacity, sum of arrivals)` and divides it by highest averages, level by level: first over the
+demands by what each demand's traffic brings (one program is one demand; in a SIMULTANEOUS list
+each policy is a demand, ties to the one created first), then within a demand over its heads, then
+within a head over its entries by their arrivals. Each part continues with its share; the rest is
+dropped on that edge. A pooled `ShortestPaths` demand (several sources whose routes meet) splits
+its total once at each router, and each member's amount is shared among the sources by highest
+averages over what each source still brings. Every demand is evaluated at once: forwarded first
+without drops, an edge whose load fits can never drop and waits for nothing; every other shared
+edge waits for all its possible arrivals, and the edges are evaluated in dependency order (the
+order of independent edges does not change the result). Splitting an edge into two in series with
+the same capacity changes nothing. Traffic that reaches its own demand's black hole is dropped
+there and takes no part in the sharing.
 
 When edges wait on each other in a cycle (one tunnel meets edge X before Y, another Y before X,
-and both can drop), only that group is recalculated, round by round, from nothing carried, until
+and both can drop; the tunnels may belong to different demands), only that group is recalculated, round by round, from nothing carried, until
 a round gives back exactly what went in; the answer is checked independently against the rule
 before anything is published. A group that alternates between two states raises
 `ValueError("lossy forwarding iteration entered a period-2 cycle")`; one that does not settle
@@ -1964,6 +1974,87 @@ After 12 units the cheap path (cost 2) is full and the solve stopped below the m
 is no cut; `saturated_boundary_edges` already reports the full edge 0. The second call adds 3 units at cost 4
 and reaches the maximum of 15, at a total cost of 10 x 2 + 5 x 4 = 40.
 
+### Several demands at once
+
+    apply_actions(ledger, actions, *, mode=BatchMode.ORDERED, outputs=None) -> list[PlacementResult]
+    Place(policy, offer)
+    Replace(policy, offer, *, design_demand=None)
+    Forward(policy, offer, *, black_holes=None)
+
+`apply_actions` runs the actions of several policies of one ledger as one operation and returns
+one `PlacementResult` per action, in input order, each with the fields of that policy's scalar
+call (`place`, `replace` or `forward`). The whole list is validated first and published once: if
+anything fails, the ledger and every policy are as they were. A policy appears at most once, and
+every policy belongs to `ledger`. An action is an immutable value that keeps its policy (and its
+black holes) alive; its offer and design demand are kept as given (an int or a float: another type
+raises `TypeError` when the action is built), and the call checks their domain.
+
+- **`BatchMode.ORDERED`** runs each action in list order exactly as its scalar call would, on the
+  state the earlier actions left (their traffic and their holds); the policies not reached yet keep
+  their old state. Normal outcomes (exhaustion, source drops, a down tunnel) are kept. Earlier
+  actions are served first: on one edge of 10, an ECMP replace of 10 and then a T1 tunnel's replace of 10
+  deliver 10 and 0, though the tunnel holds its 10, because a hold reserves setup bandwidth, not
+  service. New records take FlowIds in list order.
+- **`BatchMode.SIMULTANEOUS`** forwards every action at the same time on fixed routes, the losses
+  shared across the demands by [the loss rule](#losses-on-shared-edges). It takes `Replace` of
+  `ShortestPaths` `EQUAL` or `WEIGHTED` (its routes prepared on the list's view) and of `Pinned`,
+  and `Forward` of any policy with an installed program; every participant is LOSSY with a finite
+  offer. Controllers compute nothing here and T1 sets nothing up: prepare them first (scalar calls
+  or an ORDERED list), then forward them; a T1 owner keeps its holds. The view is the residual
+  plus every participant's old traffic, released together: owners outside the list and orphans
+  stay as fixed load, and holds are never added. Repeating a list with the same outside load gives
+  the same state, and permuting it changes nothing. Each participant's black holes are its own:
+  what reaches one is dropped there and takes no part in sharing that edge, while the others share
+  it as usual. Removing a participant later frees only its own traffic; the others do not
+  rebalance until they are forwarded again.
+- **Outputs.** `outputs` applies to every entry. `residual` and `saturated_boundary_edges` read the
+  ledger after that action (ORDERED) or after the whole list (SIMULTANEOUS: one residual for every
+  entry, each entry's boundary from its own sources and Eligibility).
+- **Validation, in this order:** the arguments' types (`TypeError`: `ledger must be a FlowLedger`,
+  `actions must be a sequence of Place, Replace or Forward (got <type>)`, `actions[<i>] must be a
+  Place, Replace or Forward (got <type>)`, `mode must be a BatchMode (got <type>)`, `outputs must be
+  an OutputOptions (got <type>)`); the mode's value (`mode: <v> is not a value of BatchMode`); an
+  empty list returns `[]`; then each action in list order, all of its checks before the next
+  action's: `list policy belongs to another ledger`, `duplicate policy in list`, the SIMULTANEOUS
+  rules (`SIMULTANEOUS does not accept Place`, `SIMULTANEOUS Replace requires ShortestPaths EQUAL or
+  WEIGHTED, or Pinned`, `SIMULTANEOUS requires admission=LOSSY`, `SIMULTANEOUS requires finite
+  offers`), then the scalar call's own checks in their order. Only then is anything computed. An
+  error of the computation (a loss cycle that does not settle, a solver or forwarding size limit,
+  an allocation failure) publishes nothing.
+
+```python
+# Two ECMP demands of 10 on one edge of 10, at the same time and one after the other.
+g = graph(2, [(0, 1, 10, 1)])
+ecmp = ngc.FlowPolicyConfig(routing=ngc.ShortestPaths(), admission=ngc.Admission.LOSSY)
+for mode in (ngc.BatchMode.SIMULTANEOUS, ngc.BatchMode.ORDERED):
+    led = ngc.FlowLedger(g)
+    a = ngc.FlowPolicy(led, 0, 1, ecmp)
+    b = ngc.FlowPolicy(led, 0, 1, ecmp)
+    res = ngc.apply_actions(led, [ngc.Replace(a, 10), ngc.Replace(b, 10)], mode=mode)
+    print(mode.name, [r.call_delivered for r in res], [r.call_edge_drops for r in res])
+
+# Edges 0: 0 -> 2 of 5, 1: 1 -> 2 of 10, 2: 2 -> 3 of 10; a from 0 and b from 1, 5 each.
+g = graph(4, [(0, 2, 5, 1), (1, 2, 10, 1), (2, 3, 10, 1)])
+led = ngc.FlowLedger(g)
+a, b = (ngc.FlowPolicy(led, s, 3, ecmp) for s in (0, 1))
+out = ngc.OutputOptions(residual=True, saturated_boundary_edges=True)
+for r in ngc.apply_actions(led, [ngc.Replace(a, 5), ngc.Replace(b, 5)],
+                           mode=ngc.BatchMode.SIMULTANEOUS, outputs=out):
+    print(r.call_delivered, r.residual.tolist(), r.saturated_boundary_edges)
+```
+
+```text
+SIMULTANEOUS [5, 5] [[(0, 5)], [(0, 5)]]
+ORDERED [10, 0] [[], [(0, 10)]]
+5 [0, 5, 0] [0]
+5 [0, 5, 0] [2]
+```
+
+At the same time the edge shares its 10 between the two demands; one after the other the first
+takes it all. In the second list both entries report the residual after the whole list, and each
+its own boundary: a's source reaches nothing beyond its full edge 0, b's reaches node 2, whose exit
+is full.
+
 ## 8. Failures, threads and lifetimes
 
 **In plain words.** A call either does everything or changes nothing: if it fails, for any
@@ -1985,7 +2076,7 @@ threads; ledgers, policies and building caches have one writer at a time.
   which do not all check for failure. A memory failure at exactly that point may crash the process
   instead of raising. Library state is never left half-changed by it. The results of `spf`, `ksp`,
   `resolve_to_paths`, `ForwardingProgram.from_routes` and `from_dag`, `FlowPolicy.place`,
-  `evaluate`, `replace` and `forward`, `evaluate_demand`, `evaluate_pairs` and
+  `evaluate`, `replace` and `forward`, `apply_actions`, `evaluate_demand`, `evaluate_pairs` and
   `evaluate_edge_failures` are built through a checked path and stay inside the guarantee, and so
   is every read of a field or property and every `repr` of the library's values (the configuration
   values and their enumerations, `FlowPolicy.config`, `program`, `plan`, `by_source`, `by_tunnel`,
@@ -2006,9 +2097,10 @@ threads; ledgers, policies and building caches have one writer at a time.
   the graph, ledger, Eligibility and cache alive while a policy needs them.
 - **Immutable values.** The configuration values (`FlowPolicyConfig`, the four models,
   `TunnelCount`, `AbsoluteCost`, `CostStretch`, `OutputOptions`, `EvaluationOptions`,
-  `RouteDefinition`) and the search options (`SpfOptions`, `KspOptions`) have read-only fields:
-  no option object changes after it is built. A policy validates its configuration once and keeps
-  that snapshot (`policy.config`); an evaluator validates and copies its options at call entry.
+  `RouteDefinition`), the search options (`SpfOptions`, `KspOptions`) and the actions of a list
+  (`Place`, `Replace`, `Forward`) have read-only fields: no option object changes after it is
+  built. A policy validates its configuration once and keeps that snapshot (`policy.config`); an
+  evaluator validates and copies its options at call entry, and `apply_actions` its actions.
 - **Exception classes.** One rule for the class of an input error, at every public entry
   (constructors, search options, call arguments, evaluator options): a Python type the position
   never takes is a `TypeError` (a bool, Python's or `numpy.bool_`, at any numeric position; a float
@@ -2315,7 +2407,7 @@ self-contained:
 | `netgraph/core/search.hpp` | `spf`, `ksp`, `resolve_to_paths`, `SpfOptions`, `SpfResult`, `KspOptions`, `SpfQueue` |
 | `netgraph/core/flow_record.hpp` | `FlowId`, `Counter128` (the 128-bit cumulative counter), `FlowRecord` |
 | `netgraph/core/flow_ledger.hpp` | `FlowLedger` |
-| `netgraph/core/flow_policy.hpp` | `FlowPolicy`, its configuration (`FlowPolicyConfig`, `ShortestPaths`, `DistributedTE`, `CentralizedTE`, `Pinned`, `TunnelCount`, `OutputOptions`) and result types (`PlacementResult`, `SourceFlow`, `TunnelFlow`, `TunnelPlan`), `Termination` |
+| `netgraph/core/flow_policy.hpp` | `FlowPolicy`, its configuration (`FlowPolicyConfig`, `ShortestPaths`, `DistributedTE`, `CentralizedTE`, `Pinned`, `TunnelCount`, `OutputOptions`) and result types (`PlacementResult`, `SourceFlow`, `TunnelFlow`, `TunnelPlan`), `Termination`; the lists: `apply_actions`, `BatchMode`, `Place`, `Replace`, `Forward`, `Action` |
 | `netgraph/core/shortest_path_cache.hpp` | `ShortestPathCache`, `ShortestPathCacheMiss` |
 | `netgraph/core/evaluators.hpp` | `evaluate_demand`, `evaluate_pairs`, `evaluate_edge_failures`, `EvaluationOptions`, `SensitivityEntry`, `SensitivityResult` |
 
@@ -2338,4 +2430,7 @@ a null `std::shared_ptr` (`edge_weights` is a shared array, `std::shared_ptr<con
 std::vector<Amount>>`). `CentralizedTE` has no default constructor: it is built from its
 `SourceAllocation`. The epoch's amounts are `Counter128` values. A Python `ValueError` is a
 `std::invalid_argument` in C++. `spf` takes a trailing C++-only `SpfQueue` argument that chooses
-the search's internal queue; the results never depend on it.
+the search's internal queue; the results never depend on it. `apply_actions` takes a
+`std::span<const Action>`, where `Action` is a `std::variant<Place, Replace, Forward>` whose
+values borrow their policy (a `std::reference_wrapper<FlowPolicy>`) and black holes (a `const
+Eligibility*`, null for none), which must outlive the call.

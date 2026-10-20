@@ -3,7 +3,7 @@
 // with the route as its support, or Pinned over it as a supplied split route: test::RoutePolicy,
 // route_policy.hpp); the 128-bit counters of the records;
 // and the commit rule itself (each edge published once, the multi-owner model, the fresh-record
-// path), driven through detail::LedgerAccess directly.
+// path, the batch exchange of several owners), driven through detail::LedgerAccess directly.
 //
 // | State             | place                         | remove()           | destroyed  | reset    | copy     |
 // | bound, no flows   | place(0) no-op; positive      | resets the epoch   | none       | rejected | rejected |
@@ -1370,4 +1370,229 @@ TEST(FlowLedger, OwnersWithoutRecordsAreForgotten) {
   LedgerAccess::release(fg, owner);
   EXPECT_EQ(LedgerAccess::bound_policy_ids(fg), (std::vector<std::int64_t> {0, 1002}));
   EXPECT_EQ(LedgerAccess::orphan_policy_ids(fg), (std::vector<std::int64_t> {1001}));
+}
+
+namespace {
+
+// The batch exchange of several owners (apply_actions' publication), each with its own rule.
+std::vector<std::vector<FlowId>> commit_batch(FlowLedger& fg, std::vector<std::int64_t> owners,
+                                              std::vector<std::vector<detail::RecordDraft>>& drafts,
+                                              std::vector<bool> retire) {
+  std::vector<detail::OwnerDrafts> parts;
+  for (std::size_t i = 0; i < owners.size(); ++i) parts.push_back({owners[i], drafts[i], retire[i]});
+  std::vector<std::vector<FlowId>> created(owners.size());
+  LedgerAccess::commit_batch(fg, parts, created);
+  return created;
+}
+
+} // namespace
+
+TEST(FlowLedger, RandomBatchesMatchAModel) {
+  // Four owners on four edges; each step one batch of one to four distinct owners in random
+  // order, each owner committing (every live record kept, changed, emptied or moved, plus up to
+  // two new) or exchanging (every live record retired, up to two new). A batch is feasible exactly
+  // when the aggregate over every owner fits, even where an owner alone would not (one gives up
+  // what another takes); new ids follow owner order, then draft order. A refused batch names an
+  // edge over its capacity and changes nothing.
+  std::mt19937 rng(23);
+  auto g = shared(make_graph(4, {{0, 1, 6, 1}, {1, 2, 4, 1}, {2, 3, 5, 1}, {0, 3, 3, 1}}));
+  const auto dag = all_edges(*g);
+  const auto m = static_cast<std::size_t>(g->num_edges());
+  FlowLedger fg(g);
+  std::vector<std::int64_t> owners;
+  for (int i = 0; i < 4; ++i) owners.push_back(LedgerAccess::bind(fg));
+  std::vector<std::map<std::int64_t, std::vector<Amount>>> model(owners.size());
+  std::int64_t next_id = 0;
+  int accepted = 0;
+  int rejected = 0;
+  int needs_batch = 0;  // accepted batches some of whose owners would be refused alone, in batch order
+  auto random_edges = [&] {
+    std::vector<Amount> a(m, 0);
+    for (std::size_t e = 0; e < m; ++e) a[e] = (rng() % 3) == 0 ? static_cast<Amount>(rng() % 3) : 0;
+    return a;
+  };
+  auto as_pairs = [](const std::vector<Amount>& a) {
+    std::vector<std::pair<EdgeId, Amount>> out;
+    for (std::size_t e = 0; e < a.size(); ++e) {
+      if (a[e] != 0) out.emplace_back(static_cast<EdgeId>(e), a[e]);
+    }
+    return out;
+  };
+  for (int step = 0; step < 3000; ++step) {
+    std::vector<std::size_t> order(owners.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::shuffle(order.begin(), order.end(), rng);
+    order.resize(1 + rng() % owners.size());
+    std::vector<std::int64_t> ids;
+    std::vector<std::vector<detail::RecordDraft>> drafts;
+    std::vector<bool> retire;
+    std::vector<std::map<std::int64_t, std::vector<Amount>>> after = model;
+    std::vector<std::vector<FlowId>> want_ids;
+    std::int64_t id = next_id;
+    for (std::size_t o : order) {
+      ids.push_back(owners[o]);
+      retire.push_back(rng() % 3 == 0);
+      drafts.emplace_back();
+      after[o].clear();
+      if (!retire.back()) {
+        for (const auto& [rid, a] : model[o]) {
+          const auto kind = rng() % 4;
+          std::vector<Amount> b = a;
+          if (kind == 1) {
+            b[rng() % m] += 1;
+          } else if (kind == 2) {
+            b.assign(m, 0);
+          } else if (kind == 3) {
+            b = random_edges();
+          }
+          drafts.back().push_back(draft_on(dag, as_pairs(b), rid));
+          after[o][rid] = b;
+        }
+      }
+      want_ids.emplace_back();
+      const int fresh = static_cast<int>(rng() % 3);
+      for (int k = 0; k < fresh; ++k) {
+        const auto b = random_edges();
+        drafts.back().push_back(draft_on(dag, as_pairs(b)));
+        after[o][id] = b;
+        want_ids.back().emplace_back(fg.uid(), id++);
+      }
+    }
+    std::vector<Amount> total(m, 0);
+    for (const auto& recs : after) {
+      for (const auto& [rid, a] : recs) {
+        for (std::size_t e = 0; e < m; ++e) total[e] += a[e];
+      }
+    }
+    bool feasible = true;
+    for (std::size_t e = 0; e < m; ++e) feasible = feasible && total[e] <= g->edge_capacity_units()[e];
+    const LedgerState before_state = ledger_state(fg);
+    if (feasible) {
+      // Would the owners, one at a time in batch order, all pass alone?
+      std::vector<Amount> running = fg.carried();
+      bool alone = true;
+      for (std::size_t j = 0; j < order.size(); ++j) {
+        const auto o = order[j];
+        for (const auto& [rid, a] : model[o]) {
+          for (std::size_t e = 0; e < m; ++e) running[e] -= a[e];
+        }
+        for (const auto& [rid, a] : after[o]) {
+          for (std::size_t e = 0; e < m; ++e) running[e] += a[e];
+        }
+        for (std::size_t e = 0; e < m; ++e) alone = alone && running[e] <= g->edge_capacity_units()[e];
+      }
+      needs_batch += alone ? 0 : 1;
+      EXPECT_EQ(commit_batch(fg, ids, drafts, retire), want_ids) << "step " << step;
+      model = after;
+      next_id = id;
+      ++accepted;
+    } else {
+      std::vector<std::string> refusals;
+      for (std::size_t e = 0; e < m; ++e) {
+        if (total[e] <= g->edge_capacity_units()[e]) continue;
+        refusals.push_back("ledger: infeasible commit on edge " + std::to_string(e) + " (" + std::to_string(total[e]) +
+                           " of " + std::to_string(g->edge_capacity_units()[e]) + ")");
+      }
+      const std::string got = logic_error_of([&] { (void)commit_batch(fg, ids, drafts, retire); });
+      EXPECT_TRUE(std::find(refusals.begin(), refusals.end(), got) != refusals.end()) << "step " << step << ": " << got;
+      expect_same(ledger_state(fg), before_state, "step " + std::to_string(step));
+      ++rejected;
+    }
+    std::vector<Amount> want(m, 0);
+    std::map<std::int64_t, std::pair<std::int64_t, std::vector<std::pair<EdgeId, Amount>>>> want_records;
+    for (std::size_t q = 0; q < owners.size(); ++q) {
+      for (const auto& [rid, a] : model[q]) {
+        for (std::size_t e = 0; e < m; ++e) want[e] += a[e];
+        want_records[rid] = {owners[q], as_pairs(a)};
+      }
+    }
+    ASSERT_EQ(fg.carried(), want) << "step " << step;
+    ASSERT_EQ(LedgerAccess::next_record_counter(fg), next_id);
+    const auto records = fg.records();
+    ASSERT_EQ(records.size(), want_records.size()) << "step " << step;
+    for (const auto& r : records) {
+      const auto it = want_records.find(r.flow_id.second);
+      ASSERT_NE(it, want_records.end()) << "step " << step << ": record " << r.flow_id.second;
+      EXPECT_EQ(r.policy_id, it->second.first) << "step " << step;
+      EXPECT_EQ(r.edge_flows, it->second.second) << "step " << step;
+    }
+  }
+  EXPECT_GT(accepted, 500);
+  EXPECT_GT(rejected, 500);
+  EXPECT_GT(needs_batch, 50);
+  for (auto owner : owners) LedgerAccess::release(fg, owner);
+}
+
+TEST(FlowLedger, BatchHoldsMoveBetweenOwnersAtomically) {
+  // A holds 6 of a reservation baseline of 6; one batch moves the hold to B (A retires its
+  // record). B alone first would be refused; the batch passes. A batch that ends over the
+  // baseline is refused with the hold message and changes nothing.
+  auto g = shared(make_graph(2, {{0, 1, 10, 1}}));
+  const auto dag = all_edges(*g);
+  const std::vector<Amount> service {10};
+  const std::vector<Amount> reservation {6};
+  FlowLedger fg(g, service, reservation);
+  const auto a = LedgerAccess::bind(fg);
+  const auto b = LedgerAccess::bind(fg);
+  auto held_draft = [&](Amount flow, Amount hold) {
+    detail::RecordDraft d = draft_on(dag, {{0, flow}});
+    d.record.edge_reservations = {{0, hold}};
+    return d;
+  };
+  std::vector<detail::RecordDraft> first {held_draft(1, 6)};
+  (void)LedgerAccess::commit(fg, a, first);
+  std::vector<detail::RecordDraft> b_alone {held_draft(1, 6)};
+  EXPECT_EQ(logic_error_of([&] { (void)LedgerAccess::commit(fg, b, b_alone); }),
+            "ledger: infeasible reservation on edge 0 (12 of 6)");
+  std::vector<std::vector<detail::RecordDraft>> over {{}, {held_draft(1, 6)}};
+  over[0].push_back(held_draft(1, 1));
+  const LedgerState before = ledger_state(fg);
+  EXPECT_EQ(logic_error_of([&] { (void)commit_batch(fg, {a, b}, over, {true, false}); }),
+            "ledger: infeasible reservation on edge 0 (7 of 6)");
+  expect_same(ledger_state(fg), before, "the refused batch");
+  std::vector<std::vector<detail::RecordDraft>> move {{held_draft(2, 6)}, {}};
+  const auto created = commit_batch(fg, {b, a}, move, {false, true});
+  EXPECT_EQ(created, (std::vector<std::vector<FlowId>> {{{fg.uid(), 1}}, {}}));
+  EXPECT_EQ(fg.carried(), (std::vector<Amount> {2}));
+  EXPECT_EQ(fg.reserved(), (std::vector<Amount> {6}));
+  ASSERT_EQ(fg.records().size(), 1U);
+  EXPECT_EQ(fg.records()[0].policy_id, b);
+  (void)LedgerAccess::detach(fg, b);
+  LedgerAccess::release(fg, a);
+  LedgerAccess::release(fg, b);
+}
+
+TEST(FlowLedger, BatchRefusalsChangeNothing) {
+  // The batch's own refusals, each before anything changes: an unbound owner, an owner twice, a
+  // created list per owner, a commit that drops a live record, and the record ids of the whole
+  // batch counted first (each owner alone would fit the ids left).
+  auto g = shared(make_graph(2, {{0, 1, 9, 1}}));
+  const auto dag = all_edges(*g);
+  FlowLedger fg(g);
+  const auto a = LedgerAccess::bind(fg);
+  const auto b = LedgerAccess::bind(fg);
+  std::vector<detail::RecordDraft> first {draft_on(dag, {{0, 1}})};
+  const auto ids = LedgerAccess::commit(fg, a, first);
+  const LedgerState before = ledger_state(fg);
+  std::vector<std::vector<detail::RecordDraft>> two {{draft_on(dag, {{0, 1}})}, {draft_on(dag, {{0, 1}})}};
+  EXPECT_EQ(logic_error_of([&] { (void)commit_batch(fg, {b, 77}, two, {true, true}); }), "ledger: commit by an unbound owner");
+  EXPECT_EQ(logic_error_of([&] { (void)commit_batch(fg, {b, b}, two, {true, true}); }), "ledger: an owner twice in a batch");
+  std::vector<detail::OwnerDrafts> parts {{a, two[0], true}};
+  std::vector<std::vector<FlowId>> none;
+  EXPECT_EQ(logic_error_of([&] { LedgerAccess::commit_batch(fg, parts, none); }),
+            "ledger: a batch needs one id list per owner");
+  EXPECT_EQ(logic_error_of([&] { (void)commit_batch(fg, {b, a}, two, {true, false}); }),
+            "ledger: a commit must carry every live record of its policy");
+  expect_same(ledger_state(fg), before, "the malformed batches");
+  LedgerAccess::set_next_ids(fg, kLastId, 2);
+  const LedgerState one_left = ledger_state(fg);
+  EXPECT_EQ(runtime_error_of([&] { (void)commit_batch(fg, {a, b}, two, {true, true}); }), "record identity limit exceeded");
+  expect_same(ledger_state(fg), one_left, "two owners' new records, one id left");
+  std::vector<std::vector<detail::RecordDraft>> one {{draft_on(dag, {{0, 2}}, ids[0].second)}, {draft_on(dag, {{0, 1}})}};
+  EXPECT_EQ(commit_batch(fg, {a, b}, one, {false, false}), (std::vector<std::vector<FlowId>> {{}, {{fg.uid(), kLastId}}}));
+  EXPECT_EQ(fg.carried(), (std::vector<Amount> {3}));
+  (void)LedgerAccess::detach(fg, a);
+  (void)LedgerAccess::detach(fg, b);
+  LedgerAccess::release(fg, a);
+  LedgerAccess::release(fg, b);
 }

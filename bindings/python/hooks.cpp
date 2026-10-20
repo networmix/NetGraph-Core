@@ -1,5 +1,5 @@
 // The private hooks (NETGRAPH_CORE_PRIVATE_HOOKS builds only): the test controls of Python and
-// native allocation failures, and the apportionment kernels.
+// native allocation failures and of lowered forwarding size limits, and the apportionment kernels.
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -7,13 +7,16 @@
 #include "registration.hpp"
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <new>
 #include <thread>
 #include <vector>
 
+#include "netgraph/core/detail/forwarding.hpp"
 #include "netgraph/core/detail/route_kernels.hpp"
 #include "netgraph/core/detail/private_hooks.hpp"
 #include "netgraph/core/flow_policy.hpp"
@@ -164,6 +167,48 @@ void register_private_hooks(py::module_& m) {
       },
       py::arg("fn"), py::arg("args"), py::arg("k"),
       "private test hook: fn(*args) with the k-th native allocation failing -> (hit, seen, result, error, live)");
+
+  m.def(
+      "_with_forwarding_limits",
+      [](const py::object& fn, const py::tuple& args, const py::object& limits) {
+        // Calls fn(*args) with this thread's forwarding size limits lowered (entry, occurrence,
+        // router, event, dependency; 0 keeps the contract's limit), then restores them. Returns
+        // (result or None, exception or None, the event structures the call's last forwarding
+        // allocated).
+        const auto w = wide_integers(limits, "limits");
+        if (w.size() != 5) throw py::value_error("limits needs 5 entries (got " + std::to_string(w.size()) + ")");
+        std::array<std::int64_t, 5> lowered {};
+        for (std::size_t i = 0; i < 5; ++i) {
+          if (!w.in(i, 0, detail::kForwardingLimit)) throw py::value_error("limits[" + std::to_string(i) + "] = " + w.text(i) + " is out of range");
+          lowered[i] = w.value[i];
+        }
+        auto& current = detail::thread_forwarding_limits();
+        const auto saved = current;
+        current = lowered;
+        detail::thread_lossy_counters().event_structures = 0;
+        PyObject* r = PyObject_CallObject(fn.ptr(), args.ptr());
+        current = saved;
+        py::object result = r != nullptr ? py::reinterpret_steal<py::object>(r) : py::object(py::none());
+        py::object error = py::none();
+        if (r == nullptr) error = take_raised_exception();
+        return py::make_tuple(result, error, detail::thread_lossy_counters().event_structures);
+      },
+      py::arg("fn"), py::arg("args"), py::arg("limits"),
+      "private test hook: fn(*args) with the five forwarding size limits lowered (0: unchanged) ->\n"
+      "(result, error, event structures)");
+
+  m.def(
+      "_check_forwarding_count",
+      [](const py::object& counter, const py::object& n) {
+        // The forwarding sizes' counting step on one exact count (counter: entry 0, occurrence 1,
+        // router 2, event 3, dependency 4), under this thread's limits.
+        const auto c = integer_value(counter, 0, 4, "counter");
+        const auto v = integer_value(n, 0, std::numeric_limits<std::int64_t>::max(), "n");
+        detail::check_forwarding_count(static_cast<detail::ForwardingCounter>(c), v);
+      },
+      py::arg("counter"), py::arg("n"),
+      "private: the forwarding size check of one count (entry, occurrence, router, event, dependency:\n"
+      "0 to 4); raises the limit's ValueError above it");
 
   m.def(
       "_round_robin",

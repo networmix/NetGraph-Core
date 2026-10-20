@@ -31,6 +31,7 @@ void register_policy_config(pybind11::module_& m);     // FlowPolicyConfig, Outp
 void register_placement_result(pybind11::module_& m);  // Termination, SourceFlow, TunnelFlow, PlacementResult
 void register_shortest_path_cache(pybind11::module_& m);         // ShortestPathCacheStats, ShortestPathCacheMiss, ShortestPathCache
 void register_flow_policy(pybind11::module_& m);       // FlowPolicy
+void register_apply_actions(pybind11::module_& m);     // BatchMode, Place, Replace, Forward, apply_actions
 void register_evaluators(pybind11::module_& m);        // evaluate_demand, evaluate_pairs, evaluate_edge_failures and their types
 void register_paths(pybind11::module_& m);             // KspOptions, ksp, resolve_to_paths
 void register_search(pybind11::module_& m);            // UNREACHABLE, SpfOptions, SpfResult, spf

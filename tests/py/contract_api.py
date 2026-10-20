@@ -7,6 +7,7 @@ declaration (an unchanged method or field) is "declared"; a property, field or e
 CONTRACT_API = {
     "AbsoluteCost": {"__init__": [[("cost", "pos", None)]], "cost": "attribute"},
     "Admission": {"LOSSLESS": "attribute", "LOSSY": "attribute"},
+    "BatchMode": {"ORDERED": "attribute", "SIMULTANEOUS": "attribute"},
     "CentralizedTE": {
         "__init__": [
             [
@@ -155,6 +156,18 @@ CONTRACT_API = {
         "route": "attribute",
         "sources": "attribute",
     },
+    "Forward": {
+        "__init__": [
+            [
+                ("policy", "pos", None),
+                ("offer", "pos", None),
+                ("black_holes", "kw", "None"),
+            ]
+        ],
+        "black_holes": "attribute",
+        "offer": "attribute",
+        "policy": "attribute",
+    },
     "ForwardingProgram": {
         "__init__": [[("_no_public_constructor", "pos", None)]],
         "destinations": "attribute",
@@ -260,6 +273,11 @@ CONTRACT_API = {
         "black_holes": "attribute",
         "program": "attribute",
     },
+    "Place": {
+        "__init__": [[("policy", "pos", None), ("offer", "pos", None)]],
+        "offer": "attribute",
+        "policy": "attribute",
+    },
     "PlacementResult": {
         "__init__": [[("_no_public_constructor", "pos", None)]],
         "admitted": "attribute",
@@ -304,6 +322,18 @@ CONTRACT_API = {
         "parent_offsets": "declared",
         "parents": "declared",
         "via_edges": "declared",
+    },
+    "Replace": {
+        "__init__": [
+            [
+                ("policy", "pos", None),
+                ("offer", "pos", None),
+                ("design_demand", "kw", "None"),
+            ]
+        ],
+        "design_demand": "attribute",
+        "offer": "attribute",
+        "policy": "attribute",
     },
     "RouteAllocation": {
         "EQUAL": "attribute",
@@ -459,6 +489,16 @@ CONTRACT_API = {
         "CAPACITY": "attribute",
         "EXPLICIT": "attribute",
         "RESIDUAL_SNAPSHOT": "attribute",
+    },
+    "apply_actions": {
+        "__call__": [
+            [
+                ("ledger", "pos", None),
+                ("actions", "pos", None),
+                ("mode", "kw", "BatchMode.ORDERED"),
+                ("outputs", "kw", "None"),
+            ]
+        ]
     },
     "as_float": {"__call__": [[("x", "pos", None), ("resolution", "pos", None)]]},
     "evaluate_demand": {
