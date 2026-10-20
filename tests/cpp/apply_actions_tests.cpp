@@ -25,6 +25,7 @@
 #include "netgraph/core/detail/forwarding.hpp"
 #include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/policy_engine.hpp"
+#include "netgraph/core/detail/program_data.hpp"
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/forwarding_program.hpp"
@@ -1205,6 +1206,167 @@ TEST(ApplyActions, ZeroSharesAddNoArc) {
     EXPECT_EQ(refused(w, {Replace {a, 2}, Replace {b, 2}, Replace {z, 2}}, SIMULTANEOUS), kPeriodTwo);
 #if NETGRAPH_CORE_PRIVATE_HOOKS
     EXPECT_EQ(detail::thread_lossy_counters().rounds, 3);
+#endif
+  }
+}
+
+// What can carry nothing changes nothing, a router's dead merges and branches included.
+// D-cycle-subdivision-after (A over links 1, 0, 2, 3 with offer 2; B over 2, 3, 0 with offer 1; C over
+// 2, 3, 0, 1 with offer 4; links of 2, 4, 2, 2; links 2 and 3 joined directly at node 10) delivers 0,
+// 0, 1 at round 4. B becomes a DAG program with a member that carries nothing at node 10:
+// - a second pooled source, node 12, whose own link (capacity 9) merges into node 10: with offer 1
+//   its share is 0; with offer 2 each source gets 1 and the new link is B's own black hole (it keeps
+//   its own router arc: one more arc);
+// - a branch from node 10 to a destination of its own, node 13: round robin sends B's unit to link 3
+//   (the lower EdgeId), so the branch carries nothing;
+// - a merge into node 10 from B's source over node 12: round robin sends B's unit to link 2's side
+//   (the lower EdgeId), so that path carries nothing;
+// the last two pooled (from_dag) and not (the DAG route beside a tunnel of weight 0 over B's links).
+// Links 2 and 3 stay a pair, and the outcome and the structure are those of B without the member.
+// sA 0, sB 1, sC 2, d 3; link e from 4 + 2e (link 2 into node 10).
+TEST(ApplyActions, MembersThatCarryNothingChangeNothing) {
+  const std::vector<InEdge> rows {{4, 5, 2, 1},    {6, 7, 4, 1},    {8, 10, 2, 1},   {10, 11, 2, 1},  {0, 6, 100, 1},
+                                  {7, 4, 100, 1},  {5, 8, 100, 1},  {11, 3, 100, 1}, {1, 8, 100, 1},  {11, 4, 100, 1},
+                                  {5, 3, 100, 1},  {2, 8, 100, 1},  {5, 6, 100, 1},  {7, 3, 100, 1},  {12, 10, 9, 1},
+                                  {10, 13, 100, 1}, {1, 12, 100, 1}};
+  struct Out {
+    std::string error;
+    Amounts delivered;
+    std::vector<Amount> carried;
+    std::int64_t rounds {-1};
+    std::int64_t groups {-1};
+    std::vector<EdgeId> barriers;
+    std::int64_t dependencies {-1};
+  };
+  enum Case { kWithout, kZeroShare, kBlackHoled, kDeadBranch, kDeadMerge };
+  auto call = [&](Case c, bool pooled) {
+    World w(shared(make_graph(14, rows)));
+    const auto id = id_of_input(*w.g);
+    auto ids = [&](std::vector<int> in) {
+      std::vector<EdgeId> out;
+      for (int i : in) out.push_back(id[static_cast<std::size_t>(i)]);
+      return out;
+    };
+    EXPECT_LT(id[3], id[15]);
+    EXPECT_LT(id[8], id[16]);
+    auto& a = w.pin(tunnel(*w.g, 0, 3, ids({4, 1, 5, 0, 6, 2, 3, 7})));
+    const auto path = ids({8, 2, 3, 9, 0, 10});
+    auto members = path;
+    std::vector<NodeId> sources {1};
+    std::vector<NodeId> dests {3};
+    if (c == kZeroShare || c == kBlackHoled) {
+      members.push_back(id[14]);
+      sources.push_back(12);
+    }
+    if (c == kDeadBranch) {
+      members.push_back(id[15]);
+      dests.push_back(13);
+    }
+    if (c == kDeadMerge) {
+      members.push_back(id[16]);
+      members.push_back(id[14]);
+    }
+    std::shared_ptr<const ForwardingProgram> prog;
+    if (pooled) {
+      prog = ForwardingProgram::from_dag(*w.g, sources, dests, dag_of(*w.g, members), RouteOptions {});
+    } else {
+      std::vector<std::vector<EdgeId>> hops;
+      for (EdgeId e : path) hops.push_back({e});
+      prog = ForwardingProgram::from_routes(*w.g, sources, dests,
+                                            std::vector<RouteDefinition> {RouteDefinition {1, dag_of(*w.g, members), 1},
+                                                                          RouteDefinition {1, std::make_shared<const Path>(*w.g, hops), 0}});
+    }
+    auto& b = w.pin(prog, LOSSY, c == kBlackHoled ? no_edges(*w.g, {id[14]}) : nullptr);
+    auto& cc = w.pin(tunnel(*w.g, 2, 3, ids({11, 2, 3, 9, 0, 12, 1, 13})));
+    Out out;
+    std::vector<PlacementResult> res;
+    out.error = error_of([&] { res = run(w, Actions {Replace {a, 2}, Replace {b, c == kBlackHoled ? 2 : 1}, Replace {cc, 4}}, SIMULTANEOUS); });
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    const auto& k = detail::thread_lossy_counters();
+    out.rounds = k.rounds;
+    out.groups = k.groups;
+    out.barriers = k.barriers;
+    out.dependencies = k.dependencies;
+#endif
+    if (out.error.empty()) {
+      out.delivered = delivered(res);
+      for (int e : {0, 1, 2, 3}) out.carried.push_back(w.ledger->carried()[static_cast<std::size_t>(id[static_cast<std::size_t>(e)])]);
+    }
+    return out;
+  };
+  struct Row {
+    Case c;
+    bool pooled;
+    const char* where;
+  };
+  for (const auto& row : {Row {kZeroShare, true, "zero-share source"}, Row {kBlackHoled, true, "black-holed source"},
+                          Row {kDeadBranch, true, "dead branch, pooled"}, Row {kDeadBranch, false, "dead branch, not pooled"},
+                          Row {kDeadMerge, true, "dead merge, pooled"}, Row {kDeadMerge, false, "dead merge, not pooled"}}) {
+    const auto without = call(kWithout, row.pooled);
+    EXPECT_EQ(without.error, "") << row.where;
+    EXPECT_EQ(without.delivered, (Amounts {0, 0, 1})) << row.where;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    EXPECT_EQ(without.rounds, 4) << row.where;
+#endif
+    const auto with = call(row.c, row.pooled);
+    EXPECT_EQ(with.error, without.error) << row.where;
+    EXPECT_EQ(with.delivered, without.delivered) << row.where;
+    EXPECT_EQ(with.carried, without.carried) << row.where;
+    EXPECT_EQ(with.rounds, without.rounds) << row.where;
+    EXPECT_EQ(with.groups, without.groups) << row.where;
+    EXPECT_EQ(with.barriers, without.barriers) << row.where;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    EXPECT_EQ(with.dependencies, without.dependencies + (row.c == kBlackHoled ? 1 : 0)) << row.where;
+#endif
+  }
+}
+
+// Traffic behind a demand's own black hole can carry nothing: D-dead-tail (A over links 2, 0 with
+// offer 1; B over 1, 0, 2 with offer 2; links of 2, 2, 1, 9) gives the period-2 error at round 3
+// without Z, and with Z (its own black hole on link 3) over links 3, 0, 1 with offer 1 as a tunnel
+// or as a supplied DAG route (a pooled context), or with offer 2 as that DAG route beside a tunnel
+// on its own exit (a split route of a program that is not pooled; each entry gets 1): what reaches
+// the black hole goes no further down the plan. sA 0, sB 1, sZ 2, d 3; link e from 4 + 2e to
+// 5 + 2e (rows 0 to 3), joined by links of 100; Z's exit is row 15.
+TEST(ApplyActions, DeadTailsTakeNoPart) {
+  for (int z : {0, 1, 2, 3}) {  // without Z, a tunnel, a DAG route, a DAG route beside a tunnel
+    World w(shared(make_graph(12, {{4, 5, 2, 1},
+                                   {6, 7, 2, 1},
+                                   {8, 9, 1, 1},
+                                   {10, 11, 9, 1},
+                                   {0, 8, 100, 1},
+                                   {9, 4, 100, 1},
+                                   {5, 3, 100, 1},
+                                   {1, 6, 100, 1},
+                                   {7, 4, 100, 1},
+                                   {5, 8, 100, 1},
+                                   {9, 3, 100, 1},
+                                   {2, 10, 100, 1},
+                                   {11, 4, 100, 1},
+                                   {5, 6, 100, 1},
+                                   {7, 3, 100, 1},
+                                   {2, 3, 100, 1}})));
+    const auto id = id_of_input(*w.g);
+    auto ids = [&](std::vector<int> in) {
+      std::vector<EdgeId> out;
+      for (int i : in) out.push_back(id[static_cast<std::size_t>(i)]);
+      return out;
+    };
+    auto& a = w.pin(tunnel(*w.g, 0, 3, ids({4, 2, 5, 0, 6})));
+    auto& b = w.pin(tunnel(*w.g, 1, 3, ids({7, 1, 8, 0, 9, 2, 10})));
+    Actions list {Replace {a, 1}, Replace {b, 2}};
+    const auto zr = ids({11, 3, 12, 0, 13, 1, 14});
+    if (z == 1) list.push_back(Replace {w.pin(tunnel(*w.g, 2, 3, zr), LOSSY, no_edges(*w.g, ids({3}))), 1});
+    if (z >= 2) {
+      std::vector<RouteDefinition> routes {RouteDefinition {2, dag_of(*w.g, zr), 1}};
+      if (z == 3) routes.push_back(RouteDefinition {2, std::make_shared<const Path>(*w.g, std::vector<std::vector<EdgeId>> {{id[15]}}), 1});
+      const auto prog = ForwardingProgram::from_routes(*w.g, std::vector<NodeId> {2}, std::vector<NodeId> {3}, routes);
+      ASSERT_EQ(detail::ProgramAccess::data(*prog).pools_source_inflows, z == 2);
+      list.push_back(Replace {w.pin(prog, LOSSY, no_edges(*w.g, ids({3}))), z == 3 ? 2 : 1});
+    }
+    EXPECT_EQ(refused(w, list, SIMULTANEOUS), kPeriodTwo) << "Z form " << z;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    EXPECT_EQ(detail::thread_lossy_counters().rounds, 3) << "Z form " << z;
 #endif
   }
 }

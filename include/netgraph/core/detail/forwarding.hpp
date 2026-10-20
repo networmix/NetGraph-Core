@@ -20,12 +20,15 @@
    rule, for one program or several demands at once (a SIMULTANEOUS list). A link that receives
    more than its free capacity V shares T = min(V, arrivals) by highest averages over the demands'
    arrivals (in their creation order), then within a demand over its sources', then within a source
-   over its entries'; A+ forwards the no-drop loads U0 first, makes every link with U0 <= V a
-   pass-through and evaluates the other links (barriers) and the split routes' routers once each in
-   dependency order; barriers that wait on each other in a cycle are iterated from zero (serial
-   normalization first, then rounds, 64 b rounds for b barriers, the period-two and round-limit
-   errors, the independent check of the whole result before anything is returned). What reaches a
-   black hole of its own demand is dropped there and makes no barrier (b counts physical links). A
+   over its entries'; A+ forwards the loads U0 first (no link shared, each demand's traffic stopped
+   at its own black holes), makes every link with U0 <= V a pass-through and evaluates the other
+   links (barriers) and the split routes' routers once each in dependency order; barriers that wait
+   on each other in a cycle are iterated from zero (serial normalization first, then rounds, 64 b
+   rounds for b barriers, the period-two and round-limit errors, the independent check of the whole
+   result before anything is returned). What reaches a black hole of its own demand is dropped there
+   and makes no barrier (b counts physical links); an occurrence that carries 0 in U0's forward (a
+   share of 0, a member whose whole-unit share is 0, traffic behind its own black hole) is dead and
+   takes no part in U0, the waits or serial normalization. A
    pooled program (one split context: a ShortestPaths program, one supplied split route) called
    alone is forwarded by its plan's kernels, which are this rule for one acyclic context; in a list
    it joins the evaluator with one amount per source on each member.
@@ -207,14 +210,17 @@ struct ForwardingDemand {
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
 // Test controls (hooks builds only): how many cyclic groups the last lossy() on this thread
-// iterated and its rounds; how many times it sized the event structures (after the event and
-// dependency counts passed); two corruptions of the iterated result before its check (the check's
+// iterated and its rounds; its barrier links (EdgeIds, ascending: the links that wait, after serial
+// normalization) and its dependency arcs; how many times it sized the event structures (after the
+// event and dependency counts passed); two corruptions of the iterated result before its check (the check's
 // planted faults, RuntimeError expected): `corrupt` lowers one carried amount after the rounds,
 // `shift` moves one unit between two occurrences of one barrier before the final forwarding (every
 // continuation consistent, only that link's loss rule wrong).
 struct LossyCounters {
   std::int64_t groups {0};
   std::int64_t rounds {0};
+  std::vector<EdgeId> barriers {};
+  std::int64_t dependencies {0};
   std::int64_t event_structures {0};
   bool corrupt {false};
   bool shift {false};

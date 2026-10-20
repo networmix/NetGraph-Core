@@ -147,7 +147,8 @@ separate kind of number: positive integers that are never converted.
   beyond raises `ValueError('forwarding <counter> limit exceeded: <n> > 2147483647')` (`<counter>`
   one of `entry`, `occurrence`, `router`, `event`, `dependency`; `<n>` the exact count). The
   entry, occurrence and router limits are checked after validation and before the network is
-  allocated; the event and dependency limits, known only after the no-drop loads, before the
+  allocated; the event and dependency limits, known only after the loads of LOSSY's first
+  forward (each demand's traffic stopped at its own black holes), before the
   event structures are allocated. Either refusal changes nothing. A list of several demands
   ([several demands at once](#several-demands-at-once)) counts its one joint network, every
   participant together. Identities are
@@ -1199,8 +1200,8 @@ weights and applies the program's whole-unit rule to the traffic that actually a
 black-holed edge carries nothing (all that arrives is dropped there); a black-holed node acts the
 same on every edge entering it; a black-holed source loses its own share as a source drop. Lossy
 drops what reaches a black hole where it arrives: it takes no part in sharing an edge (the loss
-rule below) and makes no edge wait. Lossless admits only totals that put nothing on a black hole
-(a black-holed edge serves 0). A tunnel that is up but whose path reaches a black hole is `BLACKHOLED` in
+rule below) and makes no edge wait, and the traffic behind it can carry nothing. Lossless admits
+only totals that put nothing on a black hole (a black-holed edge serves 0). A tunnel that is up but whose path reaches a black hole is `BLACKHOLED` in
 `by_tunnel`, its traffic dropped at the first black hole on its path. The policy's Eligibility
 applies first: an element both excluded and black-holed is excluded. A down tunnel keeps its
 setup status. A program forwarded by `Pinned` books no hold, whatever its producer.
@@ -1288,11 +1289,16 @@ within a head over its entries by their arrivals. Each part continues with its s
 dropped on that edge. A pooled `ShortestPaths` demand (several sources whose routes meet) splits
 its total once at each router, and each member's amount is shared among the sources by highest
 averages over what each source still brings. Every demand is evaluated at once: forwarded first
-without drops, an edge whose load fits can never drop and waits for nothing; every other shared
-edge waits for all its possible arrivals, and the edges are evaluated in dependency order (the
-order of independent edges does not change the result). Splitting an edge into two in series with
-the same capacity changes nothing. Traffic that reaches its own demand's black hole is dropped
-there and takes no part in the sharing.
+with no edge shared and its traffic dropped only at its own black holes, an edge whose load fits
+can never drop and waits for nothing; every other shared edge waits for all its possible arrivals,
+and the edges are evaluated in dependency order (the order of independent edges does not change
+the result). Traffic that can carry nothing in that first forward (a share of 0, a split member
+whose whole-unit share is 0, traffic behind its own demand's black hole) takes no part: it loads
+no edge there, makes no edge wait and never keeps two edges in series from passing traffic through
+as one, so adding a demand that can carry nothing never changes another demand's result, error or
+round count. Splitting an edge into two in series with the same capacity changes nothing (a black
+hole on it becomes one on its first part, or on both). Traffic that reaches its own demand's black
+hole is dropped there and takes no part in the sharing.
 
 When edges wait on each other in a cycle (one tunnel meets edge X before Y, another Y before X,
 and both can drop; the tunnels may belong to different demands), only that group is recalculated, round by round, from nothing carried, until

@@ -1176,6 +1176,129 @@ def test_zero_shares_add_no_arc():
     assert refused(w, actions, SIMULTANEOUS) == PERIOD_TWO
 
 
+def test_members_that_carry_nothing_change_nothing():
+    # D-cycle-subdivision-after (A over links 1, 0, 2, 3 with offer 2; B over 2, 3, 0 with offer 1;
+    # C over 2, 3, 0, 1 with offer 4; links of 2, 4, 2, 2; links 2 and 3 joined directly at node 10)
+    # delivers 0, 0, 1. B becomes a DAG program with a member that carries nothing at node 10: a
+    # second pooled source (node 12, its own link into node 10) with share 0, or whose link is B's
+    # own black hole; a branch from node 10 to a destination of its own (node 13) that round robin
+    # leaves empty; a merge into node 10 from B's source over node 12 that round robin leaves empty
+    # (pooled, and as a DAG route beside a tunnel of weight 0). Links 2 and 3 stay a pair: the same
+    # deliveries and link flows as without the member. sA 0, sB 1, sC 2, d 3; link e from 4 + 2e.
+    rows = [
+        (4, 5, 2, 1),
+        (6, 7, 4, 1),
+        (8, 10, 2, 1),
+        (10, 11, 2, 1),
+        (0, 6, 100, 1),
+        (7, 4, 100, 1),
+        (5, 8, 100, 1),
+        (11, 3, 100, 1),
+        (1, 8, 100, 1),
+        (11, 4, 100, 1),
+        (5, 3, 100, 1),
+        (2, 8, 100, 1),
+        (5, 6, 100, 1),
+        (7, 3, 100, 1),
+        (12, 10, 9, 1),
+        (10, 13, 100, 1),
+        (1, 12, 100, 1),
+    ]
+
+    def call(case, pooled=True):
+        g, i = mapped(14, rows)
+        assert i[3] < i[15] and i[8] < i[16]
+        w = World(g)
+        a = w.pin(tunnel(g, 0, 3, [i[k] for k in (4, 1, 5, 0, 6, 2, 3, 7)]))
+        path = [i[k] for k in (8, 2, 3, 9, 0, 10)]
+        members, sources, dests = list(path), [1], [3]
+        if case in ("zero share", "black hole"):
+            members, sources = [*members, i[14]], [1, 12]
+        if case == "branch":
+            members, dests = [*members, i[15]], [3, 13]
+        if case == "merge":
+            members = [*members, i[16], i[14]]
+        if pooled:
+            program = ngc.ForwardingProgram.from_dag(
+                g, sources, dests, dag_of(g, members)
+            )
+        else:
+            routes = [
+                ngc.RouteDefinition(1, dag_of(g, members)),
+                ngc.RouteDefinition(1, ngc.Path(g, [[e] for e in path]), weight=0),
+            ]
+            program = ngc.ForwardingProgram.from_routes(g, sources, dests, routes)
+        black = no_edges(g, [i[14]]) if case == "black hole" else None
+        b = w.pin(program, LY, black)
+        c = w.pin(tunnel(g, 2, 3, [i[k] for k in (11, 2, 3, 9, 0, 12, 1, 13)]))
+        offer = 2 if case == "black hole" else 1
+        actions = [ngc.Replace(a, 2), ngc.Replace(b, offer), ngc.Replace(c, 4)]
+        try:
+            results = run(w, actions, SIMULTANEOUS)
+        except ValueError as e:
+            return str(e)
+        carried = w.ledger.carried().tolist()
+        return [r.call_delivered for r in results], [carried[i[e]] for e in range(4)]
+
+    for case, pooled in (
+        ("zero share", True),
+        ("black hole", True),
+        ("branch", True),
+        ("branch", False),
+        ("merge", True),
+        ("merge", False),
+    ):
+        without = call("none", pooled)
+        assert without[0] == [0, 0, 1], (case, pooled)
+        assert call(case, pooled) == without, (case, pooled)
+
+
+def test_dead_tails_take_no_part():
+    # Traffic behind a demand's own black hole can carry nothing: D-dead-tail (A over links 2, 0
+    # with offer 1; B over 1, 0, 2 with offer 2; links of 2, 2, 1, 9) gives the period-2 error
+    # without Z, and with Z (its own black hole on link 3) over links 3, 0, 1 with offer 1 as a
+    # tunnel or as a supplied DAG route (a pooled context), or with offer 2 as that DAG route
+    # beside a tunnel on its own exit (a split route of a program that is not pooled). sA 0, sB 1,
+    # sZ 2, d 3; link e from 4 + 2e to 5 + 2e (rows 0 to 3), joined by links of 100; Z's exit is
+    # row 15.
+    rows = [
+        (4, 5, 2, 1),
+        (6, 7, 2, 1),
+        (8, 9, 1, 1),
+        (10, 11, 9, 1),
+        (0, 8, 100, 1),
+        (9, 4, 100, 1),
+        (5, 3, 100, 1),
+        (1, 6, 100, 1),
+        (7, 4, 100, 1),
+        (5, 8, 100, 1),
+        (9, 3, 100, 1),
+        (2, 10, 100, 1),
+        (11, 4, 100, 1),
+        (5, 6, 100, 1),
+        (7, 3, 100, 1),
+        (2, 3, 100, 1),
+    ]
+    for z in ("none", "tunnel", "DAG route", "DAG route and tunnel"):
+        g, i = mapped(12, rows)
+        w = World(g)
+        a = w.pin(tunnel(g, 0, 3, [i[k] for k in (4, 2, 5, 0, 6)]))
+        b = w.pin(tunnel(g, 1, 3, [i[k] for k in (7, 1, 8, 0, 9, 2, 10)]))
+        actions = [ngc.Replace(a, 1), ngc.Replace(b, 2)]
+        zr = [i[k] for k in (11, 3, 12, 0, 13, 1, 14)]
+        black = no_edges(g, [i[3]])
+        if z == "tunnel":
+            actions.append(ngc.Replace(w.pin(tunnel(g, 2, 3, zr), LY, black), 1))
+        if z.startswith("DAG route"):
+            routes = [ngc.RouteDefinition(2, dag_of(g, zr))]
+            if z == "DAG route and tunnel":
+                routes.append(ngc.RouteDefinition(2, ngc.Path(g, [[i[15]]])))
+            program = ngc.ForwardingProgram.from_routes(g, [2], [3], routes)
+            offer = 2 if z == "DAG route and tunnel" else 1
+            actions.append(ngc.Replace(w.pin(program, LY, black), offer))
+        assert refused(w, actions, SIMULTANEOUS) == PERIOD_TWO, z
+
+
 def test_maximal_offers_share_a_link():
     # Link sums beyond 2^63 and 2^64.
     for n, cap, want in (

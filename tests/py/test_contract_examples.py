@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import itertools
 import math
+import random
 from decimal import Decimal
 from fractions import Fraction
 
@@ -1495,74 +1496,164 @@ def run_number_types(cases):
 # -- several demands at once (apply_actions) ---------------------------------------------------
 
 
-def several_demands_layout(cap, routes):
-    """The list layout of routes given as link indices: each route is its own demand from its own
-    head (node i) to one destination (node n); each example link gets its own two nodes, joined to
-    the next link of a route by a link that never limits anything, except where every occurrence
-    of e continues on f and every occurrence of f comes from e: there e's head is f's tail (no
-    join), so the examples' serial pairs stay pairs. Returns the graph, per example link its
-    EdgeId and per route its path of EdgeIds."""
+def fused_links(offers, routes, cap, dark=None):
+    """Per example link the link it is fused to (-1: none): every occurrence of e that can carry
+    something continues on f and every such occurrence of f comes from e. A zero offer carries
+    nothing, and a route's traffic stops at its own black hole (which still arrives from the link
+    before it). A pair that would make a route visit a node twice (a dead occurrence on e going
+    elsewhere and one on f) is joined instead: a tunnel is a simple path."""
+    dark = dark or [()] * len(routes)
     nxt = [set() for _ in cap]
     prv = [set() for _ in cap]
-    for r in routes:
+    for r, o, holes in zip(routes, offers, dark, strict=True):
+        if not o:
+            continue
         for j, e in enumerate(r):
-            nxt[e].add(r[j + 1] if j + 1 < len(r) else -1)
             prv[e].add(r[j - 1] if j > 0 else -1)
+            if e in holes:
+                break
+            nxt[e].add(r[j + 1] if j + 1 < len(r) else -1)
+    out = [-1] * len(cap)
+    for e, s in enumerate(nxt):
+        f = next(iter(s)) if len(s) == 1 else -1
+        if f >= 0 and prv[f] == {e}:
+            out[e] = f
+    L = len(cap)
+    changed = True
+    while changed:
+        changed = False
+        for r in routes:
+            # Its nodes: a tail is e, a head L + e (a fused head is the next link's tail).
+            nodes = [r[0]]
+            for j, e in enumerate(r):
+                nodes.append(out[e] if out[e] >= 0 else L + e)
+                if j + 1 < len(r) and out[e] != r[j + 1]:
+                    nodes.append(r[j + 1])
+            if len(set(nodes)) == len(nodes):
+                continue
+            for j, e in enumerate(r):
+                if out[e] >= 0 and (j + 1 == len(r) or out[e] != r[j + 1]):
+                    out[e] = -1  # e without its f
+                if j == 0 or out[r[j - 1]] != e:
+                    out = [-1 if g == e else g for g in out]  # f without its e
+            changed = True
+    return out
 
-    def fused(e, f):
-        return nxt[e] == {f} and prv[f] == {e}
 
+# How run_list_lossy realizes a route (as list_lossy in contract_examples_tests.cpp): a tunnel; the
+# same links as a supplied DAG route alone (a pooled context); that DAG route beside a tunnel on its
+# head's own exit (a split route of a program that is not pooled), offered twice the route's offer;
+# a DAG route of the route's links plus that exit beside the exit tunnel, offered 2, so round robin
+# sends the DAG route's unit to the exit and every member on the route has a whole-unit share of 0;
+# a tunnel or a DAG route in route 0's program, of weight its offer (0: an empty entry; no
+# participant of its own), route 0 then offered `offer0` (default: its program's weights' sum).
+TUNNEL, DAG_ROUTE, DAG_BESIDE_EXIT, ZERO_BRANCH, ENTRY_TUNNEL, ENTRY_DAG = range(6)
+DEAD_FORMS = (TUNNEL, DAG_ROUTE, DAG_BESIDE_EXIT)
+
+
+def several_demands_layout(cap, routes, fusing, forms):
+    """The list layout of routes given as link indices: each route is its own demand from its own
+    head (node i; an empty entry's from route 0's head) to one destination (node n); each example
+    link gets its own two nodes, joined to the next link of a route by a link that never limits
+    anything, except where e is fused to f (fused_links): there e's head is f's tail (no join), so
+    the examples' serial pairs stay pairs; a route beside an exit has a link of its own from its
+    head to the destination. Returns the graph, per example link its EdgeId, per route its path of
+    EdgeIds and its exit's EdgeId (or None)."""
     n = len(routes)
     tail = [n + 1 + e for e in range(len(cap))]
     node = n + 1 + len(cap)
     head = []
     for e in range(len(cap)):
-        f = next(iter(nxt[e])) if len(nxt[e]) == 1 else -1
-        if f >= 0 and fused(e, f):
-            head.append(tail[f])
+        if fusing[e] >= 0:
+            head.append(tail[fusing[e]])
         else:
             head.append(node)
             node += 1
     rows = [(tail[e], head[e], c, 1) for e, c in enumerate(cap)]
-    positions = []
-    for i, r in enumerate(routes):
+    positions, exits = [], []
+    for i, (r, form) in enumerate(zip(routes, forms, strict=True)):
         path = [len(rows)]
-        rows.append((i, tail[r[0]], WIDE, 1))
+        rows.append(
+            (0 if form in (ENTRY_TUNNEL, ENTRY_DAG) else i, tail[r[0]], WIDE, 1)
+        )
         for j, e in enumerate(r):
             path.append(e)
-            if j + 1 < len(r) and not fused(e, r[j + 1]):
+            if j + 1 < len(r) and fusing[e] != r[j + 1]:
                 path.append(len(rows))
                 rows.append((head[e], tail[r[j + 1]], WIDE, 1))
         path.append(len(rows))
         rows.append((head[r[-1]], n, WIDE, 1))
         positions.append(path)
+        exits.append(None)
+        if form in (DAG_BESIDE_EXIT, ZERO_BRANCH):
+            exits[-1] = len(rows)
+            rows.append((i, n, WIDE, 1))
     g = ngc.Graph(node, *([row[k] for row in rows] for k in range(4)), 1.0)
     ids = [0] * len(rows)
     for e, position in enumerate(g.input_positions().tolist()):
         ids[position] = e
-    return g, ids, [[ids[k] for k in path] for path in positions]
+    paths = [[ids[k] for k in path] for path in positions]
+    return g, ids, paths, [None if x is None else ids[x] for x in exits]
 
 
-def run_list_lossy(offers, routes, cap):
-    """Each route its own demand: a Pinned LOSSY policy over one tunnel, created in route order,
-    all replaced in one SIMULTANEOUS list. Per demand its arrivals, carried and drops on each link
-    of its route (from its records), its delivery, and per example link the total carried."""
-    g, ids, paths = several_demands_layout(cap, routes)
+def run_list_lossy(
+    offers, routes, cap, dark=None, fusing=None, forms=None, offer0=None
+):
+    """Each route its own demand (`forms`: how each route is realized, default TUNNEL): a Pinned
+    LOSSY policy, created in route order, all replaced in one SIMULTANEOUS list; dark[i]: the
+    example links route i's demand black-holes. Per demand its arrivals, carried and drops on each
+    link of its route (from its records), its delivery (a route beside an exit: without the exit's
+    units), and per example link the total carried."""
+    dark = dark or [()] * len(routes)
+    forms = forms or [TUNNEL] * len(routes)
+    if fusing is None:
+        fusing = fused_links(offers, routes, cap, dark)
+    g, ids, paths, exits = several_demands_layout(cap, routes, fusing, forms)
     n = len(routes)
     ledger = ngc.FlowLedger(g)
-    policies = []
-    for i, path in enumerate(paths):
-        program = ngc.ForwardingProgram.from_routes(
-            g, [i], [n], [ngc.RouteDefinition(i, path_of(g, path))]
+    policies, actions, owned, exit_units = [], [], [], []
+    entries = [
+        ngc.RouteDefinition(
+            0,
+            path_of(g, path) if form == ENTRY_TUNNEL else dag_of(g, path),
+            weight=o,
         )
-        policies.append(pinned(g, program, LY, ledger=ledger))
-    actions = [ngc.Replace(p, o) for p, o in zip(policies, offers, strict=True)]
+        for path, form, o in zip(paths, forms, offers, strict=True)
+        if form in (ENTRY_TUNNEL, ENTRY_DAG)
+    ]
+    for i, (path, holes, form) in enumerate(zip(paths, dark, forms, strict=True)):
+        if form in (ENTRY_TUNNEL, ENTRY_DAG):
+            continue
+        offer, units = offers[i], 0
+        if form == TUNNEL:
+            weight = offers[0] if i == 0 else 1
+            defs = [ngc.RouteDefinition(i, path_of(g, path), weight=weight)]
+        elif form == DAG_ROUTE:
+            defs = [ngc.RouteDefinition(i, dag_of(g, path))]
+        else:
+            members = path + ([exits[i]] if form == ZERO_BRANCH else [])
+            defs = [
+                ngc.RouteDefinition(i, dag_of(g, members)),
+                ngc.RouteDefinition(i, path_of(g, [exits[i]])),
+            ]
+            offer = 2 if form == ZERO_BRANCH else 2 * offers[i]
+            units = offer - offers[i] if form == DAG_BESIDE_EXIT else 2
+        if i == 0:
+            defs += entries
+            total = offer + sum(e.weight for e in entries)
+            offer = total if offer0 is None else offer0
+        program = ngc.ForwardingProgram.from_routes(g, [i], [n], defs)
+        black = edge_mask(g, [ids[e] for e in holes])
+        policies.append(pinned(g, program, LY, black_holes=black, ledger=ledger))
+        actions.append(ngc.Replace(policies[-1], offer))
+        owned.append(routes[i])
+        exit_units.append(units)
     try:
         results = ngc.apply_actions(ledger, actions, mode=ngc.BatchMode.SIMULTANEOUS)
     except ValueError as e:
         return dict(error=str(e))
     arrivals, carried, edge_drops = [], [], []
-    for p, route in zip(policies, routes, strict=True):
+    for p, route in zip(policies, owned, strict=True):
         flows, drops = {}, {}
         for rec in p.records():
             for e, x in rec.edge_flows:
@@ -1579,7 +1670,9 @@ def run_list_lossy(offers, routes, cap):
         arrivals=arrivals,
         carried=carried,
         edge_drops=edge_drops,
-        delivered=[r.call_delivered for r in results],
+        delivered=[
+            r.call_delivered - u for r, u in zip(results, exit_units, strict=True)
+        ],
         edge_flows=[total[ids[e]] for e in range(len(cap))],
     )
 
@@ -1804,6 +1897,68 @@ def run_c3(offers, routes, cap):
     return dict(feasible_work_conserving_records=records, local_H_solutions=solutions)
 
 
+def run_dead_demand(seed, trials, form=TUNNEL):
+    """One added dead demand Z changes nothing. Small random inputs of simple-path demands (3 to 5
+    links of free capacity 1 to 3, two to four demands of offer 1 to 4 over 2 to 4 distinct links
+    each), drawn as the contract draws them; Z has a zero offer over 1 to 3 of those links, or an
+    offer of 1 to 3 whose route reaches its own black hole (link k, a link of Z's own, inserted into
+    its route, or one of its shared links) and continues behind it. The outcome with Z equals the
+    outcome with Z's dead occurrences removed (without Z for a zero offer, Z's route cut after its
+    black hole otherwise): every arrival, carried amount, drop and delivery of the others and of
+    Z's prefix, every link flow, or the error; Z's dead occurrences show 0. `form`: how Z is
+    realized (run_list_lossy). Both runs of a trial share one layout (fused_links of the input
+    with Z)."""
+    rng = random.Random(seed)
+    kinds = {"zero": 0, "tail": 0}
+    agree = errors = 0
+
+    def view(rec, n, cut):
+        if "error" in rec:
+            return rec["error"]
+        rows = [
+            rec[key][:n] + ([rec[key][n][:cut]] if cut else [])
+            for key in ("arrivals", "carried", "edge_drops")
+        ]
+        tail = [
+            x
+            for key in ("arrivals", "carried")
+            if len(rec[key]) > n
+            for x in rec[key][n][cut:]
+        ]
+        return rows, rec["delivered"][:n], rec["edge_flows"], not any(tail)
+
+    for _ in range(trials):
+        k = rng.randint(3, 5)
+        cap = [rng.randint(1, 3) for _ in range(k)] + [9]
+        n = rng.randint(2, 4)
+        routes = [rng.sample(range(k), rng.randint(2, min(4, k))) for _ in range(n)]
+        offers = [rng.randint(1, 4) for _ in range(n)]
+        links = rng.sample(range(k), rng.randint(1, min(3, k)))
+        if rng.random() < 0.5:
+            kind, z, zr, hole = "zero", 0, links, None
+        else:
+            kind, z, p = "tail", rng.randint(1, 3), rng.randrange(len(links))
+            if rng.random() < 0.5:
+                zr, hole = links[:p] + [k] + links[p:], k
+            else:
+                zr, hole = links, links[p]
+        kinds[kind] += 1
+        dark = [()] * n + [() if hole is None else (hole,)]
+        fusing = fused_links(offers + [z], routes + [zr], cap, dark)
+        forms = [TUNNEL] * n + [form]
+        full = run_list_lossy(offers + [z], routes + [zr], cap, dark, fusing, forms)
+        if kind == "zero":
+            cut, short = 0, run_list_lossy(offers, routes, cap, None, fusing)
+        else:
+            cut = zr.index(hole) + 1
+            short = run_list_lossy(
+                offers + [z], routes + [zr[:cut]], cap, dark, fusing, forms
+            )
+        agree += view(full, n, cut) == view(short, n, cut)
+        errors += "error" in full
+    return dict(trials=trials, agree=agree, kinds=kinds, errors=errors)
+
+
 # The examples of several demands at once that share an oracle with a single program's: each
 # route (or head) is its own demand, all in one SIMULTANEOUS list.
 SEVERAL_DEMANDS = {
@@ -1813,6 +1968,10 @@ SEVERAL_DEMANDS = {
     "D-cycle-prefix-suffix": run_list_lossy,
     "D-cycle-subdivision-before": run_list_lossy,
     "D-cycle-subdivision-after": run_list_lossy,
+    "D-dead-tail": run_list_lossy,
+    "D-dead-waits": run_list_lossy,
+    "D-zero-share-pair": run_list_lossy,
+    "D-dead-subdivision": run_list_lossy,
     "STALE-cycle-period-2": run_stale_list,
     "STALE-cycle-round-limit-baseline": run_stale_list,
     "STALE-cycle-round-limit": run_stale_list,
@@ -1860,6 +2019,7 @@ ADAPTERS = {
     "list_validation": run_list_validation,
     "forwarding_size": run_forwarding_size,
     "c3": run_c3,
+    "dead_demand": run_dead_demand,
     "number_types": run_number_types,
 }
 
@@ -5657,6 +5817,77 @@ EXAMPLES = [
         },
     },
     {
+        "id": "D-dead-tail",
+        "oracle": "lossy",
+        "input": {
+            "offers": [1, 2, 1],
+            "routes": [[2, 0], [1, 0, 2], [3, 0, 1]],
+            "cap": [2, 2, 1, 9],
+            "dark": [[], [], [3]],
+        },
+        "expected": {
+            "error": "lossy forwarding iteration entered a period-2 cycle",
+            "rounds": 3,
+        },
+    },
+    {
+        "id": "D-dead-waits",
+        "oracle": "lossy",
+        "input": {
+            "offers": [1, 3, 3],
+            "routes": [[2, 0], [1, 0, 2], [3, 0, 1]],
+            "cap": [2, 2, 1, 9],
+            "dark": [[], [], [3]],
+        },
+        "expected": {
+            "error": "lossy forwarding iteration entered a period-2 cycle",
+            "rounds": 3,
+        },
+    },
+    {
+        "id": "D-zero-share-pair",
+        "oracle": "lossy",
+        "input": {
+            "offers": [2, 1, 4, 0],
+            "routes": [[1, 0, 2, 3], [2, 3, 0], [2, 3, 0, 1], [2]],
+            "cap": [2, 4, 2, 2],
+        },
+        "expected": {
+            "arrivals": [[2, 2, 1, 0], [1, 0, 0], [4, 2, 2, 1], [0]],
+            "carried": [[2, 1, 0, 0], [0, 0, 0], [2, 2, 1, 1], [0]],
+            "delivered": [0, 0, 1, 0],
+            "edge_flows": [2, 3, 2, 2],
+        },
+    },
+    {
+        "id": "D-dead-subdivision",
+        "oracle": "lossy",
+        "input": {
+            "offers": [2, 1, 4, 1],
+            "routes": [[1, 0, 2, 3], [2, 3, 0], [2, 3, 0, 1], [2, 3]],
+            "cap": [2, 4, 2, 2],
+            "dark": [[], [], [], [2]],
+        },
+        "expected": {
+            "arrivals": [[2, 2, 1, 0], [1, 0, 0], [4, 2, 2, 1], [1, 0]],
+            "carried": [[2, 1, 0, 0], [0, 0, 0], [2, 2, 1, 1], [0, 0]],
+            "edge_drops": [[0, 1, 1, 0], [1, 0, 0], [2, 0, 1, 0], [1, 0]],
+            "delivered": [0, 0, 1, 0],
+            "edge_flows": [2, 3, 2, 2],
+        },
+    },
+    {
+        "id": "D-dead-demand-property",
+        "oracle": "dead_demand",
+        "input": {"seed": 4, "trials": 2000},
+        "expected": {
+            "trials": 2000,
+            "agree": 2000,
+            "kinds": {"zero": 993, "tail": 1007},
+            "errors": 55,
+        },
+    },
+    {
         "id": "D-no-H-fixed-point",
         "oracle": "c3",
         "input": {
@@ -6288,6 +6519,12 @@ NOT_REPORTED = {
     "STALE-cycle-period-2": {
         "rounds": "the error names the period-2 cycle, not the round it was found in"
     },
+    "D-dead-tail": {
+        "rounds": "the error names the period-2 cycle, not the round it was found in"
+    },
+    "D-dead-waits": {
+        "rounds": "the error names the period-2 cycle, not the round it was found in"
+    },
     "R4-refusal": {
         "requeue": "the rejected rule (a refused unit offered again), which the library never applies",
     },
@@ -6382,6 +6619,136 @@ def refuses_outside_the_domain(n, weights):
         pinned(g, program, LY).place(n)
 
 
+PERIOD_TWO = "lossy forwarding iteration entered a period-2 cycle"
+
+
+def same_without(with_, without, n, where):
+    """The other participants' outcome with and without a dead element: the error, or the first n
+    participants' rows and deliveries and every link flow (the structure is the C++ suite's: the
+    Python API reports no wait or group)."""
+    assert with_.get("error") == without.get("error"), where
+    if "error" in with_:
+        return
+    for key in ("arrivals", "carried", "edge_drops", "delivered"):
+        assert with_[key][:n] == without[key][:n], (where, key)
+    assert with_["edge_flows"] == without["edge_flows"], where
+
+
+def test_dead_occurrences_change_no_other_output():
+    # D-dead-tail, D-dead-waits, D-zero-share-pair, D-dead-subdivision and a dead load that would
+    # make a barrier (A: links 1, 0; B: 0, 2, 1; Z: 3, 2 behind its own black hole on link 3), with
+    # Z a tunnel, a DAG route alone or a DAG route beside an exit (D-zero-share-pair also as a zero
+    # branch): equal to the list with Z cut after its black hole, or without a zero-offer Z.
+    tail_routes = [[2, 0], [1, 0, 2], [3, 0, 1]]
+    tail_cut = [[2, 0], [1, 0, 2], [3]]
+    for offers in ([1, 2, 1], [1, 3, 3]):
+        for form in DEAD_FORMS:
+            forms = [TUNNEL, TUNNEL, form]
+            args = ([2, 2, 1, 9], [[], [], [3]], None, forms)
+            got = run_list_lossy(offers, tail_routes, *args)
+            assert got == dict(error=PERIOD_TWO), (offers, form)
+            same_without(got, run_list_lossy(offers, tail_cut, *args), 2, form)
+    after = [[1, 0, 2, 3], [2, 3, 0], [2, 3, 0, 1]]
+    cap = [2, 4, 2, 2]
+    plain = run_list_lossy([2, 1, 4], after, cap)
+    for form in (*DEAD_FORMS, ZERO_BRANCH):
+        forms = [TUNNEL] * 3 + [form]
+        got = run_list_lossy([2, 1, 4, 0], [*after, [2]], cap, None, None, forms)
+        assert got["delivered"] == [0, 0, 1, 0], form
+        same_without(got, plain, 3, form)
+    for form in DEAD_FORMS:
+        forms = [TUNNEL] * 3 + [form]
+        dark = [[], [], [], [2]]
+        got = run_list_lossy([2, 1, 4, 1], [*after, [2, 3]], cap, dark, None, forms)
+        assert got["edge_drops"][3] == [1, 0], form
+        cut = run_list_lossy([2, 1, 4, 1], [*after, [2]], cap, dark, None, forms)
+        same_without(got, cut, 3, form)
+    for form in DEAD_FORMS:
+        forms = [TUNNEL, TUNNEL, form]
+        args = ([2, 1, 2, 9], [[], [], [3]], None, forms)
+        got = run_list_lossy([1, 2, 2], [[1, 0], [0, 2, 1], [3, 2]], *args)
+        assert got == dict(error=PERIOD_TWO), form
+        cut = run_list_lossy([1, 2, 2], [[1, 0], [0, 2, 1], [3]], *args)
+        same_without(got, cut, 2, form)
+
+
+def test_empty_entries_change_nothing():
+    # A tunnel or a DAG route of weight 0 in A's program of D-cycle-subdivision-after (over link 2
+    # alone, or over links 2, 3, 0): it gets no share and is not forwarded.
+    after = [[1, 0, 2, 3], [2, 3, 0], [2, 3, 0, 1]]
+    cap = [2, 4, 2, 2]
+    plain = run_list_lossy([2, 1, 4], after, cap)
+    for form in (ENTRY_TUNNEL, ENTRY_DAG):
+        for extra in ([2], [2, 3, 0]):
+            forms = [TUNNEL] * 3 + [form]
+            got = run_list_lossy([2, 1, 4, 0], [*after, extra], cap, None, None, forms)
+            same_without(got, plain, 3, (form, extra))
+
+
+def test_scalar_serial_pair_with_a_zero_share_entry():
+    # D-zero-share-pair's routes as the entries of one head's program on the list layout (links 2
+    # and 3 joined directly), weights 2, 1, 4, 1 at offer 7: Z (link 2 alone) gets a share of 0 and,
+    # a tunnel or a DAG route, leaves the call's delivery 1, as without Z.
+    routes = [[1, 0, 2, 3], [2, 3, 0], [2, 3, 0, 1], [2]]
+    cap = [2, 4, 2, 2]
+    fusing = fused_links([2, 1, 4, 0], routes, cap)
+    forms = [TUNNEL, ENTRY_TUNNEL, ENTRY_TUNNEL]
+    without = run_list_lossy([2, 1, 4], routes[:3], cap, None, fusing, forms, 7)
+    assert without["delivered"] == [1]
+    for form in (ENTRY_TUNNEL, ENTRY_DAG):
+        got = run_list_lossy([2, 1, 4, 1], routes, cap, None, fusing, [*forms, form], 7)
+        same_without(got, without, 1, form)
+
+
+def test_dead_demand_property_in_every_form():
+    # D-dead-demand-property with Z a DAG route alone and a DAG route beside an exit.
+    for form in (DAG_ROUTE, DAG_BESIDE_EXIT):
+        assert run_dead_demand(4, 2000, form) == dict(
+            trials=2000, agree=2000, kinds={"zero": 993, "tail": 1007}, errors=55
+        ), form
+
+
+def test_dead_entries_in_a_scalar_call():
+    # One call (one head, the routes its entries with weights = offers), Z a tunnel or a DAG route:
+    # D-dead-tail and D-dead-waits with the call's black hole on link 3 (only Z uses it) give the
+    # period-2 error, as with Z cut after link 3; D-crossing plus Z over its own black-holed link 2
+    # then link 0 (weight 4, offer 20) gives the others what D-crossing gives them (offer 16); and
+    # D-dead-tail's routes with weights 1, 2, 1 at offer 3 (Z's share 0) give the error without Z.
+    def call(offers, routes, cap, dag, black=(), total=None):
+        g, links, paths = laid_out(cap, routes)
+        last = len(routes) - 1
+        defs = [
+            ngc.RouteDefinition(
+                0, dag_of(g, p) if dag and i == last else path_of(g, p), weight=w
+            )
+            for i, (p, w) in enumerate(zip(paths, offers, strict=True))
+        ]
+        program = ngc.ForwardingProgram.from_routes(g, [0], [1], defs)
+        mask = edge_mask(g, [links[e] for e in black])
+        offer = sum(offers) if total is None else total
+        try:
+            r = pinned(g, program, LY, black_holes=mask).place(
+                offer, ngc.OutputOptions(edge_flows=True)
+            )
+        except ValueError as e:
+            return str(e)
+        flows = r.edge_flows.tolist()
+        delivered = [t.delivered for t in r.by_tunnel][:3]
+        return delivered, [flows[links[e]] for e in range(len(cap))]
+
+    routes, cap = [[2, 0], [1, 0, 2], [3, 0, 1]], [2, 2, 1, 9]
+    for dag in (False, True):
+        for offers in ([1, 2, 1], [1, 3, 3]):
+            assert call(offers, routes, cap, dag, [3]) == PERIOD_TWO, (dag, offers)
+            assert call(offers, [*routes[:2], [3]], cap, dag, [3]) == PERIOD_TWO
+        crossing = ([[0, 1], [0], [1]], [9, 7, 9])
+        with_z = call([8, 4, 4, 4], [*crossing[0], [2, 0]], crossing[1], dag, [2])
+        assert with_z == call([8, 4, 4], *crossing, False), dag
+        assert with_z[0] == [4, 3, 3], dag
+        zero = call([1, 2, 1], routes, cap, dag, total=3)
+        assert zero == call([1, 2], routes[:2], cap, False, total=3) == PERIOD_TWO
+
+
 def check_outside_the_domain(example):
     assert mismatch(reference_ha(**example["input"]), example["expected"]) is None
     refuses_outside_the_domain(**example["input"])
@@ -6396,7 +6763,7 @@ def _param(example):
 
 def test_every_example_once():
     ids = [e["id"] for e in EXAMPLES]
-    assert len(ids) == len(set(ids)) == 183
+    assert len(ids) == len(set(ids)) == 188
     assert {e["oracle"] for e in EXAMPLES} <= set(ADAPTERS)
 
 

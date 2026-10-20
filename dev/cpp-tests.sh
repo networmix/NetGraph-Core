@@ -27,6 +27,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # compares (see flow_policy_fixture_tests.cpp's header).
 EXPECTED_OFF_SKIPS="
 ApplyActions.ForwardingSizesCountEveryParticipant
+DeadOccurrences.ForwardingSizesWithoutThem
 FlowCoreDeletion.CheckpointsEqualTheIterativeUpdate
 FlowCoreDeletion.RerunningTheFailedSearchAddsExactlyOneSearch
 ForwardingSize.TheCallChecksEachCountInOrder

@@ -293,9 +293,12 @@ API.
   tunnel case that delivered 0 now delivers 1; a black-holed edge no longer waits in a loss cycle,
   so a cycle that never settles raises its round-limit error after 64 rounds per edge that does
   wait (a loaded black-holed edge inside such a cycle added 64 more), with every amount, every
-  settling round and every period-2 error unchanged; a tunnel or split-route member whose share is 0
-  no longer makes an edge wait (it can carry nothing), so it no longer joins two edges into one loss
-  cycle.
+  settling round and every period-2 error unchanged; traffic that can carry nothing (a tunnel,
+  split-route member or pooled source whose share is 0, or traffic behind its own demand's black
+  hole) no longer counts in the loads that decide which edges can drop, makes an edge wait or keeps
+  two edges in series from passing traffic through as one, so adding a demand that can carry nothing
+  no longer changes another demand's result, error or round count (it could turn a loss cycle's
+  error into a result or a result into an error).
 
 ### Removed
 

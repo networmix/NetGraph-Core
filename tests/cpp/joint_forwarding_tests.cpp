@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -103,10 +104,19 @@ Amounts hierarchical(Amount total, const Amounts& arrivals, const std::vector<st
 RefResult reference(const std::vector<Component>& comps, const Amounts& cap) {
   const std::size_t n = comps.size();
   auto black = [&](std::size_t i, std::size_t j) { return comps[i].dark.count(comps[i].route[j]) != 0; };
+  // Dead: can carry nothing (a zero offer, or behind its own black hole); no part in the loads,
+  // the waits or serial normalization.
+  auto dead = [&](std::size_t i, std::size_t j) {
+    if (comps[i].offer == 0) return true;
+    for (std::size_t k = 0; k < j; ++k) {
+      if (black(i, k)) return true;
+    }
+    return false;
+  };
   std::map<EdgeId, std::vector<std::pair<std::size_t, std::size_t>>> occ;
   for (std::size_t i = 0; i < n; ++i) {
     for (std::size_t j = 0; j < comps[i].route.size(); ++j) {
-      if (!black(i, j)) occ[comps[i].route[j]].emplace_back(i, j);
+      if (!black(i, j) && !dead(i, j)) occ[comps[i].route[j]].emplace_back(i, j);
     }
   }
   std::set<EdgeId> binding;
@@ -146,7 +156,7 @@ RefResult reference(const std::vector<Component>& comps, const Amounts& cap) {
       const EdgeId e = comps[i].route[j];
       const Node r {0, static_cast<std::int64_t>(i), static_cast<std::int64_t>(j)};
       const Node r2 {0, static_cast<std::int64_t>(i), static_cast<std::int64_t>(j + 1)};
-      if (binding.count(e) != 0 && !black(i, j)) {
+      if (binding.count(e) != 0 && !black(i, j) && !dead(i, j)) {
         arc(r, Node {1, e, 0});
         arc(Node {1, e, 0}, r2);
       } else {
@@ -1075,6 +1085,523 @@ TEST(JointForwarding, PooledRootsBlockSerialPairs) {
   const auto two = detail::lossy(both, capacities(*g));
   same_flow(two.front(), kernel, "beside another demand");
   EXPECT_EQ(two[1].delivered, 1);
+}
+
+// A head whose share is 0 injects nothing and carries nothing (its occurrences are dead), and a dark
+// member's traffic goes no further. Chain 0->1->2->3, a pooled demand of sources {0, 1, 2}, four
+// routers. Capacities (1, 1, 1), shares (2, 0, 0): only e0 can drop and e1, e2 continue it (nodes 1
+// and 2 inject nothing), so one barrier: five events (hooks: the event limit 5 is met). Capacities
+// (2, 1, 2), shares (0, 2, 0): e1's first occurrence is source 0's, which carries nothing, yet e1
+// waits for source 1's arrival: delivered 1, source 1 drops 1 on e1. Capacities (1, 1, 1), shares
+// (2, 0, 0), e0 black-holed: source 0's traffic dies on e0, so e1 and e2 can carry nothing: no
+// barrier, four events. Each equals the kernel, and the program of its one live source alone
+// (the same plan without the heads that carry nothing): that source's amounts and (hooks) the
+// links that wait, the groups and the dependency arcs.
+TEST(JointForwarding, ZeroShareHeadsOfAPooledDemand) {
+  struct Restore {
+    ~Restore() {
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+      detail::thread_forwarding_limits() = {};
+#endif
+    }
+  } restore;
+  struct Case {
+    Amount v1;
+    Amounts shares;
+    bool black;
+    std::int64_t events;
+    Amounts delivered;
+  };
+  for (const auto& c : {Case {1, {2, 0, 0}, false, 5, {1, 0, 0}}, Case {1, {0, 2, 0}, false, 5, {0, 1, 0}},
+                        Case {1, {2, 0, 0}, true, 4, {0, 0, 0}}}) {
+    const Amount v0 = c.shares[1] != 0 ? 2 : 1;
+    const auto g = shared(make_graph(4, {{0, 1, v0, 1}, {1, 2, c.v1, 1}, {2, 3, v0, 1}}));
+    const auto a = pooled_program(g, {0, 1, 2}, 3);
+    const auto black = c.black ? std::make_shared<const Eligibility>(g->eligibility({}, std::vector<EdgeId> {0})) : nullptr;
+    const auto va = detail::make_forwarding_view(*g, a, nullptr, std::vector<NodeId> {3}, black.get());
+    const auto kernel = detail::lossy(va, capacities(*g), c.shares);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    detail::thread_forwarding_limits()[static_cast<std::size_t>(detail::ForwardingCounter::Event)] = c.events;
+#endif
+    const detail::ForwardingDemand alone {&va, c.shares};
+    const auto one = detail::lossy(std::span<const detail::ForwardingDemand>(&alone, 1), capacities(*g));
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    detail::thread_forwarding_limits() = {};
+#endif
+    const std::string where = "shares " + std::to_string(c.shares[0]) + std::to_string(c.shares[1]) + (c.black ? " black" : "");
+    same_flow(one.front(), kernel, where);
+    for (std::size_t h = 0; h < 3; ++h) EXPECT_EQ(one.front().entries[h].delivered, c.delivered[h]) << where << " source " << h;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    const auto structure = std::make_tuple(detail::thread_lossy_counters().groups, detail::thread_lossy_counters().barriers,
+                                           detail::thread_lossy_counters().dependencies);
+#endif
+    const std::size_t live = c.shares[0] != 0 ? 0 : 1;
+    const auto b = pooled_program(g, {static_cast<NodeId>(live)}, 3);
+    const auto vb = detail::make_forwarding_view(*g, b, nullptr, std::vector<NodeId> {3}, black.get());
+    const Amounts ib {c.shares[live]};
+    const detail::ForwardingDemand only {&vb, ib};
+    const auto lone = detail::lossy(std::span<const detail::ForwardingDemand>(&only, 1), capacities(*g));
+    EXPECT_EQ(one.front().entries[live].delivered, lone.front().entries[0].delivered) << where;
+    EXPECT_EQ(one.front().entries[live].edge_flows, lone.front().entries[0].edge_flows) << where;
+    EXPECT_EQ(one.front().entries[live].edge_drops, lone.front().entries[0].edge_drops) << where;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    EXPECT_EQ(structure, std::make_tuple(detail::thread_lossy_counters().groups, detail::thread_lossy_counters().barriers,
+                                         detail::thread_lossy_counters().dependencies))
+        << where;
+#endif
+  }
+}
+
+// Serial normalization reads only what can carry something: a router's merges and branches are
+// those of its live members. Each case against the same program without its dead member, pooled
+// (from_dag) and not (the DAG route beside a tunnel of weight 0), on links of capacity 0 that drop
+// everything (so every link with traffic can drop, and a link that passes its predecessor's traffic
+// through is no barrier): the delivery and (hooks) the links that wait, the groups and the arcs.
+// - Dead branch: e0 0->1, e1 1->2, e2 1->3 (capacity 9); one unit, round robin sends it to e1, so
+//   e2 carries nothing and e0, e1 stay a pair: one barrier, e0.
+// - Dead merge in one split route: e0 0->1 and e1 0->2 (capacity 9), e2 1->3, e3 2->3, e4 3->4; one
+//   unit takes e0 and e2, so e1 and e3 carry nothing and e2, e4 stay a pair: one barrier, e2.
+// - Dead merge of a pooled source: e0 0->2 (capacity 9), e1 1->2, e2 2->3; sources 0 and 1. Source 0's
+//   share is 0, or its 1 dies on e0, its own black hole (its router arc stays: one more arc); e1, e2
+//   stay a pair: one barrier, e1.
+TEST(JointForwarding, DeadBranchesAndMergesKeepPairs) {
+  struct Seen {
+    Amount delivered {0};
+    std::vector<EdgeId> barriers;
+    std::int64_t groups {-1};
+    std::int64_t dependencies {-1};
+  };
+  auto run = [](const std::shared_ptr<const Graph>& g, const std::shared_ptr<const ForwardingProgram>& prog, const Amounts& inject,
+                std::vector<NodeId> dests, const std::vector<EdgeId>& black) {
+    const auto holes = black.empty() ? nullptr : std::make_shared<const Eligibility>(g->eligibility({}, black));
+    const auto view = detail::make_forwarding_view(*g, prog, nullptr, dests, holes.get());
+    const detail::ForwardingDemand demand {&view, inject};
+    const auto out = detail::lossy(std::span<const detail::ForwardingDemand>(&demand, 1), capacities(*g));
+    Seen seen {out.front().delivered, {}, -1, -1};
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    seen.barriers = detail::thread_lossy_counters().barriers;
+    seen.groups = detail::thread_lossy_counters().groups;
+    seen.dependencies = detail::thread_lossy_counters().dependencies;
+#endif
+    return seen;
+  };
+  // A program of one DAG route from `source`, pooled or beside a weight-0 tunnel over `path`.
+  auto program = [](const std::shared_ptr<const Graph>& g, NodeId source, const std::vector<NodeId>& dests, const std::vector<EdgeId>& members,
+                    bool pooled, const std::vector<EdgeId>& path) {
+    const NodeId s[1] = {source};
+    if (pooled) return ForwardingProgram::from_dag(*g, s, dests, dag_of(*g, members), RouteOptions {});
+    std::vector<std::vector<EdgeId>> hops;
+    for (EdgeId e : path) hops.push_back({e});
+    const std::vector<RouteDefinition> defs {RouteDefinition {source, dag_of(*g, members), 1},
+                                             RouteDefinition {source, std::make_shared<const Path>(*g, hops), 0}};
+    return ForwardingProgram::from_routes(*g, s, dests, defs);
+  };
+  auto expect_same = [](const Seen& with, const Seen& without, std::int64_t extra_arcs, const std::string& where) {
+    EXPECT_EQ(with.delivered, without.delivered) << where;
+    EXPECT_EQ(with.barriers, without.barriers) << where;
+    EXPECT_EQ(with.groups, without.groups) << where;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    EXPECT_EQ(with.dependencies, without.dependencies + extra_arcs) << where;
+#else
+    (void)extra_arcs;
+#endif
+  };
+  for (bool pooled : {true, false}) {
+    const std::string kind = pooled ? "pooled" : "not pooled";
+    {
+      const auto g = shared(make_graph(4, {{0, 1, 0, 1}, {1, 2, 0, 1}, {1, 3, 9, 1}}));
+      const auto id = id_of_input(*g);
+      const auto with = run(g, program(g, 0, {2, 3}, {id[0], id[1], id[2]}, pooled, {id[0], id[1]}), {1}, {2, 3}, {});
+      const auto without = run(g, program(g, 0, {2}, {id[0], id[1]}, pooled, {id[0], id[1]}), {1}, {2}, {});
+      expect_same(with, without, 0, "dead branch, " + kind);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+      EXPECT_EQ(with.barriers, (std::vector<EdgeId> {id[0]})) << kind;
+#endif
+    }
+    {
+      const auto g = shared(make_graph(5, {{0, 1, 9, 1}, {0, 2, 9, 1}, {1, 3, 0, 1}, {2, 3, 0, 1}, {3, 4, 0, 1}}));
+      const auto id = id_of_input(*g);
+      const std::vector<EdgeId> path {id[0], id[2], id[4]};
+      const auto with = run(g, program(g, 0, {4}, {id[0], id[1], id[2], id[3], id[4]}, pooled, path), {1}, {4}, {});
+      const auto without = run(g, program(g, 0, {4}, path, pooled, path), {1}, {4}, {});
+      expect_same(with, without, 0, "dead merge in one split route, " + kind);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+      EXPECT_EQ(with.barriers, (std::vector<EdgeId> {id[2]})) << kind;
+#endif
+    }
+  }
+  const auto g = shared(make_graph(4, {{0, 2, 9, 1}, {1, 2, 0, 1}, {2, 3, 0, 1}}));
+  const auto id = id_of_input(*g);
+  const NodeId both[2] = {0, 1};
+  const NodeId live[1] = {1};
+  const NodeId d[1] = {3};
+  const auto two = ForwardingProgram::from_dag(*g, both, d, dag_of(*g, {id[0], id[1], id[2]}), RouteOptions {});
+  const auto without = run(g, ForwardingProgram::from_dag(*g, live, d, dag_of(*g, {id[1], id[2]}), RouteOptions {}), {1}, {3}, {});
+  expect_same(run(g, two, {0, 1}, {3}, {}), without, 0, "dead merge of a zero-share source");
+  expect_same(run(g, two, {1, 1}, {3}, {id[0]}), without, 1, "dead merge of a black-holed source");
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(without.barriers, (std::vector<EdgeId> {id[1]}));
+#endif
+}
+
+// Adding an element that can carry nothing changes nothing, on every path of the rule: random small
+// graphs with cycles (six inner nodes, each with an exit to the destination),
+// two to four demands that are tunnels, split routes (a DAG route beside a tunnel of weight 0) or
+// pooled contexts (from_dag over two sources), each over one or two random walks of up to four inner
+// links, and one added element:
+// - a tunnel whose offer is 0;
+// - a tunnel behind its own black hole (against the tunnel cut after its black hole);
+// - a pooled source whose share is 0, its walk merging into its demand's DAG;
+// - such a source behind its own black hole (its black-holed first link keeps one router arc);
+// - a branch that round robin leaves empty (one unit at its root, the branch on the higher EdgeId),
+//   its walk merging back or reaching the destination, pooled and not;
+// - a source of share 0 inside a demand: a tunnel or a DAG route of a new head, or a pooled source
+//   on the demand's DAG (its root inside a chain).
+// One demand in a quarter of the draws; in half of those the element joins that demand (the
+// scalar path).
+// With and without the element: every demand's delivery and carried amounts per link, the drops of
+// every demand whose own traffic is unchanged, the error, and (hooks) the rounds, the groups, the
+// links that wait and the dependency arcs.
+TEST(JointForwarding, DeadElementsChangeNothingOnEveryPath) {
+  std::mt19937 rng(20261021);
+  const NodeId inner = 6;
+  const NodeId dst = inner;
+  struct Part {
+    std::shared_ptr<const ForwardingProgram> prog;
+    std::shared_ptr<const Eligibility> black;
+    Amounts inject;
+  };
+  struct Seen {
+    std::string error;
+    Amounts delivered;
+    std::vector<std::map<EdgeId, Amount>> carried;
+    std::vector<std::map<EdgeId, Amount>> drops;
+    std::int64_t rounds {-1};
+    std::int64_t groups {-1};
+    std::vector<EdgeId> barriers;
+    std::int64_t dependencies {-1};
+  };
+  std::array<int, 7> kinds {};
+  int checked = 0;
+  int skipped = 0;
+  int cyclic = 0;
+  int errors = 0;
+  for (int trial = 0; trial < 8000; ++trial) {
+    std::vector<InEdge> rows;
+    for (NodeId u = 0; u < inner; ++u) {
+      for (NodeId w = 0; w < inner; ++w) {
+        if (u != w && rng() % 2 == 0) rows.push_back({u, w, static_cast<Amount>(rng() % 4), 1});
+      }
+      rows.push_back({u, dst, static_cast<Amount>(1 + rng() % 5), 1});
+    }
+    const auto g = shared(make_graph(inner + 1, rows));
+    std::vector<std::vector<EdgeId>> outs(static_cast<std::size_t>(inner));
+    std::vector<EdgeId> exit(static_cast<std::size_t>(inner), -1);
+    for (EdgeId e = 0; e < g->num_edges(); ++e) {
+      const auto u = g->edge_sources()[static_cast<std::size_t>(e)];
+      const auto w = g->edge_destinations()[static_cast<std::size_t>(e)];
+      if (w == dst) {
+        exit[static_cast<std::size_t>(u)] = e;
+      } else {
+        outs[static_cast<std::size_t>(u)].push_back(e);
+      }
+    }
+    auto head_of = [&](EdgeId e) { return g->edge_destinations()[static_cast<std::size_t>(e)]; };
+    // A random simple walk from u (0 to 3 inner links, avoiding `avoid`), ending at the destination
+    // or, when it can, at a node of `merge` (taken half of the time it is offered).
+    auto walk = [&](NodeId u, std::set<NodeId> avoid, const std::set<NodeId>& merge) {
+      std::vector<EdgeId> path;
+      avoid.insert(u);
+      const int len = static_cast<int>(rng() % 5);
+      for (int k = 0; k <= len; ++k) {
+        std::vector<EdgeId> into;
+        std::vector<EdgeId> free;
+        for (EdgeId e : outs[static_cast<std::size_t>(u)]) {
+          const auto w = head_of(e);
+          if (merge.count(w) != 0) into.push_back(e);
+          if (avoid.count(w) == 0 && merge.count(w) == 0) free.push_back(e);
+        }
+        if (!into.empty() && rng() % 2 == 0) {
+          path.push_back(into[rng() % into.size()]);
+          return path;
+        }
+        if (k == len || free.empty()) break;
+        const EdgeId e = free[rng() % free.size()];
+        path.push_back(e);
+        u = head_of(e);
+        avoid.insert(u);
+      }
+      path.push_back(exit[static_cast<std::size_t>(u)]);
+      return path;
+    };
+    auto nodes_of = [&](const std::vector<EdgeId>& es) {
+      std::set<NodeId> out;
+      for (EdgeId e : es) {
+        out.insert(g->edge_sources()[static_cast<std::size_t>(e)]);
+        out.insert(head_of(e));
+      }
+      out.erase(dst);
+      return out;
+    };
+    auto path_of = [&](const std::vector<EdgeId>& es) {
+      std::vector<std::vector<EdgeId>> hops;
+      for (EdgeId e : es) hops.push_back({e});
+      return std::make_shared<const Path>(*g, hops);
+    };
+    // The union of two member sets; a union with a cycle is no route (thrown as invalid_argument: the
+    // trial is skipped).
+    auto unite = [&](std::vector<EdgeId> a, const std::vector<EdgeId>& b) {
+      a.insert(a.end(), b.begin(), b.end());
+      std::sort(a.begin(), a.end());
+      a.erase(std::unique(a.begin(), a.end()), a.end());
+      std::vector<int> indegree(static_cast<std::size_t>(inner) + 1, 0);
+      for (EdgeId e : a) ++indegree[static_cast<std::size_t>(head_of(e))];
+      std::vector<NodeId> ready;
+      for (NodeId v = 0; v <= inner; ++v) {
+        if (indegree[static_cast<std::size_t>(v)] == 0) ready.push_back(v);
+      }
+      std::size_t seen = 0;
+      while (!ready.empty()) {
+        const NodeId v = ready.back();
+        ready.pop_back();
+        ++seen;
+        for (EdgeId e : a) {
+          if (g->edge_sources()[static_cast<std::size_t>(e)] == v && --indegree[static_cast<std::size_t>(head_of(e))] == 0) ready.push_back(head_of(e));
+        }
+      }
+      if (seen != static_cast<std::size_t>(inner) + 1) throw std::invalid_argument("cyclic union");
+      return a;
+    };
+    const NodeId d[1] = {dst};
+    std::vector<Part> with;
+    std::vector<Part> without;
+    int pooled_at = -1;
+    std::vector<NodeId> pooled_sources;
+    std::vector<EdgeId> pooled_members;
+    std::vector<std::vector<RouteDefinition>> defs_of;  // per demand built from routes: its definitions
+    try {
+      const int n = 1 + static_cast<int>(rng() % 4);
+      for (int i = 0; i < n; ++i) {
+        const auto kind = rng() % 3;
+        const auto h = static_cast<NodeId>(rng() % inner);
+        if (kind == 0) {
+          std::vector<RouteDefinition> defs {RouteDefinition {h, path_of(walk(h, {}, {})), 1 + static_cast<Amount>(rng() % 3)}};
+          if (rng() % 2 == 0) defs.push_back(RouteDefinition {h, path_of(walk(h, {}, {})), 1 + static_cast<Amount>(rng() % 3)});
+          const NodeId s[1] = {h};
+          with.push_back({ForwardingProgram::from_routes(*g, s, d, defs), nullptr, {static_cast<Amount>(rng() % 6)}});
+          defs_of.push_back(defs);
+        } else if (kind == 1) {
+          const auto w1 = walk(h, {}, {});
+          const auto members = rng() % 2 == 0 ? unite(w1, walk(h, {}, {})) : w1;
+          const NodeId s[1] = {h};
+          const std::vector<RouteDefinition> defs {RouteDefinition {h, dag_of(*g, members), 1}, RouteDefinition {h, path_of(w1), 0}};
+          with.push_back({ForwardingProgram::from_routes(*g, s, d, defs), nullptr, {static_cast<Amount>(rng() % 6)}});
+          defs_of.push_back(defs);
+        } else {
+          NodeId h2 = static_cast<NodeId>(rng() % inner);
+          if (h2 == h) h2 = (h + 1) % inner;
+          const auto members = unite(walk(h, {}, {}), walk(h2, {}, {}));
+          std::vector<NodeId> s {std::min(h, h2), std::max(h, h2)};
+          with.push_back({ForwardingProgram::from_dag(*g, s, d, dag_of(*g, members), RouteOptions {}), nullptr,
+                          {static_cast<Amount>(rng() % 6), static_cast<Amount>(rng() % 6)}});
+          defs_of.emplace_back();
+          if (pooled_at < 0) {
+            pooled_at = i;
+            pooled_sources = s;
+            pooled_members = members;
+          }
+        }
+      }
+      without = with;
+      auto kind = static_cast<std::size_t>(rng() % 7);
+      if (n == 1 && kind != 6 && rng() % 2 == 0) kind = pooled_at >= 0 ? 2 + rng() % 2 : 6;  // the element joins the one demand
+      if ((kind == 2 || kind == 3) && pooled_at < 0) kind = 0;
+      const auto h = static_cast<NodeId>(rng() % inner);
+      const NodeId s[1] = {h};
+      if (kind == 0) {
+        with.push_back({ForwardingProgram::from_routes(*g, s, d, std::vector<RouteDefinition> {RouteDefinition {h, path_of(walk(h, {}, {})), 1}}),
+                        nullptr, {0}});
+      } else if (kind == 1) {
+        const auto w = walk(h, {}, {});
+        const auto p = rng() % w.size();
+        const auto black = std::make_shared<const Eligibility>(g->eligibility({}, std::vector<EdgeId> {w[p]}));
+        const Amount z = 1 + static_cast<Amount>(rng() % 3);
+        with.push_back({ForwardingProgram::from_routes(*g, s, d, std::vector<RouteDefinition> {RouteDefinition {h, path_of(w), 1}}), black, {z}});
+        const std::vector<EdgeId> cut(w.begin(), w.begin() + static_cast<std::ptrdiff_t>(p) + 1);
+        const NodeId end[1] = {head_of(cut.back())};
+        without.push_back({ForwardingProgram::from_routes(*g, s, end, std::vector<RouteDefinition> {RouteDefinition {h, path_of(cut), 1}}), black, {z}});
+      } else if (kind == 2 || kind == 3) {
+        const auto live = nodes_of(pooled_members);
+        std::vector<NodeId> free;
+        for (NodeId v = 0; v < inner; ++v) {
+          if (live.count(v) == 0) free.push_back(v);
+        }
+        if (free.empty()) {
+          ++skipped;
+          continue;
+        }
+        const NodeId h0 = free[rng() % free.size()];
+        const auto w = walk(h0, live, live);
+        std::vector<NodeId> sources = pooled_sources;
+        sources.push_back(h0);
+        std::sort(sources.begin(), sources.end());
+        auto& part = with[static_cast<std::size_t>(pooled_at)];
+        const auto old_inject = part.inject;
+        part.prog = ForwardingProgram::from_dag(*g, sources, d, dag_of(*g, unite(pooled_members, w)), RouteOptions {});
+        part.inject.clear();
+        for (NodeId v : part.prog->sources()) {
+          if (v == h0) {
+            part.inject.push_back(kind == 2 ? 0 : 1 + static_cast<Amount>(rng() % 3));
+          } else {
+            part.inject.push_back(old_inject[v == pooled_sources[0] ? 0 : 1]);
+          }
+        }
+        if (kind == 3) part.black = std::make_shared<const Eligibility>(g->eligibility({}, std::vector<EdgeId> {w.front()}));
+      } else if (kind == 6) {
+        // A source of share 0 inside demand i: a new head's tunnel or DAG route, or a pooled source
+        // on the demand's DAG.
+        const auto i = static_cast<std::size_t>(rng() % static_cast<std::size_t>(n));
+        auto& part = with[i];
+        std::vector<NodeId> sources(part.prog->sources().begin(), part.prog->sources().end());
+        NodeId h0 = -1;
+        if (defs_of[i].empty()) {
+          std::vector<NodeId> inside;
+          for (NodeId v : nodes_of(i == static_cast<std::size_t>(pooled_at) ? pooled_members : std::vector<EdgeId> {})) {
+            if (std::find(sources.begin(), sources.end(), v) == sources.end()) inside.push_back(v);
+          }
+          if (inside.empty()) {
+            ++skipped;
+            continue;
+          }
+          h0 = inside[rng() % inside.size()];
+          sources.push_back(h0);
+          std::sort(sources.begin(), sources.end());
+          part.prog = ForwardingProgram::from_dag(*g, sources, d, dag_of(*g, pooled_members), RouteOptions {});
+        } else {
+          h0 = static_cast<NodeId>(rng() % inner);
+          if (std::find(sources.begin(), sources.end(), h0) != sources.end()) {
+            ++skipped;
+            continue;
+          }
+          auto defs = defs_of[i];
+          const auto w = walk(h0, {}, {});
+          if (rng() % 2 == 0) {
+            defs.push_back(RouteDefinition {h0, path_of(w), 1});
+          } else {
+            defs.push_back(RouteDefinition {h0, dag_of(*g, w), 1});
+          }
+          sources.push_back(h0);
+          std::sort(sources.begin(), sources.end());
+          part.prog = ForwardingProgram::from_routes(*g, sources, d, defs);
+        }
+        const auto old = without[i].prog->sources();
+        const auto old_inject = part.inject;
+        part.inject.clear();
+        for (NodeId v : part.prog->sources()) {
+          const auto at = std::find(old.begin(), old.end(), v);
+          part.inject.push_back(v == h0 ? 0 : old_inject[static_cast<std::size_t>(at - old.begin())]);
+        }
+      } else {
+        // The live walk W from h; the branch on a higher EdgeId out of h than W's first link.
+        const auto w = walk(h, {}, {});
+        std::vector<EdgeId> later;
+        for (EdgeId e : outs[static_cast<std::size_t>(h)]) {
+          if (e > w.front() && std::find(w.begin(), w.end(), e) == w.end()) later.push_back(e);
+        }
+        if (exit[static_cast<std::size_t>(h)] > w.front() && exit[static_cast<std::size_t>(h)] != w.front()) later.push_back(exit[static_cast<std::size_t>(h)]);
+        if (later.empty()) {
+          ++skipped;
+          continue;
+        }
+        const EdgeId branch = later[rng() % later.size()];
+        auto live = nodes_of(w);
+        std::vector<EdgeId> dead {branch};
+        const auto b = head_of(branch);
+        if (b != dst && live.count(b) == 0) {
+          auto avoid = live;
+          const auto rest = walk(b, avoid, live);
+          dead.insert(dead.end(), rest.begin(), rest.end());
+        }
+        auto program = [&](const std::vector<EdgeId>& members) {
+          if (kind == 4) return ForwardingProgram::from_dag(*g, s, d, dag_of(*g, members), RouteOptions {});
+          return ForwardingProgram::from_routes(*g, s, d,
+                                                std::vector<RouteDefinition> {RouteDefinition {h, dag_of(*g, members), 1},
+                                                                              RouteDefinition {h, path_of(w), 0}});
+        };
+        with.push_back({program(unite(w, dead)), nullptr, {1}});
+        without.push_back({program(w), nullptr, {1}});
+      }
+      ++kinds[kind];
+      auto evaluate = [&](const std::vector<Part>& parts) {
+        std::vector<std::unique_ptr<detail::ForwardingView>> views;
+        std::vector<detail::ForwardingDemand> demands;
+        for (const auto& p : parts) {
+          views.push_back(std::make_unique<detail::ForwardingView>(detail::make_forwarding_view(
+              *g, p.prog, nullptr, std::vector<NodeId>(p.prog->destinations().begin(), p.prog->destinations().end()), p.black.get())));
+          demands.push_back({views.back().get(), p.inject});
+        }
+        Seen seen;
+        std::vector<ProgramFlow> got;
+        try {
+          got = detail::lossy(demands, capacities(*g));
+        } catch (const std::invalid_argument& e) {
+          seen.error = e.what();
+        }
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+        seen.rounds = detail::thread_lossy_counters().rounds;
+        seen.groups = detail::thread_lossy_counters().groups;
+        seen.barriers = detail::thread_lossy_counters().barriers;
+        seen.dependencies = detail::thread_lossy_counters().dependencies;
+#endif
+        for (const auto& f : got) {
+          seen.delivered.push_back(f.delivered);
+          std::map<EdgeId, Amount> c;
+          std::map<EdgeId, Amount> dr;
+          for (const auto& entry : f.entries) {
+            for (const auto& [e, x] : entry.edge_flows) c[e] += x;
+            for (const auto& [e, x] : entry.edge_drops) dr[e] += x;
+          }
+          seen.carried.push_back(c);
+          seen.drops.push_back(dr);
+        }
+        return seen;
+      };
+      const auto a = evaluate(with);
+      const auto b = evaluate(without);
+      const std::string where = "trial " + std::to_string(trial) + ", kind " + std::to_string(kind);
+      EXPECT_EQ(a.error, b.error) << where;
+      EXPECT_EQ(a.rounds, b.rounds) << where;
+      EXPECT_EQ(a.groups, b.groups) << where;
+      EXPECT_EQ(a.barriers, b.barriers) << where;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+      EXPECT_EQ(a.dependencies, b.dependencies + (kind == 3 ? 1 : 0)) << where;
+#endif
+      if (a.error.empty() && b.error.empty()) {
+        // Demands present in both runs: the live ones, and the added tunnel cut or branch removed.
+        const std::size_t both = std::min(a.delivered.size(), b.delivered.size());
+        for (std::size_t i = 0; i < both; ++i) {
+          EXPECT_EQ(a.delivered[i], b.delivered[i]) << where << ", demand " << i;
+          EXPECT_EQ(a.carried[i], b.carried[i]) << where << ", demand " << i;
+          if (!(kind == 3 && static_cast<int>(i) == pooled_at)) EXPECT_EQ(a.drops[i], b.drops[i]) << where << ", demand " << i;
+        }
+      }
+      errors += a.error.empty() ? 0 : 1;
+      cyclic += a.groups > 0 ? 1 : 0;
+      ++checked;
+    } catch (const std::invalid_argument&) {
+      ++skipped;  // a random member set the builders refuse (a cycle, no route to the destination)
+    }
+    if (::testing::Test::HasFailure()) return;
+  }
+  RecordProperty("checked", checked);
+  RecordProperty("skipped", skipped);
+  RecordProperty("cyclic", cyclic);
+  RecordProperty("errors", errors);
+  EXPECT_GT(checked, 3500);
+  for (std::size_t k = 0; k < kinds.size(); ++k) EXPECT_GT(kinds[k], 300) << "kind " << k;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_GT(cyclic, 50);  // not vacuous: groups iterated
+#endif
 }
 
 // The source-labelled round state. E = e0 0->1 (1), F = e1 2->3 (1); wide e2 4->0, e3 1->2, e4

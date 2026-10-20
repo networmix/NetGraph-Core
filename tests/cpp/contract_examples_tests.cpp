@@ -8,12 +8,15 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -444,9 +447,15 @@ Routed routed(const Amounts& cap, const Routes& routes, const std::vector<NodeId
   for (NodeId v = 0; v < h; ++v) out.heads.push_back(v);
   return out;
 }
-std::shared_ptr<const ForwardingProgram> routed_program(const Routed& r, const std::vector<NodeId>& head_of, const Amounts& weights) {
+// Each route a tunnel, or (where dags[i] is set) a supplied DAG route of the same links.
+std::shared_ptr<const ForwardingProgram> routed_program(const Routed& r, const std::vector<NodeId>& head_of, const Amounts& weights,
+                                                        const std::vector<bool>& dags = {}) {
   std::vector<RouteDefinition> defs;
   for (std::size_t i = 0; i < r.paths.size(); ++i) {
+    if (i < dags.size() && dags[i]) {
+      defs.push_back(RouteDefinition {head_of[i], dag_of(*r.net.g, r.paths[i]), weights[i]});
+      continue;
+    }
     std::vector<std::vector<EdgeId>> hops;
     for (EdgeId e : r.paths[i]) hops.push_back({e});
     defs.push_back(RouteDefinition {head_of[i], std::make_shared<const Path>(*r.net.g, hops), weights[i]});
@@ -458,24 +467,43 @@ std::shared_ptr<const ForwardingProgram> routed_program(const Routed& r, const s
 // The one Lossy forwarding of routes with offers: one tunnel per route, weight = its offer, under
 // head label[i] (the hierarchy's middle level; heads share the offer equally, so a head's routes
 // must offer equal totals). Per route: what it carries and drops at each of its links, and what it
-// delivers; per link, what it carries.
+// delivers; per link, what it carries. `dark`: the abstract links the call black-holes; `dags[i]`:
+// route i a supplied DAG route instead of a tunnel; `total`: the call's offer (default: the sum of
+// the offers). The structure (hooks): the abstract links that wait, the cyclic groups, their rounds
+// and the dependency arcs.
 struct LossyOut {
   std::string error;
+  std::int64_t rounds {-1};  // hooks only, as the three below
+  std::int64_t groups {-1};
+  Ints barrier_links;
+  std::int64_t dependencies {-1};
   Routes carried;
   Routes edge_drops;
   Amounts delivered;
   Amounts edge_flows;
 };
-LossyOut lossy(const Amounts& offers, const Routes& routes, const Amounts& cap, std::vector<NodeId> head_of = {}) {
+LossyOut lossy(const Amounts& offers, const Routes& routes, const Amounts& cap, std::vector<NodeId> head_of = {}, const Ints& dark = {},
+               const std::vector<bool>& dags = {}, std::optional<Amount> total = std::nullopt) {
   if (head_of.empty()) head_of.assign(routes.size(), 0);
   const Routed r = routed(cap, routes, head_of);
-  const auto prog = routed_program(r, head_of, offers);
-  auto p = policy(r.net, r.heads, {r.destination}, {.routing = Pinned {prog, nullptr}, .admission = LY});
-  Amount total = 0;
-  for (Amount x : offers) total += x;
+  const auto prog = routed_program(r, head_of, offers, dags);
+  auto p = policy(r.net, r.heads, {r.destination}, {.routing = Pinned {prog, dark.empty() ? nullptr : r.net.mask({}, dark)}, .admission = LY});
+  if (!total.has_value()) {
+    total = 0;
+    for (Amount x : offers) *total += x;
+  }
   LossyOut out;
   PlacementResult res;
-  out.error = error_of([&] { res = p->place(total, kFlows); });
+  out.error = error_of([&] { res = p->place(*total, kFlows); });
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  const auto& counters = detail::thread_lossy_counters();
+  out.rounds = counters.rounds;
+  out.groups = counters.groups;
+  out.dependencies = counters.dependencies;
+  for (std::size_t e = 0; e < cap.size(); ++e) {
+    if (std::find(counters.barriers.begin(), counters.barriers.end(), r.link[e]) != counters.barriers.end()) out.barrier_links.push_back(static_cast<std::int64_t>(e));
+  }
+#endif
   if (!out.error.empty()) return out;
   std::map<std::int32_t, FlowRecord> rec;
   for (auto& x : p->records()) rec[*x.entry_id] = x;
@@ -495,7 +523,9 @@ LossyOut lossy(const Amounts& offers, const Routes& routes, const Amounts& cap, 
     }
     out.carried.push_back(c);
     out.edge_drops.push_back(d);
-    out.delivered.push_back(res.by_tunnel[i].delivered);
+    // by_tunnel has the tunnels only (a DAG route's delivery is not reported: -1).
+    const auto tunnel = static_cast<std::size_t>(std::count(dags.begin(), dags.begin() + static_cast<std::ptrdiff_t>(std::min(i, dags.size())), true));
+    out.delivered.push_back(i < dags.size() && dags[i] ? -1 : res.by_tunnel[i - tunnel].delivered);
   }
   for (EdgeId id : r.link) out.edge_flows.push_back((*res.edge_flows)[static_cast<std::size_t>(id)]);
   return out;
@@ -2284,15 +2314,34 @@ TEST(ContractExamples, STRETCH_numpy) {
 
 namespace {
 
-// The list form of the loss examples: each route is its own demand, a Pinned LOSSY policy over one
-// tunnel (created in route order), all in one SIMULTANEOUS list. Each abstract link e gets its own
-// two nodes; each route runs from its own head through its links to one destination, consecutive
-// links joined by a link that never limits anything, except where every occurrence of e continues on
-// f and every occurrence of f comes from e: there e's head is f's tail (no join), so the examples'
-// serial pairs stay pairs. `dark[i]`: the abstract links route i's demand black-holes.
+// The list form of the loss examples: each route is its own demand, a Pinned LOSSY policy (created
+// in route order), all in one SIMULTANEOUS list. Each abstract link e gets its own two nodes; each
+// route runs from its own head through its links to one destination, consecutive links joined by a
+// link that never limits anything, except where e is fused to f (fused_links): there e's head is f's
+// tail (no join), so the examples' serial pairs stay pairs. `dark[i]`: the abstract links route i's
+// demand black-holes. `forms[i]` (default kTunnel) realizes route i as:
+// - kTunnel: one tunnel;
+// - kDagRoute: the same links as a supplied DAG route alone (a pooled context);
+// - kDagBesideExit: that DAG route beside a tunnel on its head's own exit to the destination (a split
+//   route of a program that is not pooled), offered twice the route's offer (each entry gets it);
+// - kZeroBranch: a DAG route of the route's links plus that exit, beside the exit tunnel, offered 2:
+//   each entry gets 1 and round robin sends the DAG route's unit to the exit (a lower EdgeId than
+//   the route's first link), so every member on the route has a whole-unit share of 0 (the route's
+//   offer is not used);
+// - kEntryTunnel, kEntryDag: a tunnel or a DAG route in route 0's program, from route 0's head, of
+//   weight its offer (0: an empty entry); no participant of its own, its black holes not used; route
+//   0 (a tunnel) then has weight its offer and is offered `offer0` (default: the sum of its
+//   program's weights): with every other route an entry, the list is one scalar call.
+// Per participant (a route of its own) its rows on its route's links and its delivery (a split route
+// beside an exit: without the exit's units); the structure (hooks): the abstract links that wait
+// (after serial normalization), the cyclic groups, their rounds and the dependency arcs.
+enum Form { kTunnel, kDagRoute, kDagBesideExit, kZeroBranch, kEntryTunnel, kEntryDag };
 struct ListOut {
   std::string error;
-  std::int64_t rounds {-1};  // hooks only
+  std::int64_t rounds {-1};  // hooks only, as the three below
+  std::int64_t groups {-1};
+  Ints barrier_links;
+  std::int64_t dependencies {-1};
   Routes arrivals;
   Routes carried;
   Routes edge_drops;
@@ -2300,20 +2349,62 @@ struct ListOut {
   Amounts edge_flows;
   Texts status;
 };
-ListOut list_lossy(const Amounts& offers, const Routes& routes, const Amounts& cap, const std::vector<Ints>& dark = {}) {
-  const auto L = static_cast<std::int64_t>(cap.size());
-  // Per link its successors and predecessors over every occurrence (-1: an end).
-  std::vector<std::set<std::int64_t>> next(cap.size());
-  std::vector<std::set<std::int64_t>> prev(cap.size());
-  for (const auto& r : routes) {
+bool black_holed(const std::vector<Ints>& dark, std::size_t i, std::int64_t e) {
+  return i < dark.size() && std::find(dark[i].begin(), dark[i].end(), e) != dark[i].end();
+}
+// Per link the link it is fused to (-1: none): every occurrence of e that can carry something
+// continues on f and every such occurrence of f comes from e. A zero offer carries nothing, and a
+// route's traffic stops at its own black hole (which still arrives from the link before it). A
+// pair that would make a route visit a node twice (a dead occurrence on e going elsewhere and one
+// on f) is joined instead: a tunnel is a simple path.
+Ints fused_links(const Amounts& offers, const Routes& routes, std::size_t L, const std::vector<Ints>& dark) {
+  std::vector<std::set<std::int64_t>> next(L);
+  std::vector<std::set<std::int64_t>> prev(L);
+  for (std::size_t i = 0; i < routes.size(); ++i) {
+    if (offers[i] == 0) continue;
+    const auto& r = routes[i];
     for (std::size_t j = 0; j < r.size(); ++j) {
-      next[static_cast<std::size_t>(r[j])].insert(j + 1 < r.size() ? r[j + 1] : -1);
       prev[static_cast<std::size_t>(r[j])].insert(j > 0 ? r[j - 1] : -1);
+      if (black_holed(dark, i, r[j])) break;
+      next[static_cast<std::size_t>(r[j])].insert(j + 1 < r.size() ? r[j + 1] : -1);
     }
   }
-  auto fused = [&](std::int64_t e, std::int64_t f) {
-    return next[static_cast<std::size_t>(e)] == std::set<std::int64_t> {f} && prev[static_cast<std::size_t>(f)] == std::set<std::int64_t> {e};
-  };
+  Ints out(L, -1);
+  for (std::size_t e = 0; e < L; ++e) {
+    const auto& s = next[e];
+    if (s.size() == 1 && *s.begin() >= 0 && prev[static_cast<std::size_t>(*s.begin())] == std::set<std::int64_t> {static_cast<std::int64_t>(e)}) out[e] = *s.begin();
+  }
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (const auto& r : routes) {
+      // Its nodes: a tail is e, a head L + e (a fused head is the next link's tail).
+      std::vector<std::int64_t> nodes {r.front()};
+      for (std::size_t j = 0; j < r.size(); ++j) {
+        const auto f = out[static_cast<std::size_t>(r[j])];
+        nodes.push_back(f >= 0 ? f : static_cast<std::int64_t>(L) + r[j]);
+        if (j + 1 < r.size() && f != r[j + 1]) nodes.push_back(r[j + 1]);
+      }
+      if (std::set<std::int64_t>(nodes.begin(), nodes.end()).size() == nodes.size()) continue;
+      for (std::size_t j = 0; j < r.size(); ++j) {
+        auto& f = out[static_cast<std::size_t>(r[j])];
+        if (f >= 0 && (j + 1 == r.size() || f != r[j + 1])) f = -1;  // e without its f
+        for (auto& g : out) {
+          if (g == r[j] && (j == 0 || out[static_cast<std::size_t>(r[j - 1])] != r[j])) g = -1;  // f without its e
+        }
+      }
+      changed = true;
+    }
+  }
+  return out;
+}
+ListOut list_lossy(const Amounts& offers, const Routes& routes, const Amounts& cap, const std::vector<Ints>& dark = {},
+                   const std::optional<Ints>& fusing = std::nullopt, const std::vector<Form>& forms = {},
+                   std::optional<Amount> offer0 = std::nullopt) {
+  const auto L = static_cast<std::int64_t>(cap.size());
+  const Ints fuse = fusing.value_or(fused_links(offers, routes, cap.size(), dark));
+  auto fused = [&](std::int64_t e, std::int64_t f) { return fuse[static_cast<std::size_t>(e)] == f; };
+  auto form = [&](std::size_t i) { return i < forms.size() ? forms[i] : kTunnel; };
+  auto own = [&](std::size_t i) { return form(i) != kEntryTunnel && form(i) != kEntryDag; };
   // Nodes: heads 0..n-1, the destination n, then per link a tail and a head (a fused head is the
   // next link's tail).
   const auto n = static_cast<NodeId>(routes.size());
@@ -2323,16 +2414,17 @@ ListOut list_lossy(const Amounts& offers, const Routes& routes, const Amounts& c
   NodeId next_node = n + 1;
   for (std::int64_t e = 0; e < L; ++e) tail[static_cast<std::size_t>(e)] = next_node++;
   for (std::int64_t e = 0; e < L; ++e) {
-    const auto& s = next[static_cast<std::size_t>(e)];
-    head[static_cast<std::size_t>(e)] = s.size() == 1 && *s.begin() >= 0 && fused(e, *s.begin()) ? tail[static_cast<std::size_t>(*s.begin())] : next_node++;
+    const auto f = fuse[static_cast<std::size_t>(e)];
+    head[static_cast<std::size_t>(e)] = f >= 0 ? tail[static_cast<std::size_t>(f)] : next_node++;
   }
   std::vector<InEdge> rows;
   for (std::int64_t e = 0; e < L; ++e) rows.push_back({tail[static_cast<std::size_t>(e)], head[static_cast<std::size_t>(e)], cap[static_cast<std::size_t>(e)], 1});
   std::vector<std::vector<std::size_t>> rows_of(routes.size());
+  std::vector<std::size_t> exit_row(routes.size(), 0);
   for (std::size_t i = 0; i < routes.size(); ++i) {
     const auto& r = routes[i];
     rows_of[i].push_back(rows.size());
-    rows.push_back({static_cast<NodeId>(i), tail[static_cast<std::size_t>(r.front())], kBig, 1});
+    rows.push_back({own(i) ? static_cast<NodeId>(i) : NodeId {0}, tail[static_cast<std::size_t>(r.front())], kBig, 1});
     for (std::size_t j = 0; j < r.size(); ++j) {
       rows_of[i].push_back(static_cast<std::size_t>(r[j]));
       if (j + 1 < r.size() && !fused(r[j], r[j + 1])) {
@@ -2342,33 +2434,85 @@ ListOut list_lossy(const Amounts& offers, const Routes& routes, const Amounts& c
     }
     rows_of[i].push_back(rows.size());
     rows.push_back({head[static_cast<std::size_t>(r.back())], dest, kBig, 1});
+    if (form(i) == kDagBesideExit || form(i) == kZeroBranch) {
+      exit_row[i] = rows.size();
+      rows.push_back({static_cast<NodeId>(i), dest, kBig, 1});
+    }
   }
   const Net net(rows, next_node);
+  auto edges_of = [&](const std::vector<std::size_t>& rs) {
+    std::vector<EdgeId> out;
+    for (auto row : rs) out.push_back(net.id[row]);
+    return out;
+  };
+  auto tunnel_of = [&](const std::vector<std::size_t>& rs) {
+    std::vector<std::vector<EdgeId>> hops;
+    for (EdgeId e : edges_of(rs)) hops.push_back({e});
+    return std::make_shared<const Path>(*net.g, hops);
+  };
   auto ledger = std::make_shared<FlowLedger>(net.g);
   std::vector<std::shared_ptr<const Eligibility>> black;
   std::vector<std::unique_ptr<FlowPolicy>> policies;
+  std::vector<std::size_t> route_of;  // per participant
   std::vector<Action> list;
   for (std::size_t i = 0; i < routes.size(); ++i) {
-    std::vector<std::vector<EdgeId>> hops;
-    for (auto row : rows_of[i]) hops.push_back({net.id[row]});
-    const NodeId s[1] = {static_cast<NodeId>(i)};
+    if (!own(i)) continue;
+    const auto h = static_cast<NodeId>(i);
+    std::vector<RouteDefinition> defs;
+    Amount offer = offers[i];
+    switch (form(i)) {
+      case kTunnel:
+        defs.push_back(RouteDefinition {h, tunnel_of(rows_of[i]), i == 0 ? offers[0] : 1});
+        break;
+      case kDagRoute:
+        defs.push_back(RouteDefinition {h, dag_of(*net.g, edges_of(rows_of[i])), 1});
+        break;
+      case kDagBesideExit:
+      case kZeroBranch: {
+        auto rs = rows_of[i];
+        if (form(i) == kZeroBranch) rs.push_back(exit_row[i]);
+        defs.push_back(RouteDefinition {h, dag_of(*net.g, edges_of(rs)), 1});
+        defs.push_back(RouteDefinition {h, tunnel_of({exit_row[i]}), 1});
+        offer = form(i) == kZeroBranch ? 2 : 2 * offers[i];
+        break;
+      }
+      default:
+        break;
+    }
+    if (i == 0) {  // route 0's program holds the entries
+      for (std::size_t k = 1; k < routes.size(); ++k) {
+        if (form(k) == kEntryTunnel) defs.push_back(RouteDefinition {0, tunnel_of(rows_of[k]), offers[k]});
+        if (form(k) == kEntryDag) defs.push_back(RouteDefinition {0, dag_of(*net.g, edges_of(rows_of[k])), offers[k]});
+        if (!own(k)) offer += offers[k];
+      }
+      offer = offer0.value_or(offer);
+    }
+    const NodeId s[1] = {h};
     const NodeId t[1] = {dest};
-    const std::vector<RouteDefinition> defs {RouteDefinition {static_cast<NodeId>(i), std::make_shared<const Path>(*net.g, hops), 1}};
     const auto prog = ForwardingProgram::from_routes(*net.g, s, t, defs);
     black.push_back(i < dark.size() ? net.mask({}, dark[i]) : nullptr);
-    policies.push_back(std::make_unique<FlowPolicy>(*ledger, std::vector<NodeId> {static_cast<NodeId>(i)}, std::vector<NodeId> {dest},
+    policies.push_back(std::make_unique<FlowPolicy>(*ledger, std::vector<NodeId> {h}, std::vector<NodeId> {dest},
                                                     FlowPolicyConfig {.routing = Pinned {prog, black.back()}, .admission = LY}));
-    list.push_back(Replace {*policies.back(), offers[i]});
+    route_of.push_back(i);
+    list.push_back(Replace {*policies.back(), offer});
   }
   ListOut out;
   std::vector<PlacementResult> res;
   out.error = error_of([&] { res = apply_actions(*ledger, list, BatchMode::Simultaneous); });
 #if NETGRAPH_CORE_PRIVATE_HOOKS
-  out.rounds = detail::thread_lossy_counters().rounds;
+  const auto& counters = detail::thread_lossy_counters();
+  out.rounds = counters.rounds;
+  out.groups = counters.groups;
+  out.dependencies = counters.dependencies;
+  for (std::int64_t e = 0; e < L; ++e) {
+    const EdgeId id = net.id[static_cast<std::size_t>(e)];
+    if (std::find(counters.barriers.begin(), counters.barriers.end(), id) != counters.barriers.end()) out.barrier_links.push_back(e);
+  }
 #endif
   if (!out.error.empty()) return out;
-  for (std::size_t i = 0; i < routes.size(); ++i) {
-    const auto recs = policies[i]->records();
+  for (std::size_t k = 0; k < policies.size(); ++k) {
+    const std::size_t i = route_of[k];
+    const auto recs = policies[k]->records();
     Ints a;
     Ints c;
     Ints d;
@@ -2387,8 +2531,9 @@ ListOut list_lossy(const Amounts& offers, const Routes& routes, const Amounts& c
     out.arrivals.push_back(a);
     out.carried.push_back(c);
     out.edge_drops.push_back(d);
-    out.delivered.push_back(res[i].call_delivered);
-    out.status.push_back(name_of(res[i].by_tunnel.front().status));
+    const Amount exit = form(i) == kDagBesideExit ? offers[i] : form(i) == kZeroBranch ? 2 : 0;
+    out.delivered.push_back(res[k].call_delivered - exit);
+    out.status.push_back(form(i) == kTunnel ? name_of(res[k].by_tunnel.front().status) : "SPLIT");
   }
   for (std::int64_t e = 0; e < L; ++e) out.edge_flows.push_back(ledger->carried()[static_cast<std::size_t>(net.id[static_cast<std::size_t>(e)])]);
   return out;
@@ -2556,6 +2701,406 @@ TEST(ContractExamples, D_cycle_subdivision_before) {
 TEST(ContractExamples, D_cycle_subdivision_after) {
   expect_list(list_lossy({2, 1, 4}, {{1, 0, 2, 3}, {2, 3, 0}, {2, 3, 0, 1}}, {2, 4, 2, 2}), {{2, 2, 1, 0}, {1, 0, 0}, {4, 2, 2, 1}},
               {{2, 1, 0, 0}, {0, 0, 0}, {2, 2, 1, 1}}, std::nullopt, {0, 0, 1}, {2, 3, 2, 2});
+}
+// A dead occurrence (a zero offer or share, traffic behind its own black hole) takes no part in the
+// no-drop loads, the waits or serial normalization, so adding it changes no other output, structure
+// included: with and without it, the other participants' rows and deliveries, every link flow, the
+// error and (hooks) the links that wait, the groups, their rounds and the dependency arcs are equal.
+// "Without" is the list without the dead participant, or (behind a black hole) with its route cut
+// after its black hole, as the contract's property states it. `extra_arcs`: the dependency arcs of
+// the added element's own live part that the comparison has none of.
+void expect_same_without(const ListOut& with, const ListOut& without, std::size_t n, const std::string& where,
+                         std::int64_t extra_arcs = 0) {
+  EXPECT_EQ(with.error, without.error) << where;
+  EXPECT_EQ(with.rounds, without.rounds) << where;
+  EXPECT_EQ(with.groups, without.groups) << where;
+  EXPECT_EQ(with.barrier_links, without.barrier_links) << where;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(with.dependencies, without.dependencies + extra_arcs) << where;
+#else
+  (void)extra_arcs;
+#endif
+  auto first = [n](const auto& v) {
+    using V = std::decay_t<decltype(v)>;
+    return V(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(std::min(n, v.size())));
+  };
+  EXPECT_EQ(first(with.arrivals), first(without.arrivals)) << where;
+  EXPECT_EQ(first(with.carried), first(without.carried)) << where;
+  EXPECT_EQ(first(with.edge_drops), first(without.edge_drops)) << where;
+  EXPECT_EQ(first(with.delivered), first(without.delivered)) << where;
+  EXPECT_EQ(with.edge_flows, without.edge_flows) << where;
+}
+std::string form_name(Form f) {
+  static const char* const kNames[] = {"tunnel", "DAG route", "DAG route beside an exit", "zero branch", "entry tunnel", "entry DAG route"};
+  return kNames[static_cast<std::size_t>(f)];
+}
+const Form kDeadForms[] = {kTunnel, kDagRoute, kDagBesideExit};
+
+// D-dead-tail: Z's traffic dies on link 3, its own black hole, so its occurrences on links 0 and 1
+// are dead: the period-2 error at round 3, as with Z cut after link 3 (and as without Z), with Z a
+// tunnel, a DAG route alone or a DAG route beside an exit. The scalar call (one head, the routes
+// its entries with weights = offers, the call's black hole on link 3, which only Z uses) gives the
+// same, Z a tunnel or a DAG route, against Z cut after link 3.
+void dead_tail(const Amounts& offers) {
+  const Routes routes {{2, 0}, {1, 0, 2}, {3, 0, 1}};
+  const Routes cut {{2, 0}, {1, 0, 2}, {3}};
+  const Amounts cap {2, 2, 1, 9};
+  const std::vector<Ints> dark {{}, {}, {3}};
+  const auto alone = list_lossy({offers[0], offers[1]}, {routes[0], routes[1]}, cap);
+  EXPECT_EQ(alone.error, kPeriodTwo);
+  for (Form f : kDeadForms) {
+    const std::vector<Form> forms {kTunnel, kTunnel, f};
+    const auto with = list_lossy(offers, routes, cap, dark, std::nullopt, forms);
+    EXPECT_EQ(with.error, kPeriodTwo) << form_name(f);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    EXPECT_EQ(with.rounds, 3) << form_name(f);
+#endif
+    expect_same_without(with, list_lossy(offers, cut, cap, dark, std::nullopt, forms), 2, form_name(f) + " against Z cut");
+    EXPECT_EQ(with.barrier_links, alone.barrier_links) << form_name(f);
+    EXPECT_EQ(with.groups, alone.groups) << form_name(f);
+  }
+  for (bool dag : {false, true}) {
+    const auto with = lossy(offers, routes, cap, {}, {3}, {false, false, dag});
+    const auto without = lossy(offers, cut, cap, {}, {3}, {false, false, dag});
+    EXPECT_EQ(with.error, kPeriodTwo) << "scalar, dag " << dag;
+    EXPECT_EQ(with.error, without.error) << "scalar, dag " << dag;
+    EXPECT_EQ(with.rounds, without.rounds) << "scalar, dag " << dag;
+    EXPECT_EQ(with.groups, without.groups) << "scalar, dag " << dag;
+    EXPECT_EQ(with.barrier_links, without.barrier_links) << "scalar, dag " << dag;
+    EXPECT_EQ(with.dependencies, without.dependencies) << "scalar, dag " << dag;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    EXPECT_EQ(with.rounds, 3) << "scalar, dag " << dag;
+#endif
+  }
+}
+TEST(ContractExamples, D_dead_tail) { dead_tail({1, 2, 1}); }
+// D-dead-waits: link 1 is a barrier with or without Z; Z's dead occurrences add no wait, so links 0
+// and 2 alone form the group.
+TEST(ContractExamples, D_dead_waits) { dead_tail({1, 3, 3}); }
+// D-zero-share-pair: D-cycle-subdivision-after plus a zero offer over link 2 alone, which ends there:
+// links 2 and 3 stay a transparent pair, with Z a tunnel, a DAG route alone (a pooled head whose
+// share is 0), a DAG route beside an exit (a split route whose share is 0) or a zero branch (a
+// split route member whose whole-unit share is 0; its exit member's unit makes one arc of its own).
+TEST(ContractExamples, D_zero_share_pair) {
+  const Routes routes {{1, 0, 2, 3}, {2, 3, 0}, {2, 3, 0, 1}, {2}};
+  const Amounts cap {2, 4, 2, 2};
+  const auto without = list_lossy({2, 1, 4}, {routes[0], routes[1], routes[2]}, cap);
+  for (Form f : {kTunnel, kDagRoute, kDagBesideExit, kZeroBranch}) {
+    const auto r = list_lossy({2, 1, 4, 0}, routes, cap, {}, std::nullopt, {kTunnel, kTunnel, kTunnel, f});
+    expect_list(r, {{2, 2, 1, 0}, {1, 0, 0}, {4, 2, 2, 1}, {0}}, {{2, 1, 0, 0}, {0, 0, 0}, {2, 2, 1, 1}, {0}}, std::nullopt, {0, 0, 1, 0},
+                {2, 3, 2, 2});
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    EXPECT_EQ(r.rounds, 4) << form_name(f);
+#endif
+    expect_same_without(r, without, 3, form_name(f), f == kZeroBranch ? 1 : 0);
+  }
+}
+// D-dead-subdivision: Z over links 2 and 3 with its own black hole on link 2 alone: its unit is
+// dropped there and its occurrence on link 3 is dead, as before the split; with Z a tunnel, a DAG
+// route alone or a DAG route beside an exit, against Z cut after link 2.
+TEST(ContractExamples, D_dead_subdivision) {
+  const Routes routes {{1, 0, 2, 3}, {2, 3, 0}, {2, 3, 0, 1}, {2, 3}};
+  const Routes cut {{1, 0, 2, 3}, {2, 3, 0}, {2, 3, 0, 1}, {2}};
+  const Amounts cap {2, 4, 2, 2};
+  const std::vector<Ints> dark {{}, {}, {}, {2}};
+  for (Form f : kDeadForms) {
+    const std::vector<Form> forms {kTunnel, kTunnel, kTunnel, f};
+    const auto r = list_lossy({2, 1, 4, 1}, routes, cap, dark, std::nullopt, forms);
+    expect_list(r, {{2, 2, 1, 0}, {1, 0, 0}, {4, 2, 2, 1}, {1, 0}}, {{2, 1, 0, 0}, {0, 0, 0}, {2, 2, 1, 1}, {0, 0}},
+                Routes {{0, 1, 1, 0}, {1, 0, 0}, {2, 0, 1, 0}, {1, 0}}, {0, 0, 1, 0}, {2, 3, 2, 2});
+    if (f == kTunnel) EXPECT_EQ(r.status.back(), "BLACKHOLED");
+    expect_same_without(r, list_lossy({2, 1, 4, 1}, cut, cap, dark, std::nullopt, forms), 3, form_name(f) + " against Z cut");
+  }
+}
+
+// A dead occurrence loads no link, so it makes no barrier. A: links 1, 0 (offer 1); B: 0, 2, 1
+// (offer 2); V = 2, 1, 2. With or without Z (links 3, 2, offer 2, its own black hole on link 3; a
+// tunnel, a DAG route alone or a DAG route beside an exit) the period-2 error at round 3; Z's unit
+// on link 2 counted in the no-drop loads would make link 2 a third barrier of the group and the
+// iteration fail at the round limit (192 rounds).
+TEST(DeadOccurrences, LoadNoLink) {
+  const Amounts cap {2, 1, 2, 9};
+  const auto without = list_lossy({1, 2}, {{1, 0}, {0, 2, 1}}, cap);
+  EXPECT_EQ(without.error, kPeriodTwo);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(without.rounds, 3);
+#endif
+  for (Form f : kDeadForms) {
+    const std::vector<Form> forms {kTunnel, kTunnel, f};
+    const auto with = list_lossy({1, 2, 2}, {{1, 0}, {0, 2, 1}, {3, 2}}, cap, {{}, {}, {3}}, std::nullopt, forms);
+    expect_same_without(with, list_lossy({1, 2, 2}, {{1, 0}, {0, 2, 1}, {3}}, cap, {{}, {}, {3}}, std::nullopt, forms), 2,
+                        form_name(f) + " against Z cut");
+    EXPECT_EQ(with.error, kPeriodTwo) << form_name(f);
+    EXPECT_EQ(with.barrier_links, without.barrier_links) << form_name(f);
+  }
+}
+// An empty entry (weight 0: it gets no share and is not forwarded) changes nothing: D-cycle-
+// subdivision-after with a tunnel or a DAG route of weight 0 in A's program, over link 2 alone (it
+// would break the pair 2, 3) or over links 2, 3, 0.
+TEST(DeadOccurrences, EmptyEntriesChangeNothing) {
+  const Routes routes {{1, 0, 2, 3}, {2, 3, 0}, {2, 3, 0, 1}};
+  const Amounts cap {2, 4, 2, 2};
+  const auto without = list_lossy({2, 1, 4}, routes, cap);
+  for (Form f : {kEntryTunnel, kEntryDag}) {
+    for (const Ints& extra : {Ints {2}, Ints {2, 3, 0}}) {
+      Routes with_routes = routes;
+      with_routes.push_back(extra);
+      const auto with = list_lossy({2, 1, 4, 0}, with_routes, cap, {}, std::nullopt, {kTunnel, kTunnel, kTunnel, f});
+      expect_same_without(with, without, 3, form_name(f) + " over " + std::to_string(extra.size()) + " links");
+      EXPECT_EQ(with.delivered, (Amounts {0, 0, 1}));
+    }
+  }
+}
+// The scalar call with a real serial pair: D-zero-share-pair's routes as the entries of one head's
+// program on the list layout (links 2 and 3 joined directly), weights 2, 1, 4, 1 at offer 7, so
+// highest averages give Z (link 2 alone, then its own exit) a share of 0. Z a tunnel or a DAG
+// route: delivery 1 and the structure of the call without Z (weights 2, 1, 4 at offer 7); counted in
+// normalization, Z would keep links 2 and 3 from passing traffic through as one.
+TEST(DeadOccurrences, ScalarSerialPairWithAZeroShareEntry) {
+  const Routes routes {{1, 0, 2, 3}, {2, 3, 0}, {2, 3, 0, 1}, {2}};
+  const Amounts cap {2, 4, 2, 2};
+  const Ints fuse = fused_links({2, 1, 4, 0}, routes, cap.size(), {});
+  const auto without = list_lossy({2, 1, 4}, {routes[0], routes[1], routes[2]}, cap, {}, fuse, {kTunnel, kEntryTunnel, kEntryTunnel}, 7);
+  EXPECT_EQ(without.error, "");
+  EXPECT_EQ(without.delivered, (Amounts {1}));
+  for (Form f : {kEntryTunnel, kEntryDag}) {
+    const auto with = list_lossy({2, 1, 4, 1}, routes, cap, {}, fuse, {kTunnel, kEntryTunnel, kEntryTunnel, f}, 7);
+    expect_same_without(with, without, 1, "scalar, Z an " + form_name(f));
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    EXPECT_EQ(with.barrier_links, (Ints {0, 1, 2})) << form_name(f);  // link 3 passes link 2's traffic through
+#endif
+  }
+}
+// The scalar call: a dead entry changes no other output, structure included. D-crossing (A over
+// links 0, 1 with weight 8; B over 0, 4; C over 1, 4; V 9, 7) plus Z over its own link 2 (the
+// call's black hole) then link 0, weight 4, offer 20: Z's share dies on link 2. And D-dead-tail's
+// routes with weights 1, 2, 1 and offer 3 (no black hole): highest averages give Z a share of 0.
+// Z a tunnel or a DAG route; the outputs equal those without Z (D-crossing: offer 16; D-dead-tail:
+// weights 1, 2 and offer 3, the same shares), and D-crossing's dependency arcs those with Z cut after
+// its black hole (a DAG route's live part keeps the arcs of its own routers).
+TEST(DeadOccurrences, ScalarCallsWithoutThem) {
+  for (bool dag : {false, true}) {
+    const std::string where = dag ? "DAG route" : "tunnel";
+    const auto with = lossy({8, 4, 4, 4}, {{0, 1}, {0}, {1}, {2, 0}}, {9, 7, 9}, {}, {2}, {false, false, false, dag});
+    const auto without = lossy({8, 4, 4}, {{0, 1}, {0}, {1}}, {9, 7, 9});
+    EXPECT_EQ(with.error, "") << where;
+    EXPECT_EQ(Routes(with.carried.begin(), with.carried.begin() + 3), without.carried) << where;
+    EXPECT_EQ(Routes(with.edge_drops.begin(), with.edge_drops.begin() + 3), without.edge_drops) << where;
+    EXPECT_EQ(Amounts(with.delivered.begin(), with.delivered.begin() + 3), without.delivered) << where;
+    EXPECT_EQ(with.delivered[0], 4) << where;
+    EXPECT_EQ(with.edge_flows, without.edge_flows) << where;
+    EXPECT_EQ(with.barrier_links, without.barrier_links) << where;
+    EXPECT_EQ(with.groups, without.groups) << where;
+    // Z's live part up to its black hole (a DAG route's routers) keeps its own arcs: against Z cut.
+    const auto cut = lossy({8, 4, 4, 4}, {{0, 1}, {0}, {1}, {2}}, {9, 7, 9}, {}, {2}, {false, false, false, dag});
+    EXPECT_EQ(with.dependencies, cut.dependencies) << where;
+    EXPECT_EQ(with.barrier_links, cut.barrier_links) << where;
+    const auto zero = lossy({1, 2, 1}, {{2, 0}, {1, 0, 2}, {3, 0, 1}}, {2, 2, 1, 9}, {}, {}, {false, false, dag}, 3);
+    const auto none = lossy({1, 2}, {{2, 0}, {1, 0, 2}}, {2, 2, 1, 9}, {}, {}, {}, 3);
+    EXPECT_EQ(zero.error, kPeriodTwo) << where;
+    EXPECT_EQ(zero.error, none.error) << where;
+    EXPECT_EQ(zero.rounds, none.rounds) << where;
+    EXPECT_EQ(zero.groups, none.groups) << where;
+    EXPECT_EQ(zero.barrier_links, none.barrier_links) << where;
+    EXPECT_EQ(zero.dependencies, none.dependencies) << where;
+  }
+}
+// The forwarding sizes follow the same loads: D-dead-tail has two barriers (links 0 and 2) and
+// two dependency arcs (B: 0 before 2; A: 2 before 0; Z: none) with or without Z, so its event and
+// dependency counts are those of the network without Z (counted in Z's no-drop load, link 1 would
+// be a third barrier, with arcs to and from link 0).
+TEST(DeadOccurrences, ForwardingSizesWithoutThem) {
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  using detail::ForwardingCounter;
+  struct Restore {
+    ~Restore() { detail::thread_forwarding_limits() = {}; }
+  } restore;
+  // The smallest limit of a counter that the call meets.
+  auto smallest = [](ForwardingCounter counter, const std::function<ListOut()>& call) {
+    for (std::int64_t n = 1; n < 20; ++n) {
+      detail::thread_forwarding_limits() = {};
+      detail::thread_forwarding_limits()[static_cast<std::size_t>(counter)] = n;
+      if (call().error.find("limit exceeded") == std::string::npos) return n;
+    }
+    return std::int64_t {-1};
+  };
+  const std::function<ListOut()> with_z = [] { return list_lossy({1, 2, 1}, {{2, 0}, {1, 0, 2}, {3, 0, 1}}, {2, 2, 1, 9}, {{}, {}, {3}}); };
+  const std::function<ListOut()> without_z = [] { return list_lossy({1, 2}, {{2, 0}, {1, 0, 2}}, {2, 2, 1, 9}); };
+  EXPECT_EQ(smallest(ForwardingCounter::Event, with_z), 2);
+  EXPECT_EQ(smallest(ForwardingCounter::Event, without_z), 2);
+  EXPECT_EQ(smallest(ForwardingCounter::Dependency, with_z), 2);
+  EXPECT_EQ(smallest(ForwardingCounter::Dependency, without_z), 2);
+#else
+  GTEST_SKIP() << "needs the private hooks";
+#endif
+}
+
+// Python's random.Random(seed) for a small non-negative seed (MT19937 seeded from the seed's word, and
+// the random(), randint, randrange and sample of CPython 3.11 and later on populations of at most
+// 21), so the property below draws the contract's own inputs.
+class PyRandom {
+public:
+  explicit PyRandom(std::uint32_t seed) {
+    init(19650218U);
+    std::size_t i = 1;
+    for (std::size_t k = kN; k != 0; --k) {  // the key array's mixing, with `seed` its one word
+      mt_[i] = (mt_[i] ^ ((mt_[i - 1] ^ (mt_[i - 1] >> 30)) * 1664525U)) + seed;
+      if (++i >= kN) {
+        mt_[0] = mt_[kN - 1];
+        i = 1;
+      }
+    }
+    for (std::size_t k = kN - 1; k != 0; --k) {
+      mt_[i] = (mt_[i] ^ ((mt_[i - 1] ^ (mt_[i - 1] >> 30)) * 1566083941U)) - static_cast<std::uint32_t>(i);
+      if (++i >= kN) {
+        mt_[0] = mt_[kN - 1];
+        i = 1;
+      }
+    }
+    mt_[0] = 0x80000000U;
+  }
+  double random() {
+    const std::uint32_t a = next() >> 5;
+    const std::uint32_t b = next() >> 6;
+    return (a * 67108864.0 + b) * (1.0 / 9007199254740992.0);
+  }
+  std::int64_t randbelow(std::int64_t n) {
+    int k = 0;
+    while ((std::int64_t {1} << k) <= n) ++k;
+    std::int64_t r = next() >> (32 - k);
+    while (r >= n) r = next() >> (32 - k);
+    return r;
+  }
+  std::int64_t randint(std::int64_t a, std::int64_t b) { return a + randbelow(b - a + 1); }
+  Ints sample(std::int64_t n, std::int64_t k) {  // sample(range(n), k)
+    Ints pool(static_cast<std::size_t>(n));
+    for (std::int64_t i = 0; i < n; ++i) pool[static_cast<std::size_t>(i)] = i;
+    Ints out;
+    for (std::int64_t i = 0; i < k; ++i) {
+      const auto j = static_cast<std::size_t>(randbelow(n - i));
+      out.push_back(pool[j]);
+      pool[j] = pool[static_cast<std::size_t>(n - i - 1)];
+    }
+    return out;
+  }
+
+private:
+  static constexpr std::size_t kN = 624;
+  void init(std::uint32_t s) {
+    mt_[0] = s;
+    for (std::size_t i = 1; i < kN; ++i) mt_[i] = 1812433253U * (mt_[i - 1] ^ (mt_[i - 1] >> 30)) + static_cast<std::uint32_t>(i);
+    index_ = kN;
+  }
+  std::uint32_t next() {
+    if (index_ >= kN) {
+      for (std::size_t i = 0; i < kN; ++i) {
+        const std::uint32_t y = (mt_[i] & 0x80000000U) | (mt_[(i + 1) % kN] & 0x7fffffffU);
+        mt_[i] = mt_[(i + 397) % kN] ^ (y >> 1) ^ ((y & 1U) != 0 ? 0x9908b0dfU : 0U);
+      }
+      index_ = 0;
+    }
+    std::uint32_t y = mt_[index_++];
+    y ^= y >> 11;
+    y ^= (y << 7) & 0x9d2c5680U;
+    y ^= (y << 15) & 0xefc60000U;
+    y ^= y >> 18;
+    return y;
+  }
+  std::array<std::uint32_t, kN> mt_ {};
+  std::size_t index_ {kN};
+};
+
+// D-dead-demand-property (seed 4, 2000 trials): one added dead demand Z changes nothing. Small random
+// inputs of simple-path demands; Z has a zero offer over 1 to 3 of their links, or an offer of 1 to 3
+// whose route reaches its own black hole (link k, a link of Z's own, inserted into its route, or one of
+// its shared links) and continues behind it. The outcome with Z equals the outcome with Z's dead
+// occurrences removed (without Z for a zero offer, Z's route cut after its black hole otherwise): every
+// arrival, carried amount, drop and delivery of the others and of Z's prefix, every link flow, and an
+// error with its round count (hooks); Z's dead occurrences show 0. Structure included (hooks): the
+// links that wait, the groups and the dependency arcs are equal too. Z is a tunnel, a DAG route alone
+// (a pooled context) and a DAG route beside an exit (a split route of a program that is not pooled),
+// each on the same inputs. Both runs of a trial share one layout (fused_links of the input with Z).
+TEST(ContractExamples, D_dead_demand_property) {
+  PyRandom rng(4);
+  std::array<std::int64_t, 3> agree {};
+  std::array<std::int64_t, 3> errors {};
+  std::int64_t zero = 0;
+  std::int64_t tail = 0;
+  for (int trial = 0; trial < 2000; ++trial) {
+    const auto k = rng.randint(3, 5);
+    Amounts cap;
+    for (std::int64_t e = 0; e < k; ++e) cap.push_back(rng.randint(1, 3));
+    cap.push_back(9);
+    const auto n = static_cast<std::size_t>(rng.randint(2, 4));
+    Routes routes;
+    for (std::size_t i = 0; i < n; ++i) {
+      const auto len = rng.randint(2, std::min<std::int64_t>(4, k));
+      routes.push_back(rng.sample(k, len));
+    }
+    Amounts offers;
+    for (std::size_t i = 0; i < n; ++i) offers.push_back(rng.randint(1, 4));
+    const Ints links = rng.sample(k, rng.randint(1, std::min<std::int64_t>(3, k)));
+    Amount z = 0;
+    Ints zr = links;
+    std::int64_t hole = -1;
+    if (rng.random() < 0.5) {
+      ++zero;
+    } else {
+      ++tail;
+      z = rng.randint(1, 3);
+      const auto p = rng.randbelow(static_cast<std::int64_t>(links.size()));
+      if (rng.random() < 0.5) {
+        zr.insert(zr.begin() + p, k);
+        hole = k;
+      } else {
+        hole = links[static_cast<std::size_t>(p)];
+      }
+    }
+    std::vector<Ints> dark(n);
+    dark.push_back(hole < 0 ? Ints {} : Ints {hole});
+    Amounts all_offers = offers;
+    all_offers.push_back(z);
+    Routes all_routes = routes;
+    all_routes.push_back(zr);
+    const Ints fuse = fused_links(all_offers, all_routes, cap.size(), dark);
+    const std::size_t cut = hole < 0 ? 0 : static_cast<std::size_t>(std::find(zr.begin(), zr.end(), hole) - zr.begin()) + 1;
+    Routes cut_routes = all_routes;
+    if (cut != 0) cut_routes.back().resize(cut);
+    // The comparison: the others' rows and Z's prefix, deliveries, link flows, Z's dead tail all 0,
+    // the structure.
+    auto view = [&](const ListOut& r) {
+      std::vector<Routes> rows;
+      bool quiet = true;
+      const auto structure = std::make_tuple(r.rounds, r.groups, r.barrier_links, r.dependencies);
+      if (!r.error.empty()) return std::make_tuple(r.error, structure, rows, Amounts {}, Amounts {}, quiet);
+      for (const Routes* key : {&r.arrivals, &r.carried, &r.edge_drops}) {
+        Routes x(key->begin(), key->begin() + static_cast<std::ptrdiff_t>(std::min(n, key->size())));
+        if (cut != 0) x.push_back(Ints((*key)[n].begin(), (*key)[n].begin() + static_cast<std::ptrdiff_t>(cut)));
+        if (key != &r.edge_drops && key->size() > n) {
+          for (std::size_t j = cut; j < (*key)[n].size(); ++j) quiet = quiet && (*key)[n][j] == 0;
+        }
+        rows.push_back(x);
+      }
+      const Amounts delivered(r.delivered.begin(), r.delivered.begin() + static_cast<std::ptrdiff_t>(std::min(n, r.delivered.size())));
+      return std::make_tuple(r.error, structure, rows, delivered, r.edge_flows, quiet);
+    };
+    for (std::size_t f = 0; f < 3; ++f) {
+      std::vector<Form> forms(n, kTunnel);
+      forms.push_back(kDeadForms[f]);
+      const auto full = list_lossy(all_offers, all_routes, cap, dark, fuse, forms);
+      const auto shorter = hole < 0 ? list_lossy(offers, routes, cap, {}, fuse) : list_lossy(all_offers, cut_routes, cap, dark, fuse, forms);
+      const bool same = view(full) == view(shorter);
+      EXPECT_TRUE(same) << "trial " << trial << ", Z a " << form_name(kDeadForms[f]);
+      agree[f] += same ? 1 : 0;
+      errors[f] += full.error.empty() ? 0 : 1;
+    }
+  }
+  EXPECT_EQ(zero, 993);
+  EXPECT_EQ(tail, 1007);
+  for (std::size_t f = 0; f < 3; ++f) {
+    EXPECT_EQ(agree[f], 2000) << form_name(kDeadForms[f]);
+    EXPECT_EQ(errors[f], 55) << form_name(kDeadForms[f]);
+  }
 }
 // The documented call: two ECMP LOSSY policies on one link of 10.
 TEST(ContractExamples, D_simultaneous) {
