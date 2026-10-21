@@ -164,7 +164,7 @@ Frac reduce(std::int64_t num, std::int64_t den) {
   const auto g = std::gcd(num < 0 ? -num : num, den);
   return {num / g, den / g};
 }
-bool less(const Frac& a, const Frac& b) { return static_cast<__int128>(a.num) * b.den < static_cast<__int128>(b.num) * a.den; }
+bool less(const Frac& a, const Frac& b) { return static_cast<Int128>(a.num) * b.den < static_cast<Int128>(b.num) * a.den; }
 std::string text(const Frac& f) { return std::to_string(f.num) + "/" + std::to_string(f.den); }
 
 // Each split's largest excess and deficit against its exact share n w / W.
@@ -3241,7 +3241,7 @@ TEST(ContractExamples, LIST_outputs_simultaneous) {
   expect_entry(r[1], 5, {}, "UP", {0, 5, 0}, {2});
 }
 // The fourteen lists with real policies (a, b of the list's ledger; x of another; the cycling action
-// is the step-3 cycle's Pinned replace(3)).
+// is the cycle's Pinned replace(3)).
 TEST(ContractExamples, LIST_first_error) {
   const Net n({{0, 1, 10, 1}});
   const Net other({{0, 1, 10, 1}});

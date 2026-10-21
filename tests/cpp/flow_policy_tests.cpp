@@ -541,7 +541,7 @@ TEST(FlowPolicyRequests, RejectedRequestsLeaveThePolicyAndTheLedger) {
   auto g = diamond(5, 3, 2);
   const Pinned pinned = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})});
   const std::vector<std::pair<const char*, FlowPolicyConfig>> configs = {
-      {"ShortestPaths", cost_only_config()},
+      {"ShortestPaths", shortest_paths_config()},
       {"CentralizedTE", global_config()},
       {"Pinned", {.routing = pinned}},
       {"CentralizedTE support", {.routing = centralized(SourceAllocation::Optimized, dag_of(*g, {0, 2}))}},
@@ -648,7 +648,7 @@ TEST(FlowPolicyRequests, RoundRobinSharesFollowTheCumulativeRequest) {
   {
     auto g = star(3);
     FlowLedger fg(g);
-    FlowPolicy p(fg, sources(3), v({3}), cost_only_config());
+    FlowPolicy p(fg, sources(3), v({3}), shortest_paths_config());
     EXPECT_EQ(p.place(2).call_delivered, 2);
     EXPECT_EQ(delivered_by_source(p), (Shares {{0, 1}, {1, 1}, {2, 0}}));
     EXPECT_EQ(error_of([&] { (void)p.place(-1); }), "offer must be an integer in [0, 2^62) or permitted +inf");
@@ -676,7 +676,7 @@ TEST(FlowPolicyOutputs, OwnAllocationLedgerResidualBottleneckAndGlobalCut) {
   const CentralizedTE third = centralized(SourceAllocation::Optimized, dag_of(*g, {0, 2}));
   FlowPolicy other(fg, v({0}), v({3}), cfg(third, RouteAllocation::Optimized));
   ASSERT_EQ(other.place(1).call_delivered, 1);
-  FlowPolicy p(fg, v({0}), v({3}), cost_only_config());
+  FlowPolicy p(fg, v({0}), v({3}), shortest_paths_config());
   const OutputOptions all {true, true, true};
   auto r = p.place(4, all);
   // Both routes cost 2: Equal puts 2 units on each, so every edge carries 2 of this
@@ -738,7 +738,7 @@ TEST(FlowPolicyOutputs, BottleneckIsTheLedgersForThePolicysSourcesAndEligibility
   FlowPolicy other(fg, v({0}), v({3}), cfg(third, RouteAllocation::Optimized));
   ASSERT_EQ(other.place(1).call_delivered, 1);
   const auto el = g->eligibility({}, std::vector<EdgeId> {x});
-  FlowPolicy p(fg, v({0}), v({3}), cost_only_config(), &el);
+  FlowPolicy p(fg, v({0}), v({3}), shortest_paths_config(), &el);
   const auto r = p.place(2, OutputOptions {false, false, true});
   EXPECT_EQ(r.call_delivered, 2);
   ASSERT_TRUE(r.saturated_boundary_edges.has_value());
@@ -1004,10 +1004,10 @@ TEST(FlowPolicyGlobal, RandomCumulativeSolvesAreOptimalWithACertifiedCut) {
 // excludes; a Lossless policy's records deliver its delivered() total, and the ledger's aggregate is the
 // sum of its records (expect_balanced). ShortestPaths chooses routes by cost, not by the minimum-cost
 // flow, so no optimality certificate applies here (T1's records: T1Property, distributed_te_tests.cpp).
-TEST(FlowPolicyRecords, RandomCostOnlyRecordsAreFlows) {
+TEST(FlowPolicyRecords, RandomShortestPathsRecordsAreFlows) {
   const auto res = sel(RouteTieBreak::FewerHops);
   const std::vector<FlowPolicyConfig> configs = {
-      cost_only_config(),
+      shortest_paths_config(),
       cfg(ShortestPaths {}, RouteAllocation::Weighted),
       cfg(ShortestPaths {}, RouteAllocation::Optimized),
       // The FEWER_HOPS single path (several sources reject a HIGHER_* tie_break with it).
@@ -1049,7 +1049,7 @@ TEST(FlowPolicyRecords, RandomCostOnlyRecordsAreFlows) {
     FlowLedger fg(g);
     std::optional<FlowPolicy> other;
     if (n >= 6 && rng() % 2 == 0) {
-      other.emplace(fg, v({2}), v({3}), cost_only_config());
+      other.emplace(fg, v({2}), v({3}), shortest_paths_config());
       (void)other->place(static_cast<Amount>(rng() % 5));
     }
     FlowPolicy p(fg, srcs, dsts, config, elig);
@@ -1121,7 +1121,7 @@ TEST(FlowPolicyRecords, BundlesAreSharedOrPruned) {
   // ShortestPaths: a source whose route is the whole cached support shares it.
   ShortestPathCache cache(*g);
   FlowLedger fg3(g);
-  FlowPolicy c(fg3, v({0}), v({3}), cost_only_config(), nullptr, &cache);
+  FlowPolicy c(fg3, v({0}), v({3}), shortest_paths_config(), nullptr, &cache);
   (void)c.place(2);
   const auto support = cache.lookup(*g, v({3}), Direction::Reverse, nullptr);
   EXPECT_EQ(c.records().front().route.get(), support.get());
@@ -1202,7 +1202,7 @@ TEST(PredDAGStorage, ABundleCostsItsEntriesNotTheGraph) {
   const std::vector<std::pair<const char*, FlowPolicyConfig>> built = {
       {"pruned Pinned", {.routing = pinned_dags(*h, n - 3, n - 1, {three})}},
       {"CentralizedTE support", {.routing = centralized(SourceAllocation::Optimized, dag_of(*h, {inv[0], inv[1]}))}},
-      {"ShortestPaths", cost_only_config()},
+      {"ShortestPaths", shortest_paths_config()},
       {"CentralizedTE", global_config()}};
   for (const auto& [name, c] : built) {
     FlowLedger fh(h);
@@ -1220,7 +1220,7 @@ TEST(Evaluators, CapacityIsPlaceInfOnAFreshLedger) {
   // program has the endpoints; T1's evaluate of its design: TunnelEvaluators.T1Capacity).
   auto g = diamond(5, 3, 2);
   const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})});
-  for (const auto& c : {global_config(), cost_only_config(), FlowPolicyConfig {.routing = pin},
+  for (const auto& c : {global_config(), shortest_paths_config(), FlowPolicyConfig {.routing = pin},
                         FlowPolicyConfig {.routing = centralized(SourceAllocation::Optimized, dag_of(*g, {0, 2}))}}) {
     const auto r = evaluate_demand(*g, v({0}), v({3}), EvaluationOptions {c, nullptr, nullptr, OutputOptions {true, true, true}});
     FlowLedger fg(g);
@@ -1278,7 +1278,7 @@ TEST(Evaluators, BatchOrderIntersectionsExceptionsAndWorkers) {
             "evaluate_pairs does not accept Pinned");
   EXPECT_TRUE(contains(error_of([&] { (void)evaluate_pairs(*g, pairs, opts, per, 0); }), "workers"));
   ShortestPathCache cache(*g);
-  const EvaluationOptions with_cache {cost_only_config(), nullptr, &cache};
+  const EvaluationOptions with_cache {shortest_paths_config(), nullptr, &cache};
   EXPECT_TRUE(contains(error_of([&] { (void)evaluate_pairs(*g, pairs, with_cache, {}, 2); }), "workers == 1"));
   const auto cached = evaluate_pairs(*g, pairs, with_cache, {}, 1);
   EXPECT_EQ(cache.stats().misses, 2);  // destination sets {3} and {1, 2}
@@ -1304,12 +1304,12 @@ TEST(Evaluators, BatchOrderIntersectionsExceptionsAndWorkers) {
             "foreign Eligibility: built for another graph");
   EXPECT_EQ(first_error(pinned_bad, nullptr, &foreign_cache, short_per, 2), "foreign ShortestPathCache: bound to another graph");
   EXPECT_EQ(first_error(pinned_bad, nullptr, &building, short_per, 2),
-            "evaluate_pairs does not accept Pinned");  // amendment 9: arguments before cache mode
+            "evaluate_pairs does not accept Pinned");  // arguments before cache mode
   EXPECT_EQ(first_error(pinned_bad, nullptr, &building, short_per, 1), "evaluate_pairs does not accept Pinned");
   EXPECT_EQ(first_error(config_bad, nullptr, &building, short_per, 1), "ShortestPaths OPTIMIZED requires admission=LOSSLESS");
   EXPECT_EQ(first_error(global_config(), nullptr, &building, short_per, 1), "CentralizedTE does not use ShortestPathCache");
-  EXPECT_EQ(first_error(cost_only_config(), nullptr, &building, short_per, 1), "per_pair_eligibility has 1 entries for 4 pairs");
-  EXPECT_EQ(first_error(cost_only_config(), nullptr, &building, per, 1), "destinations: node 9 out of node range [0, 4)");
+  EXPECT_EQ(first_error(shortest_paths_config(), nullptr, &building, short_per, 1), "per_pair_eligibility has 1 entries for 4 pairs");
+  EXPECT_EQ(first_error(shortest_paths_config(), nullptr, &building, per, 1), "destinations: node 9 out of node range [0, 4)");
   EXPECT_EQ(stats_of(building.stats()), stats_of(ShortestPathCache(*g).stats()));
 }
 
@@ -1421,8 +1421,8 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
       ++pinned_trials;
     }
     for (const auto& c : trial_configs) {
-      const bool cost_only = std::holds_alternative<ShortestPaths>(c.routing);
-      if (cost_only && s.size() > 1 && !std::get<ShortestPaths>(c.routing).multipath &&
+      const bool shortest_paths = std::holds_alternative<ShortestPaths>(c.routing);
+      if (shortest_paths && s.size() > 1 && !std::get<ShortestPaths>(c.routing).multipath &&
           std::get<ShortestPaths>(c.routing).tie_break != RouteTieBreak::FewerHops) {
         continue;  // the pooled single-path rule
       }
@@ -1447,7 +1447,7 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
       const bool equal_global = std::holds_alternative<CentralizedTE>(c.routing) && !global;
       const std::string model = global          ? " CentralizedTE"
                                 : equal_global  ? " CentralizedTE equal"
-                                : cost_only     ? " ShortestPaths"
+                                : shortest_paths     ? " ShortestPaths"
                                 : pinned        ? " Pinned"
                                                 : " T1";
       std::vector<EdgeId> listed;
@@ -1464,8 +1464,8 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
         const Amount want = loss(e.edge);
         ASSERT_EQ(e.delivery_reduction, want) << "trial " << trial << " edge " << e.edge << model;
         ++entries;
-        if (want != 0) ++(global ? global_losses : cost_only ? policy_losses : pinned ? pinned_losses : aware_losses);
-        if (cost_only && want == 0) ++policy_zero;
+        if (want != 0) ++(global ? global_losses : shortest_paths ? policy_losses : pinned ? pinned_losses : aware_losses);
+        if (shortest_paths && want == 0) ++policy_zero;
         if (g->edge_capacity_units()[static_cast<std::size_t>(e.edge)] == 0 && want != 0) ++zero_edge_losses;
         if (want < 0) ++negative;
       }
@@ -1510,7 +1510,7 @@ TEST(Evaluators, SensitivityCandidatesAndSignedLosses) {
   // third would cross the zero link. Without the thin link (members 1, 2): 1, loss 1; without the
   // wide link (0, 2): 1, loss 1; without the zero link (0, 1): 2, loss 0.
   auto p = shared(make_graph(2, {{0, 1, 1, 1}, {0, 1, 10, 1}, {0, 1, 0, 1}}));
-  const auto opts = EvaluationOptions {cost_only_config()};
+  const auto opts = EvaluationOptions {shortest_paths_config()};
   s = evaluate_edge_failures(*p, v({0}), v({1}), opts, 1);
   EXPECT_EQ(s.baseline.call_delivered, 2);
   // The exact (edge, loss) list in ascending EdgeId.
@@ -1554,7 +1554,7 @@ TEST(Evaluators, SensitivityBaselineIsCapacityWithTheRequestedOutputs) {
   auto g = diamond(5, 3, 2);
   const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})});
   const OutputOptions all {.edge_flows = true, .residual = true, .saturated_boundary_edges = true, .edge_reservations = true};
-  for (const auto& c : {global_config(), cost_only_config(), t1(2), FlowPolicyConfig {.routing = pin},
+  for (const auto& c : {global_config(), shortest_paths_config(), t1(2), FlowPolicyConfig {.routing = pin},
                         FlowPolicyConfig {.routing = centralized(SourceAllocation::Optimized, dag_of(*g, {0, 2}))}}) {
     const auto with = [&](EvaluationOptions q) {
       if (std::holds_alternative<DistributedTE>(c.routing)) q.design_demand = Amount {6};
@@ -1580,7 +1580,7 @@ TEST(Evaluators, SensitivityBaselineIsCapacityWithTheRequestedOutputs) {
 // lowest EdgeIds first), but 2->4 and 4->5, carrying nothing, are in its reachable support and are
 // re-evaluated (loss 0); 1->2 is not and is skipped. From sources 0 and 1 (pooled, 20) the second
 // source reaches 1->2 too, and every deletion loses 10.
-TEST(Evaluators, CostOnlySensitivityReevaluatesExactlyTheReachableSupport) {
+TEST(Evaluators, ShortestPathsSensitivityReevaluatesExactlyTheReachableSupport) {
   auto g = shared(make_graph(6, {{0, 2, 10, 1}, {1, 2, 10, 1}, {2, 3, 10, 1}, {2, 4, 10, 1}, {3, 5, 10, 1}, {4, 5, 10, 1}}));
   const auto in = id_of_input(*g);
   const auto c = cfg(ShortestPaths {}, RouteAllocation::Optimized);
@@ -1617,7 +1617,7 @@ TEST(Evaluators, SensitivityChecksWorkersAndCachesAsTheBatchDoes) {
   ShortestPathCache foreign_cache(*other);
   ShortestPathCache building(*g);
   const auto first_error = [&](const Eligibility* elig, ShortestPathCache* cache, std::int32_t workers) {
-    return error_of([&] { (void)evaluate_edge_failures(*g, v({0}), v({3}), EvaluationOptions {cost_only_config(), elig, cache}, workers); });
+    return error_of([&] { (void)evaluate_edge_failures(*g, v({0}), v({3}), EvaluationOptions {shortest_paths_config(), elig, cache}, workers); });
   };
   EXPECT_EQ(first_error(&foreign, &foreign_cache, 0), "workers must be >= 1 (got 0)");
   EXPECT_EQ(first_error(&foreign, &foreign_cache, 2), "foreign Eligibility: built for another graph");
@@ -1638,7 +1638,7 @@ TEST(Evaluators, SensitivityChecksWorkersAndCachesAsTheBatchDoes) {
 
 // Only ShortestPaths reads the cache: CentralizedTE, T1 and Pinned reject one (frozen too) before
 // any lookup and count nothing; ShortestPaths's baseline raises the miss of an empty frozen cache.
-TEST(Evaluators, SensitivityReadsTheCacheOnlyUnderCostOnly) {
+TEST(Evaluators, SensitivityReadsTheCacheOnlyUnderShortestPaths) {
   auto g = diamond(5, 3, 2);
   const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})});
   ShortestPathCache empty(*g);
@@ -1655,7 +1655,7 @@ TEST(Evaluators, SensitivityReadsTheCacheOnlyUnderCostOnly) {
     }
   }
   EXPECT_EQ(stats_of(empty.stats()), stats_of(ShortestPathCache(*g).stats()));
-  EXPECT_THROW((void)evaluate_edge_failures(*g, v({0}), v({3}), EvaluationOptions {cost_only_config(), nullptr, &empty}, 1),
+  EXPECT_THROW((void)evaluate_edge_failures(*g, v({0}), v({3}), EvaluationOptions {shortest_paths_config(), nullptr, &empty}, 1),
                ShortestPathCacheMiss);
   EXPECT_EQ(empty.stats().misses, 1);
 }
@@ -1700,7 +1700,7 @@ std::optional<std::optional<Amount>> units(Amount a) { return std::optional<std:
 // ECMP Lossless on PAR(4, 10): uncapped 8; an offer below the bound in full, above it up to 8.
 TEST(Evaluators, OfferShortestPaths) {
   const auto g = par(4, 10);
-  const auto ecmp = cost_only_config();
+  const auto ecmp = shortest_paths_config();
   auto r = evaluate_demand(*g, v({0}), v({1}), offered(ecmp, kNoOffer));
   EXPECT_EQ(std::tuple(r.call_delivered, r.termination), std::tuple(Amount {8}, Termination::Exhausted));
   r = evaluate_demand(*g, v({0}), v({1}), offered(ecmp, units(5)));
@@ -1750,7 +1750,7 @@ TEST(Evaluators, OfferDomain) {
   const auto g = par(4, 10);
   const std::string domain = "offer must be an integer in [0, 2^62)";
   for (const auto& offer : {units(kL62), units(-5), std::optional<std::optional<Amount>> {std::in_place, std::nullopt}}) {
-    EXPECT_EQ(error_of([&] { (void)evaluate_demand(*g, v({0}), v({1}), offered(cost_only_config(), offer)); }), domain);
+    EXPECT_EQ(error_of([&] { (void)evaluate_demand(*g, v({0}), v({1}), offered(shortest_paths_config(), offer)); }), domain);
     EXPECT_EQ(error_of([&] { (void)evaluate_demand(*g, v({0}), v({1}), offered(t1(2), offer, units(-1))); }), domain);
   }
   EXPECT_EQ(error_of([&] {
@@ -1758,9 +1758,9 @@ TEST(Evaluators, OfferDomain) {
                                     offered({.routing = centralized(SourceAllocation::Equal, {}, std::nullopt, true)}, units(-5)));
             }),
             "prefer_headroom requires tunnel_count");
-  EXPECT_EQ(error_of([&] { (void)evaluate_demand(*g, v({0}), v({1}), offered(cost_only_config(), kNoOffer, units(-1))); }),
+  EXPECT_EQ(error_of([&] { (void)evaluate_demand(*g, v({0}), v({1}), offered(shortest_paths_config(), kNoOffer, units(-1))); }),
             "ShortestPaths does not accept design_demand");
-  EXPECT_EQ(error_of([&] { (void)evaluate_demand(*g, v({0}), v({1}), offered(cost_only_config(), units(kL62 - 1))); }), "");
+  EXPECT_EQ(error_of([&] { (void)evaluate_demand(*g, v({0}), v({1}), offered(shortest_paths_config(), units(kL62 - 1))); }), "");
 }
 
 // The failure study of every controller and ShortestPaths at finite offers below, at and above

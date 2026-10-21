@@ -17,21 +17,14 @@
 namespace netgraph::core::detail {
 
 struct Trace {
-  enum class Kind : std::uint8_t { Null, Bool, Int, Str, List, Map };
+  enum class Kind : std::uint8_t { Null, Int, Str, List, Map };
   Kind kind {Kind::Null};
-  bool b {false};
   std::int64_t i {0};
   std::string s {};
   std::vector<Trace> items {};                           // List
   std::vector<std::pair<std::string, Trace>> fields {};  // Map, in insertion order
 
   static Trace null() { return {}; }
-  static Trace boolean(bool v) {
-    Trace t;
-    t.kind = Kind::Bool;
-    t.b = v;
-    return t;
-  }
   static Trace integer(std::int64_t v) {
     Trace t;
     t.kind = Kind::Int;

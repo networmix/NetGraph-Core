@@ -68,6 +68,7 @@
 #include "netgraph/core/detail/min_cost_flow.hpp"
 #include "netgraph/core/detail/forwarding.hpp"
 #include "netgraph/core/detail/int128.hpp"
+#include "netgraph/core/detail/sparse.hpp"
 #include "netgraph/core/detail/route_kernels.hpp"
 #include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/policy_engine.hpp"
@@ -300,8 +301,8 @@ void prepare_outputs(const PolicyEngine& pe, const LedgerTotals* totals, const O
     const LedgerTotals t = totals != nullptr ? *totals : totals_of(pe.ledger);
     std::vector<Amount> res(m);
     for (std::size_t e = 0; e < m; ++e) res[e] = t.service_baseline[e] - t.carried[e];
-    for (const auto& cohort : pe.epoch.record_groups) {
-      for (const auto& s : cohort) {
+    for (const auto& record_group : pe.epoch.record_groups) {
+      for (const auto& s : record_group) {
         for (const auto& [e, x] : LedgerAccess::live(pe.ledger, s.record_counter).edge_flows) res[static_cast<std::size_t>(e)] += x;
       }
     }
@@ -419,8 +420,8 @@ Counter128 total_cost_of(const Graph& graph, std::span<const FlowRecord* const> 
 // The records of the policy's live flows (a call that commits nothing).
 std::vector<const FlowRecord*> current_records(const PolicyEngine& pe) {
   std::vector<const FlowRecord*> out;
-  for (const auto& cohort : pe.epoch.record_groups) {
-    for (const auto& s : cohort) out.push_back(&LedgerAccess::live(pe.ledger, s.record_counter));
+  for (const auto& record_group : pe.epoch.record_groups) {
+    for (const auto& s : record_group) out.push_back(&LedgerAccess::live(pe.ledger, s.record_counter));
   }
   return out;
 }
@@ -495,7 +496,7 @@ Counter128 requested_after(const PolicyEpoch& cur, std::optional<Amount> v) noex
   return r;
 }
 
-// The epoch a full-offer call starts: one empty cohort per roster source (or program entry);
+// The epoch a full-offer call starts: one empty record_group per roster source (or program entry);
 // forward keeps the installed program and ShortestPaths Optimized's support.
 PolicyEpoch fresh_epoch(const PolicyEngine& pe, bool keep_program) {
   PolicyEpoch e;
@@ -812,16 +813,6 @@ std::vector<std::pair<EdgeId, Counter128>> plus(const std::vector<std::pair<Edge
   return out;
 }
 
-// The positive entries of a member-aligned array as (EdgeId, amount) pairs.
-std::vector<std::pair<EdgeId, Amount>> positive(std::span<const EdgeId> members, std::span<const Amount> a) {
-  std::vector<std::pair<EdgeId, Amount>> out;
-  out.reserve(static_cast<std::size_t>(std::count_if(a.begin(), a.end(), [](Amount x) { return x != 0; })));
-  for (std::size_t m = 0; m < members.size(); ++m) {
-    if (a[m] != 0) out.emplace_back(members[m], a[m]);
-  }
-  return out;
-}
-
 // The sum of several ascending (EdgeId, amount) lists.
 std::vector<std::pair<EdgeId, Amount>> merged(std::vector<std::pair<EdgeId, Amount>> all) {
   std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
@@ -929,7 +920,7 @@ PendingPolicyUpdate place_pooled(const PolicyEngine& pe, const PolicyEpoch& cur,
       // One source holds the whole admitted allocation (the attribution's degenerate form): it
       // delivers all of it, with no second forwarding.
       auto& r = drafts.front().record;
-      r.edge_flows = positive(members, step.edge_flows);
+      r.edge_flows = nonzero_pairs(members, step.edge_flows);
       r.delivered = step.admitted;
     } else {
       // Several sources: forward the admitted total again to attribute it.
@@ -967,8 +958,8 @@ PendingPolicyUpdate place_pooled(const PolicyEngine& pe, const PolicyEpoch& cur,
       Amount offer = fw.offered;
       Amount delivered = fw.delivered;
       if (per_source == nullptr) {
-        carried = positive(members, fw.edge_flows);
-        dropped = positive(members, fw.edge_drops);
+        carried = nonzero_pairs(members, fw.edge_flows);
+        dropped = nonzero_pairs(members, fw.edge_drops);
       } else {
         for (const auto& x : attr.entries[i]) {
           const EdgeId e = members[static_cast<std::size_t>(x.edge_position)];
@@ -999,7 +990,7 @@ PendingPolicyUpdate place_pooled(const PolicyEngine& pe, const PolicyEpoch& cur,
   out.call_delivered = call_delivered;
   if (v.has_value()) out.call_undelivered = *v - call_delivered;
   out.delivery_delta = call_delivered;
-  if (lossy) out.call_edge_drops = positive(members, fw.edge_drops);
+  if (lossy) out.call_edge_drops = nonzero_pairs(members, fw.edge_drops);
   out.call_source_drops = fw.source_drops;
   if (members.empty()) {
     out.termination = Termination::NoActiveWeight;
@@ -1508,7 +1499,7 @@ std::vector<Amount> reservation_view(const PolicyEngine& pe, const LedgerTotals&
 }
 
 // The design volume of a tunnel model's call: the explicit design, or the offer (nullopt:
-// unlimited; T1's is finite, checked by check_call_state).
+// unlimited; T1's is finite, checked by check_policy_arguments).
 std::optional<Amount> design_of(const PolicyCall& rq) noexcept { return rq.design.has_value() ? *rq.design : rq.offer; }
 
 // The plan of a T1 setup for the design D: the tunnel count, D, the heads' shares and the holds
@@ -2032,7 +2023,7 @@ std::unique_ptr<PolicyEngine> finish_engine(std::unique_ptr<PolicyEngine> pe, Sh
       }
     }
   }
-  // The tunnel models' cohorts are per program entry, sized by their first call.
+  // The tunnel models' record_groups are per program entry, sized by their first call.
   if (!detail::tunnel_model(*pe)) pe->epoch.record_groups.resize(pe->reachable_sources.size());
   pe->policy_id = LedgerAccess::bind(ledger);  // last: nothing is bound when construction fails
   return pe;
@@ -2607,7 +2598,7 @@ void FlowPolicy::remove() {
   auto& pe = *engine_;
   const auto gate = LedgerAccess::lock(pe.ledger);
   (void)LedgerAccess::detach(pe.ledger, pe.policy_id);
-  // A new epoch (nothing below throws): the same number of cohorts, every one empty.
+  // A new epoch (nothing below throws): the same number of record_groups, every one empty.
   for (auto& c : pe.epoch.record_groups) c.clear();
   pe.epoch.program.reset();
   pe.epoch.plan.reset();

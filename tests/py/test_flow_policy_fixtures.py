@@ -223,7 +223,7 @@ def ledger_json(fg):
 def policy_json(pol):
     st = pol._state()
     lossy = pol.config.admission == ngc.Admission.LOSSY
-    cohorts = []
+    record_groups = []
     for s, flows in sorted(st["cohorts"].items()):
         if not flows:
             continue
@@ -238,13 +238,13 @@ def policy_json(pol):
                     "alloc": [[e, x] for e, x in f["alloc"]],
                 }
             )
-        cohorts.append([s, out])
+        record_groups.append([s, out])
     return {
         "roster": list(st["roster"]),
         "requested": st["requested"],
         "infinite": st["infinite"],
         "placed_demand": st["placed_demand"],
-        "cohorts": cohorts,
+        "cohorts": record_groups,
     }
 
 

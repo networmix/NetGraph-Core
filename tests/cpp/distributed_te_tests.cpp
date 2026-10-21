@@ -762,7 +762,7 @@ TEST(T1Operations, NoIncrementsAndForwardNeedsAProgram) {
 // design: the model, its domain, finiteness) and the terminations.
 TEST(T1Operations, DesignValidationAndTerminations) {
   const auto g = one10();
-  for (const auto& c : {cost_only_config(), global_config(),
+  for (const auto& c : {shortest_paths_config(), global_config(),
                         FlowPolicyConfig {.routing = pinned_paths(*g, {0}, {1}, {{0, {0}, 1}})}}) {
     auto p = make(g, {0}, {1}, c);
     const std::string model = detail::model_name(c.routing);
@@ -807,7 +807,7 @@ TEST(T1Operations, NoCertificatesAndPlanOnlyForT1) {
   ASSERT_TRUE(r.plan.has_value());
   auto pin = make(g, {0, 1}, {2}, FlowPolicyConfig {.routing = Pinned {r.program, nullptr}});
   EXPECT_FALSE(pin->replace(12).plan.has_value());
-  for (const auto& c : {cost_only_config(), global_config()}) {
+  for (const auto& c : {shortest_paths_config(), global_config()}) {
     auto q = make(g, {0, 1}, {2}, c);
     EXPECT_FALSE(q->place(5).plan.has_value());
     EXPECT_FALSE(q->replace(5).plan.has_value());
@@ -829,7 +829,7 @@ TEST(LedgerProjections, ELedger) {
   EXPECT_EQ(ledger->residual(), (Amounts {6}));
   EXPECT_EQ(ledger->reserved(), (Amounts {6}));
   EXPECT_EQ(ledger->unreserved(), (Amounts {4}));
-  auto c = make(g, {0}, {1}, cost_only_config(), nullptr, ledger);
+  auto c = make(g, {0}, {1}, shortest_paths_config(), nullptr, ledger);
   EXPECT_EQ(c->place(10).call_delivered, 6);
   c->remove();
   const auto r = p->replace(2, 6);
@@ -923,7 +923,7 @@ TEST(LedgerProjections, HoldsAreStoredFromTheFirstHold) {
   EXPECT_EQ(fg.unreserved(), (Amounts {2, 10}));
   EXPECT_EQ(vec(detail::LedgerAccess::reservation_baseline(fg)), (Amounts {2, 10}));
   {
-    FlowPolicy cost(fg, v({0, 1}), v({2}), cost_only_config());
+    FlowPolicy cost(fg, v({0, 1}), v({2}), shortest_paths_config());
     (void)cost.place(3);
     EXPECT_TRUE(detail::LedgerAccess::reserved(fg).empty());  // carried traffic holds nothing
     cost.remove();
@@ -976,7 +976,7 @@ TEST(LedgerProjections, AbsentReservationBaselineIsTheCapacities) {
 // program books no hold; the bottleneck report reads the service view only.
 TEST(LedgerProjections, OutputsImportsAndBottleneck) {
   const auto g = twoh(2, 10);
-  auto c = make(g, {0, 1}, {2}, cost_only_config());
+  auto c = make(g, {0, 1}, {2}, shortest_paths_config());
   EXPECT_EQ(*c->place(4, kHolds).edge_reservations, (Amounts {0, 0}));
   auto p = make(g, {0, 1}, {2}, t1(2, LOSSY));
   const auto r = p->replace(12, 12);
@@ -1311,7 +1311,7 @@ TEST(TunnelEvaluators, T1Capacity) {
   // An explicit offer comes before the design.
   bad.offer = kL62;
   EXPECT_EQ(err(bad), "offer must be an integer in [0, 2^62)");
-  for (const auto& c : {cost_only_config(), global_config()}) {
+  for (const auto& c : {shortest_paths_config(), global_config()}) {
     EvaluationOptions o {c};
     o.design_demand = Amount {5};
     EXPECT_EQ(err(o), std::string(detail::model_class(c.routing)) + " does not accept design_demand");
@@ -1661,7 +1661,7 @@ TEST(T1Property, SetupAndBoundAgainstTheReference) {
         (void)s.holds->replace(0, other_d);
       }
       if (other_load) {
-        s.load = std::make_unique<FlowPolicy>(*s.ledger, src, dst, cost_only_config());
+        s.load = std::make_unique<FlowPolicy>(*s.ledger, src, dst, shortest_paths_config());
         (void)s.load->place(other_d);
       }
       s.p = std::make_unique<FlowPolicy>(*s.ledger, src, dst, t1(N, a, ceiling, minimum, rs.tie_break, rs.parallel_edges), elig);

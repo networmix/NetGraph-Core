@@ -817,22 +817,22 @@ inline std::vector<Row> rows() {
     return p;
   };
   r.push_back({"kernel.proportional.clos", "kernel",
-               "Optimized placement on fixed cost-only DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
+               "Optimized placement on fixed ShortestPaths DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
                [=] { return kernel_row(gen_clos(64, 32, 13), clos_pairs(), 50.0, Kernel::Optimized); }});
   r.push_back({"kernel.eb.clos", "kernel",
-               "Equal placement on fixed cost-only DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
+               "Equal placement on fixed ShortestPaths DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
                [=] { return kernel_row(gen_clos(64, 32, 13), clos_pairs(), 50.0, Kernel::Equal); }});
   r.push_back({"kernel.lossy.clos", "kernel",
-               "Equal placement with Lossy admission on fixed cost-only DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
+               "Equal placement with Lossy admission on fixed ShortestPaths DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
                [=] { return kernel_row(gen_clos(64, 32, 13), clos_pairs(), 50.0, Kernel::Lossy); }});
   r.push_back({"kernel.proportional.grid", "kernel",
-               "Optimized placement on fixed cost-only DAGs, 24x24 unit grid, 32 corner pairs of 20",
+               "Optimized placement on fixed ShortestPaths DAGs, 24x24 unit grid, 32 corner pairs of 20",
                [=] { return kernel_row(gen_grid(24, 14, true), grid_pairs(), 20.0, Kernel::Optimized); }});
   r.push_back({"kernel.eb.grid", "kernel",
-               "Equal placement on fixed cost-only DAGs, 24x24 unit grid, 32 corner pairs of 20",
+               "Equal placement on fixed ShortestPaths DAGs, 24x24 unit grid, 32 corner pairs of 20",
                [=] { return kernel_row(gen_grid(24, 14, true), grid_pairs(), 20.0, Kernel::Equal); }});
   r.push_back({"kernel.weighted.clos", "kernel",
-               "Weighted placement on fixed cost-only DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
+               "Weighted placement on fixed ShortestPaths DAGs, Clos 64x32, 64 pairs of 50 on one ledger",
                [=] { return kernel_row(gen_clos(64, 32, 13), clos_pairs(), 50.0, Kernel::Weighted); }});
   // ---- scalar ShortestPaths capacity across unique failure states and pairs
   auto capacity_row = [](Kernel k) {
@@ -844,7 +844,7 @@ inline std::vector<Row> rows() {
     for (int i = 0; i < 8; ++i) pairs.push_back({i, i + 16});
     return Iter([g, states, pairs, k] {
       Digest d;
-      for (auto& el : *states) for (auto [s, t] : pairs) d.add_d(abaapi::costonly_capacity(*g, s, t, k, el));
+      for (auto& el : *states) for (auto [s, t] : pairs) d.add_d(abaapi::shortest_paths_capacity(*g, s, t, k, el));
       return d.h;
     });
   };
@@ -1180,7 +1180,7 @@ inline std::vector<Row> rows() {
                    if (s != t) { dem.push_back({s, t}); base.push_back(double(1 + rng() % 5)); }
                  }
                  return Iter([g, el, dem, base] {
-                   abaapi::CostOnlySeries series(*g, *el);
+                   abaapi::ShortestPathsSeries series(*g, *el);
                    int probes = 0;
                    auto feasible = [&](double alpha) {
                      ++probes;

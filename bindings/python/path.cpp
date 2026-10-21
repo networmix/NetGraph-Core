@@ -53,7 +53,8 @@ void register_path(py::module_& m) {
              return native_call([&] { return std::make_shared<Path>(detail::PathBuilder::of_hops(*graph, std::move(narrowed))); });
            }),
            py::arg("graph"), py::arg("hops"),
-           "Validates, in order (ValueError on the first defect): every member id in range, no duplicate\n"
+           "A wrong type raises TypeError; structural and range defects raise ValueError. Validates, in order:\n"
+           "every member id in range, no duplicate\n"
            "member, a non-empty hop list, every hop non-empty, the members of a hop sharing (u, v),\n"
            "contiguous hops, no repeated node.")
       .def("graph_uid", &Path::graph_uid, "uid of the graph this path belongs to")

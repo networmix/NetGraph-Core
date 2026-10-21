@@ -200,6 +200,8 @@ API.
   canonical unit-by-unit augmentation; tunnels in round order with identifier `j * H + i` (dead
   heads leave holes), weight 1, `planned_bandwidth` u, never held. `TunnelCount(L, up_to=True)`
   chooses the smallest common count up to L whose program carries the live part of the design.
+  If no count carries that share, it chooses the greatest score, then the smallest count; this does
+  not promise whole-demand delivery.
   No live head, or no whole unit per tunnel (`insufficient_resolution`), installs a program
   without tunnels that keeps the roster. `OPTIMIZED` source allocation only with one input source.
   With a `support`, T2 uses only the support's edges allowed by the policy's mask, in every step,
@@ -333,6 +335,10 @@ API.
   error into a result or a result into an error).
 
 ### Removed
+
+Planned names superseded before implementation (these were never released APIs):
+`ListMode` became `BatchMode`, `place_many` became `apply_actions`,
+`Place.__init__:volume` became `Place.__init__:offer`, and `Place.volume` became `Place.offer`.
 
 - The 0.11 library and its bindings: `FlowState`, the previous `FlowGraph` and `FlowPolicy` and
   their configuration, the backend and algorithms facade (with its `Graph` handle), the search

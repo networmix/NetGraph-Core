@@ -159,7 +159,7 @@ PhysicalValues physical_values(const py::handle& x) {
     const char kind = given.dtype().kind();
     if (kind != 'f' && kind != 'i' && kind != 'u') throw py::type_error(dtype_text(given));
     if (given.ndim() > 1) throw py::type_error(kNotOneDimensional);
-    const py::array_t<double, py::array::c_style | py::array::forcecast> doubles(given);
+    const auto doubles = numpy_conversion<double, py::array::c_style | py::array::forcecast>(given);
     out.scalar = given.ndim() == 0;
     out.values.assign(doubles.data(), doubles.data() + doubles.size());
     return out;

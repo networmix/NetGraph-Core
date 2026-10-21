@@ -57,8 +57,10 @@ PyMemAllocatorEx g_saved_allocator {};
 std::atomic<long> g_fail_countdown {-1};
 std::atomic<long> g_fail_seen {0};
 std::atomic<bool> g_fail_hit {false};
+std::atomic<bool> g_numpy_only {false};
 
 bool fail_now() {
+  if (g_numpy_only.load() && !in_numpy_conversion) return false;
   g_fail_seen.fetch_add(1);
   if (g_fail_countdown.load() < 0) return false;
   if (g_fail_countdown.fetch_sub(1) == 0) {
@@ -147,10 +149,11 @@ void register_private_hooks(py::module_& m) {
   register_concurrency_hooks(m);
   m.def(
       "_fail_python_allocation",
-      [](const py::object& fn, const py::tuple& args, long k) {
+      [](const py::object& fn, const py::tuple& args, long k, bool numpy_only) {
         // Calls fn(*args) with the k-th Python object allocation (from 0) failing, then
         // restores the allocator. Returns (hit, allocations seen, result or None, exception or
         // None). One caller at a time: the allocator is process-wide while the call runs.
+        g_numpy_only.store(numpy_only);
         PyMem_GetAllocator(PYMEM_DOMAIN_OBJ, &g_saved_allocator);
         PyMemAllocatorEx hook {nullptr, failing_malloc, failing_calloc, failing_realloc, forwarding_free};
         g_fail_countdown.store(k);
@@ -160,13 +163,15 @@ void register_private_hooks(py::module_& m) {
         PyObject* r = PyObject_CallObject(fn.ptr(), args.ptr());
         PyMem_SetAllocator(PYMEM_DOMAIN_OBJ, &g_saved_allocator);
         g_fail_countdown.store(-1);
+        g_numpy_only.store(false);
         py::object result = r != nullptr ? py::reinterpret_steal<py::object>(r) : py::object(py::none());
         py::object error = py::none();
         if (r == nullptr) error = take_raised_exception();
         return py::make_tuple(g_fail_hit.load(), g_fail_seen.load(), result, error);
       },
-      py::arg("fn"), py::arg("args"), py::arg("k"),
-      "private test hook: fn(*args) with the k-th Python object allocation failing -> (hit, seen, result, error)");
+      py::arg("fn"), py::arg("args"), py::arg("k"), py::arg("numpy_only") = false,
+      "private test hook: fn(*args) with the k-th Python object allocation failing -> (hit, seen, result, error);\n"
+      "numpy_only=True counts and fails only allocations inside NumPy casts, excluding other binding allocations");
 
   m.def(
       "_fail_native_allocation",

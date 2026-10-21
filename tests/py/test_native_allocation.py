@@ -33,8 +33,8 @@ import _netgraph_core as ext
 import numpy as np
 from helpers import (
     ALL_OUT,
-    COSTONLY,
     GLOBAL,
+    SHORTEST_PATHS,
     build,
     full_ledger_state,
     plain,
@@ -167,7 +167,7 @@ def listed(mode):
             ngc.FlowPolicy(ledger, [0, 1], 4, POOLED_LOSSY),
             ngc.FlowPolicy(ledger, 0, 4, pinned(g)),
             ngc.FlowPolicy(
-                ledger, 0, 4, COSTONLY if mode == "ORDERED" else POOLED_LOSSY
+                ledger, 0, 4, SHORTEST_PATHS if mode == "ORDERED" else POOLED_LOSSY
             ),
         ]
         for policy in policies:
@@ -243,9 +243,9 @@ def getter(make_owner, read):
 def frozen_cache_capacity():
     g = graph()
     cache = ngc.ShortestPathCache(g)
-    ngc.evaluate_demand(g, 0, 4, ngc.EvaluationOptions(COSTONLY, cache=cache))
+    ngc.evaluate_demand(g, 0, 4, ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache))
     cache.freeze()
-    opts = ngc.EvaluationOptions(COSTONLY, cache=cache, outputs=ALL_OUT)
+    opts = ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache, outputs=ALL_OUT)
     return ngc.evaluate_demand, (g, 0, 4, opts), lambda: stats_of(cache)
 
 
@@ -258,7 +258,7 @@ def with_orphan(call):
     def make():
         g = graph()
         ledger = ngc.FlowLedger(g)
-        ngc.FlowPolicy(ledger, 0, 4, COSTONLY).place(2)
+        ngc.FlowPolicy(ledger, 0, 4, SHORTEST_PATHS).place(2)
         gc.collect()  # the policy is gone: its record is an orphan
         fn, args = call(ledger)
         return fn, args, lambda: full_ledger_state(ledger)
@@ -346,12 +346,12 @@ SCENARIOS = {
     "resolve_to_paths": stateless(
         lambda g: (ngc.resolve_to_paths, (g, ngc.spf(g, 0, spf_opts()).dag, 0, 4, True))
     ),
-    "place.costonly": placement(COSTONLY, traced=False),
+    "place.shortest_paths": placement(SHORTEST_PATHS, traced=False),
     "place.global": placement(GLOBAL, traced=False),
     "place_traced.global": placement(GLOBAL, traced=True),
     # Two sources: the pooled program's attribution and per-source rows, Lossy accounting, and
     # the equal source allocation's bisection.
-    "place.costonly_pooled_lossy": placement(
+    "place.shortest_paths_pooled_lossy": placement(
         POOLED_LOSSY, traced=False, sources=[0, 1]
     ),
     "place.global_equal": placement(GLOBAL_EQUAL, traced=False, sources=[0, 1]),
@@ -403,7 +403,7 @@ SCENARIOS = {
         ),
         "replace",
     ),
-    "forward.costonly_pooled_lossy_black_holes": operation(
+    "forward.shortest_paths_pooled_lossy_black_holes": operation(
         lambda g: POOLED_LOSSY,
         "forward",
         sources=[0, 1],
@@ -432,7 +432,7 @@ SCENARIOS = {
     ),
     "FlowRecord.route": getter(
         lambda g: (lambda p: (p.place(6), p.records()[0])[1])(
-            ngc.FlowPolicy(ngc.FlowLedger(g), 0, 4, COSTONLY)
+            ngc.FlowPolicy(ngc.FlowLedger(g), 0, 4, SHORTEST_PATHS)
         ),
         lambda r: r.route,
     ),

@@ -95,17 +95,17 @@ py::dict state_obj(const py::object& self) {
     Counter128 requested;
     bool infinite;
     Amount delivered {0};
-    std::vector<std::vector<Flow>> cohorts;
+    std::vector<std::vector<Flow>> record_groups;
   };
   auto snapshot = native_call([&] {
     const auto gate = detail::LedgerAccess::lock(pe.ledger);
     Snapshot state {pe.reachable_sources, pe.epoch.requested, pe.epoch.infinite, 0, {}};
-    state.cohorts.resize(pe.epoch.record_groups.size());
-    for (std::size_t i = 0; i < state.cohorts.size(); ++i) {
+    state.record_groups.resize(pe.epoch.record_groups.size());
+    for (std::size_t i = 0; i < state.record_groups.size(); ++i) {
       for (const auto& flow : pe.epoch.record_groups[i]) {
         auto record = detail::LedgerAccess::live(pe.ledger, flow.record_counter);
         state.delivered += record.delivered;
-        state.cohorts[i].push_back({flow, std::move(record)});
+        state.record_groups[i].push_back({flow, std::move(record)});
       }
     }
     return state;
@@ -117,14 +117,14 @@ py::dict state_obj(const py::object& self) {
   out["requested"] = counter_int(snapshot.requested);
   out["infinite"] = snapshot.infinite;
   out["placed_demand"] = snapshot.delivered;
-  py::dict cohorts;
+  py::dict record_groups;
   // Per roster source its flows (T1, T2 and Pinned: per program entry, keyed by its position).
   const auto* gl = std::get_if<CentralizedTE>(&r);
   const bool per_entry = std::holds_alternative<Pinned>(r) || std::holds_alternative<DistributedTE>(r) ||
                          (gl != nullptr && gl->tunnel_count.has_value());
-  for (std::size_t i = 0; i < snapshot.cohorts.size(); ++i) {
+  for (std::size_t i = 0; i < snapshot.record_groups.size(); ++i) {
     py::list flows;
-    for (const auto& row : snapshot.cohorts[i]) {
+    for (const auto& row : snapshot.record_groups[i]) {
       const auto& s = row.flow;
       const FlowRecord& rec = row.record;
       py::dict f;
@@ -138,9 +138,9 @@ py::dict state_obj(const py::object& self) {
       f["entry"] = s.entry_id < 0 ? py::object(py::none()) : py::object(py::int_(s.entry_id));
       flows.append(f);
     }
-    cohorts[py::int_(per_entry ? static_cast<std::int64_t>(i) : static_cast<std::int64_t>(snapshot.roster[i]))] = flows;
+    record_groups[py::int_(per_entry ? static_cast<std::int64_t>(i) : static_cast<std::int64_t>(snapshot.roster[i]))] = flows;
   }
-  out["cohorts"] = cohorts;
+  out["cohorts"] = record_groups;
   return out;
 }
 
@@ -368,7 +368,7 @@ void register_flow_policy(py::module_& m) {
           py::arg("offer"), py::arg("outputs") = py::none(),
           "private: place() with the transaction's trace (the call's intermediate values, keyed as\n"
           "the tests' model of the policy keys them)")
-      .def("_state", &state_obj, "private: the epoch state (roster, requested, +inf, cohorts)")
+      .def("_state", &state_obj, "private: the epoch state (roster, requested, +inf, record_groups)")
       .def(
           "_owner", [](const py::object& self) { auto& p = policy_value(self); return detail::PolicyAccess::engine(p).policy_id; },
           "private: the ledger-local owner id (FlowRecord.policy_id)");

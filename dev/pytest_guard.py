@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # replay of the fixtures produced by the reference under tests/reference/policy/ (the
 # parametrizations of test_fixture) skips as well.
 EXPECTED_OFF_SKIPS = [
+    "tests/py/test_integer_array_allocation.py::test_integer_array_readers_propagate_allocation_failure_in_separate_processes",
     "tests/py/test_apportionment.py::test_apportionment_entries",
     (
         "tests/py/test_shortest_path_cache.py::test_frozen_statistics_survive_python_allocation_failures"
@@ -32,9 +33,9 @@ EXPECTED_OFF_SKIPS = [
     "tests/py/test_flow_ledger.py::test_a_flow_id_read_passes_an_allocation_failure_through",
     "tests/py/test_flow_policy.py::test_evaluator_results_survive_python_allocation_failures",
     "tests/py/test_flow_policy.py::test_owner_hook_is_the_owner_of_the_records",
-    "tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[False-costonly]",
+    "tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[False-shortest_paths]",
     "tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[False-global]",
-    "tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[True-costonly]",
+    "tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[True-shortest_paths]",
     "tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[True-global]",
     "tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[ledger]",
     "tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[policy]",
@@ -90,7 +91,7 @@ EXPECTED_OFF_SKIPS = [
         "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[evaluate.global]"
     ),
     (
-        "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[forward.costonly_pooled_lossy_black_holes]"
+        "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[forward.shortest_paths_pooled_lossy_black_holes]"
     ),
     (
         "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[from_dag]"
@@ -102,10 +103,10 @@ EXPECTED_OFF_SKIPS = [
         "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[ksp]"
     ),
     (
-        "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.costonly]"
+        "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.shortest_paths]"
     ),
     (
-        "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.costonly_pooled_lossy]"
+        "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.shortest_paths_pooled_lossy]"
     ),
     (
         "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[place.global]"
@@ -148,8 +149,8 @@ EXPECTED_OFF_SKIPS = [
     ),
     "tests/py/test_native_allocation.py::test_the_row_checks_reject_a_wrong_call",
     "tests/py/test_programs.py::test_from_routes_and_getters_survive_python_allocation_failures",
-    "tests/py/test_programs.py::test_operations_are_all_or_nothing[costonly forward]",
-    "tests/py/test_programs.py::test_operations_are_all_or_nothing[costonly replace]",
+    "tests/py/test_programs.py::test_operations_are_all_or_nothing[shortest_paths forward]",
+    "tests/py/test_programs.py::test_operations_are_all_or_nothing[shortest_paths replace]",
     "tests/py/test_programs.py::test_operations_are_all_or_nothing[global evaluate]",
     "tests/py/test_programs.py::test_operations_are_all_or_nothing[pinned replace]",
     "tests/py/test_search.py::test_python_result_construction_is_all_or_nothing",

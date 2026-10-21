@@ -371,7 +371,8 @@ parallel edges). Both are immutable, bound to their graph and checked once when 
   ends at `len(parents) == len(via_edges)`; then every id is in range, every via edge joins its
   parent to its
   node, no `(node, via)` pair repeats, the DAG has no cycle and every node's entries are in
-  ascending via EdgeId. Any failure is a `ValueError`.
+  ascending via EdgeId. A wrong type raises `TypeError`; structural and range defects raise
+  `ValueError`, in the order above.
 - **`Path(graph, hops)`.** `hops` is a list of hops, each a non-empty list of EdgeIds that share
   one `(u, v)` pair (parallel members). Validation, in order: every member id in range, no
   member twice, at least one hop, no empty hop, the members of a hop share `(u, v)`, consecutive
@@ -1481,8 +1482,9 @@ gets through.
   nothing.
 - **The plan.** `result.plan` is a `TunnelPlan` of the program after the call:
   `tunnels_per_head` (N), `design_demand` (D), `design_by_head` (`(head, RR(D, H, i))` for every
-  roster head) and `total_reserved_bandwidth` (the up tunnels' requests, each counted once). It is
-  `None` for every other routing, `Pinned` over a T1 program included.
+  roster head) and `total_reserved_bandwidth` (the up tunnels' requests, each counted once).
+  T2 also returns a `TunnelPlan`, with the fields described below; all other routings, including
+  `Pinned` over a T1 program, return `None`.
 
 A T1 call: head 0's only edge has 2 units, head 1's has 10, two tunnels per head:
 
@@ -1821,10 +1823,10 @@ view**: the ledger's residual with the policy's own traffic given back.
   minus the old (it may be negative). A later `place` continues the epoch a `replace` or a
   `forward` began (its records keep their ids).
 - With other owners fixed, identical full inputs give identical results, except fresh record ids.
-- `forward`'s checks, in order: `Pinned forwards with replace`; `forward requires an installed
-  program` (also after `remove()`); the offer; a Lossy `+inf` (`LOSSY forwarding requires a finite
-  offer`, as for `evaluate` and `replace` and Lossy `Pinned`); the black holes' graph
-  (`black_holes belongs to another graph`).
+- `forward`'s checks, in order: `Pinned forwards with replace`; the offer; a Lossy `+inf`
+  (`LOSSY forwarding requires a finite offer`, as for `evaluate` and `replace` and Lossy `Pinned`);
+  the black holes' type and graph (`black_holes belongs to another graph`); then, under the ledger
+  gate, `forward requires an installed program` (also after `remove()`).
 - **`design_demand`** belongs to T1 and T2 alone (every other routing raises `<model> does not
   accept design_demand`, the model `ShortestPaths`, `CentralizedTE` or `Pinned`): an integer in
   `[0, 2^62)` or `float('inf')` (else `design_demand must be an integer in [0, 2^62) or permitted

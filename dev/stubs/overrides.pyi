@@ -21,7 +21,7 @@
 # - integers: collections.abc.Sequence[typing.SupportsIndex] | numpy.typing.NDArray[numpy.integer],
 #   one-dimensional (the rank and the values are checked at run time);
 # - a node set: one integer or integers;
-# - a number: float | numpy.floating | typing.SupportsIndex.
+# - a physical number or resolution: int | float | numpy.integer | numpy.floating.
 # Arrays that the module returns carry their exact dtype; their shape (one-dimensional) and
 # whether they are read-only views are in the docstrings.
 #
@@ -48,7 +48,7 @@ class Eligibility:
 
 class Graph:
     # reason: num_nodes is an integer, the four edge arrays are integers (exact values checked by the binding)
-    # generated: def __init__(self, num_nodes: typing.Any, edge_sources: typing.Any, edge_destinations: typing.Any, edge_capacity_units: typing.Any, edge_costs: typing.Any, resolution: typing.SupportsFloat | typing.SupportsIndex) -> None:
+    # generated: def __init__(self, num_nodes: typing.Any, edge_sources: typing.Any, edge_destinations: typing.Any, edge_capacity_units: typing.Any, edge_costs: typing.Any, resolution: int | float | numpy.integer | numpy.floating) -> None:
     def __init__(
         self,
         num_nodes: typing.SupportsIndex,
@@ -60,7 +60,7 @@ class Graph:
         | numpy.typing.NDArray[numpy.integer],
         edge_costs: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer],
-        resolution: typing.SupportsFloat | typing.SupportsIndex,
+        resolution: int | float | numpy.integer | numpy.floating,
     ) -> None: ...
     # reason: a read-only int64 view
     # generated: def edge_capacity_units(self) -> numpy.ndarray:
@@ -758,7 +758,7 @@ class SpfResult:
     def target_cost(self) -> int | None: ...
 
 # reason: vectors give float64 arrays; int and NumPy integer scalars give float; another index protocol may also be a sequence
-# generated: def as_float(x: typing.Any, resolution: typing.SupportsFloat | typing.SupportsIndex) -> typing.Any:
+# generated: def as_float(x: typing.Any, resolution: int | float | numpy.integer | numpy.floating) -> typing.Any:
 @typing.overload
 def as_float(
     x: collections.abc.Sequence[typing.SupportsIndex]
@@ -860,7 +860,7 @@ def spf(
 ) -> SpfResult: ...
 
 # reason: scalars give int, Python sequences int64 arrays; unknown-rank arrays may be 0-d (int) or 1-d (array)
-# generated: def to_units(x: typing.Any, resolution: typing.SupportsFloat | typing.SupportsIndex) -> typing.Any:
+# generated: def to_units(x: typing.Any, resolution: int | float | numpy.integer | numpy.floating) -> typing.Any:
 @typing.overload
 def to_units(
     x: int | float | numpy.floating | numpy.integer,

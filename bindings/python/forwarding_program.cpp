@@ -44,6 +44,17 @@ std::optional<CheckedIntegerVector> wide_or_none(const py::object& obj, const ch
   return wide_integers(obj, name);
 }
 
+// Validate and narrow captured weights at the factory's weight-validation step.
+std::vector<Amount> checked_edge_weights(const CheckedIntegerVector& weights, std::size_t num_edges) {
+  if (weights.size() != num_edges) throw py::value_error("edge_weights: expected " + std::to_string(num_edges) + " entries");
+  for (std::size_t e = 0; e < num_edges; ++e) {
+    if (!weights.in(e, 0, kDomainLimit - 1)) {
+      throw py::value_error("edge_weights[" + std::to_string(e) + "] must be an integer in [0, 2^62)");
+    }
+  }
+  return weights.narrow<Amount>();
+}
+
 } // namespace
 
 void register_program(py::module_& m) {
@@ -183,16 +194,7 @@ void register_program(py::module_& m) {
             RouteOptions options;
             options.allocation = allocation;
             options.weight_basis = weight_basis;
-            const auto E = static_cast<std::size_t>(graph->num_edges());
-            if (ew.has_value()) {
-              if (ew->size() != E) throw py::value_error("edge_weights: expected " + std::to_string(E) + " entries");
-              for (std::size_t e = 0; e < E; ++e) {
-                if (!ew->in(e, 0, kDomainLimit - 1)) {
-                  throw py::value_error("edge_weights[" + std::to_string(e) + "] must be an integer in [0, 2^62)");
-                }
-              }
-              options.edge_weights = ew->narrow<Amount>();
-            }
+            if (ew.has_value()) options.edge_weights = checked_edge_weights(*ew, static_cast<std::size_t>(graph->num_edges()));
             if (rw.has_value()) options.residual = edge_amounts(residual, *graph, "residual", "residual (units)").narrow<Amount>();
             auto checked = native_call<false>([&] { return detail::check_route_definitions(*graph, s, d, rs, options); });
             return typed_shared(native_call([&] {
@@ -203,8 +205,8 @@ void register_program(py::module_& m) {
           py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("routes"), py::kw_only(),
           py::arg("allocation") = py::none(), py::arg("weight_basis") = py::none(), py::arg("edge_weights") = py::none(),
           py::arg("residual") = py::none(),
-          "Validate and freeze supplied routes -> ForwardingProgram (ValueError for the first failure, in this\n"
-          "order): the endpoint sets; `routes must not be empty`; when no route is a PredecessorDAG, any option given\n"
+          "Validate and freeze supplied routes -> ForwardingProgram. A wrong type raises TypeError; structural,\n"
+          "range and combination defects raise ValueError, in this order: the endpoint sets; `routes must not be empty`; when no route is a PredecessorDAG, any option given\n"
           "(`<allocation, weight_basis, edge_weights or residual> applies only to PredecessorDAG routes`); allocation\n"
           "OPTIMIZED (`from_routes allocation must be EQUAL or WEIGHTED`); weight_basis only with allocation=WEIGHTED,\n"
           "EXPLICIT with edge_weights, RESIDUAL_SNAPSHOT with residual; edge_weights' length and entries in [0,\n"
@@ -238,16 +240,7 @@ void register_program(py::module_& m) {
             RouteOptions options;
             options.allocation = allocation;
             options.weight_basis = weight_basis;
-            const auto E = static_cast<std::size_t>(graph->num_edges());
-            if (ew.has_value()) {
-              if (ew->size() != E) throw py::value_error("edge_weights: expected " + std::to_string(E) + " entries");
-              for (std::size_t e = 0; e < E; ++e) {
-                if (!ew->in(e, 0, kDomainLimit - 1)) {
-                  throw py::value_error("edge_weights[" + std::to_string(e) + "] must be an integer in [0, 2^62)");
-                }
-              }
-              options.edge_weights = ew->narrow<Amount>();
-            }
+            if (ew.has_value()) options.edge_weights = checked_edge_weights(*ew, static_cast<std::size_t>(graph->num_edges()));
             if (rw.has_value()) options.residual = edge_amounts(residual, *graph, "residual", "residual (units)").narrow<Amount>();
             return typed_shared(native_call([&] { return ForwardingProgram::from_dag(*graph, s, d, shared_dag, options); }));
           },
@@ -256,8 +249,8 @@ void register_program(py::module_& m) {
           py::arg("residual") = py::none(),
           "One shared hop-by-hop program on a supplied PredecessorDAG of the graph -> ForwardingProgram: the sources\n"
           "allocated equally and pooled at every shared router exactly as ShortestPaths EQUAL/WEIGHTED (one\n"
-          "split context), the DAG trimmed to the walks from each source to its first destinations. ValueError for\n"
-          "the first failure, in this order: the endpoint sets; `dag belongs to another graph`; allocation OPTIMIZED\n"
+          "split context), the DAG trimmed to the walks from each source to its first destinations. A wrong type\n"
+          "raises TypeError; structural, range and combination defects raise ValueError, in this order: the endpoint sets; `dag belongs to another graph`; allocation OPTIMIZED\n"
           "(`from_dag allocation must be EQUAL or WEIGHTED`); weight_basis only with allocation=WEIGHTED, EXPLICIT\n"
           "with edge_weights, RESIDUAL_SNAPSHOT with residual; edge_weights' length and entries in [0, 2^62) and\n"
           "residual's (one entry per edge in [0, capacity]). A dag of another type raises TypeError. The roster is\n"

@@ -114,7 +114,7 @@ const std::vector<Scenario>& scenarios() {
 TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   const auto g = shared(make_graph(3, {{0, 1, 9, 1}, {1, 2, 9, 1}, {0, 2, 4, 3}}));
   FlowLedger fg(g);
-  auto p = std::make_unique<FlowPolicy>(fg, v({0}), v({2}), cost_only_config());
+  auto p = std::make_unique<FlowPolicy>(fg, v({0}), v({2}), shortest_paths_config());
   const PlacementResult r = p->place(5, OutputOptions {true, true, true});
   const LedgerState st = ledger_state(fg);
   ASSERT_EQ(st.records.size(), 1U);
@@ -221,9 +221,59 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
     results[k](x);
     EXPECT_GT(failures_of([&] { expect_same(x, r, "result"); }), 0) << "result field " << k;
   }
+  // Program values, including absent/present both ways and separately constructed equal values.
+  ASSERT_TRUE(r.program != nullptr);
+  PlacementResult absent = r;
+  absent.program.reset();
+  EXPECT_EQ(failures_of([&] { expect_same(absent, absent, "both programs absent"); }), 0);
+  EXPECT_GT(failures_of([&] { expect_same(absent, r, "absent program"); }), 0);
+  EXPECT_GT(failures_of([&] { expect_same(r, absent, "present program"); }), 0);
+  FlowLedger equal_ledger(g);
+  FlowPolicy equal_policy(equal_ledger, v({0}), v({2}), shortest_paths_config());
+  const auto equal_result = equal_policy.place(5);
+  ASSERT_NE(r.program.get(), equal_result.program.get());
+  PlacementResult same_program = r;
+  same_program.program = equal_result.program;
+  EXPECT_EQ(failures_of([&] { expect_same(same_program, r, "equal program value"); }), 0);
+  FlowLedger different_ledger(g);
+  FlowPolicy different_policy(different_ledger, v({1}), v({2}), shortest_paths_config());
+  PlacementResult different_program = r;
+  different_program.program = different_policy.place(5).program;
+  EXPECT_GT(failures_of([&] { expect_same(different_program, r, "different program"); }), 0);
+  EXPECT_GT(failures_of([&] { expect_same(r, different_program, "different program reversed"); }), 0);
+
+  // Tunnel rows: empty/populated boundaries, every field, and a wrong distribution with the same total.
+  ASSERT_TRUE(r.by_tunnel.empty());
+  PlacementResult tunnels = r;
+  tunnels.by_tunnel = {{3, 0, TunnelStatus::Up, Counter128 {0, 2}, 2, Counter128 {0, 1}},
+                       {4, 0, TunnelStatus::Up, Counter128 {0, 2}, 2, Counter128 {0, 1}}};
+  const PlacementResult same_tunnels = tunnels;
+  EXPECT_EQ(failures_of([&] { expect_same(tunnels, same_tunnels, "equal populated tunnel rows"); }), 0);
+  EXPECT_GT(failures_of([&] { expect_same(r, tunnels, "empty tunnel rows"); }), 0);
+  EXPECT_GT(failures_of([&] { expect_same(tunnels, r, "populated tunnel rows"); }), 0);
+  const std::vector<std::function<void(TunnelFlow&)>> tunnel_fields = {
+      [](auto& x) { ++x.entry_id; },
+      [](auto& x) { ++x.head; },
+      [](auto& x) { x.status = TunnelStatus::Failed; },
+      [](auto& x) { ++x.assigned.hi; },
+      [](auto& x) { ++x.assigned.lo; },
+      [](auto& x) { ++x.delivered; },
+      [](auto& x) { ++x.total_edge_drops.hi; },
+      [](auto& x) { ++x.total_edge_drops.lo; },
+  };
+  for (std::size_t k = 0; k < tunnel_fields.size(); ++k) {
+    PlacementResult x = tunnels;
+    tunnel_fields[k](x.by_tunnel.front());
+    EXPECT_GT(failures_of([&] { expect_same(x, tunnels, "tunnel row field"); }), 0) << k;
+  }
+  PlacementResult redistributed = tunnels;
+  --redistributed.by_tunnel[0].delivered;
+  ++redistributed.by_tunnel[1].delivered;
+  EXPECT_GT(failures_of([&] { expect_same(redistributed, tunnels, "tunnel distribution"); }), 0);
+
   // The epoch: every field of the call state and of a flow.
   const Epoch ep = epoch(*p);
-  ASSERT_FALSE(ep.cohorts.empty() || ep.cohorts.front().empty());
+  ASSERT_FALSE(ep.record_groups.empty() || ep.record_groups.front().empty());
   EXPECT_EQ(failures_of([&] { expect_same(ep, ep, "same"); }), 0);
   const std::vector<std::function<void(Epoch&)>> epochs = {
       [](auto& x) { ++x.requested.hi; },
@@ -243,11 +293,11 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { x.support.push_back(0); },
       [](auto& x) { x.source_drops_by_source.emplace_back(); },
       [](auto& x) { x.by_tunnel.emplace_back(); },
-      [](auto& x) { x.cohorts.emplace_back(); },
-      [](auto& x) { ++x.cohorts[0][0].id; },
-      [](auto& x) { ++x.cohorts[0][0].cost; },
-      [](auto& x) { x.cohorts[0][0].route.push_back(0); },
-      [](auto& x) { ++x.cohorts[0][0].entry; },
+      [](auto& x) { x.record_groups.emplace_back(); },
+      [](auto& x) { ++x.record_groups[0][0].id; },
+      [](auto& x) { ++x.record_groups[0][0].cost; },
+      [](auto& x) { x.record_groups[0][0].route.push_back(0); },
+      [](auto& x) { ++x.record_groups[0][0].entry; },
   };
   for (std::size_t k = 0; k < epochs.size(); ++k) {
     Epoch x = ep;
@@ -758,7 +808,7 @@ TEST(LedgerFaults, RemovalAndReleaseNeverAllocate) {
 TEST(LedgerFaults, PlacementSweepRejectsAPartialCommit) {
   const auto g = shared(make_graph(3, {{0, 1, 10, 1}, {1, 2, 10, 1}}));
   const auto setup = [](FlowLedger& fg) {
-    auto p = std::make_shared<FlowPolicy>(fg, std::vector<NodeId> {0}, std::vector<NodeId> {2}, cost_only_config());
+    auto p = std::make_shared<FlowPolicy>(fg, std::vector<NodeId> {0}, std::vector<NodeId> {2}, shortest_paths_config());
     return Staged {p, p.get()};
   };
   long reached = 0;

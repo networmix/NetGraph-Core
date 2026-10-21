@@ -13,7 +13,7 @@ import traceback
 import _netgraph_core as ext
 import pytest
 from concurrency_support import run_test_in_subprocess
-from helpers import ALL_OUT, COSTONLY, GLOBAL, build, exact, stats_of
+from helpers import ALL_OUT, GLOBAL, SHORTEST_PATHS, build, exact, stats_of
 from private_hooks import needs_hooks
 
 import netgraph_core as ngc
@@ -32,7 +32,9 @@ def prepopulate(g, keys):
     looks up the destinations' reverse support; the source is spine 6), frozen afterwards."""
     cache = ngc.ShortestPathCache(g)
     for dst in keys:
-        ngc.evaluate_demand(g, 6, dst, ngc.EvaluationOptions(COSTONLY, cache=cache))
+        ngc.evaluate_demand(
+            g, 6, dst, ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache)
+        )
     cache.freeze()
     return cache
 
@@ -45,8 +47,10 @@ def stats(cache):
 def test_transition_table():
     g = fabric()
     cache = ngc.ShortestPathCache(g)
-    opts = ngc.EvaluationOptions(COSTONLY, cache=cache)
-    want = ngc.evaluate_demand(g, 0, 3, ngc.EvaluationOptions(COSTONLY)).call_delivered
+    opts = ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache)
+    want = ngc.evaluate_demand(
+        g, 0, 3, ngc.EvaluationOptions(SHORTEST_PATHS)
+    ).call_delivered
     assert want == 12  # three spines of 4: the comparisons below are not of zeros
     assert ngc.evaluate_demand(g, 0, 3, opts).call_delivered == want
     assert stats(cache) == (0, 1, 1)
@@ -89,19 +93,22 @@ def test_frozen_cache_shared_by_every_worker():
     pairs = [(0, 3), (1, 4), (2, 5), ([0, 1], [3, 4])]
     want = [
         r.call_delivered
-        for r in ngc.evaluate_pairs(g, pairs, ngc.EvaluationOptions(COSTONLY))
+        for r in ngc.evaluate_pairs(g, pairs, ngc.EvaluationOptions(SHORTEST_PATHS))
     ]
     building = ngc.ShortestPathCache(g)
     with pytest.raises(ValueError, match="workers == 1"):
         ngc.evaluate_pairs(
-            g, pairs, ngc.EvaluationOptions(COSTONLY, cache=building), workers=2
+            g, pairs, ngc.EvaluationOptions(SHORTEST_PATHS, cache=building), workers=2
         )
     assert all(w > 0 for w in want)  # every pair places: the comparison is not of zeros
     cache = prepopulate(g, [[3], [4], [5], [3, 4]])
     for workers in (1, 2, 4):
         before = stats(cache)
         got = ngc.evaluate_pairs(
-            g, pairs, ngc.EvaluationOptions(COSTONLY, cache=cache), workers=workers
+            g,
+            pairs,
+            ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache),
+            workers=workers,
         )
         assert [r.call_delivered for r in got] == want
         assert stats(cache) == (before[0] + 4, before[1], 4), workers  # a hit per pair
@@ -114,7 +121,7 @@ def test_frozen_cache_shared_by_every_worker():
             ngc.evaluate_pairs(
                 g,
                 pairs[:3],
-                ngc.EvaluationOptions(COSTONLY, cache=partial),
+                ngc.EvaluationOptions(SHORTEST_PATHS, cache=partial),
                 workers=workers,
             )
         assert stats(partial) == (before[0], before[1] + 1, 1), workers
@@ -128,18 +135,18 @@ def test_prepopulated_uids_and_intersections():
     pairs = [(1, 4), (2, 5)]
     cache = ngc.ShortestPathCache(g)
     ngc.evaluate_demand(
-        g, 1, 4, ngc.EvaluationOptions(COSTONLY, eligibility=narrow, cache=cache)
+        g, 1, 4, ngc.EvaluationOptions(SHORTEST_PATHS, eligibility=narrow, cache=cache)
     )
     ngc.evaluate_demand(
-        g, 2, 5, ngc.EvaluationOptions(COSTONLY, eligibility=common, cache=cache)
+        g, 2, 5, ngc.EvaluationOptions(SHORTEST_PATHS, eligibility=common, cache=cache)
     )
     cache.freeze()
-    opts = ngc.EvaluationOptions(COSTONLY, eligibility=common, cache=cache)
+    opts = ngc.EvaluationOptions(SHORTEST_PATHS, eligibility=common, cache=cache)
     ngc.evaluate_pairs(g, pairs, opts, [narrow, None], workers=2)  # returns the operand
     ngc.evaluate_pairs(
         g,
         pairs,
-        ngc.EvaluationOptions(COSTONLY, cache=cache),
+        ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache),
         [narrow, common],
         workers=2,
     )
@@ -151,7 +158,7 @@ def test_prepopulated_uids_and_intersections():
 def test_edge_failures_propagates_the_miss_and_global_rejects_a_cache():
     g = fabric()
     cache = prepopulate(g, [[4]])
-    opts = ngc.EvaluationOptions(COSTONLY, cache=cache)
+    opts = ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache)
     for workers in (1, 2, 4):
         before = stats(cache)
         with pytest.raises(ngc.ShortestPathCacheMiss, match=r"roots \{4\}"):
@@ -179,7 +186,9 @@ def _frozen_lookups_from_python_threads():
     g = fabric()
     cache = prepopulate(g, [[d] for d in range(6)])
     want = {
-        d: ngc.evaluate_demand(g, 6, d, ngc.EvaluationOptions(COSTONLY)).call_delivered
+        d: ngc.evaluate_demand(
+            g, 6, d, ngc.EvaluationOptions(SHORTEST_PATHS)
+        ).call_delivered
         for d in range(6)
     }
     # The spine's one edge of 4 into each leaf: the comparisons below are not of zeros.
@@ -191,7 +200,7 @@ def _frozen_lookups_from_python_threads():
             for i in range(60):
                 d = (i + t) % 6
                 r = ngc.evaluate_demand(
-                    g, 6, d, ngc.EvaluationOptions(COSTONLY, cache=cache)
+                    g, 6, d, ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache)
                 )
                 assert r.call_delivered == want[d]
         except BaseException as exc:  # reported below; pytest's own failures included
@@ -217,7 +226,7 @@ def test_a_failed_call_changes_no_statistic_but_its_miss():
     # worker and with several; ShortestPaths' evaluate_edge_failures drops its baseline's hit the same way.
     g = fabric()
     cache = prepopulate(g, [[3]])
-    opts = ngc.EvaluationOptions(COSTONLY, cache=cache)
+    opts = ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache)
     for workers in (1, 2, 4):
         before = stats_of(cache)
         with pytest.raises(ngc.ShortestPathCacheMiss, match=r"roots \{4\}"):
@@ -228,7 +237,7 @@ def test_a_failed_call_changes_no_statistic_but_its_miss():
         before = stats_of(cache)
         with pytest.raises(ngc.ShortestPathCacheMiss, match=r"roots \{3\}"):
             ngc.evaluate_edge_failures(
-                g, 0, 3, ngc.EvaluationOptions(COSTONLY, cache=cache), workers
+                g, 0, 3, ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache), workers
             )
         assert stats_of(cache) == plus(before, misses=1)
     before = stats_of(cache)
@@ -245,7 +254,7 @@ def _concurrent_calls_keep_every_successful_hit():
     # successful capacity (one hit) and a failing batch (its hit dropped, one miss).
     g = fabric()
     cache = prepopulate(g, [[3], [4]])
-    opts = ngc.EvaluationOptions(COSTONLY, cache=cache)
+    opts = ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache)
     errors = []
 
     def caller():
@@ -311,7 +320,7 @@ def test_frozen_statistics_survive_python_allocation_failures():
     g = fabric()
     cache = prepopulate(g, [[3], [4], [3, 4]])
     opts = ngc.EvaluationOptions(
-        COSTONLY,
+        SHORTEST_PATHS,
         cache=cache,
         outputs=ALL_OUT,
     )
@@ -338,7 +347,7 @@ def test_frozen_statistics_survive_python_allocation_failures():
             )
             >= 2
         )
-    sens = ngc.EvaluationOptions(COSTONLY, cache=cache)
+    sens = ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache)
     assert (
         sweep_frozen(cache, ngc.evaluate_edge_failures, (g, 0, 3, sens, 1), miss=True)
         >= 1
@@ -347,7 +356,9 @@ def test_frozen_statistics_survive_python_allocation_failures():
     # and no placed deletion.
     island = build(3, [(0, 1, 4, 1), (1, 0, 4, 1)])
     small = ngc.ShortestPathCache(island)
-    ngc.evaluate_demand(island, 0, 1, ngc.EvaluationOptions(COSTONLY, cache=small))
+    ngc.evaluate_demand(
+        island, 0, 1, ngc.EvaluationOptions(SHORTEST_PATHS, cache=small)
+    )
     small.freeze()
     for workers in (1, 2):
         assert (
@@ -358,7 +369,7 @@ def test_frozen_statistics_survive_python_allocation_failures():
                     island,
                     2,
                     1,
-                    ngc.EvaluationOptions(COSTONLY, cache=small),
+                    ngc.EvaluationOptions(SHORTEST_PATHS, cache=small),
                     workers,
                 ),
                 hits=1,
@@ -378,8 +389,8 @@ def test_the_frozen_sweep_rejects_a_wrong_call():
     g = fabric()
     cache = prepopulate(g, [[3]])
     other = prepopulate(g, [[3]])
-    opts = ngc.EvaluationOptions(COSTONLY, cache=cache, outputs=ALL_OUT)
-    elsewhere = ngc.EvaluationOptions(COSTONLY, cache=other, outputs=ALL_OUT)
+    opts = ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache, outputs=ALL_OUT)
+    elsewhere = ngc.EvaluationOptions(SHORTEST_PATHS, cache=other, outputs=ALL_OUT)
     hit = (g, 0, 3, opts)
     miss = (g, 0, 5, opts)
 
@@ -461,7 +472,7 @@ def test_the_frozen_sweep_rejects_a_wrong_call():
         assert traceback.extract_tb(info.tb)[-1].line == clause, clause
 
     # Made outside the sweep, as every bound object.
-    uncached = ngc.EvaluationOptions(COSTONLY)
+    uncached = ngc.EvaluationOptions(SHORTEST_PATHS)
 
     def endless(*args):
         while True:

@@ -359,14 +359,14 @@ SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<c
   const auto* global_routing = std::get_if<CentralizedTE>(&options.config.routing);
   const bool global = global_routing != nullptr && !global_routing->support && !global_routing->tunnel_count.has_value() &&
                       global_routing->source_allocation != SourceAllocation::Equal;
-  const bool cost_only = std::holds_alternative<ShortestPaths>(options.config.routing);
+  const bool shortest_paths = std::holds_alternative<ShortestPaths>(options.config.routing);
   SensitivityResult out;
   std::vector<std::uint8_t> on_route;  // ShortestPaths: the baseline's reachable support
   detail::DeletionCapture capture;     // optimized CentralizedTE: the baseline solve's final state
   {
     std::unique_ptr<ShortestPathCache> own;
     ShortestPathCache* cache = options.cache;
-    if (cache == nullptr && cost_only) {
+    if (cache == nullptr && shortest_paths) {
       own = std::make_unique<ShortestPathCache>(graph);
       cache = own.get();
     }
@@ -376,7 +376,7 @@ SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<c
     if (global) pe.capture = &capture;
     out.baseline = run(policy, evaluator_call(policy.config(), options.offer, options.design_demand), options.outputs);
     pe.capture = nullptr;
-    if (cost_only) on_route = reachable_support(graph, pe);
+    if (shortest_paths) on_route = reachable_support(graph, pe);
   }
   std::vector<EdgeId> candidates;
   std::vector<Amount> baseline_flows;
@@ -440,7 +440,7 @@ SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<c
       else entry.delivery_reduction = resolvers[t].loss(e);
       return;
     }
-    if (cost_only && on_route[static_cast<std::size_t>(e)] == 0) {
+    if (shortest_paths && on_route[static_cast<std::size_t>(e)] == 0) {
       entry.delivery_reduction = 0;
     } else {
       const EdgeId one[1] = {e};

@@ -158,7 +158,7 @@ def t1_config(count, admission=None, **routing):
 # Lossless (ShortestPaths() is ECMP: FEWER_HOPS, every route and parallel edge). Configurations
 # are immutable, so tests share these values.
 GLOBAL = config(centralized())
-COSTONLY = config(ngc.ShortestPaths())
+SHORTEST_PATHS = config(ngc.ShortestPaths())
 
 
 # The result classes whose public attributes are all fields (no methods).

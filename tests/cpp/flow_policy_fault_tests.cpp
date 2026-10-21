@@ -103,16 +103,16 @@ std::vector<Mode> modes(const Graph& g) {
   std::vector<Mode> out;
   const std::vector<NodeId> S = {0, 1};
   const std::vector<NodeId> D = {5, 6};
-  out.push_back({"costonly maxflow", shortest(RouteAllocation::Optimized, Admission::Lossless), S, D});
-  out.push_back({"costonly eb", cost_only_config(), S, D});
-  out.push_back({"costonly weighted residual",
+  out.push_back({"shortest_paths maxflow", shortest(RouteAllocation::Optimized, Admission::Lossless), S, D});
+  out.push_back({"shortest_paths eb", shortest_paths_config(), S, D});
+  out.push_back({"shortest_paths weighted residual",
                  shortest(RouteAllocation::Weighted, Admission::Lossless,
                           [](ShortestPaths& sp) { sp.weight_basis = WeightBasis::ResidualSnapshot; }),
                  S, D});
-  out.push_back({"costonly lossy", shortest(RouteAllocation::Equal, Admission::Lossy), S, D});
+  out.push_back({"shortest_paths lossy", shortest(RouteAllocation::Equal, Admission::Lossy), S, D});
   // Several sources: the FEWER_HOPS single path (the pooled single-path rule rejects a HIGHER_*
   // tie_break with multipath false).
-  out.push_back({"costonly single path collapse",
+  out.push_back({"shortest_paths single path collapse",
                  shortest(RouteAllocation::Equal, Admission::Lossless,
                           [](ShortestPaths& sp) {
                             sp.multipath = false;
@@ -122,13 +122,13 @@ std::vector<Mode> modes(const Graph& g) {
   out.push_back({"global", global_config(), S, D});
   // The equal source allocation of the controllers: the bisection's probe solves and the final solve.
   out.push_back({"global equal", {.routing = centralized(SourceAllocation::Equal)}, S, D});
-  out.push_back({"costonly maxflow equal",
+  out.push_back({"shortest_paths maxflow equal",
                  shortest(RouteAllocation::Optimized, Admission::Lossless,
                           [](ShortestPaths& sp) { sp.source_allocation = SourceAllocation::Equal; }),
                  S, D});
   // Pooled Weighted Lossy: source 1's zero-capacity member has weight 0 (pruned), the shares
   // attributed across the shared routers.
-  out.push_back({"costonly weighted lossy", shortest(RouteAllocation::Weighted, Admission::Lossy), S, D});
+  out.push_back({"shortest_paths weighted lossy", shortest(RouteAllocation::Weighted, Admission::Lossy), S, D});
   // Pinned over supplied programs: three split routes of source 0 (one all-zero: a Weighted
   // route without a member), Lossless Equal and Lossy Weighted; and two sources' crossing
   // tunnels, Lossy, which meet on shared links (the general loss rule).
@@ -168,15 +168,15 @@ std::vector<Mode> modes(const Graph& g) {
                  S, D, std::optional<Amount> {6}});
   // ShortestPaths creation in one pass: its Collapse branch (multipath, parallel_edges false,
   // HIGHER_AVAILABLE_CAPACITY on the creation view) and its Weighted weights (capacity basis).
-  out.push_back({"costonly eb multipath collapse",
+  out.push_back({"shortest_paths eb multipath collapse",
                  shortest(RouteAllocation::Equal, Admission::Lossless,
                           [](ShortestPaths& sp) {
                             sp.tie_break = RouteTieBreak::HigherAvailableCapacity;
                             sp.parallel_edges = false;
                           }),
                  S, D});
-  out.push_back({"costonly weighted capacity", shortest(RouteAllocation::Weighted, Admission::Lossless), S, D});
-  out.push_back({"costonly weighted explicit",
+  out.push_back({"shortest_paths weighted capacity", shortest(RouteAllocation::Weighted, Admission::Lossless), S, D});
+  out.push_back({"shortest_paths weighted explicit",
                  shortest(RouteAllocation::Weighted, Admission::Lossy,
                           [](ShortestPaths& sp) {
                             sp.weight_basis = WeightBasis::Explicit;
@@ -266,7 +266,7 @@ TEST(PolicyFaults, ZeroCapacityLinksTakePartInTheSweeps) {
     FlowPolicy p(fg, m.sources, m.destinations, m.cfg);
     (void)p.place(5);
     const auto& pe = detail::PolicyAccess::engine(p);
-    if (m.name == "costonly eb") {
+    if (m.name == "shortest_paths eb") {
       // The pooled program of both sources holds the zero link as a member.
       ASSERT_TRUE(pe.epoch.program != nullptr);
       const auto& plan = *detail::ProgramAccess::data(*pe.epoch.program).split_contexts.front().prepared_route;
@@ -916,7 +916,7 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
   const Eligibility no_bypass = without_bypass(*g);
   const Eligibility no_cross = without_cross(*g);
   const std::int32_t one[] = {1};
-  const std::vector<std::string> exhaustive_edge_failures = {"costonly eb", "global", "pinned eb split routes",
+  const std::vector<std::string> exhaustive_edge_failures = {"shortest_paths eb", "global", "pinned eb split routes",
                                                            "pinned tunnels lossy"};
   int swept_edge_failures = 0;
   long attempts = 0;
@@ -1037,7 +1037,7 @@ TEST(PolicyFaults, FiniteOfferEvaluatorsFailAtomically) {
   const auto g = graph();
   int swept = 0;
   long attempts = 0;
-  for (const char* name : {"costonly maxflow", "costonly eb", "global equal"}) {
+  for (const char* name : {"shortest_paths maxflow", "shortest_paths eb", "global equal"}) {
     attempts += sweep_finite_offers(*g, name, {-1}, swept);
     if (::testing::Test::HasFailure()) return;
   }
@@ -1146,8 +1146,8 @@ void expect_scratch_growth_failure_leaves_nothing_half_grown(
 // A split kernel's placement (ShortestPaths Equal): the working residual and the kernels'
 // scratch.
 TEST(PolicyFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
-  expect_scratch_growth_failure_leaves_nothing_half_grown("costonly eb",
-                                                          [](const Graph&) { return cost_only_config(); });
+  expect_scratch_growth_failure_leaves_nothing_half_grown("shortest_paths eb",
+                                                          [](const Graph&) { return shortest_paths_config(); });
 }
 
 // A controller's placement also grows the decomposition's per-thread scratch (cursors, range ends,
@@ -1341,7 +1341,7 @@ TEST(PolicyFaults, FrozenStatisticsFollowThePublicCall) {
     if (::testing::Test::HasFailure()) return;
   }
   // A ShortestPaths policy whose key is absent: the constructor's outcome is the miss.
-  const auto& eb = all[1];  // costonly eb
+  const auto& eb = all[1];  // shortest_paths eb
   ASSERT_TRUE(std::holds_alternative<ShortestPaths>(eb.cfg.routing));
   const std::vector<NodeId> absent = {4};
   EXPECT_GT(sweep_frozen_stats("frozen construction miss", cache, false, 1, 0, true,
@@ -1372,7 +1372,7 @@ TEST(PolicyFaults, FrozenStatisticsFollowThePublicCall) {
     }
     // ShortestPaths' failure study from a source that reaches no destination: one lookup (the baseline's
     // hit), no placed deletion, and the call succeeds; its failures happen after the hit.
-    EXPECT_GT(sweep_frozen_stats("frozen costonly sensitivity" + std::string(" workers ") + std::to_string(workers),
+    EXPECT_GT(sweep_frozen_stats("frozen shortest_paths sensitivity" + std::string(" workers ") + std::to_string(workers),
                                  cache, false, 3, 1, false,
                                  [&] {
                                    (void)evaluate_edge_failures(*g, std::vector<NodeId> {5}, std::vector<NodeId> {6},
@@ -1382,17 +1382,17 @@ TEST(PolicyFaults, FrozenStatisticsFollowThePublicCall) {
   }
   // ShortestPaths' failure study whose deletions miss (a fresh uid per deletion): the baseline's hit is
   // dropped with the failed call, and the miss counts once.
-  const auto costonly_miss = [&](std::int32_t workers) {
+  const auto shortest_paths_miss = [&](std::int32_t workers) {
     (void)evaluate_edge_failures(*g, eb.sources, eb.destinations, EvaluationOptions {eb.cfg, nullptr, &cache}, workers);
   };
-  EXPECT_GT(sweep_frozen_stats("frozen costonly sensitivity miss", cache, false, 1, 0, true, [&] { costonly_miss(1); }),
+  EXPECT_GT(sweep_frozen_stats("frozen shortest_paths sensitivity miss", cache, false, 1, 0, true, [&] { shortest_paths_miss(1); }),
             2);
   // The same with the deletions evaluated by 2 and 4 workers, every third allocation of the
   // worker threads failing. The tasks start in increasing index and the lowest failing index's
   // exception is raised, so an injected failure either is raised (nothing counted) or loses to a
   // lower deletion's miss (the miss counted once, no hit).
   for (const std::int32_t workers : {2, 4}) {
-    const std::string w = "frozen costonly sensitivity miss, worker threads, workers " + std::to_string(workers);
+    const std::string w = "frozen shortest_paths sensitivity miss, worker threads, workers " + std::to_string(workers);
     long reached = 0, surfaced = 0;
     for (long at = 0;; at += 3) {
       const std::string where = w + " allocation " + std::to_string(at);
@@ -1404,7 +1404,7 @@ TEST(PolicyFaults, FrozenStatisticsFollowThePublicCall) {
           at,
           [&] {
             try {
-              costonly_miss(workers);
+              shortest_paths_miss(workers);
             } catch (const ShortestPathCacheMiss&) {
               missed = true;
             }
@@ -1433,7 +1433,7 @@ TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
   // reference. CentralizedTE's failure study, which reads no cache, rejects it before any worker starts.
   const auto g = graph();
   const auto all = modes(*g);
-  const auto& m = all[1];  // costonly eb: reads the cache
+  const auto& m = all[1];  // shortest_paths eb: reads the cache
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {
       {m.sources, m.destinations}, {{1}, {6}}, {{0}, {5}}};
   ShortestPathCache cache(*g);
@@ -1465,12 +1465,12 @@ TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
     const std::string w = e.what();
     return w.substr(0, w.find(", Eligibility uid "));
   };
-  const auto costonly_edge_failures = [&](std::int32_t w) {
+  const auto shortest_paths_edge_failures = [&](std::int32_t w) {
     (void)evaluate_edge_failures(*g, m.sources, m.destinations, query_of(m, nullptr, &cache), w);
   };
   std::string want_miss;
   try {
-    costonly_edge_failures(1);
+    shortest_paths_edge_failures(1);
   } catch (const ShortestPathCacheMiss& e) {
     want_miss = key_of(e);
   }
@@ -1479,14 +1479,14 @@ TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
       "frozen sensitivity", 1, false, 1,
       [&](std::int32_t w) {
         try {
-          costonly_edge_failures(w);
+          shortest_paths_edge_failures(w);
         } catch (const ShortestPathCacheMiss&) {
         }
       },
       [&](std::int32_t w) {
         EXPECT_EQ(cache.stats().entries, entries);
         try {
-          costonly_edge_failures(w);
+          shortest_paths_edge_failures(w);
           ADD_FAILURE() << "no ShortestPathCacheMiss";
         } catch (const ShortestPathCacheMiss& e) {
           EXPECT_EQ(key_of(e), want_miss);

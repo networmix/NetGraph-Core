@@ -317,7 +317,7 @@ failed.
 | `spf` | `spf.to.random16k`, `spf.to.targetset_clos` | 8 reverse searches; 16 reverse searches rooted at a destination set (`queries/targetset_clos.json`) |
 | `spf` | `spf.single.canonical16k` | 8 canonical single paths to frozen targets (`queries/canonical16k.json`) on the residual |
 | `construct` | `construct.random65k`, `construct.clos` | graph construction from arrays, unit conversion included |
-| `kernel` | `kernel.{proportional,eb,lossy}.clos`, `kernel.{proportional,eb}.grid`, `kernel.weighted.clos` | placements on fixed cost-only DAGs into one ledger |
+| `kernel` | `kernel.{proportional,eb,lossy}.clos`, `kernel.{proportional,eb}.grid`, `kernel.weighted.clos` | placements on fixed ShortestPaths DAGs into one ledger |
 | `capacity` | `capacity.costonly_{eb,prop}.failures` | ShortestPaths capacity over 32 failure states x 8 pairs |
 | `maxflow` | `maxflow.exact.{totals,detailed}` | exact maximum flow over 8 failure states x 4 pairs |
 | `sensitivity` | `sens.exact`, `sens.policy_all_edges`, `sens.equal_global` | exact-model sensitivity; policy-model loss for every eligible edge; equal-source-allocation CentralizedTE, every edge solved afresh |

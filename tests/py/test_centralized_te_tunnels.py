@@ -13,10 +13,10 @@ from fractions import Fraction
 import pytest
 import tunnel_oracle as orc
 from helpers import (
-    COSTONLY,
     GLOBAL,
     INF,
     L62,
+    SHORTEST_PATHS,
     build,
     dag_of,
     exact,
@@ -835,11 +835,11 @@ def test_operations_and_design_validation():
     ):
         ly.replace(INF)
     assert p.replace(INF).plan.design_demand == INF  # an unlimited design
-    for cfg in (COSTONLY, GLOBAL):
+    for cfg in (SHORTEST_PATHS, GLOBAL):
         with pytest.raises(
             ValueError,
             match=exact(
-                f"{'ShortestPaths' if cfg is COSTONLY else 'CentralizedTE'} does not accept design_demand"
+                f"{'ShortestPaths' if cfg is SHORTEST_PATHS else 'CentralizedTE'} does not accept design_demand"
             ),
         ):
             ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg).replace(5, design_demand=5)

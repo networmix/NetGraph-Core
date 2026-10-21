@@ -8,6 +8,7 @@ and dtype lines, a mistake in the caller's own code) that a type checker must ca
 """
 
 import typing
+from decimal import Decimal
 from fractions import Fraction
 
 import numpy as np
@@ -108,3 +109,27 @@ def require_float(x: typing.SupportsIndex) -> float:
 
 ng.to_units(1.5, Fraction(1, 2))  # expect: reportCallIssue, reportArgumentType
 ng.as_float(3, Fraction(1, 2))  # expect: reportCallIssue, reportArgumentType
+
+
+class IndexResolution:
+    def __index__(self) -> int:
+        return 1
+
+
+class FloatResolution:
+    def __float__(self) -> float:
+        return 1.0
+
+
+ng.Graph(2, [0], [1], [10], [1], Fraction(1))  # expect: reportArgumentType
+ng.Graph(2, [0], [1], [10], [1], Decimal(1))  # expect: reportArgumentType
+ng.Graph(2, [0], [1], [10], [1], IndexResolution())  # expect: reportArgumentType
+ng.Graph(2, [0], [1], [10], [1], FloatResolution())  # expect: reportArgumentType
+
+
+class BothResolution(IndexResolution, FloatResolution):
+    pass
+
+
+ng.Graph(2, [0], [1], [10], [1], BothResolution())  # expect: reportArgumentType
+ng.Graph(2, [0], [1], [10], [1], np.array(1.0))  # expect: reportArgumentType

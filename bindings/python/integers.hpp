@@ -21,6 +21,7 @@
 #include "netgraph/core/graph.hpp"
 #include "netgraph/core/types.hpp"
 #include "strict_bool.hpp"
+#include "numpy_conversion.hpp"
 
 namespace py = pybind11;
 
@@ -38,9 +39,9 @@ inline bool is_bool(const py::handle& obj) {
   throw py::type_error(what + " must be an integer (got " + std::string(py::str(py::type::of(item).attr("__name__"))) + ")");
 }
 
-// The Python int of an integer-like object (a Python int or a NumPy integer scalar); bools and
-// everything else are rejected (throw_not_an_integer), and an exception of the object's own
-// __index__ propagates as raised. The result is an exact int, so PyLong_AsLongLongAndOverflow
+// The Python int of any non-bool object with __index__, read with PyNumber_Index; bools and
+// objects without that protocol are rejected (throw_not_an_integer), and an exception of the
+// object's own __index__ propagates as raised. The result is an exact int, so PyLong_AsLongLongAndOverflow
 // cannot fail on it.
 inline py::object python_int(const py::handle& item, const std::string& what) {
   if (is_bool(item) || !PyIndex_Check(item.ptr())) throw_not_an_integer(item, what);
@@ -124,7 +125,7 @@ inline CheckedIntegerVector wide_integers(const py::handle& obj, const char* nam
     }
     out.value.reserve(static_cast<std::size_t>(arr.size()));
     if (kind == 'u' && arr.itemsize() == 8) {
-      auto u = py::array_t<std::uint64_t, py::array::forcecast>::ensure(arr);
+      const auto u = numpy_conversion<std::uint64_t>(arr);
       auto r = u.unchecked<1>();
       constexpr auto kMax = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
       for (py::ssize_t i = 0; i < r.shape(0); ++i) {
@@ -138,7 +139,7 @@ inline CheckedIntegerVector wide_integers(const py::handle& obj, const char* nam
       }
       return out;
     }
-    auto a = py::array_t<std::int64_t, py::array::forcecast>::ensure(arr);
+    const auto a = numpy_conversion<std::int64_t>(arr);
     auto r = a.unchecked<1>();
     for (py::ssize_t i = 0; i < r.shape(0); ++i) out.value.push_back(r(i));
     return out;

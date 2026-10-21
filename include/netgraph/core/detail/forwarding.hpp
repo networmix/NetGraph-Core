@@ -176,6 +176,10 @@ struct ProgramFlow {
 // the event and dependency counts, known only after the no-drop loads, before the event
 // structures are allocated. Either refusal changes nothing.
 inline constexpr std::int64_t kForwardingLimit = std::numeric_limits<std::int32_t>::max();
+// Head labels include destinations as well as roots and member occurrences: their count is
+// at most entries + occurrences, which can exceed the signed 32-bit occurrence limit.
+using HeadLabelOffset = std::size_t;
+
 enum class ForwardingCounter { Entry, Occurrence, Router, Event, Dependency };
 void check_forwarding_count(ForwardingCounter counter, std::int64_t n);
 

@@ -13,11 +13,11 @@ import numpy as np
 import pytest
 from helpers import (
     ALL_OUT,
-    COSTONLY,
     GLOBAL,
     HIGHER_AVAIL,
     INF,
     L62,
+    SHORTEST_PATHS,
     assert_read_only,
     build,
     config,
@@ -292,43 +292,45 @@ def test_validation_messages_before_binding():
         src=[0, 1],
     )
     rejects(
-        COSTONLY,
+        SHORTEST_PATHS,
         "node 3 is in both endpoint sets: sources and destinations must not overlap",
         src=[0, 3],
     )
-    rejects(COSTONLY, "sources: the node set is empty", src=[])
-    rejects(COSTONLY, f"sources: node {L62} out of node range [0, 4)", src=[L62])
+    rejects(SHORTEST_PATHS, "sources: the node set is empty", src=[])
+    rejects(SHORTEST_PATHS, f"sources: node {L62} out of node range [0, 4)", src=[L62])
     with pytest.raises(
         ValueError, match=exact("foreign Eligibility: built for another graph")
     ):
-        ngc.FlowPolicy(fg, 0, 3, COSTONLY, diamond().eligibility(excluded_edges=[0]))
+        ngc.FlowPolicy(
+            fg, 0, 3, SHORTEST_PATHS, diamond().eligibility(excluded_edges=[0])
+        )
     with pytest.raises(
         ValueError, match=exact("foreign ShortestPathCache: bound to another graph")
     ):
-        ngc.FlowPolicy(fg, 0, 3, COSTONLY, None, ngc.ShortestPathCache(diamond()))
+        ngc.FlowPolicy(fg, 0, 3, SHORTEST_PATHS, None, ngc.ShortestPathCache(diamond()))
     # Arguments of the wrong kind are TypeError: a ledger of None, non-integer node ids, a ledger,
     # config, eligibility or cache of the wrong class and an unknown keyword.
     with pytest.raises(TypeError, match=exact("ledger must be a FlowLedger")):
-        ngc.FlowPolicy(None, 0, 3, COSTONLY)
+        ngc.FlowPolicy(None, 0, 3, SHORTEST_PATHS)
     with pytest.raises(
         TypeError, match=exact("sources[0] must be an integer (got float)")
     ):
-        ngc.FlowPolicy(fg, [0.0], 3, COSTONLY)
+        ngc.FlowPolicy(fg, [0.0], 3, SHORTEST_PATHS)
     with pytest.raises(
         TypeError, match=exact("destinations must be a sequence of integers")
     ):
-        ngc.FlowPolicy(fg, 0, 3.0, COSTONLY)
+        ngc.FlowPolicy(fg, 0, 3.0, SHORTEST_PATHS)
     for wrong in (
-        lambda: ngc.FlowPolicy(g, 0, 3, COSTONLY),
+        lambda: ngc.FlowPolicy(g, 0, 3, SHORTEST_PATHS),
         lambda: ngc.FlowPolicy(fg, 0, 3, ngc.ShortestPaths()),
-        lambda: ngc.FlowPolicy(fg, 0, 3, COSTONLY, ngc.ShortestPathCache(g)),
-        lambda: ngc.FlowPolicy(fg, 0, 3, COSTONLY, None, g.eligibility()),
-        lambda: ngc.FlowPolicy(fg, 0, 3, COSTONLY, cash=None),
+        lambda: ngc.FlowPolicy(fg, 0, 3, SHORTEST_PATHS, ngc.ShortestPathCache(g)),
+        lambda: ngc.FlowPolicy(fg, 0, 3, SHORTEST_PATHS, None, g.eligibility()),
+        lambda: ngc.FlowPolicy(fg, 0, 3, SHORTEST_PATHS, cash=None),
     ):
         with pytest.raises(TypeError):
             wrong()
     fg.reset()  # nothing bound
-    pol = ngc.FlowPolicy(fg, 0, 3, COSTONLY)
+    pol = ngc.FlowPolicy(fg, 0, 3, SHORTEST_PATHS)
     with pytest.raises(
         TypeError, match=exact("outputs must be an OutputOptions (got ShortestPaths)")
     ):
@@ -493,7 +495,7 @@ def test_enum_values_outside_their_enumeration_are_rejected():
 def test_placement_result_fields_and_outputs():
     g = diamond()
     fg = ngc.FlowLedger(g)
-    pol = ngc.FlowPolicy(fg, [0], [3], COSTONLY)
+    pol = ngc.FlowPolicy(fg, [0], [3], SHORTEST_PATHS)
     r = pol.place(4)
     assert (r.call_delivered, r.call_undelivered, r.termination) == (4, 0, T.COMPLETE)
     assert not hasattr(r, "local_outcomes")
@@ -582,7 +584,7 @@ def test_lifetimes_keep_alive_and_orphans():
     fg = ngc.FlowLedger(g)
     el = g.eligibility(excluded_edges=ids(g, [2]))
     cache = ngc.ShortestPathCache(g)
-    pol = ngc.FlowPolicy(fg, 0, 3, COSTONLY, el, cache)
+    pol = ngc.FlowPolicy(fg, 0, 3, SHORTEST_PATHS, el, cache)
     held = [weakref.ref(x) for x in (fg, el, cache)]
     del fg, el, cache
     gc.collect()
@@ -594,7 +596,7 @@ def test_lifetimes_keep_alive_and_orphans():
     gc.collect()
     assert all(r() is None for r in held)  # the policy alone held them
     fg2 = ngc.FlowLedger(g)
-    p = ngc.FlowPolicy(fg2, 0, 3, COSTONLY)
+    p = ngc.FlowPolicy(fg2, 0, 3, SHORTEST_PATHS)
     p.place(2)
     del p
     gc.collect()
@@ -602,7 +604,7 @@ def test_lifetimes_keep_alive_and_orphans():
         assert fg2._state()["orphans"] == [0]
     assert fg2.records()[0].delivered == 2
     with pytest.raises(ValueError, match="bound"):
-        q = ngc.FlowPolicy(fg2, 0, 3, COSTONLY)
+        q = ngc.FlowPolicy(fg2, 0, 3, SHORTEST_PATHS)
         fg2.reset()
     del q
     gc.collect()
@@ -616,7 +618,7 @@ def test_owner_hook_is_the_owner_of_the_records():
     # ledger, known before the policy has a record, and carried by its records as FlowRecord.policy_id.
     g = diamond()
     fg = ngc.FlowLedger(g)
-    policies = [ngc.FlowPolicy(fg, 0, 3, COSTONLY) for _ in range(3)]
+    policies = [ngc.FlowPolicy(fg, 0, 3, SHORTEST_PATHS) for _ in range(3)]
     owners = [p._owner() for p in policies]
     assert len(set(owners)) == 3
     for p in reversed(policies):
@@ -683,7 +685,7 @@ def test_dag_cache_statistics_and_projection():
     g = diamond()
     cache = ngc.ShortestPathCache(g)
     fg = ngc.FlowLedger(g)
-    a = ngc.FlowPolicy(fg, 0, 3, COSTONLY, None, cache)
+    a = ngc.FlowPolicy(fg, 0, 3, SHORTEST_PATHS, None, cache)
     b = ngc.FlowPolicy(
         fg,
         0,
@@ -752,7 +754,7 @@ def test_capacity_batch_and_workers(monkeypatch):
             ngc.EvaluationOptions(pinned_over(g, dag_of(g, ids(g, [0, 1])))),
         )
     cache = ngc.ShortestPathCache(g)
-    eb = ngc.EvaluationOptions(COSTONLY, cache=cache)
+    eb = ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache)
     with pytest.raises(ValueError, match="workers == 1"):
         ngc.evaluate_pairs(g, pairs, eb, workers=2)
     got = ngc.evaluate_pairs(
@@ -789,7 +791,7 @@ def test_edge_failures_candidates_and_signed_reductions(monkeypatch):
     # over parallel links of 1, 10 and 0 fits 2 units (a third would cross the zero link);
     # without the thin link 1 fits, without the wide link 1, without the zero link 2.
     p = build(2, [(0, 1, 1, 1), (0, 1, 10, 1), (0, 1, 0, 1)])
-    opts = ngc.EvaluationOptions(COSTONLY)
+    opts = ngc.EvaluationOptions(SHORTEST_PATHS)
     s = ngc.evaluate_edge_failures(p, 0, 1, opts, workers=2)
     assert s.baseline.call_delivered == 2
     pos = p.input_positions()
@@ -812,7 +814,7 @@ def test_edge_failures_candidates_and_signed_reductions(monkeypatch):
     with pytest.raises(ValueError, match="both endpoint sets"):
         ngc.evaluate_edge_failures(p, 0, 0, opts)
     # The baseline is evaluate_demand() with the requested outputs.
-    for cfg in (GLOBAL, COSTONLY):
+    for cfg in (GLOBAL, SHORTEST_PATHS):
         s = ngc.evaluate_edge_failures(
             g, 0, 2, ngc.EvaluationOptions(cfg, outputs=ALL_OUT)
         )
@@ -845,7 +847,7 @@ def test_evaluator_options_and_results():
             True,
             False,
         )
-        d = cls(COSTONLY)
+        d = cls(SHORTEST_PATHS)
         assert d.eligibility is None and d.cache is None
         assert (
             d.outputs.edge_flows,
@@ -868,8 +870,8 @@ def test_explicit_workers_win_over_the_environment(monkeypatch):
     monkeypatch.setenv("NGRAPH_CORE_SENSITIVITY_THREADS", "4")
     g = diamond(5, 3)
     building = ngc.ShortestPathCache(g)
-    bopts = ngc.EvaluationOptions(COSTONLY, cache=building)
-    sopts = ngc.EvaluationOptions(COSTONLY, cache=building)
+    bopts = ngc.EvaluationOptions(SHORTEST_PATHS, cache=building)
+    sopts = ngc.EvaluationOptions(SHORTEST_PATHS, cache=building)
     want = [
         r.call_delivered
         for r in ngc.evaluate_pairs(g, [(0, 3), (1, 3)], bopts, workers=1)
@@ -901,9 +903,9 @@ def test_python_keeps_what_a_policy_and_an_option_need_alive():
         g.edge_destinations().tolist(),
     ]
     ledger = ngc.FlowLedger(g)
-    policy = ngc.FlowPolicy(ledger, 0, 3, COSTONLY)
+    policy = ngc.FlowPolicy(ledger, 0, 3, SHORTEST_PATHS)
     opts = ngc.EvaluationOptions(
-        COSTONLY,
+        SHORTEST_PATHS,
         eligibility=g.eligibility(excluded_edges=ids(g, [2])),
         cache=ngc.ShortestPathCache(g),
     )
@@ -945,7 +947,7 @@ def test_exception_classes_of_conversions():
             call()
         assert error.type is ValueError
     g = build(2, [(0, 1, 5, 1)])
-    p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, COSTONLY)
+    p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, SHORTEST_PATHS)
     for big in (10**400, -(10**400)):
         with pytest.raises(
             ValueError,
@@ -959,14 +961,14 @@ def test_exception_classes_of_conversions():
 
 
 @needs_hooks
-@pytest.mark.parametrize("routing", ["costonly", "global"])
+@pytest.mark.parametrize("routing", ["shortest_paths", "global"])
 @pytest.mark.parametrize("traced", [False, True])
 def test_python_publication_is_all_or_nothing(routing, traced):
     # Every Python object of a placement exists before anything is published, so the k-th
     # Python allocation failing raises with the ledger and the policy unchanged (an earlier
     # call's flow in the same epoch included), never crashes, and a retry places as a call
     # without failure does.
-    cfg = GLOBAL if routing == "global" else COSTONLY
+    cfg = GLOBAL if routing == "global" else SHORTEST_PATHS
     g = build(2, [(0, 1, 10, 1)])
 
     for entry in (

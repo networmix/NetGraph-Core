@@ -92,7 +92,8 @@ void register_predecessor_dag(py::module_& m) {
             return native_call([&] { return std::make_shared<PredecessorDAG>(detail::PredecessorDAGBuilder::of_csr(*graph, ov, pv, wv)); });
           },
           py::arg("graph"), py::arg("parent_offsets"), py::arg("parents"), py::arg("via_edges"),
-          "Validates, in order, before any traversal (ValueError on the first defect): parent_offsets of\n"
+          "A wrong type raises TypeError; structural and range defects raise ValueError. Validates, in order,\n"
+          "before any traversal: parent_offsets of\n"
           "length N + 1, parent_offsets[0] == 0, monotone, parent_offsets[N] == len(parents) ==\n"
           "len(via_edges); then every parent and via edge in range, every via edge joining (parent, child),\n"
           "no duplicate (child, via edge), acyclic; within a node the entries in ascending via EdgeId.")

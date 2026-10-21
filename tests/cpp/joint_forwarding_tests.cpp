@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <random>
@@ -1647,3 +1648,41 @@ TEST(JointForwarding, PooledCycleKeepsSourceState) {
 }
 
 } // namespace
+
+
+// Source labels also reach destinations, which have no outgoing occurrence. A long chain
+// followed by a disconnected live component therefore crosses the occurrence index's width.
+TEST(JointForwarding, PooledHeadLabelOffsetsIncludeDestinationsWithoutNarrowing) {
+  constexpr std::int64_t chain_heads = 65535;
+  constexpr std::int64_t entries = chain_heads + 1;
+  constexpr std::int64_t occurrences = chain_heads * (chain_heads + 1) / 2 + 1;
+  constexpr std::int64_t routers = chain_heads + 3;
+  EXPECT_NO_THROW(detail::check_forwarding_count(detail::ForwardingCounter::Entry, entries));
+  EXPECT_NO_THROW(detail::check_forwarding_count(detail::ForwardingCounter::Occurrence, occurrences));
+  EXPECT_NO_THROW(detail::check_forwarding_count(detail::ForwardingCounter::Router, routers));
+  using Offset = detail::HeadLabelOffset;
+  // Each label is a root entry or is reached over an incoming occurrence. The cumulative
+  // offset must hold their sum, although each separate preflight counter fits in int32.
+  EXPECT_GE(static_cast<std::uint64_t>(std::numeric_limits<Offset>::max()),
+            2 * static_cast<std::uint64_t>(detail::kForwardingLimit));
+  std::int64_t exact_labels = 0;
+  Offset offset = 0;
+  for (std::int64_t labels = 1; labels <= chain_heads; ++labels) {
+    exact_labels += labels;
+    offset = static_cast<Offset>(exact_labels);
+    ASSERT_EQ(static_cast<std::int64_t>(offset), exact_labels);
+  }
+  exact_labels += chain_heads;  // destination labels have no outgoing occurrence
+  offset = static_cast<Offset>(exact_labels);
+  EXPECT_EQ(exact_labels, 2147516415LL);
+  EXPECT_EQ(static_cast<std::int64_t>(offset), exact_labels);
+  EXPECT_GT(static_cast<std::uint64_t>(offset), static_cast<std::uint64_t>(detail::kForwardingLimit));
+  const Offset disconnected_begin = offset;
+  offset = static_cast<Offset>(++exact_labels);
+  EXPECT_EQ(offset - disconnected_begin, Offset {1});
+  offset = static_cast<Offset>(++exact_labels);  // its destination
+  EXPECT_EQ(static_cast<std::int64_t>(offset), 2147516417LL);
+  // The bound includes destination labels; it is not the occurrence-only bound.
+  EXPECT_LE(static_cast<std::int64_t>(offset), entries + occurrences);
+  EXPECT_EQ(occurrences, 2147450881LL);
+}

@@ -92,7 +92,7 @@ TEST(FlowLedger, BaselineValidationAndSnapshots) {
 
 // A baseline with one or several defects (one error, from the shared edge-amount check): its length
 // before any entry, then its first entry outside [0, capacity] in EdgeId order, at construction
-// and at reset; amendment 9 checks the immutable baseline before bound state. A rejected reset changes
+// and at reset; the immutable baseline is checked before bound state. A rejected reset changes
 // nothing (records, allocation, baseline, the next FlowId).
 TEST(FlowLedger, BaselineDefectsReportTheFirstInOrder) {
   const auto g = shared(edge_amount_graph());

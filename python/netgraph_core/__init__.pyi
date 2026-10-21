@@ -417,7 +417,7 @@ class Graph:
         | numpy.typing.NDArray[numpy.integer],
         edge_costs: collections.abc.Sequence[typing.SupportsIndex]
         | numpy.typing.NDArray[numpy.integer],
-        resolution: typing.SupportsFloat | typing.SupportsIndex,
+        resolution: int | float | numpy.integer | numpy.floating,
     ) -> None:
         """
         Validates, in order, and reports the first defect: the resolution (a power of two in
@@ -536,7 +536,8 @@ class PredecessorDAG:
         | numpy.typing.NDArray[numpy.integer],
     ) -> PredecessorDAG:
         """
-        Validates, in order, before any traversal (ValueError on the first defect): parent_offsets of
+        A wrong type raises TypeError; structural and range defects raise ValueError. Validates, in order,
+        before any traversal: parent_offsets of
         length N + 1, parent_offsets[0] == 0, monotone, parent_offsets[N] == len(parents) ==
         len(via_edges); then every parent and via edge in range, every via edge joining (parent, child),
         no duplicate (child, via edge), acyclic; within a node the entries in ascending via EdgeId.
@@ -584,7 +585,8 @@ class Path:
         | numpy.typing.NDArray[numpy.integer],
     ) -> None:
         """
-        Validates, in order (ValueError on the first defect): every member id in range, no duplicate
+        A wrong type raises TypeError; structural and range defects raise ValueError. Validates, in order:
+        every member id in range, no duplicate
         member, a non-empty hop list, every hop non-empty, the members of a hop sharing (u, v),
         contiguous hops, no repeated node.
         """
@@ -999,8 +1001,8 @@ class ForwardingProgram:
         """
         One shared hop-by-hop program on a supplied PredecessorDAG of the graph -> ForwardingProgram: the sources
         allocated equally and pooled at every shared router exactly as ShortestPaths EQUAL/WEIGHTED (one
-        split context), the DAG trimmed to the walks from each source to its first destinations. ValueError for
-        the first failure, in this order: the endpoint sets; `dag belongs to another graph`; allocation OPTIMIZED
+        split context), the DAG trimmed to the walks from each source to its first destinations. A wrong type
+        raises TypeError; structural, range and combination defects raise ValueError, in this order: the endpoint sets; `dag belongs to another graph`; allocation OPTIMIZED
         (`from_dag allocation must be EQUAL or WEIGHTED`); weight_basis only with allocation=WEIGHTED, EXPLICIT
         with edge_weights, RESIDUAL_SNAPSHOT with residual; edge_weights' length and entries in [0, 2^62) and
         residual's (one entry per edge in [0, capacity]). A dag of another type raises TypeError. The roster is
@@ -1029,8 +1031,8 @@ class ForwardingProgram:
         | None = None,
     ) -> ForwardingProgram:
         """
-        Validate and freeze supplied routes -> ForwardingProgram (ValueError for the first failure, in this
-        order): the endpoint sets; `routes must not be empty`; when no route is a PredecessorDAG, any option given
+        Validate and freeze supplied routes -> ForwardingProgram. A wrong type raises TypeError; structural,
+        range and combination defects raise ValueError, in this order: the endpoint sets; `routes must not be empty`; when no route is a PredecessorDAG, any option given
         (`<allocation, weight_basis, edge_weights or residual> applies only to PredecessorDAG routes`); allocation
         OPTIMIZED (`from_routes allocation must be EQUAL or WEIGHTED`); weight_basis only with allocation=WEIGHTED,
         EXPLICIT with edge_weights, RESIDUAL_SNAPSHOT with residual; edge_weights' length and entries in [0,
@@ -2766,7 +2768,8 @@ def ksp(
     a single edge. Order: lowest cost; then, under a HIGHER_* tie_break only, the highest bottleneck
     (the smallest tie value along the path); then fewest hops; then the smallest EdgeId
     sequence. The result is the first k paths of that order
-    within the inclusive cost ceiling. Validated in this order before any work (ValueError): source and
+    within the inclusive cost ceiling. A wrong type raises TypeError; structural, range and combination
+    defects raise ValueError. Validated in this order before any work: source and
     destination in range, source == destination, k >= 1, the ceiling, the residual (length, then every
     entry), a foreign Eligibility. An excluded endpoint, no static route under a CostStretch ceiling, or
     no path gives [].

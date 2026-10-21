@@ -34,6 +34,12 @@ assert_type(eligibility.edge_allowed(), npt.NDArray[np.bool_])
 both = ng.Eligibility.intersect(eligibility, g.eligibility())
 assert_type(both, ng.Eligibility)
 
+# Graph resolutions take concrete Python and NumPy number scalars.
+for resolution in (1, 1.0, np.int32(1), np.uint64(1), np.float32(1), np.float64(1)):
+    numeric_graph = ng.Graph(2, [0], [1], [10], [1], resolution)
+    assert_type(numeric_graph.resolution(), float)
+    assert numeric_graph.resolution() == 1.0
+
 # Units: scalars and Python sequences have known shapes; ndarray rank needs narrowing.
 assert_type(ng.to_units(1.5, 0.5), int)
 assert_type(ng.to_units(np.float32(0.1), np.int64(1)), int)

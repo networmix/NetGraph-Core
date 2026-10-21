@@ -97,7 +97,7 @@ ShortestPaths sel(RouteTieBreak t = RouteTieBreak::FewerHops, bool multipath = t
 }
 
 // ShortestPaths with the allocation `k`, the route choice of `s` and the source allocation `o`.
-FlowPolicyConfig cost_only(RouteAllocation k = RouteAllocation::Equal, Admission a = Admission::Lossless,
+FlowPolicyConfig shortest_paths_policy(RouteAllocation k = RouteAllocation::Equal, Admission a = Admission::Lossless,
                            ShortestPaths s = {}, std::optional<SourceAllocation> o = std::nullopt) {
   s.allocation = k;
   s.source_allocation = o;
@@ -152,11 +152,11 @@ std::string construct_error(const std::vector<InEdge>& edges, std::vector<NodeId
 TEST(ConfigOrigin, MatrixTexts) {
   const std::vector<std::pair<FlowPolicyConfig, std::string>> rows = {
       {FlowPolicyConfig {.routing = ShortestPaths {}}, ""},
-      {cost_only(RouteAllocation::Equal, Admission::Lossless, {}, SourceAllocation::Optimized),
+      {shortest_paths_policy(RouteAllocation::Equal, Admission::Lossless, {}, SourceAllocation::Optimized),
        "ShortestPaths with EQUAL or WEIGHTED requires source_allocation=EQUAL"},
-      {cost_only(RouteAllocation::Weighted, Admission::Lossless, {}, SourceAllocation::Optimized),
+      {shortest_paths_policy(RouteAllocation::Weighted, Admission::Lossless, {}, SourceAllocation::Optimized),
        "ShortestPaths with EQUAL or WEIGHTED requires source_allocation=EQUAL"},
-      {cost_only(RouteAllocation::Optimized, Admission::Lossy), "ShortestPaths OPTIMIZED requires admission=LOSSLESS"},
+      {shortest_paths_policy(RouteAllocation::Optimized, Admission::Lossy), "ShortestPaths OPTIMIZED requires admission=LOSSLESS"},
       {FlowPolicyConfig {.routing = centralized(), .admission = Admission::Lossy},
        "CentralizedTE without tunnel_count requires admission=LOSSLESS"},
       {FlowPolicyConfig {.routing = centralized(SourceAllocation::Equal), .admission = Admission::Lossy},
@@ -199,7 +199,7 @@ TEST(ConfigOrigin, MatrixOrder) {
   EXPECT_EQ(construct_error(kB1, {0, 1}, {3}, FlowPolicyConfig {centralized(SourceAllocation::Equal), Admission::Lossy}),
             "CentralizedTE without tunnel_count requires admission=LOSSLESS");
   EXPECT_EQ(construct_error(kPool, {0, 1}, {3},
-                            cost_only(RouteAllocation::Equal, Admission::Lossless, kPreferPath, SourceAllocation::Optimized)),
+                            shortest_paths_policy(RouteAllocation::Equal, Admission::Lossless, kPreferPath, SourceAllocation::Optimized)),
             "ShortestPaths with EQUAL or WEIGHTED requires source_allocation=EQUAL");
   const auto g = graph(kB1);
   ShortestPathCache cache(*g);
@@ -224,7 +224,7 @@ TEST(ConfigOrigin, EndpointsBeforeOwnership) {
 
 // Finite after infinite, place(0) included, until remove().
 TEST(ConfigOrigin, FiniteAfterInfinite) {
-  for (const auto& cfg : {cost_only(), glob(), cost_only(RouteAllocation::Equal, Admission::Lossy)}) {
+  for (const auto& cfg : {shortest_paths_policy(), glob(), shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy)}) {
     Case k(kOne, {0}, {1}, cfg);
     (void)k.place(std::nullopt);
     for (Amount x : {Amount {1}, Amount {0}}) {
@@ -241,11 +241,11 @@ TEST(ConfigOrigin, FiniteAfterInfinite) {
 // single paths for every kernel; one source and multipath are accepted.
 TEST(PooledSinglePath, Rejected) {
   for (auto k : {RouteAllocation::Equal, RouteAllocation::Weighted, RouteAllocation::Optimized}) {
-    EXPECT_EQ(construct_error(kPool, {0, 1}, {3}, cost_only(k, Admission::Lossless, kPreferPath)), kQ12);
-    EXPECT_EQ(construct_error(kPool, {0, 1}, {3}, cost_only(k, Admission::Lossless, kPreferPath), {1}), kQ12);
-    EXPECT_EQ(construct_error(kPool, {0, 0}, {3}, cost_only(k, Admission::Lossless, kPreferPath)), "");
+    EXPECT_EQ(construct_error(kPool, {0, 1}, {3}, shortest_paths_policy(k, Admission::Lossless, kPreferPath)), kQ12);
+    EXPECT_EQ(construct_error(kPool, {0, 1}, {3}, shortest_paths_policy(k, Admission::Lossless, kPreferPath), {1}), kQ12);
+    EXPECT_EQ(construct_error(kPool, {0, 0}, {3}, shortest_paths_policy(k, Admission::Lossless, kPreferPath)), "");
     EXPECT_EQ(construct_error(kPool, {0, 1}, {3},
-                              cost_only(k, Admission::Lossless, sel(RouteTieBreak::HigherCapacity, true, false))),
+                              shortest_paths_policy(k, Admission::Lossless, sel(RouteTieBreak::HigherCapacity, true, false))),
               "");
   }
 }
@@ -253,11 +253,11 @@ TEST(PooledSinglePath, Rejected) {
 // FEWER_HOPS single paths pool: 0: [e0, e2], 1: [e1, e2] (equal cost and hops: e2).
 TEST(PooledSinglePath, DeterministicPaths) {
   const auto det = sel(RouteTieBreak::FewerHops, false);
-  Case k(kPool, {0, 1}, {3}, cost_only(RouteAllocation::Equal, Admission::Lossless, det));
+  Case k(kPool, {0, 1}, {3}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossless, det));
   const auto r = k.place(std::nullopt);
   EXPECT_EQ(r.call_delivered, 1);
   EXPECT_EQ(rows(r), (std::vector<Row> {{0, kNone, 1, 1, 0, 0}, {1, kNone, 0, 0, 0, 0}}));
-  Case lossy(kPool, {0, 1}, {3}, cost_only(RouteAllocation::Equal, Admission::Lossy, det));
+  Case lossy(kPool, {0, 1}, {3}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy, det));
   const auto l = lossy.place(2);
   EXPECT_EQ(l.call_delivered, 1);
   EXPECT_EQ(l.call_edge_drops, (Drops {{2, 1}}));
@@ -272,27 +272,27 @@ TEST(PooledSinglePath, DeterministicPaths) {
 
 // One split at the shared router, attributed member by member.
 TEST(Pooled, SharedRouterSplitsOnce) {
-  Case k(kPool, {0, 1}, {3}, cost_only());
+  Case k(kPool, {0, 1}, {3}, shortest_paths_policy());
   const auto r = k.place(2, kEdges);
   EXPECT_EQ(r.call_delivered, 2);
   EXPECT_EQ(r.termination, Termination::Complete);
   EXPECT_EQ(*r.edge_flows, (std::vector<Amount> {1, 1, 1, 1}));
   EXPECT_EQ(rows(r), (std::vector<Row> {{0, kNone, 1, 1, 0, 0}, {1, kNone, 1, 1, 0, 0}}));
   EXPECT_EQ(k.records(), (decltype(k.records()) {{{{0, 1}, {2, 1}}, 1}, {{{1, 1}, {3, 1}}, 1}}));
-  Case inf(kPool, {0, 1}, {3}, cost_only());
+  Case inf(kPool, {0, 1}, {3}, shortest_paths_policy());
   const auto i = inf.place(std::nullopt);
   EXPECT_EQ(i.call_delivered, 2);
   EXPECT_EQ(i.termination, Termination::Exhausted);
   EXPECT_FALSE(i.requested.has_value());
   EXPECT_FALSE(i.unadmitted.has_value());
   EXPECT_FALSE(i.call_undelivered.has_value());
-  Case w(kPool, {0, 1}, {3}, cost_only(RouteAllocation::Weighted));
+  Case w(kPool, {0, 1}, {3}, shortest_paths_policy(RouteAllocation::Weighted));
   EXPECT_EQ(w.place(2).call_delivered, 2);
 }
 
 // Each member's arrivals divided by what each source brought.
 TEST(Pooled, LossyAttributionByArrivals) {
-  Case k(kPool, {0, 1}, {3}, cost_only(RouteAllocation::Equal, Admission::Lossy));
+  Case k(kPool, {0, 1}, {3}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy));
   const auto r = k.place(4);
   EXPECT_EQ(r.call_delivered, 2);
   EXPECT_EQ(r.call_edge_drops, (Drops {{2, 1}, {3, 1}}));
@@ -304,15 +304,15 @@ TEST(Pooled, LossyAttributionByArrivals) {
 // source behind the zero edge nothing; Lossy drops its share on that edge.
 TEST(Pooled, EqualEntryThatCannotPass) {
   for (const auto& [edges, want] : {std::pair {kB3Z, Amount {0}}, std::pair {kB3P, Amount {1}}}) {
-    Case eb(edges, {0, 1}, {2}, cost_only());
+    Case eb(edges, {0, 1}, {2}, shortest_paths_policy());
     const auto r = eb.place(10);
     EXPECT_EQ(r.call_delivered, want);
     EXPECT_EQ(r.termination, Termination::Exhausted);
     EXPECT_EQ(eb.p->records().size(), 2U);
-    Case w(edges, {0, 1}, {2}, cost_only(RouteAllocation::Weighted));
+    Case w(edges, {0, 1}, {2}, shortest_paths_policy(RouteAllocation::Weighted));
     EXPECT_EQ(w.place(10).call_delivered, want);
   }
-  Case lossy(kB3Z, {0, 1}, {2}, cost_only(RouteAllocation::Equal, Admission::Lossy));
+  Case lossy(kB3Z, {0, 1}, {2}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy));
   const auto l = lossy.place(10);
   EXPECT_EQ(l.call_delivered, 5);
   EXPECT_EQ(l.call_edge_drops, (Drops {{0, 5}}));
@@ -322,7 +322,7 @@ TEST(Pooled, EqualEntryThatCannotPass) {
 
 // Weighted gives the zero edge weight 0; source 0's share has no member and is source loss.
 TEST(Pooled, WeightedZeroRouteIsSourceLoss) {
-  Case k(kB3Z, {0, 1}, {2}, cost_only(RouteAllocation::Weighted, Admission::Lossy));
+  Case k(kB3Z, {0, 1}, {2}, shortest_paths_policy(RouteAllocation::Weighted, Admission::Lossy));
   const auto r = k.place(10);
   EXPECT_EQ(r.call_delivered, 5);
   EXPECT_EQ(r.termination, Termination::Complete);
@@ -334,12 +334,12 @@ TEST(Pooled, WeightedZeroRouteIsSourceLoss) {
 
 // P10, P11 on B1.
 TEST(Pooled, EqualOriginLimitsTheTotal) {
-  Case k(kB1, {0, 1}, {3}, cost_only());
+  Case k(kB1, {0, 1}, {3}, shortest_paths_policy());
   const auto r = k.place(12);
   EXPECT_EQ(r.call_delivered, 4);
   EXPECT_EQ(r.termination, Termination::Exhausted);
   EXPECT_EQ(rows(r), (std::vector<Row> {{0, kNone, 2, 2, 0, 0}, {1, kNone, 2, 2, 0, 0}}));
-  Case lossy(kB1, {0, 1}, {3}, cost_only(RouteAllocation::Equal, Admission::Lossy));
+  Case lossy(kB1, {0, 1}, {3}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy));
   const auto l = lossy.place(12);
   EXPECT_EQ(l.call_delivered, 8);
   EXPECT_EQ(l.call_edge_drops, (Drops {{0, 4}}));
@@ -347,18 +347,18 @@ TEST(Pooled, EqualOriginLimitsTheTotal) {
 
 // CHAIN: source 1's traffic passes source 0's router.
 TEST(Pooled, TransitThroughASource) {
-  Case k(kChain, {0, 1}, {2}, cost_only(RouteAllocation::Equal, Admission::Lossy));
+  Case k(kChain, {0, 1}, {2}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy));
   const auto r = k.place(10);
   EXPECT_EQ(r.call_delivered, 3);
   EXPECT_EQ(r.call_edge_drops, (Drops {{0, 7}}));
   EXPECT_EQ(rows(r), (std::vector<Row> {{0, 5, 5, 2, 0, 3}, {1, 5, 5, 1, 0, 4}}));
   EXPECT_EQ(k.records(), (decltype(k.records()) {{{{0, 2}}, 2}, {{{0, 1}, {1, 5}}, 1}}));
   for (const auto& rec : k.p->records()) expect_conserved(*k.g, rec, "transit through a source");
-  Case lossless(kChain, {0, 1}, {2}, cost_only());
+  Case lossless(kChain, {0, 1}, {2}, shortest_paths_policy());
   const auto l = lossless.place(std::nullopt);
   EXPECT_EQ(l.call_delivered, 3);
   EXPECT_EQ(rows(l), (std::vector<Row> {{0, kNone, 2, 2, 0, 0}, {1, kNone, 1, 1, 0, 0}}));
-  Case hop(kChain, {0, 1}, {2}, cost_only(RouteAllocation::Equal, Admission::Lossy));
+  Case hop(kChain, {0, 1}, {2}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy));
   const auto h = hop.place(std::nullopt);
   EXPECT_EQ(h.call_delivered, 3);
   EXPECT_EQ(h.termination, Termination::Exhausted);
@@ -371,7 +371,7 @@ TEST(Pooled, TransitThroughASource) {
 TEST(Pooled, ResidualWeightsOnTheCommonView) {
   auto residual_basis = sel(RouteTieBreak::FewerHops);
   residual_basis.weight_basis = WeightBasis::ResidualSnapshot;
-  auto snapshot = cost_only(RouteAllocation::Weighted, Admission::Lossless, residual_basis);
+  auto snapshot = shortest_paths_policy(RouteAllocation::Weighted, Admission::Lossless, residual_basis);
   Case k(kSnap, {0, 1}, {3}, snapshot, {}, {10, 10, 2, 10});
   const auto r = k.place(std::nullopt);
   EXPECT_EQ(r.call_delivered, 12);
@@ -386,7 +386,7 @@ TEST(Pooled, WeightsFrozenForTheEpoch) {
   EXPECT_EQ(other->place(8).call_delivered, 8);
   auto residual_basis = sel(RouteTieBreak::FewerHops);
   residual_basis.weight_basis = WeightBasis::ResidualSnapshot;
-  auto snapshot = cost_only(RouteAllocation::Weighted, Admission::Lossless, residual_basis);
+  auto snapshot = shortest_paths_policy(RouteAllocation::Weighted, Admission::Lossless, residual_basis);
   FlowPolicy p(fg, v({0, 1}), v({3}), snapshot);
   EXPECT_EQ(p.place(2).call_delivered, 2);
   other->remove();
@@ -397,7 +397,7 @@ TEST(Pooled, WeightsFrozenForTheEpoch) {
 
 // The first-hop experiment.
 TEST(Pooled, FirstHopExperiment) {
-  Case k(kPriv, {0, 1}, {2}, cost_only(RouteAllocation::Equal, Admission::Lossy));
+  Case k(kPriv, {0, 1}, {2}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy));
   const auto r = k.place(std::nullopt);
   EXPECT_EQ(r.call_delivered, 10);
   EXPECT_EQ(lo(r.offered), 10);
@@ -433,7 +433,7 @@ TEST(Pooled, RecordsStayOnTheirRoutesAndAccountExactly) {
     const auto a = pick(2) == 0 ? Admission::Lossless : Admission::Lossy;
     const auto choice = sel(RouteTieBreak::FewerHops, pick(3) != 0);
     FlowLedger fg(g);
-    FlowPolicy p(fg, s, t, cost_only(k, a, choice), &mask);
+    FlowPolicy p(fg, s, t, shortest_paths_policy(k, a, choice), &mask);
     const std::string where = "trial " + std::to_string(trial);
     for (int call = 0, calls = 1 + pick(3); call < calls; ++call) {
       const std::optional<Amount> vol = pick(5) == 0 && call == calls - 1 ? std::nullopt : std::optional<Amount> {pick(9)};
@@ -486,7 +486,7 @@ TEST(Pooled, RecordsStayOnTheirRoutesAndAccountExactly) {
 // ---------------------------------------------------------------- increments and zero calls
 
 TEST(Increments, LosslessRefusedUnitsStayRefused) {
-  Case k(kInc, {0, 1}, {2}, cost_only());
+  Case k(kInc, {0, 1}, {2}, shortest_paths_policy());
   const auto a = k.place(3);
   const auto b = k.place(1);
   EXPECT_EQ(a.call_delivered, 2);
@@ -496,7 +496,7 @@ TEST(Increments, LosslessRefusedUnitsStayRefused) {
   EXPECT_EQ(lo(b.admitted), 2);
   EXPECT_EQ(lo(b.unadmitted), 2);
   EXPECT_FALSE(b.offered.has_value());
-  Case lossy(kInc, {0, 1}, {2}, cost_only(RouteAllocation::Equal, Admission::Lossy));
+  Case lossy(kInc, {0, 1}, {2}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy));
   const auto la = lossy.place(3);
   const auto lb = lossy.place(1);
   EXPECT_EQ(la.call_delivered, 2);
@@ -510,9 +510,9 @@ TEST(Increments, LosslessRefusedUnitsStayRefused) {
   // Another owner holds 8, leaves, places 5.
   const auto g = graph(kOne);
   FlowLedger fg(g);
-  FlowPolicy other(fg, v({0}), v({1}), cost_only());
+  FlowPolicy other(fg, v({0}), v({1}), shortest_paths_policy());
   (void)other.place(8);
-  FlowPolicy p(fg, v({0}), v({1}), cost_only());
+  FlowPolicy p(fg, v({0}), v({1}), shortest_paths_policy());
   EXPECT_EQ(p.place(5).call_delivered, 2);
   other.remove();
   (void)other.place(5);
@@ -520,12 +520,12 @@ TEST(Increments, LosslessRefusedUnitsStayRefused) {
   EXPECT_EQ(r.call_delivered, 1);
   EXPECT_EQ(lo(r.requested), 6);
   EXPECT_EQ(lo(r.unadmitted), 3);
-  Case rc(kRc, {0}, {1}, cost_only(RouteAllocation::Equal, Admission::Lossy));
+  Case rc(kRc, {0}, {1}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy));
   EXPECT_EQ(rc.place(1).call_delivered, 1);
   EXPECT_EQ(rc.place(1).call_delivered, 0);
-  Case rc2(kRc, {0}, {1}, cost_only(RouteAllocation::Equal, Admission::Lossy));
+  Case rc2(kRc, {0}, {1}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy));
   EXPECT_EQ(rc2.place(2).call_delivered, 2);
-  Case rc3(kRc, {0}, {1}, cost_only());
+  Case rc3(kRc, {0}, {1}, shortest_paths_policy());
   EXPECT_EQ(rc3.place(1).call_delivered, 1);
   EXPECT_EQ(*rc3.place(1, kEdges).edge_flows, (std::vector<Amount> {1, 1}));
 }
@@ -534,7 +534,7 @@ TEST(Increments, LosslessRefusedUnitsStayRefused) {
 // remove().
 TEST(Epochs, ZeroCallBeforePreparation) {
   for (const bool global : {false, true}) {
-    Case k(kPar, {0}, {1}, global ? glob() : cost_only(), {}, {4, 6});
+    Case k(kPar, {0}, {1}, global ? glob() : shortest_paths_policy(), {}, {4, 6});
     auto unprepared = [&](const PlacementResult& r) {
       EXPECT_EQ(r.call_delivered, 0);
       EXPECT_EQ(r.call_undelivered, 0);
@@ -567,7 +567,7 @@ TEST(Epochs, ZeroCallBeforePreparation) {
 // ---------------------------------------------------------------- the controllers
 
 // One controller on the union of the sources' shortest routes.
-TEST(CostOnlyMaxFlow, OptimizedPoolsTheRoster) {
+TEST(ShortestPathsMaxFlow, OptimizedPoolsTheRoster) {
   struct Want {
     std::vector<InEdge> edges;
     std::vector<NodeId> s;
@@ -585,7 +585,7 @@ TEST(CostOnlyMaxFlow, OptimizedPoolsTheRoster) {
       {kSpf, {0}, 1, std::nullopt, 5, 0, 0, {{}}},
   };
   for (const auto& w : wants) {
-    Case k(w.edges, w.s, {w.t}, cost_only(RouteAllocation::Optimized, Admission::Lossless, {}, w.source_allocation));
+    Case k(w.edges, w.s, {w.t}, shortest_paths_policy(RouteAllocation::Optimized, Admission::Lossless, {}, w.source_allocation));
     const auto r = k.place(w.request, kCut);
     EXPECT_EQ(r.call_delivered, w.delivered);
     EXPECT_EQ(r.termination, w.delivered == w.request ? Termination::Complete : Termination::Exhausted);
@@ -596,7 +596,7 @@ TEST(CostOnlyMaxFlow, OptimizedPoolsTheRoster) {
     for (const auto& rec : k.p->records()) got.push_back(rec.edge_flows);
     EXPECT_EQ(got, w.records);
   }
-  Case r4(kR4, {0, 1}, {2}, cost_only(RouteAllocation::Optimized, Admission::Lossless, {}, SourceAllocation::Equal));
+  Case r4(kR4, {0, 1}, {2}, shortest_paths_policy(RouteAllocation::Optimized, Admission::Lossless, {}, SourceAllocation::Equal));
   EXPECT_EQ(r4.place(3).call_delivered, 3);
   EXPECT_EQ(r4.place(3).call_delivered, 1);
   EXPECT_EQ(*r4.place(0).total_cost, c(20));
@@ -657,7 +657,7 @@ TEST(GlobalEqual, Increments) {
   EXPECT_EQ(lo(b.unadmitted), 2);
   const auto g = graph(kOne);
   FlowLedger fg(g);
-  FlowPolicy other(fg, v({0}), v({1}), cost_only());
+  FlowPolicy other(fg, v({0}), v({1}), shortest_paths_policy());
   (void)other.place(8);
   FlowPolicy p(fg, v({0}), v({1}), glob());
   EXPECT_EQ(p.place(5).call_delivered, 2);
@@ -867,7 +867,7 @@ void certify_controllers(bool global) {
     std::vector<Amount> view(g->edge_capacity_units().begin(), g->edge_capacity_units().end());
     std::vector<Amount> delivered_by_source_allocation;
     for (const auto source_allocation : {SourceAllocation::Equal, SourceAllocation::Optimized}) {
-      const auto cfg = global ? glob(source_allocation) : cost_only(RouteAllocation::Optimized, Admission::Lossless, {}, source_allocation);
+      const auto cfg = global ? glob(source_allocation) : shortest_paths_policy(RouteAllocation::Optimized, Admission::Lossless, {}, source_allocation);
       const std::string where = "trial " + std::to_string(trial) + (source_allocation == SourceAllocation::Equal ? " equal" : " optimized");
       const auto r = evaluate_demand(*g, s, t, EvaluationOptions {cfg, &mask, nullptr, kEdges});
       const auto& flows = *r.edge_flows;
@@ -925,7 +925,7 @@ void certify_controllers(bool global) {
 
 TEST(GlobalEqual, Certificates) { certify_controllers(true); }
 
-TEST(CostOnlyMaxFlow, Certificates) { certify_controllers(false); }
+TEST(ShortestPathsMaxFlow, Certificates) { certify_controllers(false); }
 
 // total_cost is exact beyond 64 bits, for both controllers under both source allocations (the values as
 // hexadecimal halves {hi, lo}). One link of capacity = cost = 2^40: 2^80. Two sources, 0 -> 2
@@ -953,7 +953,7 @@ TEST(ResultShape, TotalCostBeyond64Bits) {
     for (const auto source_allocation : {SourceAllocation::Optimized, SourceAllocation::Equal}) {
       const Counter128 want = source_allocation == SourceAllocation::Optimized ? w.optimized : w.equal;
       for (const auto& cfg :
-           {glob(source_allocation), cost_only(RouteAllocation::Optimized, Admission::Lossless, {}, source_allocation)}) {
+           {glob(source_allocation), shortest_paths_policy(RouteAllocation::Optimized, Admission::Lossless, {}, source_allocation)}) {
         Case k(w.edges, w.s, {w.t}, cfg);
         EXPECT_EQ(*k.place(std::nullopt).total_cost, want);
         EXPECT_EQ(*evaluate_demand(*g, w.s, v({w.t}), EvaluationOptions {cfg}).total_cost, want);
@@ -992,7 +992,7 @@ TEST(GlobalMinCut, Flag) {
 // ---------------------------------------------------------------- terminations and the result
 
 TEST(Terminations, Order) {
-  for (const auto& cfg : {glob(), cost_only(), cost_only(RouteAllocation::Equal, Admission::Lossy)}) {
+  for (const auto& cfg : {glob(), shortest_paths_policy(), shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy)}) {
     Case k({{1, 0, 5, 1}}, {0}, {1}, cfg);
     EXPECT_EQ(k.place(0).termination, Termination::Complete);
     const auto r = k.place(5);
@@ -1007,18 +1007,18 @@ TEST(Terminations, Order) {
       EXPECT_EQ(lo(r.unadmitted), 5);
     }
   }
-  Case w(kZero, {0}, {1}, cost_only(RouteAllocation::Weighted, Admission::Lossy));
+  Case w(kZero, {0}, {1}, shortest_paths_policy(RouteAllocation::Weighted, Admission::Lossy));
   const auto wr = w.place(2);
   EXPECT_EQ(wr.termination, Termination::NoActiveWeight);
   EXPECT_EQ(wr.call_source_drops, 2);
   EXPECT_EQ(lo(wr.offered), 2);
-  Case wl(kZero, {0}, {1}, cost_only(RouteAllocation::Weighted));
+  Case wl(kZero, {0}, {1}, shortest_paths_policy(RouteAllocation::Weighted));
   const auto wlr = wl.place(2);
   EXPECT_EQ(wlr.termination, Termination::NoActiveWeight);
   EXPECT_EQ(lo(wlr.unadmitted), 2);
-  Case lossy(kB1, {0, 1}, {3}, cost_only(RouteAllocation::Equal, Admission::Lossy));
+  Case lossy(kB1, {0, 1}, {3}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy));
   EXPECT_EQ(lossy.place(12).termination, Termination::Complete);
-  Case unlimited(kPool, {0, 1}, {3}, cost_only());
+  Case unlimited(kPool, {0, 1}, {3}, shortest_paths_policy());
   EXPECT_EQ(unlimited.place(std::nullopt).termination, Termination::Exhausted);
 }
 
@@ -1026,7 +1026,7 @@ TEST(Terminations, Order) {
 TEST(Terminations, ControllerAtZero) {
   Case g(kZero, {0}, {1}, glob());
   EXPECT_EQ(g.place(5).termination, Termination::Exhausted);
-  Case m(kSpf, {0}, {1}, cost_only(RouteAllocation::Optimized));
+  Case m(kSpf, {0}, {1}, shortest_paths_policy(RouteAllocation::Optimized));
   EXPECT_EQ(m.place(5).termination, Termination::Exhausted);
 }
 
@@ -1048,7 +1048,7 @@ TEST(ResultShape, LosslessAccounting) {
 
 // Lossy accounting: state versus call.
 TEST(ResultShape, LossyAccounting) {
-  Case k(kChain, {0, 1}, {2}, cost_only(RouteAllocation::Equal, Admission::Lossy));
+  Case k(kChain, {0, 1}, {2}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy));
   const auto r = k.place(10);
   EXPECT_EQ(lo(r.requested), 10);
   EXPECT_EQ(lo(r.offered), 10);
@@ -1057,7 +1057,7 @@ TEST(ResultShape, LossyAccounting) {
   EXPECT_EQ(lo(r.unadmitted), 0);
   EXPECT_EQ(lo(r.source_drops), 0);
   EXPECT_EQ(r.edge_drops, (Counters {{0, c(7)}}));
-  Case inc(kInc, {0, 1}, {2}, cost_only(RouteAllocation::Equal, Admission::Lossy));
+  Case inc(kInc, {0, 1}, {2}, shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy));
   (void)inc.place(3);
   const auto b = inc.place(1);
   EXPECT_TRUE(b.call_edge_drops.empty());
@@ -1066,12 +1066,12 @@ TEST(ResultShape, LossyAccounting) {
 
 // A row for every input source; total_cost only for the controllers.
 TEST(ResultShape, RowsForEveryInputSource) {
-  Case k(kRows, {0, 1, 4}, {3}, cost_only(), {4});
+  Case k(kRows, {0, 1, 4}, {3}, shortest_paths_policy(), {4});
   EXPECT_EQ(rows(k.place(3)),
             (std::vector<Row> {{0, kNone, 3, 3, 0, 0}, {1, kNone, 0, 0, 0, 0}, {4, kNone, 0, 0, 0, 0}}));
   const auto g = graph(kB1);
   const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0})});
-  for (const auto& cfg : {cost_only(), cost_only(RouteAllocation::Weighted)}) {
+  for (const auto& cfg : {shortest_paths_policy(), shortest_paths_policy(RouteAllocation::Weighted)}) {
     FlowLedger fg(g);
     EXPECT_FALSE(FlowPolicy(fg, v({0, 1}), v({3}), cfg).place(1).total_cost.has_value());
   }
@@ -1084,7 +1084,7 @@ TEST(ResultShape, RowsForEveryInputSource) {
   FlowLedger fs(g);
   EXPECT_EQ(*FlowPolicy(fs, v({0}), v({3}), FlowPolicyConfig {.routing = centralized(SourceAllocation::Optimized, dag_of(*g, {0}))}).place(1).total_cost,
             c(1));
-  Case mf(kB1, {0, 1}, {3}, cost_only(RouteAllocation::Optimized));
+  Case mf(kB1, {0, 1}, {3}, shortest_paths_policy(RouteAllocation::Optimized));
   EXPECT_EQ(*mf.place(12).total_cost, c(32));
 }
 
@@ -1117,14 +1117,14 @@ TEST(Evaluators, CapacityUnderBothOrigins) {
   const std::vector<std::pair<FlowPolicyConfig, Amount>> wants = {
       {glob(SourceAllocation::Equal), 4},
       {glob(), 12},
-      {cost_only(RouteAllocation::Optimized), 12},
-      {cost_only(RouteAllocation::Optimized, Admission::Lossless, {}, SourceAllocation::Equal), 4},
-      {cost_only(), 4},
+      {shortest_paths_policy(RouteAllocation::Optimized), 12},
+      {shortest_paths_policy(RouteAllocation::Optimized, Admission::Lossless, {}, SourceAllocation::Equal), 4},
+      {shortest_paths_policy(), 4},
   };
   for (const auto& [cfg, delivered] : wants) EXPECT_EQ(evaluate_demand(*g, v({0, 1}), v({3}), EvaluationOptions {cfg}).call_delivered, delivered);
-  EXPECT_EQ(evaluate_demand(*graph(kPool), v({0, 1}), v({3}), EvaluationOptions {cost_only()}).call_delivered, 2);
+  EXPECT_EQ(evaluate_demand(*graph(kPool), v({0, 1}), v({3}), EvaluationOptions {shortest_paths_policy()}).call_delivered, 2);
   const auto r = evaluate_demand(*graph(kPriv), v({0, 1}), v({2}),
-                          EvaluationOptions {cost_only(RouteAllocation::Equal, Admission::Lossy)});
+                          EvaluationOptions {shortest_paths_policy(RouteAllocation::Equal, Admission::Lossy)});
   EXPECT_EQ(r.delivered, 10);
   EXPECT_EQ(lo(r.offered), 10);
   EXPECT_FALSE(r.requested.has_value());
@@ -1142,7 +1142,7 @@ TEST(Evaluators, BatchEqual) {
 // The pooled single-path rule per pair, the lowest failing pair.
 TEST(Evaluators, BatchQ12PerPair) {
   const auto g = graph(kPool);
-  const EvaluationOptions opts {cost_only(RouteAllocation::Equal, Admission::Lossless, kPreferPath)};
+  const EvaluationOptions opts {shortest_paths_policy(RouteAllocation::Equal, Admission::Lossless, kPreferPath)};
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> bad = {{{0}, {3}}, {{0, 1}, {3}}};
   EXPECT_EQ(error_of([&] { (void)evaluate_pairs(*g, bad, opts, {}, 1); }), kQ12);
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> good = {{{0}, {3}}, {{1}, {3}}};
@@ -1162,7 +1162,7 @@ TEST(Evaluators, SensitivityEqualGlobal) {
 
 // Pooled ShortestPaths: deleting e0 takes source 0 out of the roster.
 TEST(Evaluators, SensitivityPooled) {
-  const auto r = evaluate_edge_failures(*graph(kB1), v({0, 1}), v({3}), EvaluationOptions {cost_only()}, 1);
+  const auto r = evaluate_edge_failures(*graph(kB1), v({0, 1}), v({3}), EvaluationOptions {shortest_paths_policy()}, 1);
   EXPECT_EQ(r.baseline.call_delivered, 4);
   std::vector<std::pair<EdgeId, Amount>> got;
   for (const auto& e : r.entries) got.emplace_back(e.edge, e.delivery_reduction);

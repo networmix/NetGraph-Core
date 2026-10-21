@@ -12,10 +12,10 @@ import itertools
 import numpy as np
 import pytest
 from helpers import (
-    COSTONLY,
     GLOBAL,
     INF,
     L62,
+    SHORTEST_PATHS,
     build,
     dag_of,
     exact,
@@ -308,7 +308,7 @@ def test_record_endpoint_sets_are_ascending():
     # once; a record per source under CentralizedTE, each with its one source.
     g = build(4, [(0, 2, 5, 1), (0, 3, 5, 1), (1, 2, 5, 1), (1, 3, 5, 1)])
     fg = ngc.FlowLedger(g)
-    ngc.FlowPolicy(fg, 0, [3, 2, 3], COSTONLY).place(2)
+    ngc.FlowPolicy(fg, 0, [3, 2, 3], SHORTEST_PATHS).place(2)
     ngc.FlowPolicy(fg, [1, 0, 1], [3, 2], GLOBAL).place(4)
     records = fg.records()
     assert [r.destinations for r in records] == [[2, 3]] * len(records)
@@ -414,7 +414,9 @@ def test_rejected_requests_leave_the_policy_and_the_ledger(routing):
     if routing == "Pinned":
         p = pinned(fg, 0, 3, [0, 2], EB)  # EdgeIds of 0 -> 1 -> 3
     else:
-        p = ngc.FlowPolicy(fg, 0, 3, GLOBAL if routing == "CentralizedTE" else COSTONLY)
+        p = ngc.FlowPolicy(
+            fg, 0, 3, GLOBAL if routing == "CentralizedTE" else SHORTEST_PATHS
+        )
 
     def state():
         own = p._state() if HOOKS else None

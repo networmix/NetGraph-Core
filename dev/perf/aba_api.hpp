@@ -277,7 +277,7 @@ inline std::uint64_t spf_path(const Graph& g, int src, int dst, const Sel& s, co
   return d.h;
 }
 
-// A fixed DAG for placement kernels: the cost-only destination search (setup, not timed).
+// A fixed DAG for placement kernels: the ShortestPaths destination search (setup, not timed).
 struct Dag {
   std::shared_ptr<const nc::PredecessorDAG> dag;
 };
@@ -348,7 +348,7 @@ struct Ledger {
 };
 
 // Scalar ShortestPaths policy capacity: place(+inf) of a ShortestPaths policy on a fresh ledger.
-inline double costonly_capacity(const Graph& g, int src, int dst, Kernel k, const Elig& el) {
+inline double shortest_paths_capacity(const Graph& g, int src, int dst, Kernel k, const Elig& el) {
   const nc::NodeId s[1] = {src};
   const nc::NodeId t[1] = {dst};
   nc::EvaluationOptions opts {config(nc::ShortestPaths {}, k), el.get(), nullptr, {}};
@@ -891,11 +891,11 @@ inline std::uint64_t t2_mesh(const Graph& g, const std::vector<std::int64_t>& fr
 
 // One series of ShortestPaths Equal placements with one ShortestPathCache per series (the support of
 // each destination set under the series Eligibility; NetGraph's hop-by-hop engine).
-struct CostOnlySeries {
+struct ShortestPathsSeries {
   const Graph& g;
   const Elig& el;
   nc::ShortestPathCache cache;
-  CostOnlySeries(const Graph& graph, const Elig& elig) : g(graph), el(elig), cache(graph.ref()) {}
+  ShortestPathsSeries(const Graph& graph, const Elig& elig) : g(graph), el(elig), cache(graph.ref()) {}
   // Places every demand on a fresh ledger; returns the delivered amount per demand.
   std::vector<double> place_all(const std::vector<std::pair<int, int>>& demands, const std::vector<double>& offers) {
     nc::FlowLedger fg(g.g);

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from helpers import COSTONLY, build, exact, ledger_state, t1_config
+from helpers import SHORTEST_PATHS, build, exact, ledger_state, t1_config
 
 import netgraph_core as ngc
 
@@ -50,7 +50,7 @@ def test_holds_are_never_added_to_carried_load():
     # After the T1 call (carried 4, held 6) a ShortestPaths policy places the residual 6 (not 10 - 4 - 6).
     fg = ngc.FlowLedger(one10())
     t1(fg, 0, 1, 1).replace(4, design_demand=6)
-    assert ngc.FlowPolicy(fg, 0, 1, COSTONLY).place(10).call_delivered == 6
+    assert ngc.FlowPolicy(fg, 0, 1, SHORTEST_PATHS).place(10).call_delivered == 6
 
 
 def test_unreserved_texts():
@@ -176,7 +176,7 @@ def test_reservation_output_and_record_holds():
         for e, x in rec.edge_reservations:
             held[e] += x
     assert held == fg.reserved().tolist()
-    c = ngc.FlowPolicy(ngc.FlowLedger(twoh(2, 10)), [0, 1], 2, COSTONLY)
+    c = ngc.FlowPolicy(ngc.FlowLedger(twoh(2, 10)), [0, 1], 2, SHORTEST_PATHS)
     assert c.place(4, HOLDS).edge_reservations.tolist() == [0, 0]
     assert r.residual is None  # only what is requested
     assert p.replace(12, design_demand=12).edge_reservations is None

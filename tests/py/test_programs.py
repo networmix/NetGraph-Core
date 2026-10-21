@@ -93,7 +93,7 @@ def pinned(
     )
 
 
-def cost_only(allocation=EB, admission=LOSSLESS, routing=None, **fields):
+def shortest_paths(allocation=EB, admission=LOSSLESS, routing=None, **fields):
     return ngc.FlowPolicyConfig(
         routing=shortest(routing, allocation=allocation, **fields), admission=admission
     )
@@ -201,16 +201,16 @@ def test_single_source_decomposed():
     assert [t.path_cost for t in r.program.tunnels] == [2, 3]
     assert r.total_cost == 34
     assert r.program.source_weights == ((0, 12),)
-    mf = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, cost_only(MF)).place(12)
+    mf = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, shortest_paths(MF)).place(12)
     assert mf.call_delivered == 2
     assert listing(mf.program) == [(0, [0, 2], 2)]
     assert mf.program.source_weights == ((0, 2),)
 
 
-def test_cost_only_split_program():
+def test_shortest_paths_split_program():
     # A ShortestPaths split program lists no tunnel.
     g = graph(4, POOL2)
-    r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, cost_only()).place(2)
+    r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, shortest_paths()).place(2)
     assert r.program.tunnels == ()
     assert r.program.source_weights is None
     assert r.program.sources == (0, 1) and r.program.destinations == (3,)
@@ -261,7 +261,7 @@ def test_empty_roster_program():
     # An empty roster installs an empty program.
     g = graph(2, ONE)
     p = ngc.FlowPolicy(
-        ngc.FlowLedger(g), 0, 1, cost_only(), g.eligibility(excluded_nodes=[0])
+        ngc.FlowLedger(g), 0, 1, shortest_paths(), g.eligibility(excluded_nodes=[0])
     )
     r = p.place(1)
     assert r.termination == T.NO_ROUTE
@@ -332,38 +332,38 @@ def test_global_support_wide_cost_and_ownership():
 def test_explicit_weights():
     # Configured (explicit) weights.
     g = par2(10, 10)
-    cfg = cost_only(
+    cfg = shortest_paths(
         W, LOSSY, weight_basis=ngc.WeightBasis.EXPLICIT, edge_weights=[1, 2]
     )
     r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg).place(
         12, ngc.OutputOptions(edge_flows=True)
     )
     assert r.edge_flows.tolist() == [4, 8]
-    cap = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cost_only(W, LOSSY)).place(
+    cap = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, shortest_paths(W, LOSSY)).place(
         12, ngc.OutputOptions(edge_flows=True)
     )
     assert cap.edge_flows.tolist() == [6, 6]
-    ll = cost_only(W, weight_basis=ngc.WeightBasis.EXPLICIT, edge_weights=[1, 2])
+    ll = shortest_paths(W, weight_basis=ngc.WeightBasis.EXPLICIT, edge_weights=[1, 2])
     assert ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, ll).place(INF).call_delivered == 15
     assert ngc.evaluate_demand(g, 0, 1, ngc.EvaluationOptions(ll)).call_delivered == 15
     # A positive weight on an edge of capacity 0 becomes 0.
     z = par2(0, 10)
-    cfg = cost_only(
+    cfg = shortest_paths(
         W, LOSSY, weight_basis=ngc.WeightBasis.EXPLICIT, edge_weights=[5, 1]
     )
     r = ngc.FlowPolicy(ngc.FlowLedger(z), 0, 1, cfg).place(7)
     assert (r.call_delivered, r.call_edge_drops) == (7, [])
     # A zero weight prunes.
-    cfg = cost_only(W, weight_basis=ngc.WeightBasis.EXPLICIT, edge_weights=[0, 3])
+    cfg = shortest_paths(W, weight_basis=ngc.WeightBasis.EXPLICIT, edge_weights=[0, 3])
     assert ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg).place(12).call_delivered == 10
-    cfg = cost_only(
+    cfg = shortest_paths(
         W, LOSSY, weight_basis=ngc.WeightBasis.EXPLICIT, edge_weights=[0, 3]
     )
     r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg).place(12)
     assert (r.call_delivered, r.call_edge_drops) == (10, [(1, 2)])
     # Every weight 0.
     for adm, loss in ((LOSSY, 5), (LOSSLESS, 0)):
-        cfg = cost_only(
+        cfg = shortest_paths(
             W, adm, weight_basis=ngc.WeightBasis.EXPLICIT, edge_weights=[0, 0]
         )
         r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg).place(5)
@@ -380,7 +380,7 @@ def test_snapshot_weights():
 
     def policy(admission, **fields):
         ledger = ngc.FlowLedger(g, [2, 10])
-        return ngc.FlowPolicy(ledger, 0, 1, cost_only(W, admission, **fields))
+        return ngc.FlowPolicy(ledger, 0, 1, shortest_paths(W, admission, **fields))
 
     assert policy(LOSSLESS).place(12).call_delivered == 4
     snap = ngc.WeightBasis.RESIDUAL_SNAPSHOT
@@ -407,27 +407,29 @@ def test_weight_texts():
     explicit = ngc.WeightBasis.EXPLICIT
     cases = [
         (
-            cost_only(weight_basis=ngc.WeightBasis.CAPACITY),
+            shortest_paths(weight_basis=ngc.WeightBasis.CAPACITY),
             "weight_basis requires allocation=WEIGHTED",
         ),
         (
-            cost_only(edge_weights=[1, 1]),
+            shortest_paths(edge_weights=[1, 1]),
             "edge_weights require weight_basis=EXPLICIT",
         ),
         (
-            cost_only(W, weight_basis=explicit),
+            shortest_paths(W, weight_basis=explicit),
             "weight_basis=EXPLICIT requires edge_weights",
         ),
         (
-            cost_only(W, weight_basis=ngc.WeightBasis.CAPACITY, edge_weights=[1, 1]),
+            shortest_paths(
+                W, weight_basis=ngc.WeightBasis.CAPACITY, edge_weights=[1, 1]
+            ),
             "edge_weights require weight_basis=EXPLICIT",
         ),
         (
-            cost_only(W, weight_basis=explicit, edge_weights=[1, 2, 3]),
+            shortest_paths(W, weight_basis=explicit, edge_weights=[1, 2, 3]),
             "edge_weights: expected 2 entries",
         ),
         (
-            cost_only(W, weight_basis=explicit, edge_weights=[1, 1 << 62]),
+            shortest_paths(W, weight_basis=explicit, edge_weights=[1, 1 << 62]),
             "edge_weights[1] must be an integer in [0, 2^62)",
         ),
     ]
@@ -438,13 +440,13 @@ def test_weight_texts():
         ValueError, match=exact("edge_weights[0] must be an integer in [0, 2^62)")
     ):
         ngc.FlowPolicy(
-            ledger, 0, 1, cost_only(W, weight_basis=explicit, edge_weights=[-1, 1])
+            ledger, 0, 1, shortest_paths(W, weight_basis=explicit, edge_weights=[-1, 1])
         )
     # An entry beyond int64 is refused when the model is built.
     with pytest.raises(
         ValueError, match=exact("edge_weights[1] must be an integer in [0, 2^62)")
     ):
-        cost_only(W, weight_basis=explicit, edge_weights=[1, 1 << 64])
+        shortest_paths(W, weight_basis=explicit, edge_weights=[1, 1 << 64])
     # The other models take no weights.
     for model in (
         lambda **kw: ngc.CentralizedTE(
@@ -458,8 +460,8 @@ def test_weight_texts():
         with pytest.raises(TypeError):
             model(edge_weights=[1, 1])
     with pytest.raises(TypeError):
-        cost_only(W, weight_basis=explicit, edge_weights=[True, 1])
-    cfg = cost_only(W, weight_basis=explicit, edge_weights=[1, 2])
+        shortest_paths(W, weight_basis=explicit, edge_weights=[True, 1])
+    cfg = shortest_paths(W, weight_basis=explicit, edge_weights=[1, 2])
     assert cfg.routing.edge_weights == (1, 2)
 
 
@@ -1273,7 +1275,7 @@ def test_increments():
     # A Lossless increment's refused units.
     one = graph(2, ONE)
     ledger = ngc.FlowLedger(one)
-    other = ngc.FlowPolicy(ledger, 0, 1, cost_only())
+    other = ngc.FlowPolicy(ledger, 0, 1, shortest_paths())
     other.place(8)
     p = pinned(one, tunnels(one, [0], [1], [(0, [0], 1)]), ledger=ledger)
     assert p.place(5).call_delivered == 2
@@ -1317,7 +1319,7 @@ def test_split_contexts():
     assert pinned(g, prog).place(INF).call_delivered == 1
     r = pinned(g, prog, LOSSY).replace(2, outputs=ngc.OutputOptions(edge_flows=True))
     assert r.call_edge_drops == [(0, 1)]
-    pooled = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cost_only())
+    pooled = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, shortest_paths())
     r = pooled.place(INF, ngc.OutputOptions(edge_flows=True))
     assert (r.call_delivered, r.edge_flows.tolist()) == (2, [1, 1])
 
@@ -1642,7 +1644,7 @@ def test_replay_split_routes():
     # A stale remote tail repaired; a stale tunnel node repaired; frozen weights.
     g = graph(4, DIAM)
     prog = (
-        ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, cost_only(admission=LOSSY))
+        ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, shortest_paths(admission=LOSSY))
         .place(1)
         .program
     )
@@ -1656,7 +1658,11 @@ def test_replay_split_routes():
     assert [s.assigned for s in r.by_tunnel] == [10, 0]
     assert pinned(t, tp, LOSSLESS, m).place(INF).call_delivered == 10
     z = par2(0, 10)
-    wp = ngc.FlowPolicy(ngc.FlowLedger(z), 0, 1, cost_only(W, LOSSY)).place(1).program
+    wp = (
+        ngc.FlowPolicy(ngc.FlowLedger(z), 0, 1, shortest_paths(W, LOSSY))
+        .place(1)
+        .program
+    )
     fresh = par2(10, 10)
     r = pinned(z, wp, LOSSY, ledger=ngc.FlowLedger(z)).replace(5)
     assert (r.call_delivered, r.call_edge_drops) == (5, [])
@@ -1668,7 +1674,7 @@ def test_replay_split_routes():
 
 def test_stale_examples():
     g = graph(4, DIAM)
-    p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, cost_only(admission=LOSSY))
+    p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, shortest_paths(admission=LOSSY))
     p.replace(100)
     installed = p.program
     r = p.forward(100, black_holes=g.eligibility(excluded_edges=[3]))
@@ -1679,7 +1685,7 @@ def test_stale_examples():
     assert p.program is installed and not r.routes_changed and not r.weights_changed
     assert p.replace(100).call_delivered == 100
     w = graph(2, [(0, 1, 10), (0, 1, 40)])
-    q = ngc.FlowPolicy(ngc.FlowLedger(w), 0, 1, cost_only(W, LOSSY))
+    q = ngc.FlowPolicy(ngc.FlowLedger(w), 0, 1, shortest_paths(W, LOSSY))
     q.replace(40)
     r = q.forward(40, black_holes=w.eligibility(excluded_edges=[0]))
     assert (r.call_delivered, r.call_edge_drops) == (
@@ -1687,7 +1693,7 @@ def test_stale_examples():
         [(0, 8)],
     )  # a stale WCMP member
     wz = graph(2, [(0, 1, 0), (0, 1, 40)])
-    q = ngc.FlowPolicy(ngc.FlowLedger(wz), 0, 1, cost_only(W, LOSSY))
+    q = ngc.FlowPolicy(ngc.FlowLedger(wz), 0, 1, shortest_paths(W, LOSSY))
     q.replace(1)
     assert q.forward(40).call_delivered == 40  # a stale WCMP member of capacity 0
     rel = graph(4, REL)
@@ -1712,7 +1718,7 @@ def test_stale_tunnels_and_pools():
     assert r.call_edge_drops == [(1, 5)]
     assert pinned(t, tp, LOSSLESS, black_holes=bh).replace(10).call_delivered == 1
     pool = graph(4, POOL2)
-    p = ngc.FlowPolicy(ngc.FlowLedger(pool), [0, 1], 3, cost_only(admission=LOSSY))
+    p = ngc.FlowPolicy(ngc.FlowLedger(pool), [0, 1], 3, shortest_paths(admission=LOSSY))
     p.replace(0)
     r = p.forward(2, outputs=ngc.OutputOptions(edge_flows=True))
     assert (r.call_delivered, r.edge_flows.tolist()) == (2, [1, 1, 1, 1])
@@ -1722,12 +1728,12 @@ def test_stale_tunnels_and_pools():
         [(0, 1)],
     )  # a stale pooled remainder
     zero = graph(2, [(0, 1, 0)])
-    q = ngc.FlowPolicy(ngc.FlowLedger(zero), 0, 1, cost_only(W, LOSSY))
+    q = ngc.FlowPolicy(ngc.FlowLedger(zero), 0, 1, shortest_paths(W, LOSSY))
     q.replace(0)
     r = q.forward(2)
     assert (r.source_drops, r.termination) == (2, T.NO_ACTIVE_WEIGHT)
     one = graph(2, ONE)
-    q = ngc.FlowPolicy(ngc.FlowLedger(one), 0, 1, cost_only(admission=LOSSY))
+    q = ngc.FlowPolicy(ngc.FlowLedger(one), 0, 1, shortest_paths(admission=LOSSY))
     q.replace(0)
     r = q.forward(10, black_holes=one.eligibility(excluded_nodes=[0]))
     assert (r.source_drops, r.call_edge_drops, r.call_delivered) == (10, [], 0)
@@ -1771,7 +1777,7 @@ def test_stale_with_mask_and_global():
 def test_evaluate_publishes_nothing():
     g = par2(10, 10)
     ledger = ngc.FlowLedger(g)
-    p = ngc.FlowPolicy(ledger, 0, 1, cost_only())
+    p = ngc.FlowPolicy(ledger, 0, 1, shortest_paths())
     p.replace(6)
 
     def state():
@@ -1795,7 +1801,7 @@ def test_evaluate_publishes_nothing():
 def test_replace_and_epochs():
     g = par2(10, 10)
     ledger = ngc.FlowLedger(g)
-    p = ngc.FlowPolicy(ledger, 0, 1, cost_only())
+    p = ngc.FlowPolicy(ledger, 0, 1, shortest_paths())
     p.place(4)
     old = p.records()[0].flow_id
     r = p.replace(6)
@@ -1809,7 +1815,7 @@ def test_replace_and_epochs():
         INF,
         T.EXHAUSTED,
     )
-    q = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cost_only())
+    q = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, shortest_paths())
     q.replace(10)
     r = q.replace(4)
     assert (r.call_delivered, r.delivery_delta) == (4, -6)
@@ -1817,7 +1823,7 @@ def test_replace_and_epochs():
     r = q.place(3)
     assert (r.call_delivered, r.requested, r.admitted) == (3, 7, 7)
     assert [rec.flow_id for rec in q.records()] == ids
-    lossy = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cost_only(admission=LOSSY))
+    lossy = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, shortest_paths(admission=LOSSY))
     lossy.replace(6)
     r = lossy.place(3)
     assert (r.call_delivered, r.offered, r.requested) == (3, 9, 9)
@@ -1827,7 +1833,7 @@ def test_forward_keeps_the_program_and_flags():
     g = par2(10, 10)
     ledger = ngc.FlowLedger(g, [2, 10])
     a = ngc.FlowPolicy(
-        ledger, 0, 1, cost_only(W, weight_basis=ngc.WeightBasis.RESIDUAL_SNAPSHOT)
+        ledger, 0, 1, shortest_paths(W, weight_basis=ngc.WeightBasis.RESIDUAL_SNAPSHOT)
     )
     assert a.replace(6).call_delivered == 6
     b = pinned(g, tunnels(g, [0], [1], [(0, [1], 1)]), ledger=ledger)
@@ -1842,7 +1848,7 @@ def test_forward_keeps_the_program_and_flags():
 
 def test_forward_texts_and_order():
     g = par2(10, 10)
-    p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cost_only(admission=LOSSY))
+    p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, shortest_paths(admission=LOSSY))
     with pytest.raises(
         ValueError,
         match=exact("offer must be an integer in [0, 2^62) or permitted +inf"),
@@ -1888,11 +1894,11 @@ def test_forward_texts_and_order():
 
 def test_zero_replace_and_first_flags():
     g = graph(4, POOL2)
-    p = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, cost_only())
+    p = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, shortest_paths())
     r = p.replace(0)
     assert r.termination == T.COMPLETE and r.routes_changed and r.weights_changed
     assert [rec.delivered for rec in p.records()] == [0, 0]
-    q = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, cost_only())
+    q = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, shortest_paths())
     r = q.place(2)
     assert r.routes_changed and r.weights_changed
     r = q.place(2)
@@ -1920,7 +1926,7 @@ def test_controller_flags():
     ]
     assert flags[1:] == [(False, False), (False, False)]
     cost = ngc.FlowPolicy(
-        ngc.FlowLedger(par2(10, 10)), 0, 1, cost_only(admission=LOSSY)
+        ngc.FlowLedger(par2(10, 10)), 0, 1, shortest_paths(admission=LOSSY)
     )
     cost.place(1)
     assert [cost.forward(x).routes_changed for x in (5, 7)] == [False, False]
@@ -1940,7 +1946,7 @@ def test_pooled_records_in_pinned():
     # shared router's traffic by highest averages).
     g = graph(4, POOL2)
     prog = (
-        ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, cost_only(admission=LOSSY))
+        ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, shortest_paths(admission=LOSSY))
         .place(2)
         .program
     )
@@ -2006,8 +2012,8 @@ def test_evaluation_options_offer():
     # A finite offer for every model under each admission it supports.
     t1 = ngc.FlowPolicyConfig(routing=ngc.DistributedTE(ngc.TunnelCount(1)))
     for opts in (
-        ngc.EvaluationOptions(cost_only(admission=LOSSY), offer=5),
-        ngc.EvaluationOptions(cost_only(), offer=5),
+        ngc.EvaluationOptions(shortest_paths(admission=LOSSY), offer=5),
+        ngc.EvaluationOptions(shortest_paths(), offer=5),
         ngc.EvaluationOptions(global_(), offer=5),
         ngc.EvaluationOptions(cfg, offer=5),
         ngc.EvaluationOptions(t1, design_demand=6, offer=5),
@@ -2419,7 +2425,7 @@ def test_pinned_facts_of_the_retired_reference_fixtures():
     # zero-delivery call keeps the id and sets no flag (an offer-only call).
     g = graph(2, [(0, 1, 1)])
     ledger = ngc.FlowLedger(g)
-    ngc.FlowPolicy(ledger, 0, 1, cost_only()).place(1)
+    ngc.FlowPolicy(ledger, 0, 1, shortest_paths()).place(1)
     p = pinned(g, tunnels(g, [0], [1], [(0, [0], 1)]), ledger=ledger)
     r = p.place(1)
     ids = [rec.flow_id for rec in p.records()]
@@ -2441,7 +2447,12 @@ def test_pinned_facts_of_the_retired_reference_fixtures():
 @needs_hooks
 @pytest.mark.parametrize(
     "case",
-    ["costonly replace", "costonly forward", "global evaluate", "pinned replace"],
+    [
+        "shortest_paths replace",
+        "shortest_paths forward",
+        "global evaluate",
+        "pinned replace",
+    ],
 )
 def test_operations_are_all_or_nothing(case):
     # Every Python object of evaluate, replace and forward exists before anything is published:
@@ -2451,8 +2462,8 @@ def test_operations_are_all_or_nothing(case):
     g = graph(4, PINLOSS)
     prog = tunnels(g, [0], [3], [(0, [0, 2], 1), (0, [1, 3], 1)])
     configs = {
-        "costonly replace": (cost_only(admission=LOSSY), "replace"),
-        "costonly forward": (cost_only(admission=LOSSY), "forward"),
+        "shortest_paths replace": (shortest_paths(admission=LOSSY), "replace"),
+        "shortest_paths forward": (shortest_paths(admission=LOSSY), "forward"),
         "global evaluate": (global_(), "evaluate"),
         "pinned replace": (
             ngc.FlowPolicyConfig(routing=ngc.Pinned(prog), admission=LOSSY),
@@ -2521,7 +2532,7 @@ def test_large_equal_weights_deliver_exactly_eight(kind, admission, w):
             ngc.FlowLedger(g),
             0,
             1,
-            cost_only(
+            shortest_paths(
                 W,
                 admission,
                 weight_basis=ngc.WeightBasis.EXPLICIT,
@@ -2556,7 +2567,7 @@ def test_large_unequal_weights_split_by_highest_averages(admission):
             ngc.FlowLedger(g),
             0,
             1,
-            cost_only(
+            shortest_paths(
                 W,
                 admission,
                 weight_basis=ngc.WeightBasis.EXPLICIT,
@@ -2579,7 +2590,7 @@ def test_full_zero_offer_is_complete(method, case, admission):
     # A full zero offer is COMPLETE (the first termination rule), after its preparation: an empty
     # roster and a program without a positive weight alike.
     g = graph(2, [(0, 1, 10)])
-    cfg = cost_only(
+    cfg = shortest_paths(
         W, admission, weight_basis=ngc.WeightBasis.EXPLICIT, edge_weights=[0]
     )
     eligibility = g.eligibility(excluded_edges=[0]) if case == "no-route" else None
@@ -2721,11 +2732,11 @@ def test_change_flags_of_empty_programs_and_place_zero():
     # none (an empty roster, replace(0) included) sets neither; place(0) prepares and installs
     # nothing, while the full zero offer replace(0) installs the program and follows the rows.
     g = graph(3, [(0, 1, 10), (2, 1, 10)])  # source 0 reaches 1; nothing reaches 2
-    empty = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 2, cost_only())
+    empty = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 2, shortest_paths())
     r = empty.replace(0)
     assert r.program is not None and r.program.tunnels == ()
     assert (r.routes_changed, r.weights_changed) == (False, False)
-    p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cost_only())
+    p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, shortest_paths())
     r = p.place(0)
     assert r.program is None and p.program is None
     assert (r.routes_changed, r.weights_changed) == (False, False)

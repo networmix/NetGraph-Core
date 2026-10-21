@@ -76,7 +76,7 @@ inline ShortestPaths shortest_paths(RouteAllocation allocation = RouteAllocation
 // The two policy configurations most tests use, both Lossless with the default route choice: the
 // exact maximum flow (CentralizedTE with the optimized source allocation) and ShortestPaths ECMP.
 inline FlowPolicyConfig global_config() { return FlowPolicyConfig {.routing = centralized()}; }
-inline FlowPolicyConfig cost_only_config() { return FlowPolicyConfig {.routing = ShortestPaths {}}; }
+inline FlowPolicyConfig shortest_paths_config() { return FlowPolicyConfig {.routing = ShortestPaths {}}; }
 
 // The five statistics of a ShortestPathCache, comparable as one value.
 inline std::tuple<std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t> stats_of(

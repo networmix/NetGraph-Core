@@ -177,7 +177,7 @@ def delivered(results):
 
 
 def cyc12():
-    """The step-3 cycle Pc's graph: CYC(1, 2)."""
+    """The cycle Pc's graph: CYC(1, 2)."""
     return graph(
         6,
         [
@@ -1070,7 +1070,7 @@ def test_dark_arrivals_add_no_barrier():
 
 def test_zero_shares_add_no_arc():
     # An entry whose share is 0 can carry nothing: it makes no link wait and joins no group. Two
-    # step-3 cycles bridged by two tunnels of offer 0 fail with the period-2 error with or without
+    # cycles bridged by two tunnels of offer 0 fail with the period-2 error with or without
     # the bridges; so does a link X before a period-2 pair with or without Z (offer 0) over L0 then
     # X, as a Pinned tunnel or a ShortestPaths demand.
     cycle = [

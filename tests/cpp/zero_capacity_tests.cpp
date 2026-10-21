@@ -198,16 +198,16 @@ TEST(ZeroCapacity, DagCacheValuesAndTheirConsumers) {
   (void)cache.lookup(*g, v({1}), Direction::Reverse, nullptr);
   EXPECT_EQ(cache.stats().hits, 1);
   FlowLedger fg(g);
-  FlowPolicy p(fg, v({0}), v({1}), cost_only_config(), nullptr, &cache);
+  FlowPolicy p(fg, v({0}), v({1}), shortest_paths_config(), nullptr, &cache);
   EXPECT_EQ(p.place(5).call_delivered, 0);
   cache.freeze();
-  EXPECT_EQ(evaluate_demand(*g, v({0}), v({1}), EvaluationOptions {cost_only_config(), nullptr, &cache}).call_delivered, 0);
+  EXPECT_EQ(evaluate_demand(*g, v({0}), v({1}), EvaluationOptions {shortest_paths_config(), nullptr, &cache}).call_delivered, 0);
 }
 
 // S under every model: its only shortest route crosses the zero edge.
 TEST(ZeroCapacity, G8ForEveryModel) {
   const auto g = graph_s();
-  const auto eb = place_once(g, {0}, {1}, cost_only_config(), 5);
+  const auto eb = place_once(g, {0}, {1}, shortest_paths_config(), 5);
   EXPECT_EQ(eb.r.call_delivered, 0);
   EXPECT_EQ(eb.r.call_undelivered, 5);
   EXPECT_EQ(eb.r.termination, Termination::Exhausted);
@@ -260,7 +260,7 @@ TEST(ZeroCapacity, EqualSplitsKeepTheZeroMemberWeightedSplitsPruneIt) {
     Amount weighted, maxflow;
   };
   auto check = [](const std::shared_ptr<const Graph>& g, NodeId dst, const Want& w, const std::string& where) {
-    EXPECT_EQ(place_once(g, {0}, {dst}, cost_only_config(), 10).r.call_delivered, w.eb_lossless) << where;
+    EXPECT_EQ(place_once(g, {0}, {dst}, shortest_paths_config(), 10).r.call_delivered, w.eb_lossless) << where;
     const auto lossy = place_once(g, {0}, {dst}, cfg(ShortestPaths {}, RouteAllocation::Equal, Admission::Lossy), 10);
     EXPECT_EQ(lossy.r.call_delivered, w.eb_lossy) << where;
     EXPECT_EQ(lossy.r.call_edge_drops, w.drops) << where;
@@ -330,7 +330,7 @@ TEST(ZeroCapacity, LossyInjectionAndAllZeroWeights) {
 // admits only when it is 0 (0 when it is the first source, 1 when the second) and Lossy loses.
 TEST(ZeroCapacity, ZeroCapacitySourcesStayInTheRoster) {
   const auto b = graph_b(0, 10);
-  const auto ll = place_once(b, {0, 1}, {2}, cost_only_config(), 10);
+  const auto ll = place_once(b, {0, 1}, {2}, shortest_paths_config(), 10);
   EXPECT_EQ(ll.r.call_delivered, 0);
   EXPECT_EQ(ll.r.termination, Termination::Exhausted);
   ASSERT_EQ(ll.records.size(), 2U);
@@ -344,7 +344,7 @@ TEST(ZeroCapacity, ZeroCapacitySourcesStayInTheRoster) {
   EXPECT_EQ(ly.r.call_edge_drops, (Drops {{0, 5}}));
   EXPECT_EQ(ly.r.termination, Termination::Complete);
   const auto bp = graph_b(10, 0);
-  const auto pl = place_once(bp, {0, 1}, {2}, cost_only_config(), 10);
+  const auto pl = place_once(bp, {0, 1}, {2}, shortest_paths_config(), 10);
   EXPECT_EQ(pl.r.call_delivered, 1);
   const auto py = place_once(bp, {0, 1}, {2}, lossy_eb, 10);
   EXPECT_EQ(py.r.call_delivered, 5);
@@ -353,7 +353,7 @@ TEST(ZeroCapacity, ZeroCapacitySourcesStayInTheRoster) {
   const auto no_node = b->eligibility(std::vector<NodeId> {0}, {});
   const auto no_link = b->eligibility({}, std::vector<EdgeId> {0});
   for (const Eligibility* el : {&no_node, &no_link}) {
-    EXPECT_EQ(place_once(b, {0, 1}, {2}, cost_only_config(), 10, el).r.call_delivered, 10);
+    EXPECT_EQ(place_once(b, {0, 1}, {2}, shortest_paths_config(), 10, el).r.call_delivered, 10);
     EXPECT_EQ(place_once(b, {0, 1}, {2}, global_config(), 10, el).r.call_delivered, 10);
   }
   // CentralizedTE keeps a zero-delivery record of source 0 with an empty route.
@@ -472,7 +472,7 @@ TEST(ZeroCapacity, WeightedRoutePlansKeepOnlyPositiveEdges) {
 TEST(ZeroCapacity, EvaluatorsCountZeroCapacityRoutesAndCandidates) {
   const auto s = graph_s();
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {{{0}, {1}}, {{2}, {1}}};
-  const auto batch = evaluate_pairs(*s, pairs, EvaluationOptions {cost_only_config()}, {}, 1);
+  const auto batch = evaluate_pairs(*s, pairs, EvaluationOptions {shortest_paths_config()}, {}, 1);
   ASSERT_EQ(batch.size(), 2U);
   EXPECT_EQ(batch[0].call_delivered, 0);
   EXPECT_EQ(batch[1].call_delivered, 5);
@@ -484,7 +484,7 @@ TEST(ZeroCapacity, EvaluatorsCountZeroCapacityRoutesAndCandidates) {
   // ShortestPaths EB under the equal source allocation (the zero-capacity source first): the baseline is 0; deleting the zero link
   // takes source 0 out of the roster and raises the total to 10 (loss -10); deleting link 1 leaves
   // source 0 alone (0).
-  const auto eb = evaluate_edge_failures(*b, v({0, 1}), v({2}), EvaluationOptions {cost_only_config()}, 1);
+  const auto eb = evaluate_edge_failures(*b, v({0, 1}), v({2}), EvaluationOptions {shortest_paths_config()}, 1);
   EXPECT_EQ(eb.baseline.call_delivered, 0);
   EXPECT_EQ(entries(eb), (std::vector<std::pair<EdgeId, Amount>> {{0, -10}, {1, 0}}));
   // T1 with the design 10 (X8's shape): head 0 is down and first, so the

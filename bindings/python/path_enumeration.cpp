@@ -142,7 +142,8 @@ void register_paths(py::module_& m) {
       "a single edge. Order: lowest cost; then, under a HIGHER_* tie_break only, the highest bottleneck\n"
       "(the smallest tie value along the path); then fewest hops; then the smallest EdgeId\n"
       "sequence. The result is the first k paths of that order\n"
-      "within the inclusive cost ceiling. Validated in this order before any work (ValueError): source and\n"
+      "within the inclusive cost ceiling. A wrong type raises TypeError; structural, range and combination\n"
+      "defects raise ValueError. Validated in this order before any work: source and\n"
       "destination in range, source == destination, k >= 1, the ceiling, the residual (length, then every\n"
       "entry), a foreign Eligibility. An excluded endpoint, no static route under a CostStretch ceiling, or\n"
       "no path gives [].");

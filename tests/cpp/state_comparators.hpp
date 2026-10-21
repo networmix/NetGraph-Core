@@ -172,7 +172,7 @@ struct FlowSnapshot {
 
 // A policy's epoch state: the call state (requested, offered, +inf, prepared, the delivered
 // demand), CentralizedTE's cumulative curve, the installed program (its identity and its value) and T1's
-// plan, ShortestPaths Optimized's support, a Pinned head's own losses, the by_tunnel rows and per cohort
+// plan, ShortestPaths Optimized's support, a Pinned head's own losses, the by_tunnel rows and per record_group
 // its flows.
 struct Epoch {
   Counter128 requested;
@@ -187,7 +187,7 @@ struct Epoch {
   std::vector<EdgeId> support;
   std::vector<Counter128> source_drops_by_source;
   std::vector<TunnelFlow> by_tunnel;
-  std::vector<std::vector<FlowSnapshot>> cohorts;
+  std::vector<std::vector<FlowSnapshot>> record_groups;
 };
 
 inline Epoch epoch(const FlowPolicy& p) {
@@ -197,7 +197,7 @@ inline Epoch epoch(const FlowPolicy& p) {
            program_snapshot(ep.program.get()), ep.plan ? std::optional<TunnelPlan>(*ep.plan) : std::nullopt, ep.support,
            ep.source_drops_by_source, ep.by_tunnel, {}};
   for (const auto& c : ep.record_groups) {
-    auto& out = e.cohorts.emplace_back();
+    auto& out = e.record_groups.emplace_back();
     for (const auto& f : c) out.push_back({f.record_counter, f.min_route_cost, f.route ? ascending_edges(*f.route) : std::vector<EdgeId> {}, f.entry_id});
   }
   return e;
@@ -215,7 +215,7 @@ inline void expect_same(const Epoch& a, const Epoch& b, const std::string& where
   EXPECT_EQ(a.support, b.support) << where;
   EXPECT_EQ(a.source_drops_by_source, b.source_drops_by_source) << where;
   EXPECT_TRUE(a.by_tunnel == b.by_tunnel) << where;
-  EXPECT_TRUE(a.cohorts == b.cohorts) << where;
+  EXPECT_TRUE(a.record_groups == b.record_groups) << where;
 }
 
 // The same state on the same policy: also the same program object (a failed call installs none).

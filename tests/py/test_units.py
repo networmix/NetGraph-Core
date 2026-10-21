@@ -356,7 +356,7 @@ def test_physical_boundaries(call, cls):
     "x", [[True, False], (np.True_, np.False_), [True]], ids=["list", "numpy", "one"]
 )
 def test_an_all_bool_sequence_keeps_its_dtype_text(x):
-    # Refused before amendment 6 too: the text stays NumPy's dtype, the class TypeError.
+    # A nonnumeric dtype is a type defect; its text names NumPy's dtype.
     with pytest.raises(
         TypeError, match=exact("to_units takes physical numbers (got dtype bool)")
     ) as error:

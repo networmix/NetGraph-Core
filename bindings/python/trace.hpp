@@ -27,7 +27,6 @@ inline py::object trace_obj(const detail::Trace& t) {
   using K = detail::Trace::Kind;
   switch (t.kind) {
     case K::Null: return py::none();
-    case K::Bool: return py::bool_(t.b);
     case K::Int: return checked(PyLong_FromLongLong(t.i));
     case K::Str: return checked(PyUnicode_FromStringAndSize(t.s.data(), static_cast<Py_ssize_t>(t.s.size())));
     case K::List: {

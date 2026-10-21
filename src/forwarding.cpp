@@ -51,6 +51,7 @@
 #include <utility>
 
 #include "netgraph/core/detail/int128.hpp"
+#include "netgraph/core/detail/sparse.hpp"
 #include "netgraph/core/detail/route_builders.hpp"
 #include "netgraph/core/detail/strong_components.hpp"
 
@@ -439,16 +440,6 @@ void entry_shares(const ForwardingView& view, std::span<const Amount> heads, std
   }
 }
 
-// The positive entries of a member-aligned array as (EdgeId, amount) pairs.
-std::vector<std::pair<EdgeId, Amount>> positive_pairs(std::span<const EdgeId> members, std::span<const Amount> a) {
-  std::vector<std::pair<EdgeId, Amount>> out;
-  out.reserve(static_cast<std::size_t>(std::count_if(a.begin(), a.end(), [](Amount x) { return x != 0; })));
-  for (std::size_t m = 0; m < members.size(); ++m) {
-    if (a[m] != 0) out.emplace_back(members[m], a[m]);
-  }
-  return out;
-}
-
 void sort_pairs(std::vector<std::pair<EdgeId, Amount>>& v) {
   std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
 }
@@ -483,8 +474,8 @@ void pooled_entries(const ForwardingView& view, const PreparedRoute& plan, const
     auto& f = out.entries[e];
     if (attr == nullptr) {
       // One root holds the whole forwarding (the attribution's degenerate form).
-      f.edge_flows = positive_pairs(plan.forwarding_edges, alloc);
-      if (!drops.empty()) f.edge_drops = positive_pairs(plan.forwarding_edges, drops);
+      f.edge_flows = nonzero_pairs(plan.forwarding_edges, alloc);
+      if (!drops.empty()) f.edge_drops = nonzero_pairs(plan.forwarding_edges, drops);
       continue;
     }
     for (const auto& x : attr->entries[h]) {
@@ -808,7 +799,7 @@ ForwardingNetwork build_forwarding_network(std::span<const ForwardingView* const
   }
   // Pooled contexts: the heads reaching each position (in topological order: its roots and the
   // heads of its in-members' tails), the members' occurrences and the positions' slots.
-  std::vector<std::int32_t> heads_offsets;  // per position of the current item + 1
+  std::vector<HeadLabelOffset> heads_offsets;  // per position of the current item + 1
   std::vector<std::int32_t> heads;          // the heads per position, ascending
   std::vector<std::int32_t> stamp;
   std::vector<std::int32_t> in_offsets;
@@ -854,7 +845,7 @@ ForwardingNetwork build_forwarding_network(std::span<const ForwardingView* const
         for (auto k = heads_offsets[t]; k < heads_offsets[t + 1]; ++k) add(heads[static_cast<std::size_t>(k)]);
       }
       std::sort(heads.begin() + static_cast<std::ptrdiff_t>(first), heads.end());
-      heads_offsets[q + 1] = static_cast<std::int32_t>(heads.size());
+      heads_offsets[q + 1] = heads.size();
     }
     it.first_member = net.member_occurrence_offsets.size();
     std::int32_t count = 0;
@@ -862,7 +853,9 @@ ForwardingNetwork build_forwarding_network(std::span<const ForwardingView* const
       net.member_occurrence_offsets.push_back(nocc + count);
       net.member_tail_positions.push_back(tails[m]);
       const auto t = static_cast<std::size_t>(tails[m]);
-      count += heads_offsets[t + 1] - heads_offsets[t];
+      // This range contributes to the preflight-checked occurrence total, unlike the
+      // cumulative label offset (which also includes labels at destinations).
+      count += static_cast<std::int32_t>(heads_offsets[t + 1] - heads_offsets[t]);
     }
     net.member_occurrence_offsets.push_back(nocc + count);
     net.member_tail_positions.push_back(-1);

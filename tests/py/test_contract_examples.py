@@ -1750,7 +1750,7 @@ def run_list_validation(cases):
     """Each case's list with real policies, on one ledger per case over CYC(1, 2) plus a separate
     link 6 -> 7 of 10: an action's policy (by name, created at its first use) has the case's model
     and admission on 6 -> 7, a foreign one is of another ledger; a Pinned action that `computes`
-    the period-2 error is the step-3 cycle (two crossing tunnels from 4, weights 1 and 2) with that
+    the period-2 error is the cycle (two crossing tunnels from 4, weights 1 and 2) with that
     cycle's offer 3 in place of the case's, another Pinned one a tunnel over 6 -> 7; `program` installs the policy's program first (a replace or a
     place of 1), `after_infinite` places +inf first, `foreign_black_holes` gives black holes of
     another graph. The list's first error, or "valid"."""

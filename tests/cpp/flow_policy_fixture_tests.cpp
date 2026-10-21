@@ -518,7 +518,7 @@ J policy_json(const FlowPolicy& policy) {
   j.set("requested", J::integer(wide(pe.epoch.requested)));
   j.set("infinite", J::boolean(pe.epoch.infinite));
   j.set("placed_demand", J::integer(policy.delivered()));
-  J cohorts = J::arr();
+  J record_groups = J::arr();
   for (std::size_t i = 0; i < pe.reachable_sources.size(); ++i) {
     if (pe.epoch.record_groups[i].empty()) continue;
     J flows = J::arr();
@@ -537,9 +537,9 @@ J policy_json(const FlowPolicy& policy) {
     J entry = J::arr();
     entry.push(J::integer(pe.reachable_sources[i]));
     entry.push(std::move(flows));
-    cohorts.push(std::move(entry));
+    record_groups.push(std::move(entry));
   }
-  j.set("cohorts", std::move(cohorts));
+  j.set("cohorts", std::move(record_groups));
   return j;
 }
 
@@ -549,7 +549,6 @@ J trace_json(const detail::Trace& t) {
   using K = detail::Trace::Kind;
   switch (t.kind) {
     case K::Null: return J::null();
-    case K::Bool: return J::boolean(t.b);
     case K::Int: return J::integer(t.i);
     case K::Str: return J::str(t.s);
     case K::List: {

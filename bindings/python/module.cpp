@@ -9,14 +9,14 @@
   build) adds the test controls and the parity diagnostics.
 
   - Graph accessors return read-only NumPy views that keep the graph alive (no per-call copy).
-  - Integer inputs (capacities, costs, ids, views, caps) must be integers: Python ints, NumPy
-    integer scalars or integer arrays; floats and bools are rejected with TypeError, never
+  - Integer inputs (capacities, costs, ids, views, caps) take any non-bool object with __index__, including Python ints and NumPy
+    integer scalars, and sequences or integer arrays; floats and bools are rejected with TypeError, never
     truncated. Values are read without narrowing and validated in the C++
     constructors' order before any conversion to the C++ types. Physical values
     enter only through to_units; the resolution is validated before anything else.
   - One rule for the class of an input error: a type the position never takes TypeError, a value
     outside its domain ValueError. std::invalid_argument from Core maps to ValueError; enumeration
-    values outside their enumeration are rejected at construction (ValueError).
+    domains are checked when a configuration or options value is consumed (ValueError).
   - _solve_min_cost_flow is a private entry point for the flow checks: it returns the flow
     core's payload as a dict of Python ints and lists.
   - Amounts and counters cross as Python ints (exact, also beyond 64 bits); per-edge arrays as

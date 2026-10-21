@@ -210,7 +210,7 @@ Tally compare_with_general_path(std::mt19937& rng, int trials, Cost factor) {
 
 } // namespace
 
-TEST(CostOnlyCreation, LowerBoundFromEveryHintIsStdLowerBound) {
+TEST(ShortestPathsCreation, LowerBoundFromEveryHintIsStdLowerBound) {
   std::mt19937 rng(20261007);
   int forward = 0;   // the answer above the hint
   int backward = 0;  // the answer below the hint
@@ -236,7 +236,7 @@ TEST(CostOnlyCreation, LowerBoundFromEveryHintIsStdLowerBound) {
   EXPECT_GT(backward, 1000000);
 }
 
-TEST(CostOnlyCreation, EqualsTheGeneralPathForEverySourceSelectionAndKernel) {
+TEST(ShortestPathsCreation, EqualsTheGeneralPathForEverySourceSelectionAndKernel) {
   std::mt19937 rng(1007);
   const Tally t = compare_with_general_path(rng, 300, 1);
   // Not vacuous: every branch of the one pass was compared, and the declined inputs too.
@@ -249,7 +249,7 @@ TEST(CostOnlyCreation, EqualsTheGeneralPathForEverySourceSelectionAndKernel) {
   EXPECT_GT(t.zero_weight, 1000);
 }
 
-TEST(CostOnlyCreation, WideCostsEqualTheGeneralPath) {
+TEST(ShortestPathsCreation, WideCostsEqualTheGeneralPath) {
   // Repeat the general-path comparison with factors 3, 64 and 2^35. These cases catch the
   // int32 output truncation; with 2^35 every answered cost exceeds INT32_MAX.
   // They do not catch every narrower representation: an output cut to 48 bits would pass here
@@ -266,7 +266,7 @@ TEST(CostOnlyCreation, WideCostsEqualTheGeneralPath) {
   }
 }
 
-TEST(CostOnlyCreation, ChainCostsBeyondInt32AreExact) {
+TEST(ShortestPathsCreation, ChainCostsBeyondInt32AreExact) {
   // A chain of two edges beyond int32 (0 -> 1 -> 2, two edges of 2^35: the cost 2^36 =
   // 68,719,476,736), a chain whose total 2,500,000,000 exceeds INT32_MAX without being a power of
   // two, a diamond of 2^35 edges with a parallel pair, and a full-width chain of two edges of
@@ -313,7 +313,7 @@ TEST(CostOnlyCreation, ChainCostsBeyondInt32AreExact) {
   }
 }
 
-TEST(CostOnlyCreation, LargerGraphsEqualTheGeneralPath) {
+TEST(ShortestPathsCreation, LargerGraphsEqualTheGeneralPath) {
   // Larger fabrics (Clos and random) where the walk crosses many ranges: every source of the two
   // Clos fabrics and every 7th source of the two 200-node random graphs, to one and to two
   // destinations, the EB and Optimized kernels, with and without Collapse. A record route shares the
@@ -375,7 +375,7 @@ TEST(CostOnlyCreation, LargerGraphsEqualTheGeneralPath) {
   }
 }
 
-TEST(CostOnlyCreation, CraftedSupportsGiveNothingOrTheGeneralPath) {
+TEST(ShortestPathsCreation, CraftedSupportsGiveNothingOrTheGeneralPath) {
   // Acyclic edge sets that are no static support: edges leaving a destination, nodes that reach no
   // destination, members below one unit. The one pass declines them or equals the general path.
   std::mt19937 rng(99);
@@ -429,7 +429,7 @@ TEST(CostOnlyCreation, CraftedSupportsGiveNothingOrTheGeneralPath) {
   EXPECT_GT(declined, 1000);
 }
 
-TEST(CostOnlyCreation, DeclinesEachBrokenPrecondition) {
+TEST(ShortestPathsCreation, DeclinesEachBrokenPrecondition) {
   // 0 -> 1 -> 3 and 0 -> 2 -> 3, destination 3: the general path keeps the whole route, and so
   // does the one pass. Each variant breaks one precondition; the one pass then answers nothing (the
   // general path's members differ from its route, or it throws), except that Optimized and

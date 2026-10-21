@@ -220,8 +220,8 @@ TEST(DagCacheModes, RouteChoiceIsNoPartOfTheKeyAndClearReleasesUnheldValues) {
   // Two ShortestPaths policies differing only in their route choice share one entry (the route
   // choice is a projection at creation, never part of the key).
   FlowLedger fg(g);
-  FlowPolicy a(fg, v({0}), v({3}), cost_only_config(), nullptr, &cache);
-  auto other_choice = cost_only_config();
+  FlowPolicy a(fg, v({0}), v({3}), shortest_paths_config(), nullptr, &cache);
+  auto other_choice = shortest_paths_config();
   ShortestPaths single_member;
   single_member.tie_break = RouteTieBreak::HigherAvailableCapacity;
   single_member.multipath = false;
@@ -307,7 +307,7 @@ TEST(DagCacheFrozen, SharedByEveryWorkerOfABatch) {
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs = {
       {v({0}), v({3})}, {v({1}), v({4})}, {v({2}), v({5})}, {v({0, 1}), v({3, 4})}};
   const OutputOptions all {true, true, true};
-  const auto want = evaluate_pairs(*g, pairs, EvaluationOptions {cost_only_config(), nullptr, nullptr, all}, {}, 1);
+  const auto want = evaluate_pairs(*g, pairs, EvaluationOptions {shortest_paths_config(), nullptr, nullptr, all}, {}, 1);
   for (const auto& r : want) EXPECT_GT(r.call_delivered, 0);  // every pair places: the comparison is not of zeros
   for (int workers : {1, 2, 4}) {
     ShortestPathCache cache(*g);
@@ -315,12 +315,12 @@ TEST(DagCacheFrozen, SharedByEveryWorkerOfABatch) {
     // A building cache with two or more workers is rejected; frozen, it is shared.
     if (workers > 1) {
       EXPECT_THROW(
-          (void)evaluate_pairs(*g, pairs, EvaluationOptions {cost_only_config(), nullptr, &cache, all}, {}, workers),
+          (void)evaluate_pairs(*g, pairs, EvaluationOptions {shortest_paths_config(), nullptr, &cache, all}, {}, workers),
           std::invalid_argument);
     }
     cache.freeze();
     const auto before = cache.stats();
-    const auto got = evaluate_pairs(*g, pairs, EvaluationOptions {cost_only_config(), nullptr, &cache, all}, {}, workers);
+    const auto got = evaluate_pairs(*g, pairs, EvaluationOptions {shortest_paths_config(), nullptr, &cache, all}, {}, workers);
     ASSERT_EQ(got.size(), want.size());
     for (std::size_t i = 0; i < got.size(); ++i) {
       ASSERT_TRUE(got[i].edge_flows.has_value() && want[i].edge_flows.has_value()) << workers << " " << i;
@@ -345,7 +345,7 @@ TEST(DagCacheFrozen, MissPropagatesThroughBatchCapacity) {
     ShortestPathCache cache(*g);
     (void)cache.lookup(*g, v({4}), Direction::Reverse, nullptr);  // only pair 1's key
     cache.freeze();
-    const auto msg = miss_of([&] { (void)evaluate_pairs(*g, pairs, EvaluationOptions {cost_only_config(), nullptr, &cache}, {}, workers); });
+    const auto msg = miss_of([&] { (void)evaluate_pairs(*g, pairs, EvaluationOptions {shortest_paths_config(), nullptr, &cache}, {}, workers); });
     EXPECT_NE(msg.find("roots {3}"), std::string::npos) << workers << ": " << msg;  // pair 0, the lowest index
   }
 }
@@ -370,20 +370,20 @@ TEST(DagCacheFrozen, PerPairIntersectionsAndPrepopulatedUids) {
   // A common value containing the per-pair one: intersect returns the per-pair operand.
   auto before = hits();
   const std::vector<const Eligibility*> contained = {&narrow, nullptr};
-  EXPECT_EQ(evaluate_pairs(*g, pairs, EvaluationOptions {cost_only_config(), &common, &cache}, contained, 2).size(), 2U);
+  EXPECT_EQ(evaluate_pairs(*g, pairs, EvaluationOptions {shortest_paths_config(), &common, &cache}, contained, 2).size(), 2U);
   EXPECT_EQ(hits() - before, 2);
   // An unchanged intersection (the operand itself) and already-effective values with a null
   // common value.
   before = hits();
   const std::vector<const Eligibility*> same = {&common, &common};
-  EXPECT_EQ(evaluate_pairs(*g, pairs, EvaluationOptions {cost_only_config(), &common, &cache}, same, 2).size(), 2U);
+  EXPECT_EQ(evaluate_pairs(*g, pairs, EvaluationOptions {shortest_paths_config(), &common, &cache}, same, 2).size(), 2U);
   const std::vector<const Eligibility*> own = {&narrow, &common};
-  EXPECT_EQ(evaluate_pairs(*g, pairs, EvaluationOptions {cost_only_config(), nullptr, &cache}, own, 2).size(), 2U);
+  EXPECT_EQ(evaluate_pairs(*g, pairs, EvaluationOptions {shortest_paths_config(), nullptr, &cache}, own, 2).size(), 2U);
   EXPECT_EQ(hits() - before, 4);
   // An intersection that differs from both operands: a fresh uid, absent from the cache.
   const auto misses = cache.stats().misses;
   const std::vector<const Eligibility*> changed = {&other, nullptr};
-  const auto msg = miss_of([&] { (void)evaluate_pairs(*g, pairs, EvaluationOptions {cost_only_config(), &common, &cache}, changed, 2); });
+  const auto msg = miss_of([&] { (void)evaluate_pairs(*g, pairs, EvaluationOptions {shortest_paths_config(), &common, &cache}, changed, 2); });
   EXPECT_NE(msg.find("roots {4}"), std::string::npos) << msg;
   EXPECT_EQ(msg.find("uid " + std::to_string(common.uid()) + " "), std::string::npos) << msg;
   EXPECT_EQ(msg.find("uid " + std::to_string(other.uid()) + " "), std::string::npos) << msg;
@@ -400,7 +400,7 @@ TEST(DagCacheFrozen, MissPropagatesThroughSensitivity) {
     ShortestPathCache cache(*g);
     (void)cache.lookup(*g, v({4}), Direction::Reverse, nullptr);
     cache.freeze();
-    const auto msg = miss_of([&] { (void)evaluate_edge_failures(*g, v({1}), v({4}), EvaluationOptions {cost_only_config(), nullptr, &cache}, workers); });
+    const auto msg = miss_of([&] { (void)evaluate_edge_failures(*g, v({1}), v({4}), EvaluationOptions {shortest_paths_config(), nullptr, &cache}, workers); });
     EXPECT_NE(msg.find("no entry for roots {4}"), std::string::npos) << workers << ": " << msg;
     EXPECT_EQ(cache.stats().entries, 1);  // nothing inserted
   }
@@ -433,7 +433,7 @@ TEST(DagCacheFrozen, AFailedCallChangesNoStatisticButItsMiss) {
     cache.freeze();
     auto before = stats_of(cache.stats());
     // Pairs 1 and 2 miss; pairs 0 and 3 hit.
-    EXPECT_NE(miss_of([&] { (void)evaluate_pairs(*g, pairs, EvaluationOptions {cost_only_config(), nullptr, &cache}, {}, workers); })
+    EXPECT_NE(miss_of([&] { (void)evaluate_pairs(*g, pairs, EvaluationOptions {shortest_paths_config(), nullptr, &cache}, {}, workers); })
                   .find("roots {4}"),
               std::string::npos);
     auto want = before;
@@ -441,7 +441,7 @@ TEST(DagCacheFrozen, AFailedCallChangesNoStatisticButItsMiss) {
     EXPECT_EQ(stats_of(cache.stats()), want) << workers;
     before = stats_of(cache.stats());
     EXPECT_NE(miss_of([&] {
-                (void)evaluate_edge_failures(*g, v({0}), v({3}), EvaluationOptions {cost_only_config(), nullptr, &cache}, workers);
+                (void)evaluate_edge_failures(*g, v({0}), v({3}), EvaluationOptions {shortest_paths_config(), nullptr, &cache}, workers);
               }).find("roots {3}"),
               std::string::npos);
     want = before;
@@ -451,7 +451,7 @@ TEST(DagCacheFrozen, AFailedCallChangesNoStatisticButItsMiss) {
   ShortestPathCache cache(*g);
   cache.freeze();
   FlowLedger fg(g);
-  EXPECT_FALSE(miss_of([&] { FlowPolicy p(fg, v({0}), v({3}), cost_only_config(), nullptr, &cache); }).empty());
+  EXPECT_FALSE(miss_of([&] { FlowPolicy p(fg, v({0}), v({3}), shortest_paths_config(), nullptr, &cache); }).empty());
   EXPECT_EQ(stats_of(cache.stats()), std::make_tuple(0, 1, 0, 0, 0));
 }
 
@@ -464,7 +464,7 @@ TEST(DagCacheFrozen, ConcurrentCallsKeepEverySuccessfulHit) {
   for (NodeId d : {3, 4}) (void)cache.lookup(*g, v({d}), Direction::Reverse, nullptr);
   cache.freeze();
   const auto before = cache.stats();
-  const EvaluationOptions opts {cost_only_config(), nullptr, &cache};
+  const EvaluationOptions opts {shortest_paths_config(), nullptr, &cache};
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> good = {{v({0}), v({3})}, {v({1}), v({4})}};
   const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> bad = {{v({0}), v({3})}, {v({1}), v({5})}};
   constexpr int kThreads = 4;
@@ -513,7 +513,7 @@ TEST(DagCacheFrozen, ConcurrentPublicationsLoseNoIncrement) {
     pool.emplace_back([&] {
       FlowLedger fg(g);
       start.arrive_and_wait();
-      for (int round = 0; round < kRounds; ++round) FlowPolicy p(fg, v({0}), v({3}), cost_only_config(), nullptr, &cache);
+      for (int round = 0; round < kRounds; ++round) FlowPolicy p(fg, v({0}), v({3}), shortest_paths_config(), nullptr, &cache);
     });
   }
   for (auto& th : pool) th.join();

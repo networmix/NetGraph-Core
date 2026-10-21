@@ -156,7 +156,7 @@ Amounts delivered(const std::vector<PlacementResult>& rs) {
 
 const OutputOptions kAll {.edge_flows = true, .residual = true, .saturated_boundary_edges = true, .edge_reservations = true};
 
-// The step-3 cycle Pc: CYC(1, 2), two tunnels crossing X (e0) and Y (e3) in opposite orders,
+// The cycle Pc: CYC(1, 2), two tunnels crossing X (e0) and Y (e3) in opposite orders,
 // weights 1 and 2; its replace(3) enters a period-2 cycle.
 std::shared_ptr<const Graph> cyc12() {
   return graph(6, {{0, 1, 1, 1}, {1, 2, 1000, 1}, {1, 5, 1000, 1}, {2, 3, 2, 1}, {3, 0, 1000, 1}, {3, 5, 1000, 1}, {4, 0, 1000, 1},
@@ -1135,7 +1135,7 @@ TEST(ApplyActions, DarkArrivalsAddNoBarrier) {
 }
 
 // An entry whose share is 0 can carry nothing, so it makes no link wait and joins no group. Two
-// step-3 cycles (CYC(1, 2) twice, 4 -> 5 and 16 -> 17, offers 1 and 2 each) bridged by two Pinned
+// cycles (CYC(1, 2) twice, 4 -> 5 and 16 -> 17, offers 1 and 2 each) bridged by two Pinned
 // tunnels of offer 0 (4 -> 17 over the first cycle's X and the second's links, 16 -> 5 the other
 // way): the period-2 error at round 3 with or without the bridges (with arcs through them the two
 // groups merged and failed at the round limit). And a link X before a period-2 pair: A over X, L0,

@@ -1,6 +1,6 @@
 /*
   The float converter of the resolution parameters. It takes exactly a number: a float (a Python
-  float or a NumPy floating value, through its own __float__) or an integer (a Python int or a
+  float, read by its stored value, or a NumPy floating value, converted to double) or an integer (a Python int or a
   NumPy integer, read exactly). Every other type is refused, and the call fails with pybind11's
   TypeError for incompatible arguments: a bool (Python's or numpy.bool_, by type identity), a
   fractions.Fraction, a decimal.Decimal, any object known only by __float__ or __index__. An
@@ -18,7 +18,7 @@
 
 namespace netgraph::core::bindings {
 
-// A float parameter's value (its signature says float).
+// The double value of a parameter that takes concrete Python and NumPy numbers.
 struct StrictFloat {
   double value {0.0};
   constexpr operator double() const noexcept { return value; }  // NOLINT(google-explicit-constructor)
@@ -30,8 +30,8 @@ namespace pybind11::detail {
 
 template <>
 struct type_caster<netgraph::core::bindings::StrictFloat> {
-  // Named as pybind11's own float conversion names its argument and its result.
-  PYBIND11_TYPE_CASTER(netgraph::core::bindings::StrictFloat, io_name("typing.SupportsFloat | typing.SupportsIndex", "float"));
+  // The input names exactly the concrete number types accepted by load().
+  PYBIND11_TYPE_CASTER(netgraph::core::bindings::StrictFloat, io_name("int | float | numpy.integer | numpy.floating", "float"));
 
   bool load(handle src, bool convert) {
     PyObject* o = src.ptr();

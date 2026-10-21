@@ -12,10 +12,10 @@ from fractions import Fraction
 
 import pytest
 from helpers import (
-    COSTONLY,
     GLOBAL,
     HIGHER_CAP,
     HIGHER_HEADROOM,
+    SHORTEST_PATHS,
     config,
     dag_of,
     t1_config,
@@ -88,7 +88,7 @@ def test_headroom_without_a_residual_reads_one_or_zero():
 
 def test_g8_for_every_model():
     g = graph(3, S)
-    r, p = place(g, 0, 1, COSTONLY, 5)
+    r, p = place(g, 0, 1, SHORTEST_PATHS, 5)
     assert (r.call_delivered, r.call_undelivered, r.termination) == (
         0,
         5,
@@ -125,8 +125,8 @@ def test_g8_for_every_model():
 def test_equal_and_weighted_splits_over_a_zero_member():
     first = graph(2, [(0, 1, 0, 1), (0, 1, 10, 1)])
     last = graph(2, [(0, 1, 10, 1), (0, 1, 0, 1)])
-    assert place(first, 0, 1, COSTONLY, 10)[0].call_delivered == 0
-    assert place(last, 0, 1, COSTONLY, 10)[0].call_delivered == 1
+    assert place(first, 0, 1, SHORTEST_PATHS, 10)[0].call_delivered == 0
+    assert place(last, 0, 1, SHORTEST_PATHS, 10)[0].call_delivered == 1
     r, _ = place(first, 0, 1, config(ngc.ShortestPaths(), EB, LOSSY), 10)
     assert (r.call_delivered, r.edge_drops) == (5, [(0, 5)])
     assert (
@@ -158,7 +158,7 @@ def test_two_sources_one_behind_a_zero_link(caps, lossless, drops):
     # (RR(1) gives source 0 the unit), 1 when source 1 is (RR(2) gives source 1 a unit). LOSSY
     # offers RR(10) = 5 and 5 and drops the share behind the zero link.
     g = graph(3, [(0, 2, caps[0], 1), (1, 2, caps[1], 1)])
-    r, p = place(g, [0, 1], 2, COSTONLY, 10)
+    r, p = place(g, [0, 1], 2, SHORTEST_PATHS, 10)
     assert (r.call_delivered, r.termination) == (lossless, ngc.Termination.EXHAUSTED)
     assert [row.source for row in r.by_source] == [0, 1]
     assert len(p.records()) == 2
@@ -172,11 +172,13 @@ def test_b3_delete_zero_and_edge_failures():
         g.eligibility(excluded_nodes=[0]),
         g.eligibility(excluded_edges=[0]),
     ):
-        assert place(g, [0, 1], 2, COSTONLY, 10, eligibility)[0].call_delivered == 10
+        assert (
+            place(g, [0, 1], 2, SHORTEST_PATHS, 10, eligibility)[0].call_delivered == 10
+        )
         assert place(g, [0, 1], 2, GLOBAL, 10, eligibility)[0].call_delivered == 10
     # The zero-capacity source first, under the pooled equal source allocation, admits 0; removing the zero link takes source 0
     # out of the program, so the deletion gains 10 (a negative loss); removing 1 -> 2 leaves 0.
-    s = ngc.evaluate_edge_failures(g, [0, 1], 2, ngc.EvaluationOptions(COSTONLY))
+    s = ngc.evaluate_edge_failures(g, [0, 1], 2, ngc.EvaluationOptions(SHORTEST_PATHS))
     assert (
         s.baseline.call_delivered,
         [(e.edge, e.delivery_reduction) for e in s.entries],
@@ -185,7 +187,9 @@ def test_b3_delete_zero_and_edge_failures():
         [(0, -10), (1, 0)],
     )
     # A negative loss for the zero-capacity link.
-    s8 = ngc.evaluate_edge_failures(graph(3, S), 0, 1, ngc.EvaluationOptions(COSTONLY))
+    s8 = ngc.evaluate_edge_failures(
+        graph(3, S), 0, 1, ngc.EvaluationOptions(SHORTEST_PATHS)
+    )
     assert [(e.edge, e.delivery_reduction) for e in s8.entries] == [
         (0, -5),
         (1, 0),

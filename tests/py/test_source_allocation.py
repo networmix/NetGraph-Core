@@ -72,7 +72,7 @@ def glob(source_allocation=ORIGIN.OPTIMIZED, admission=A.LOSSLESS, **fields):
     )
 
 
-def cost_only(
+def shortest_paths(
     allocation=P.EQUAL, admission=A.LOSSLESS, routing=None, source_allocation=None
 ):
     return ngc.FlowPolicyConfig(
@@ -116,7 +116,7 @@ def test_defaults_resolve():
     p = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, c)
     assert p.config.routing.source_allocation == ORIGIN.EQUAL
     assert p.config.routing.tie_break == ngc.RouteTieBreak.FEWER_HOPS
-    for cfg in (cost_only(P.OPTIMIZED), glob()):
+    for cfg in (shortest_paths(P.OPTIMIZED), glob()):
         assert (
             ngc.FlowPolicy(
                 ngc.FlowLedger(g), [0, 1], 3, cfg
@@ -124,7 +124,7 @@ def test_defaults_resolve():
             == ORIGIN.OPTIMIZED
         )
     for cfg in (
-        cost_only(P.OPTIMIZED, source_allocation=ORIGIN.EQUAL),
+        shortest_paths(P.OPTIMIZED, source_allocation=ORIGIN.EQUAL),
         glob(ORIGIN.EQUAL),
     ):
         assert (
@@ -157,17 +157,19 @@ CTE_LOSSY = "CentralizedTE without tunnel_count requires admission=LOSSLESS"
 @pytest.mark.parametrize(
     ("config", "message"),
     [
-        (cost_only(P.EQUAL, source_allocation=ORIGIN.OPTIMIZED), SOURCE_RULE),
-        (cost_only(P.WEIGHTED, source_allocation=ORIGIN.OPTIMIZED), SOURCE_RULE),
+        (shortest_paths(P.EQUAL, source_allocation=ORIGIN.OPTIMIZED), SOURCE_RULE),
+        (shortest_paths(P.WEIGHTED, source_allocation=ORIGIN.OPTIMIZED), SOURCE_RULE),
         (
-            cost_only(P.OPTIMIZED, A.LOSSY),
+            shortest_paths(P.OPTIMIZED, A.LOSSY),
             "ShortestPaths OPTIMIZED requires admission=LOSSLESS",
         ),
         (glob(admission=A.LOSSY), CTE_LOSSY),
         (glob(ORIGIN.EQUAL, A.LOSSY), CTE_LOSSY),
         # The source rule before the pooled single-path rule.
         (
-            cost_only(P.EQUAL, routing=PREFER_PATH, source_allocation=ORIGIN.OPTIMIZED),
+            shortest_paths(
+                P.EQUAL, routing=PREFER_PATH, source_allocation=ORIGIN.OPTIMIZED
+            ),
             SOURCE_RULE,
         ),
     ],
@@ -231,7 +233,7 @@ def test_endpoints_before_ownership():
 
 
 def test_amount_texts():
-    _, _, p = fresh(ONE, 0, 1, cost_only())
+    _, _, p = fresh(ONE, 0, 1, shortest_paths())
     # One text, with the class of its cause: a bool is a wrong type, the rest wrong values.
     for bad, cls in [(v, ValueError) for v in (-1, 2**62, float("nan"), 1.5, -INF)] + [
         (True, TypeError)
@@ -261,7 +263,7 @@ def test_amount_texts():
 def test_pooled_single_path_rule():
     g = graph(POOL)
     for placement in (P.EQUAL, P.WEIGHTED, P.OPTIMIZED):
-        config = cost_only(placement, routing=PREFER_PATH)
+        config = shortest_paths(placement, routing=PREFER_PATH)
         # Two input sources, also when the mask leaves one.
         for eligibility in (None, g.eligibility(excluded_nodes=[1])):
             with pytest.raises(ValueError, match=exact(POOLED_PHP)):
@@ -277,7 +279,7 @@ def test_pooled_single_path_rule():
         )
         # Multipath with a HIGHER_* tie_break (one member of each parallel pair: the equal
         # pair 2 -> 3 keeps its lower EdgeId, capacity 1) is accepted with two sources.
-        multipath = cost_only(
+        multipath = shortest_paths(
             placement,
             routing=ngc.ShortestPaths(tie_break=HIGHER_CAP, parallel_edges=False),
         )
@@ -288,7 +290,7 @@ def test_pooled_single_path_rule():
             == 1
         )
     # evaluate_pairs checks each pair; pair 1 is the lowest failing.
-    opts = ngc.EvaluationOptions(cost_only(routing=PREFER_PATH))
+    opts = ngc.EvaluationOptions(shortest_paths(routing=PREFER_PATH))
     with pytest.raises(ValueError, match=exact(POOLED_PHP)):
         ngc.evaluate_pairs(g, [([0], 3), ([0, 1], 3)], opts)
     assert [
@@ -302,11 +304,11 @@ def test_pooled_single_path_rule():
 def test_deterministic_single_paths_pool():
     # Canonical paths 0: [e0, e2], 1: [e1, e2] (equal cost and hops, lower EdgeId e2).
     det = ngc.ShortestPaths(multipath=False)
-    _, _, p = fresh(POOL, [0, 1], 3, cost_only(routing=det))
+    _, _, p = fresh(POOL, [0, 1], 3, shortest_paths(routing=det))
     r = p.place(INF)
     assert (r.call_delivered, [x.admitted for x in r.by_source]) == (1, [1, 0])
     # Lossy 2: e2's arrivals (1, 1), carried H(1, [1, 1]) = [1, 0].
-    _, _, p = fresh(POOL, [0, 1], 3, cost_only(admission=A.LOSSY, routing=det))
+    _, _, p = fresh(POOL, [0, 1], 3, shortest_paths(admission=A.LOSSY, routing=det))
     r = p.place(2)
     assert (r.call_delivered, r.call_edge_drops) == (1, [(2, 1)])
     assert rows(r) == [(0, 1, 1, 1, 0, 0), (1, 1, 1, 0, 0, 1)]
@@ -417,7 +419,7 @@ def test_global_increments():
     # Refused units are not offered again.
     g = graph(ONE)
     ledger = ngc.FlowLedger(g)
-    other = ngc.FlowPolicy(ledger, 0, 1, cost_only())
+    other = ngc.FlowPolicy(ledger, 0, 1, shortest_paths())
     other.place(8)
     p = ngc.FlowPolicy(ledger, 0, 1, glob())
     assert p.place(5).call_delivered == 2
@@ -451,7 +453,7 @@ def test_global_increments():
         (SPF, 0, 1, ORIGIN.OPTIMIZED, 0, 0, [[]]),
     ],
 )
-def test_cost_only_max_flow(
+def test_shortest_paths_max_flow(
     edges, sources, dest, source_allocation, delivered, cost, records
 ):
     request = 5 if edges is SPF else 12
@@ -459,7 +461,7 @@ def test_cost_only_max_flow(
         edges,
         sources,
         dest,
-        cost_only(P.OPTIMIZED, source_allocation=source_allocation),
+        shortest_paths(P.OPTIMIZED, source_allocation=source_allocation),
     )
     r = p.place(request, CUT)
     term = T.COMPLETE if delivered == request else T.EXHAUSTED
@@ -469,9 +471,9 @@ def test_cost_only_max_flow(
     assert (r.marginal_cost_curve, r.min_cut) == (None, None)
 
 
-def test_cost_only_max_flow_increments():
+def test_shortest_paths_max_flow_increments():
     _, _, p = fresh(
-        R4, [0, 1], 2, cost_only(P.OPTIMIZED, source_allocation=ORIGIN.EQUAL)
+        R4, [0, 1], 2, shortest_paths(P.OPTIMIZED, source_allocation=ORIGIN.EQUAL)
     )
     assert [p.place(3).call_delivered, p.place(3).call_delivered] == [3, 1]
     assert p.place(0).total_cost == 20
@@ -541,7 +543,7 @@ def test_total_cost_beyond_64_bits(edges, sources, dest, optimized, equal):
         assert want >= 2**64
         for config in (
             glob(source_allocation),
-            cost_only(P.OPTIMIZED, source_allocation=source_allocation),
+            shortest_paths(P.OPTIMIZED, source_allocation=source_allocation),
         ):
             p = ngc.FlowPolicy(ngc.FlowLedger(g), sources, dest, config)
             assert p.place(INF).total_cost == want
@@ -560,10 +562,10 @@ def test_total_cost_beyond_64_bits(edges, sources, dest, optimized, equal):
 # -- zero calls, the result, terminations ----------------------------------------------------
 
 
-@pytest.mark.parametrize("routing", ["costonly", "global"])
+@pytest.mark.parametrize("routing", ["shortest_paths", "global"])
 def test_zero_unprepared(routing):
     # A zero call before the preparation; after a positive call and after remove().
-    config = cost_only() if routing == "costonly" else glob()
+    config = shortest_paths() if routing == "shortest_paths" else glob()
     g, ledger, p = fresh(PAR, 0, 1, config, residual=[4, 6])
 
     def unprepared(r):
@@ -636,7 +638,11 @@ def test_result_accounting():
     )
     # A row for every input source: 4 is masked, 1 has no route.
     _, _, p = fresh(
-        ROWS, [0, 1, 4], 3, cost_only(), lambda g: g.eligibility(excluded_nodes=[4])
+        ROWS,
+        [0, 1, 4],
+        3,
+        shortest_paths(),
+        lambda g: g.eligibility(excluded_nodes=[4]),
     )
     assert rows(p.place(3)) == [
         (0, None, 3, 3, 0, 0),
@@ -645,7 +651,7 @@ def test_result_accounting():
     ]
     # total_cost only for the controllers.
     g = graph(B1)
-    for config in (cost_only(), cost_only(P.WEIGHTED)):
+    for config in (shortest_paths(), shortest_paths(P.WEIGHTED)):
         assert (
             ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, config).place(1).total_cost
             is None
@@ -709,7 +715,7 @@ def test_equal_source_increments_beyond_64_bits():
 
 def test_terminations():
     # An empty roster (no edge reaches 1 from 0).
-    for config in (glob(), cost_only(), cost_only(admission=A.LOSSY)):
+    for config in (glob(), shortest_paths(), shortest_paths(admission=A.LOSSY)):
         _, _, p = fresh([(1, 0, 5, 1)], 0, 1, config)
         assert p.place(0).termination == T.COMPLETE
         r = p.place(5)
@@ -721,14 +727,14 @@ def test_terminations():
         else:
             assert (r.offered, r.unadmitted) == (None, 5)
     # Weighted splitting over the zero edge: no positive weight.
-    _, _, p = fresh(ZERO, 0, 1, cost_only(P.WEIGHTED, A.LOSSY))
+    _, _, p = fresh(ZERO, 0, 1, shortest_paths(P.WEIGHTED, A.LOSSY))
     r = p.place(2)
     assert (r.termination, r.call_source_drops, r.offered) == (T.NO_ACTIVE_WEIGHT, 2, 2)
-    _, _, p = fresh(ZERO, 0, 1, cost_only(P.WEIGHTED))
+    _, _, p = fresh(ZERO, 0, 1, shortest_paths(P.WEIGHTED))
     r = p.place(2)
     assert (r.termination, r.unadmitted) == (T.NO_ACTIVE_WEIGHT, 2)
     # A controller at zero over existing routes.
-    for config in (glob(), cost_only(P.OPTIMIZED)):
+    for config in (glob(), shortest_paths(P.OPTIMIZED)):
         _, _, p = fresh(
             SPF if config.routing.__class__ is ngc.ShortestPaths else ZERO, 0, 1, config
         )
@@ -757,9 +763,9 @@ def test_evaluators():
     for config, delivered in (
         (glob(ORIGIN.EQUAL), 4),
         (glob(), 12),
-        (cost_only(P.OPTIMIZED), 12),
-        (cost_only(P.OPTIMIZED, source_allocation=ORIGIN.EQUAL), 4),
-        (cost_only(), 4),
+        (shortest_paths(P.OPTIMIZED), 12),
+        (shortest_paths(P.OPTIMIZED, source_allocation=ORIGIN.EQUAL), 4),
+        (shortest_paths(), 4),
     ):
         assert (
             ngc.evaluate_demand(
@@ -769,12 +775,12 @@ def test_evaluators():
         )
     assert (
         ngc.evaluate_demand(
-            graph(POOL), [0, 1], 3, ngc.EvaluationOptions(cost_only())
+            graph(POOL), [0, 1], 3, ngc.EvaluationOptions(shortest_paths())
         ).call_delivered
         == 2
     )
     r = ngc.evaluate_demand(
-        graph(PRIV), [0, 1], 2, ngc.EvaluationOptions(cost_only(admission=A.LOSSY))
+        graph(PRIV), [0, 1], 2, ngc.EvaluationOptions(shortest_paths(admission=A.LOSSY))
     )
     assert (r.delivered, r.offered, r.requested, r.termination) == (
         10,
@@ -799,7 +805,9 @@ def test_evaluators():
             [(0, -10), (1, 0)],
         )
     # Pooled ShortestPaths: deleting e0 takes source 0 out of the roster.
-    s = ngc.evaluate_edge_failures(g, [0, 1], 3, ngc.EvaluationOptions(cost_only()))
+    s = ngc.evaluate_edge_failures(
+        g, [0, 1], 3, ngc.EvaluationOptions(shortest_paths())
+    )
     assert (
         s.baseline.call_delivered,
         [(e.edge, e.delivery_reduction) for e in s.entries],
@@ -865,12 +873,12 @@ def test_controllers_random(seed):
         for s in ref.roster:
             for e in ref.route[s]:
                 support[e] = True
-    for routing, allowed in (("global", edge_allowed), ("costonly", support)):
+    for routing, allowed in (("global", edge_allowed), ("shortest_paths", support)):
         for source_allocation in (ORIGIN.EQUAL, ORIGIN.OPTIMIZED):
             config = (
                 glob(source_allocation)
                 if routing == "global"
-                else cost_only(P.OPTIMIZED, source_allocation=source_allocation)
+                else shortest_paths(P.OPTIMIZED, source_allocation=source_allocation)
             )
             oracle = (
                 equal_source_allocation

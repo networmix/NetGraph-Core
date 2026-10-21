@@ -11,10 +11,10 @@ from fractions import Fraction
 import pytest
 import tunnel_oracle as orc
 from helpers import (
-    COSTONLY,
     GLOBAL,
     INF,
     L62,
+    SHORTEST_PATHS,
     assert_ints,
     build,
     exact,
@@ -422,7 +422,7 @@ def test_traced_place_checks_the_operation_first():
             match=exact("DistributedTE does not support incremental placement"),
         ):
             p._place_traced(v)
-    sp = ngc.FlowPolicy(ngc.FlowLedger(one10()), 0, 1, COSTONLY)
+    sp = ngc.FlowPolicy(ngc.FlowLedger(one10()), 0, 1, SHORTEST_PATHS)
     with pytest.raises(
         ValueError,
         match=exact("offer must be an integer in [0, 2^62) or permitted +inf"),
@@ -443,7 +443,7 @@ def test_operations_and_design_validation():
             match=exact("DistributedTE does not support incremental placement"),
         ):
             p.place(v)
-    sp = ngc.FlowPolicy(ngc.FlowLedger(one10()), 0, 1, COSTONLY)
+    sp = ngc.FlowPolicy(ngc.FlowLedger(one10()), 0, 1, SHORTEST_PATHS)
     for v in (-1, L62, 2**100):
         with pytest.raises(
             ValueError,
@@ -487,7 +487,7 @@ def test_operations_and_design_validation():
         g, 0, 1, [ngc.RouteDefinition(0, ngc.Path(g, [[0]]))]
     )
     for cfg, model in (
-        (COSTONLY, "ShortestPaths"),
+        (SHORTEST_PATHS, "ShortestPaths"),
         (GLOBAL, "CentralizedTE"),
         (ngc.FlowPolicyConfig(routing=ngc.Pinned(pin)), "Pinned"),
     ):
@@ -897,7 +897,7 @@ def test_no_certificates_and_plan_only_for_t1():
         ngc.FlowPolicyConfig(routing=ngc.Pinned(r.program)),
     )
     assert pin.replace(12).plan is None
-    for cfg in (COSTONLY, GLOBAL):
+    for cfg in (SHORTEST_PATHS, GLOBAL):
         q = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, cfg)
         assert q.place(5).plan is None and q.replace(5).plan is None
     with pytest.raises(TypeError):
@@ -1065,7 +1065,10 @@ def test_capacity():
             q(t1_config(4, LOSSY), design_demand=12, offer=INF),
             "offer must be an integer in [0, 2^62)",
         ),
-        (q(COSTONLY, design_demand=5), "ShortestPaths does not accept design_demand"),
+        (
+            q(SHORTEST_PATHS, design_demand=5),
+            "ShortestPaths does not accept design_demand",
+        ),
         (q(GLOBAL, design_demand=5), "CentralizedTE does not accept design_demand"),
     ):
         with pytest.raises(ValueError, match=exact(text)):
@@ -1083,7 +1086,7 @@ def test_capacity():
     assert q(t1_config(4), design_demand=INF).design_demand == INF
     assert (
         q(t1_config(4), design_demand=7).design_demand == 7
-        and q(COSTONLY).design_demand is None
+        and q(SHORTEST_PATHS).design_demand is None
     )
     prog = ngc.ForwardingProgram.from_routes(
         g, 0, 1, [ngc.RouteDefinition(0, ngc.Path(g, [[0]]))]

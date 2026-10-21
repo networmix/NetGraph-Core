@@ -257,7 +257,7 @@ docs/semantics.md | tunnels | an ideal controller that sees the whole network, o
 docs/semantics.md | tunnels | distributed strict-bandwidth tunnels, as RSVP-TE head ends s | a link anchor, the slug of the docs' own heading
 docs/semantics.md | tunnels | up whose paths or up and down tunnels differ from the instal | a model's tunnels (ForwardingProgram.tunnels is the current name)
 docs/semantics.md | tunnels | h's first nonempty program (`ShortestPaths` and the controll | a model's tunnels (ForwardingProgram.tunnels is the current name)
-docs/semantics.md | via | ascending via EdgeId. Any failure is a `ValueError`. | the via edge of a DAG entry
+docs/semantics.md | via | ascending via EdgeId. A wrong type raises `TypeError`; | the via edge of a DAG entry
 docs/semantics.md | via | ends at `len(parents) == len(via_edges)`; then every id is i | the via edge of a DAG entry
 docs/semantics.md | via | node, no `(node, via)` pair repeats, the DAG has no cycle an | the via edge of a DAG entry
 docs/semantics.md | volume | - **Design demand.** The volume T1 and T2 size their tunnels | the design volume D of the tunnel models
@@ -352,7 +352,7 @@ src/evaluators.cpp | priority | reachable from it, then selected on the priority
 src/evaluators.cpp | sensitivity | ShortestPaths sensitivity: the edges of the full static supp | sensitivity analysis, or the env var NGRAPH_CORE_SENSITIVITY_THREADS
 src/flow_policy.cpp | volume | The design volume of a tunnel model's call: the explicit des | the design volume D of the tunnel models
 src/forwarding_program.cpp | Route | Routes: the ordered heads, each entry's kind and route (a tu | a route or routes (a heading such as 'Route structures' or 'Routes')
-src/forwarding_program.cpp | placed | A stable counting sort by slot: counted at slot + 2, summed, | traffic placed (delivered) on a ledger
+src/forwarding_program.cpp | placed | A stable counting sort by slot: counted at slot + 2, summed, | array entries placed by the stable counting sort
 src/min_cost_flow.cpp | f_e | Delete e = (u, v), with flow f_e > 0, from a copy and run th | a math symbol of the comment's formula
 src/min_cost_flow.cpp | f_e | origin and target and that all-vertex update before Dinic ph | a math symbol of the comment's formula
 src/min_cost_flow.cpp | f_e | u to v; call the amount moved m. If r = f_e - m > 0, move r | a math symbol of the comment's formula
@@ -547,9 +547,9 @@ pyproject.toml | selection | scikit-build-core 1.0 introduced the "explicit" sdi
 src/centralized_te_tunnels.cpp | Tunnels | Sizing. Tunnels of a common size s > 0 exist exactly when K  | the word starting a sentence: actual tunnels
 src/flow_policy.cpp | cost_distribution | cost_distribution | a key of the frozen reference's trace format (the fixtures' keys)
 src/flow_policy.cpp | placed | placed | a key of the frozen reference's trace and payload format (the fixtures' keys)
-tests/cpp/flow_policy_fault_tests.cpp | sensitivity | frozen costonly sensitivity | a test case label: sensitivity analysis (the evaluator's subject)
-tests/cpp/flow_policy_fault_tests.cpp | sensitivity | frozen costonly sensitivity miss | a test case label: sensitivity analysis (the evaluator's subject)
-tests/cpp/flow_policy_fault_tests.cpp | sensitivity | frozen costonly sensitivity miss, worker threads, workers | a test case label: sensitivity analysis (the evaluator's subject)
+tests/cpp/flow_policy_fault_tests.cpp | sensitivity | frozen shortest_paths sensitivity | a test case label: sensitivity analysis (the evaluator's subject)
+tests/cpp/flow_policy_fault_tests.cpp | sensitivity | frozen shortest_paths sensitivity miss | a test case label: sensitivity analysis (the evaluator's subject)
+tests/cpp/flow_policy_fault_tests.cpp | sensitivity | frozen shortest_paths sensitivity miss, worker threads, workers | a test case label: sensitivity analysis (the evaluator's subject)
 tests/cpp/flow_policy_fault_tests.cpp | sensitivity | frozen sensitivity | a test case label: sensitivity analysis (the evaluator's subject)
 tests/cpp/flow_policy_fault_tests.cpp | sensitivity | sensitivity | a test case label: sensitivity analysis (the evaluator's subject)
 tests/cpp/flow_policy_tests.cpp | sensitivity | sensitivity baseline with every output | a test case label: sensitivity analysis (the evaluator's subject)
