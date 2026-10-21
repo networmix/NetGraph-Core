@@ -89,13 +89,17 @@ and `src/` with their uncommitted changes; a git revision is extracted with `git
 `OUT_DIR/src`. `REV` is required (there is no default reference), and a revision git does not
 know is refused. `OUT_DIR` must be absent or empty; it receives `harness` and the build record
 `harness.json`. The compiler is `clang++` from `PATH` with the first `flags=(...)` line of
-`build.sh` (`-std=c++20 -O3 -DNDEBUG -funroll-loops -fno-math-errno -fno-trapping-math -Wall
--Wextra`). `CXX` overrides the compiler; on macOS a set `CXX` also gets `-isysroot "$(xcrun
+`build.sh` (`-std=c++20 -O3 -DNDEBUG -funroll-loops -fno-math-errno -fno-trapping-math
+-falign-functions=64 -Wall -Wextra`). `CXX` overrides the compiler; on macOS a set `CXX` also gets `-isysroot "$(xcrun
 --show-sdk-path)"` (a toolchain compiler such as `$(xcrun --find clang++)` finds no system headers
 without it), and a set `CXX` without an SDK is refused. A refusal exits 2. A failed compile exits
 with the compiler's status, and a failure while the build record is written exits non-zero;
 either leaves neither `harness` nor `harness.json` (a revision's extracted sources stay in
 `OUT_DIR/src`, so a second attempt needs another or an emptied `OUT_DIR`).
+
+Function alignment reduces timing variation due to code placement. Build both sides with
+the same flags. The script enables neither `-march=native` nor PGO. These harness flags do not
+change the package wheels' Release flags.
 
 ### Build records
 

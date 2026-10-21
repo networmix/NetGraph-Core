@@ -15,7 +15,7 @@
 # -isysroot "$(xcrun --show-sdk-path)" (a toolchain compiler such as "$(xcrun --find clang++)"
 # finds no system headers without it), and a set CXX without an SDK is refused.
 set -euo pipefail
-flags=(-std=c++20 -O3 -DNDEBUG -funroll-loops -fno-math-errno -fno-trapping-math -Wall -Wextra)
+flags=(-std=c++20 -O3 -DNDEBUG -funroll-loops -fno-math-errno -fno-trapping-math -falign-functions=64 -Wall -Wextra)
 [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ] || { echo "usage: build.sh REV|worktree OUT_DIR" >&2; exit 2; }
 rev=$1
 out=$2

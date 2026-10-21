@@ -2734,6 +2734,18 @@ class BuildScript(unittest.TestCase):
     def record(self, out: Path) -> dict:
         return json.loads((out / "harness.json").read_text())
 
+    def test_function_alignment_on_both_sides(self):
+        # Check the actual compiler arguments and record independently of self.flags, which
+        # is parsed from build.sh and would otherwise accept an accidentally removed flag.
+        for rev, name in (("worktree", "aligned-worktree"), (self.base, "aligned-ref")):
+            with self.subTest(rev=rev):
+                proc = self.build(rev, name)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                argv = self.log.read_text().splitlines()
+                self.assertEqual(argv.count("-falign-functions=64"), 1)
+                recorded = self.record(self.top / name)["flags"].split()
+                self.assertEqual(recorded.count("-falign-functions=64"), 1)
+
     def test_refusals(self):
         for args, why in (
             ((), "usage: build.sh REV|worktree OUT_DIR"),

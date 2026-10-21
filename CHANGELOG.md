@@ -36,6 +36,8 @@ API.
 
 ### Changed
 
+- **Performance tooling**: A/B/A harness builds use 64-byte function alignment on both the
+  reference and candidate to reduce timing variation due to code placement. Wheel build flags are unchanged.
 - **Exact sensitivity**: unrestricted optimized `CentralizedTE` with a maximum baseline uses
   residual-component certificates, or stops a deletion repair when its
   scalar loss is known. The complete baseline, candidate order and reductions are preserved;
