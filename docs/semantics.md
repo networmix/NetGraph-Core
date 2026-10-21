@@ -2020,11 +2020,12 @@ raises `TypeError` when the action is built), and the call checks their domain.
   `actions must be a sequence of Place, Replace or Forward (got <type>)`, `actions[<i>] must be a
   Place, Replace or Forward (got <type>)`, `mode must be a BatchMode (got <type>)`, `outputs must be
   an OutputOptions (got <type>)`); the mode's value (`mode: <v> is not a value of BatchMode`); an
-  empty list returns `[]`; then each action in list order, all of its checks before the next
-  action's: `list policy belongs to another ledger`, `duplicate policy in list`, the SIMULTANEOUS
+  empty list checks ledger usability under the gate before returning `[]`. Each action's
+  argument checks run in list order: `list policy belongs to another ledger`, `duplicate policy in list`, the SIMULTANEOUS
   rules (`SIMULTANEOUS does not accept Place`, `SIMULTANEOUS Replace requires ShortestPaths EQUAL or
   WEIGHTED, or Pinned`, `SIMULTANEOUS requires admission=LOSSY`, `SIMULTANEOUS requires finite
-  offers`), then the scalar call's own checks in their order. Only then is anything computed. An
+  offers`), then the scalar call's argument checks. After all actions pass, check ledger usability
+  and every action's mutable state under the gate, in list order. Only then compute anything. An
   error of the computation (a loss cycle that does not settle, a solver or forwarding size limit,
   an allocation failure) publishes nothing.
 
@@ -2066,7 +2067,8 @@ is full.
 **In plain words.** A call either does everything or changes nothing: if it fails, for any
 reason, every ledger, policy and cache is as it was and you get one exception. There are two
 stated exceptions to this, described below. Immutable values can be shared freely between
-threads; ledgers, policies and building caches have one writer at a time.
+threads. Calls on one ledger serialize; different ledgers run in parallel. Cache leases serialize
+building calls and admit frozen readers together.
 
 **Exact rules.**
 
@@ -2095,10 +2097,35 @@ threads; ledgers, policies and building caches have one writer at a time.
   partial entry, every value it handed out stays valid, and a kept entry never changes any later
   result. A failed lookup counts one miss. A frozen cache never changes its entries; a failed
   call changes none of its statistics, except one miss when the call raised `ShortestPathCacheMiss`.
-- **Threads.** `Graph`, `Eligibility`, `PredecessorDAG`, `Path` and a frozen `ShortestPathCache` may be shared
-  by any number of threads. A `FlowLedger`, a `FlowPolicy` and a building `ShortestPathCache` have one
-  writer and no concurrent readers. An array lent to a call (a residual) must not change during
-  the call.
+- **Threads and the GIL.** Each ledger has one native gate protecting its projections and every
+  bound policy, including reads, lists, removal and policy destruction. Calls on one ledger take
+  effect one at a time; different ledgers can compute in parallel. Native work releases the GIL,
+  including policy calls, searches, factories and array conversions. Immutable reads keep the GIL
+  and take no gate: graph, mask, route, program, configuration and result fields, `policy.config`,
+  cache `graph_uid()` and `stats()`. Each statistics field is read atomically, without promising a
+  consistent snapshot of all fields.
+- **Call phases.** Convert and copy inputs, pin dependencies and check every argument and immutable
+  object in the first pass's order. Python conversions and protocols keep the GIL; linear checks of
+  a just-converted argument may keep it too. Native checks that grow with the graph release it,
+  before any lease or gate: the tunnel-limit roster search in policy construction and the evaluators
+  (once per pair in a batch), and `from_routes`' walk of each supplied PredecessorDAG. `evaluate_pairs`'
+  workers and the other evaluators' main evaluation reuse the checked rosters; each deletion of
+  `evaluate_edge_failures` searches under its own mask. Publishing calls also allocate and register their fixed Python
+  results here: a policy, a `PlacementResult`, a list of n results, or a `SensitivityResult`.
+  Release the GIL, acquire at most one cache lease, then the ledger gate. Check mutable state,
+  compute privately, join workers and publish without allocation or failure. Frozen hits publish
+  last, inside the lease. Release every gate and lease before reacquiring the GIL to return or
+  translate an exception. Reads, searches and factories wrap their owned native snapshots after
+  unlocking. Python conversions and protocols execute with no native lock held.
+- **Validation passes.** In the documented validation order, all argument and immutable checks
+  precede all mutable-state checks. Thus an invalid offer or foreign black holes precede
+  `forward requires an installed program`; a later invalid list action precedes an earlier
+  action's epoch error. Installed programs, finite `place` calls after infinity, requested limits,
+  cache mode, ledger usability and identity availability are checked under the gate or lease,
+  in their documented order, action by action. No list action computes before both passes finish.
+- **Free-threaded Python.** The cp314t build supports the same concurrency rules. It detaches its
+  Python thread state before waiting for a gate or lease. Step-one conversion still copies every
+  borrowed array; changing an argument concurrently with its conversion remains a caller race.
 - **Lifetimes.** The graph outlives the ledger, the ledger outlives its policies; Python keeps
   the graph, ledger, Eligibility and cache alive while a policy needs them.
 - **Immutable values.** The configuration values (`FlowPolicyConfig`, the four models,
@@ -2178,8 +2205,9 @@ error).
   `HIGHER_HEADROOM` from the residual at that moment and `HIGHER_CAPACITY` from static capacities.
   Because the cached DAG keeps every equal-cost parallel member, a member that a static choice
   would have dropped is still available when its residual makes it the right one.
-- **Who reads it.** `ShortestPaths` policies read the cache (keyed by their destination set,
-  reverse direction, and Eligibility uid); so do the evaluators when they run a `ShortestPaths`
+- **Who reads it.** `ShortestPaths` policy construction reads the cache (keyed by its destination
+  set, reverse direction, and Eligibility uid) and retains the support DAG. Later scalar calls and
+  lists use that retained support without a cache lease. The evaluators read their supplied cache when they run a `ShortestPaths`
   configuration. The other models do not read it and reject a supplied cache (`ValueError`, for
   example `CentralizedTE does not use ShortestPathCache`), as the last check of the model matrix.
 
@@ -2189,9 +2217,14 @@ error).
 | lookup miss | searches, inserts, returns | raises `ShortestPathCacheMiss` |
 | `freeze()` | becomes frozen | no effect |
 | `clear()` | empties the cache; hit and miss counters persist | `ValueError` |
-| `thaw()` | no effect | becomes building; join every reader first |
-| destruction | allowed | allowed after joining every reader; values already handed out stay valid |
+| `thaw()` | no effect | waits for active calls, then becomes building |
+| destruction | callers keep it alive during calls | callers keep it alive during calls; returned values stay valid |
 
+- **Leases.** Each building call owns one exclusive lease for its whole computation; frozen
+  calls own shared leases. `freeze()`, `thaw()` and `clear()` take exclusive admission and wait
+  for active calls. Admission is FIFO: a queued lifecycle call cannot be overtaken by later
+  builders or readers. Evaluator workers borrow their outer call's lease and never acquire it
+  again. The cache lease precedes any ledger gate.
 - **Statistics.** `stats()` returns `hits`, `misses`, `entries`, `bytes` (the entries' retained
   arrays, without container overhead) and `live_values` (values alive anywhere, cache entries
   included). Each field is atomic; together they are not one consistent snapshot. An invalid
@@ -2285,14 +2318,13 @@ on a ledger with that load.
   order. Nothing is shared between pairs (no reservations, no capacity): the results are
   independent capacities, not allocations that coexist; demands that share capacity are policies
   on one ledger. Pair `i` uses `options.eligibility` intersected with `per_pair_eligibility[i]`
-  (entries may be `None`; a given list has one entry per pair). Everything is validated before any
-  worker starts: first the arguments (the worker count, the graph of `options.eligibility` and of
-  the cache, the cache rule, `Pinned`, which is rejected because a program fixes its endpoints
-  (`evaluate_pairs does not accept Pinned`), the configuration, the offer and design rules above,
-  then the length of `per_pair_eligibility`), then each pair completely (its endpoint sets, their
-  overlap, its Eligibility's graph, the pooled single-path rule of [section 7](#configuration) and
-  T2's several-sources rule for its sources) in pair order, so the error of the lowest failing
-  pair is the one raised. An empty batch returns `[]`.
+  (entries may be `None`; a given list has one entry per pair). All checks finish before evaluation workers start: first the arguments (the worker count, the graph of `options.eligibility` and
+  of the cache, `Pinned`, which is rejected because a program fixes its endpoints (`evaluate_pairs does not accept
+  Pinned`), the configuration, the offer and design rules above, then the length of `per_pair_eligibility`), then each
+  pair completely (its endpoint sets, their overlap, its Eligibility's graph, the pooled single-path rule of
+  [section 7](#configuration), T2's several-sources rule and, for the tunnel models, the tunnel limit for its sources)
+  in pair order, so the error of the lowest failing pair is the one raised. A supplied building cache's
+  `workers == 1` rule reads the cache's mode and comes last, under the cache's lease. An empty batch returns `[]`.
 - **`evaluate_edge_failures(graph, sources, destinations, options, workers=None)`** returns a
   `SensitivityResult`: `baseline` (the result of `evaluate_demand`, with the requested outputs)
   and `entries`, one `SensitivityEntry(edge, delivery_reduction)` per candidate edge, in ascending

@@ -4,7 +4,8 @@
 #
 #   bash dev/run-checks.sh pytest on [PYTEST_ARGS...]
 #       The Python suite against the netgraph_core that $PYTHON imports, which must carry the
-#       private hooks (the editable development build): no test may skip. (make check-ci)
+#       private hooks (the editable development build): no test may skip on a GIL build;
+#       only the GIL-proof tests skip on a free-threaded build. (make check-ci)
 #   bash dev/run-checks.sh pytest off [PYTEST_ARGS...]
 #       The Python suite against an installed, non-editable netgraph_core without the hooks (a
 #       wheel, or a build from the sdist): exactly the tests that need a hook skip, listed in

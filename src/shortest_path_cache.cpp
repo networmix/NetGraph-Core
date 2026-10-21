@@ -6,6 +6,7 @@
 #include "netgraph/core/shortest_path_cache.hpp"
 
 #include <algorithm>
+#include <array>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -34,18 +35,40 @@ struct LiveDeleter {
 // The key function of ShortestPathCacheMiss (shortest_path_cache.hpp): its vtable and type_info live here only.
 const char* ShortestPathCacheMiss::what() const noexcept { return what_->c_str(); }
 
-ShortestPathCache::ShortestPathCache(const Graph& graph) : graph_uid_(graph.uid()) {}
+ShortestPathCache::ShortestPathCache(const Graph& graph)
+    : gate_(std::make_unique<detail::CacheGate>()), graph_uid_(graph.uid()) {}
+
+ShortestPathCache::~ShortestPathCache() = default;
 
 std::shared_ptr<const PredecessorDAG> ShortestPathCache::lookup(const Graph& graph, std::span<const NodeId> roots,
                                                 Direction direction, const Eligibility* eligibility) {
-  return lookup_in_call(graph, roots, direction, eligibility, nullptr);
+  if (graph.uid() != graph_uid_) throw std::invalid_argument("ShortestPathCache: the graph is not the cache's graph (foreign graph)");
+  if (eligibility != nullptr && eligibility->graph_uid() != graph.uid()) throw std::invalid_argument("foreign Eligibility: built for another graph");
+  // Copy borrowed roots before waiting. Small direct hits need no heap allocation.
+  std::array<NodeId, 8> small;
+  std::vector<NodeId> large;
+  std::span<NodeId> owned;
+  if (roots.size() <= small.size()) {
+    owned = std::span(small).first(roots.size());
+    std::copy(roots.begin(), roots.end(), owned.begin());
+  } else {
+    large.assign(roots.begin(), roots.end());
+    owned = large;
+  }
+  if (owned.empty()) (void)detail::node_set(owned, graph.num_nodes(), "roots");
+  detail::check_range(owned, graph.num_nodes(), "roots");
+  std::sort(owned.begin(), owned.end());
+  const auto count = static_cast<std::size_t>(std::unique(owned.begin(), owned.end()) - owned.begin());
+  detail::check_member(direction, "direction");
+  const detail::CacheGate::Lease lease(*gate_);
+  return lookup_in_call(graph, owned.first(count), direction, eligibility, nullptr);
 }
 
 std::shared_ptr<const PredecessorDAG> ShortestPathCache::lookup_in_call(const Graph& graph, std::span<const NodeId> roots,
                                                         Direction direction, const Eligibility* eligibility,
                                                         detail::FrozenCacheHitTally* tally) {
   // Inside a public call a frozen cache's statistics wait for the call's boundary.
-  const bool staged = frozen_ && tally != nullptr && tally->cache() == this;
+  const bool staged = gate_->frozen() && tally != nullptr && tally->cache() == this;
   // Invalid queries throw before anything is counted.
   if (graph.uid() != graph_uid_) throw std::invalid_argument("ShortestPathCache: the graph is not the cache's graph (foreign graph)");
   if (eligibility != nullptr && eligibility->graph_uid() != graph.uid()) {
@@ -73,7 +96,7 @@ std::shared_ptr<const PredecessorDAG> ShortestPathCache::lookup_in_call(const Gr
     }
     return it->second;
   }
-  if (frozen_) {
+  if (gate_->frozen()) {
     // A frozen miss counts one miss (the lookup found no entry; inside a call, the boundary
     // counts it) and inserts nothing; the exception is built first, so a failed allocation there
     // counts nothing.
@@ -101,15 +124,26 @@ std::shared_ptr<const PredecessorDAG> ShortestPathCache::lookup_in_call(const Gr
   return shared;
 }
 
-void ShortestPathCache::freeze() noexcept { frozen_ = true; }
+void ShortestPathCache::freeze() {
+  const detail::CacheGate::Lease lease(*gate_, true);
+  gate_->freeze(true);
+}
 
-void ShortestPathCache::thaw() noexcept { frozen_ = false; }
+void ShortestPathCache::thaw() {
+  const detail::CacheGate::Lease lease(*gate_, true);
+  gate_->freeze(false);
+}
 
 void ShortestPathCache::clear() {
-  if (frozen_) {
+  const detail::CacheGate::Lease lease(*gate_, true);
+  if (gate_->frozen()) {
     throw std::invalid_argument(
-        "ShortestPathCache.clear is rejected while the cache is frozen (join every reader, then thaw() and clear())");
+        "ShortestPathCache.clear is rejected while the cache is frozen (thaw() it, then clear())");
   }
+  clear_contents();
+}
+
+void ShortestPathCache::clear_contents() noexcept {
   entries_.clear();
   num_entries_.store(0, std::memory_order_relaxed);
   bytes_.store(0, std::memory_order_relaxed);

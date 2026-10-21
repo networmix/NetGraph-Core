@@ -1844,7 +1844,8 @@ def test_forward_texts_and_order():
     g = par2(10, 10)
     p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cost_only(admission=LOSSY))
     with pytest.raises(
-        ValueError, match=exact("forward requires an installed program")
+        ValueError,
+        match=exact("offer must be an integer in [0, 2^62) or permitted +inf"),
     ):
         p.forward(-1)
     p.place(1)

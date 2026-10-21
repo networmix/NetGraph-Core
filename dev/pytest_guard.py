@@ -3,7 +3,8 @@
 
     python dev/pytest_guard.py on|off [PYTEST_ARGS...]
 
-on: the extension carries the private hooks (the editable development build) and no test skips.
+on: the extension carries the private hooks (the editable development build). On a GIL build
+no test skips; on a free-threaded build exactly GIL_PROOF_SKIPS skip with reason GIL-proof-only.
 off: an installation without them (a wheel, or a build from the sdist), imported from outside
 the source tree, and exactly the tests that need a hook skip (EXPECTED_OFF_SKIPS, and every
 replay of the reference fixtures). A small plugin records the skipped node ids (tests, and modules
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+import sysconfig
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +56,9 @@ EXPECTED_OFF_SKIPS = [
     ),
     "tests/py/test_number_types.py::test_a_cold_conversion_raises_memory_error",
     "tests/py/test_native_allocation.py::test_allocation_hooks_preserve_exception_identity",
+    "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[evaluate_pairs.t1]",
+    "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[evaluate_pairs.t2]",
+    "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[evaluate_pairs.t2_support]",
     (
         "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[Eligibility.intersect]"
     ),
@@ -245,6 +250,70 @@ EXPECTED_OFF_SKIPS = [
         "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[apply_actions.simultaneous]"
     ),
 ]
+# Every new hooks-only node is explicit; a module-level skip cannot hide a public race.
+EXPECTED_OFF_SKIPS += [
+    "tests/py/test_concurrency.py::test_conversions_run_before_native_locks",
+    "tests/py/test_concurrency.py::test_batch_first_pass_uses_one_detach_and_no_computation_event",
+    "tests/py/test_concurrency.py::test_inputs_are_copied_before_native_work",
+    "tests/py/test_concurrency.py::test_options_snapshot_at_entry",
+    "tests/py/test_concurrency.py::test_initializing_policy_is_not_exposed",
+    "tests/py/test_concurrency.py::test_native_phase_allows_heartbeat",
+    "tests/py/test_concurrency.py::test_cache_before_gate_order",
+    "tests/py/test_concurrency.py::test_cached_policies_ignore_busy_original_cache",
+    "tests/py/test_concurrency.py::test_record_and_workers_do_not_deadlock",
+    "tests/py/test_concurrency.py::test_same_ledger_calls_serialize",
+    "tests/py/test_concurrency.py::test_every_ledger_reader_waits_without_gil",
+    "tests/py/test_concurrency.py::test_immutable_readers_do_not_wait",
+    "tests/py/test_concurrency.py::test_two_ledgers_enter_together",
+    "tests/py/test_concurrency.py::test_full_calls_and_reads_serialize",
+    "tests/py/test_concurrency.py::test_list_publication_is_atomic",
+    "tests/py/test_concurrency.py::test_reservations_and_program_are_atomic",
+    "tests/py/test_concurrency.py::test_building_cache_serializes_native_calls",
+    "tests/py/test_concurrency.py::test_frozen_cache_allows_overlapping_calls",
+    "tests/py/test_concurrency.py::test_cache_fifo_admission",
+    "tests/py/test_concurrency.py::test_workers_borrow_outer_lease",
+    "tests/py/test_concurrency.py::test_failed_waiter_unblocks_lifecycle",
+    "tests/py/test_concurrency.py::test_worker_validation_uses_leased_mode",
+    "tests/py/test_concurrency.py::test_frozen_tally_finishes_before_lifecycle",
+    "tests/py/test_concurrency.py::test_cache_lifetime_is_pinned_during_wait",
+    "tests/py/test_concurrency.py::test_policy_destructor_cannot_deadlock",
+    "tests/py/test_concurrency.py::test_waiters_pin_every_dependency",
+    "tests/py/test_concurrency.py::test_identity_order_is_a_serial_order",
+    "tests/py/test_concurrency.py::test_bind_copy_reset_races",
+    "tests/py/test_concurrency.py::test_failed_acquisition_releases_waiters",
+    "tests/py/test_concurrency.py::test_lowest_worker_exception_survives_overlap",
+    "tests/py/test_concurrency.py::test_failure_does_not_strand_waiters",
+    "tests/py/test_concurrency.py::test_zero_empty_and_masked_calls",
+    "tests/py/test_concurrency.py::test_immutable_native_operations_overlap_heartbeat",
+    "tests/py/test_concurrency.py::test_trace_conversion_is_separate_read",
+    "tests/py/test_getter_allocation.py::test_native_trace_conversion_allocation_failures",
+    "tests/py/test_getter_allocation.py::test_policy_shell_native_failures_leave_no_binding",
+    "tests/py/test_concurrency.py::test_daemon_exit_releases_native_resources",
+    "tests/py/test_concurrency.py::test_every_program_representation_uses_the_transaction_gate",
+    "tests/py/test_contract_examples.py::test_contract_example[F-publication-locked]",
+    "tests/py/test_contract_examples.py::test_contract_example[F-publication-unlocked]",
+    "tests/py/test_contract_examples.py::test_contract_example[F-publish-result-first]",
+    "tests/py/test_contract_examples.py::test_contract_example[F-publish-result-after]",
+    "tests/py/test_contract_examples.py::test_contract_example[F-read-result-failure]",
+    "tests/py/test_contract_examples.py::test_contract_example[F-read-result-under-gate]",
+    "tests/py/test_contract_examples.py::test_contract_example[F-frozen-hits]",
+    "tests/py/test_contract_examples.py::test_contract_example[F-frozen-hits-after-lease]",
+    "tests/py/test_contract_examples.py::test_contract_example[LIST-state-second]",
+]
+GIL_PROOF_SKIPS = {
+    "tests/py/test_concurrency.py::test_native_phase_allows_heartbeat",
+    "tests/py/test_concurrency.py::test_immutable_native_operations_overlap_heartbeat",
+}
+CONCURRENCY_PUBLIC = {
+    "tests/py/test_concurrency_public.py::test_shared_policy_increments",
+    "tests/py/test_concurrency_public.py::test_replacements_replay_by_flow_id",
+    "tests/py/test_concurrency_public.py::test_independent_ledgers",
+    "tests/py/test_concurrency_public.py::test_immutable_configuration_and_snapshots",
+    "tests/py/test_concurrency_public.py::test_cache_lifecycle_and_retained_values",
+    "tests/py/test_concurrency_public.py::test_public_policy_teardown",
+    "tests/py/test_concurrency_public.py::test_final_policy_rejects_swallowed_constructor_error",
+    "tests/py/test_contract_examples.py::test_contract_example[CALL-state-second]",
+}
 EXPECTED_OFF_SKIPPED_PREFIX = "tests/py/test_flow_policy_fixtures.py::test_fixture["
 
 
@@ -270,10 +339,30 @@ class Record:
             self.skip(report)
 
 
-def problems(hooks, has_hooks, modules, seen, skipped, root=ROOT):
+def problems(
+    hooks,
+    has_hooks,
+    modules,
+    seen,
+    skipped,
+    root=ROOT,
+    *,
+    free_threaded=False,
+    runtime_gil=None,
+    require_concurrency=False,
+):
     """The checks of one run (hooks: "on" or "off"; modules: the files of _netgraph_core and
     netgraph_core as imported, None when not imported); returns the problems found."""
     out = []
+    if runtime_gil is not None and runtime_gil == free_threaded:
+        out.append(
+            "Python ABI/runtime mismatch: free-threaded ABI must run without the GIL"
+        )
+    if require_concurrency:
+        out += [
+            f"required public concurrency test did not run: {node}"
+            for node in sorted(CONCURRENCY_PUBLIC - seen)
+        ]
     if None in modules:
         out.append(f"netgraph_core or _netgraph_core was not imported: {modules}")
     if hooks == "on":
@@ -281,10 +370,25 @@ def problems(hooks, has_hooks, modules, seen, skipped, root=ROOT):
             out.append(
                 "the extension lacks the private hooks (expected the editable build)"
             )
-        if skipped:
+        allowed = GIL_PROOF_SKIPS if free_threaded else set()
+        if not free_threaded and skipped:
             out.append(
                 f"{len(skipped)} tests skipped in a hooks-on run: {sorted(skipped)}"
             )
+        elif free_threaded:
+            out += [
+                f"expected GIL-only skip did not occur: {n}"
+                for n in sorted(allowed - set(skipped))
+            ]
+            out += [
+                f"unexpected skip in free-threaded hooks-on run: {n}"
+                for n in sorted(set(skipped) - allowed)
+            ]
+            out += [
+                f"wrong GIL-only skip reason: {n}: {reason}"
+                for n, reason in sorted(skipped.items())
+                if n in allowed and "GIL-proof-only" not in reason
+            ]
         return out
     if has_hooks:
         out.append(
@@ -308,6 +412,7 @@ def problems(hooks, has_hooks, modules, seen, skipped, root=ROOT):
         f"skipped for another reason: {n}: {r}"
         for n, r in sorted(skipped.items())
         if "needs the private hooks" not in r
+        and not (free_threaded and n in GIL_PROOF_SKIPS and "GIL-proof-only" in r)
     ]
     return out
 
@@ -333,6 +438,13 @@ def main(argv):
         modules,
         record.seen,
         record.skipped,
+        free_threaded=bool(sysconfig.get_config_var("Py_GIL_DISABLED")),
+        runtime_gil=getattr(sys, "_is_gil_enabled", lambda: True)(),
+        require_concurrency=(
+            not any(not arg.startswith("-") for arg in argv[1:])
+            or any(node.startswith("tests/py/") for node in record.seen)
+        )
+        and not any("::" in arg or arg.endswith(".py") for arg in argv[1:]),
     )
     for p in found:
         print(f"dev/pytest_guard.py: {p}", file=sys.stderr)
@@ -344,7 +456,9 @@ def main(argv):
             f" imported {modules[0]}"
         )
     else:
-        print(f"hooks on: no test skipped; imported {modules[0]}")
+        print(
+            f"hooks on: {len(record.skipped)} exact build-specific skips; imported {modules[0]}"
+        )
     return 0
 
 

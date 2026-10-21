@@ -23,6 +23,7 @@ namespace netgraph::core {
 namespace detail {
 struct DagCacheAccess;
 class FrozenCacheHitTally;
+class CacheGate;
 } // namespace detail
 
 // A frozen-cache lookup with no matching key throws ShortestPathCacheMiss. The shared message can be
@@ -45,7 +46,7 @@ private:
 // Values remain valid after clear() or cache destruction. The route choice is applied when a policy
 // creates a flow and is never cached.
 //
-// Building mode (a new cache): one writer, no concurrent readers. A hit returns the value; a miss
+// Building mode (a new cache): one exclusive lease per call. A hit returns the value; a miss
 // runs the search, inserts and returns (a failed search counts one miss and inserts nothing); an
 // invalid query (a graph or Eligibility of another graph, an empty root set, a root out of range,
 // a direction outside its enumeration) throws std::invalid_argument and counts nothing. clear()
@@ -54,8 +55,9 @@ private:
 // Frozen mode (after freeze()): read-only and shareable; lookups from several threads at once are
 // safe. A hit returns the value; a miss counts one miss and throws ShortestPathCacheMiss (nothing is
 // inserted); clear() throws std::invalid_argument; freeze() again has no effect; thaw() returns to
-// building mode once the caller has joined every reader (no lookup may run concurrently with
-// freeze(), thaw() or destruction).
+// building mode after outstanding calls release their leases. Lifecycle calls take exclusive
+// admission, in FIFO order with lookups, so later building calls and frozen readers cannot
+// starve them. Callers keep the cache alive throughout every call; returned values own their data.
 //
 // Each statistic is atomic, but reading several fields need not give one consistent snapshot.
 // `bytes` counts the entries' stored DAG arrays; `live_values` counts values alive anywhere,
@@ -78,23 +80,25 @@ public:
   explicit ShortestPathCache(const Graph& graph);
   ShortestPathCache(const ShortestPathCache&) = delete;
   ShortestPathCache& operator=(const ShortestPathCache&) = delete;
-  ~ShortestPathCache() = default;
+  ~ShortestPathCache();
 
   [[nodiscard]] std::uint64_t graph_uid() const noexcept { return graph_uid_; }
   [[nodiscard]] std::shared_ptr<const PredecessorDAG> lookup(const Graph& graph, std::span<const NodeId> roots,
                                                       Direction direction, const Eligibility* eligibility);
-  void freeze() noexcept;
-  void thaw() noexcept;
+  void freeze();
+  void thaw();
   void clear();
   [[nodiscard]] Stats stats() const noexcept;
 
 private:
   friend struct detail::DagCacheAccess;
+  // Caller owns the lifecycle lease, or this cache is exclusive to one worker.
+  void clear_contents() noexcept;
   // lookup() inside a public call: with a tally of this cache, a frozen hit is recorded in it and a
   // frozen miss counts nothing here (the call's boundary counts it).
   std::shared_ptr<const PredecessorDAG> lookup_in_call(const Graph& graph, std::span<const NodeId> roots, Direction direction,
                                                 const Eligibility* eligibility, detail::FrozenCacheHitTally* tally);
-  bool frozen_ {false};
+  std::unique_ptr<detail::CacheGate> gate_;
   using Key = std::tuple<std::vector<NodeId>, Direction, std::uint64_t>;
   // A lookup's key over borrowed roots (a validated sorted, duplicate-free span): a hit needs no copy.
   using KeyView = std::tuple<std::span<const NodeId>, Direction, std::uint64_t>;

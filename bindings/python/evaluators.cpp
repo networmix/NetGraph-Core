@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -22,6 +23,7 @@
 #include "netgraph/core/graph.hpp"
 #include "integers.hpp"
 #include "publication.hpp"
+#include "native_call.hpp"
 #include "values.hpp"
 #include "registration.hpp"
 
@@ -116,16 +118,15 @@ void register_evaluators(py::module_& m) {
         const auto s = node_ids(sources, graph->num_nodes(), "sources");
         const auto d = node_ids(destinations, graph->num_nodes(), "destinations");
         const EvaluationOptions c = o.native();
-        // One public call on a frozen cache's statistics, its result object included: its hits count
-        // only when the Python result exists.
-        return detail::frozen_call(c.cache, [&](detail::FrozenCacheHitTally& tally) {
-          PlacementResult r;
-          {
-            py::gil_scoped_release release;
-            r = detail::evaluate_demand_in_call(*graph, s, d, c, tally);
-          }
-          return object_of(std::move(r));
+        const auto roster = detail::check_demand_arguments(*graph, s, d, c, detached_argument_work);
+        auto [obj, slot] = new_object<PlacementResult>();
+        native_call([&] {
+          return detail::frozen_call(c.cache, [&](detail::FrozenCacheHitTally& tally) {
+            *slot = detail::evaluate_demand_in_call(*graph, s, d, c, tally, roster ? &*roster : nullptr);
+            return true;
+          });
         });
+        return std::move(obj);
       },
       py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("options"),
       "The evaluation of a fresh FlowPolicy with options.config on a fresh ledger of graph at options.offer\n"
@@ -165,40 +166,51 @@ void register_evaluators(py::module_& m) {
         std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> ps;
         std::vector<std::shared_ptr<Eligibility>> keep;
         std::vector<const Eligibility*> per;
+        std::exception_ptr pending;
         const auto n = graph->num_nodes();
         for (std::size_t i = 0; i < num_pairs; ++i) {
-          const py::object item = items[i];
-          // Not a sequence is a wrong type, a sequence of another length a wrong value: one text.
-          if (is_invalid_sequence(item)) throw py::type_error("each pair must be (sources, destinations)");
-          if (py::len(item) != 2) throw py::value_error("each pair must be (sources, destinations)");
-          auto t = py::reinterpret_borrow<py::sequence>(item);
-          auto src = node_ids(t[0], n, "sources");
-          auto dst = node_ids(t[1], n, "destinations");
-          const Eligibility* e = nullptr;
-          if (eligs) {
-            const py::object entry = (*eligs)[i];
-            if (!entry.is_none()) {
-              if (!py::isinstance<Eligibility>(entry)) throw py::type_error("per_pair_eligibility entries must be Eligibility or None");
-              keep.push_back(entry.cast<std::shared_ptr<Eligibility>>());
-              e = keep.back().get();
+          try {
+            const py::object item = items[i];
+            // Not a sequence is a wrong type, a sequence of another length a wrong value: one text.
+            if (is_invalid_sequence(item)) throw py::type_error("each pair must be (sources, destinations)");
+            if (py::len(item) != 2) throw py::value_error("each pair must be (sources, destinations)");
+            auto t = py::reinterpret_borrow<py::sequence>(item);
+            auto src = node_ids(t[0], n, "sources");
+            auto dst = node_ids(t[1], n, "destinations");
+            const Eligibility* e = nullptr;
+            if (eligs) {
+              const py::object entry = (*eligs)[i];
+              if (!entry.is_none()) {
+                if (!py::isinstance<Eligibility>(entry)) throw py::type_error("per_pair_eligibility entries must be Eligibility or None");
+                keep.push_back(entry.cast<std::shared_ptr<Eligibility>>());
+                e = keep.back().get();
+              }
+              per.push_back(e);
             }
-            per.push_back(e);
+            detail::check_batch_pair(*graph, c.config, src, dst, e, i);
+            ps.emplace_back(std::move(src), std::move(dst));
+          } catch (...) {
+            pending = std::current_exception();
+            break;
           }
-          detail::check_batch_pair(*graph, c.config, src, dst, e, i);
-          ps.emplace_back(std::move(src), std::move(dst));
         }
-        return detail::frozen_call(c.cache, [&](detail::FrozenCacheHitTally& tally) {
-          std::vector<PlacementResult> rs;
-          {
-            py::gil_scoped_release release;
-            rs = detail::evaluate_pairs_in_call(*graph, ps, c, per, w, tally);
-          }
-          auto out = py::reinterpret_steal<py::list>(checked(PyList_New(static_cast<Py_ssize_t>(rs.size()))).release());
-          for (std::size_t i = 0; i < rs.size(); ++i) {
-            PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), object_of(std::move(rs[i])).release().ptr());
-          }
-          return py::object(std::move(out));
+        const auto rosters = detail::prepare_batch_rosters(*graph, ps, c, per, w, detached_argument_work);
+        if (pending) std::rethrow_exception(pending);
+        auto out = py::reinterpret_steal<py::list>(checked(PyList_New(static_cast<Py_ssize_t>(num_pairs))).release());
+        std::vector<PlacementResult*> slots(num_pairs);
+        for (std::size_t i = 0; i < num_pairs; ++i) {
+          auto [obj, slot] = new_object<PlacementResult>();
+          slots[i] = slot;
+          PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), obj.release().ptr());
+        }
+        native_call([&] {
+          return detail::frozen_call(c.cache, [&](detail::FrozenCacheHitTally& tally) {
+            auto rs = detail::evaluate_pairs_in_call(*graph, ps, c, per, w, tally, rosters);
+            for (std::size_t i = 0; i < rs.size(); ++i) *slots[i] = std::move(rs[i]);
+            return true;
+          });
         });
+        return out;
       },
       py::arg("graph"), py::arg("pairs"), py::arg("options"), py::arg("per_pair_eligibility") = py::none(),
       py::arg("workers") = py::none(),
@@ -206,8 +218,9 @@ void register_evaluators(py::module_& m) {
       "options.eligibility "
       "intersected with per_pair_eligibility[i] (None entries allowed; a given sequence has one entry per pair,\n"
       "also when empty). workers >= 1; None: NGRAPH_CORE_BATCH_THREADS or 1, and 1 when a cache is\n"
-      "supplied. Everything is validated before a worker starts, the arguments first, then each pair\n"
-      "completely in pair order, so the error of the lowest failing pair is raised. Pinned is rejected\n"
+      "supplied. All checks finish before evaluation workers start: the arguments first, then each pair\n"
+      "completely in pair order, so the error of the lowest failing pair is raised. First-pass tunnel\n"
+      "searches run in parallel under one GIL release, before any lease or gate. Pinned is rejected\n"
       "(`evaluate_pairs does not accept Pinned`: a program has fixed endpoints);\n"
       "an empty batch returns [].\n"
       "Caches: a supplied building cache needs workers == 1; a frozen cache is shared by every worker\n"
@@ -227,14 +240,15 @@ void register_evaluators(py::module_& m) {
         const auto d = node_ids(destinations, graph->num_nodes(), "destinations");
         const auto w = workers_of(workers, true, static_cast<bool>(o.cache));
         const EvaluationOptions c = o.native();
-        return detail::frozen_call(c.cache, [&](detail::FrozenCacheHitTally& tally) {
-          SensitivityResult r;
-          {
-            py::gil_scoped_release release;
-            r = detail::evaluate_edge_failures_in_call(*graph, s, d, c, w, tally);
-          }
-          return object_of(std::move(r));
+        const auto roster = detail::check_edge_failure_arguments(*graph, s, d, c, w, detached_argument_work);
+        auto [obj, slot] = new_object<SensitivityResult>();
+        native_call([&] {
+          return detail::frozen_call(c.cache, [&](detail::FrozenCacheHitTally& tally) {
+            *slot = detail::evaluate_edge_failures_in_call(*graph, s, d, c, w, tally, roster ? &*roster : nullptr);
+            return true;
+          });
         });
+        return std::move(obj);
       },
       py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("options"), py::arg("workers") = py::none(),
       "The baseline evaluate_demand() and one SensitivityEntry per candidate edge. Candidates: with unrestricted\n"

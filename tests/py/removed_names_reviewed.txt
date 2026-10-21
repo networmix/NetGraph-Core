@@ -354,7 +354,6 @@ netgraph_core | Route | - Route structures: ``PredecessorDAG``, ``Path``. | a ro
 netgraph_core | placed | - The ledger of placed traffic: ``FlowLedger`` and its ``Flo | traffic placed (delivered) on a ledger
 src/centralized_te_tunnels.cpp | Route | Routes at u: count vectors x with x[e] <= b[e] = min(K, floo | a route or routes (a heading such as 'Route structures' or 'Routes')
 src/distributed_te.cpp | volume | The design volume D is split RR(D, H, i) over the heads and | the design volume D of the tunnel models
-src/evaluators.cpp | allocated | Everything a worker needs (the result slots, the private cac | allocated memory, storage or amounts
 src/evaluators.cpp | placed | reaches an allowed destination (nothing is placed). | traffic placed (delivered) on a ledger
 src/evaluators.cpp | priority | reachable from it, then selected on the priority values of t | a score's priority order, or a priority queue
 src/evaluators.cpp | sensitivity | ShortestPaths sensitivity: the edges of the full static supp | sensitivity analysis, or the env var NGRAPH_CORE_SENSITIVITY_THREADS

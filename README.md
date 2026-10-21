@@ -173,6 +173,11 @@ specified in [docs/semantics.md](docs/semantics.md).
   unchanged, except that a call raising `ShortestPathCacheMiss` counts one miss
   ([docs/semantics.md](docs/semantics.md#8-failures-threads-and-lifetimes)).
 
+Native computation releases the GIL. Calls on one ledger serialize through one native gate;
+different ledgers run in parallel. Immutable readers take no gate. Building caches take exclusive
+leases, frozen caches shared leases, and lifecycle calls wait for active calls without starvation.
+The free-threaded Python build uses the same gates and leases and detaches thread state before waiting.
+
 ### Search
 
 `spf(graph, roots, SpfOptions(direction, *, targets=None, tie_break=FEWER_HOPS, multipath=True,
@@ -207,11 +212,12 @@ lists a DAG's walks as `Path` values.
 not traffic) that policies build, keyed by the root set, the direction and the Eligibility. Values
 are immutable and shared, and `stats()` reports hits, misses, entries, retained bytes and live
 values.
-- **Building mode (new caches):** one writer; a miss searches and inserts. An evaluator given a
+- **Building mode (new caches):** one exclusive lease per call; a miss searches and inserts. An evaluator given a
   building cache runs on one worker (an explicit `workers` above 1 is rejected).
 - **Frozen mode (`freeze()`):** read-only and shared by every worker of an evaluator (pass
   `workers` explicitly; with a cache the default is 1); a miss raises `ShortestPathCacheMiss`.
-  `thaw()` returns to building mode once every reader has finished.
+  `thaw()` waits for active calls, then returns to building mode; lifecycle calls cannot be
+  overtaken by later readers or builders.
 
 ### Evaluators
 

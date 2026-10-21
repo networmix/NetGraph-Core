@@ -3,7 +3,7 @@ values (copied as written), one adapter per kind of example that builds the inpu
 and returns what the example names, compared field by field (an expected mapping may name fewer
 fields than the adapter returns; an int is not a float or a bool; a Fraction compares by its exact
 string). The examples of several demands at once run as one apply_actions list (each route or head
-its own demand); the examples of concurrent publication are not here.
+its own demand); concurrent publication examples use an exhaustive native finite-state port.
 
 Examples given as routes of link indices (no nodes) are laid out as one head, a feeder link to each
 route's first link, a connector between consecutive links and an exit link to one destination;
@@ -23,6 +23,7 @@ from fractions import Fraction
 import _netgraph_core as ext
 import numpy as np
 import pytest
+from private_hooks import needs_hooks
 
 import netgraph_core as ngc
 
@@ -1798,6 +1799,9 @@ def run_list_validation(cases):
                     (p.place if admission == LL else p.replace)(1)
                 if a.get("after_infinite"):
                     p.place(INF)
+                if "requested" in a:
+                    requested = a["requested"]
+                    p._seed_requested(requested >> 64, requested & ((1 << 64) - 1))
                 policies[a["policy"]] = p
             p = policies[a["policy"]]
             offer = INF if a["offer"] == "inf" else a["offer"]
@@ -6435,7 +6439,7 @@ EXAMPLES = [
             "lossy forwarding iteration entered a period-2 cycle",
             "DistributedTE does not support incremental placement",
             "Pinned forwards with replace",
-            "finite placement after infinite placement requires a new epoch",
+            "list policy belongs to another ledger",
             "ShortestPaths does not accept design_demand",
             "black_holes belongs to another graph",
             "valid",
@@ -6757,13 +6761,496 @@ def check_outside_the_domain(example):
         assert mismatch(split_offer_on_unit_links(**case), want) is None, case
 
 
+def run_publication(locked):
+    return ext._concurrency_model(
+        "publication-locked" if locked else "publication-unlocked"
+    )
+
+
+def run_phases(protocol):
+    return ext._concurrency_model(protocol)
+
+
+def run_search_call_checks(case):
+    faults = set(case["faults"])
+    heads = 107375
+    g = ngc.Graph(
+        heads + 2, list(range(1, heads + 1)), [0] * heads, [1] * heads, [1] * heads, 1.0
+    )
+    options = ngc.EvaluationOptions(
+        ngc.FlowPolicyConfig(routing=ngc.DistributedTE(ngc.TunnelCount(10000))),
+        design_demand=None if "no_design" in faults else 1,
+        offer=INF if "offer_infinite" in faults else 1,
+    )
+    try:
+        if case["entry"] == "evaluate_pairs":
+            pairs = []
+            for i in range(2):
+                if f"p{i}_overlap" in faults:
+                    pairs.append(([heads + 1], [heads + 1]))
+                elif f"p{i}_tunnel_limit" in faults:
+                    pairs.append((list(range(1, heads + 1)), [0]))
+                else:
+                    pairs.append(([1], [0]))
+            ngc.evaluate_pairs(g, pairs, options, workers=2)
+        else:
+            sources = list(range(1, heads + 1)) if "tunnel_limit" in faults else [1]
+            if case["entry"] == "evaluate_demand":
+                ngc.evaluate_demand(g, sources, 0, options)
+            else:
+                ngc.evaluate_edge_failures(g, sources, 0, options, workers=2)
+    except (TypeError, ValueError) as error:
+        return f"{type(error).__name__}: {error}"
+    return "valid"
+
+
+def run_call_checks(cases):
+    out = []
+    for case in cases:
+        faults = set(case["faults"])
+        if case["entry"] == "evaluate_demand" or any(
+            "tunnel_limit" in f or f.endswith("_overlap") for f in faults
+        ):
+            out.append(run_search_call_checks(case))
+            continue
+        g = ngc.Graph(2, [0], [1], [10], [1], 1.0)
+        other = ngc.Graph(2, [0], [1], [10], [1], 1.0)
+        program = ngc.ForwardingProgram.from_routes(
+            g, 0, 1, [ngc.RouteDefinition(0, ngc.Path(g, [[0]]))]
+        )
+        routing = ngc.Pinned(program) if "pinned" in faults else ngc.ShortestPaths()
+        try:
+            if case["entry"] == "forward":
+                p = ngc.FlowPolicy(
+                    ngc.FlowLedger(g),
+                    0,
+                    1,
+                    ngc.FlowPolicyConfig(routing=routing, admission=LY),
+                )
+                offer = (
+                    "x"
+                    if "offer_type" in faults
+                    else (
+                        -1
+                        if "offer_domain" in faults
+                        else (INF if "lossy_infinite" in faults else 1)
+                    )
+                )
+                black_holes = (
+                    "x"
+                    if "black_holes_type" in faults
+                    else (
+                        other.eligibility(excluded_edges=[0])
+                        if "foreign_black_holes" in faults
+                        else None
+                    )
+                )
+                p.forward(offer, black_holes=black_holes)
+            else:
+                cache = ngc.ShortestPathCache(other if "foreign_cache" in faults else g)
+                options = ngc.EvaluationOptions(
+                    ngc.FlowPolicyConfig(routing=routing),
+                    cache=cache,
+                    offer=INF if "offer_infinite" in faults else None,
+                )
+                if case["entry"] == "evaluate_pairs":
+                    pairs = (
+                        "x"
+                        if "pairs_type" in faults
+                        else ([(0, 1, 2)] if "pair_length" in faults else [(0, 1)])
+                    )
+                    ngc.evaluate_pairs(g, pairs, options, workers=2)
+                else:
+                    ngc.evaluate_edge_failures(g, 0, 1, options, workers=2)
+        except (ValueError, TypeError) as error:
+            out.append(f"{type(error).__name__}: {error}")
+        else:
+            out.append("valid")
+    return out
+
+
+ADAPTERS.update(
+    publication=run_publication, phases=run_phases, call_checks=run_call_checks
+)
+EXAMPLES.extend(
+    [
+        {
+            "id": "F-publication-locked",
+            "oracle": "publication",
+            "input": {"locked": True},
+            "expected": {"mixed": 0, "states": 15},
+        },
+        {
+            "id": "F-publication-unlocked",
+            "oracle": "publication",
+            "input": {"locked": False},
+            "expected": {"mixed": 2, "states": 23},
+        },
+        {
+            "id": "CALL-state-second",
+            "oracle": "call_checks",
+            "input": {
+                "cases": [
+                    {"entry": "forward", "faults": ["no_program", "offer_type"]},
+                    {"entry": "forward", "faults": ["no_program", "offer_domain"]},
+                    {"entry": "forward", "faults": ["no_program", "black_holes_type"]},
+                    {"entry": "forward", "faults": ["no_program", "lossy_infinite"]},
+                    {
+                        "entry": "forward",
+                        "faults": ["no_program", "foreign_black_holes"],
+                    },
+                    {"entry": "forward", "faults": ["pinned", "offer_type"]},
+                    {"entry": "forward", "faults": ["no_program"]},
+                    {"entry": "evaluate_pairs", "faults": ["building_cache", "pinned"]},
+                    {
+                        "entry": "evaluate_pairs",
+                        "faults": ["building_cache", "offer_infinite"],
+                    },
+                    {
+                        "entry": "evaluate_pairs",
+                        "faults": ["building_cache", "pairs_type"],
+                    },
+                    {
+                        "entry": "evaluate_pairs",
+                        "faults": ["building_cache", "pair_length"],
+                    },
+                    {
+                        "entry": "evaluate_pairs",
+                        "faults": ["foreign_cache", "building_cache"],
+                    },
+                    {"entry": "evaluate_pairs", "faults": ["building_cache"]},
+                    {
+                        "entry": "evaluate_edge_failures",
+                        "faults": ["building_cache", "offer_infinite"],
+                    },
+                    {"entry": "evaluate_edge_failures", "faults": ["building_cache"]},
+                ]
+            },
+            "expected": [
+                "TypeError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+                "TypeError: black_holes must be an Eligibility or None (got str)",
+                "ValueError: LOSSY forwarding requires a finite offer",
+                "ValueError: black_holes belongs to another graph",
+                "ValueError: Pinned forwards with replace",
+                "ValueError: forward requires an installed program",
+                "ValueError: evaluate_pairs does not accept Pinned",
+                "ValueError: offer must be an integer in [0, 2^62)",
+                "TypeError: pairs must be a sequence of (sources, destinations)",
+                "ValueError: each pair must be (sources, destinations)",
+                "ValueError: foreign ShortestPathCache: bound to another graph",
+                "ValueError: a supplied building ShortestPathCache has one writer: it "
+                "is rejected unless workers == 1 (got workers = 2; a frozen cache may "
+                "be shared by every worker)",
+                "ValueError: offer must be an integer in [0, 2^62)",
+                "ValueError: a supplied building ShortestPathCache has one writer: it "
+                "is rejected unless workers == 1 (got workers = 2; a frozen cache may "
+                "be shared by every worker)",
+            ],
+        },
+        {
+            "id": "LIST-state-second",
+            "oracle": "list_validation",
+            "input": {
+                "cases": [
+                    {
+                        "mode": "ORDERED",
+                        "actions": [
+                            {
+                                "kind": "Forward",
+                                "policy": "a",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": -1,
+                            }
+                        ],
+                    },
+                    {
+                        "mode": "ORDERED",
+                        "actions": [
+                            {
+                                "kind": "Forward",
+                                "policy": "a",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": 1,
+                                "foreign_black_holes": True,
+                            }
+                        ],
+                    },
+                    {
+                        "mode": "ORDERED",
+                        "actions": [
+                            {
+                                "kind": "Forward",
+                                "policy": "a",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": 1,
+                            },
+                            {
+                                "kind": "Replace",
+                                "policy": "x",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": 1,
+                                "foreign": True,
+                            },
+                        ],
+                    },
+                    {
+                        "mode": "ORDERED",
+                        "actions": [
+                            {
+                                "kind": "Place",
+                                "policy": "a",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": 5,
+                                "after_infinite": True,
+                            },
+                            {
+                                "kind": "Replace",
+                                "policy": "b",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": -1,
+                            },
+                        ],
+                    },
+                    {
+                        "mode": "ORDERED",
+                        "actions": [
+                            {
+                                "kind": "Place",
+                                "policy": "a",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": 1,
+                                "requested": 170141183460469231731687303715884105727,
+                            },
+                            {
+                                "kind": "Replace",
+                                "policy": "b",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": -1,
+                            },
+                        ],
+                    },
+                    {
+                        "mode": "ORDERED",
+                        "actions": [
+                            {
+                                "kind": "Place",
+                                "policy": "a",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": 1,
+                                "requested": 170141183460469231731687303715884105727,
+                            }
+                        ],
+                    },
+                    {
+                        "mode": "ORDERED",
+                        "actions": [
+                            {
+                                "kind": "Forward",
+                                "policy": "a",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": 1,
+                            },
+                            {
+                                "kind": "Place",
+                                "policy": "b",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": 5,
+                                "after_infinite": True,
+                            },
+                        ],
+                    },
+                    {
+                        "mode": "ORDERED",
+                        "actions": [
+                            {
+                                "kind": "Place",
+                                "policy": "a",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": 5,
+                                "after_infinite": True,
+                            },
+                            {
+                                "kind": "Forward",
+                                "policy": "b",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": 1,
+                            },
+                        ],
+                    },
+                    {
+                        "mode": "SIMULTANEOUS",
+                        "actions": [
+                            {
+                                "kind": "Forward",
+                                "policy": "a",
+                                "model": "ShortestPaths",
+                                "admission": "LOSSY",
+                                "offer": 1,
+                            },
+                            {
+                                "kind": "Replace",
+                                "policy": "b",
+                                "model": "Pinned",
+                                "admission": "LOSSY",
+                                "offer": 4611686018427387904,
+                            },
+                        ],
+                    },
+                ]
+            },
+            "expected": [
+                "offer must be an integer in [0, 2^62) or permitted +inf",
+                "black_holes belongs to another graph",
+                "list policy belongs to another ledger",
+                "offer must be an integer in [0, 2^62) or permitted +inf",
+                "offer must be an integer in [0, 2^62) or permitted +inf",
+                "requested limit exceeded",
+                "forward requires an installed program",
+                "finite placement after infinite placement requires a new epoch",
+                "offer must be an integer in [0, 2^62) or permitted +inf",
+            ],
+        },
+        {
+            "id": "F-publish-result-first",
+            "oracle": "phases",
+            "input": {"protocol": "publish-result-first"},
+            "expected": {
+                "states": 22,
+                "partial": 0,
+                "python_under_lock": 0,
+                "late_hits": 0,
+            },
+        },
+        {
+            "id": "F-publish-result-after",
+            "oracle": "phases",
+            "input": {"protocol": "publish-result-after"},
+            "expected": {
+                "states": 22,
+                "partial": 1,
+                "python_under_lock": 0,
+                "late_hits": 0,
+            },
+        },
+        {
+            "id": "F-read-result-failure",
+            "oracle": "phases",
+            "input": {"protocol": "read-result-failure"},
+            "expected": {
+                "states": 20,
+                "partial": 0,
+                "python_under_lock": 0,
+                "late_hits": 0,
+            },
+        },
+        {
+            "id": "F-read-result-under-gate",
+            "oracle": "phases",
+            "input": {"protocol": "read-result-under-gate"},
+            "expected": {
+                "states": 18,
+                "partial": 0,
+                "python_under_lock": 2,
+                "late_hits": 0,
+            },
+        },
+        {
+            "id": "F-frozen-hits",
+            "oracle": "phases",
+            "input": {"protocol": "frozen-hits"},
+            "expected": {
+                "states": 25,
+                "partial": 0,
+                "python_under_lock": 0,
+                "late_hits": 0,
+            },
+        },
+        {
+            "id": "F-frozen-hits-after-lease",
+            "oracle": "phases",
+            "input": {"protocol": "frozen-hits-after-lease"},
+            "expected": {
+                "states": 28,
+                "partial": 0,
+                "python_under_lock": 0,
+                "late_hits": 2,
+            },
+        },
+    ]
+)
+
+
+EXAMPLES.append(
+    {
+        "id": "CALL-search-first-pass",
+        "oracle": "call_checks",
+        "input": {
+            "cases": [
+                {"entry": "evaluate_pairs", "faults": ["p0_tunnel_limit"]},
+                {
+                    "entry": "evaluate_pairs",
+                    "faults": ["offer_infinite", "p0_tunnel_limit"],
+                },
+                {
+                    "entry": "evaluate_pairs",
+                    "faults": ["p0_tunnel_limit", "p1_overlap"],
+                },
+                {
+                    "entry": "evaluate_pairs",
+                    "faults": ["p0_overlap", "p1_tunnel_limit"],
+                },
+                {
+                    "entry": "evaluate_edge_failures",
+                    "faults": ["tunnel_limit", "offer_infinite"],
+                },
+                {
+                    "entry": "evaluate_demand",
+                    "faults": ["tunnel_limit", "offer_infinite"],
+                },
+                {"entry": "evaluate_demand", "faults": ["tunnel_limit", "no_design"]},
+                {"entry": "evaluate_demand", "faults": ["offer_infinite", "no_design"]},
+            ]
+        },
+        "expected": [
+            "ValueError: tunnel limit exceeded: 107375 heads x 10000 tunnels > 1073741823",
+            "ValueError: offer must be an integer in [0, 2^62)",
+            "ValueError: tunnel limit exceeded: 107375 heads x 10000 tunnels > 1073741823",
+            "ValueError: node 107376 is in both endpoint sets: sources and destinations must not overlap",
+            "ValueError: tunnel limit exceeded: 107375 heads x 10000 tunnels > 1073741823",
+            "ValueError: tunnel limit exceeded: 107375 heads x 10000 tunnels > 1073741823",
+            "ValueError: tunnel limit exceeded: 107375 heads x 10000 tunnels > 1073741823",
+            "ValueError: offer must be an integer in [0, 2^62)",
+        ],
+    }
+)
+
+
 def _param(example):
-    return pytest.param(example, id=example["id"])
+    marks = (
+        needs_hooks
+        if example["id"].startswith("F-") or example["id"] == "LIST-state-second"
+        else []
+    )
+    return pytest.param(example, id=example["id"], marks=marks)
 
 
 def test_every_example_once():
     ids = [e["id"] for e in EXAMPLES]
-    assert len(ids) == len(set(ids)) == 188
+    assert len(ids) == len(set(ids)) == 199
     assert {e["oracle"] for e in EXAMPLES} <= set(ADAPTERS)
 
 
@@ -6779,3 +7266,163 @@ def test_contract_example(example):
     adapter = SEVERAL_DEMANDS.get(example["id"], ADAPTERS[example["oracle"]])
     got = adapter(**copy.deepcopy(example["input"]))
     assert mismatch(got, expected) is None
+
+
+def test_every_pair_of_call_check_faults():
+    # The ordered first-pass and second-pass refusals, derived independently
+    # from the documented scalar/evaluator order: 39 pairs plus 16 single-fault controls.
+    building = (
+        "ValueError: a supplied building ShortestPathCache has one writer: it is rejected unless workers == 1 "
+        "(got workers = 2; a frozen cache may be shared by every worker)"
+    )
+    order = {
+        "forward": [
+            ("pinned", 1, "ValueError: Pinned forwards with replace"),
+            ("no_program", 2, "ValueError: forward requires an installed program"),
+            (
+                "offer_type",
+                1,
+                "TypeError: offer must be an integer in [0, 2^62) or permitted +inf",
+            ),
+            (
+                "offer_domain",
+                1,
+                "ValueError: offer must be an integer in [0, 2^62) or permitted +inf",
+            ),
+            (
+                "black_holes_type",
+                1,
+                "TypeError: black_holes must be an Eligibility or None (got str)",
+            ),
+            (
+                "lossy_infinite",
+                1,
+                "ValueError: LOSSY forwarding requires a finite offer",
+            ),
+            (
+                "foreign_black_holes",
+                1,
+                "ValueError: black_holes belongs to another graph",
+            ),
+        ],
+        "evaluate_pairs": [
+            (
+                "foreign_cache",
+                1,
+                "ValueError: foreign ShortestPathCache: bound to another graph",
+            ),
+            ("building_cache", 2, building),
+            ("pinned", 1, "ValueError: evaluate_pairs does not accept Pinned"),
+            ("offer_infinite", 1, "ValueError: offer must be an integer in [0, 2^62)"),
+            (
+                "pairs_type",
+                1,
+                "TypeError: pairs must be a sequence of (sources, destinations)",
+            ),
+            ("pair_length", 1, "ValueError: each pair must be (sources, destinations)"),
+        ],
+        "evaluate_edge_failures": [
+            (
+                "foreign_cache",
+                1,
+                "ValueError: foreign ShortestPathCache: bound to another graph",
+            ),
+            ("building_cache", 2, building),
+            ("offer_infinite", 1, "ValueError: offer must be an integer in [0, 2^62)"),
+        ],
+    }
+    count = 0
+    for entry, checks in order.items():
+        for pair in itertools.chain(
+            itertools.combinations(checks, 1), itertools.combinations(checks, 2)
+        ):
+            faults = {item[0] for item in pair}
+            expected = next(
+                text
+                for fault, _, text in sorted(checks, key=lambda c: c[1])
+                if fault in faults
+            )
+            assert run_call_checks([{"entry": entry, "faults": sorted(faults)}]) == [
+                expected
+            ], (entry, faults)
+            count += 1
+    assert count == 55
+
+
+def test_scalar_argument_conversions_precede_domain_checks():
+    g = ngc.Graph(2, [0], [1], [10], [1], 1.0)
+    other = ngc.Graph(2, [0], [1], [10], [1], 1.0)
+    domain = "offer must be an integer in [0, 2^62) or permitted +inf"
+    design = "design_demand must be an integer in [0, 2^62) or permitted +inf"
+    for admission in (LL, LY):
+        for routing in (ngc.ShortestPaths(), ngc.DistributedTE(ngc.TunnelCount(1))):
+            ledger = ngc.FlowLedger(g)
+            policy = ngc.FlowPolicy(
+                ledger, 0, 1, ngc.FlowPolicyConfig(routing=routing, admission=admission)
+            )
+            policy.replace(
+                1,
+                **(
+                    {"design_demand": 1}
+                    if isinstance(routing, ngc.DistributedTE)
+                    else {}
+                ),
+            )
+            for operation in (policy.evaluate, policy.replace):
+                for offer, kwargs, error, text in [
+                    (-1, {"design_demand": "x"}, ValueError, domain),
+                    (INF, {"design_demand": "x"}, TypeError, design),
+                    (1, {"design_demand": "x"}, TypeError, design),
+                    (
+                        -1,
+                        {"outputs": "x"},
+                        ValueError,
+                        domain,
+                    ),
+                    (
+                        INF,
+                        {"outputs": "x"},
+                        TypeError,
+                        "outputs must be an OutputOptions (got str)",
+                    ),
+                    (
+                        1,
+                        {"design_demand": 5, "outputs": "x"},
+                        TypeError,
+                        "outputs must be an OutputOptions (got str)",
+                    ),
+                    ("x", {"design_demand": "x"}, TypeError, domain),
+                ]:
+                    with pytest.raises(error) as caught:
+                        operation(offer, **kwargs)
+                    assert str(caught.value) == text
+            for offer, kwargs, error, text in [
+                (
+                    INF,
+                    {"black_holes": "x"},
+                    TypeError,
+                    "black_holes must be an Eligibility or None (got str)",
+                ),
+                (
+                    -1,
+                    {"black_holes": "x"},
+                    ValueError,
+                    domain,
+                ),
+                (
+                    INF,
+                    {"outputs": "x"},
+                    TypeError,
+                    "outputs must be an OutputOptions (got str)",
+                ),
+                (
+                    1,
+                    {"black_holes": other.eligibility(), "outputs": "x"},
+                    TypeError,
+                    "outputs must be an OutputOptions (got str)",
+                ),
+            ]:
+                with pytest.raises(error) as caught:
+                    policy.forward(offer, **kwargs)
+                assert str(caught.value) == text
+            assert policy.delivered() == 1

@@ -4,8 +4,10 @@
 #include <pybind11/stl.h>
 
 #include <cmath>
+#include <initializer_list>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,6 +21,9 @@
 #include "integers.hpp"
 #include "publication.hpp"
 #include "values.hpp"
+#include "native_call.hpp"
+#include "policy_value.hpp"
+#include "netgraph/core/detail/ledger_access.hpp"
 #if NETGRAPH_CORE_PRIVATE_HOOKS
 #include <functional>
 #include <variant>
@@ -36,6 +41,29 @@ namespace py = pybind11;
 namespace netgraph::core::bindings {
 
 namespace {
+
+// Register all dependencies before binding the policy. This leaves no flag or
+// incremented reference behind when
+// a map/vector allocation fails. with_internals supplies pybind11's registry
+// lock on a free-threaded interpreter; no Python callback runs inside it.
+void pin_policy(py::detail::instance* nurse, std::initializer_list<py::handle> dependencies) {
+  std::vector<PyObject*> pins;
+  pins.reserve(dependencies.size());
+  for (const auto dependency : dependencies) {
+    if (!dependency.is_none()) pins.push_back(dependency.ptr());
+  }
+  py::detail::with_internals([&](py::detail::internals& internals) {
+    const auto [it, inserted] = internals.patients.emplace(reinterpret_cast<PyObject*>(nurse), std::move(pins));
+    (void)it;
+    if (!inserted) throw std::logic_error("FlowPolicy dependencies already registered");
+  });
+  // Arguments still pin these objects. The remaining steps cannot fail and run
+  // after the registry lock, before this shell can publish a bound policy.
+  for (const auto dependency : dependencies) {
+    if (!dependency.is_none()) Py_INCREF(dependency.ptr());
+  }
+  nurse->has_patients = true;
+}
 
 // A request or a full offer: units in [0, 2^62) or +inf (float('inf')); nullopt is +inf.
 std::optional<Amount> request_units(const py::object& offer) {
@@ -58,24 +86,47 @@ std::optional<std::optional<Amount>> design_units(const py::object& design) {
 #if NETGRAPH_CORE_PRIVATE_HOOKS
 
 // The epoch state of a policy (roster, requested, +inf, per roster source the flows).
-py::dict state_obj(const FlowPolicy& policy) {
+py::dict state_obj(const py::object& self) {
+  const auto& policy = policy_value(self);
   const auto& pe = detail::PolicyAccess::engine(policy);
+  struct Flow { detail::LiveFlow flow; FlowRecord record; };
+  struct Snapshot {
+    std::vector<NodeId> roster;
+    Counter128 requested;
+    bool infinite;
+    Amount delivered {0};
+    std::vector<std::vector<Flow>> cohorts;
+  };
+  auto snapshot = native_call([&] {
+    const auto gate = detail::LedgerAccess::lock(pe.ledger);
+    Snapshot state {pe.reachable_sources, pe.epoch.requested, pe.epoch.infinite, 0, {}};
+    state.cohorts.resize(pe.epoch.record_groups.size());
+    for (std::size_t i = 0; i < state.cohorts.size(); ++i) {
+      for (const auto& flow : pe.epoch.record_groups[i]) {
+        auto record = detail::LedgerAccess::live(pe.ledger, flow.record_counter);
+        state.delivered += record.delivered;
+        state.cohorts[i].push_back({flow, std::move(record)});
+      }
+    }
+    return state;
+  });
   py::dict out;
   const auto& r = pe.config.routing;
   out["mode"] = detail::model_name(r);
-  out["roster"] = pe.reachable_sources;
-  out["requested"] = counter_int(pe.epoch.requested);
-  out["infinite"] = pe.epoch.infinite;
-  out["placed_demand"] = policy.delivered();
+  out["roster"] = snapshot.roster;
+  out["requested"] = counter_int(snapshot.requested);
+  out["infinite"] = snapshot.infinite;
+  out["placed_demand"] = snapshot.delivered;
   py::dict cohorts;
   // Per roster source its flows (T1, T2 and Pinned: per program entry, keyed by its position).
   const auto* gl = std::get_if<CentralizedTE>(&r);
   const bool per_entry = std::holds_alternative<Pinned>(r) || std::holds_alternative<DistributedTE>(r) ||
                          (gl != nullptr && gl->tunnel_count.has_value());
-  for (std::size_t i = 0; i < pe.epoch.record_groups.size(); ++i) {
+  for (std::size_t i = 0; i < snapshot.cohorts.size(); ++i) {
     py::list flows;
-    for (const auto& s : pe.epoch.record_groups[i]) {
-      const FlowRecord& rec = detail::LedgerAccess::live(pe.ledger, s.record_counter);
+    for (const auto& row : snapshot.cohorts[i]) {
+      const auto& s = row.flow;
+      const FlowRecord& rec = row.record;
       py::dict f;
       f["flow_id"] = py::make_tuple(rec.flow_id.first, rec.flow_id.second);
       f["src"] = s.source;
@@ -87,7 +138,7 @@ py::dict state_obj(const FlowPolicy& policy) {
       f["entry"] = s.entry_id < 0 ? py::object(py::none()) : py::object(py::int_(s.entry_id));
       flows.append(f);
     }
-    cohorts[py::int_(per_entry ? static_cast<std::int64_t>(i) : static_cast<std::int64_t>(pe.reachable_sources[i]))] = flows;
+    cohorts[py::int_(per_entry ? static_cast<std::int64_t>(i) : static_cast<std::int64_t>(snapshot.roster[i]))] = flows;
   }
   out["cohorts"] = cohorts;
   return out;
@@ -99,8 +150,9 @@ py::dict state_obj(const FlowPolicy& policy) {
 
 void register_flow_policy(py::module_& m) {
   [[maybe_unused]] auto flow_policy = py::class_<FlowPolicy>(
-      m, "FlowPolicy",
-      "The placement engine for one demand, bound to its ledger at construction. Every call (place,\n"
+      m, "FlowPolicy", py::is_final(), py::release_gil_before_calling_cpp_dtor(),
+      "The placement engine for one demand, bound to its ledger at construction. A final Python class.\n"
+      "Native computation releases the GIL; one ledger gate serializes calls and mutable reads. Every call (place,\n"
       "evaluate, replace, forward) is all-or-nothing: a failed call raises and leaves the ledger and the\n"
       "policy as they were (with the two limits in the module docstring). remove() takes every flow of the\n"
       "policy back out, clears its program and starts a new epoch (the request total starts again from 0);\n"
@@ -111,16 +163,44 @@ void register_flow_policy(py::module_& m) {
       "graph, ledger or policy; TypeError for a ledger (None included), config, eligibility, cache or\n"
       "outputs of the wrong class, a node id or a request of a wrong type (a bool, a float node id, a\n"
       "string) and an unknown keyword.")
-      .def(py::init([](const std::shared_ptr<FlowLedger>& ledger, const py::object& sources,
-                       const py::object& destinations, const FlowPolicyConfig& config,
+      .def("__init__", [](py::detail::value_and_holder& instance, const std::shared_ptr<FlowLedger>& ledger,
+                       const py::object& sources, const py::object& destinations, const FlowPolicyConfig& config,
                        const std::shared_ptr<Eligibility>& elig, const std::shared_ptr<ShortestPathCache>& cache) {
              if (!ledger) throw py::type_error("ledger must be a FlowLedger");
-             const auto n = ledger->graph()->num_nodes();
+             const auto n = detail::LedgerAccess::graph(*ledger)->num_nodes();
              const auto s = node_ids(sources, n, "sources");
              const auto d = node_ids(destinations, n, "destinations");
-             return std::make_unique<FlowPolicy>(*ledger, s, d, config, elig.get(), cache.get());
-           }),
-           py::keep_alive<1, 2>(), py::keep_alive<1, 6>(), py::keep_alive<1, 7>(), py::arg("ledger"),
+             auto prepared = detail::PolicyAccess::prepare(*ledger, s, d, config, elig.get(), cache.get(), nullptr, detached_argument_work);
+             // Registration and holder construction can allocate. Complete them while the
+             // shell is unbound; no Python work remains after native construction publishes.
+             auto holder = detail::PolicyAccess::shell();
+             auto* policy = holder.get();
+             instance.inst->owned = false;
+             instance.value_ptr() = policy;
+             try {
+               instance.type->init_instance(instance.inst, &holder);
+               instance.inst->owned = true;
+             } catch (...) {
+               instance.value_ptr() = nullptr;
+               throw;
+             }
+             try {
+               pin_policy(instance.inst, {py::cast(ledger), py::cast(elig), py::cast(cache)});
+               native_call([&] { detail::PolicyAccess::construct(*policy, std::move(prepared), cache.get()); });
+             } catch (...) {
+               // A failed __init__ must leave no usable shell, including explicit __new__
+               // followed by a caught constructor failure. Final classes also forbid a
+               // subclass that swallows __init__'s exception.
+               if (instance.instance_registered()) {
+                 py::detail::deregister_instance(instance.inst, instance.value_ptr(), instance.type);
+                 instance.set_instance_registered(false);
+               }
+               instance.type->dealloc(instance);
+               if (instance.inst->has_patients) py::detail::clear_patients(reinterpret_cast<PyObject*>(instance.inst));
+               throw;
+             }
+           }, py::detail::is_new_style_constructor(),
+           py::arg("ledger"),
            py::arg("sources"), py::arg("destinations"), py::arg("config"), py::arg("eligibility") = nullptr,
            py::arg("cache") = nullptr,
            "Bind a policy to ledger. eligibility (None: everything allowed) and cache (None: none; only ShortestPaths\n"
@@ -138,16 +218,15 @@ void register_flow_policy(py::module_& m) {
            "match policy endpoints`).")
       .def(
           "place",
-          [](FlowPolicy& p, const py::object& offer, const py::object& outputs) {
+          [](const py::object& self, const py::object& offer, const py::object& outputs) {
+            auto& p = policy_value(self);
             // The operation comes before the offer (the call's order).
             detail::check_place_operation(detail::PolicyAccess::engine(p));
             const auto v = request_units(offer);
             const auto o = outputs_of(outputs);
-            // All or nothing across the boundary: the result's Python object exists before the
-            // call, and after the commit nothing allocates (the value moves into it). The GIL
-            // stays held: the call mutates the ledger (one writer per ledger).
+            detail::check_policy_arguments(detail::PolicyAccess::engine(p), detail::PolicyOperation::Place, v);
             auto [obj, slot] = new_object<PlacementResult>();
-            *slot = p.place(v, o);
+            native_call([&] { *slot = p.place(v, o); });
             return std::move(obj);
           },
           py::arg("offer"), py::arg("outputs") = py::none(),
@@ -169,26 +248,29 @@ void register_flow_policy(py::module_& m) {
           "more than INT32_MAX - 2 nodes, or more than 2^30 - 1 edges, sources and destinations together. A\n"
           "LOSSY forwarding whose losses wait on each other in a cycle raises ValueError when its rounds\n"
           "alternate between two states or reach the round limit, RuntimeError when the result's check fails.")
-      .def("remove", &FlowPolicy::remove,
+      .def("remove", [](const py::object& self) { auto& p = policy_value(self); native_call([&] { p.remove(); }); },
            "revert every flow and hold of the policy, retire the ids, clear the program, open a new epoch")
-      .def("delivered", &FlowPolicy::delivered, "the sum of delivered over the policy's live records")
+      .def("delivered", [](const py::object& self) { auto& p = policy_value(self); return native_call([&] { return p.delivered(); }); }, "the sum of delivered over the policy's live records")
       .def(
-          "records", [](const FlowPolicy& p) { return list_of(p.records()); },
+          "records", [](const py::object& self) { auto& p = policy_value(self); return list_of(native_call([&] { return p.records(); })); },
           "the policy's live records as snapshots in FlowId order")
       .def(
           "record",
-          [](const FlowPolicy& p, const py::object& flow_id) { return typed_object(p.record(flow_id_of(flow_id))); },
+          [](const py::object& self, const py::object& flow_id) {
+            auto& p = policy_value(self); const auto id = flow_id_of(flow_id); return typed_object(native_call([&] { return p.record(id); })); },
           py::arg("flow_id"),
           "one of the policy's live records by FlowId (ValueError for a FlowId of another ledger or policy, a\n"
           "retired or an unknown id)")
       .def(
           "evaluate",
-          [](const FlowPolicy& p, const py::object& offer, const py::object& design_demand, const py::object& outputs) {
+          [](const py::object& self, const py::object& offer, const py::object& design_demand, const py::object& outputs) {
+            auto& p = policy_value(self);
             const auto v = request_units(offer);
             const auto d = design_units(design_demand);
             const auto o = outputs_of(outputs);
+            detail::check_policy_arguments(detail::PolicyAccess::engine(p), detail::PolicyOperation::Evaluate, v, d);
             auto [obj, slot] = new_object<PlacementResult>();
-            *slot = p.evaluate(v, d, o);
+            native_call([&] { *slot = p.evaluate(v, d, o); });
             return std::move(obj);
           },
           py::arg("offer"), py::kw_only(), py::arg("design_demand") = py::none(), py::arg("outputs") = py::none(),
@@ -200,12 +282,14 @@ void register_flow_policy(py::module_& m) {
           "replace. LOSSY requires a finite offer.")
       .def(
           "replace",
-          [](FlowPolicy& p, const py::object& offer, const py::object& design_demand, const py::object& outputs) {
+          [](const py::object& self, const py::object& offer, const py::object& design_demand, const py::object& outputs) {
+            auto& p = policy_value(self);
             const auto v = request_units(offer);
             const auto d = design_units(design_demand);
             const auto o = outputs_of(outputs);
+            detail::check_policy_arguments(detail::PolicyAccess::engine(p), detail::PolicyOperation::Replace, v, d);
             auto [obj, slot] = new_object<PlacementResult>();
-            *slot = p.replace(v, d, o);
+            native_call([&] { *slot = p.replace(v, d, o); });
             return std::move(obj);
           },
           py::arg("offer"), py::kw_only(), py::arg("design_demand") = py::none(), py::arg("outputs") = py::none(),
@@ -221,14 +305,16 @@ void register_flow_policy(py::module_& m) {
           "finiteness).")
       .def(
           "forward",
-          [](FlowPolicy& p, const py::object& offer, const py::object& black_holes, const py::object& outputs) {
-            // The operation and the installed program come before the offer (the call's order).
+          [](const py::object& self, const py::object& offer, const py::object& black_holes, const py::object& outputs) {
+            auto& p = policy_value(self);
+            // Only the immutable operation check precedes offer conversion.
             detail::check_forward_operation(detail::PolicyAccess::engine(p));
             const auto v = request_units(offer);
             const auto bh = eligibility_or_none(black_holes, "black_holes");
             const auto o = outputs_of(outputs);
+            detail::check_policy_arguments(detail::PolicyAccess::engine(p), detail::PolicyOperation::Forward, v, {}, bh.get());
             auto [obj, slot] = new_object<PlacementResult>();
-            *slot = p.forward(v, bh.get(), o);
+            native_call([&] { *slot = p.forward(v, bh.get(), o); });
             return std::move(obj);
           },
           py::arg("offer"), py::kw_only(), py::arg("black_holes") = py::none(), py::arg("outputs") = py::none(),
@@ -238,36 +324,45 @@ void register_flow_policy(py::module_& m) {
           "program's lossless bound up to the offer; LOSSY sends the offer. black_holes (an Eligibility of the\n"
           "graph): the nodes and edges it excludes are black holes for this call (stale forwarding: traffic\n"
           "reaching one is dropped there; a black-holed source loses its share). In this order: Pinned raises\n"
-          "`Pinned forwards with replace`; no installed program `forward requires an installed program`;\n"
-          "the offer; LOSSY +inf `LOSSY forwarding requires a finite offer`; black_holes\n"
-          "of another graph `black_holes belongs to another graph`.")
+          "`Pinned forwards with replace`; the offer; LOSSY +inf `LOSSY forwarding requires a finite offer`;\n"
+          "black_holes of another graph `black_holes belongs to another graph`; then, under the gate,\n"
+          "no installed program `forward requires an installed program`.")
       .def_property_readonly(
 
           "program",
-          [](const FlowPolicy& p) { return optional_shared(p.program()); },
+          [](const py::object& self) { auto& p = policy_value(self); return optional_shared(native_call([&] { return p.program(); })); },
           "the installed ForwardingProgram; None before the first preparation and after remove()")
-      .def_property_readonly("config", [](const FlowPolicy& p) { return typed_object(p.config()); },
+      .def_property_readonly("config", [](const py::object& self) { auto& p = policy_value(self); return typed_object(p.config()); },
                              "the configuration as validated at construction, ShortestPaths' absent\n"
                              "source_allocation and weight_basis resolved to the allocation's defaults");
 #if NETGRAPH_CORE_PRIVATE_HOOKS
+  py::class_<detail::Trace>(m, "_PlacementTrace")
+      .def("as_dict", [](const detail::Trace& trace) { return trace_obj(trace); },
+           "private: convert the completed native trace to Python values");
   flow_policy
+      .def("_seed_requested", [](const py::object& self, std::uint64_t hi, std::uint64_t lo) {
+            auto& p = policy_value(self);
+        if (hi >= (std::uint64_t{1} << 63)) throw py::value_error("requested seed reaches 2^127");
+        native_call([&] {
+          auto& engine = detail::PolicyAccess::engine(p);
+          const auto gate = detail::LedgerAccess::lock(engine.ledger);
+          engine.epoch.requested = Counter128 {hi, lo};
+        });
+      }, py::arg("hi"), py::arg("lo"), "private: seed the exact requested counter")
       .def(
           "_place_traced",
-          [](FlowPolicy& p, const py::object& offer, const py::object& outputs) {
+          [](const py::object& self, const py::object& offer, const py::object& outputs) {
+            auto& p = policy_value(self);
             detail::check_place_operation(detail::PolicyAccess::engine(p));
             const auto v = request_units(offer);
             const auto o = outputs_of(outputs);
-            // As place(): every Python object exists before anything changes; the engine runs the
-            // `staged` callback, which converts the trace, after the work is done and before the
-            // commit, so a failed conversion changes nothing.
+            detail::check_policy_arguments(detail::PolicyAccess::engine(p), detail::PolicyOperation::Place, v);
             auto [obj, slot] = new_object<PlacementResult>();
+            auto [trace_obj, trace] = new_object<detail::Trace>();
             auto pair = py::reinterpret_steal<py::tuple>(checked(PyTuple_New(2)).release());
-            py::object trace_py;
-            detail::Trace trace;
-            const std::function<void()> staged = [&] { trace_py = trace_obj(trace); };
-            *slot = detail::place_traced(p, v, o, trace, &staged);
             PyTuple_SET_ITEM(pair.ptr(), 0, obj.release().ptr());
-            PyTuple_SET_ITEM(pair.ptr(), 1, trace_py.release().ptr());
+            PyTuple_SET_ITEM(pair.ptr(), 1, trace_obj.release().ptr());
+            native_call([&] { *slot = detail::place_traced(p, v, o, *trace); });
             return pair;
           },
           py::arg("offer"), py::arg("outputs") = py::none(),
@@ -275,7 +370,7 @@ void register_flow_policy(py::module_& m) {
           "the tests' model of the policy keys them)")
       .def("_state", &state_obj, "private: the epoch state (roster, requested, +inf, cohorts)")
       .def(
-          "_owner", [](const FlowPolicy& p) { return detail::PolicyAccess::engine(p).policy_id; },
+          "_owner", [](const py::object& self) { auto& p = policy_value(self); return detail::PolicyAccess::engine(p).policy_id; },
           "private: the ledger-local owner id (FlowRecord.policy_id)");
 #endif
 }

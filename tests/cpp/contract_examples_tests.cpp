@@ -22,6 +22,8 @@
 #include <vector>
 
 #include "netgraph/core/detail/forwarding.hpp"
+#include "netgraph/core/detail/concurrency_models.hpp"
+#include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/detail/route_kernels.hpp"
 #include "netgraph/core/evaluators.hpp"
@@ -3296,7 +3298,7 @@ TEST(ContractExamples, LIST_first_error) {
                          "SIMULTANEOUS does not accept Place", "SIMULTANEOUS Replace requires ShortestPaths EQUAL or WEIGHTED, or Pinned",
                          "SIMULTANEOUS requires admission=LOSSY", "offer must be an integer in [0, 2^62) or permitted +inf", kPeriodTwo,
                          "DistributedTE does not support incremental placement", "Pinned forwards with replace",
-                         "finite placement after infinite placement requires a new epoch", "ShortestPaths does not accept design_demand",
+                         "list policy belongs to another ledger", "ShortestPaths does not accept design_demand",
                          "black_holes belongs to another graph", "valid"}));
 }
 // The forwarding sizes' counting step on the example's sizes (per participant, groups of tunnels
@@ -3345,4 +3347,129 @@ TEST(ContractExamples, ERR_class_list) {
   EXPECT_EQ(run(-1), "offer must be an integer in [0, 2^62) or permitted +inf");
   EXPECT_EQ(run(5), "valid");
   EXPECT_EQ(run(std::nullopt), "valid");
+}
+
+TEST(ContractExamples, FPublicationLocked) {
+  const auto out = detail::publication_model(true);
+  EXPECT_EQ(out.mixed, 0U);
+  EXPECT_EQ(out.states, 15U);
+}
+TEST(ContractExamples, FPublicationUnlocked) {
+  const auto out = detail::publication_model(false);
+  EXPECT_EQ(out.mixed, 2U);
+  EXPECT_EQ(out.states, 23U);
+}
+namespace {
+void expect_phases(std::string_view name, std::size_t states, std::size_t partial,
+                   std::size_t python_under_lock, std::size_t late_hits) {
+  const auto out = detail::phase_model(name);
+  EXPECT_EQ(out.states, states);
+  EXPECT_EQ(out.partial, partial);
+  EXPECT_EQ(out.python_under_lock, python_under_lock);
+  EXPECT_EQ(out.late_hits, late_hits);
+}
+} // namespace
+TEST(ContractExamples, FPublishResultFirst) { expect_phases("publish-result-first", 22, 0, 0, 0); }
+TEST(ContractExamples, FPublishResultAfter) { expect_phases("publish-result-after", 22, 1, 0, 0); }
+TEST(ContractExamples, FReadResultFailure) { expect_phases("read-result-failure", 20, 0, 0, 0); }
+TEST(ContractExamples, FReadResultUnderGate) { expect_phases("read-result-under-gate", 18, 0, 2, 0); }
+TEST(ContractExamples, FFrozenHits) { expect_phases("frozen-hits", 25, 0, 0, 0); }
+TEST(ContractExamples, FFrozenHitsAfterLease) { expect_phases("frozen-hits-after-lease", 28, 0, 0, 2); }
+
+TEST(ContractExamples, LIST_state_second) {
+  const Texts expected {
+    "offer must be an integer in [0, 2^62) or permitted +inf",
+    "black_holes belongs to another graph",
+    "list policy belongs to another ledger",
+    "offer must be an integer in [0, 2^62) or permitted +inf",
+    "offer must be an integer in [0, 2^62) or permitted +inf",
+    "requested limit exceeded",
+    "forward requires an installed program",
+    "finite placement after infinite placement requires a new epoch",
+    "offer must be an integer in [0, 2^62) or permitted +inf"};
+  Texts observed;
+  for (std::size_t which = 0; which < expected.size(); ++which) {
+    const Net net({{0, 1, 10, 1}}), foreign({{0, 1, 10, 1}});
+    FlowLedger ledger(net.g), other(net.g);
+    FlowPolicy a(ledger, v({0}), v({1}), {.routing = ShortestPaths{}, .admission = LY});
+    FlowPolicy b(ledger, v({0}), v({1}), {.routing = ShortestPaths{}, .admission = LY});
+    FlowPolicy x(other, v({0}), v({1}), {.routing = ShortestPaths{}, .admission = LY});
+    const auto program = ForwardingProgram::from_routes(*net.g, v({0}), v({1}),
+        std::vector<RouteDefinition>{{0, net.path({0}), 1}});
+    FlowPolicy pin(ledger, v({0}), v({1}), {.routing = Pinned{program}, .admission = LY});
+    const auto holes = foreign.mask({}, {0});
+    if (which == 3 || which == 7) (void)a.place(std::nullopt);
+    if (which == 6) (void)b.place(std::nullopt);
+    if (which == 4 || which == 5) {
+      const auto gate = detail::LedgerAccess::lock(ledger);
+      detail::PolicyAccess::engine(a).epoch.requested = Counter128{(std::uint64_t{1} << 63) - 1, ~std::uint64_t{0}};
+    }
+    std::vector<Action> actions;
+    switch (which) {
+      case 0: actions = {Forward{a, -1}}; break;
+      case 1: actions = {Forward{a, 1, holes.get()}}; break;
+      case 2: actions = {Forward{a, 1}, Replace{x, 1}}; break;
+      case 3: actions = {Place{a, 5}, Replace{b, -1}}; break;
+      case 4: actions = {Place{a, 1}, Replace{b, -1}}; break;
+      case 5: actions = {Place{a, 1}}; break;
+      case 6: actions = {Forward{a, 1}, Place{b, 5}}; break;
+      case 7: actions = {Place{a, 5}, Forward{b, 1}}; break;
+      case 8: actions = {Forward{a, 1}, Replace{pin, kDomainLimit}}; break;
+    }
+    const auto carried = ledger.carried();
+    const auto holds = ledger.reserved();
+    const auto a_program = a.program(), b_program = b.program(), pin_program = pin.program();
+    const auto record_id = detail::LedgerAccess::next_record_counter(ledger);
+    observed.push_back(error_of([&] { (void)apply_actions(ledger, actions,
+        which == 8 ? BatchMode::Simultaneous : BatchMode::Ordered); }));
+    EXPECT_EQ(ledger.carried(), carried);
+    EXPECT_EQ(ledger.reserved(), holds);
+    EXPECT_EQ(a.program(), a_program);
+    EXPECT_EQ(b.program(), b_program);
+    EXPECT_EQ(pin.program(), pin_program);
+    EXPECT_EQ(detail::LedgerAccess::next_record_counter(ledger), record_id);
+  }
+  EXPECT_EQ(observed, expected);
+}
+
+// The numeric/ownership forms of CALL-state-second. Wrong Python types and
+// malformed pair shapes have no C++ value and are checked by its Python port.
+TEST(ContractExamples, CALL_state_second) {
+  const Net net({{0, 1, 10, 1}}), foreign({{0, 1, 10, 1}});
+  FlowLedger ledger(net.g);
+  FlowPolicy p(ledger, v({0}), v({1}), {.routing = ShortestPaths{}, .admission = LY});
+  const auto holes = foreign.mask({}, {0});
+  const auto program = ForwardingProgram::from_routes(*net.g, v({0}), v({1}),
+      std::vector<RouteDefinition>{{0, net.path({0}), 1}});
+  FlowPolicy pin(ledger, v({0}), v({1}), {.routing = Pinned{program}, .admission = LY});
+  ShortestPathCache cache(*net.g), wrong(*foreign.g);
+  const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs {{{0}, {1}}};
+  EvaluationOptions options;
+  options.cache = &cache;
+  const std::string mode = "a supplied building ShortestPathCache has one writer: it is rejected unless workers == 1 (got workers = 2; a frozen cache may be shared by every worker)";
+  Texts observed;
+  observed.push_back(error_of([&] { (void)p.forward(-1); }));
+  observed.push_back(error_of([&] { (void)p.forward(std::nullopt); }));
+  observed.push_back(error_of([&] { (void)p.forward(1, holes.get()); }));
+  observed.push_back(error_of([&] { (void)pin.forward(-1); }));
+  observed.push_back(error_of([&] { (void)p.forward(1); }));
+  options.config.routing = Pinned{program};
+  observed.push_back(error_of([&] { (void)evaluate_pairs(*net.g, pairs, options, {}, 2); }));
+  options.config.routing = ShortestPaths{};
+  options.offer = kUnlimited;
+  observed.push_back(error_of([&] { (void)evaluate_pairs(*net.g, pairs, options, {}, 2); }));
+  options.offer.reset();
+  options.cache = &wrong;
+  observed.push_back(error_of([&] { (void)evaluate_pairs(*net.g, pairs, options, {}, 2); }));
+  options.cache = &cache;
+  observed.push_back(error_of([&] { (void)evaluate_pairs(*net.g, pairs, options, {}, 2); }));
+  options.offer = kUnlimited;
+  observed.push_back(error_of([&] { (void)evaluate_edge_failures(*net.g, v({0}), v({1}), options, 2); }));
+  options.offer.reset();
+  observed.push_back(error_of([&] { (void)evaluate_edge_failures(*net.g, v({0}), v({1}), options, 2); }));
+  EXPECT_EQ(observed, (Texts{
+      "offer must be an integer in [0, 2^62) or permitted +inf", "LOSSY forwarding requires a finite offer",
+      "black_holes belongs to another graph", "Pinned forwards with replace", "forward requires an installed program",
+      "evaluate_pairs does not accept Pinned", "offer must be an integer in [0, 2^62)",
+      "foreign ShortestPathCache: bound to another graph", mode, "offer must be an integer in [0, 2^62)", mode}));
 }

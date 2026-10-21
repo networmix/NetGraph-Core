@@ -100,9 +100,9 @@ PlacementResult run(FlowPolicy& policy, const EvaluatorCall& call, const OutputO
 // One evaluation inside a public call: a supplied frozen cache's hit goes to the call's tally.
 PlacementResult evaluate(const Graph& graph, std::span<const NodeId> sources, std::span<const NodeId> destinations,
                          const EvaluationOptions& opts, const Eligibility* eligibility, ShortestPathCache* cache,
-                         const OutputOptions& outputs, detail::FrozenCacheHitTally& tally) {
+                         const OutputOptions& outputs, detail::FrozenCacheHitTally& tally, const detail::TunnelRoster* roster = nullptr) {
   FlowLedger fg(borrowed(graph));
-  FlowPolicy policy = detail::PolicyAccess::make(fg, sources, destinations, opts.config, eligibility, cache, tally);
+  FlowPolicy policy = detail::PolicyAccess::make(fg, sources, destinations, opts.config, eligibility, cache, tally, roster);
   return run(policy, evaluator_call(policy.config(), opts.offer, opts.design_demand), outputs);
 }
 
@@ -114,6 +114,10 @@ void check_common(const Graph& graph, const Eligibility* eligibility, const Shor
   if (cache != nullptr && cache->graph_uid() != graph.uid()) {
     throw std::invalid_argument("foreign ShortestPathCache: bound to another graph");
   }
+}
+
+// Called only while the evaluator's single supplied-cache lease is held.
+void check_cache_mode(const ShortestPathCache* cache, std::int32_t workers) {
   if (cache != nullptr && workers != 1 && !detail::DagCacheAccess::frozen(*cache)) {
     throw std::invalid_argument(
         "a supplied building ShortestPathCache has one writer: it is rejected unless workers == 1 (got workers = " +
@@ -126,40 +130,36 @@ std::size_t worker_threads(std::size_t n, std::int32_t workers) {
   return std::max<std::size_t>(1, static_cast<std::size_t>(std::min<std::int64_t>(workers, static_cast<std::int64_t>(n))));
 }
 
-// Runs task(i, cache, t) for i in [0, n) on worker_threads(n, workers) threads (t the worker's
-// index), each with its own private building cache unless `shared` is given (a supplied cache:
-// building with workers == 1, or frozen and shared by every worker). Indices are taken in increasing
-// order and a taken index always runs, so after an exception every lower index has run: the
-// lowest failing index is the one a sequential run would report, and its exception is rethrown.
-// Everything a worker needs (the result slots, the private caches) is allocated here, before
-// any thread starts, so a failure throws in the caller; the worker body cannot throw (an
-// exception escaping a std::thread terminates the process): a task's exception is caught into
-// its slot, and every launched thread is joined before anything is rethrown.
 // A worker's cache for one evaluation: only ShortestPaths reads one (the other models reject a cache,
 // and the caller's was validated before the workers started).
 ShortestPathCache* worker_cache(const FlowPolicyConfig& config, ShortestPathCache& cache) noexcept {
   return std::holds_alternative<ShortestPaths>(config.routing) ? &cache : nullptr;
 }
 
+// Increasing indices ensure every task below a failing index has already been taken.
+// Taken tasks finish even after an abort. Each exception has its own slot, and every
+// launched thread is joined before the lowest-index exception is rethrown.
+// The caller allocates result slots before entering; error and thread storage is private here.
 template <class Task>
-void run_indexed(std::size_t n, std::int32_t workers, const Graph& graph, ShortestPathCache* shared, Task task) {
+void run_tasks(std::size_t n, std::int32_t workers, Task task) {
   if (n == 0) return;
   const auto threads = worker_threads(n, workers);
   std::vector<std::exception_ptr> errors(n);
-  std::vector<std::unique_ptr<ShortestPathCache>> own;
-  if (shared == nullptr) {
-    own.reserve(threads);
-    for (std::size_t t = 0; t < threads; ++t) own.push_back(std::make_unique<ShortestPathCache>(graph));
-  }
   std::atomic<std::size_t> next {0};
   std::atomic<bool> abort {false};
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  const auto* caller_probe = detail::current_concurrent_probe();
+#endif
   auto worker = [&](std::size_t t) noexcept {
-    ShortestPathCache& cache = shared != nullptr ? *shared : *own[t];
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    const detail::ScopedConcurrentProbe inherited(caller_probe);
+#endif
     while (!abort.load(std::memory_order_relaxed)) {
       const std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
       if (i >= n) break;
       try {
-        task(i, cache, t);
+        detail::concurrent_event(detail::ConcurrentStage::WorkerBegin, &i);
+        task(i, t);
       } catch (...) {
         errors[i] = std::current_exception();
         abort.store(true, std::memory_order_relaxed);
@@ -172,7 +172,10 @@ void run_indexed(std::size_t n, std::int32_t workers, const Graph& graph, Shorte
     std::vector<std::thread> pool;
     pool.reserve(threads);
     try {
-      for (std::size_t t = 0; t < threads; ++t) pool.emplace_back(worker, t);
+      for (std::size_t t = 0; t < threads; ++t) {
+        detail::concurrent_event(detail::ConcurrentStage::ThreadLaunch, &t);
+        pool.emplace_back(worker, t);
+      }
     } catch (...) {
       abort.store(true);
       for (auto& th : pool) th.join();
@@ -183,6 +186,22 @@ void run_indexed(std::size_t n, std::int32_t workers, const Graph& graph, Shorte
   for (const auto& e : errors) {
     if (e) std::rethrow_exception(e);
   }
+}
+
+// Evaluation workers borrow the supplied cache or own one private building cache each.
+// First-pass roster checks use run_tasks directly and need no cache or lease.
+template <class Task>
+void run_indexed(std::size_t n, std::int32_t workers, const Graph& graph, ShortestPathCache* shared, Task task) {
+  if (n == 0) return;
+  std::vector<std::unique_ptr<ShortestPathCache>> own;
+  if (shared == nullptr) {
+    const auto threads = worker_threads(n, workers);
+    own.reserve(threads);
+    for (std::size_t t = 0; t < threads; ++t) own.push_back(std::make_unique<ShortestPathCache>(graph));
+  }
+  run_tasks(n, workers, [&](std::size_t i, std::size_t t) {
+    task(i, shared != nullptr ? *shared : *own[t], t);
+  });
 }
 
 // ShortestPaths sensitivity: the edges of the full static support (every edge on a static shortest
@@ -226,6 +245,19 @@ std::vector<std::uint8_t> reachable_support(const Graph& graph, const detail::Po
 
 namespace detail {
 
+std::optional<TunnelRoster> check_demand_arguments(const Graph& graph, std::span<const NodeId> sources,
+    std::span<const NodeId> destinations, const EvaluationOptions& options, ArgumentWork search) {
+  auto roster = check_policy_construction(graph, sources, destinations, options.config, options.eligibility, options.cache, search);
+  (void)evaluator_call(options.config, options.offer, options.design_demand);
+  return roster;
+}
+
+std::optional<TunnelRoster> check_edge_failure_arguments(const Graph& graph, std::span<const NodeId> sources,
+    std::span<const NodeId> destinations, const EvaluationOptions& options, std::int32_t workers, ArgumentWork search) {
+  check_common(graph, options.eligibility, options.cache, workers);
+  return check_demand_arguments(graph, sources, destinations, options, search);
+}
+
 void check_batch_arguments(const Graph& graph, const EvaluationOptions& options, std::int32_t workers) {
   check_common(graph, options.eligibility, options.cache, workers);
   if (std::holds_alternative<Pinned>(options.config.routing)) throw std::invalid_argument("evaluate_pairs does not accept Pinned");
@@ -249,24 +281,40 @@ void check_batch_pair(const Graph& graph, const FlowPolicyConfig& config, std::s
   check_source_count(config, s.size());
 }
 
+std::vector<TunnelRoster> prepare_batch_rosters(const Graph& graph,
+    std::span<const std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs,
+    const EvaluationOptions& options, std::span<const Eligibility* const> per_pair, std::int32_t workers,
+    ArgumentWork search) {
+  const auto* centralized = std::get_if<CentralizedTE>(&options.config.routing);
+  if (pairs.empty() || !(std::holds_alternative<DistributedTE>(options.config.routing) ||
+                        (centralized && centralized->tunnel_count.has_value()))) return {};
+  std::vector<TunnelRoster> rosters;
+  auto work = [&] {
+    rosters.resize(pairs.size());
+    run_tasks(pairs.size(), workers, [&](std::size_t i, std::size_t /*t*/) {
+      const auto* common = options.eligibility;
+      const auto* eligibility = per_pair.empty() ? nullptr : per_pair[i];
+      std::optional<Eligibility> both;
+      if (common && eligibility) both = Eligibility::intersect(*common, *eligibility);
+      const auto* mask = both ? &*both : (common ? common : eligibility);
+      rosters[i] = *check_policy_construction(graph, pairs[i].first, pairs[i].second, options.config, mask, nullptr);
+    });
+  };
+  if (search != nullptr) search([](void* context) { (*static_cast<decltype(work)*>(context))(); }, &work);
+  else work();
+  return rosters;
+}
+
 PlacementResult evaluate_demand_in_call(const Graph& graph, std::span<const NodeId> sources,
-                                 std::span<const NodeId> destinations, const EvaluationOptions& options, FrozenCacheHitTally& tally) {
-  return evaluate(graph, sources, destinations, options, options.eligibility, options.cache, options.outputs, tally);
+                                 std::span<const NodeId> destinations, const EvaluationOptions& options, FrozenCacheHitTally& tally, const TunnelRoster* roster) {
+  return evaluate(graph, sources, destinations, options, options.eligibility, options.cache, options.outputs, tally, roster);
 }
 
 std::vector<PlacementResult> evaluate_pairs_in_call(
     const Graph& graph, const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>>& pairs,
     const EvaluationOptions& options, std::span<const Eligibility* const> per_pair_eligibility, std::int32_t workers,
-    FrozenCacheHitTally& tally) {
-  check_batch_arguments(graph, options, workers);
-  if (!per_pair_eligibility.empty() && per_pair_eligibility.size() != pairs.size()) {
-    throw std::invalid_argument("per_pair_eligibility has " + std::to_string(per_pair_eligibility.size()) + " entries for " +
-                                std::to_string(pairs.size()) + " pairs");
-  }
-  for (std::size_t i = 0; i < pairs.size(); ++i) {
-    check_batch_pair(graph, options.config, pairs[i].first, pairs[i].second, per_pair_eligibility.empty() ? nullptr : per_pair_eligibility[i],
-                     i);
-  }
+    FrozenCacheHitTally& tally, std::span<const TunnelRoster> rosters) {
+  check_cache_mode(options.cache, workers);
   std::vector<std::optional<PlacementResult>> results(pairs.size());
   run_indexed(pairs.size(), workers, graph, options.cache, [&](std::size_t i, ShortestPathCache& cache, std::size_t /*t*/) {
     const Eligibility* extra = per_pair_eligibility.empty() ? nullptr : per_pair_eligibility[i];
@@ -281,7 +329,7 @@ std::vector<PlacementResult> evaluate_pairs_in_call(
       }
     }
     results[i] = evaluate(graph, pairs[i].first, pairs[i].second, options, elig, worker_cache(options.config, cache),
-                          options.outputs, tally);
+                          options.outputs, tally, rosters.empty() ? nullptr : &rosters[i]);
   });
   std::vector<PlacementResult> out;
   out.reserve(results.size());
@@ -291,8 +339,8 @@ std::vector<PlacementResult> evaluate_pairs_in_call(
 
 SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<const NodeId> sources,
                                       std::span<const NodeId> destinations, const EvaluationOptions& options,
-                                      std::int32_t workers, FrozenCacheHitTally& tally) {
-  check_common(graph, options.eligibility, options.cache, workers);
+                                      std::int32_t workers, FrozenCacheHitTally& tally, const TunnelRoster* roster) {
+  check_cache_mode(options.cache, workers);
   // Unrestricted CentralizedTE with the optimized source allocation skips the links its baseline leaves without
   // flow (deleting one keeps the baseline feasible, so the delivery stays). When the baseline is a maximum flow (no
   // offer, or a finite offer above what it delivers) each deletion repairs the baseline's state; when the offer
@@ -313,7 +361,7 @@ SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<c
       cache = own.get();
     }
     FlowLedger fg(borrowed(graph));
-    FlowPolicy policy = PolicyAccess::make(fg, sources, destinations, options.config, options.eligibility, cache, tally);
+    FlowPolicy policy = PolicyAccess::make(fg, sources, destinations, options.config, options.eligibility, cache, tally, roster);
     auto& pe = PolicyAccess::engine(policy);
     if (global) pe.capture = &capture;
     out.baseline = run(policy, evaluator_call(policy.config(), options.offer, options.design_demand), options.outputs);
@@ -369,7 +417,7 @@ SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<c
                               OutputOptions {}, tally);
       entry.delivery_reduction = base - r.call_delivered;
     }
-    if (&cache != options.cache) cache.clear();
+    if (&cache != options.cache) detail::DagCacheAccess::clear_private(cache);
   });
   return out;
 }
@@ -386,26 +434,58 @@ std::int32_t default_workers(bool edge_failures) noexcept {
 } // namespace detail
 
 // Each evaluator is one public call on a supplied frozen cache's statistics.
-PlacementResult evaluate_demand(const Graph& graph, std::span<const NodeId> sources,
-                         std::span<const NodeId> destinations, const EvaluationOptions& options) {
+PlacementResult evaluate_demand(const Graph& graph, std::span<const NodeId> input_sources,
+                         std::span<const NodeId> input_destinations, const EvaluationOptions& input_options) {
+  const EvaluationOptions options = input_options;
+  const std::vector<NodeId> sources(input_sources.begin(), input_sources.end());
+  const std::vector<NodeId> destinations(input_destinations.begin(), input_destinations.end());
+  const auto roster = detail::check_demand_arguments(graph, sources, destinations, options);
   return detail::frozen_call(options.cache, [&](detail::FrozenCacheHitTally& tally) {
-    return detail::evaluate_demand_in_call(graph, sources, destinations, options, tally);
+    return detail::evaluate_demand_in_call(graph, sources, destinations, options, tally, roster ? &*roster : nullptr);
   });
 }
 
 std::vector<PlacementResult> evaluate_pairs(
-    const Graph& graph, const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>>& pairs,
-    const EvaluationOptions& options, std::span<const Eligibility* const> per_pair_eligibility, std::int32_t workers) {
+    const Graph& graph, const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>>& input_pairs,
+    const EvaluationOptions& input_options, std::span<const Eligibility* const> input_per_pair, std::int32_t workers) {
+  const EvaluationOptions options = input_options;
+  const auto pairs = input_pairs;
+  const std::vector<const Eligibility*> per_pair_eligibility(input_per_pair.begin(), input_per_pair.end());
+  detail::check_batch_arguments(graph, options, workers);
+  if (!per_pair_eligibility.empty() && per_pair_eligibility.size() != pairs.size()) {
+    throw std::invalid_argument("per_pair_eligibility has " + std::to_string(per_pair_eligibility.size()) + " entries for " +
+                                std::to_string(pairs.size()) + " pairs");
+  }
+  std::exception_ptr pending;
+  std::size_t valid = 0;
+  for (std::size_t i = 0; i < pairs.size(); ++i) {
+    try {
+      detail::check_batch_pair(graph, options.config, pairs[i].first, pairs[i].second,
+          per_pair_eligibility.empty() ? nullptr : per_pair_eligibility[i], i);
+      ++valid;
+    } catch (...) {
+      pending = std::current_exception();
+      break;
+    }
+  }
+  // Searches of the valid prefix precede the later pair's attached-check error.
+  // The search workers themselves report the lowest failing pair and are joined here.
+  const auto rosters = detail::prepare_batch_rosters(graph, std::span(pairs).first(valid), options, per_pair_eligibility, workers);
+  if (pending) std::rethrow_exception(pending);
   return detail::frozen_call(options.cache, [&](detail::FrozenCacheHitTally& tally) {
-    return detail::evaluate_pairs_in_call(graph, pairs, options, per_pair_eligibility, workers, tally);
+    return detail::evaluate_pairs_in_call(graph, pairs, options, per_pair_eligibility, workers, tally, rosters);
   });
 }
 
-SensitivityResult evaluate_edge_failures(const Graph& graph, std::span<const NodeId> sources,
-                              std::span<const NodeId> destinations, const EvaluationOptions& options,
+SensitivityResult evaluate_edge_failures(const Graph& graph, std::span<const NodeId> input_sources,
+                              std::span<const NodeId> input_destinations, const EvaluationOptions& input_options,
                               std::int32_t workers) {
+  const EvaluationOptions options = input_options;
+  const std::vector<NodeId> sources(input_sources.begin(), input_sources.end());
+  const std::vector<NodeId> destinations(input_destinations.begin(), input_destinations.end());
+  const auto roster = detail::check_edge_failure_arguments(graph, sources, destinations, options, workers);
   return detail::frozen_call(options.cache, [&](detail::FrozenCacheHitTally& tally) {
-    return detail::evaluate_edge_failures_in_call(graph, sources, destinations, options, workers, tally);
+    return detail::evaluate_edge_failures_in_call(graph, sources, destinations, options, workers, tally, roster ? &*roster : nullptr);
   });
 }
 

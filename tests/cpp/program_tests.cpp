@@ -694,6 +694,57 @@ TEST(FromRoutes, Order) {
             "routes[0]: head 1 is not a source");
 }
 
+TEST(FromRoutes, CheckedPlansAreSharedAndOwned) {
+  const auto g = par2(4, 8);
+  const std::vector<NodeId> sources {0}, destinations {1};
+  const std::vector<RouteDefinition> routes {
+    tunnel_route(*g, 0, {0}, 0), dag_route(*g, 0, {0, 1}), dag_route(*g, 0, {0, 1}, 0)};
+  const std::vector<RouteOptions> options {
+    {}, {.allocation = W},
+    {.allocation = W, .weight_basis = WeightBasis::Explicit, .edge_weights = Amounts {1, 3}},
+    {.allocation = W, .weight_basis = WeightBasis::ResidualSnapshot, .residual = Amounts {0, 8}},
+    {.allocation = W, .weight_basis = WeightBasis::Explicit, .edge_weights = Amounts {0, 0}}};
+  const std::vector<Amounts> expected_weights {{}, {4, 8}, {1, 3}, {8}, {}};
+  const std::vector<Amounts> expected_carried {{2, 2}, {1, 3}, {1, 3}, {0, 4}, {0, 0}};
+  for (std::size_t k = 0; k < options.size(); ++k) {
+    std::shared_ptr<const ForwardingProgram> prog;
+    std::weak_ptr<const detail::PreparedRoute> retained;
+    {
+      auto checked = detail::check_route_definitions(*g, sources, destinations, routes, options[k]);
+      ASSERT_EQ(checked.split_contexts.size(), 2U);
+      std::vector<const detail::PreparedRoute*> plans;
+      for (const auto& c : checked.split_contexts) plans.push_back(c.prepared_route.get());
+      for (const auto& c : checked.split_contexts) {
+        ASSERT_TRUE(c.prepared_route);
+        EXPECT_EQ(c.prepared_route->support_edges, (std::vector<EdgeId> {0, 1}));
+        EXPECT_EQ(c.prepared_route->weights, expected_weights[k]);
+        const std::vector<EdgeId> members = k == 4 ? std::vector<EdgeId> {} : k == 3 ? std::vector<EdgeId> {1} : std::vector<EdgeId> {0, 1};
+        EXPECT_EQ(c.prepared_route->forwarding_edges, members);
+      }
+      retained = checked.split_contexts.front().prepared_route;
+      prog = detail::ProgramAccess::from_checked_routes(sources, destinations, routes, std::move(checked));
+      const auto& data = detail::ProgramAccess::data(*prog);
+      ASSERT_EQ(data.split_contexts.size(), 2U);
+      EXPECT_EQ(data.entries.size(), 3U);
+      EXPECT_EQ(prog->tunnels().size(), 1U);
+      for (std::size_t i = 0; i < plans.size(); ++i) {
+        EXPECT_EQ(data.split_contexts[i].prepared_route.get(), plans[i]);
+        EXPECT_EQ(data.entries[i + 1].min_route_cost, 1);
+      }
+    }
+    ASSERT_FALSE(retained.expired());  // before any read through a borrowed plan
+    {
+      FlowLedger ledger(g);
+      FlowPolicy p(ledger, sources, destinations, {.routing = Pinned {prog, nullptr}});
+      const auto result = p.place(4);
+      EXPECT_EQ(result.call_delivered, k == 4 ? 0 : 4);
+      EXPECT_EQ(ledger.carried(), expected_carried[k]);
+    }
+    prog.reset();
+    EXPECT_TRUE(retained.expired());
+  }
+}
+
 // A zero-weight route keeps its index and is validated in full.
 TEST(FromRoutes, ZeroWeightKept) {
   const auto g = par2(4, 8);
@@ -1498,7 +1549,7 @@ TEST(Operations, ForwardOrder) {
   auto pin = pinned(g, tunnels(*g, {0}, {1}, {{0, {0}, 1}}));
   EXPECT_EQ(error_of([&] { (void)pin->forward(INF, &foreign); }), "Pinned forwards with replace");
   auto p = make(g, {0}, {1}, cost_only(EB, LOSSY));
-  EXPECT_EQ(error_of([&] { (void)p->forward(-1); }), kNoProgram);
+  EXPECT_EQ(error_of([&] { (void)p->forward(-1); }), "offer must be an integer in [0, 2^62) or permitted +inf");
   (void)p->place(1);
   EXPECT_EQ(error_of([&] { (void)p->forward(-1, &foreign); }), "offer must be an integer in [0, 2^62) or permitted +inf");
   EXPECT_EQ(error_of([&] { (void)p->forward(INF, &foreign); }), kFinite);

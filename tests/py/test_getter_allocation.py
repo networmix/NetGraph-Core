@@ -437,3 +437,66 @@ def test_a_failed_integer_read_raises_memory_error():
         faults += 1
         assert got is None and type(error) is MemoryError, (k, repr(error))
     pytest.fail("no completing read in 20 allocation points")
+
+
+@needs_hooks
+def test_native_trace_conversion_allocation_failures():
+    from concurrency_support import run_python
+
+    run_python("""
+from helpers import full_ledger_state, sweep_python_allocation
+def make():
+    ledger = ngc.FlowLedger(graph(1000))
+    p = ngc.FlowPolicy(ledger, 0, 1, ngc.FlowPolicyConfig(routing=ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.OPTIMIZED)))
+    result, trace = p._place_traced(300)
+    assert result.delivered == 300
+    def snapshot():
+        return full_ledger_state(ledger), p._state(), p.program
+    return trace.as_dict, (), snapshot
+assert sweep_python_allocation(make) >= 10
+""")
+
+
+@needs_hooks
+def test_policy_shell_native_failures_leave_no_binding():
+    from concurrency_support import run_python
+
+    run_python("""
+from helpers import full_ledger_state
+cfg = ngc.FlowPolicyConfig(routing=ngc.ShortestPaths())
+# Grow pybind11's process-wide instance and patient registries before counting
+# allocations owned by a constructor attempt.
+warm_ledger = ngc.FlowLedger(graph())
+warm = ngc.FlowPolicy(warm_ledger, 0, 1, cfg)
+del warm
+faults = 0
+for k in range(600):
+    ledger = ngc.FlowLedger(graph())
+    before = full_ledger_state(ledger)
+    # Python's generic tp_new is outside the binding's allocation guarantee.
+    # Sweep the new initialization path on an already created Python shell.
+    shell = ngc.FlowPolicy.__new__(ngc.FlowPolicy)
+    initialize = shell.__init__
+    gc.collect()
+    print('constructor native allocation', k, flush=True)
+    hit, _, value, error, live = ext._fail_native_allocation(initialize, (ledger, 0, 1, cfg), k)
+    if error is not None:
+        assert hit
+        faults += 1
+        assert value is None and type(error) is MemoryError, (k, repr(error))
+        assert live == 0, (k, live)
+        assert full_ledger_state(ledger) == before
+        with pytest.raises(TypeError, match='not constructed'):
+            shell.delivered()
+        retry = ngc.FlowPolicy(ledger, 0, 1, cfg)
+        assert retry.place(3).delivered == 3
+        del retry
+    else:
+        assert error is None and value is None
+        assert shell.place(3).delivered == 3
+        if not hit:
+            assert faults >= 1
+            break
+else:
+    raise AssertionError('no completing constructor in 600 allocation points')
+""")

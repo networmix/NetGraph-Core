@@ -14,6 +14,7 @@ is built or installed. Run by ``bash dev/stubs/run.sh check``, or directly:
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import os
@@ -28,6 +29,24 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import generate
+
+
+class FinalClasses(unittest.TestCase):
+    def test_only_native_final_types_are_marked(self):
+        class Open:
+            pass
+
+        package = types.SimpleNamespace(Final=bool, Open=Open)
+        nodes = ast.parse("class Final: pass\nclass Open: pass").body
+        generate.apply_final_classes({node.name: node for node in nodes}, package)
+        self.assertEqual(
+            [ast.unparse(d) for d in nodes[0].decorator_list], ["typing.final"]
+        )
+        self.assertEqual(nodes[1].decorator_list, [])
+        with self.assertRaises(TypeError):
+            type("Forbidden", (bool,), {})
+        self.assertTrue(issubclass(type("Allowed", (Open,), {}), Open))
+
 
 RAW = '''"""raw"""
 from __future__ import annotations

@@ -17,7 +17,6 @@ inline constexpr bool kTraced = NETGRAPH_CORE_PRIVATE_HOOKS != 0;
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
 
-#include <functional>
 #include <optional>
 
 #include "netgraph/core/detail/trace.hpp"
@@ -25,13 +24,9 @@ inline constexpr bool kTraced = NETGRAPH_CORE_PRIVATE_HOOKS != 0;
 
 namespace netgraph::core::detail {
 
-// FlowPolicy::place with the transaction's trace (a Trace: the call's intermediate values,
-// keyed as the tests' model of the policy keys them). `before_publish`, when given, runs
-// once the result and the trace are final and before anything is published (the commit, the
-// epoch state): an exception from it aborts the call with nothing changed (the binding builds
-// its Python objects there).
-PlacementResult place_traced(FlowPolicy& policy, std::optional<Amount> offer, const OutputOptions& outputs, Trace& trace,
-                             const std::function<void()>* before_publish = nullptr);
+// FlowPolicy::place with a native trace. Python conversion is a separate read,
+// after the operation has released the ledger gate.
+PlacementResult place_traced(FlowPolicy& policy, std::optional<Amount> offer, const OutputOptions& outputs, Trace& trace);
 
 } // namespace netgraph::core::detail
 

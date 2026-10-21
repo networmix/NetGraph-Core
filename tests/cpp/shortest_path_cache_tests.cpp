@@ -122,7 +122,7 @@ TEST(DagCacheModes, TransitionTableAndStatistics) {
   invalid_queries_count_nothing("frozen");
   // clear() throws when frozen and keeps the entries.
   EXPECT_EQ(error_of([&] { cache.clear(); }),
-            "ShortestPathCache.clear is rejected while the cache is frozen (join every reader, then thaw() and clear())");
+            "ShortestPathCache.clear is rejected while the cache is frozen (thaw() it, then clear())");
   EXPECT_EQ(cache.stats().entries, 1);
   // thaw(): building again; a miss searches and inserts, clear() empties (counters persist).
   cache.thaw();

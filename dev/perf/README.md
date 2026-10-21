@@ -325,7 +325,9 @@ failed.
 | `t2` | `t2.exact16.headroom`, `t2.exact16.cost`, `t2.upto256.headroom`, `t2.size.mesh` | T2 on the same fabric and demands: 16 tunnels per head with and without `prefer_headroom`, up to 256 with it; 16 tunnels for 10 heads on a 500-node mesh (2000 links, 5/8 to 8/8 free), sizing-dominated |
 | `msd` | `msd.loop` | the maximum-supported-demand bracket and bisection with a per-series DAG cache |
 | `ksp` | `ksp.fabric3_k8` | k = 8 shortest paths for 8 pairs |
-| `cache` | `cache.cold`, `cache.warm` | ShortestPathCache series from a cleared / prepopulated cache |
+| `cache` | `cache.cold`, `cache.warm`, `cache.frozen.reads` | 64 direct lookups from a cleared, prepopulated building, or prepopulated frozen cache |
+| `concurrency` | `concurrency.place_zero`, `delivered`, `program`, `config` | 10,000 calls of one operation on a prepared one-link policy (capacity 16, cost 3, q=1, replace(4)); config is the immutable control |
+| `concurrency` | `concurrency.two_ledgers_serial`, `concurrency.two_ledgers_parallel` | 32 evaluate(32) calls on each independent ledger; 384-node/2816-edge layered graph, q=1, capacity 64, two thread launches and joins in both modes |
 | `eligibility` | `eligibility.build_intersect` | 64 failure states built and intersected |
 | `construct` | the fourteen storage construction rows (`construct.wgrid256`, `fanout_clos`, `random1m_nat`, `random1m_scat`, `wide65k`, `k65536`, `k65537`, `star1m`, `sparse1m`, `empty1m`, `random65k_bprime`, `random65k_reversed`, `star1m_smallk`, `instar1m_smallk`) | the constructor on prepared input: many short rows, the sort fallback above 65,536 distinct costs and both sides of that limit, very long rows, mostly isolated nodes, an empty graph, input already in or reversed from edge-id order |
 | `spf` | the six storage search rows (`spf.to.{wgrid256,random1m,wide_fallback16k,width65536,width65537}`, `spf.full.random1m`) | 8 full searches each: the bucket queue, a large scattered graph, the heap, and both sides of the bucket-width limit 65,536 |
@@ -334,6 +336,15 @@ Every row's `desc` (in `aba-list`) describes its input and its work; the generat
 sources are in `aba_rows.hpp`. The row names are fixed (the frozen inputs and earlier reports
 name them): `proportional` and `prop` in a name mean the OPTIMIZED route allocation, and `lossy`
 means the EQUAL route allocation with LOSSY admission.
+
+The tiny native operation rows use added time per call against the same row on the reference:
+at most 0.1 microseconds for a gated call. The two direct-hit cache rows have the same
+0.1-microsecond allowance per lookup; `cache.cold` keeps the ordinary 3% tolerance. The immutable
+configuration control keeps the ordinary tolerance. For two ledgers compare candidate serial
+against candidate parallel on identical work, with a speedup target of at least 1.5; both modes
+include two thread launches/joins. These budgets are interpreted separately from the default
+percentage verdict of `aba.py`. Correctness checks assert full delivery (one unit per head,
+below every link's capacity) before accepting a time.
 
 **The storage rows** exercise the graph's storage and construction. Every input comes from a
 generator in `aba_rows.hpp` (`storage_inputs()`) with fixed seeds, one random draw per

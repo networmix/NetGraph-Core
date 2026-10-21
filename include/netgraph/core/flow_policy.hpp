@@ -1,6 +1,7 @@
 /* The policy engine FlowPolicy. */
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -22,6 +23,7 @@
 namespace netgraph::core {
 
 namespace detail {
+struct TunnelRoster;
 struct PolicyEngine;
 struct PolicyAccess;
 class FrozenCacheHitTally;
@@ -304,7 +306,8 @@ struct PlacementResult {
 };
 
 // A policy binds to its ledger at construction. Every call validates, then computes on working
-// copies and publishes all changes together, or none.
+// copies and publishes all changes together, or none. The ledger's single gate covers
+// every policy call and mutable read; config() is immutable and lock-free.
 // place(offer) adds offer to the epoch: ShortestPaths prepares its program at the epoch's first positive call
 // (every roster source's shortest routes on the ledger's residual at that call's entry) and keeps
 // it for the epoch; Equal and Weighted forward the equal source allocation over the pooled routes:
@@ -340,18 +343,19 @@ struct PlacementResult {
 // the ShortestPathCache and the black holes by the ledger's graph, the configuration (FlowPolicyConfig's
 // order), then the roster and count rules (the pooled single-path rule; T2's several-sources
 // rule; the tunnel limit; a Pinned program's endpoints equal to the policy's). A call validates the
-// operation for the model (T1's and T2's place), an installed program (forward), the request ([0,
+// operation for the model (T1's and T2's place), the request ([0,
 // 2^62) units or +inf), a Lossy full offer's finiteness, the design demand (the model accepts one,
 // [0, 2^62) or +inf, T1 finite), a finite place after +inf in the epoch (rejected, also 0) and the black holes' graph
-// (forward) before any change. A solve of the flow core (CentralizedTE, ShortestPaths Optimized, a Optimized flow) whose
+// (forward) before any change. Argument/immutable checks run first; installed-program, epoch
+// and counter checks then run under the gate, in that order. A solve of the flow core (CentralizedTE, ShortestPaths Optimized, a Optimized flow) whose
 // network exceeds the core's int32 numbering throws std::invalid_argument, and the call changes
 // nothing: more than INT32_MAX - 2 nodes, or more than 2^30 - 1 edges, sources and destinations
 // together. A Lossy forwarding whose losses wait on each other in a cycle that alternates between
 // two states or does not settle within its round limit throws std::invalid_argument; a failed
 // check of an iterated forwarding throws std::runtime_error; neither publishes anything.
 //
-// Lifetime: the ledger, the Eligibility and the ShortestPathCache outlive the policy (the policy holds
-// pointers to them); a Pinned policy shares its program and black holes. The roster (the eligible
+// Lifetime: the ledger and Eligibility outlive the policy. A cache is read during
+// construction; the support DAG is retained by the policy. A Pinned policy shares its program and black holes. The roster (the eligible
 // sources that statically reach an allowed destination, over allowed edges whatever their
 // capacity, the tunnel models' heads; Pinned: the program's roster heads that reach an allowed destination over
 // its basis under the Eligibility) is fixed at construction.
@@ -363,7 +367,7 @@ public:
   FlowPolicy& operator=(const FlowPolicy&) = delete;
   FlowPolicy(FlowPolicy&&) = delete;
   FlowPolicy& operator=(FlowPolicy&&) = delete;
-  ~FlowPolicy();
+  ~FlowPolicy() noexcept;
 
   // offer and an inner design_demand: units, nullopt is +inf; an absent design_demand is
   // the offer.
@@ -386,19 +390,23 @@ public:
   // One of this policy's live records; a FlowId of another ledger or policy, a retired or an
   // unknown id throws std::invalid_argument.
   [[nodiscard]] FlowRecord record(const FlowId& flow_id) const;
-  // The installed program: null before the epoch's first preparation and after remove().
-  [[nodiscard]] std::shared_ptr<const ForwardingProgram> program() const noexcept;
+  // A gated snapshot of the installed program: null before preparation and after remove().
+  [[nodiscard]] std::shared_ptr<const ForwardingProgram> program() const;
   // The configuration as validated at construction: a copy whose absent source_allocation and
   // weight_basis are resolved to the model's defaults (FlowPolicyConfig).
   [[nodiscard]] const FlowPolicyConfig& config() const noexcept;
 
 private:
   friend struct detail::PolicyAccess;
+  FlowPolicy() noexcept;
   // Construction inside another public call (an evaluator): a supplied frozen cache's hits are
   // recorded in that call's tally.
   FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
-             FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache, detail::FrozenCacheHitTally& tally);
+             FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache, detail::FrozenCacheHitTally& tally, const detail::TunnelRoster* roster);
   std::unique_ptr<detail::PolicyEngine> engine_;
+  // A Python __new__ shell can be visible while __init__ is detached. The engine
+  // stays at the same address after this release publication under its gate.
+  std::atomic<bool> ready_ {false};
 };
 
 // ---------------------------------------------------------------- several demands at once
@@ -447,13 +455,15 @@ using Action = std::variant<Place, Replace, Forward>;
 // with its two errors. Every entry reports the one residual after the list and its own
 // saturated_boundary_edges on it. An empty list returns nothing after checking the ledger and mode.
 //
-// Validation (std::invalid_argument, before anything is computed): the ledger (a moved-from one:
+// Validation has two passes in the order below: arguments/immutable objects first, then mutable
+// state under the gate. Nothing computes before both passes finish. The ledger (a moved-from one:
 // std::logic_error), `mode` a BatchMode value (`mode: <v> is not a value of BatchMode`); then each
-// action in list order, all of its checks before the next one's: `list policy belongs to another
+// action's argument checks in list order: `list policy belongs to another
 // ledger`; `duplicate policy in list` (at the second occurrence); Simultaneous only, in this order,
 // `SIMULTANEOUS does not accept Place`, `SIMULTANEOUS Replace requires ShortestPaths EQUAL or WEIGHTED,
 // or Pinned`, `SIMULTANEOUS requires admission=LOSSY`, `SIMULTANEOUS requires finite offers`; then
-// the scalar call's own checks in their order. A computation error (the loss iteration's errors, a
+// the scalar call's argument checks. Ledger usability and every action's mutable checks run
+// under the gate, in list order. A computation error (the loss iteration's errors, a
 // solver or forwarding size, the record identity limit counted for the whole list) also changes
 // nothing.
 std::vector<PlacementResult> apply_actions(FlowLedger& ledger, std::span<const Action> actions,

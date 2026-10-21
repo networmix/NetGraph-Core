@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <new>
 #include <thread>
 #include <vector>
@@ -92,6 +93,27 @@ bool native_counted() noexcept {
   return g_native_armed.load(std::memory_order_relaxed) && g_native_owner.load() == std::this_thread::get_id();
 }
 
+// Registration may lazily allocate a bucket table which pybind11 keeps after
+// the last instance is removed. In a free-threaded build the address of a new
+// result can select a previously unused shard despite warming the operation.
+// Prepare only those interpreter-owned empty tables before counting the call;
+// native buffers, holders and registry nodes still fail/count in the call.
+void prepare_native_registry() {
+  auto prepare = [](py::detail::instance_map& instances) {
+    if (instances.empty() && instances.bucket_count() <= 1) instances.reserve(1);
+  };
+  auto& internals = py::detail::get_internals();
+#ifdef Py_GIL_DISABLED
+  for (std::size_t i = 0; i <= internals.instance_shards_mask; ++i) {
+    auto& shard = internals.instance_shards[i];
+    std::unique_lock<py::detail::pymutex> lock(shard.mutex);
+    prepare(shard.registered_instances);
+  }
+#else
+  prepare(internals.registered_instances);
+#endif
+}
+
 void* native_allocate(std::size_t n) {
   if (native_counted()) {
     g_native_seen.fetch_add(1);
@@ -122,6 +144,7 @@ void native_free(void* p) noexcept {
 } // namespace
 
 void register_private_hooks(py::module_& m) {
+  register_concurrency_hooks(m);
   m.def(
       "_fail_python_allocation",
       [](const py::object& fn, const py::tuple& args, long k) {
@@ -151,6 +174,7 @@ void register_private_hooks(py::module_& m) {
         // Calls fn(*args) with the calling thread's k-th native allocation (from 0) failing.
         // Returns (hit, allocations seen, result or None, exception or None, allocations of the
         // call still live). One caller at a time.
+        prepare_native_registry();
         g_native_countdown.store(k);
         g_native_seen.store(0);
         g_native_live.store(0);

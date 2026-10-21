@@ -291,7 +291,40 @@ def spf_opts(direction=ngc.Direction.FORWARD, multipath=True, **kw):
     return ngc.SpfOptions(direction, multipath=multipath, **kw)
 
 
+def tunnel_pairs(g, model):
+    from helpers import dag_of
+
+    routing = (
+        ngc.DistributedTE(ngc.TunnelCount(2))
+        if model == "t1"
+        else ngc.CentralizedTE(
+            source_allocation=ngc.SourceAllocation.EQUAL,
+            tunnel_count=ngc.TunnelCount(2),
+            support=dag_of(g, range(g.num_edges())) if model == "t2_support" else None,
+        )
+    )
+    common = g.eligibility(excluded_edges=[0])
+    extra = g.eligibility(excluded_edges=[g.num_edges() - 1])
+    options = ngc.EvaluationOptions(
+        ngc.FlowPolicyConfig(routing=routing),
+        eligibility=common,
+        outputs=ALL_OUT,
+        design_demand=8,
+        offer=6,
+    )
+    return ngc.evaluate_pairs, (
+        g,
+        [([0, 1], 4), (1, 3), (0, 4)],
+        options,
+        [extra] * 3,
+        1,
+    )
+
+
 SCENARIOS = {
+    "evaluate_pairs.t1": stateless(lambda g: tunnel_pairs(g, "t1")),
+    "evaluate_pairs.t2": stateless(lambda g: tunnel_pairs(g, "t2")),
+    "evaluate_pairs.t2_support": stateless(lambda g: tunnel_pairs(g, "t2_support")),
     "spf.full": stateless(lambda g: (ngc.spf, (g, 0, spf_opts()))),
     "spf.targets_residual": stateless(
         lambda g: (

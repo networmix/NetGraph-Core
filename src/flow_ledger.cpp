@@ -51,6 +51,7 @@ FlowLedger::FlowLedger(std::shared_ptr<const Graph> graph, std::span<const Amoun
 }
 
 FlowLedger::FlowLedger(const FlowLedger& other) {
+  const auto guard = detail::LedgerAccess::lock(other);
   other.check_usable();
   if (other.num_bound_policies_ != 0) {
     throw std::invalid_argument("FlowLedger: a ledger with bound policies cannot be copied");
@@ -70,11 +71,12 @@ FlowLedger::FlowLedger(const FlowLedger& other) {
 }
 
 FlowLedger::FlowLedger(FlowLedger&& other) {
+  const auto guard = detail::LedgerAccess::lock(other);
   other.check_usable();
   if (other.num_bound_policies_ != 0) {
     throw std::invalid_argument("FlowLedger: a ledger with bound policies cannot be moved");
   }
-  graph_ = std::move(other.graph_);
+  graph_ = other.graph_;
   uid_ = other.uid_;
   service_baseline_ = std::move(other.service_baseline_);
   carried_ = std::move(other.carried_);
@@ -105,21 +107,25 @@ std::vector<Amount> FlowLedger::checked_baseline(std::span<const Amount> amounts
 }
 
 std::uint64_t FlowLedger::uid() const {
+  const auto guard = detail::LedgerAccess::lock(*this);
   check_usable();
   return uid_;
 }
 
 const std::shared_ptr<const Graph>& FlowLedger::graph() const {
+  const auto guard = detail::LedgerAccess::lock(*this);
   check_usable();
   return graph_;
 }
 
 std::span<const Amount> FlowLedger::edge_capacity_units() const {
+  const auto guard = detail::LedgerAccess::lock(*this);
   check_usable();
   return graph_->edge_capacity_units();
 }
 
 std::vector<Amount> FlowLedger::residual() const {
+  const auto guard = detail::LedgerAccess::lock(*this);
   check_usable();
   std::vector<Amount> out(service_baseline_.size());
   for (std::size_t e = 0; e < out.size(); ++e) out[e] = service_baseline_[e] - carried_[e];
@@ -127,16 +133,19 @@ std::vector<Amount> FlowLedger::residual() const {
 }
 
 std::vector<Amount> FlowLedger::carried() const {
+  const auto guard = detail::LedgerAccess::lock(*this);
   check_usable();
   return carried_;
 }
 
 std::vector<Amount> FlowLedger::reserved() const {
+  const auto guard = detail::LedgerAccess::lock(*this);
   check_usable();
   return reserved_.empty() ? std::vector<Amount>(service_baseline_.size(), 0) : reserved_;
 }
 
 std::vector<Amount> FlowLedger::unreserved() const {
+  const auto guard = detail::LedgerAccess::lock(*this);
   check_usable();
   std::vector<Amount> out(service_baseline_.size());
   for (std::size_t e = 0; e < out.size(); ++e) out[e] = reservation_at(e) - reserved_at(e);
@@ -144,6 +153,7 @@ std::vector<Amount> FlowLedger::unreserved() const {
 }
 
 std::vector<FlowRecord> FlowLedger::records() const {
+  const auto guard = detail::LedgerAccess::lock(*this);
   check_usable();
   std::vector<FlowRecord> out;
   out.reserve(records_.size());
@@ -152,13 +162,18 @@ std::vector<FlowRecord> FlowLedger::records() const {
 }
 
 FlowRecord FlowLedger::record(const FlowId& flow_id) const {
-  check_usable();
-  if (flow_id.first != uid_) {
+  const auto guard = detail::LedgerAccess::lock(*this);
+  return detail::LedgerAccess::record(*this, flow_id);
+}
+
+FlowRecord detail::LedgerAccess::record(const FlowLedger& ledger, const FlowId& flow_id) {
+  ledger.check_usable();
+  if (flow_id.first != ledger.uid_) {
     throw std::invalid_argument("FlowId (" + std::to_string(flow_id.first) + ", " + std::to_string(flow_id.second) +
-                                ") belongs to another ledger (uid " + std::to_string(uid_) + ")");
+                                ") belongs to another ledger (uid " + std::to_string(ledger.uid_) + ")");
   }
-  const auto it = records_.find(flow_id.second);
-  if (it == records_.end()) {
+  const auto it = ledger.records_.find(flow_id.second);
+  if (it == ledger.records_.end()) {
     throw std::invalid_argument("FlowId (" + std::to_string(flow_id.first) + ", " + std::to_string(flow_id.second) +
                                 ") is retired or unknown");
   }
@@ -166,13 +181,15 @@ FlowRecord FlowLedger::record(const FlowId& flow_id) const {
 }
 
 std::vector<EdgeId> FlowLedger::saturated_boundary_edges(std::span<const NodeId> sources, const Eligibility* eligibility) const {
-  check_usable();
   const auto& g = *graph_;
   const auto srcs = detail::node_set(sources, g.num_nodes(), "sources");
   if (eligibility != nullptr && eligibility->graph_uid() != g.uid()) {
     throw std::invalid_argument("foreign Eligibility: built for another graph");
   }
-  return detail::saturated_boundary_edges_of(g, residual(), srcs, eligibility);
+  const auto guard = detail::LedgerAccess::lock(*this);
+  std::vector<Amount> residual;
+  detail::LedgerAccess::residual_into(*this, residual);
+  return detail::saturated_boundary_edges_of(g, residual, srcs, eligibility);
 }
 
 namespace detail {
@@ -220,21 +237,24 @@ std::vector<EdgeId> saturated_boundary_edges_of(const Graph& graph, std::span<co
 } // namespace detail
 
 void FlowLedger::reset() {
-  check_usable();
   reset(graph_->edge_capacity_units());
 }
 
 void FlowLedger::reset(std::span<const Amount> service_baseline) {
+  auto baseline = checked_baseline(service_baseline, "service_baseline");
+  const auto guard = detail::LedgerAccess::lock(*this);
   check_usable();
   check_resettable();
-  install(checked_baseline(service_baseline, "service_baseline"), {});
+  install(std::move(baseline), {});
 }
 
 void FlowLedger::reset(std::span<const Amount> service_baseline, std::span<const Amount> reservation_baseline) {
+  auto baseline = checked_baseline(service_baseline, "service_baseline");
+  auto reservation = checked_baseline(reservation_baseline, "reservation_baseline");
+  const auto guard = detail::LedgerAccess::lock(*this);
   check_usable();
   check_resettable();
-  auto baseline = checked_baseline(service_baseline, "service_baseline");
-  install(std::move(baseline), checked_baseline(reservation_baseline, "reservation_baseline"));
+  install(std::move(baseline), std::move(reservation));
 }
 
 void FlowLedger::check_resettable() const {
@@ -343,6 +363,7 @@ std::int64_t LedgerAccess::bind(FlowLedger& ledger) {
 }
 
 void LedgerAccess::release(FlowLedger& ledger, std::int64_t owner) noexcept {
+  const auto guard = lock(ledger);
   const auto it = ledger.policy_bindings_.find(owner);
   if (it == ledger.policy_bindings_.end() || !it->second) return;
   --ledger.num_bound_policies_;

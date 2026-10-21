@@ -17,6 +17,7 @@
 #include "netgraph/core/detail/endpoints.hpp"
 #include "netgraph/core/detail/enum_domain.hpp"
 #include "netgraph/core/detail/program_data.hpp"
+#include "netgraph/core/detail/concurrency.hpp"
 #include "netgraph/core/detail/route_builders.hpp"
 
 namespace netgraph::core {
@@ -396,25 +397,10 @@ void check_route_vectors(const Graph& graph, const RouteOptions& options) {
 
 } // namespace
 
-std::shared_ptr<const ForwardingProgram> ForwardingProgram::from_routes(const Graph& graph, std::span<const NodeId> sources,
-                                                                        std::span<const NodeId> destinations,
-                                                                        std::span<const RouteDefinition> routes,
-                                                                        const RouteOptions& options) {
+detail::ProgramData detail::check_route_definitions(const Graph& graph, std::span<const NodeId> src,
+    std::span<const NodeId> dst, std::span<const RouteDefinition> routes, const RouteOptions& options) {
   using detail::invalid;
   using detail::route_at;
-  // 1. The endpoint sets.
-  auto src = detail::node_set(sources, graph.num_nodes(), "sources");
-  auto dst = detail::node_set(destinations, graph.num_nodes(), "destinations");
-  detail::check_disjoint(src, dst, "sources", "destinations");
-  // 2. The list.
-  if (routes.empty()) invalid("routes must not be empty");
-  // 3 to 5. The options.
-  bool any_dag = false;
-  for (const auto& r : routes) any_dag = any_dag || std::holds_alternative<std::shared_ptr<const PredecessorDAG>>(r.route);
-  detail::check_route_options("from_routes", any_dag, options.allocation, options.weight_basis,
-                              options.edge_weights.has_value(), options.residual.has_value());
-  // 6. The vectors' lengths and entries.
-  check_route_vectors(graph, options);
   // 7. Each route in list order, its entry made as soon as it is checked (a later route's failure
   // discards the program being made). The roster is the sources with a route.
   const auto edge_destinations = graph.edge_destinations();
@@ -432,10 +418,9 @@ std::shared_ptr<const ForwardingProgram> ForwardingProgram::from_routes(const Gr
   p->entries.reserve(routes.size());
   p->split_contexts.reserve(num_dags);
   p->tunnels.reserve(routes.size() - num_dags);
-  // The destination flags, made for the first Path (a tunnel's end and its earlier hops).
-  std::vector<std::uint8_t> is_dst;
   for (std::size_t i = 0; i < routes.size(); ++i) {
     const auto& r = routes[i];
+    detail::concurrent_event(detail::ConcurrentStage::RouteDefinitionCheck, &r);
     const auto* path = std::get_if<std::shared_ptr<const Path>>(&r.route);
     const auto* dag = std::get_if<std::shared_ptr<const PredecessorDAG>>(&r.route);
     if ((path != nullptr && !*path) || (dag != nullptr && !*dag)) invalid(route_at(i) + "route is null");
@@ -449,10 +434,6 @@ std::shared_ptr<const ForwardingProgram> ForwardingProgram::from_routes(const Gr
     entry.head = r.head;
     entry.weight = r.weight;
     if (path != nullptr) {
-      if (is_dst.empty()) {
-        is_dst.assign(static_cast<std::size_t>(graph.num_nodes()), 0);
-        for (NodeId d : dst) is_dst[static_cast<std::size_t>(d)] = 1;
-      }
       const auto& hops = (*path)->hops();
       for (const auto& hop : hops) {
         if (hop.size() != 1) invalid(route_at(i) + "a tunnel has one edge per hop");
@@ -460,12 +441,12 @@ std::shared_ptr<const ForwardingProgram> ForwardingProgram::from_routes(const Gr
       if ((*path)->source() != r.head) {
         invalid(route_at(i) + "the path starts at " + std::to_string((*path)->source()) + ", not at head " + std::to_string(r.head));
       }
-      if (is_dst[static_cast<std::size_t>((*path)->destination())] == 0) {
+      if (!std::binary_search(dst.begin(), dst.end(), (*path)->destination())) {
         invalid(route_at(i) + "the path ends at " + std::to_string((*path)->destination()) + ", not at a destination");
       }
       for (std::size_t h = 0; h + 1 < hops.size(); ++h) {
         const NodeId v = edge_destinations[static_cast<std::size_t>(hops[h].front())];
-        if (is_dst[static_cast<std::size_t>(v)] != 0) {
+        if (std::binary_search(dst.begin(), dst.end(), v)) {
           invalid(route_at(i) + "the path meets destination " + std::to_string(v) + " before its end");
         }
       }
@@ -476,9 +457,6 @@ std::shared_ptr<const ForwardingProgram> ForwardingProgram::from_routes(const Gr
       t.destination = (*path)->destination();
       t.path_cost = (*path)->cost();
       t.weight = r.weight;
-      auto& edges = t.edges.emplace();
-      edges.reserve(hops.size());
-      for (const auto& hop : hops) edges.push_back(hop.front());
       entry.tunnel_position = static_cast<std::int32_t>(p->tunnels.size());
       entry.min_route_cost = (*path)->cost();
       p->tunnels.push_back(std::move(t));
@@ -506,7 +484,49 @@ std::shared_ptr<const ForwardingProgram> ForwardingProgram::from_routes(const Gr
   // One split route of positive weight forwards in its pooled form (its plan's kernels). The
   // roster: the heads with a route.
   p->pools_source_inflows = p->entries.size() == 1 && p->tunnels.empty() && p->entries.front().weight > 0;
-  p->initialize_storage(src, dst, std::nullopt);
+  return data;
+}
+
+std::shared_ptr<const ForwardingProgram> ForwardingProgram::from_routes(const Graph& graph, std::span<const NodeId> sources,
+                                                                        std::span<const NodeId> destinations,
+                                                                        std::span<const RouteDefinition> routes,
+                                                                        const RouteOptions& options) {
+  using detail::invalid;
+  using detail::route_at;
+  // 1. The endpoint sets.
+  auto src = detail::node_set(sources, graph.num_nodes(), "sources");
+  auto dst = detail::node_set(destinations, graph.num_nodes(), "destinations");
+  detail::check_disjoint(src, dst, "sources", "destinations");
+  // 2. The list.
+  if (routes.empty()) invalid("routes must not be empty");
+  // 3 to 5. The options.
+  bool any_dag = false;
+  for (const auto& r : routes) any_dag = any_dag || std::holds_alternative<std::shared_ptr<const PredecessorDAG>>(r.route);
+  detail::check_route_options("from_routes", any_dag, options.allocation, options.weight_basis,
+                              options.edge_weights.has_value(), options.residual.has_value());
+  // 6. The vectors' lengths and entries.
+  check_route_vectors(graph, options);
+  auto checked = detail::check_route_definitions(graph, src, dst, routes, options);
+  return detail::ProgramAccess::from_checked_routes(src, dst, routes, std::move(checked));
+}
+
+std::shared_ptr<const ForwardingProgram> detail::ProgramAccess::from_checked_routes(
+    std::span<const NodeId> src, std::span<const NodeId> dst,
+    std::span<const RouteDefinition> routes, ProgramData&& data) {
+  // Path checks are complete; copy their hops in the construction phase. A
+  // DAG-only call already owns every plan and needs no second route dispatch.
+  if (!data.tunnels.empty()) {
+    std::size_t tunnel = 0;
+    for (const auto& r : routes) {
+      if (const auto* path = std::get_if<std::shared_ptr<const Path>>(&r.route)) {
+        const auto& hops = (*path)->hops();
+        auto& edges = data.tunnels[tunnel++].edges.emplace();
+        edges.reserve(hops.size());
+        for (const auto& hop : hops) edges.push_back(hop.front());
+      }
+    }
+  }
+  data.initialize_storage(src, dst, std::nullopt);
   return detail::ProgramAccess::make(std::move(data));
 }
 

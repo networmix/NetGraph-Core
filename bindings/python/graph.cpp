@@ -13,6 +13,7 @@
 #include "integers.hpp"
 #include "strict_float.hpp"
 #include "values.hpp"
+#include "native_call.hpp"
 #include "registration.hpp"
 
 namespace py = pybind11;
@@ -112,8 +113,7 @@ std::shared_ptr<Graph> make_graph(const py::object& num_nodes, const py::object&
   auto cost_v = w.narrow<Cost>();
   auto src_v = s.narrow<NodeId>();
   auto dst_v = d.narrow<NodeId>();
-  py::gil_scoped_release release;
-  return std::make_shared<Graph>(static_cast<std::int32_t>(n), src_v, dst_v, cap_v, cost_v, resolution);
+  return native_call([&] { return std::make_shared<Graph>(static_cast<std::int32_t>(n), src_v, dst_v, cap_v, cost_v, resolution); });
 }
 
 } // namespace
@@ -208,7 +208,9 @@ void register_graph(py::module_& m) {
                                       std::to_string(g.num_edges()) + ")");
               }
             }
-            return std::make_shared<Eligibility>(g.eligibility(xn.narrow<NodeId>(), xe.narrow<EdgeId>()));
+            const auto nodes = xn.narrow<NodeId>();
+            const auto edges = xe.narrow<EdgeId>();
+            return native_call([&] { return std::make_shared<Eligibility>(g.eligibility(nodes, edges)); });
           },
           py::arg("excluded_nodes") = py::tuple(), py::arg("excluded_edges") = py::tuple(),
           "Static eligibility from excluded node ids and EdgeIds (duplicates and unsorted lists\n"

@@ -41,6 +41,40 @@ def off_run(**change):
 
 
 class Checks(unittest.TestCase):
+    def test_free_threaded_skip_policy_and_public_population(self):
+        record = dict(
+            has_hooks=True,
+            modules=OUTSIDE,
+            seen=set(guard.CONCURRENCY_PUBLIC) | guard.GIL_PROOF_SKIPS,
+            skipped={n: "Skipped: GIL-proof-only" for n in guard.GIL_PROOF_SKIPS},
+            free_threaded=True,
+            runtime_gil=False,
+            require_concurrency=True,
+        )
+        self.assertEqual(guard.problems("on", **record), [])
+        broken = dict(
+            record, seen=record["seen"] - {next(iter(guard.CONCURRENCY_PUBLIC))}
+        )
+        self.assertTrue(
+            any("required public" in p for p in guard.problems("on", **broken))
+        )
+        self.assertTrue(guard.problems("on", **dict(record, runtime_gil=True)))
+        self.assertTrue(guard.problems("on", **dict(record, skipped={})))
+        wrong_reason = {n: REASON for n in guard.GIL_PROOF_SKIPS}
+        self.assertTrue(guard.problems("on", **dict(record, skipped=wrong_reason)))
+        unknown = dict(record["skipped"], unknown="Skipped: GIL-proof-only")
+        self.assertTrue(guard.problems("on", **dict(record, skipped=unknown)))
+
+    def test_free_threaded_hooks_off_still_runs_public_races(self):
+        record = off_run()
+        record["seen"] |= guard.CONCURRENCY_PUBLIC
+        record.update(free_threaded=True, runtime_gil=False, require_concurrency=True)
+        for node in guard.GIL_PROOF_SKIPS:
+            record["skipped"][node] = "Skipped: GIL-proof-only"
+        self.assertEqual(guard.problems("off", **record), [])
+        record["skipped"][next(iter(guard.CONCURRENCY_PUBLIC))] = REASON
+        self.assertTrue(guard.problems("off", **record))
+
     def test_hooks_on(self):
         ok = dict(has_hooks=True, modules=OUTSIDE, seen={"a"}, skipped={})
         self.assertEqual(guard.problems("on", **ok), [])

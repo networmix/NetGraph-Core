@@ -70,11 +70,13 @@ struct SensitivityResult {
 // Run evaluate_demand() per pair, returning results in pair order. Intersect options.eligibility with
 // per_pair_eligibility[i]; null entries are allowed, and an empty span supplies no per-pair values.
 // The Python binding checks the length of every supplied sequence.
-// Before starting workers, validate in order: workers >= 1; options.eligibility's and the cache's graph;
-// a supplied building cache with workers > 1; Pinned (rejected: a program has fixed endpoints);
-// the configuration; offer and design_demand (the rules of evaluate_demand); and per_pair_eligibility's length. Then validate each pair completely in index
-// order: endpoint sets, overlap, Eligibility's graph, the pooled single-path rule for its sources.
-// This reports the lowest failing pair index.
+// Before evaluation workers start, validate in order: workers >= 1;
+// options.eligibility's and the cache's graph; Pinned (rejected: a program has fixed endpoints); the configuration;
+// offer and design_demand (the rules of evaluate_demand); and per_pair_eligibility's length. Then validate each pair
+// completely in index order: endpoint sets, overlap, Eligibility's graph, the pooled single-path rule for its sources
+// and, for the tunnel models, the tunnel limit. This reports the lowest failing pair index. Last, under the cache's
+// lease: a supplied building cache requires workers == 1. First-pass tunnel searches run in parallel
+// over the checked prefix, before any lease; their immutable rosters are retained for evaluation.
 // A supplied building cache requires workers == 1 because it allows one writer. Workers share
 // a supplied frozen cache, and the one worker uses a supplied building cache; without a supplied
 // cache each worker gets a private building cache before threads start.

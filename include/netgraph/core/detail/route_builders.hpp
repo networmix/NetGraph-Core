@@ -11,7 +11,15 @@
 
 namespace netgraph::core::detail {
 
+// Input checks shared by native factories and Python's attached argument pass.
+void check_csr(const Graph& graph, std::span<const std::int32_t> offsets,
+               std::span<const NodeId> parents, std::span<const EdgeId> via);
+void check_hops(const Graph& graph, const std::vector<std::vector<EdgeId>>& hops);
+
 struct PredecessorDAGBuilder {
+  // The same arrays after check_csr; builds owned storage without repeating validation.
+  [[nodiscard]] static PredecessorDAG of_csr(const Graph& graph, std::span<const std::int32_t> offsets,
+      std::span<const NodeId> parents, std::span<const EdgeId> via);
   // Build a DAG from acyclic, duplicate-free edges; callers guarantee these preconditions.
   // Group predecessor entries (edge source, e) by node, with ascending EdgeId within each node.
   // For graph node count N and 8 |edges| < N, sort in O(|edges| log |edges|) without graph-sized

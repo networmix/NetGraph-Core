@@ -36,6 +36,7 @@ void register_evaluators(pybind11::module_& m);        // evaluate_demand, evalu
 void register_paths(pybind11::module_& m);             // KspOptions, ksp, resolve_to_paths
 void register_search(pybind11::module_& m);            // UNREACHABLE, SpfOptions, SpfResult, spf
 #if NETGRAPH_CORE_PRIVATE_HOOKS
+void register_concurrency_hooks(pybind11::module_& m);
 void register_private_hooks(pybind11::module_& m);     // the test controls and diagnostics
 #endif
 

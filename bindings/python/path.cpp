@@ -13,6 +13,8 @@
 #include "integers.hpp"
 #include "registration.hpp"
 #include "values.hpp"
+#include "native_call.hpp"
+#include "netgraph/core/detail/route_builders.hpp"
 
 namespace py = pybind11;
 
@@ -47,7 +49,8 @@ void register_path(py::module_& m) {
              std::vector<std::vector<EdgeId>> narrowed;
              narrowed.reserve(raw.size());
              for (const auto& r : raw) narrowed.push_back(r.narrow<EdgeId>());
-             return std::make_shared<Path>(*graph, std::move(narrowed));
+             detail::check_hops(*graph, narrowed);
+             return native_call([&] { return std::make_shared<Path>(detail::PathBuilder::of_hops(*graph, std::move(narrowed))); });
            }),
            py::arg("graph"), py::arg("hops"),
            "Validates, in order (ValueError on the first defect): every member id in range, no duplicate\n"
@@ -59,7 +62,7 @@ void register_path(py::module_& m) {
       .def("destination", &Path::destination, "the last node of the walk")
       .def("cost", &Path::cost, "sum over hops of the minimum member cost")
       .def(
-          "to_dag", [](const Path& p) { return std::make_shared<PredecessorDAG>(p.to_dag()); },
+          "to_dag", [](const Path& p) { return native_call([&] { return std::make_shared<PredecessorDAG>(p.to_dag()); }); },
           "the equivalent PredecessorDAG (every member of every hop)")
       .def("__eq__", [](const Path& a, const py::object& b) {
         return py::isinstance<Path>(b) && a == b.cast<const Path&>();

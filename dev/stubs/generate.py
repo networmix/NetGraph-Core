@@ -23,6 +23,8 @@ The steps, each failing loudly:
 5. The module's positional-only parameters (``/`` in its signatures, which pybind11-stubgen
    3.0.0 drops) are positional-only in the stub too, wherever a parameter other than the
    receiver is affected (the enums' comparison operand and ``__setstate__``'s state).
+   Native classes that refuse subclassing (their CPython type has no BASETYPE flag)
+   carry ``@typing.final``; this is read from the installed class, not an override.
 6. ruff (pinned) formats the result; ``--write`` writes it, ``--check`` compares it with the
    committed stub and prints the difference.
 
@@ -472,6 +474,17 @@ def check_no_any(tree: ast.Module) -> None:
         )
 
 
+def apply_final_classes(classes: dict[str, ast.ClassDef], pkg) -> None:
+    # Py_TPFLAGS_BASETYPE is CPython's public flag for whether a type can be
+    # subclassed. Read it without creating classes or running __init_subclass__.
+    base_type = 1 << 10
+    for name, node in classes.items():
+        runtime = getattr(pkg, name)
+        if not runtime.__flags__ & base_type:
+            if not any(ast.unparse(d) == "typing.final" for d in node.decorator_list):
+                node.decorator_list.append(ast.parse("typing.final", mode="eval").body)
+
+
 def build_stub(raw: str, pkg) -> str:
     raw_lines = raw.splitlines()
     tree = ast.parse(raw)
@@ -523,6 +536,7 @@ def build_stub(raw: str, pkg) -> str:
         raise Failure(f"overrides without a generated declaration: {unused}")
     check_markers(classes, pkg)
     apply_positional_only(decls, pkg)
+    apply_final_classes(classes, pkg)
 
     doc = ast.Expr(ast.Constant(inspect.cleandoc(pkg.__doc__ or "")))
     body: list[ast.stmt] = ast.parse(f"__all__: list[str] = {exported!r}").body

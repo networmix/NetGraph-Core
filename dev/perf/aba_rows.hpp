@@ -1183,6 +1183,34 @@ inline std::vector<Row> rows() {
                  abaapi::eligibility_build_intersect(*g, common, {});
                  return Iter([g, states, common] { return abaapi::eligibility_build_intersect(*g, common, states); });
                }});
+  for (const auto& [name, operation] : std::array<std::pair<const char*, abaapi::TinyOperation>, 4>{{
+      {"concurrency.place_zero", abaapi::TinyOperation::PlaceZero},
+      {"concurrency.delivered", abaapi::TinyOperation::Delivered},
+      {"concurrency.program", abaapi::TinyOperation::Program},
+      {"concurrency.config", abaapi::TinyOperation::Config}}}) {
+    r.push_back({name, "concurrency", "10,000 calls of one operation on a prepared one-link LOSSLESS policy (4 of 16 units)",
+      [operation] {
+        auto fixture = std::make_shared<abaapi::TinyCalls>();
+        return Iter([fixture, operation] { return fixture->run(operation); });
+      }});
+  }
+  r.push_back({"cache.frozen.reads", "cache", "64 direct frozen-cache hits, Clos 64x32, same roots as cache.warm",
+    [] {
+      auto g = std::make_shared<Graph>(abaapi::build(gen_clos(64, 32, 25)));
+      std::vector<int> roots;
+      for (int i = 0; i < 64; ++i) roots.push_back(i);
+      (void)abaapi::dag_cache_series(*g, roots, true);
+      g->warm_cache->freeze();
+      return Iter([g, roots] { return abaapi::dag_cache_series(*g, roots, true); });
+    }});
+  for (bool parallel : {false, true}) {
+    r.push_back({parallel ? "concurrency.two_ledgers_parallel" : "concurrency.two_ledgers_serial", "concurrency",
+      "Two independent ledgers, 32 evaluate(32) calls each; two thread launches/joins in both modes; layered graph 384 nodes/2816 edges",
+      [parallel] {
+        auto fixture = std::make_shared<abaapi::ParallelLedgers>();
+        return Iter([fixture, parallel] { return fixture->run(parallel); });
+      }});
+  }
   add_storage_rows(r);  // the storage rows come last in the list
   return r;
 }

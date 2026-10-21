@@ -8,6 +8,7 @@
 #include "netgraph/core/shortest_path_cache.hpp"
 #include "netgraph/core/graph.hpp"
 #include "registration.hpp"
+#include "native_call.hpp"
 #include "values.hpp"
 
 namespace py = pybind11;
@@ -36,11 +37,11 @@ void register_shortest_path_cache(py::module_& m) {
       "(the root set, the direction, the Eligibility uid). It stores the full DAG and applies each\n"
       "caller's route choice afterwards, so the route choice is never cached. ShortestPaths policies and the\n"
       "evaluators read it.\n"
-      "Building mode (a new cache): one writer, no concurrent readers; a miss searches and inserts;\n"
+      "Building mode (a new cache): one exclusive lease per call; a miss searches and inserts;\n"
       "clear() empties it (the hit and miss counters persist), and values already handed out stay valid.\n"
       "Frozen mode (freeze()): read-only and shareable by every worker; a miss counts one miss and raises\n"
-      "ShortestPathCacheMiss; clear() raises ValueError; thaw() returns to building once the caller has joined\n"
-      "every reader.\n"
+      "ShortestPathCacheMiss; clear() raises ValueError; thaw() waits for active calls, then returns to building.\n"
+      "Lifecycle calls take exclusive FIFO admission and cannot be overtaken by later calls.\n"
       "When a public call fails: a building cache passed to it keeps the complete entries and statistics\n"
       "of the lookups that succeeded before the failure (never a partial entry; a kept entry never\n"
       "changes a result); a frozen cache's statistics stay unchanged, except one miss when the call\n"
@@ -52,9 +53,9 @@ void register_shortest_path_cache(py::module_& m) {
            }),
            py::arg("graph"), "An empty cache in building mode, bound to graph (by its uid).")
       .def("graph_uid", &ShortestPathCache::graph_uid, "uid of the graph this cache is bound to")
-      .def("freeze", &ShortestPathCache::freeze, "enter frozen mode (no effect when frozen)")
-      .def("thaw", &ShortestPathCache::thaw, "return to building mode (no effect when building); join every reader first")
-      .def("clear", &ShortestPathCache::clear, "empty a building cache; ValueError when frozen")
+      .def("freeze", [](ShortestPathCache& cache) { native_call([&] { cache.freeze(); }); }, "wait for active calls and enter frozen mode (no effect when frozen)")
+      .def("thaw", [](ShortestPathCache& cache) { native_call([&] { cache.thaw(); }); }, "wait for active calls and return to building mode (no effect when building)")
+      .def("clear", [](ShortestPathCache& cache) { native_call([&] { cache.clear(); }); }, "empty a building cache; ValueError when frozen")
       .def("stats", &ShortestPathCache::stats, "the current ShortestPathCacheStats (each field read atomically)");
 }
 

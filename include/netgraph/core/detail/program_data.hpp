@@ -136,7 +136,18 @@ struct ProgramBlock {
 struct ProgramAccess {
   [[nodiscard]] static const ProgramData& data(const ForwardingProgram& p) noexcept { return *p.data_; }
   [[nodiscard]] static std::shared_ptr<const ForwardingProgram> make(ProgramData&& data);
+  // Endpoints/options/entries have all passed their ordered checks. Construction
+  // does not repeat route validation; native and Python entries share this builder.
+  [[nodiscard]] static std::shared_ptr<const ForwardingProgram> from_checked_routes(
+      std::span<const NodeId> sources, std::span<const NodeId> destinations,
+      std::span<const RouteDefinition> routes, ProgramData&& data);
 };
+
+// Check each supplied entry in order, preparing its private storage in the same
+// pass. A later refusal discards it all. Endpoints/options have already passed
+// their checks; no program is published until from_checked_routes finishes it.
+[[nodiscard]] ProgramData check_route_definitions(const Graph& graph, std::span<const NodeId> sources,
+    std::span<const NodeId> destinations, std::span<const RouteDefinition> routes, const RouteOptions& options);
 
 // A controller's path (CentralizedTE, ShortestPaths Optimized): its source's roster position, its edges in walk
 // order, its amount.

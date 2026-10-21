@@ -16,6 +16,7 @@
 #include "netgraph/core/graph.hpp"
 #include "integers.hpp"
 #include "registration.hpp"
+#include "native_call.hpp"
 
 namespace py = pybind11;
 
@@ -58,12 +59,11 @@ void register_flow_solver_hook(py::module_& m) {
           }
           c = static_cast<Amount>(value);
         }
-        detail::MinCostFlowResult r;
-        {
-          py::gil_scoped_release release;
-          const auto view_units = v.narrow<Amount>();
-          r = detail::solve_min_cost_flow(*graph, view_units, s, d, elig.get(), c);
+        if (elig && elig->graph_uid() != graph->uid()) {
+          throw py::value_error("foreign Eligibility: built for another graph");
         }
+        const auto view_units = v.narrow<Amount>();
+        auto r = native_call([&] { return detail::solve_min_cost_flow(*graph, view_units, s, d, elig.get(), c); });
         py::dict out;
         out["flow_value"] = py::int_(r.flow_value);
         py::list curve;

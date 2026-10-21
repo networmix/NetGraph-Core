@@ -19,6 +19,7 @@
 #include <string>
 
 #include "netgraph/core/detail/enum_domain.hpp"
+#include "netgraph/core/detail/concurrency.hpp"
 #include "netgraph/core/detail/int128.hpp"
 #include "netgraph/core/detail/route_builders.hpp"
 
@@ -252,6 +253,7 @@ DagScratch& dag_scratch() {
 template <class Keep>
 void build_split(const Graph& graph, const PredecessorDAG& dag, std::span<const NodeId> roots, std::span<const NodeId> destinations,
                  Keep keep, PreparedRoute* out, Cost* cost) {
+  concurrent_event(ConcurrentStage::RouteWalk, &dag);
   if (cost != nullptr) *cost = kUnreachable;
   const auto parents = dag.parents();
   const auto via = dag.via_edges();

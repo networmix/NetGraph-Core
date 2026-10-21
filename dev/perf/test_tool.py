@@ -3121,7 +3121,7 @@ class Harness(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = aba.row_list(proc.stdout.encode(), "aba-list")
         real = {k: v for k, v in rows.items() if not k.startswith("test.")}
-        self.assertEqual(len(real), 70)
+        self.assertEqual(len(real), 77)
         sums = sha256sums(HERE / "queries")
         lists = {}
         for name in sums:
@@ -3155,7 +3155,7 @@ class Harness(unittest.TestCase):
         real = [row for row in listed if not row.startswith("test.")]
         with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 1) as pool:
             procs = list(pool.map(lambda row: self.harness("aba-run", row, "1"), real))
-        self.assertEqual(len(procs), 70)
+        self.assertEqual(len(procs), 77)
         for row, proc in zip(real, procs, strict=True):
             self.assertEqual(proc.returncode, 0, (row, proc.stderr))
             self.assertEqual(
@@ -3180,6 +3180,21 @@ class Harness(unittest.TestCase):
         self.assertEqual(
             digest("batch.simultaneous.clos"), digest("batch.ordered.clos")
         )
+
+    def test_concurrency_rows_have_fixed_work_and_equal_serial_results(self):
+        expected = {
+            "concurrency.place_zero": 40000,
+            "concurrency.delivered": 40000,
+            "concurrency.program": 10000,
+            "concurrency.config": 10000,
+            "concurrency.two_ledgers_serial": 2048,
+            "concurrency.two_ledgers_parallel": 2048,
+        }
+        for row, digest in expected.items():
+            proc = self.harness("aba-run", row, "1")
+            self.assertEqual(proc.returncode, 0, (row, proc.stderr))
+            result = aba.parse_block(proc.stdout.encode(), row, row)
+            self.assertEqual(result["digest"], f"{digest:016x}")
 
     def test_memory_does_not_grow_with_the_count(self):
         # the per-iteration bookkeeping is allocated before the setup and does not grow: the

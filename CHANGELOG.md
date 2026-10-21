@@ -16,8 +16,8 @@ API.
 - **Several demands at once**: `apply_actions(ledger, actions, *, mode=BatchMode.ORDERED,
   outputs=None)` runs `Place(policy, offer)`, `Replace(policy, offer, *, design_demand=None)` and
   `Forward(policy, offer, *, black_holes=None)` actions of several policies of one ledger as one
-  transaction: validated whole (the argument types, then each action in list order: ownership, a
-  policy at most once, the mode's rules, the scalar call's checks), then computed, then published
+  transaction: validated whole in two passes (arguments and immutable objects for every action,
+  then mutable state under the ledger gate, each pass in list order), then computed, then published
   once, with one `PlacementResult` per action in input order. The actions are immutable values
   that keep their policy and black holes alive and their offers as given. `BatchMode.ORDERED` runs
   each action as its scalar call on the state the earlier ones left (earlier actions are served
@@ -35,6 +35,28 @@ API.
   Replace, Forward>`.
 
 ### Changed
+
+- **Concurrency**: native work releases the GIL. One gate per ledger protects reads and whole
+  scalar/list publications; independent ledgers run in parallel. Policy construction and evaluators
+  take one optional building-exclusive or frozen-shared cache lease, with FIFO lifecycle admission;
+  workers borrow that lease. Native first-pass checks release the GIL before any lease or gate:
+  the tunnel-limit roster search in policy construction and the evaluators (once per pair in a
+  batch), and `from_routes`' walk of each supplied PredecessorDAG. `evaluate_pairs`' workers and
+  the other evaluators' main evaluation reuse the checked rosters; each deletion of
+  `evaluate_edge_failures` searches under its own mask. Immutable reads remain lock-free. cp314t detaches thread state
+  before native waits. Publishing calls prepare Python results before native work; reads wrap
+  owned snapshots after unlocking. `FlowPolicy` is final in Python, and failed construction
+  leaves an unconstructed object that raises a clean `TypeError`.
+- **Validation order**: argument and immutable checks run first, then mutable-state checks under
+  the ledger gate or cache lease. Invalid offers, black holes and later list actions now precede
+  missing-program/epoch errors; evaluator argument errors precede the building-cache worker rule.
+  With a frozen empty cache, an invalid offer now precedes a cache miss in all three evaluators,
+  and no miss is counted.
+- **Cache clear**: its frozen-cache refusal now says to thaw it, then clear it; thaw waits for readers itself.
+- **C++ signatures**: `FlowPolicy::program()`, `ShortestPathCache::freeze()` and `thaw()` can fail
+  while acquiring a native lock and are no longer `noexcept`. Policy destruction remains
+  `noexcept` and allocates nothing. A moved-from ledger retains its immutable graph owner so
+  existing graph references remain valid; its public calls still reject the unusable ledger.
 
 - **Graph**: `Graph(num_nodes, edge_sources, edge_destinations, edge_capacity_units, edge_costs,
   resolution)` (replacing 0.11's `StrictMultiDiGraph`) is the one constructor: capacities are
@@ -217,7 +239,7 @@ API.
   - **Frozen mode:** `freeze()` makes the cache read-only and shareable by every worker of an
     evaluator. A frozen lookup miss raises `ShortestPathCacheMiss`, an exception the evaluators
     pass on unchanged. `clear()` raises when frozen, and `thaw()` returns to building mode after
-    the caller has joined every reader.
+    waiting for active calls. Lifecycle admission is FIFO, with no overtaking by later readers.
 - **Evaluators**: one options type, `EvaluationOptions(config, *, eligibility=None, cache=None,
   outputs=None, design_demand=None, offer=None)`, the design and the offer kept as given and
   checked by the evaluator; `evaluate_demand(graph, sources, destinations, options)` (with

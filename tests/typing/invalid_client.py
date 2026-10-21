@@ -88,3 +88,7 @@ listed_policy = ng.FlowPolicy(lister, 0, 1, cfg)
 ng.apply_actions(lister, [listed_policy])  # expect: reportArgumentType
 ng.apply_actions(lister, [], ng.BatchMode.ORDERED)  # expect: reportCallIssue
 ng.Replace(listed_policy, "1")  # expect: reportArgumentType
+
+
+class PolicySubclass(ng.FlowPolicy):  # expect: reportGeneralTypeIssues
+    pass

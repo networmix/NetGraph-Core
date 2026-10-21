@@ -25,6 +25,7 @@
 #include "publication.hpp"
 #include "values.hpp"
 #include "registration.hpp"
+#include "native_call.hpp"
 
 namespace py = pybind11;
 
@@ -122,11 +123,10 @@ void register_paths(py::module_& m) {
         if (!o.residual.is_none()) res = edge_units(o.residual, *graph, "residual");
         if (res.has_value()) c.residual = std::span<const Amount>(*res);
         c.eligibility = o.eligibility.get();
-        std::vector<std::pair<Cost, Path>> paths;
-        {
-          py::gil_scoped_release release;
-          paths = ksp(*graph, s, t, c);
+        if (c.eligibility && c.eligibility->graph_uid() != graph->uid()) {
+          throw py::value_error("foreign Eligibility: built for another graph");
         }
+        auto paths = native_call([&] { return ksp(*graph, s, t, c); });
         // Every object through a checked allocation: a failure raises MemoryError.
         auto out = py::reinterpret_steal<py::list>(checked(PyList_New(static_cast<Py_ssize_t>(paths.size()))).release());
         for (std::size_t i = 0; i < paths.size(); ++i) {
@@ -160,11 +160,7 @@ void register_paths(py::module_& m) {
         if (s == t) throw py::value_error(detail::overlap_error(s, "source", "destination"));
         std::optional<std::int64_t> mp;
         if (!max_paths.is_none()) mp = count_of(max_paths, "max_paths");
-        std::vector<Path> paths;
-        {
-          py::gil_scoped_release release;
-          paths = resolve_to_paths(*graph, *dag, s, t, split_parallel_edges, mp);
-        }
+        auto paths = native_call([&] { return resolve_to_paths(*graph, *dag, s, t, split_parallel_edges, mp); });
         auto out = py::reinterpret_steal<py::list>(checked(PyList_New(static_cast<Py_ssize_t>(paths.size()))).release());
         for (std::size_t i = 0; i < paths.size(); ++i) {
           PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), object_from<Path>(std::move(paths[i])).release().ptr());

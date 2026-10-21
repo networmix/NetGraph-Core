@@ -771,7 +771,7 @@ def as_float(
 ) -> float: ...
 
 # reason: pairs of node sets, each pair a length-2 sequence (sources, destinations), an integer array included (so pairs may be an integer array of shape (k, 2), or (k, 2, m) for sets of m nodes); options is EvaluationOptions; per_pair_eligibility has one Eligibility or None per pair; workers is an integer or None; one PlacementResult per pair
-# generated: def evaluate_pairs(graph: Graph, pairs: typing.Any, options: typing.Any, per_pair_eligibility: typing.Any = None, workers: typing.Any = None) -> typing.Any:
+# generated: def evaluate_pairs(graph: Graph, pairs: typing.Any, options: typing.Any, per_pair_eligibility: typing.Any = None, workers: typing.Any = None) -> list:
 def evaluate_pairs(
     graph: Graph,
     pairs: collections.abc.Sequence[

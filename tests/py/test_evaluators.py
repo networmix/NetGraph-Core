@@ -589,3 +589,146 @@ def test_failures_at_every_offer():
                     (pair,) = ngc.evaluate_pairs(g, [(0, 3)], o, workers=2)
                     assert pair.call_delivered == base, (name, admission, offer)
     assert checked > 100
+
+
+def test_invalid_offer_precedes_frozen_cache_miss():
+    g = par(5, 7)
+    cache = ngc.ShortestPathCache(g)
+    cache.freeze()
+    invalid = opts(ngc.ShortestPaths(), cache=cache, offer=INF)
+    valid = opts(ngc.ShortestPaths(), cache=cache, offer=1)
+    calls = [
+        lambda o: ngc.evaluate_demand(g, 0, 1, o),
+        lambda o: ngc.evaluate_pairs(g, [(0, 1)], o, workers=2),
+        lambda o: ngc.evaluate_edge_failures(g, 0, 1, o, workers=2),
+    ]
+    for call in calls:
+        before = cache.stats()
+        with pytest.raises(ValueError) as error:
+            call(invalid)
+        assert str(error.value) == DOMAIN
+        after = cache.stats()
+        assert (after.hits, after.misses, after.entries) == (
+            before.hits,
+            before.misses,
+            before.entries,
+        )
+        with pytest.raises(ngc.ShortestPathCacheMiss):
+            call(valid)
+        after = cache.stats()
+        assert (
+            after.misses == before.misses + 1
+            and after.hits == before.hits
+            and after.entries == 0
+        )
+    cache.thaw()
+    result = ngc.evaluate_demand(g, 0, 1, valid)
+    assert result.call_delivered == 1
+
+
+@pytest.mark.parametrize("model", ["distributed", "centralized", "support"])
+def test_pair_rosters_use_the_composed_mask(model):
+    """Every reused roster has the same endpoints and effective mask as its evaluation."""
+    import random
+
+    from helpers import ALL_OUT, dag_of, plain
+
+    def routing(g):
+        if model == "distributed":
+            return dte(2)
+        return ngc.CentralizedTE(
+            source_allocation=S.EQUAL,
+            tunnel_count=ngc.TunnelCount(2),
+            support=dag_of(g, range(g.num_edges())) if model == "support" else None,
+        )
+
+    # A removed source (or its only edge) leaves one head: the full offer 4 goes
+    # to that head. Using the unmasked two-head roster would lose its share.
+    g = build(4, [(0, 3, 4, 1), (1, 3, 8, 1)])
+    masks = [
+        g.eligibility(excluded_nodes=[0]),
+        g.eligibility(excluded_edges=[0]),
+        g.eligibility(excluded_nodes=[0, 1]),
+    ]
+    common = g.eligibility(excluded_nodes=[2])
+    o = opts(routing(g), eligibility=common, design_demand=6, offer=4, outputs=ALL_OUT)
+    result = ngc.evaluate_pairs(g, [([0, 1], 3)] * 3, o, masks, 2)
+    assert [r.delivered for r in result] == [4, 4, 0]
+    assert [r.edge_flows.tolist() for r in result] == [[0, 4], [0, 4], [0, 0]]
+    zero = opts(
+        routing(g), eligibility=common, design_demand=6, offer=0, outputs=ALL_OUT
+    )
+    assert all(
+        r.delivered == 0
+        for r in ngc.evaluate_pairs(g, [([0, 1], 3)] * 3, zero, masks, 2)
+    )
+
+    rng = random.Random(7)
+    compared = 0
+    for _ in range(150):
+        n = rng.randint(5, 9)
+        edges = [
+            (u, v, rng.randint(1, 9), rng.randint(1, 4))
+            for u in range(n)
+            for v in range(u + 1, n)
+            if rng.random() < 0.45
+        ]
+        if not edges:
+            continue
+        g = build(n, edges)
+        common = (
+            g.eligibility(excluded_edges=[rng.randrange(g.num_edges())])
+            if rng.random() < 0.5
+            else None
+        )
+        pairs, per = [], []
+        for _ in range(3):
+            nodes = list(range(n - 2))
+            rng.shuffle(nodes)
+            heads = sorted(nodes[: rng.randint(2, 3)])
+            pairs.append((heads, [rng.choice([n - 2, n - 1])]))
+            per.append(
+                g.eligibility(
+                    excluded_nodes=[h for h in heads if rng.random() < 0.4],
+                    excluded_edges=[
+                        e for e in range(g.num_edges()) if rng.random() < 0.25
+                    ],
+                )
+            )
+        config = ngc.FlowPolicyConfig(routing=routing(g))
+        options = ngc.EvaluationOptions(
+            config, eligibility=common, design_demand=6, offer=4, outputs=ALL_OUT
+        )
+        batch = ngc.evaluate_pairs(g, pairs, options, per, 2)
+        assert len(batch) == 3
+        for i, (heads, destinations) in enumerate(pairs):
+            mask = (
+                per[i] if common is None else ngc.Eligibility.intersect(common, per[i])
+            )
+            single = ngc.EvaluationOptions(
+                config, eligibility=mask, design_demand=6, offer=4, outputs=ALL_OUT
+            )
+            assert plain(batch[i]) == plain(
+                ngc.evaluate_demand(g, heads, destinations, single)
+            )
+            compared += 1
+    assert compared >= 400
+
+
+def test_tunnel_pair_search_error_precedes_later_conversion_error():
+    # floor((2^30-1)/10000)+1 reachable heads exceed the tunnel limit.
+    heads = ((1 << 30) - 1) // 10000 + 1
+    g = build(heads + 1, [(h, heads, 1, 1) for h in range(heads)])
+    expected = f"tunnel limit exceeded: {heads} heads x 10000 tunnels > {(1 << 30) - 1}"
+    for model in (dte(10000), t2(10000)):
+        options = opts(model, design_demand=1, offer=1)
+        for invalid in (None, (0,), ([], heads), (0, 0)):
+            with pytest.raises(ValueError, match=exact(expected)):
+                ngc.evaluate_pairs(
+                    g, [(list(range(heads)), heads), invalid], options, workers=2
+                )
+        # If the earlier pair fails its linear checks, no later search takes precedence.
+        with pytest.raises(ValueError, match=exact("sources: the node set is empty")):
+            ngc.evaluate_pairs(
+                g, [([], heads), (list(range(heads)), heads)], options, workers=2
+            )

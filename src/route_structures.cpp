@@ -18,7 +18,7 @@ std::string idx(std::size_t i) { return std::to_string(i); }
 
 } // namespace
 
-PredecessorDAG PredecessorDAG::from_csr(const Graph& graph, std::span<const std::int32_t> offsets,
+void detail::check_csr(const Graph& graph, std::span<const std::int32_t> offsets,
                           std::span<const NodeId> parents, std::span<const EdgeId> via) {
   const auto n = static_cast<std::size_t>(graph.num_nodes());
   const auto m = static_cast<std::int64_t>(graph.num_edges());
@@ -122,6 +122,17 @@ PredecessorDAG PredecessorDAG::from_csr(const Graph& graph, std::span<const std:
       }
     }
   }
+}
+
+PredecessorDAG PredecessorDAG::from_csr(const Graph& graph, std::span<const std::int32_t> offsets,
+    std::span<const NodeId> parents, std::span<const EdgeId> via) {
+  detail::check_csr(graph, offsets, parents, via);
+  return detail::PredecessorDAGBuilder::of_csr(graph, offsets, parents, via);
+}
+
+PredecessorDAG detail::PredecessorDAGBuilder::of_csr(const Graph& graph, std::span<const std::int32_t> offsets,
+    std::span<const NodeId> parents, std::span<const EdgeId> via) {
+  const auto n = static_cast<std::size_t>(graph.num_nodes());
   PredecessorDAG out;
   out.graph_uid_ = graph.uid();
   out.num_nodes_ = graph.num_nodes();
@@ -282,7 +293,7 @@ std::size_t PredecessorDAGBuilder::payload_bytes(const PredecessorDAG& dag) noex
 
 } // namespace detail
 
-Path::Path(const Graph& graph, std::vector<std::vector<EdgeId>> hops) {
+void detail::check_hops(const Graph& graph, const std::vector<std::vector<EdgeId>>& hops) {
   const auto m = static_cast<std::int64_t>(graph.num_edges());
   // Every member in range before any endpoint is read.
   for (std::size_t h = 0; h < hops.size(); ++h) {
@@ -310,7 +321,6 @@ Path::Path(const Graph& graph, std::vector<std::vector<EdgeId>> hops) {
   }
   const auto edge_sources = graph.edge_sources();
   const auto edge_destinations = graph.edge_destinations();
-  const auto cost = graph.edge_costs();
   for (std::size_t h = 0; h < hops.size(); ++h) {
     const auto first = static_cast<std::size_t>(hops[h].front());
     for (EdgeId e : hops[h]) {
@@ -334,12 +344,8 @@ Path::Path(const Graph& graph, std::vector<std::vector<EdgeId>> hops) {
   std::vector<NodeId> nodes;
   nodes.reserve(hops.size() + 1);
   nodes.push_back(edge_sources[static_cast<std::size_t>(hops.front().front())]);
-  Cost total = 0;
   for (const auto& hop : hops) {
     nodes.push_back(edge_destinations[static_cast<std::size_t>(hop.front())]);
-    Cost best = cost[static_cast<std::size_t>(hop.front())];
-    for (EdgeId e : hop) best = std::min(best, cost[static_cast<std::size_t>(e)]);
-    total += best;
   }
   {
     std::vector<NodeId> sorted(nodes);
@@ -347,11 +353,11 @@ Path::Path(const Graph& graph, std::vector<std::vector<EdgeId>> hops) {
     const auto dup = std::adjacent_find(sorted.begin(), sorted.end());
     if (dup != sorted.end()) throw std::invalid_argument("Path: node " + std::to_string(*dup) + " is repeated");
   }
-  graph_uid_ = graph.uid();
-  num_nodes_ = graph.num_nodes();
-  hops_ = std::move(hops);
-  nodes_ = std::move(nodes);
-  cost_ = total;
+}
+
+Path::Path(const Graph& graph, std::vector<std::vector<EdgeId>> hops) {
+  detail::check_hops(graph, hops);
+  *this = detail::PathBuilder::of_hops(graph, std::move(hops));
 }
 
 PredecessorDAG Path::to_dag() const {

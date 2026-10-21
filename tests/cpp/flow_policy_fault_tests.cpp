@@ -42,6 +42,7 @@
 #include "fault_injection.hpp"
 #include "netgraph/core/shortest_path_cache.hpp"
 #include "netgraph/core/detail/ledger_access.hpp"
+#include "netgraph/core/detail/evaluator_checks.hpp"
 #include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/detail/route_builders.hpp"
 #include "netgraph/core/detail/search_detail.hpp"
@@ -402,6 +403,54 @@ TEST(PolicyFaults, FromDagConstructionFailsCleanly) {
         EXPECT_EQ(g_live.load(), live) << "allocation " << k;
       }
       EXPECT_GT(injected, 3);  // not vacuous
+    }
+  }
+}
+
+// Each failed preparation/buffering/publication is discarded; a retry on that
+// same thread yields the complete program, with cold and already-grown scratch.
+TEST(PolicyFaults, FromRoutesPreparationFailsCleanly) {
+  const auto g = graph();
+  std::vector<EdgeId> every(static_cast<std::size_t>(g->num_edges()));
+  std::iota(every.begin(), every.end(), EdgeId {0});
+  const auto whole = dag_of(*g, every);
+  const auto inv = id_of_input(*g);
+  const auto path = std::make_shared<const Path>(*g, std::vector<std::vector<EdgeId>> {{inv[0]}, {inv[4]}});
+  const std::vector<NodeId> sources {0, 1}, destinations {5, 6};
+  const std::vector<RouteDefinition> routes {{0, whole, 2}, {0, path, 1}, {1, whole, 3}, {0, whole, 0}};
+  RouteOptions capacity {.allocation = RouteAllocation::Weighted};
+  RouteOptions explicit_weights {.allocation = RouteAllocation::Weighted, .weight_basis = WeightBasis::Explicit,
+                                .edge_weights = std::vector<Amount>(every.size(), 0)};
+  (*explicit_weights.edge_weights)[static_cast<std::size_t>(inv[0])] = 2;
+  (*explicit_weights.edge_weights)[static_cast<std::size_t>(inv[4])] = 3;
+  RouteOptions snapshot {.allocation = RouteAllocation::Weighted, .weight_basis = WeightBasis::ResidualSnapshot,
+                        .residual = std::vector<Amount>(every.size(), 0)};
+  for (const auto& options : {RouteOptions {}, capacity, explicit_weights, snapshot}) {
+    const auto reference = ForwardingProgram::from_routes(*g, sources, destinations, routes, options);
+    const auto want = program_snapshot(reference.get());
+    for (const bool warm : {false, true}) {
+      long injected = 0;
+      for (long at = 0;; ++at) {
+        const long live = g_live.load();
+        bool failed = false;
+        std::thread worker([&] {
+          if (warm) (void)ForwardingProgram::from_routes(*g, sources, destinations, routes, options);
+          std::shared_ptr<const ForwardingProgram> made;
+          failed = fails_at(at, [&] { made = ForwardingProgram::from_routes(*g, sources, destinations, routes, options); });
+          if (failed) {
+            EXPECT_FALSE(made);
+            made = ForwardingProgram::from_routes(*g, sources, destinations, routes, options);
+          }
+          ASSERT_TRUE(made);
+          EXPECT_EQ(program_snapshot(made.get()), want);
+        });
+        worker.join();
+        EXPECT_EQ(g_live.load(), live) << "allocation " << at << ", warm " << warm;
+        if (::testing::Test::HasFailure()) return;
+        if (!failed) break;
+        ++injected;
+      }
+      EXPECT_GT(injected, 3);
     }
   }
 }
@@ -1113,53 +1162,65 @@ TEST(PolicyFaults, ControllerScratchGrowthFailureLeavesNothingHalfGrown) {
 }
 
 TEST(PolicyFaults, FrozenLookupsFailWithoutCounting) {
-  // A frozen lookup allocates a key only for roots that are not already a sorted set (a sorted set
-  // is borrowed: nothing), and a frozen miss builds the ShortestPathCacheMiss message, all before counting:
+  // Small queries own a stack copy; larger queries own a vector before waiting
+  // for the lease. A miss also builds its message, all before counting:
   // a failure there counts nothing and changes no entry; a clean retry counts.
-  const auto g = graph();
-  ShortestPathCache cache(*g);
-  const std::vector<NodeId> unsorted = {6, 5};
-  const std::vector<NodeId> sorted = {5, 6};
-  const std::vector<NodeId> absent = {5};
-  const auto value = cache.lookup(*g, unsorted, Direction::Reverse, nullptr);
-  cache.freeze();
-  for (const int kind : {0, 1, 2}) {  // a hit on unsorted roots, a hit on a sorted set, a miss
-    const bool hit = kind != 2;
-    const auto& present = kind == 0 ? unsorted : sorted;
-    long failures = 0;
-    for (long at = 0;; ++at) {
-      const std::string w = std::string(hit ? "hit" : "miss") + " allocation " + std::to_string(at);
-      const long live = g_live.load();
-      const auto before = cache.stats();
-      bool missed = false;
-      const auto call = [&] {
-        try {
-          if (cache.lookup(*g, hit ? present : absent, Direction::Reverse, nullptr).get() != value.get()) ADD_FAILURE();
-        } catch (const ShortestPathCacheMiss&) {
-          missed = true;
+  for (bool large : {false, true}) {
+    const auto g = large ? std::make_shared<const Graph>(12, std::vector<NodeId>{}, std::vector<NodeId>{},
+        std::vector<Amount>{}, std::vector<Cost>{}, 1.0) : graph();
+    ShortestPathCache cache(*g);
+    const std::vector<NodeId> unsorted = large ? std::vector<NodeId>{9,8,7,6,5,4,3,2,1,0} : std::vector<NodeId>{6,5};
+    auto sorted = unsorted;
+    std::sort(sorted.begin(), sorted.end());
+    const std::vector<NodeId> absent = large ? std::vector<NodeId>{11} : std::vector<NodeId>{5};
+    const auto value = cache.lookup(*g, unsorted, Direction::Reverse, nullptr);
+    cache.freeze();
+    for (const int kind : {0, 1, 2}) {  // a hit on unsorted roots, a hit on a sorted set, a miss
+      const bool hit = kind != 2;
+      const auto& present = kind == 0 ? unsorted : sorted;
+      long failures = 0;
+      for (long at = 0;; ++at) {
+        const std::string w = std::string(hit ? "hit" : "miss") + " allocation " + std::to_string(at);
+        const long live = g_live.load();
+        const auto before = cache.stats();
+        bool missed = false;
+        const auto call = [&] {
+          try {
+            if (cache.lookup(*g, hit ? present : absent, Direction::Reverse, nullptr).get() != value.get()) ADD_FAILURE();
+          } catch (const ShortestPathCacheMiss&) {
+            missed = true;
+          }
+        };
+        const bool failed = fails_at(at, call);
+        EXPECT_EQ(g_live.load(), live) << w << ": a leak";  // the key and the miss's message are gone
+        const auto s = cache.stats();
+        EXPECT_EQ(s.entries, 1) << w;
+        EXPECT_EQ(s.bytes, before.bytes) << w;
+        EXPECT_EQ(s.live_values, before.live_values) << w;
+        if (failed) {
+          ++failures;
+          EXPECT_EQ(s.hits, before.hits) << w;
+          EXPECT_EQ(s.misses, before.misses) << w;
+          // A clean retry on the same thread after every failed allocation.
+          bool retry_missed = false;
+          try {
+            EXPECT_EQ(cache.lookup(*g, hit ? present : absent, Direction::Reverse, nullptr).get(), value.get());
+          } catch (const ShortestPathCacheMiss&) { retry_missed = true; }
+          EXPECT_EQ(retry_missed, !hit) << w;
+          EXPECT_EQ(cache.stats().hits - s.hits, hit ? 1 : 0) << w;
+          EXPECT_EQ(cache.stats().misses - s.misses, hit ? 0 : 1) << w;
+          continue;
         }
-      };
-      const bool failed = fails_at(at, call);
-      EXPECT_EQ(g_live.load(), live) << w << ": a leak";  // the key and the miss's message are gone
-      const auto s = cache.stats();
-      EXPECT_EQ(s.entries, 1) << w;
-      EXPECT_EQ(s.bytes, before.bytes) << w;
-      EXPECT_EQ(s.live_values, before.live_values) << w;
-      if (failed) {
-        ++failures;
-        EXPECT_EQ(s.hits, before.hits) << w;
-        EXPECT_EQ(s.misses, before.misses) << w;
-        continue;
+        EXPECT_EQ(missed, !hit) << w;
+        EXPECT_EQ(s.hits - before.hits, hit ? 1 : 0) << w;
+        EXPECT_EQ(s.misses - before.misses, hit ? 0 : 1) << w;
+        break;
       }
-      EXPECT_EQ(missed, !hit) << w;
-      EXPECT_EQ(s.hits - before.hits, hit ? 1 : 0) << w;
-      EXPECT_EQ(s.misses - before.misses, hit ? 0 : 1) << w;
-      break;
-    }
-    if (kind == 1) {
-      EXPECT_EQ(failures, 0) << "hit on a sorted set";  // borrowed: no allocation at all
-    } else {
-      EXPECT_GE(failures, hit ? 1 : 2) << (hit ? "hit" : "miss");  // the key; the message (sorted roots)
+      if (hit && !large) {
+        EXPECT_EQ(failures, 0) << "small owned query";
+      } else {
+        EXPECT_GE(failures, hit ? 1 : 2) << (hit ? "large query copy" : "miss message");
+      }
     }
   }
 }
@@ -1572,7 +1633,7 @@ TEST(PolicyFaults, T1EvaluatorsLeaveNoPoisonedScratch) {
       }
       EXPECT_GT(injected, 0) << name;
       attempts += injected + sweep_batch(m, *g, one, 1, o) + sweep_edge_failures(m, *g, one, 1, o);
-      attempts += sweep_edge_failures(m, *g, several, 7, o);
+      attempts += sweep_batch(m, *g, several, 1, o) + sweep_edge_failures(m, *g, several, 7, o);
       if (::testing::Test::HasFailure()) return;
     }
   }
@@ -1824,7 +1885,7 @@ void sweep_t2_evaluators(const Mode& m, int part) {
         if (!failed || ::testing::Test::HasFailure()) break;
       }
       EXPECT_GT(injected, 0) << name;
-      attempts += injected + sweep_batch(m, *g, one, 1, o);
+      attempts += injected + sweep_batch(m, *g, one, 1, o) + sweep_batch(m, *g, several, 1, o);
       if (::testing::Test::HasFailure()) return;
     }
   }
@@ -1858,5 +1919,62 @@ TEST(PolicyFaults, T2RemovalAndReleaseNeverAllocate) {
     EXPECT_EQ(orphaned.reserved, std::vector<Amount>(orphaned.reserved.size(), 0)) << m.name;
     EXPECT_EQ(orphaned.records.size(), held.records.size()) << m.name;
     EXPECT_TRUE(orphaned.bound.empty()) << m.name;
+  }
+}
+
+TEST(PolicyFaults, ParallelRosterPreparationFailsCleanly) {
+  const Graph g(4, std::vector<NodeId>{0,1,2}, std::vector<NodeId>{3,3,3},
+                std::vector<Amount>{10,10,10}, std::vector<Cost>{1,3,2}, 1.0);
+  const auto common = g.eligibility({}, std::vector<EdgeId>{2});
+  const auto first = g.eligibility(std::vector<NodeId>{0}, {});
+  const auto second = g.eligibility(std::vector<NodeId>{1}, {});
+  const auto none = g.eligibility(std::vector<NodeId>{0,1,2}, {});
+  const std::vector<const Eligibility*> per {&first, &second, &none};
+  const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs(3, {{0,1,2}, {3}});
+  const auto support = dag_of(g, std::vector<EdgeId>{0,1,2});
+  for (int model = 0; model < 3; ++model) {
+    EvaluationOptions options;
+    if (model == 0) options.config.routing = DistributedTE{TunnelCount{1}};
+    else {
+      CentralizedTE central(SourceAllocation::Equal);
+      central.tunnel_count = TunnelCount{1};
+      central.support = model == 2 ? support : nullptr;
+      options.config.routing = std::move(central);
+    }
+    options.eligibility = &common;
+    const auto check = [&](const std::vector<detail::TunnelRoster>& roster) {
+      ASSERT_EQ(roster.size(), 3U);
+      EXPECT_EQ(roster[0].heads, (std::vector<NodeId>{1}));
+      EXPECT_EQ(roster[0].c0, 3);
+      EXPECT_EQ(roster[1].heads, (std::vector<NodeId>{0}));
+      EXPECT_EQ(roster[1].c0, 1);
+      EXPECT_TRUE(roster[2].heads.empty());
+      EXPECT_EQ(roster[2].c0, kUnreachable);
+    };
+    for (int workers : {1, 3}) {
+      for (bool warm : {false, true}) {
+        long failures = 0;
+        for (long at = 0;; ++at) {
+          const auto live = g_live.load();
+          bool failed = false;
+          std::thread attempt([&] {
+            if (warm) check(detail::prepare_batch_rosters(g, pairs, options, per, workers));
+            std::vector<detail::TunnelRoster> result;
+            failed = fails_at(at, [&] { result = detail::prepare_batch_rosters(g, pairs, options, per, workers); });
+            if (failed) {
+              EXPECT_TRUE(result.empty());
+              result = detail::prepare_batch_rosters(g, pairs, options, per, workers);
+            }
+            check(result);
+          });
+          attempt.join();
+          EXPECT_EQ(g_live.load(), live) << "model " << model << " workers " << workers << " warm " << warm << " allocation " << at;
+          if (!failed || ::testing::Test::HasFailure()) break;
+          ++failures;
+        }
+        EXPECT_GT(failures, 3);
+        if (::testing::Test::HasFailure()) return;
+      }
+    }
   }
 }

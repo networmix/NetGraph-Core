@@ -12,6 +12,7 @@ import traceback
 
 import _netgraph_core as ext
 import pytest
+from concurrency_support import run_test_in_subprocess
 from helpers import ALL_OUT, COSTONLY, GLOBAL, build, exact, stats_of
 from private_hooks import needs_hooks
 
@@ -58,8 +59,12 @@ def test_transition_table():
     ):
         ngc.evaluate_demand(g, 0, 4, opts)
     assert stats(cache) == (1, 2, 1)  # one miss, nothing inserted
-    with pytest.raises(ValueError, match="rejected while the cache is frozen"):
+    with pytest.raises(ValueError) as error:
         cache.clear()
+    assert (
+        str(error.value)
+        == "ShortestPathCache.clear is rejected while the cache is frozen (thaw() it, then clear())"
+    )
     assert stats(cache) == (1, 2, 1)
     cache.thaw()
     cache.thaw()  # no effect
@@ -167,6 +172,10 @@ def test_edge_failures_propagates_the_miss_and_global_rejects_a_cache():
 
 
 def test_frozen_lookups_from_python_threads():
+    run_test_in_subprocess(__file__, "_frozen_lookups_from_python_threads")
+
+
+def _frozen_lookups_from_python_threads():
     g = fabric()
     cache = prepopulate(g, [[d] for d in range(6)])
     want = {
@@ -228,6 +237,10 @@ def test_a_failed_call_changes_no_statistic_but_its_miss():
 
 
 def test_concurrent_calls_keep_every_successful_hit():
+    run_test_in_subprocess(__file__, "_concurrent_calls_keep_every_successful_hit")
+
+
+def _concurrent_calls_keep_every_successful_hit():
     # Python threads (the evaluators release the GIL) on one frozen cache, each alternating a
     # successful capacity (one hit) and a failing batch (its hit dropped, one miss).
     g = fabric()
@@ -303,10 +316,12 @@ def test_frozen_statistics_survive_python_allocation_failures():
         outputs=ALL_OUT,
     )
     pairs = [(0, 3), (1, 4), ([0, 1], [3, 4])]
-    # A call that completes allocates its result objects (one per result); a call that ends in
-    # the miss allocates nothing before it, so its sweep reaches the miss's translation only.
+    # Each result shell exists before the lease, including calls that end in a
+    # miss. Failing a shell leaves statistics unchanged; failing translation
+    # after the native miss keeps exactly that one miss. List shell allocation
+    # may reuse CPython's free list; each result instance is still a new object.
     assert sweep_frozen(cache, ngc.evaluate_demand, (g, 0, 3, opts), hits=1) >= 1
-    assert sweep_frozen(cache, ngc.evaluate_demand, (g, 0, 5, opts), miss=True) == 0
+    assert sweep_frozen(cache, ngc.evaluate_demand, (g, 0, 5, opts), miss=True) >= 1
     for workers in (1, 2):
         assert (
             sweep_frozen(
@@ -321,12 +336,12 @@ def test_frozen_statistics_survive_python_allocation_failures():
                 (g, [(0, 3), (1, 5)], opts, None, workers),
                 miss=True,
             )
-            == 0
+            >= 2
         )
     sens = ngc.EvaluationOptions(COSTONLY, cache=cache)
     assert (
         sweep_frozen(cache, ngc.evaluate_edge_failures, (g, 0, 3, sens, 1), miss=True)
-        == 0
+        >= 1
     )
     # ShortestPaths' evaluate_edge_failures from a source that reaches no destination: one hit (the baseline's)
     # and no placed deletion.
@@ -387,7 +402,7 @@ def test_the_frozen_sweep_rejects_a_wrong_call():
     # The miss call until its allocations are used up (its translation fails last), then a
     # longer call of hits that fails inside.
     turn = ext._fail_python_allocation(ngc.evaluate_demand, miss, 10**6)[1]
-    longer = (g, [(0, 3), (1, 3), (2, 3), (4, 3)], opts, None, 1)
+    longer = (g, [(0, 3), (1, 3), (2, 3), (4, 3)] * 2, opts, None, 1)
     assert ext._fail_python_allocation(ngc.evaluate_pairs, longer, 10**6)[1] > turn + 1
     attempts = itertools.count()
 

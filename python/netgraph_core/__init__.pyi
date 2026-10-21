@@ -1977,11 +1977,11 @@ class ShortestPathCache:
     (the root set, the direction, the Eligibility uid). It stores the full DAG and applies each
     caller's route choice afterwards, so the route choice is never cached. ShortestPaths policies and the
     evaluators read it.
-    Building mode (a new cache): one writer, no concurrent readers; a miss searches and inserts;
+    Building mode (a new cache): one exclusive lease per call; a miss searches and inserts;
     clear() empties it (the hit and miss counters persist), and values already handed out stay valid.
     Frozen mode (freeze()): read-only and shareable by every worker; a miss counts one miss and raises
-    ShortestPathCacheMiss; clear() raises ValueError; thaw() returns to building once the caller has joined
-    every reader.
+    ShortestPathCacheMiss; clear() raises ValueError; thaw() waits for active calls, then returns to building.
+    Lifecycle calls take exclusive FIFO admission and cannot be overtaken by later calls.
     When a public call fails: a building cache passed to it keeps the complete entries and statistics
     of the lookups that succeeded before the failure (never a partial entry; a kept entry never
     changes a result); a frozen cache's statistics stay unchanged, except one miss when the call
@@ -2001,7 +2001,7 @@ class ShortestPathCache:
 
     def freeze(self) -> None:
         """
-        enter frozen mode (no effect when frozen)
+        wait for active calls and enter frozen mode (no effect when frozen)
         """
 
     def graph_uid(self) -> int:
@@ -2016,12 +2016,14 @@ class ShortestPathCache:
 
     def thaw(self) -> None:
         """
-        return to building mode (no effect when building); join every reader first
+        wait for active calls and return to building mode (no effect when building)
         """
 
+@typing.final
 class FlowPolicy:
     """
-    The placement engine for one demand, bound to its ledger at construction. Every call (place,
+    The placement engine for one demand, bound to its ledger at construction. A final Python class.
+    Native computation releases the GIL; one ledger gate serializes calls and mutable reads. Every call (place,
     evaluate, replace, forward) is all-or-nothing: a failed call raises and leaves the ledger and the
     policy as they were (with the two limits in the module docstring). remove() takes every flow of the
     policy back out, clears its program and starts a new epoch (the request total starts again from 0);
@@ -2098,9 +2100,9 @@ class FlowPolicy:
         program's lossless bound up to the offer; LOSSY sends the offer. black_holes (an Eligibility of the
         graph): the nodes and edges it excludes are black holes for this call (stale forwarding: traffic
         reaching one is dropped there; a black-holed source loses its share). In this order: Pinned raises
-        `Pinned forwards with replace`; no installed program `forward requires an installed program`;
-        the offer; LOSSY +inf `LOSSY forwarding requires a finite offer`; black_holes
-        of another graph `black_holes belongs to another graph`.
+        `Pinned forwards with replace`; the offer; LOSSY +inf `LOSSY forwarding requires a finite offer`;
+        black_holes of another graph `black_holes belongs to another graph`; then, under the gate,
+        no installed program `forward requires an installed program`.
         """
 
     def place(
@@ -2623,12 +2625,14 @@ def apply_actions(
     Checked in this order: the arguments' types (TypeError: `ledger must be a FlowLedger`, `actions must
     be a sequence of Place, Replace or Forward (got <type>)`, `actions[<i>] must be a Place, Replace or
     Forward (got <type>)`, `mode must be a BatchMode (got <type>)`, `outputs must be an OutputOptions
-    (got <type>)`); mode's value (`mode: <v> is not a value of BatchMode`); an empty list returns [];
-    then each action in list order, all of its checks before the next action's: `list policy belongs
+    (got <type>)`); mode's value (`mode: <v> is not a value of BatchMode`); then each action's
+    argument/immutable checks in list order: `list policy belongs
     to another ledger`, `duplicate policy in list`, SIMULTANEOUS's own rules (`SIMULTANEOUS does not
     accept Place`, `SIMULTANEOUS Replace requires ShortestPaths EQUAL or WEIGHTED, or Pinned`,
     `SIMULTANEOUS requires admission=LOSSY`, `SIMULTANEOUS requires finite offers`), then the scalar
-    call's checks in its order. Only then is anything computed; an error of the computation (a
+    call's argument checks. Ledger usability and every action's mutable state are then checked under
+    the gate, in list order, before any computation. An empty list checks usability and mode, then
+    returns []. An error of the computation (a
     loss-iteration error, a solver or forwarding size limit, the record identity limit counted for the
     whole list) publishes nothing.
     """
@@ -2723,8 +2727,9 @@ def evaluate_pairs(
     evaluate_demand() for each (sources, destinations) pair, results in pair order. Pair i uses
     options.eligibility intersected with per_pair_eligibility[i] (None entries allowed; a given sequence has one entry per pair,
     also when empty). workers >= 1; None: NGRAPH_CORE_BATCH_THREADS or 1, and 1 when a cache is
-    supplied. Everything is validated before a worker starts, the arguments first, then each pair
-    completely in pair order, so the error of the lowest failing pair is raised. Pinned is rejected
+    supplied. All checks finish before evaluation workers start: the arguments first, then each pair
+    completely in pair order, so the error of the lowest failing pair is raised. First-pass tunnel
+    searches run in parallel under one GIL release, before any lease or gate. Pinned is rejected
     (`evaluate_pairs does not accept Pinned`: a program has fixed endpoints);
     an empty batch returns [].
     Caches: a supplied building cache needs workers == 1; a frozen cache is shared by every worker

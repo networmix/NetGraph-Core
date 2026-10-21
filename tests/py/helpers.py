@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import re
 
+import _netgraph_core
 import pytest
 
 import netgraph_core as ngc
@@ -179,6 +180,8 @@ def plain(value):
     tunnels included) by every public field, a PredecessorDAG by its three arrays, a Path by its
     endpoints, hops and cost, an Eligibility by its two masks, containers element by element,
     arrays as lists."""
+    if isinstance(value, getattr(_netgraph_core, "_PlacementTrace", ())):
+        return plain(value.as_dict())
     if isinstance(value, _RESULTS):
         fields = [
             f
@@ -243,7 +246,7 @@ def full_ledger_state(ledger):
     return [ledger._state(), ledger_state(ledger)]
 
 
-def sweep_python_allocation(make, limit=400, collect=True):
+def sweep_python_allocation(make, limit=400, collect=True, allocation_call=None):
     """The all-or-nothing sweep of a call's Python object allocations (private hooks needed).
     make() gives fresh (fn, args, snapshot); attempt k = 0, 1, ... makes the k-th Python object
     allocation of fn(*args) fail, until a call completes. Every reached failure raises
@@ -257,6 +260,10 @@ def sweep_python_allocation(make, limit=400, collect=True):
 
     import _netgraph_core as ext
 
+    # Install native probes outside the checked allocation window, when needed.
+    if allocation_call is None:
+        allocation_call = ext._fail_python_allocation
+
     fn, args, _ = make()
     want = plain(fn(*args))
     failures = 0
@@ -265,7 +272,7 @@ def sweep_python_allocation(make, limit=400, collect=True):
         before = snapshot()
         if collect:
             gc.collect()
-        hit, seen, value, error = ext._fail_python_allocation(fn, args, k)
+        hit, seen, value, error = allocation_call(fn, args, k)
         where = (getattr(fn, "__name__", fn), k)
         if not hit:
             assert error is None, (where, repr(error))

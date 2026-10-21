@@ -15,6 +15,7 @@
 
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/flow_record.hpp"
+#include "netgraph/core/detail/concurrency.hpp"
 
 namespace netgraph::core::detail {
 
@@ -40,6 +41,16 @@ struct OwnerDrafts {
                                                 std::span<const NodeId> sources, const Eligibility* eligibility);
 
 struct LedgerAccess {
+  [[nodiscard]] static std::unique_lock<std::mutex> lock(const FlowLedger& ledger) {
+    concurrent_event(ConcurrentStage::LedgerWait, &ledger);
+    std::unique_lock guard(ledger.gate_);
+    concurrent_event(ConcurrentStage::LedgerAcquired, &ledger);
+    return guard;
+  }
+  // Immutable metadata; no mutable-state check or lock. All other internal access below
+  // requires the ledger gate, except release(), which acquires it for destruction.
+  [[nodiscard]] static const std::shared_ptr<const Graph>& graph(const FlowLedger& ledger) noexcept { return ledger.graph_; }
+  [[nodiscard]] static FlowRecord record(const FlowLedger& ledger, const FlowId& id);
   // A new owner id (0, 1, ... per ledger, below the largest int64: std::runtime_error `policy
   // identity limit exceeded` there, nothing changed). Throws on a moved-from ledger.
   [[nodiscard]] static std::int64_t bind(FlowLedger& ledger);

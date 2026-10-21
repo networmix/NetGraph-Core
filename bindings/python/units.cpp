@@ -3,6 +3,7 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -10,9 +11,11 @@
 #include <vector>
 
 #include "netgraph/core/graph.hpp"
+#include "netgraph/core/detail/unit_conversion.hpp"
 #include "integers.hpp"
 #include "strict_float.hpp"
 #include "values.hpp"
+#include "native_call.hpp"
 #include "registration.hpp"
 
 namespace py = pybind11;
@@ -247,13 +250,24 @@ void register_units(py::module_& m) {
   m.def(
       "to_units",
       [](const py::object& x, StrictFloat resolution) -> py::object {
-        (void)resolution_exponent(resolution);  // before the shape: an empty array is no exemption
+        const int k = resolution_exponent(resolution);  // before the shape: an empty array is no exemption
         const PhysicalValues v = physical_values(x);
         if (v.scalar) return int_object(to_units(v.values[0], resolution));
-        py::array_t<std::int64_t> out(static_cast<py::ssize_t>(v.values.size()));
-        auto o = out.mutable_unchecked<1>();
-        for (std::size_t i = 0; i < v.values.size(); ++i) o(static_cast<py::ssize_t>(i)) = to_units(v.values[i], resolution);
-        return std::move(out);
+        // At this scale the nearest double below 2^62 is hundreds of units
+        // away: rounding cannot cross the boundary. Validate with the physical
+        // bound, then leave the scaling/rounding kernel to the detached phase.
+        const double limit = 4611686018427387904.0 * static_cast<double>(resolution);
+        for (double x : v.values) {
+          if (!(x >= 0.0 && x < limit)) (void)to_units(x, resolution);
+        }
+        auto result = native_call([&] {
+          std::vector<std::int64_t> values(v.values.size());
+          for (std::size_t i = 0; i < v.values.size(); ++i) {
+            values[i] = static_cast<Amount>(detail::rounded_units(v.values[i], k));
+          }
+          return values;
+        });
+        return int64_array(result);
       },
       py::arg("x"), py::arg("resolution"),
       "Physical value(s) to units of the resolution q, rounding half up: an int for a scalar, an\n"
@@ -272,12 +286,19 @@ void register_units(py::module_& m) {
         // A sequence, a NumPy array of any rank included: wide_integers refuses a rank other than 1.
         if (!is_invalid_sequence(x)) {
           const auto v = wide_integers(x, "as_float: x");
-          py::array_t<double> out(static_cast<py::ssize_t>(v.size()));
-          auto o = out.mutable_unchecked<1>();
+          std::vector<double> values(v.size());
+          // Arbitrary Python integer arithmetic remains attached; the ordinary
+          // fixed-width conversion loop works only on the copied native values.
           for (std::size_t i = 0; i < v.size(); ++i) {
-            o(static_cast<py::ssize_t>(i)) = v.sign(i) == 0 ? as_float(v.value[i], resolution)
-                                                            : amount_as_float(v.source[py::int_(i)], k, resolution);
+            if (v.sign(i) != 0) values[i] = amount_as_float(v.source[py::int_(i)], k, resolution);
           }
+          native_call([&] {
+            for (std::size_t i = 0; i < v.size(); ++i) {
+              if (v.sign(i) == 0) values[i] = detail::scaled_units(v.value[i], k);
+            }
+          });
+          py::array_t<double> out(static_cast<py::ssize_t>(values.size()));
+          std::copy(values.begin(), values.end(), out.mutable_data());
           return std::move(out);
         }
         return py::float_(amount_as_float(x, k, resolution));

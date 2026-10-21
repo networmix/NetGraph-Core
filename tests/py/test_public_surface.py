@@ -80,6 +80,10 @@ PRIVATE = {"_solve_min_cost_flow"}
 # The private hooks (NETGRAPH_CORE_PRIVATE_HOOKS: the development build only): module functions
 # and class members.
 HOOK_FUNCTIONS = {
+    "_ConcurrencyProbe",
+    "_at_native_exit",
+    "_PlacementTrace",
+    "_concurrency_model",
     "_fail_python_allocation",
     "_fail_native_allocation",
     "_with_forwarding_limits",
@@ -89,7 +93,7 @@ HOOK_FUNCTIONS = {
 }
 HOOK_MEMBERS = {
     "FlowLedger": {"_state"},
-    "FlowPolicy": {"_place_traced", "_state", "_owner"},
+    "FlowPolicy": {"_place_traced", "_state", "_owner", "_seed_requested"},
 }
 
 

@@ -317,7 +317,7 @@ def replay(fx, at=None):
             continue
         r, trace = pol._place_traced(offer, outputs)
         assert exactly(result_json(r), expect["result"]), where
-        assert exactly(norm(trace), expect["trace"]), where
+        assert exactly(norm(trace.as_dict()), expect["trace"]), where
         assert exactly(ledger_json(fg), expect["ledger"]), where
         assert exactly(policy_json(pol), expect["policy"]), where
 

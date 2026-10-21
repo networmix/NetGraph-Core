@@ -66,6 +66,7 @@ endif()
 # =============================================================================
 
 add_library(netgraph_core STATIC
+  src/concurrency.cpp
   src/graph.cpp
   src/eligibility.cpp
   src/min_cost_flow.cpp
@@ -113,6 +114,7 @@ pybind11_add_module(_netgraph_core
   bindings/python/path_enumeration.cpp
   bindings/python/search.cpp
   bindings/python/hooks.cpp
+  bindings/python/concurrency_hooks.cpp
 )
 # The library's PUBLIC usage requirements (C++20, the hooks flag, the libc++ settings below) reach
 # the extension through this link.
@@ -148,6 +150,7 @@ if(NETGRAPH_CORE_BUILD_TESTS)
     tests/cpp/graph_tests.cpp
     tests/cpp/graph_layout_tests.cpp
     tests/cpp/graph_concurrency_tests.cpp
+    tests/cpp/concurrency_tests.cpp
     tests/cpp/min_cost_flow_tests.cpp
     tests/cpp/min_cost_flow_deletion_tests.cpp
     tests/cpp/eligibility_tests.cpp

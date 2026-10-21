@@ -8,6 +8,7 @@ from __future__ import annotations
 import gc
 import weakref
 
+import _netgraph_core as ext
 import numpy as np
 import pytest
 from helpers import (
@@ -968,26 +969,45 @@ def test_python_publication_is_all_or_nothing(routing, traced):
     cfg = GLOBAL if routing == "global" else COSTONLY
     g = build(2, [(0, 1, 10, 1)])
 
-    def make():
-        ledger = ngc.FlowLedger(g)
-        policy = ngc.FlowPolicy(ledger, 0, 1, cfg)
-        assert policy.place(1).call_delivered == 1
+    for entry in (
+        ("_place_traced",) if traced else ("place", "replace", "forward", "evaluate")
+    ):
+        current_probe = []
 
-        def snapshot():
-            return [full_ledger_state(ledger), repr(policy._state())]
+        def make(entry=entry, current_probe=current_probe):
+            ledger = ngc.FlowLedger(g)
+            policy = ngc.FlowPolicy(ledger, 0, 1, cfg)
+            assert policy.place(1).call_delivered == 1
+            probe = ext._ConcurrencyProbe()
+            current_probe[:] = [probe]
 
-        return (policy._place_traced if traced else policy.place), (3,), snapshot
+            def snapshot():
+                return [
+                    full_ledger_state(ledger),
+                    repr(policy._state()),
+                    probe.counts()["native_begin"],
+                ]
 
-    # Not vacuous: the result object at least (its fields convert when read); traced, also the
-    # pair and the trace.
-    assert sweep_python_allocation(make) >= (3 if traced else 1)
+            return getattr(policy, entry), (3,), snapshot
+
+        def allocation_call(fn, args, k, current_probe=current_probe):
+            probe = current_probe[0]
+            result = probe.run(ext._fail_python_allocation, fn, args, k)
+            if not result[0]:
+                assert probe.counts()["native_begin"] == 1
+            return result
+
+        # Each scalar entry owns its result allocation path. Not vacuous: the result
+        # object at least; traced, also the pair and trace. Retry must return every field.
+        assert sweep_python_allocation(make, allocation_call=allocation_call) >= (
+            3 if traced else 1
+        ), entry
 
 
 @needs_hooks
 def test_evaluator_results_survive_python_allocation_failures():
-    # The evaluators publish nothing; their result objects are made through the checked path
-    # too, so a failed Python allocation raises instead of crashing, and the call that
-    # completes returns what a clean call returns.
+    # Fixed evaluator result objects exist before native entry, even without a supplied cache.
+    # A failed Python allocation raises before native work; the completed call matches a clean call.
     g = diamond(5, 3)
     calls = [
         (ngc.evaluate_demand, (g, 0, 3, ngc.EvaluationOptions(GLOBAL))),
@@ -1001,8 +1021,21 @@ def test_evaluator_results_survive_python_allocation_failures():
         (ngc.evaluate_edge_failures, (g, 0, 3, ngc.EvaluationOptions(GLOBAL))),
     ]
     for fn, args in calls:
-        # An evaluator keeps no state between calls: nothing to snapshot.
-        failures = sweep_python_allocation(lambda fn=fn, args=args: (fn, args, list))
+        current_probe = []
+
+        def make(fn=fn, args=args, current_probe=current_probe):
+            probe = ext._ConcurrencyProbe()
+            current_probe[:] = [probe]
+            return fn, args, lambda: probe.counts()["native_begin"]
+
+        def allocation_call(fn, args, k, current_probe=current_probe):
+            probe = current_probe[0]
+            result = probe.run(ext._fail_python_allocation, fn, args, k)
+            if not result[0]:
+                assert probe.counts()["native_begin"] == 1
+            return result
+
+        failures = sweep_python_allocation(make, allocation_call=allocation_call)
         # Not vacuous: the result objects allocate (their fields convert when read).
         assert failures >= 1, fn.__name__
 

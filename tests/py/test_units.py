@@ -24,6 +24,27 @@ def test_half_up_boundaries(q):
     assert ngc.to_units(-0.0, q) == 0
     assert ngc.as_float(12345, q) == 12345 * q
     assert type(ngc.to_units(2.5 * q, q)) is int
+    # The detached array kernel reuses the resolution checked before entry.
+    # These hand-derived values distinguish half-up from floor and ties-to-even.
+    values = [
+        2.5 * q,
+        0.5 * q,
+        0.49 * q,
+        7.5 * q,
+        math.nextafter(7.5 * q, 0),
+        0.0,
+        -0.0,
+    ]
+    assert ngc.to_units(values, q).tolist() == [3, 1, 0, 8, 7, 0, 0]
+    assert ngc.as_float(
+        [0, 1, (1 << 53) + 1, (1 << 53) + 3, -((1 << 53) + 3)], q
+    ).tolist() == [
+        0.0,
+        q,
+        (1 << 53) * q,
+        ((1 << 53) + 4) * q,
+        -((1 << 53) + 4) * q,
+    ]
 
 
 def test_arrays():

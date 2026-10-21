@@ -18,6 +18,7 @@
 #include "netgraph/core/forwarding_program.hpp"
 #include "integers.hpp"
 #include "values.hpp"
+#include "native_call.hpp"
 #include "publication.hpp"
 #include "registration.hpp"
 
@@ -193,7 +194,11 @@ void register_program(py::module_& m) {
               options.edge_weights = ew->narrow<Amount>();
             }
             if (rw.has_value()) options.residual = edge_amounts(residual, *graph, "residual", "residual (units)").narrow<Amount>();
-            return typed_shared(ForwardingProgram::from_routes(*graph, s, d, rs, options));
+            auto checked = native_call<false>([&] { return detail::check_route_definitions(*graph, s, d, rs, options); });
+            return typed_shared(native_call([&] {
+              auto prepared = std::move(checked);
+              return detail::ProgramAccess::from_checked_routes(s, d, rs, std::move(prepared));
+            }));
           },
           py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("routes"), py::kw_only(),
           py::arg("allocation") = py::none(), py::arg("weight_basis") = py::none(), py::arg("edge_weights") = py::none(),
@@ -244,7 +249,7 @@ void register_program(py::module_& m) {
               options.edge_weights = ew->narrow<Amount>();
             }
             if (rw.has_value()) options.residual = edge_amounts(residual, *graph, "residual", "residual (units)").narrow<Amount>();
-            return typed_shared(ForwardingProgram::from_dag(*graph, s, d, shared_dag, options));
+            return typed_shared(native_call([&] { return ForwardingProgram::from_dag(*graph, s, d, shared_dag, options); }));
           },
           py::arg("graph"), py::arg("sources"), py::arg("destinations"), py::arg("dag"), py::kw_only(),
           py::arg("allocation") = py::none(), py::arg("weight_basis") = py::none(), py::arg("edge_weights") = py::none(),

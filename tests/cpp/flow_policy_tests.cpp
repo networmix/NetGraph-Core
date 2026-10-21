@@ -1304,8 +1304,7 @@ TEST(Evaluators, BatchOrderIntersectionsExceptionsAndWorkers) {
             "foreign Eligibility: built for another graph");
   EXPECT_EQ(first_error(pinned_bad, nullptr, &foreign_cache, short_per, 2), "foreign ShortestPathCache: bound to another graph");
   EXPECT_EQ(first_error(pinned_bad, nullptr, &building, short_per, 2),
-            "a supplied building ShortestPathCache has one writer: it is rejected unless workers == 1 (got workers = 2; a "
-            "frozen cache may be shared by every worker)");
+            "evaluate_pairs does not accept Pinned");  // amendment 9: arguments before cache mode
   EXPECT_EQ(first_error(pinned_bad, nullptr, &building, short_per, 1), "evaluate_pairs does not accept Pinned");
   EXPECT_EQ(first_error(config_bad, nullptr, &building, short_per, 1), "ShortestPaths OPTIMIZED requires admission=LOSSLESS");
   EXPECT_EQ(first_error(global_config(), nullptr, &building, short_per, 1), "CentralizedTE does not use ShortestPathCache");

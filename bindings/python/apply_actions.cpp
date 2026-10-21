@@ -14,6 +14,9 @@
 #include "netgraph/core/flow_policy.hpp"
 #include "integers.hpp"
 #include "publication.hpp"
+#include "native_call.hpp"
+#include "policy_value.hpp"
+#include "netgraph/core/detail/policy_engine.hpp"
 #include "values.hpp"
 #include "registration.hpp"
 
@@ -43,7 +46,9 @@ struct PyForward {
 std::string type_name(const py::handle& obj) { return std::string(py::str(py::type::of(obj).attr("__name__"))); }
 
 py::object policy_arg(const py::object& policy) {
-  if (!py::isinstance<FlowPolicy>(policy)) throw py::type_error("policy must be a FlowPolicy (got " + type_name(policy) + ")");
+  const auto* type = py::detail::get_type_info(typeid(FlowPolicy), true);
+  if (PyObject_TypeCheck(policy.ptr(), type->type) == 0) throw py::type_error("policy must be a FlowPolicy (got " + type_name(policy) + ")");
+  (void)policy_value(policy);
   return policy;
 }
 
@@ -62,7 +67,7 @@ py::object black_holes_arg(const py::object& black_holes) {
 // own check raises the offer text in its place.
 std::optional<Amount> offer_at_use(const py::object& offer) { return *units_at_use(offer); }
 
-FlowPolicy& policy_at_use(const py::object& policy) { return policy.cast<FlowPolicy&>(); }
+FlowPolicy& policy_at_use(const py::object& policy) { return policy_value(policy); }
 
 // The native action of entry i, or the type error of an entry that is not an action.
 Action action_of(const py::handle& item, std::size_t i) {
@@ -155,9 +160,9 @@ void register_apply_actions(py::module_& m) {
         if (!py::isinstance<BatchMode>(mode)) throw py::type_error("mode must be a BatchMode (got " + type_name(mode) + ")");
         const auto batch_mode = mode.cast<BatchMode>();
         const auto o = outputs_of(outputs);
-        // All or nothing across the boundary: the list and its n result objects exist before the
-        // call, and after the commit nothing allocates (each value moves into its object). The GIL
-        // stays held: the call mutates the ledger (one writer per ledger).
+        auto& target = ledger.cast<FlowLedger&>();
+        detail::check_list_arguments(target, native, batch_mode, o);
+        // The list and every result holder exist before the native transaction.
         auto out = py::reinterpret_steal<py::typing::List<PlacementResult>>(checked(PyList_New(count)).release());
         std::vector<PlacementResult*> slots(n);
         for (std::size_t i = 0; i < n; ++i) {
@@ -165,8 +170,10 @@ void register_apply_actions(py::module_& m) {
           slots[i] = slot;
           PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(i), obj.release().ptr());
         }
-        auto results = apply_actions(ledger.cast<FlowLedger&>(), native, batch_mode, o);
-        for (std::size_t i = 0; i < n; ++i) *slots[i] = std::move(results[i]);
+        native_call([&] {
+          auto results = apply_actions(target, native, batch_mode, o);
+          for (std::size_t i = 0; i < n; ++i) *slots[i] = std::move(results[i]);
+        });
         return out;
       },
       py::arg("ledger"), py::arg("actions"), py::kw_only(), py::arg_v("mode", BatchMode::Ordered, "BatchMode.ORDERED"),
@@ -192,12 +199,14 @@ void register_apply_actions(py::module_& m) {
       "Checked in this order: the arguments' types (TypeError: `ledger must be a FlowLedger`, `actions must\n"
       "be a sequence of Place, Replace or Forward (got <type>)`, `actions[<i>] must be a Place, Replace or\n"
       "Forward (got <type>)`, `mode must be a BatchMode (got <type>)`, `outputs must be an OutputOptions\n"
-      "(got <type>)`); mode's value (`mode: <v> is not a value of BatchMode`); an empty list returns [];\n"
-      "then each action in list order, all of its checks before the next action's: `list policy belongs\n"
+      "(got <type>)`); mode's value (`mode: <v> is not a value of BatchMode`); then each action's\n"
+      "argument/immutable checks in list order: `list policy belongs\n"
       "to another ledger`, `duplicate policy in list`, SIMULTANEOUS's own rules (`SIMULTANEOUS does not\n"
       "accept Place`, `SIMULTANEOUS Replace requires ShortestPaths EQUAL or WEIGHTED, or Pinned`,\n"
       "`SIMULTANEOUS requires admission=LOSSY`, `SIMULTANEOUS requires finite offers`), then the scalar\n"
-      "call's checks in its order. Only then is anything computed; an error of the computation (a\n"
+      "call's argument checks. Ledger usability and every action's mutable state are then checked under\n"
+      "the gate, in list order, before any computation. An empty list checks usability and mode, then\n"
+      "returns []. An error of the computation (a\n"
       "loss-iteration error, a solver or forwarding size limit, the record identity limit counted for the\n"
       "whole list) publishes nothing.");
 }

@@ -22,6 +22,14 @@
 namespace netgraph::core::detail {
 
 struct DeletionCapture;
+// A detached argument search may be run by the binding; the callback and its
+// context are native stack values, invoked synchronously before any lock.
+using ArgumentWork = void (*)(void (*)(void*), void*);
+struct TunnelRoster {
+  std::vector<NodeId> heads;
+  Cost c0 {0};
+};
+enum class PolicyOperation { Place, Evaluate, Replace, Forward };
 
 // A live flow of the policy between calls. Its amounts are its ledger record (delivered; edge flows;
 // Lossy offered and edge drops; T1's holds). The flows of ShortestPaths and CentralizedTE are one per roster
@@ -61,7 +69,7 @@ struct PolicyEpoch {
 };
 
 struct PolicyEngine {
-  PolicyEngine(FlowLedger& ledger, FlowPolicyConfig config) : ledger(ledger), config(std::move(config)) {}
+  PolicyEngine(FlowLedger& ledger, FlowPolicyConfig&& config) : ledger(ledger), config(std::move(config)) {}
 
   FlowLedger& ledger;
   std::shared_ptr<const Graph> graph {};
@@ -102,14 +110,22 @@ struct PolicyEngine {
 // The internal access to a policy's engine (the pattern of LedgerAccess): FlowPolicy's public
 // interface is the documented API; everything else reaches the state here.
 struct PolicyAccess {
+  [[nodiscard]] static bool constructed(const FlowPolicy& policy) noexcept { return policy.ready_.load(std::memory_order_acquire); }
   [[nodiscard]] static const PolicyEngine& engine(const FlowPolicy& policy) noexcept { return *policy.engine_; }
   [[nodiscard]] static PolicyEngine& engine(FlowPolicy& policy) noexcept { return *policy.engine_; }
+  // Argument-only construction work, performed before a cache lease or ledger gate.
+  [[nodiscard]] static std::unique_ptr<PolicyEngine> prepare(FlowLedger& ledger, std::span<const NodeId> sources,
+      std::span<const NodeId> destinations, FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache,
+      const TunnelRoster* roster = nullptr, ArgumentWork search = nullptr);
+  // An unbound, destructible shell; installation is the only publishing step.
+  [[nodiscard]] static std::unique_ptr<FlowPolicy> shell();
+  static void construct(FlowPolicy& policy, std::unique_ptr<PolicyEngine> prepared, ShortestPathCache* cache);
   // A policy constructed inside another public call, whose tally records a supplied frozen
   // cache's hits; returned as a prvalue (FlowPolicy does not move).
   [[nodiscard]] static FlowPolicy make(FlowLedger& ledger, std::span<const NodeId> sources,
                                        std::span<const NodeId> destinations, FlowPolicyConfig config,
-                                       const Eligibility* eligibility, ShortestPathCache* cache, FrozenCacheHitTally& tally) {
-    return FlowPolicy(ledger, sources, destinations, std::move(config), eligibility, cache, tally);
+                                       const Eligibility* eligibility, ShortestPathCache* cache, FrozenCacheHitTally& tally, const TunnelRoster* roster = nullptr) {
+    return FlowPolicy(ledger, sources, destinations, std::move(config), eligibility, cache, tally, roster);
   }
 };
 
@@ -129,12 +145,24 @@ void check_source_count(const FlowPolicyConfig& config, std::size_t num_sources)
 // The resolved source allocation of a computing model; none for Pinned (its program has one).
 [[nodiscard]] std::optional<SourceAllocation> source_allocation_of(const Routing& r) noexcept;
 void check_tunnel_limit(const FlowPolicyConfig& cfg, std::size_t num_heads);
+// Construction's immutable checks, shared with evaluator preflight. Endpoints are
+// normalized here before graph ownership and model checks.
+std::optional<TunnelRoster> check_policy_construction(const Graph& graph, std::span<const NodeId> sources,
+    std::span<const NodeId> destinations, const FlowPolicyConfig& config,
+    const Eligibility* eligibility, const ShortestPathCache* cache, ArgumentWork search = nullptr);
 // place()'s first check, before its offer is read (the binding runs it before converting it): T1
 // and T2 raise `<model> does not support incremental placement`.
 void check_place_operation(const PolicyEngine& pe);
-// forward()'s first checks, before its offer is read (the binding runs them before converting
-// it): `Pinned forwards with replace`, then `forward requires an installed program`.
+// forward()'s first check, before its offer is read (the binding runs it before converting
+// it): `Pinned forwards with replace`. The installed program is checked under the
+// gate, after every argument check.
 void check_forward_operation(const PolicyEngine& pe);
+void check_policy_offer(const PolicyEngine& pe, PolicyOperation operation, std::optional<Amount> offer);
+void check_policy_design_model(const PolicyEngine& pe);
+// All argument/immutable checks of a scalar call. No epoch or ledger state is read.
+void check_policy_arguments(const PolicyEngine& pe, PolicyOperation operation, std::optional<Amount> offer,
+    const std::optional<std::optional<Amount>>& design = {}, const Eligibility* black_holes = nullptr);
+void check_list_arguments(FlowLedger& ledger, std::span<const Action> actions, BatchMode mode, const OutputOptions& outputs);
 // The model's name in messages: ShortestPaths, CentralizedTE, T1 (DistributedTE), T2 (CentralizedTE with tunnel_count) or
 // Pinned.
 [[nodiscard]] const char* model_name(const Routing& r) noexcept;

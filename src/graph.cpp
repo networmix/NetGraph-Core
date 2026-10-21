@@ -49,6 +49,7 @@
 #include "netgraph/core/detail/graph_access.hpp"
 #include "netgraph/core/detail/hooks_flag.hpp"
 #include "netgraph/core/detail/uid.hpp"
+#include "netgraph/core/detail/unit_conversion.hpp"
 
 namespace netgraph::core {
 
@@ -323,18 +324,8 @@ Amount to_units(double x, double resolution) {
   if (x < 0.0) {
     throw std::invalid_argument("to_units: a negative amount has no unit value");
   }
-  // x / q is exact (q is a power of two) unless it overflows to infinity or falls below the
-  // normal range (below 2^-1022 it may lose low bits; it then rounds to 0 units either way).
-  const double y = std::ldexp(x, -k);
-  constexpr double kTwo52 = 4503599627370496.0;  // 2^52: doubles at or above it are integers
   constexpr double kLimit = 4611686018427387904.0;  // 2^62
-  double r;
-  if (y >= kTwo52) {
-    r = y;
-  } else {
-    const double f = std::floor(y);
-    r = (y - f >= 0.5) ? f + 1.0 : f;  // y - f is exact below 2^52: round half up
-  }
+  const double r = detail::rounded_units(x, k);
   if (!(r < kLimit)) {
     throw std::invalid_argument(
         "to_units: the amount is at or above the bound of the units domain (2^62 units)");
@@ -344,7 +335,7 @@ Amount to_units(double x, double resolution) {
 
 double as_float(Amount x, double resolution) {
   const int k = resolution_exponent(resolution);
-  return std::ldexp(static_cast<double>(x), k);
+  return detail::scaled_units(x, k);
 }
 
 Graph::Graph(std::int32_t num_nodes,

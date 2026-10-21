@@ -11,6 +11,8 @@
 #include "netgraph/core/route_structures.hpp"
 #include "integers.hpp"
 #include "values.hpp"
+#include "native_call.hpp"
+#include "netgraph/core/detail/route_builders.hpp"
 #include "registration.hpp"
 
 namespace py = pybind11;
@@ -47,9 +49,9 @@ void register_predecessor_dag(py::module_& m) {
           [](const std::shared_ptr<Graph>& graph, const py::object& offsets, const py::object& parents,
              const py::object& via) {
             if (!graph) throw py::type_error("graph must be a Graph");
-            // from_csr's validation order on unnarrowed values (the shape, then the ranges); the C++
-            // constructor re-checks it and adds the structural checks (endpoints, duplicates,
-            // acyclic, ascending).
+            // Validate the unnarrowed shape and ranges, then the native structural
+            // rules below (endpoints, duplicates, acyclic, ascending), all before
+            // detaching. The builder consumes these checked native arrays.
             const auto n = static_cast<std::size_t>(graph->num_nodes());
             const auto edge_count = static_cast<std::int64_t>(graph->num_edges());
             const std::size_t lo = sequence_length(offsets, "parent_offsets");
@@ -86,7 +88,8 @@ void register_predecessor_dag(py::module_& m) {
             const auto ov = o.narrow<std::int32_t>();
             const auto pv = p.narrow<NodeId>();
             const auto wv = w.narrow<EdgeId>();
-            return std::make_shared<PredecessorDAG>(PredecessorDAG::from_csr(*graph, ov, pv, wv));
+            detail::check_csr(*graph, ov, pv, wv);
+            return native_call([&] { return std::make_shared<PredecessorDAG>(detail::PredecessorDAGBuilder::of_csr(*graph, ov, pv, wv)); });
           },
           py::arg("graph"), py::arg("parent_offsets"), py::arg("parents"), py::arg("via_edges"),
           "Validates, in order, before any traversal (ValueError on the first defect): parent_offsets of\n"

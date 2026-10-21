@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <vector>
@@ -27,11 +28,13 @@ struct LedgerAccess;
 // 0 <= S <= R0 per edge); max(L, S) is no occupancy, and traffic may use bandwidth that is held.
 // Policies alone place, hold or remove through detail::LedgerAccess; there is no public
 // placement, removal or reservation. All four return int64[E] snapshots in EdgeId order.
+// One gate protects every mutable read, lifecycle operation and bound policy publication.
 //
 // Lifetime: the graph outlives the ledger (shared pointer), the ledger outlives its policies.
 // A ledger with bound policies cannot be copied, moved or reset. A copy of an unbound ledger
 // is a new ledger (new uid) holding the same baselines, records, ids and holds under the new uid;
-// a moved-from ledger is empty and unusable (every call throws std::logic_error). A policy
+// a moved-from ledger retains its immutable graph owner but its mutable state is empty and
+// unusable (every public call throws std::logic_error). A policy
 // destroyed without remove() leaves its records, allocations and holds as orphans (readable,
 // never changed again) until reset().
 class FlowLedger {
@@ -85,7 +88,11 @@ private:
   }
   [[nodiscard]] Amount reserved_at(std::size_t e) const noexcept { return reserved_.empty() ? 0 : reserved_[e]; }
 
+  // Never changed after construction, including when moving this ledger. Internal argument
+  // checks can safely pin graph metadata before acquiring the gate; public reads still gate
+  // their usability check. The gate itself stays with its object across copy/move.
   std::shared_ptr<const Graph> graph_ {};
+  mutable std::mutex gate_;
   std::uint64_t uid_ {0};
   bool usable_ {true};
   std::vector<Amount> service_baseline_ {};

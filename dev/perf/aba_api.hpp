@@ -48,6 +48,10 @@
 #include "netgraph/core/detail/search_detail.hpp"
 
 #include <algorithm>
+#include <array>
+#include <exception>
+#include <stdexcept>
+#include <thread>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -919,6 +923,99 @@ inline std::uint64_t dag_cache_series(const Graph& g, const std::vector<int>& ro
   d.add_i(static_cast<std::int64_t>(cache->stats().entries));
   return d.h;
 }
+
+// One operation per row, 10,000 calls per iteration. Construction and preparation
+// are untimed. The immutable config getter is the control for the gated getters.
+enum class TinyOperation { PlaceZero, Delivered, Program, Config };
+struct TinyCalls {
+  std::shared_ptr<const nc::Graph> graph;
+  nc::FlowLedger ledger;
+  nc::FlowPolicy policy;
+  TinyCalls()
+      : graph(std::make_shared<const nc::Graph>(2, std::vector<nc::NodeId>{0}, std::vector<nc::NodeId>{1},
+            std::vector<nc::Amount>{16}, std::vector<nc::Cost>{3}, 1.0)),
+        ledger(graph), policy(ledger, std::vector<nc::NodeId>{0}, std::vector<nc::NodeId>{1}, {}) {
+    const auto r = policy.replace(4);
+    if (r.delivered != 4 || !r.program || r.by_source.size() != 1 || r.by_source[0].delivered != 4 ||
+        ledger.residual() != std::vector<nc::Amount>{12}) throw std::runtime_error("tiny fixture preparation failed");
+    const auto zero = policy.place(0);
+    if (zero.call_delivered != 0 || zero.delivered != 4 || zero.requested != nc::Counter128{0, 4} ||
+        zero.routes_changed || zero.weights_changed || zero.reservations_changed || zero.program != r.program ||
+        zero.edge_flows || zero.residual || zero.plan) throw std::runtime_error("tiny zero-call result differs");
+  }
+  std::uint64_t run(TinyOperation operation) {
+    std::uint64_t sum = 0;
+    for (int i = 0; i < 10000; ++i) {
+      switch (operation) {
+        case TinyOperation::PlaceZero: sum += static_cast<std::uint64_t>(policy.place(0).delivered); break;
+        case TinyOperation::Delivered: sum += static_cast<std::uint64_t>(policy.delivered()); break;
+        case TinyOperation::Program: sum += policy.program() != nullptr ? 1U : 0U; break;
+        case TinyOperation::Config: sum += policy.config().admission == nc::Admission::Lossless ? 1U : 0U; break;
+      }
+    }
+    return sum;
+  }
+};
+
+// Fixed layered graph, 32 heads, 32 destinations, 12 layers, eight outgoing links
+// per nonterminal node. Offer 32 sends one unit per head; no link can receive more
+// than 32, below every capacity 64, so every call must deliver all 32 units.
+struct ParallelLedgers {
+  std::shared_ptr<const nc::Graph> graph;
+  std::array<std::unique_ptr<nc::FlowLedger>, 2> ledgers;
+  std::array<std::unique_ptr<nc::FlowPolicy>, 2> policies;
+  ParallelLedgers() {
+    std::vector<nc::NodeId> source, destination;
+    std::vector<nc::Amount> capacity;
+    std::vector<nc::Cost> cost;
+    constexpr std::array<int, 8> offsets {0, 1, 3, 7, 11, 17, 23, 29};
+    for (int layer = 0; layer < 11; ++layer) for (int head = 0; head < 32; ++head) for (int offset : offsets) {
+      source.push_back(layer * 32 + head);
+      destination.push_back((layer + 1) * 32 + (head + offset) % 32);
+      capacity.push_back(64);
+      cost.push_back(1 + (head * 17 + offset * 13 + layer) % 7);
+    }
+    graph = std::make_shared<const nc::Graph>(384, source, destination, capacity, cost, 1.0);
+    std::vector<nc::NodeId> heads, targets;
+    for (int i = 0; i < 32; ++i) { heads.push_back(i); targets.push_back(352 + i); }
+    for (std::size_t i = 0; i < 2; ++i) {
+      ledgers[i] = std::make_unique<nc::FlowLedger>(graph);
+      policies[i] = std::make_unique<nc::FlowPolicy>(*ledgers[i], heads, targets, nc::FlowPolicyConfig{});
+      const auto r = policies[i]->replace(32);
+      if (r.delivered != 32 || r.by_source.size() != 32) throw std::runtime_error("parallel fixture preparation failed");
+      for (const auto& row : r.by_source) if (row.delivered != 1) throw std::runtime_error("parallel fixture source delivery differs");
+    }
+  }
+  std::uint64_t run(bool parallel) {
+    std::array<std::uint64_t, 2> sums {};
+    std::array<std::exception_ptr, 2> errors {};
+    auto worker = [&](std::size_t i) noexcept {
+      try {
+        for (int call = 0; call < 32; ++call) {
+          const auto r = policies[i]->evaluate(32);
+          if (r.delivered != 32 || r.call_delivered != 32 || r.delivery_delta != 0 || r.by_source.size() != 32) {
+            throw std::runtime_error("parallel evaluation differs");
+          }
+          for (const auto& row : r.by_source) if (row.delivered != 1) throw std::runtime_error("parallel source delivery differs");
+          sums[i] += static_cast<std::uint64_t>(r.delivered);
+        }
+      } catch (...) { errors[i] = std::current_exception(); }
+    };
+    std::array<std::thread, 2> threads;
+    try {
+      for (std::size_t i = 0; i < 2; ++i) {
+        threads[i] = std::thread(worker, i);
+        if (!parallel) threads[i].join();
+      }
+    } catch (...) {
+      for (auto& thread : threads) if (thread.joinable()) thread.join();
+      throw;
+    }
+    for (auto& thread : threads) if (thread.joinable()) thread.join();
+    for (const auto& error : errors) if (error) std::rethrow_exception(error);
+    return sums[0] + sums[1];
+  }
+};
 
 // K shortest paths: the FEWER_HOPS tie_break, every parallel edge.
 inline std::uint64_t ksp(const Graph& g, int src, int dst, int k) {

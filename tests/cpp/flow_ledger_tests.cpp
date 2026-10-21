@@ -92,7 +92,7 @@ TEST(FlowLedger, BaselineValidationAndSnapshots) {
 
 // A baseline with one or several defects (one error, from the shared edge-amount check): its length
 // before any entry, then its first entry outside [0, capacity] in EdgeId order, at construction
-// and at reset; a bound policy is reported before the baseline, and a rejected reset changes
+// and at reset; amendment 9 checks the immutable baseline before bound state. A rejected reset changes
 // nothing (records, allocation, baseline, the next FlowId).
 TEST(FlowLedger, BaselineDefectsReportTheFirstInOrder) {
   const auto g = shared(edge_amount_graph());
@@ -104,7 +104,7 @@ TEST(FlowLedger, BaselineDefectsReportTheFirstInOrder) {
     RoutePolicy q(fg, 0, 3, split_route(fg, 0, 3, all_edges(*g), RouteAllocation::Equal, Admission::Lossless));
     ASSERT_EQ(q.place(1).call_delivered, 1);
     for (const auto& c : edge_amount_defects()) {
-      EXPECT_EQ(error_of([&] { fg.reset(c.amounts); }), "FlowLedger.reset is rejected while a policy is bound (1 bound)");
+      EXPECT_EQ(error_of([&] { fg.reset(c.amounts); }), "service_baseline" + c.error);
     }
   }  // destroyed without remove(): the record stays as an orphan
   const auto records = fg.records();

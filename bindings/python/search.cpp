@@ -27,6 +27,7 @@
 #include "publication.hpp"
 #include "values.hpp"
 #include "registration.hpp"
+#include "native_call.hpp"
 
 namespace py = pybind11;
 
@@ -165,22 +166,21 @@ void register_search(py::module_& m) {
         // Above INT64_MAX it gates every residual edge exactly as INT64_MAX does (residuals < 2^62).
         c.min_residual = overflow != 0 ? std::numeric_limits<Amount>::max() : static_cast<Amount>(mv);
         c.eligibility = o.eligibility.get();
-        std::optional<SpfResult> result;
-        {
-          py::gil_scoped_release release;
-          result.emplace(spf(*graph, r, c));
+        if (c.eligibility && c.eligibility->graph_uid() != graph->uid()) {
+          throw py::value_error("foreign Eligibility: built for another graph");
         }
+        auto result = native_call([&] { return spf(*graph, r, c); });
         // The result's Python objects, each through a checked allocation: a failure raises.
         auto [obj, slot] = new_object<PySpfResult>();
-        if (result->costs.has_value()) {
-          py::array_t<std::int64_t> costs(static_cast<py::ssize_t>(result->costs->size()));
-          std::copy(result->costs->begin(), result->costs->end(), costs.mutable_data());
+        if (result.costs.has_value()) {
+          py::array_t<std::int64_t> costs(static_cast<py::ssize_t>(result.costs->size()));
+          std::copy(result.costs->begin(), result.costs->end(), costs.mutable_data());
           py::detail::array_proxy(costs.ptr())->flags &= ~py::detail::npy_api::NPY_ARRAY_WRITEABLE_;
           slot->costs = std::move(costs);
         }
-        slot->dag = object_from<PredecessorDAG>(std::move(result->dag));
-        if (result->target_cost.has_value() && *result->target_cost != kUnreachable) {
-          slot->target_cost = int_object(*result->target_cost);
+        slot->dag = object_from<PredecessorDAG>(std::move(result.dag));
+        if (result.target_cost.has_value() && *result.target_cost != kUnreachable) {
+          slot->target_cost = int_object(*result.target_cost);
         }
         return std::move(obj);
       },

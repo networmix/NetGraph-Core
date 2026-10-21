@@ -464,8 +464,6 @@ std::string key(NodeId v) { return std::to_string(v); }
 
 // What a call computes. place(v) continues the epoch `cur` (the policy's); evaluate, replace and
 // forward start from a fresh epoch (forward keeps the installed program) on the released view.
-enum class PolicyOperation { Place, Evaluate, Replace, Forward };
-
 struct PolicyCall {
   PolicyOperation operation {PolicyOperation::Place};
   std::optional<Amount> offer {};          // nullopt: +inf
@@ -1510,7 +1508,7 @@ std::vector<Amount> reservation_view(const PolicyEngine& pe, const LedgerTotals&
 }
 
 // The design volume of a tunnel model's call: the explicit design, or the offer (nullopt:
-// unlimited; T1's is finite, checked by check_call).
+// unlimited; T1's is finite, checked by check_call_state).
 std::optional<Amount> design_of(const PolicyCall& rq) noexcept { return rq.design.has_value() ? *rq.design : rq.offer; }
 
 // The plan of a T1 setup for the design D: the tunnel count, D, the heads' shares and the holds
@@ -1862,22 +1860,28 @@ namespace {
 // The engine of a new policy, bound to its ledger as the last step. A supplied frozen cache's hit
 // is recorded in `tally`: the public constructor publishes it once construction has
 // succeeded, an evaluator once its whole call has.
-std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const NodeId> sources,
-                                          std::span<const NodeId> destinations, FlowPolicyConfig config,
-                                          const Eligibility* eligibility, ShortestPathCache* cache, detail::FrozenCacheHitTally& tally) {
-  auto pe = std::make_unique<PolicyEngine>(ledger, std::move(config));
-  pe->graph = ledger.graph();
-  const auto& g = *pe->graph;
+struct ConstructionInputs {
+  FlowPolicyConfig config;
+  std::vector<NodeId> sources, destinations, reachable_sources;
+  const Eligibility* eligibility {nullptr};
+  std::unique_ptr<const Eligibility> support_mask;
+  Cost c0 {0};
+};
+
+template<class Prepared>
+void prepare_arguments(Prepared& pe, const Graph& g, std::span<const NodeId> sources,
+    std::span<const NodeId> destinations, const Eligibility* eligibility, const ShortestPathCache* cache,
+    const detail::TunnelRoster* roster = nullptr, detail::ArgumentWork search = nullptr) {
   // The endpoints, then the ownership of the mask, the program, the support, the cache and the
   // black holes, then the configuration.
-  pe->sources = detail::node_set(sources, g.num_nodes(), "sources");
-  pe->destinations = detail::node_set(destinations, g.num_nodes(), "destinations");
-  detail::check_disjoint(pe->sources, pe->destinations, "sources", "destinations");
+  pe.sources = detail::node_set(sources, g.num_nodes(), "sources");
+  pe.destinations = detail::node_set(destinations, g.num_nodes(), "destinations");
+  detail::check_disjoint(pe.sources, pe.destinations, "sources", "destinations");
   if (eligibility != nullptr && eligibility->graph_uid() != g.uid()) {
     throw std::invalid_argument("foreign Eligibility: built for another graph");
   }
-  const auto* pinned = std::get_if<Pinned>(&pe->config.routing);
-  const auto* global = std::get_if<CentralizedTE>(&pe->config.routing);
+  const auto* pinned = std::get_if<Pinned>(&pe.config.routing);
+  const auto* global = std::get_if<CentralizedTE>(&pe.config.routing);
   if (pinned != nullptr) {
     if (!pinned->program) throw std::invalid_argument("Pinned requires a program");
     if (pinned->program->graph_uid() != g.uid()) throw std::invalid_argument("program belongs to another graph");
@@ -1891,34 +1895,75 @@ std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const No
   if (pinned != nullptr && pinned->black_holes && pinned->black_holes->graph_uid() != g.uid()) {
     throw std::invalid_argument("black_holes belongs to another graph");
   }
-  pe->eligibility = eligibility;
-  detail::check_config(pe->config, cache != nullptr, g.num_edges(), pe->sources.size());
-  pe->config = detail::resolved_config(std::move(pe->config));
-  if (global != nullptr && global->support && global->tunnel_count.has_value()) {
-    // T2 on a support: the support's edges intersected with the mask are the allowed links of every
-    // step (roster, sizing, objectives, decomposition, the programs' replay basis).
-    std::vector<NodeId> xn;
-    std::vector<EdgeId> xe;
-    const auto kept = detail::PredecessorDAGBuilder::ascending(*global->support);
-    for (NodeId v = 0; v < g.num_nodes(); ++v) {
-      if (eligibility != nullptr && !eligibility->allows_node(v)) xn.push_back(v);
-    }
-    for (EdgeId e = 0; e < g.num_edges(); ++e) {
-      const bool in_support = std::binary_search(kept.begin(), kept.end(), e);
-      if (!in_support || (eligibility != nullptr && !eligibility->allows_edge(e))) xe.push_back(e);
-    }
-    pe->support_mask = std::make_unique<const Eligibility>(g.eligibility(xn, xe));
-    eligibility = pe->support_mask.get();
-    pe->eligibility = eligibility;
+  pe.eligibility = eligibility;
+  detail::check_config(pe.config, cache != nullptr, g.num_edges(), pe.sources.size());
+  // Only ShortestPaths has absent defaults to resolve. The other models keep
+  // their already-validated snapshot without moving the routing variant.
+  if (std::holds_alternative<ShortestPaths>(pe.config.routing)) {
+    pe.config = detail::resolved_config(std::move(pe.config));
   }
   if (pinned != nullptr) {
     const auto& prog = *pinned->program;
-    if (!std::equal(prog.sources().begin(), prog.sources().end(), pe->sources.begin(), pe->sources.end()) ||
-        !std::equal(prog.destinations().begin(), prog.destinations().end(), pe->destinations.begin(),
-                    pe->destinations.end())) {
+    if (!std::equal(prog.sources().begin(), prog.sources().end(), pe.sources.begin(), pe.sources.end()) ||
+        !std::equal(prog.destinations().begin(), prog.destinations().end(), pe.destinations.begin(), pe.destinations.end())) {
       throw std::invalid_argument("program endpoints do not match policy endpoints");
     }
   }
+  if (std::holds_alternative<DistributedTE>(pe.config.routing) || (global != nullptr && global->tunnel_count.has_value())) {
+    auto work = [&] {
+      if (global != nullptr && global->support && global->tunnel_count.has_value()) {
+        // T2 on a support: the support's edges intersected with the mask are the allowed links of every
+        // step (roster, sizing, objectives, decomposition, the programs' replay basis).
+        std::vector<NodeId> xn;
+        std::vector<EdgeId> xe;
+        const auto kept = detail::PredecessorDAGBuilder::ascending(*global->support);
+        for (NodeId v = 0; v < g.num_nodes(); ++v) {
+          if (eligibility != nullptr && !eligibility->allows_node(v)) xn.push_back(v);
+        }
+        for (EdgeId e = 0; e < g.num_edges(); ++e) {
+          const bool in_support = std::binary_search(kept.begin(), kept.end(), e);
+          if (!in_support || (eligibility != nullptr && !eligibility->allows_edge(e))) xe.push_back(e);
+        }
+        pe.support_mask = std::make_unique<const Eligibility>(g.eligibility(xn, xe));
+        eligibility = pe.support_mask.get();
+        pe.eligibility = eligibility;
+      }
+      // The tunnel count's roster is immutable. Validate it in the argument pass, without
+      // consulting a cache or ledger state; retain the roster for native construction.
+      {
+        if (roster != nullptr) {
+          pe.reachable_sources = roster->heads;
+          pe.c0 = roster->c0;
+        } else {
+          std::vector<NodeId> allowed;
+          for (NodeId d : pe.destinations) if (eligibility == nullptr || eligibility->allows_node(d)) allowed.push_back(d);
+          detail::concurrent_event(detail::ConcurrentStage::TunnelRosterSearch, &g);
+          const auto dist = detail::static_costs(g, eligibility, allowed, pe.sources);
+          pe.c0 = kUnreachable;
+          for (std::size_t i = 0; i < pe.sources.size(); ++i) {
+            if ((eligibility == nullptr || eligibility->allows_node(pe.sources[i])) && dist[i] != kUnreachable) {
+              pe.reachable_sources.push_back(pe.sources[i]);
+              pe.c0 = std::min(pe.c0, dist[i]);
+            }
+          }
+          detail::check_tunnel_limit(pe.config, pe.reachable_sources.size());
+        }
+      }
+    };
+    if (search != nullptr) {
+      search([](void* context) { (*static_cast<decltype(work)*>(context))(); }, &work);
+    } else work();
+  }
+}
+
+std::unique_ptr<PolicyEngine> finish_engine(std::unique_ptr<PolicyEngine> pe, ShortestPathCache* cache,
+                                           detail::FrozenCacheHitTally& tally) {
+  auto& ledger = pe->ledger;
+  (void)LedgerAccess::baseline(ledger);  // mutable usability, after all immutable checks
+  const auto& g = *pe->graph;
+  auto* eligibility = pe->eligibility;
+  const auto* pinned = std::get_if<Pinned>(&pe->config.routing);
+  const auto* global = std::get_if<CentralizedTE>(&pe->config.routing);
   if (const auto* sp = std::get_if<ShortestPaths>(&pe->config.routing)) {
     pe->route_choice = detail::RouteChoice {sp->tie_break, sp->multipath, sp->parallel_edges};
   } else if (const auto* ca = std::get_if<DistributedTE>(&pe->config.routing)) {
@@ -1966,6 +2011,7 @@ std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const No
   } else {
     // The static costs fix the roster (unrestricted CentralizedTE, T1 and T2); T1's CostStretch baseline c0
     // is their minimum over the roster heads (zero-capacity edges included, before any filter).
+    if (!detail::tunnel_model(*pe)) {
     const auto dist = detail::static_costs(g, eligibility, pe->allowed_destinations, pe->sources);
     pe->c0 = kUnreachable;
     for (std::size_t i = 0; i < pe->sources.size(); ++i) {
@@ -1973,6 +2019,7 @@ std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const No
       if (!node_allowed(s) || dist[i] == kUnreachable) continue;
       pe->reachable_sources.push_back(s);
       pe->c0 = std::min(pe->c0, dist[i]);
+    }
     }
     detail::check_tunnel_limit(pe->config, pe->reachable_sources.size());
     if (eligibility != nullptr && eligibility->uid() != 0) {
@@ -1993,19 +2040,56 @@ std::unique_ptr<PolicyEngine> make_engine(FlowLedger& ledger, std::span<const No
 
 } // namespace
 
-// A public call of its own: a supplied frozen cache counts the hit once the policy exists.
-FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
-                       FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache)
-    : engine_(detail::frozen_call(cache, [&](detail::FrozenCacheHitTally& tally) {
-        return make_engine(ledger, sources, destinations, std::move(config), eligibility, cache, tally);
-      })) {}
+std::optional<detail::TunnelRoster> detail::check_policy_construction(const Graph& graph, std::span<const NodeId> sources,
+    std::span<const NodeId> destinations, const FlowPolicyConfig& config,
+    const Eligibility* eligibility, const ShortestPathCache* cache, detail::ArgumentWork search) {
+  ConstructionInputs prepared {config, {}, {}, {}, nullptr, {}, 0};
+  prepare_arguments(prepared, graph, sources, destinations, eligibility, cache, nullptr, search);
+  const auto* global = std::get_if<CentralizedTE>(&config.routing);
+  if (std::holds_alternative<DistributedTE>(config.routing) || (global && global->tunnel_count.has_value())) {
+    return detail::TunnelRoster {std::move(prepared.reachable_sources), prepared.c0};
+  }
+  return std::nullopt;
+}
+
+std::unique_ptr<PolicyEngine> detail::PolicyAccess::prepare(FlowLedger& ledger, std::span<const NodeId> sources,
+    std::span<const NodeId> destinations, FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache, const detail::TunnelRoster* roster, detail::ArgumentWork search) {
+  auto pe = std::make_unique<PolicyEngine>(ledger, std::move(config));
+  pe->graph = LedgerAccess::graph(ledger);
+  prepare_arguments(*pe, *pe->graph, sources, destinations, eligibility, cache, roster, search);
+  return pe;
+}
+
+FlowPolicy::FlowPolicy() noexcept = default;
+std::unique_ptr<FlowPolicy> detail::PolicyAccess::shell() { return std::unique_ptr<FlowPolicy>(new FlowPolicy); }
+
+void detail::PolicyAccess::construct(FlowPolicy& policy, std::unique_ptr<PolicyEngine> prepared, ShortestPathCache* cache) {
+  (void)detail::frozen_call(cache, [&](detail::FrozenCacheHitTally& tally) {
+    const auto gate = LedgerAccess::lock(prepared->ledger);
+    policy.engine_ = finish_engine(std::move(prepared), cache, tally);
+    detail::publication_event(detail::ConcurrentStage::PolicyEngineInstalled, &policy);
+    policy.ready_.store(true, std::memory_order_release);
+    return true;
+  });
+}
 
 FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
-                       FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache, detail::FrozenCacheHitTally& tally)
-    : engine_(make_engine(ledger, sources, destinations, std::move(config), eligibility, cache, tally)) {}
+                       FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache) {
+  auto prepared = detail::PolicyAccess::prepare(ledger, sources, destinations, std::move(config), eligibility, cache);
+  detail::PolicyAccess::construct(*this, std::move(prepared), cache);
+}
 
-// The destruction law: the records stay in the ledger as orphans.
-FlowPolicy::~FlowPolicy() { LedgerAccess::release(engine_->ledger, engine_->policy_id); }
+FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
+                       FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache, detail::FrozenCacheHitTally& tally, const detail::TunnelRoster* roster) {
+  auto prepared = detail::PolicyAccess::prepare(ledger, sources, destinations, std::move(config), eligibility, cache, roster);
+  const auto gate = LedgerAccess::lock(ledger);
+  engine_ = finish_engine(std::move(prepared), cache, tally);
+  detail::publication_event(detail::ConcurrentStage::PolicyEngineInstalled, this);
+  ready_.store(true, std::memory_order_release);
+}
+
+// The destruction law: the records stay in the ledger as orphans. A failed shell owns none.
+FlowPolicy::~FlowPolicy() noexcept { if (engine_) LedgerAccess::release(engine_->ledger, engine_->policy_id); }
 
 namespace detail {
 namespace {
@@ -2091,28 +2175,30 @@ void check_place_operation(const PolicyEngine& pe) {
 
 void check_forward_operation(const PolicyEngine& pe) {
   if (is<Pinned>(pe)) invalid("Pinned forwards with replace");
-  if (!pe.epoch.program) invalid("forward requires an installed program");
 }
 
-namespace {
-
-// The call's validation (before any change, also before the zero shortcut), in this order: the
-// operation for the model (T1's and T2's place) and an installed program (forward), the offer, a
-// Lossy full offer's finiteness, the design demand (the model, its domain, T1's finiteness), a
-// finite place after +inf, the requested total's limit, the black holes' graph.
-void check_call(const PolicyEngine& pe, const PolicyCall& rq) {
+void check_policy_offer(const PolicyEngine& pe, PolicyOperation operation, std::optional<Amount> offer) {
   const bool lossy = pe.config.admission == Admission::Lossy;
-  const bool t1 = is<DistributedTE>(pe);
-  if (rq.operation == PolicyOperation::Place) check_place_operation(pe);
-  if (rq.operation == PolicyOperation::Forward) check_forward_operation(pe);
-  if (rq.offer.has_value() && (*rq.offer < 0 || *rq.offer >= kDomainLimit)) {
+  if (operation == PolicyOperation::Place) check_place_operation(pe);
+  if (operation == PolicyOperation::Forward) check_forward_operation(pe);
+  if (offer.has_value() && (*offer < 0 || *offer >= kDomainLimit)) {
     invalid("offer must be an integer in [0, 2^62) or permitted +inf");
   }
   // A Lossy full offer is finite; ShortestPaths's place(+inf) is its first-hop experiment.
-  if (lossy && !rq.offer.has_value() && (rq.is_full_offer() || is<Pinned>(pe))) invalid("LOSSY forwarding requires a finite offer");
+  if (lossy && !offer.has_value() && ((operation != PolicyOperation::Place) || is<Pinned>(pe))) invalid("LOSSY forwarding requires a finite offer");
+}
+void check_policy_design_model(const PolicyEngine& pe) {
+  if (!tunnel_model(pe)) invalid(std::string(model_name(pe.config.routing)) + " does not accept design_demand");
+}
+
+void check_policy_arguments(const PolicyEngine& pe, PolicyOperation operation, std::optional<Amount> offer,
+    const std::optional<std::optional<Amount>>& design, const Eligibility* black_holes) {
+  const PolicyCall rq {operation, offer, design, black_holes};
+  check_policy_offer(pe, operation, offer);
+  const bool t1 = is<DistributedTE>(pe);
   // The design demand: the tunnel models' alone, in its domain, T1's finite (absent: the offer).
   if (rq.design.has_value()) {
-    if (!tunnel_model(pe)) invalid(std::string(model_name(pe.config.routing)) + " does not accept design_demand");
+    check_policy_design_model(pe);
     if (rq.design->has_value() && (**rq.design < 0 || **rq.design >= kDomainLimit)) {
       invalid("design_demand must be an integer in [0, 2^62) or permitted +inf");
     }
@@ -2120,6 +2206,14 @@ void check_call(const PolicyEngine& pe, const PolicyCall& rq) {
   if (t1 && rq.operation != PolicyOperation::Forward && (rq.design.has_value() ? !rq.design->has_value() : !rq.offer.has_value())) {
     invalid("DistributedTE requires a finite design demand");
   }
+  if (rq.operation == PolicyOperation::Forward && rq.black_holes != nullptr && rq.black_holes->graph_uid() != pe.graph->uid()) {
+    invalid("black_holes belongs to another graph");
+  }
+}
+
+namespace {
+void check_call_state(const PolicyEngine& pe, const PolicyCall& rq) {
+  if (rq.operation == PolicyOperation::Forward && !pe.epoch.program) invalid("forward requires an installed program");
   if (rq.operation == PolicyOperation::Place) {
     if (pe.epoch.infinite && rq.offer.has_value()) invalid("finite placement after infinite placement requires a new epoch");
     // The only check of the cumulative request: nothing changes the requested total between here
@@ -2128,9 +2222,6 @@ void check_call(const PolicyEngine& pe, const PolicyCall& rq) {
       Counter128 probe = pe.epoch.requested;
       if (!probe.add(*rq.offer)) invalid("requested limit exceeded");
     }
-  }
-  if (rq.operation == PolicyOperation::Forward && rq.black_holes != nullptr && rq.black_holes->graph_uid() != pe.graph->uid()) {
-    invalid("black_holes belongs to another graph");
   }
 }
 
@@ -2182,25 +2273,25 @@ PendingPolicyUpdate compute(const PolicyEngine& pe, const PolicyCall& rq) {
 // The publication: the ledger's one atomic exchange (a place commits every live record and the new
 // ones; a full-offer call retires the live ones and creates the new ones), then the epoch.
 void publish(PolicyEngine& pe, PendingPolicyUpdate& s, bool full) {
+  concurrent_event(ConcurrentStage::BeforePublication, &pe.ledger);
   const auto ids = full ? LedgerAccess::exchange(pe.ledger, pe.policy_id, s.drafts) : LedgerAccess::commit(pe.ledger, pe.policy_id, s.drafts);
+  publication_event(ConcurrentStage::AfterLedgerExchange, &pe.ledger);
   // Committed: the epoch state follows (nothing below throws).
   for (std::size_t n = 0; n < s.fresh.size(); ++n) s.next_epoch.record_groups[s.fresh[n].first][s.fresh[n].second].record_counter = ids[n].second;
   pe.epoch = std::move(s.next_epoch);
 }
 
-// A publishing call (place, replace, forward; evaluate computes without it). `before_publish`
-// (optional) runs once the call's result and trace are final and before anything is published (the
-// ledger commit, the epoch state): an exception from it aborts the call with nothing changed (the
-// Python binding builds its result objects there).
-PlacementResult run_call(PolicyEngine& pe, const PolicyCall& rq, const std::function<void()>* before_publish) {
-  check_call(pe, rq);
+// A publishing call: compute and finish every fallible result/trace step before
+// the ledger exchange. The gate remains held through the complete epoch update.
+PlacementResult run_call(PolicyEngine& pe, const PolicyCall& rq) {
+  check_policy_arguments(pe, rq.operation, rq.offer, rq.design, rq.black_holes);
+  const auto gate = LedgerAccess::lock(pe.ledger);
+  check_call_state(pe, rq);
   if (rq.operation == PolicyOperation::Place && rq.offer.has_value() && *rq.offer == 0) {
     PlacementResult out = zero_state(pe, rq.totals, *rq.outputs);
-    if (before_publish != nullptr && *before_publish) (*before_publish)();
     return out;
   }
   PendingPolicyUpdate s = compute(pe, rq);
-  if (before_publish != nullptr && *before_publish) (*before_publish)();
   PlacementResult out = std::move(s.result);
   publish(pe, s, rq.is_full_offer());
   return out;
@@ -2215,10 +2306,10 @@ struct ListAction {
 };
 
 // The list's validation, before anything is computed: the ledger, the mode, then each
-// action in list order, all of its checks before the next one's (ownership, the duplicate rule,
-// the SIMULTANEOUS rules, the scalar call's own checks).
+// action's argument/immutable checks in list order (ownership, the duplicate rule,
+// the SIMULTANEOUS rules, the scalar call's immutable checks). Mutable checks run
+// in list order under the gate, after this entire first pass succeeds.
 std::vector<ListAction> validate_list(FlowLedger& ledger, std::span<const Action> actions, BatchMode mode, const OutputOptions& outputs) {
-  (void)LedgerAccess::baseline(ledger);  // a moved-from ledger: std::logic_error
   switch (mode) {
     case BatchMode::Ordered:
     case BatchMode::Simultaneous: break;
@@ -2226,7 +2317,7 @@ std::vector<ListAction> validate_list(FlowLedger& ledger, std::span<const Action
   }
   std::vector<ListAction> out;
   out.reserve(actions.size());
-  std::set<std::int64_t> seen;
+  std::set<const FlowPolicy*> seen;
   for (const Action& a : actions) {
     ListAction x;
     FlowPolicy* policy = nullptr;
@@ -2250,7 +2341,7 @@ std::vector<ListAction> validate_list(FlowLedger& ledger, std::span<const Action
     PolicyEngine& pe = PolicyAccess::engine(*policy);
     x.engine = &pe;
     if (&pe.ledger != &ledger) invalid("list policy belongs to another ledger");
-    if (!seen.insert(pe.policy_id).second) invalid("duplicate policy in list");
+    if (!seen.insert(policy).second) invalid("duplicate policy in list");
     if (mode == BatchMode::Simultaneous) {
       if (x.call.operation == PolicyOperation::Place) invalid("SIMULTANEOUS does not accept Place");
       if (x.call.operation == PolicyOperation::Replace && !is<Pinned>(pe) &&
@@ -2260,7 +2351,7 @@ std::vector<ListAction> validate_list(FlowLedger& ledger, std::span<const Action
       if (pe.config.admission != Admission::Lossy) invalid("SIMULTANEOUS requires admission=LOSSY");
       if (!x.call.offer.has_value()) invalid("SIMULTANEOUS requires finite offers");
     }
-    check_call(pe, x.call);
+    check_policy_arguments(pe, x.call.operation, x.call.offer, x.call.design, x.call.black_holes);
     out.push_back(x);
   }
   return out;
@@ -2277,7 +2368,9 @@ void publish_list(FlowLedger& ledger, std::span<ListAction> list, std::span<Pend
     which.push_back(i);
   }
   std::vector<std::vector<FlowId>> created(owners.size());
+  concurrent_event(ConcurrentStage::BeforePublication, &ledger);
   LedgerAccess::commit_batch(ledger, owners, created);
+  publication_event(ConcurrentStage::AfterLedgerExchange, &ledger);
   for (std::size_t k = 0; k < which.size(); ++k) {
     PendingPolicyUpdate& s = pending[which[k]];
     for (std::size_t n = 0; n < s.fresh.size(); ++n) s.next_epoch.record_groups[s.fresh[n].first][s.fresh[n].second].record_counter = created[k][n].second;
@@ -2460,45 +2553,59 @@ std::vector<PlacementResult> run_simultaneous(FlowLedger& ledger, std::span<List
 } // namespace
 } // namespace detail
 
-PlacementResult FlowPolicy::place(std::optional<Amount> offer, const OutputOptions& outputs) {
-  return detail::run_call(*engine_, detail::PolicyCall {detail::PolicyOperation::Place, offer, {}, nullptr, &outputs, nullptr}, nullptr);
+void detail::check_list_arguments(FlowLedger& ledger, std::span<const Action> actions, BatchMode mode, const OutputOptions& outputs) {
+  (void)validate_list(ledger, actions, mode, outputs);
+}
+
+PlacementResult FlowPolicy::place(std::optional<Amount> offer, const OutputOptions& input_outputs) {
+  const OutputOptions outputs = input_outputs;
+  return detail::run_call(*engine_, detail::PolicyCall {detail::PolicyOperation::Place, offer, {}, nullptr, &outputs, nullptr});
 }
 
 PlacementResult FlowPolicy::evaluate(std::optional<Amount> offer, const std::optional<std::optional<Amount>>& design_demand,
-                                     const OutputOptions& outputs) const {
+                                     const OutputOptions& input_outputs) const {
+  const OutputOptions outputs = input_outputs;
   const detail::PolicyCall rq {detail::PolicyOperation::Evaluate, offer, design_demand, nullptr, &outputs, nullptr};
-  detail::check_call(*engine_, rq);
+  detail::check_policy_arguments(*engine_, rq.operation, rq.offer, rq.design, rq.black_holes);
+  const auto gate = LedgerAccess::lock(engine_->ledger);
+  detail::check_call_state(*engine_, rq);
   return std::move(detail::compute(*engine_, rq).result);
 }
 
 PlacementResult FlowPolicy::replace(std::optional<Amount> offer, const std::optional<std::optional<Amount>>& design_demand,
-                                    const OutputOptions& outputs) {
-  return detail::run_call(*engine_, detail::PolicyCall {detail::PolicyOperation::Replace, offer, design_demand, nullptr, &outputs, nullptr},
-                          nullptr);
+                                    const OutputOptions& input_outputs) {
+  const OutputOptions outputs = input_outputs;
+  return detail::run_call(*engine_, detail::PolicyCall {detail::PolicyOperation::Replace, offer, design_demand, nullptr, &outputs, nullptr});
 }
 
 PlacementResult FlowPolicy::forward(std::optional<Amount> offer, const Eligibility* black_holes,
-                                    const OutputOptions& outputs) {
-  return detail::run_call(*engine_, detail::PolicyCall {detail::PolicyOperation::Forward, offer, {}, black_holes, &outputs, nullptr},
-                          nullptr);
+                                    const OutputOptions& input_outputs) {
+  const OutputOptions outputs = input_outputs;
+  return detail::run_call(*engine_, detail::PolicyCall {detail::PolicyOperation::Forward, offer, {}, black_holes, &outputs, nullptr});
 }
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
-PlacementResult detail::place_traced(FlowPolicy& policy, std::optional<Amount> offer, const OutputOptions& outputs,
-                                     Trace& trace, const std::function<void()>* before_publish) {
+PlacementResult detail::place_traced(FlowPolicy& policy, std::optional<Amount> offer, const OutputOptions& input_outputs,
+                                     Trace& trace) {
+  const OutputOptions outputs = input_outputs;
   trace = Trace::map();
-  return run_call(PolicyAccess::engine(policy), PolicyCall {PolicyOperation::Place, offer, {}, nullptr, &outputs, &trace}, before_publish);
+  return run_call(PolicyAccess::engine(policy), PolicyCall {PolicyOperation::Place, offer, {}, nullptr, &outputs, &trace});
 }
 #endif
 
-std::vector<PlacementResult> apply_actions(FlowLedger& ledger, std::span<const Action> actions, BatchMode mode, const OutputOptions& outputs) {
+std::vector<PlacementResult> apply_actions(FlowLedger& ledger, std::span<const Action> actions, BatchMode mode, const OutputOptions& input_outputs) {
+  const OutputOptions outputs = input_outputs;
   auto list = detail::validate_list(ledger, actions, mode, outputs);
+  const auto gate = LedgerAccess::lock(ledger);
+  (void)LedgerAccess::baseline(ledger);
+  for (const auto& action : list) detail::check_call_state(*action.engine, action.call);
   if (list.empty()) return {};
   return mode == BatchMode::Ordered ? detail::run_ordered(ledger, list, outputs) : detail::run_simultaneous(ledger, list, outputs);
 }
 
 void FlowPolicy::remove() {
   auto& pe = *engine_;
+  const auto gate = LedgerAccess::lock(pe.ledger);
   (void)LedgerAccess::detach(pe.ledger, pe.policy_id);
   // A new epoch (nothing below throws): the same number of cohorts, every one empty.
   for (auto& c : pe.epoch.record_groups) c.clear();
@@ -2516,6 +2623,7 @@ void FlowPolicy::remove() {
 
 Amount FlowPolicy::delivered() const {
   const auto& pe = *engine_;
+  const auto gate = LedgerAccess::lock(pe.ledger);
   Amount total = 0;
   for (const auto& c : pe.epoch.record_groups) {
     for (const auto& s : c) total += LedgerAccess::live(pe.ledger, s.record_counter).delivered;
@@ -2525,6 +2633,7 @@ Amount FlowPolicy::delivered() const {
 
 std::vector<FlowRecord> FlowPolicy::records() const {
   const auto& pe = *engine_;
+  const auto gate = LedgerAccess::lock(pe.ledger);
   std::vector<std::int64_t> ids;
   for (const auto& c : pe.epoch.record_groups) {
     for (const auto& s : c) ids.push_back(s.record_counter);
@@ -2538,9 +2647,10 @@ std::vector<FlowRecord> FlowPolicy::records() const {
 
 FlowRecord FlowPolicy::record(const FlowId& flow_id) const {
   const auto& pe = *engine_;
+  const auto gate = LedgerAccess::lock(pe.ledger);
   const FlowLedger& fg = pe.ledger;
   // The ledger's checks first (another ledger, a retired or unknown id), then the owner.
-  FlowRecord rec = fg.record(flow_id);
+  FlowRecord rec = LedgerAccess::record(fg, flow_id);
   if (rec.policy_id != pe.policy_id) {
     throw std::invalid_argument("FlowId (" + std::to_string(flow_id.first) + ", " + std::to_string(flow_id.second) +
                                 ") is not a record of this policy");
@@ -2548,7 +2658,10 @@ FlowRecord FlowPolicy::record(const FlowId& flow_id) const {
   return rec;
 }
 
-std::shared_ptr<const ForwardingProgram> FlowPolicy::program() const noexcept { return engine_->epoch.program; }
+std::shared_ptr<const ForwardingProgram> FlowPolicy::program() const {
+  const auto gate = LedgerAccess::lock(engine_->ledger);
+  return engine_->epoch.program;
+}
 
 const FlowPolicyConfig& FlowPolicy::config() const noexcept { return engine_->config; }
 

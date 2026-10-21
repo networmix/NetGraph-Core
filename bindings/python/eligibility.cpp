@@ -8,6 +8,7 @@
 
 #include "netgraph/core/eligibility.hpp"
 #include "values.hpp"
+#include "native_call.hpp"
 #include "publication.hpp"
 #include "registration.hpp"
 
@@ -41,7 +42,8 @@ void register_eligibility(py::module_& m) {
           "intersect",
           [](const std::shared_ptr<Eligibility>& a, const std::shared_ptr<Eligibility>& b) {
             if (!a || !b) throw py::type_error("Eligibility.intersect takes two Eligibility values");
-            auto r = Eligibility::intersect(*a, *b);
+            if (a->graph_uid() != b->graph_uid()) throw py::value_error("Eligibility.intersect: the two values belong to different graphs");
+            auto r = native_call([&] { return Eligibility::intersect(*a, *b); });
             if (r.uid() == a->uid()) return typed_shared(a);
             if (r.uid() == b->uid()) return typed_shared(b);
             return typed_shared(std::make_shared<Eligibility>(std::move(r)));
