@@ -2641,20 +2641,33 @@ def apply_actions(
 def as_float(
     x: collections.abc.Sequence[typing.SupportsIndex]
     | numpy.typing.NDArray[numpy.integer],
-    resolution: typing.SupportsFloat | typing.SupportsIndex,
+    resolution: int | float | numpy.integer | numpy.floating,
 ) -> numpy.typing.NDArray[numpy.float64]:
     """
-    Units to physical value(s): x * q, correctly rounded (exact below 2^53 units). An int, of
-    any size, gives a float, an integer array a float64 array; a result beyond the finite
-    doubles raises ValueError. x is an integer position (any object with __index__, never a bool;
-    anything else is a TypeError); q must be a power of two in [2^-32, 2^32] (a float, a NumPy float
-    or an integer).
+    Units to physical value(s): the exact product x*q correctly rounded to binary64, nearest
+    with ties to even. x is any signed, unbounded integer: an int or NumPy integer gives a
+    float, an integer vector a float64 array. An int or NumPy integer, a subclass included,
+    is never read as a sequence. An integer position accepts __index__, never
+    a bool; other types raise TypeError. q is a power of two in [2^-32, 2^32] (float, NumPy
+    float or integer). The result is finite iff abs(x*q) < 2^1024 - 2^970; otherwise raise
+    ValueError('as_float: <x> units times the resolution exceed the largest finite double').
+    Exact for abs(x) <= 2^53 inclusive. Above 2^53 an integer of binary length L is exact
+    iff divisible by 2^(L-53); 2^53+1 rounds to 2^53, 2^53+3 to 2^53+4, times q.
+    to_units(as_float(x,q),q)==x holds for x in [0,2^53] at every q, and for larger x in
+    [0,2^62) exactly when x is a double. The first failure is 2^53+1; 2^62-1 rounds to
+    2^62*q and reconversion raises the to_units domain ValueError. A successful to_units
+    result is always exact here; its error against the promoted binary64 input is in
+    (-q/2,q/2]. Choose q before Graph construction, then use Graph.resolution().
     """
 
 @typing.overload
 def as_float(
-    x: typing.SupportsIndex, resolution: typing.SupportsFloat | typing.SupportsIndex
+    x: int | numpy.integer, resolution: int | float | numpy.integer | numpy.floating
 ) -> float: ...
+@typing.overload
+def as_float(
+    x: typing.SupportsIndex, resolution: int | float | numpy.integer | numpy.floating
+) -> float | numpy.typing.NDArray[numpy.float64]: ...
 def evaluate_demand(
     graph: Graph,
     sources: typing.SupportsIndex
@@ -2804,25 +2817,43 @@ def spf(
 
 @typing.overload
 def to_units(
-    x: float | numpy.floating | numpy.integer,
-    resolution: typing.SupportsFloat | typing.SupportsIndex,
+    x: int | float | numpy.floating | numpy.integer,
+    resolution: int | float | numpy.integer | numpy.floating,
 ) -> int:
     """
-    Physical value(s) to units of the resolution q, rounding half up: an int for a scalar, an
-    int64 array for an array. NaN, infinity, negative values, an integer too large for NumPy and
-    results at or above 2^62 units raise ValueError; a bool (also as an entry), a string or an array
-    of another dtype or rank, or any type but int, float and the NumPy numbers (a Decimal, a
-    Fraction, an object known by __float__, __index__ or __array__) TypeError; an int or float
-    subclass is read by its value. q must be a power of two in [2^-32, 2^32]: a float, a NumPy
-    float or an integer (any other type is a TypeError; an integer beyond the float range a
-    ValueError).
+    Physical value(s) to units of resolution q. Each input becomes binary64 b: float32 widens
+    exactly; integers become the nearest double, ties to even. Return floor(b/q + 1/2),
+    evaluated exactly, never by floating addition of 1/2 or by reading the printed decimal.
+    Ties are b=(2n+1)*q/2, 0 <= n < 2^52; each gives n+1, never the even neighbour. Scaling
+    by q=2^k is exact while normal; underflow only affects values rounding to zero. Below
+    2^52 scaled units the fractional comparison is exact; above it doubles are integral.
+    A scalar or 0-d array gives an int; a sequence or 1-d array gives an int64 array. Negative
+    zero gives 0. NaN, infinity, negative values, an integer too large for NumPy and results
+    at or above 2^62 units raise ValueError. A bool, string, wrong dtype/rank or type other
+    than int, float or NumPy numbers raises TypeError; int/float subclasses use stored values.
+    q must be a power of two in [2^-32, 2^32]: a float, NumPy float or integer (another type
+    raises TypeError, an integer beyond the float range ValueError).
+    Every result u is exactly representable, so as_float(u,q) adds no error: against b,
+    -q/2 < as_float(u,q)-b <= q/2, with +q/2 exactly at ties. Against an original argument a
+    changed by promotion, add b-a (2^53+1 at q=1 loses 1 before quantization). N separately
+    rounded values have total error in (-N*q/2,N*q/2]; no sign is promised. With symmetric
+    non-tie fractional parts, mean error is (q/2)*P(tie); continuous uniform parts have none.
+    Round a demand once, then split whole units. 2^53 is no decimal precision threshold: a
+    decimal is exact only if its reduced denominator is a power of two and it fits binary64.
+    A decimal and its parsed double agree only in the same half-up cell; 5501195.1796 at
+    q=2^-21 gives 11536842473289, whereas its decimal reading would give 11536842473288.
+    CostStretch deliberately reads printed decimals for ratios; physical amounts use b.
     """
 
 @typing.overload
 def to_units(
-    x: collections.abc.Sequence[float | numpy.floating | numpy.integer]
-    | numpy.typing.NDArray[numpy.floating | numpy.integer],
-    resolution: typing.SupportsFloat | typing.SupportsIndex,
+    x: collections.abc.Sequence[int | float | numpy.floating | numpy.integer],
+    resolution: int | float | numpy.integer | numpy.floating,
 ) -> numpy.typing.NDArray[numpy.int64]: ...
+@typing.overload
+def to_units(
+    x: numpy.typing.NDArray[numpy.floating | numpy.integer],
+    resolution: int | float | numpy.integer | numpy.floating,
+) -> int | numpy.typing.NDArray[numpy.int64]: ...
 
 UNREACHABLE: int = 9223372036854775807

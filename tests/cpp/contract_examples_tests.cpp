@@ -9,6 +9,11 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
+#include <iomanip>
+#include <limits>
+#include <random>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -3472,4 +3477,172 @@ TEST(ContractExamples, CALL_state_second) {
       "black_holes belongs to another graph", "Pinned forwards with replace", "forward requires an installed program",
       "evaluate_pairs does not accept Pinned", "offer must be an integer in [0, 2^62)",
       "foreign ShortestPathCache: bound to another graph", mode, "offer must be an integer in [0, 2^62)", mode}));
+}
+
+namespace {
+
+// Independently decode b = significand * 2^exponent, then divide integers with a half-up
+// remainder test. No production kernel, floating scaling, floor or floating +1/2 is used.
+Amount binary_units_reference(double b, int k) {
+  const auto bits = std::bit_cast<std::uint64_t>(b);
+  const auto biased = static_cast<int>((bits >> 52) & 0x7ffU);
+  const auto significand = (bits & ((std::uint64_t {1} << 52) - 1)) |
+                          (biased == 0 ? 0 : (std::uint64_t {1} << 52));
+  const int exponent = (biased == 0 ? -1074 : biased - 1023 - 52) - k;
+  if (exponent >= 0) return static_cast<Amount>(significand << exponent);
+  const int down = -exponent;
+  if (down >= 64) return 0;
+  const auto remainder = significand & ((std::uint64_t {1} << down) - 1);
+  return static_cast<Amount>((significand >> down) + (remainder >= (std::uint64_t {1} << (down - 1))));
+}
+
+void unit_error(double b, double q, Amount expected, double error_in_units) {
+  const auto u = to_units(b, q);
+  EXPECT_EQ(u, expected);
+  const auto product = as_float(u, q);
+  EXPECT_EQ(product, static_cast<double>(u) * q);
+  EXPECT_EQ((product - b) / q, error_in_units);
+  EXPECT_GT((product - b) / q, -0.5);
+  EXPECT_LE((product - b) / q, 0.5);
+}
+
+} // namespace
+
+TEST(ContractExamples, UNITS_literal_tie) {
+  const double q = 0x1p-21;
+  unit_error(5501195.1796, q, 11536842473289LL, 0.5);
+  EXPECT_EQ(to_units(std::nextafter(5501195.1796, 0.0), q), 11536842473288LL);
+}
+
+TEST(ContractExamples, UNITS_computed_tie) {
+  const double q = 0x1p-18;
+  unit_error(400.0 + 0x1p-19, q, 104857601, 0.5);
+  EXPECT_EQ(to_units(400.0, q), 104857600);
+}
+
+TEST(ContractExamples, UNITS_float32) {
+  const double q = 0x1p-32;
+  // float32(0.1) = 13421773/134217728, not the decimal its short printing suggests.
+  const double b = static_cast<double>(0.1F);
+  EXPECT_EQ(b, 13421773.0 / 134217728.0);
+  unit_error(b, q, 429496736, 0.0);
+  EXPECT_EQ(to_units(0.1, q), 429496730);
+}
+
+TEST(ContractExamples, UNITS_ties) {
+  EXPECT_EQ(to_units(0x1p-33, 0x1p-32), 1);
+  EXPECT_EQ(to_units(std::nextafter(0x1p-33, 0.0), 0x1p-32), 0);
+  EXPECT_EQ(to_units(0x1p31, 0x1p32), 1);
+  for (Amount n = 0; n != 4; ++n) EXPECT_EQ(to_units(static_cast<double>(n) + 0.5, 1.0), n + 1);
+  EXPECT_EQ(to_units(0x1p52 - 0.5, 1.0), Amount {1} << 52);
+  EXPECT_EQ(to_units(0x1p52 + 1, 1.0), (Amount {1} << 52) + 1);
+  EXPECT_EQ(to_units(0x1p53 + 2, 1.0), (Amount {1} << 53) + 2);
+  EXPECT_EQ(to_units(-0.0, 1.0), 0);
+  EXPECT_EQ(to_units(std::numeric_limits<double>::denorm_min(), 0x1p32), 0);
+}
+
+TEST(ContractExamples, UNITS_round_trip) {
+  for (double q : {1.0, 0x1p-32, 0x1p32}) {
+    for (Amount u : {Amount {1} << 53, (Amount {1} << 53) + 2, (Amount {1} << 62) - 512}) {
+      EXPECT_EQ(to_units(as_float(u, q), q), u);
+    }
+    EXPECT_EQ(to_units(as_float((Amount {1} << 53) + 1, q), q), Amount {1} << 53);
+    EXPECT_EQ(as_float((Amount {1} << 53) + 1, q), 0x1p53 * q);
+    EXPECT_THROW((void)to_units(as_float((Amount {1} << 62) - 1, q), q), std::invalid_argument);
+  }
+  EXPECT_EQ(to_units(as_float(120401795907070192LL, 0x1p-27), 0x1p-27), 120401795907070192LL);
+}
+
+TEST(ContractExamples, UNITS_promoted_integer) {
+  const Amount first = (Amount {1} << 53) + 1;
+  const Amount second = (Amount {1} << 53) + 3;
+  unit_error(static_cast<double>(first), 1.0, first - 1, 0.0);
+  unit_error(static_cast<double>(second), 1.0, second + 1, 0.0);
+  // Compare as integers to preserve the promotion error which a double subtraction would hide.
+  EXPECT_EQ(to_units(static_cast<double>(first), 1.0) - first, -1);
+  EXPECT_EQ(to_units(static_cast<double>(second), 1.0) - second, 1);
+}
+
+TEST(ContractExamples, UNITS_as_float_range) {
+  EXPECT_EQ(as_float(-1, 0.5), -0.5);
+  EXPECT_EQ(as_float((Amount {1} << 53) + 3, 1.0), 9007199254740996.0);
+  // The native signature is int64, so the unbounded-integer finite-double boundary and
+  // 2^70+1 case belong to the Python API tests. Native int64 extrema are always finite.
+  for (int k = -32; k <= 32; ++k) {
+    const double q = std::ldexp(1.0, k);
+    EXPECT_EQ(as_float(std::numeric_limits<Amount>::max(), q), std::ldexp(1.0, 63 + k));
+    EXPECT_EQ(as_float(std::numeric_limits<Amount>::min(), q), -std::ldexp(1.0, 63 + k));
+    EXPECT_EQ(as_float(-(Amount {1} << 53), q), -0x1p53 * q);
+    EXPECT_EQ(as_float(-((Amount {1} << 53) + 3), q), -(0x1p53 + 4) * q);
+  }
+}
+
+TEST(ContractExamples, UNITS_sums) {
+  EXPECT_EQ(to_units(0.5, 1.0), 1);
+  EXPECT_EQ(to_units(0.5, 1.0) + to_units(0.5, 1.0), 2);
+  EXPECT_EQ(to_units(0.5 + 0.5, 1.0), 1);
+  EXPECT_EQ(to_units(0.25, 1.0), 0);
+  EXPECT_EQ(to_units(0.25, 1.0) + to_units(0.25, 1.0), 0);
+  EXPECT_EQ(to_units(0.25 + 0.25, 1.0), 1);
+  EXPECT_EQ(as_float(2, 1.0) - (0.5 + 0.5), 1.0);
+  EXPECT_EQ(as_float(0, 1.0) - (0.25 + 0.25), -0.5);
+}
+
+TEST(ContractExamples, UNITS_double_steps) {
+  // Two hand-derived differentiators for each oracle branch: below half/at half, odd/even
+  // ties, the last tie/first integral double, and exact/inexact integer promotion.
+  EXPECT_EQ(binary_units_reference(0.25, 0), 0);
+  EXPECT_EQ(binary_units_reference(0.5, 0), 1);
+  EXPECT_EQ(binary_units_reference(1.5, 0), 2);
+  EXPECT_EQ(binary_units_reference(2.5, 0), 3);
+  EXPECT_EQ(binary_units_reference(0x1p52 - 0.5, 0), Amount {1} << 52);
+  EXPECT_EQ(binary_units_reference(0x1p52 + 1, 0), (Amount {1} << 52) + 1);
+  EXPECT_EQ(binary_units_reference(0x1p53, 0), Amount {1} << 53);
+  EXPECT_EQ(binary_units_reference(0x1p53 + 2, 0), (Amount {1} << 53) + 2);
+  EXPECT_EQ(binary_units_reference(0x1p-1074, 32), 0);
+  EXPECT_EQ(binary_units_reference(0x1p-1074, -32), 0);
+  std::mt19937_64 rng(10);
+  int checked = 0;
+  int returned = 0;
+  for (int k = -32; k <= 32; ++k) {
+    const double q = std::ldexp(1.0, k);
+    const auto check = [&](double b) {
+      const auto expected = binary_units_reference(b, k);
+      const auto u = to_units(b, q);
+      EXPECT_EQ(u, expected) << "b=" << std::hexfloat << b << " k=" << k;
+      const auto value = as_float(u, q);
+      EXPECT_EQ(value, static_cast<double>(u) * q);
+      EXPECT_GT((value - b) / q, -0.5);
+      EXPECT_LE((value - b) / q, 0.5);
+      ++checked;
+    };
+    for (int i = 0; i < 68; ++i) {
+      const Amount n = i == 0 ? 0 : i == 1 ? 1 : i == 2 ? Amount {1} << 26 :
+                       i == 3 ? (Amount {1} << 52) - 1 : static_cast<Amount>(rng() % (std::uint64_t {1} << 52));
+      const double tie = static_cast<double>(2 * n + 1) * q / 2;
+      EXPECT_EQ(to_units(tie, q), n + 1);
+      check(tie);
+      check(std::nextafter(tie, 0.0));
+      check(std::nextafter(tie, std::numeric_limits<double>::infinity()));
+    }
+    for (double edge : {0x1p52, 0x1p53}) {
+      check(edge * q);
+      check(std::nextafter(edge * q, 0.0));
+    }
+    check(std::numeric_limits<double>::denorm_min());
+    for (int i = 0; i < 64; ++i) {
+      // A 53-bit significand, with exponents covering tiny values through <2^62 scaled units.
+      const double mantissa = static_cast<double>(rng() >> 11) * 0x1p-53;
+      const int exponent = static_cast<int>(rng() % 103) - 40;
+      check(std::ldexp(mantissa, exponent) * q);
+    }
+    for (int i = 0; i < 68; ++i) {
+      const Amount u = i == 0 ? 0 : i == 1 ? 1 : i == 2 ? (Amount {1} << 53) - 1 :
+                       i == 3 ? Amount {1} << 53 : static_cast<Amount>(rng() % ((std::uint64_t {1} << 53) + 1));
+      EXPECT_EQ(to_units(as_float(u, q), q), u);
+      ++returned;
+    }
+  }
+  EXPECT_EQ(checked, 17745);
+  EXPECT_EQ(returned, 4420);
 }

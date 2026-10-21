@@ -162,12 +162,65 @@ separate kind of number: positive integers that are never converted.
   sentinel `UNREACHABLE` (the largest `int64`). An offer is an integer in `[0, 2^62)` units or
   positive infinity (`float('inf')`, "as much as possible"). Everything outside the domain is a
   `ValueError` raised before anything changes.
-- **`to_units(x, q)`** converts physical values to units, rounding half up: a scalar gives an
-  `int`, an array an `int64` array. NaN, infinity, negative values and results at or above
-  `2^62` units raise `ValueError`. It is the only way physical numbers enter the library.
-- **`as_float(x, q)`** converts units to physical values (`x * q`, correctly rounded, exact
-  below `2^53` units): an `int` gives a `float`, an integer array a `float64` array. A result
-  beyond the finite doubles raises `ValueError`. Costs are never converted.
+- **`to_units(x, q)`** reads each physical input as its binary64 value `b`: Python floats and
+  NumPy float64 keep their exact value, float32 widens exactly, and integers become the nearest
+  double, ties to even (`2^53 + 1` becomes `2^53`, `2^53 + 3` becomes `2^53 + 4`). It returns
+  `floor(b/q + 1/2)`, evaluated exactly on rational numbers, not by floating addition of `1/2`.
+  A scalar or 0-d NumPy array gives an `int`; a Python sequence or 1-d NumPy array gives an
+  `int64` array. Negative zero gives 0. NaN, infinity, negative values and results at or above
+  `2^62` units raise `ValueError`. This is the only entry for physical numbers.
+- **Binary values and precision.** A float is never read through its printed decimal; conversion
+  cannot recover a source literal. `2^53` is the limit of consecutive integers among doubles,
+  not a size below which decimal fractions are exact. A decimal is exactly a double only if
+  its reduced denominator is a power of two and it fits binary64; even `0.1` is rounded on
+  parsing. A decimal and its parsed double give the same units exactly when both lie in the
+  same cell `[(n - 1/2)*q, (n + 1/2)*q)`. No magnitude or unit count guarantees this: a parse
+  error can cross or land on a boundary at an ordinary size. At `q = 2^-21`, `5501195.1796`
+  denotes the exact binary tie `11536842473288.5` units, giving `11536842473289`; the typed
+  decimal would be `11536842473288.4992` units. At `q = 2^-18`, the computed `400 + 2^-19`
+  is the tie `104857600.5` and gives `104857601`, although its printed decimal
+  `400.00000190734863` is just below the tie. `np.float32(0.1)` is exactly
+  `13421773/134217728`, giving `429496736` units at `q = 2^-32`; decimal `0.1` would give
+  `429496730`. `CostStretch` deliberately uses the printed decimal instead: a stretch is a
+  ratio a person writes (`1.2` means `6/5`), compared exactly with ratios of integer costs.
+  A physical amount is the measured or computed double the caller holds.
+- **Ties and exact scaling.** The ties are exactly the accepted `b = (2*n + 1)*q/2` for integers
+  `0 <= n < 2^52`; every tie gives `n + 1`, never the even neighbour. At `q = 1`, `0.5`
+  gives 1, `2.5` gives 3, `3.5` gives 4, and the last tie `2^52 - 1/2` gives `2^52`.
+  For `q = 2^k`, scaling `y = b*2^-k` is exact while normal; only below the normal range
+  (`y < 2^-1022`) may it lose bits, where the answer is 0 either way. Overflow is refused by
+  the `2^62` bound. Below `2^52`, `y - floor(y)` is exact and compared with `1/2`; at and
+  above `2^52` every double is integral, so `y` is the result. These double operations thus
+  introduce no error beyond the specified quantization.
+- **`as_float(u, q)`** returns the correctly rounded binary64 value of the exact product `u*q`
+  (nearest, ties to even). Here `u` may be any signed, unbounded integer, unlike graph and
+  flow amounts. An integer scalar gives a `float`, an integer vector a `float64` array.
+  An int or NumPy integer, a subclass included, is never read as a sequence.
+  The result is finite exactly when `abs(u*q) < 2^1024 - 2^970`; otherwise it raises
+  `ValueError('as_float: <u> units times the resolution exceed the largest finite double')`.
+  Every `abs(u) <= 2^53`, including the endpoint, converts exactly. Beyond `2^53`, an integer
+  of binary length `L` converts exactly iff it is divisible by `2^(L - 53)`; `2^53 + 1`
+  gives `2^53*q`, and `2^53 + 3` gives `(2^53 + 4)*q`. Costs are never converted.
+- **Round trip.** `to_units(as_float(u, q), q) == u` for every `u` in `[0, 2^53]` at every
+  resolution, and for larger `u` in `[0, 2^62)` exactly when `u` is a double. Otherwise the
+  result is the units of the rounded value. The first failure, `2^53 + 1`, comes back as
+  `2^53`; `2^62 - 1` becomes `2^62*q`, which `to_units` refuses.
+- **Error and sums.** Every successful `to_units` result `u` is itself a double, so `as_float`
+  adds no error: `e = as_float(to_units(b, q), q) - b` satisfies `-q/2 < e <= q/2`, with
+  equality at the upper end exactly at ties. This bound concerns `b`. Against an argument
+  `a` changed by promotion (a large integer or a wider NumPy float where available), the
+  error is `e + (b - a)`: `2^53 + 1` at `q = 1` has error 0 against `b`, but -1 against
+  the original integer. There is no exact-integer path for physical inputs.
+  Rounding `N` values separately gives total error in `(-N*q/2, N*q/2]`. Ties contribute
+  `+q/2` each; other errors go either way, so a sum has no promised sign. At `q = 1`,
+  `[0.5, 0.5]` gives `[1, 1]` (2 units for a total of 1), while `[0.25, 0.25]` gives
+  `[0, 0]` (0 units for a total of 0.5). When non-tie fractional parts are symmetric about
+  `1/2`, their mean error cancels and mean error per value is `(q/2)*P(tie)`; a continuous
+  uniform fractional part has none. The Core assumes no distribution. Round a demand once,
+  then split whole units to preserve its total; rounding `1.0` once gives 1 unit.
+  Choose one `q` before graph construction and use the constructed graph's `resolution()` afterwards. Choosing
+  `q` and reporting rounding belong to the caller (NetGraph's units report); Core converts
+  and validates, without a selector or rounding report.
 - **Routability.** An edge with less than 1 unit of capacity carries nothing, but it stays in
   routing: searches, routes and rosters treat it like any other edge, and only a supplied
   residual (below the search's threshold) or an Eligibility removes an edge from a search. An

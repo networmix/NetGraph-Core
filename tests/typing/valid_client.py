@@ -6,7 +6,7 @@ types of the generated stub: a wrong dtype, a lost Optional or a widened result 
 """
 
 from fractions import Fraction
-from typing import assert_type
+from typing import SupportsIndex, assert_type
 
 import numpy as np
 import numpy.typing as npt
@@ -34,11 +34,64 @@ assert_type(eligibility.edge_allowed(), npt.NDArray[np.bool_])
 both = ng.Eligibility.intersect(eligibility, g.eligibility())
 assert_type(both, ng.Eligibility)
 
-# Units: a scalar gives an int, an array an int64 array; and back.
+# Units: scalars and Python sequences have known shapes; ndarray rank needs narrowing.
 assert_type(ng.to_units(1.5, 0.5), int)
+assert_type(ng.to_units(np.float32(0.1), np.int64(1)), int)
+assert_type(ng.to_units(3, np.float32(0.5)), int)
 assert_type(ng.to_units([1.5, 2.0], 0.5), npt.NDArray[np.int64])
+assert_type(ng.to_units((np.int64(3), np.float32(2)), 0.5), npt.NDArray[np.int64])
+assert_type(ng.to_units(np.array(1.5), 0.5), int | npt.NDArray[np.int64])
+assert_type(ng.to_units(np.array([1.5, 2.0]), 0.5), int | npt.NDArray[np.int64])
+converted = ng.to_units(np.array([1.5, 2.0]), 0.5)
+if isinstance(converted, np.ndarray):
+    assert_type(converted, npt.NDArray[np.int64])
+    assert converted.tolist() == [3, 4]
+assert type(ng.to_units(np.array(1.5), 0.5)) is int
 assert_type(ng.as_float(3, 0.5), float)
+assert_type(ng.as_float(np.int64(3), 0.5), float)
+assert_type(ng.as_float([3, 4], 0.5), npt.NDArray[np.float64])
 assert_type(ng.as_float(np.array([3, 4]), 0.5), npt.NDArray[np.float64])
+
+
+class IndexValue:
+    def __index__(self) -> int:
+        return 3
+
+
+def physical_index(x: SupportsIndex) -> float | npt.NDArray[np.float64]:
+    assert_type(ng.as_float(x, 0.5), float | npt.NDArray[np.float64])
+    return ng.as_float(x, 0.5)
+
+
+assert physical_index(IndexValue()) == 1.5
+
+
+# A structural integer protocol may also be a sequence. Sequence classification wins at runtime.
+class IndexSequence(list[int]):
+    def __index__(self) -> int:
+        return 3
+
+
+assert_type(ng.as_float(IndexSequence([3, 4]), 0.5), npt.NDArray[np.float64])
+assert isinstance(physical_index(IndexSequence([3, 4])), np.ndarray)
+
+
+# Integer subclasses keep the scalar overload even when they expose sequence methods.
+class IntegerSequence(int):
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, index: int) -> int:
+        if index in (0, 1):
+            return (3, 4)[index]
+        raise IndexError(index)
+
+
+scalar_from_integer = ng.as_float(IntegerSequence(7), 0.5)
+assert_type(scalar_from_integer, float)
+assert type(scalar_from_integer) is float
+assert scalar_from_integer == 3.5
+assert scalar_from_integer.hex() == (3.5).hex()
 
 # The search: optional results are checked before use.
 full = ng.spf(
@@ -263,3 +316,9 @@ together = ng.apply_actions(listed, actions, mode=ng.BatchMode.SIMULTANEOUS)
 assert_type(together, list[ng.PlacementResult])
 in_order = ng.apply_actions(listed, (ng.Place(first_policy, 1),))
 assert_type(in_order[0].call_delivered, int)
+
+# Units' floating branches describe allowed positive infinity, including NumPy float32.
+units_inf = np.float32(np.inf)
+assert ng.EvaluationOptions(
+    ng.FlowPolicyConfig(routing=ng.ShortestPaths()), offer=units_inf
+).offer == float("inf")

@@ -270,19 +270,37 @@ void register_units(py::module_& m) {
         return int64_array(result);
       },
       py::arg("x"), py::arg("resolution"),
-      "Physical value(s) to units of the resolution q, rounding half up: an int for a scalar, an\n"
-      "int64 array for an array. NaN, infinity, negative values, an integer too large for NumPy and\n"
-      "results at or above 2^62 units raise ValueError; a bool (also as an entry), a string or an array\n"
-      "of another dtype or rank, or any type but int, float and the NumPy numbers (a Decimal, a\n"
-      "Fraction, an object known by __float__, __index__ or __array__) TypeError; an int or float\n"
-      "subclass is read by its value. q must be a power of two in [2^-32, 2^32]: a float, a NumPy\n"
-      "float or an integer (any other type is a TypeError; an integer beyond the float range a\n"
-      "ValueError).");
+      "Physical value(s) to units of resolution q. Each input becomes binary64 b: float32 widens\n"
+      "exactly; integers become the nearest double, ties to even. Return floor(b/q + 1/2),\n"
+      "evaluated exactly, never by floating addition of 1/2 or by reading the printed decimal.\n"
+      "Ties are b=(2n+1)*q/2, 0 <= n < 2^52; each gives n+1, never the even neighbour. Scaling\n"
+      "by q=2^k is exact while normal; underflow only affects values rounding to zero. Below\n"
+      "2^52 scaled units the fractional comparison is exact; above it doubles are integral.\n"
+      "A scalar or 0-d array gives an int; a sequence or 1-d array gives an int64 array. Negative\n"
+      "zero gives 0. NaN, infinity, negative values, an integer too large for NumPy and results\n"
+      "at or above 2^62 units raise ValueError. A bool, string, wrong dtype/rank or type other\n"
+      "than int, float or NumPy numbers raises TypeError; int/float subclasses use stored values.\n"
+      "q must be a power of two in [2^-32, 2^32]: a float, NumPy float or integer (another type\n"
+      "raises TypeError, an integer beyond the float range ValueError).\n"
+      "Every result u is exactly representable, so as_float(u,q) adds no error: against b,\n"
+      "-q/2 < as_float(u,q)-b <= q/2, with +q/2 exactly at ties. Against an original argument a\n"
+      "changed by promotion, add b-a (2^53+1 at q=1 loses 1 before quantization). N separately\n"
+      "rounded values have total error in (-N*q/2,N*q/2]; no sign is promised. With symmetric\n"
+      "non-tie fractional parts, mean error is (q/2)*P(tie); continuous uniform parts have none.\n"
+      "Round a demand once, then split whole units. 2^53 is no decimal precision threshold: a\n"
+      "decimal is exact only if its reduced denominator is a power of two and it fits binary64.\n"
+      "A decimal and its parsed double agree only in the same half-up cell; 5501195.1796 at\n"
+      "q=2^-21 gives 11536842473289, whereas its decimal reading would give 11536842473288.\n"
+      "CostStretch deliberately reads printed decimals for ratios; physical amounts use b.");
 
   m.def(
       "as_float",
       [](const py::object& x, StrictFloat resolution) -> py::object {
         const int k = resolution_exponent(resolution);  // the resolution before the shape
+        if (!is_bool(x) &&
+            (PyLong_Check(x.ptr()) != 0 || has_type(x.ptr(), numpy_number_types().first))) {
+          return py::float_(amount_as_float(x, k, resolution));
+        }
         // A sequence, a NumPy array of any rank included: wide_integers refuses a rank other than 1.
         if (!is_invalid_sequence(x)) {
           const auto v = wide_integers(x, "as_float: x");
@@ -304,11 +322,20 @@ void register_units(py::module_& m) {
         return py::float_(amount_as_float(x, k, resolution));
       },
       py::arg("x"), py::arg("resolution"),
-      "Units to physical value(s): x * q, correctly rounded (exact below 2^53 units). An int, of\n"
-      "any size, gives a float, an integer array a float64 array; a result beyond the finite\n"
-      "doubles raises ValueError. x is an integer position (any object with __index__, never a bool;\n"
-      "anything else is a TypeError); q must be a power of two in [2^-32, 2^32] (a float, a NumPy float\n"
-      "or an integer).");
+      "Units to physical value(s): the exact product x*q correctly rounded to binary64, nearest\n"
+      "with ties to even. x is any signed, unbounded integer: an int or NumPy integer gives a\n"
+      "float, an integer vector a float64 array. An int or NumPy integer, a subclass included,\n"
+      "is never read as a sequence. An integer position accepts __index__, never\n"
+      "a bool; other types raise TypeError. q is a power of two in [2^-32, 2^32] (float, NumPy\n"
+      "float or integer). The result is finite iff abs(x*q) < 2^1024 - 2^970; otherwise raise\n"
+      "ValueError('as_float: <x> units times the resolution exceed the largest finite double').\n"
+      "Exact for abs(x) <= 2^53 inclusive. Above 2^53 an integer of binary length L is exact\n"
+      "iff divisible by 2^(L-53); 2^53+1 rounds to 2^53, 2^53+3 to 2^53+4, times q.\n"
+      "to_units(as_float(x,q),q)==x holds for x in [0,2^53] at every q, and for larger x in\n"
+      "[0,2^62) exactly when x is a double. The first failure is 2^53+1; 2^62-1 rounds to\n"
+      "2^62*q and reconversion raises the to_units domain ValueError. A successful to_units\n"
+      "result is always exact here; its error against the promoted binary64 input is in\n"
+      "(-q/2,q/2]. Choose q before Graph construction, then use Graph.resolution().");
 }
 
 } // namespace netgraph::core::bindings

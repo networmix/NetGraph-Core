@@ -7,6 +7,9 @@ each marked line is a mistake the compiled module rejects at run time (or, for t
 and dtype lines, a mistake in the caller's own code) that a type checker must catch before.
 """
 
+import typing
+from fractions import Fraction
+
 import numpy as np
 import numpy.typing as npt
 
@@ -92,3 +95,16 @@ ng.Replace(listed_policy, "1")  # expect: reportArgumentType
 
 class PolicySubclass(ng.FlowPolicy):  # expect: reportGeneralTypeIssues
     pass
+
+
+# Unknown ndarray rank cannot promise an array, and a general index protocol may be a sequence.
+a0 = np.array(1.5)
+c: npt.NDArray[np.int64] = ng.to_units(a0, 0.5)  # expect: reportAssignmentType
+
+
+def require_float(x: typing.SupportsIndex) -> float:
+    return ng.as_float(x, 0.5)  # expect: reportReturnType
+
+
+ng.to_units(1.5, Fraction(1, 2))  # expect: reportCallIssue, reportArgumentType
+ng.as_float(3, Fraction(1, 2))  # expect: reportCallIssue, reportArgumentType

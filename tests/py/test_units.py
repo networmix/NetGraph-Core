@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import random
 from decimal import Decimal
 from fractions import Fraction
 
@@ -388,3 +389,485 @@ def test_physical_inputs_still_taken():
         ngc.to_units(1.0, _FloatFails(1.0))
     with pytest.raises(TypeError, match="incompatible function arguments"):
         ngc.to_units(1.0, _IndexFails())
+
+
+# Exact binary values, the last half-unit tie, promotion, round trips and signed products.
+# Expectations are fixed arithmetic witnesses, independent of the production converter.
+UNITS_EXAMPLES = [
+    pytest.param(
+        [
+            {"op": "to_units", "x": 5501195.1796, "q": ["pow2", -21]},
+            {"op": "error", "x": 5501195.1796, "q": ["pow2", -21]},
+            {
+                "op": "to_units",
+                "x": math.nextafter(5501195.1796, 0.0),
+                "q": ["pow2", -21],
+            },
+        ],
+        [
+            11536842473289,
+            dict(
+                units=11536842473289,
+                error="1/2",
+                inside=True,
+                error_against_argument="1/2",
+            ),
+            11536842473288,
+        ],
+        id="UNITS-literal-tie",
+    ),
+    pytest.param(
+        [
+            {"op": "to_units", "x": 400 + 2 ** (-19), "q": ["pow2", -18]},
+            {"op": "error", "x": 400 + 2 ** (-19), "q": ["pow2", -18]},
+            {"op": "to_units", "x": 400.0, "q": ["pow2", -18]},
+        ],
+        [
+            104857601,
+            dict(
+                units=104857601, error="1/2", inside=True, error_against_argument="1/2"
+            ),
+            104857600,
+        ],
+        id="UNITS-computed-tie",
+    ),
+    pytest.param(
+        [
+            {"op": "to_units", "x": ["numpy", "float32", 0.1], "q": ["pow2", -32]},
+            {
+                "op": "to_units",
+                "x": ["array", "float32", [0.1, 0.1]],
+                "q": ["pow2", -32],
+            },
+            {"op": "error", "x": ["numpy", "float32", 0.1], "q": ["pow2", -32]},
+            {"op": "to_units", "x": ["numpy", "float64", 0.1], "q": ["pow2", -32]},
+            {"op": "to_units", "x": 0.1, "q": ["pow2", -32]},
+        ],
+        [
+            429496736,
+            [429496736, 429496736],
+            dict(units=429496736, error="0", inside=True, error_against_argument="0"),
+            429496730,
+            429496730,
+        ],
+        id="UNITS-float32",
+    ),
+    pytest.param(
+        [
+            {"op": "to_units", "x": 2 ** (-33), "q": ["pow2", -32]},
+            {
+                "op": "to_units",
+                "x": math.nextafter(2 ** (-33), 0.0),
+                "q": ["pow2", -32],
+            },
+            {"op": "to_units", "x": 2.0**31, "q": ["pow2", 32]},
+            {"op": "to_units", "x": 0.5, "q": 1.0},
+            {"op": "to_units", "x": 1.5, "q": 1.0},
+            {"op": "to_units", "x": 2.5, "q": 1.0},
+            {"op": "to_units", "x": 3.5, "q": 1.0},
+            {"op": "to_units", "x": 2.0**52 - 0.5, "q": 1.0},
+            {"op": "to_units", "x": 2.0**52 + 1, "q": 1.0},
+            {"op": "to_units", "x": 2.0**53 + 2, "q": 1.0},
+            {"op": "to_units", "x": -0.0, "q": 1.0},
+            {"op": "to_units", "x": 5e-324, "q": ["pow2", 32]},
+        ],
+        [1, 0, 1, 1, 2, 3, 4, 2**52, 2**52 + 1, 2**53 + 2, 0, 0],
+        id="UNITS-ties",
+    ),
+    pytest.param(
+        [
+            {"op": "round_trip", "u": 2**53, "q": 1.0},
+            {"op": "round_trip", "u": 2**53, "q": ["pow2", -32]},
+            {"op": "round_trip", "u": 2**53, "q": ["pow2", 32]},
+            {"op": "round_trip", "u": 2**53 + 1, "q": 1.0},
+            {"op": "as_float", "u": 2**53 + 1, "q": 1.0},
+            {"op": "round_trip", "u": 2**53 + 2, "q": 1.0},
+            {"op": "round_trip", "u": 2**62 - 2**9, "q": ["pow2", -32]},
+            {"op": "round_trip", "u": 2**62 - 1, "q": 1.0},
+            {"op": "round_trip", "u": 120401795907070192, "q": ["pow2", -27]},
+        ],
+        [
+            2**53,
+            2**53,
+            2**53,
+            2**53,
+            9007199254740992.0,
+            2**53 + 2,
+            2**62 - 2**9,
+            "ValueError: to_units: the amount is at or above the bound of the units domain (2^62 units)",
+            120401795907070192,
+        ],
+        id="UNITS-round-trip",
+    ),
+    pytest.param(
+        [
+            {"op": "error", "x": 2**53 + 1, "q": 1.0},
+            {"op": "error", "x": 2**53 + 3, "q": 1.0},
+            {"op": "to_units", "x": ["list", 2**53 + 1, 2**53 + 3], "q": 1.0},
+        ],
+        [
+            dict(units=2**53, error="0", inside=True, error_against_argument="-1"),
+            dict(units=2**53 + 4, error="0", inside=True, error_against_argument="1"),
+            [2**53, 2**53 + 4],
+        ],
+        id="UNITS-promoted-integer",
+    ),
+    pytest.param(
+        [
+            {"op": "as_float", "u": -1, "q": 0.5},
+            {"op": "as_float", "u": 2**53 + 3, "q": 1.0},
+            {"op": "as_float", "u": 2**70 + 1, "q": 1.0},
+            {"op": "as_float", "u": 2**1024 - 2**970 - 1, "q": 1.0},
+            {"op": "as_float", "u": 2**1024 - 2**970, "q": 1.0},
+            {"op": "as_float", "u": -(2**1024 - 2**970 - 1), "q": 1.0},
+            {"op": "as_float", "u": (2**1024 - 2**970) * 2**32 - 1, "q": ["pow2", -32]},
+            {"op": "as_float", "u": (2**1024 - 2**970) * 2**32, "q": ["pow2", -32]},
+        ],
+        [
+            -0.5,
+            9007199254740996.0,
+            1.1805916207174113e21,
+            1.7976931348623157e308,
+            f"ValueError: as_float: {2**1024 - 2**970} units times the resolution exceed the largest finite double",
+            -1.7976931348623157e308,
+            1.7976931348623157e308,
+            f"ValueError: as_float: {(2**1024 - 2**970) * 2**32} units times the resolution exceed the largest finite double",
+        ],
+        id="UNITS-as-float-range",
+    ),
+    pytest.param(
+        [
+            {"op": "sum", "xs": [0.5, 0.5], "q": 1.0},
+            {"op": "sum", "xs": [0.25, 0.25], "q": 1.0},
+        ],
+        [
+            dict(units=[1, 1], sum_of_units=2, total="1", units_of_total=1),
+            dict(units=[0, 0], sum_of_units=0, total="1/2", units_of_total=1),
+        ],
+        id="UNITS-sums",
+    ),
+]
+
+
+def _units_input(spec):
+    if not isinstance(spec, list):
+        return spec
+    if spec[0] == "pow2":
+        return 2.0 ** spec[1]
+    if spec[0] == "numpy":
+        return getattr(np, spec[1])(spec[2])
+    if spec[0] == "array":
+        return np.array(spec[2], dtype=spec[1])
+    assert spec[0] == "list"
+    return spec[1:]
+
+
+def _units_to_python(value):
+    if isinstance(value, np.ndarray):
+        assert value.dtype == np.int64
+        assert value.ndim == 1
+        return value.tolist()
+    assert type(value) is int
+    return value
+
+
+def _units_example(cases):
+    results = []
+    for case in cases:
+        q = _units_input(case["q"])
+        op = case["op"]
+        try:
+            if op == "to_units":
+                result = _units_to_python(ngc.to_units(_units_input(case["x"]), q))
+            elif op == "as_float":
+                result = ngc.as_float(case["u"], q)
+                assert type(result) is float
+            elif op == "round_trip":
+                result = ngc.to_units(ngc.as_float(case["u"], q), q)
+                assert type(result) is int
+            elif op == "error":
+                a = _units_input(case["x"])
+                b = float(a)
+                u = ngc.to_units(a, q)
+                value = Fraction(ngc.as_float(u, q))
+                error = (value - Fraction(b)) / Fraction(q)
+                exact_argument = Fraction(a) if isinstance(a, int) else Fraction(b)
+                result = dict(
+                    units=u,
+                    error=str(error),
+                    inside=-Fraction(1, 2) < error <= Fraction(1, 2),
+                    error_against_argument=str((value - exact_argument) / Fraction(q)),
+                )
+            else:
+                assert op == "sum"
+                xs = case["xs"]
+                each = _units_to_python(ngc.to_units(xs, q))
+                total = sum(map(Fraction, xs), Fraction(0))
+                result = dict(
+                    units=each,
+                    sum_of_units=sum(each),
+                    total=str(total / Fraction(q)),
+                    units_of_total=ngc.to_units(float(total), q),
+                )
+        except ValueError as exc:
+            result = f"ValueError: {exc}"
+        results.append(result)
+    return results
+
+
+def _assert_units_result(got, expected):
+    # Equality alone lets 1, True and 1.0 pass interchangeably; pin the types and every key.
+    assert type(got) is type(expected), (got, expected)
+    if isinstance(expected, dict):
+        assert got.keys() == expected.keys()
+        for key in expected:
+            _assert_units_result(got[key], expected[key])
+    elif isinstance(expected, list):
+        assert len(got) == len(expected)
+        for value, want in zip(got, expected, strict=True):
+            _assert_units_result(value, want)
+    else:
+        assert got == expected
+
+
+@pytest.mark.parametrize("cases, expected", UNITS_EXAMPLES)
+def test_binary64_examples(cases, expected):
+    _assert_units_result(_units_example(cases), expected)
+
+
+def _exact_binary_units(b, q):
+    # An independent rational oracle: never calls a production conversion helper.
+    return math.floor(Fraction(b) / Fraction(q) + Fraction(1, 2))
+
+
+def _units_sweep():
+    rng = random.Random(10)
+    counts = dict.fromkeys(
+        [
+            "checked",
+            "agree",
+            "ties",
+            "ties_up",
+            "inside",
+            "decimal_differs",
+            "round_trips",
+            "returned",
+        ],
+        0,
+    )
+
+    def one(b, q, tie_n=None):
+        expected = _exact_binary_units(b, q)
+        u = ngc.to_units(b, q)
+        assert type(u) is int
+        assert u == expected, (b, q, u, expected)
+        # The array kernel must obey the same rule, including both ndarray ranks.
+        assert ngc.to_units(np.array(b), q) == expected
+        array = ngc.to_units([b, b], q)
+        assert array.dtype == np.int64 and array.tolist() == [expected, expected]
+        array = ngc.to_units(np.array([b, 0.0, b])[::2], q)
+        assert array.dtype == np.int64 and array.tolist() == [expected, expected]
+        counts["checked"] += 1
+        counts["agree"] += u == expected
+        if tie_n is not None:
+            assert expected == tie_n + 1
+            counts["ties"] += 1
+            counts["ties_up"] += u == tie_n + 1
+        value = ngc.as_float(u, q)
+        assert type(value) is float
+        assert Fraction(value) == Fraction(u) * Fraction(q)
+        assert ngc.as_float([u, u], q).tolist() == [value, value]
+        e = Fraction(value) - Fraction(b)
+        assert -Fraction(q) / 2 < e <= Fraction(q) / 2
+        counts["inside"] += 1
+        counts["decimal_differs"] += (
+            math.floor(Fraction(str(b)) / Fraction(q) + Fraction(1, 2)) != expected
+        )
+
+    for k in range(-32, 33):
+        q = 2.0**k
+        ns = [0, 1, 2**26, 2**52 - 1] + [rng.randrange(2**52) for _ in range(64)]
+        for n in ns:
+            tie = (2 * n + 1) * q / 2
+            one(tie, q, n)
+            one(math.nextafter(tie, 0.0), q)
+            one(math.nextafter(tie, math.inf), q)
+        for edge in (2**52, 2**53):
+            one(edge * q, q)
+            one(math.nextafter(edge * q, 0.0), q)
+        one(5e-324, q)
+        for _ in range(64):
+            one(math.ldexp(rng.random(), rng.randrange(-40, 63)) * q, q)
+        for u in [0, 1, 2**53 - 1, 2**53] + [
+            rng.randrange(2**53 + 1) for _ in range(64)
+        ]:
+            value = ngc.as_float(u, q)
+            assert Fraction(value) == Fraction(u) * Fraction(q)
+            returned = ngc.to_units(value, q)
+            assert returned == u
+            counts["round_trips"] += 1
+            counts["returned"] += returned == u
+    return counts
+
+
+def test_binary64_double_steps():
+    _assert_units_result(
+        _units_sweep(),
+        dict(
+            checked=17745,
+            agree=17745,
+            ties=4420,
+            ties_up=4420,
+            inside=17745,
+            decimal_differs=2248,
+            round_trips=4420,
+            returned=4420,
+        ),
+    )
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_binary64_float32_containers(dtype):
+    # float32 promotion is exact; the shortest decimal of the source float32 is not its value.
+    value = dtype(0.1)
+    expected = 429496736 if dtype is np.float32 else 429496730
+    q = 2.0**-32
+    assert ngc.to_units(value, q) == expected
+    assert ngc.to_units(float(value), q) == expected
+    assert ngc.to_units(np.array(value), q) == expected
+    for values in (
+        [value, value],
+        (value, value),
+        np.array([value, value], dtype=dtype),
+    ):
+        result = ngc.to_units(values, q)
+        assert result.dtype == np.int64
+        assert result.tolist() == [expected, expected]
+
+
+@pytest.mark.parametrize("q", [2.0**k for k in range(-32, 33)])
+def test_binary64_signed_round_trip_and_refusal(q):
+    # Both directions around the consecutive-integer limit; vector and scalar paths.
+    for u in [
+        -(2**53 + 3),
+        -(2**53 + 1),
+        -(2**53),
+        -1,
+        0,
+        1,
+        2**53,
+        2**53 + 1,
+        2**53 + 3,
+    ]:
+        expected = float(Fraction(u) * Fraction(q))
+        assert ngc.as_float(u, q) == expected
+        assert ngc.as_float([u, u], q).tolist() == [expected, expected]
+    with pytest.raises(ValueError, match=exact(BOUND)):
+        ngc.to_units(ngc.as_float(2**62 - 1, q), q)
+    assert ngc.to_units(ngc.as_float(2**62 - 512, q), q) == 2**62 - 512
+
+
+@pytest.mark.parametrize("q", [1.0, 2.0**-32])
+@pytest.mark.parametrize("sign", [-1, 1])
+def test_binary64_unbounded_finite_edge(q, sign):
+    first_invalid = (2**1024 - 2**970) * (1 if q == 1.0 else 2**32)
+    last_valid = sign * (first_invalid - 1)
+    expected = sign * float.fromhex("0x1.fffffffffffffp+1023")
+    assert ngc.as_float(last_valid, q) == expected
+    result = ngc.as_float([1, last_valid], q)
+    assert result.dtype == np.float64 and result.tolist() == [q, expected]
+    u = sign * first_invalid
+    message = exact(
+        f"as_float: {u} units times the resolution exceed the largest finite double"
+    )
+    for value in (u, [1, u]):
+        with pytest.raises(ValueError, match=message) as error:
+            ngc.as_float(value, q)
+        assert error.type is ValueError
+
+
+class _IntegerSequence(int):
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, index):
+        if index in (0, 1):
+            return (3, 4)[index]
+        raise IndexError(index)
+
+
+class _NumpySignedSequence(np.int64):
+    __len__ = _IntegerSequence.__len__
+    __getitem__ = _IntegerSequence.__getitem__
+
+
+class _NumpyUnsignedSequence(np.uint64):
+    __len__ = _IntegerSequence.__len__
+    __getitem__ = _IntegerSequence.__getitem__
+
+
+@pytest.mark.parametrize(
+    "scalar_type", [_IntegerSequence, _NumpySignedSequence, _NumpyUnsignedSequence]
+)
+def test_as_float_integer_scalar_precedes_sequence(scalar_type):
+    value = scalar_type(7)
+    result = ngc.as_float(value, 0.5)
+    assert type(result) is float
+    assert result == 3.5
+    assert result.hex() == (3.5).hex()
+
+
+def test_as_float_noninteger_sequence_keeps_its_path():
+    class IndexSequence(list):
+        def __index__(self):
+            return 7
+
+    result = ngc.as_float(IndexSequence([3, 4]), 0.5)
+    assert type(result) is np.ndarray
+    assert result.dtype == np.float64 and result.shape == (2,)
+    assert result.tolist() == [1.5, 2.0]
+
+
+@pytest.mark.parametrize("dtype", [np.int64, np.uint64])
+def test_as_float_integer_array_paths_are_unchanged(dtype):
+    with pytest.raises(
+        TypeError,
+        match=exact("as_float: x must be a 1-D array (got 0 dimensions)"),
+    ):
+        ngc.as_float(np.array(7, dtype=dtype), 0.5)
+    result = ngc.as_float(np.array([3, 4], dtype=dtype), 0.5)
+    assert type(result) is np.ndarray
+    assert result.dtype == np.float64 and result.shape == (2,)
+    assert result.tolist() == [1.5, 2.0]
+    with pytest.raises(
+        TypeError,
+        match=exact("as_float: x must be a 1-D array (got 2 dimensions)"),
+    ):
+        ngc.as_float(np.array([[7]], dtype=dtype), 0.5)
+
+
+@pytest.mark.parametrize("value", [True, False, np.True_, np.False_])
+def test_as_float_scalar_classification_still_rejects_bool(value):
+    with pytest.raises(TypeError):
+        ngc.as_float(value, 0.5)
+    assert ngc.as_float(1, 0.5) == 0.5
+
+
+@pytest.mark.parametrize("dtype", [np.int64, np.uint64])
+@pytest.mark.parametrize(
+    "value, expected", [(2**53 + 1, 2**53), (2**53 + 3, 2**53 + 4)]
+)
+def test_to_units_integer_zero_dimensional_array_promotes(dtype, value, expected):
+    result = ngc.to_units(np.array(value, dtype=dtype), 1.0)
+    assert type(result) is int
+    assert result == expected
+
+
+@pytest.mark.parametrize("dtype", [np.int64, np.uint64])
+def test_to_units_integer_array_promotes(dtype):
+    values = np.array([2**53 + 1, 2**53 + 3], dtype=dtype)
+    result = ngc.to_units(values, 1.0)
+    assert type(result) is np.ndarray
+    assert result.shape == (2,)
+    assert result.dtype == np.int64
+    assert result.tolist() == [2**53, 2**53 + 4]

@@ -757,18 +757,22 @@ class SpfResult:
     @property
     def target_cost(self) -> int | None: ...
 
-# reason: one integer gives a float, integers give a float64 array (the array overload first: a NumPy array also has __index__)
+# reason: vectors give float64 arrays; int and NumPy integer scalars give float; another index protocol may also be a sequence
 # generated: def as_float(x: typing.Any, resolution: typing.SupportsFloat | typing.SupportsIndex) -> typing.Any:
 @typing.overload
 def as_float(
     x: collections.abc.Sequence[typing.SupportsIndex]
     | numpy.typing.NDArray[numpy.integer],
-    resolution: typing.SupportsFloat | typing.SupportsIndex,
+    resolution: int | float | numpy.integer | numpy.floating,
 ) -> numpy.typing.NDArray[numpy.float64]: ...
 @typing.overload
 def as_float(
-    x: typing.SupportsIndex, resolution: typing.SupportsFloat | typing.SupportsIndex
+    x: int | numpy.integer, resolution: int | float | numpy.integer | numpy.floating
 ) -> float: ...
+@typing.overload
+def as_float(
+    x: typing.SupportsIndex, resolution: int | float | numpy.integer | numpy.floating
+) -> float | numpy.typing.NDArray[numpy.float64]: ...
 
 # reason: pairs of node sets, each pair a length-2 sequence (sources, destinations), an integer array included (so pairs may be an integer array of shape (k, 2), or (k, 2, m) for sets of m nodes); options is EvaluationOptions; per_pair_eligibility has one Eligibility or None per pair; workers is an integer or None; one PlacementResult per pair
 # generated: def evaluate_pairs(graph: Graph, pairs: typing.Any, options: typing.Any, per_pair_eligibility: typing.Any = None, workers: typing.Any = None) -> list:
@@ -855,16 +859,20 @@ def spf(
     options: SpfOptions,
 ) -> SpfResult: ...
 
-# reason: a scalar number gives an int, a sequence or a 1-D array of numbers an int64 array (a 0-d array gives an int, which the array overload cannot say)
+# reason: scalars give int, Python sequences int64 arrays; unknown-rank arrays may be 0-d (int) or 1-d (array)
 # generated: def to_units(x: typing.Any, resolution: typing.SupportsFloat | typing.SupportsIndex) -> typing.Any:
 @typing.overload
 def to_units(
-    x: float | numpy.floating | numpy.integer,
-    resolution: typing.SupportsFloat | typing.SupportsIndex,
+    x: int | float | numpy.floating | numpy.integer,
+    resolution: int | float | numpy.integer | numpy.floating,
 ) -> int: ...
 @typing.overload
 def to_units(
-    x: collections.abc.Sequence[float | numpy.floating | numpy.integer]
-    | numpy.typing.NDArray[numpy.floating | numpy.integer],
-    resolution: typing.SupportsFloat | typing.SupportsIndex,
+    x: collections.abc.Sequence[int | float | numpy.floating | numpy.integer],
+    resolution: int | float | numpy.integer | numpy.floating,
 ) -> numpy.typing.NDArray[numpy.int64]: ...
+@typing.overload
+def to_units(
+    x: numpy.typing.NDArray[numpy.floating | numpy.integer],
+    resolution: int | float | numpy.integer | numpy.floating,
+) -> int | numpy.typing.NDArray[numpy.int64]: ...
