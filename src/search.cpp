@@ -70,6 +70,12 @@ bool uses_buckets(const Graph& graph, SpfQueue queue) noexcept {
 }
 
 #if NETGRAPH_CORE_PRIVATE_HOOKS
+namespace {
+thread_local const KspProbe* ksp_probe = nullptr;
+}
+const KspProbe* current_ksp_probe() noexcept { return ksp_probe; }
+void set_ksp_probe(const KspProbe* probe) noexcept { ksp_probe = probe; }
+
 QueueCounts& thread_queue_counts() noexcept {
   thread_local QueueCounts counts;
   return counts;
@@ -1333,7 +1339,9 @@ std::vector<std::pair<Cost, Path>> ksp(const Graph& graph, NodeId source, NodeId
   const PriorityValues values {&graph, choice.tie_break, residual};
   const PriorityReader prio = PriorityReader::of(values);
   const bool prefer = choice.prefers_score();
-  // Yen's method finds alternatives by keeping a prefix and replacing its suffix at a spur.
+  // Lawler's partition of Yen's alternatives: a path generated at spur d needs expansion
+  // only at j >= d (inclusive). Earlier prefix regions already have their exact pending
+  // minima. Each suffix is the minimum whole prefixed path, including its prefix bottleneck.
   // The first path and each spur suffix use the canonical search with that spur's exclusions.
   // Match prefixes by EdgeId sequence. Ban the next edge of every accepted matching path
   // (Expand), or its entire (u, v) transition (Collapse); exclude earlier prefix vertices to
@@ -1343,6 +1351,9 @@ std::vector<std::pair<Cost, Path>> ksp(const Graph& graph, NodeId source, NodeId
     Cost cost {0};
     Priority bottleneck {0, 1, true};
     std::vector<EdgeId> edges {};
+    // Not part of the key. Mutable only so duplicate insertion can retain the lower index
+    // without copying a path or changing the ordering of the set.
+    mutable std::size_t deviation {0};
   };
   struct PathCandidateOrder {
     bool prefer;
@@ -1365,13 +1376,33 @@ std::vector<std::pair<Cost, Path>> ksp(const Graph& graph, NodeId source, NodeId
   const auto cost = graph.edge_costs();
   std::vector<NodeId> nodes;
   std::vector<EdgeId> banned;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  const KspProbe* probe = current_ksp_probe();
+#endif
   while (static_cast<std::int64_t>(accepted.size()) < options.k) {
+    const std::size_t deviation = accepted.back().deviation;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    const std::size_t start = probe != nullptr && probe->full_yen ? 0 : deviation;
+#else
+    const std::size_t start = deviation;
+#endif
     const std::vector<EdgeId> last = accepted.back().edges;
     nodes.assign(1, source);
     for (EdgeId e : last) nodes.push_back(edst[static_cast<std::size_t>(e)]);
     Cost prefix_cost = 0;
     Priority prefix_bottleneck {0, 1, true};
-    for (std::size_t j = 0; j < last.size(); ++j) {
+    // Skipping searches must not skip the cost or score of any prefix edge.
+    for (std::size_t j = 0; j < start; ++j) {
+      prefix_cost += cost[static_cast<std::size_t>(last[j])];
+      if (prefer) {
+        const Priority pj = prio(last[j]);
+        if (compare(pj, prefix_bottleneck) < 0) prefix_bottleneck = pj;
+      }
+    }
+    for (std::size_t j = start; j < last.size(); ++j) {
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+      if (probe != nullptr && probe->spur != nullptr) probe->spur(probe->context, deviation, j);
+#endif
       banned.clear();
       for (const auto& p : accepted) {
         if (p.edges.size() > j && std::equal(last.begin(), last.begin() + static_cast<std::ptrdiff_t>(j), p.edges.begin())) {
@@ -1387,10 +1418,20 @@ std::vector<std::pair<Cost, Path>> ksp(const Graph& graph, NodeId source, NodeId
         c.bottleneck = compare(sp->bottleneck, prefix_bottleneck) < 0 ? sp->bottleneck : prefix_bottleneck;
         c.edges.assign(last.begin(), last.begin() + static_cast<std::ptrdiff_t>(j));
         c.edges.insert(c.edges.end(), sp->edges.begin(), sp->edges.end());
+        c.deviation = j;
         // Never an accepted path: every accepted path with this prefix has its next edge (Expand)
         // or its next transition (Collapse) banned at the spur, and the candidate's next edge is
         // the spur walk's first. Only a pending candidate can be equal; the set keeps one.
-        candidates.insert(std::move(c));
+        const auto [pending, inserted] = candidates.insert(std::move(c));
+        if (!inserted) {
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+          if (probe != nullptr && probe->duplicate != nullptr) probe->duplicate(probe->context, pending->deviation, j);
+#endif
+          // A region is searched only when it is created or its pending minimum is accepted,
+          // so no spur regenerates a pending path. Duplicates arise only under the private
+          // full-Yen control, with equal indices. min keeps the index safe either way.
+          pending->deviation = std::min(pending->deviation, j);
+        }
       }
       prefix_cost += cost[static_cast<std::size_t>(last[j])];
       if (prefer) {

@@ -243,6 +243,17 @@ TEST(SearchFaults, KspAndTheResolverFailCleanly) {
   const auto want_expand = ksp_of(expand);
   const auto want_collapse = ksp_of(collapse);
   ASSERT_GE(want_expand.size(), 3U);
+  ASSERT_GE(want_collapse.size(), 3U);
+  // Every later path has a nonzero deviation after a long prefix. Retry must reset
+  // the skipped prefix's flags and scores as well as the first complete expansion.
+  std::vector<InEdge> prefix_rows;
+  for (NodeId v = 0; v < 40; ++v) prefix_rows.push_back({v, v + 1, 1, 1});
+  for (Cost c = 1; c <= 8; ++c) prefix_rows.push_back({40, 41, c, c});
+  const auto prefix_graph = make_graph(42, prefix_rows);
+  KspOptions prefix_options(8);
+  prefix_options.tie_break = RouteTieBreak::HigherCapacity;
+  const auto want_prefix = ksp(prefix_graph, 0, 41, prefix_options);
+  ASSERT_EQ(want_prefix.size(), 8U);
   // Layers 0 -> {1..5} -> {6..10} -> 59 with a parallel pair 10 -> 59: 25 equal shortest node
   // walks, 30 when the pair is split into its members (the resolver below splits and keeps 7).
   std::vector<InEdge> layered;
@@ -256,7 +267,7 @@ TEST(SearchFaults, KspAndTheResolverFailCleanly) {
   SpfOptions full(Direction::Forward);
   const auto dag = spf(unit, std::vector<NodeId> {0}, full).dag;
   const auto want_paths = resolve_to_paths(unit, dag, 0, 59, true, 7);
-  ASSERT_GE(want_paths.size(), 2U);
+  ASSERT_EQ(want_paths.size(), 7U);
   auto same = [](const std::vector<std::pair<Cost, Path>>& a, const std::vector<std::pair<Cost, Path>>& b) {
     if (a.size() != b.size()) return false;
     for (std::size_t i = 0; i < a.size(); ++i) {
@@ -277,6 +288,7 @@ TEST(SearchFaults, KspAndTheResolverFailCleanly) {
   std::vector<std::function<void()>> calls = {
       [&] { EXPECT_TRUE(same(ksp_of(expand), want_expand)); },
       [&] { EXPECT_TRUE(same(ksp_of(collapse), want_collapse)); },
+      [&] { EXPECT_TRUE(same(ksp(prefix_graph, 0, 41, prefix_options), want_prefix)); },
       [&] {
         const auto got = resolve_to_paths(unit, dag, 0, 59, true, 7);
         ASSERT_EQ(got.size(), want_paths.size());
@@ -295,6 +307,30 @@ TEST(SearchFaults, KspAndTheResolverFailCleanly) {
       ++failures;
     }
     EXPECT_GE(failures - harness, 60) << "call " << c;  // beyond the thread's own allocations
+  }
+  // Separate queries on already-grown TLS: once after a two-node warm-up (the next
+  // query grows it again), once after every full query has warmed all reusable buffers.
+  // Arm the fail point only after warming, and retry every query on that same thread.
+  const auto tiny = make_graph(2, {{0, 1, 1, 1}});
+  const std::function<void()> nothing = [] {};
+  for (int warm = 0; warm < 2; ++warm) for (std::size_t c = 0; c < calls.size(); ++c) {
+    long failures = 0;
+    for (long k = 0;; ++k) {
+      const long live = g_live.load();
+      bool hit = false;
+      in_fresh_thread([&] {
+        if (warm == 0) (void)ksp(tiny, 0, 1, KspOptions(1));
+        else every();
+        hit = fails_at(k, calls[c]);
+        every();
+      }, nothing);
+      EXPECT_EQ(g_live.load(), live) << "warm " << warm << " call " << c << " allocation " << k;
+      if (!hit) break;
+      ++failures;
+    }
+    // Every call returns at least three Paths: their hops/nodes plus the result list
+    // alone exceed ten allocations, independently of retained workspace capacity.
+    EXPECT_GE(failures, 10) << "warm " << warm << " call " << c;
   }
 }
 

@@ -526,49 +526,53 @@ TEST(DeletionFaults, CaptureFailsAtEveryAllocationOnAColdOrGrowingThread) {
 // CentralizedTE's failure study at every allocation (any thread's, and the workers' only) on 1, 2 and 4
 // workers; after each failure a retry gives the reference baseline and every entry.
 TEST(DeletionFaults, GlobalSensitivityFailsAtEveryAllocation) {
-  const auto g = std::make_shared<const Graph>(
-      make_graph(5, {{0, 1, 2, 1}, {1, 2, 2, 1}, {1, 3, 1, 2}, {3, 2, 1, 2}, {2, 4, 2, 1}, {0, 3, 1, 5}}));
-  const EvaluationOptions opts {global_config(), nullptr, nullptr, OutputOptions {true, true, true}};
-  const std::vector<NodeId> sources {0};
-  const std::vector<NodeId> destinations {4};
-  const auto want = evaluate_edge_failures(*g, sources, destinations, opts, 1);
-  ASSERT_EQ(want.entries.size(), 3U);  // the cheapest path 0 -> 1 -> 2 -> 4 carries the maximum 2
-  const auto same = [&](const SensitivityResult& got, const std::string& where) {
-    expect_same(got.baseline, want.baseline, where);
-    ASSERT_EQ(got.entries.size(), want.entries.size()) << where;
-    for (std::size_t i = 0; i < want.entries.size(); ++i) {
-      EXPECT_EQ(got.entries[i].edge, want.entries[i].edge) << where;
-      EXPECT_EQ(got.entries[i].delivery_reduction, want.entries[i].delivery_reduction) << where;
-    }
+  const std::vector<std::shared_ptr<const Graph>> graphs {
+    std::make_shared<const Graph>(make_graph(5, {{0, 1, 2, 1}, {1, 2, 2, 1}, {1, 3, 1, 2}, {3, 2, 1, 2}, {2, 4, 2, 1}, {0, 3, 1, 5}})),
+    std::make_shared<const Graph>(make_graph(5, {{0, 1, 3, 1}, {0, 2, 3, 3}, {1, 3, 3, 1}, {2, 3, 3, 1}, {3, 4, 3, 1}})),
   };
-  for (std::int32_t workers : {1, 2, 4}) {
-    for (bool workers_only : {false, true}) {
-      if (workers == 1 && workers_only) continue;
-      int failures = 0;
-      for (long at = 0;; ++at) {
-        const std::string where = "workers " + std::to_string(workers) + (workers_only ? " (workers only)" : "") +
-                                  " allocation " + std::to_string(at);
-        // The result and the retry end with the attempt, the workers' scratch with their threads,
-        // and the reference above grew this thread's: an allocation left live is a leak.
-        const long live = g_live.load();
-        bool failed = false;
-        {
-          SensitivityResult got;
-          const auto call = [&] { got = evaluate_edge_failures(*g, sources, destinations, opts, workers); };
-          failed = workers_only ? fails_in_workers_at(at, call) : fails_at(at, call);
-          if (!failed) {
-            same(got, where);
-          } else {
-            same(evaluate_edge_failures(*g, sources, destinations, opts, workers), "retry after " + where);
-          }
-        }
-        EXPECT_EQ(g_live.load(), live) << where << ": a leak";
-        if (!failed) break;
-        ++failures;
-        ASSERT_FALSE(::testing::Test::HasFailure());
-        ASSERT_LT(at, 10000);
+  for (const auto& g : graphs) {
+    const EvaluationOptions opts {global_config(), nullptr, nullptr, OutputOptions {true, true, true}};
+    const std::vector<NodeId> sources {0};
+    const std::vector<NodeId> destinations {4};
+    const auto want = evaluate_edge_failures(*g, sources, destinations, opts, 1);
+    ASSERT_EQ(want.entries.size(), 3U);  // three baseline-positive candidates, including a cut edge
+    const auto same = [&](const SensitivityResult& got, const std::string& where) {
+      expect_same(got.baseline, want.baseline, where);
+      ASSERT_EQ(got.entries.size(), want.entries.size()) << where;
+      for (std::size_t i = 0; i < want.entries.size(); ++i) {
+        EXPECT_EQ(got.entries[i].edge, want.entries[i].edge) << where;
+        EXPECT_EQ(got.entries[i].delivery_reduction, want.entries[i].delivery_reduction) << where;
       }
-      EXPECT_GT(failures, workers_only ? 10 : 100) << "workers " << workers << " workers_only " << workers_only;
+    };
+    for (std::int32_t workers : {1, 2, 4}) {
+      for (bool workers_only : {false, true}) {
+        if (workers == 1 && workers_only) continue;
+        int failures = 0;
+        for (long at = 0;; ++at) {
+          const std::string where = "workers " + std::to_string(workers) + (workers_only ? " (workers only)" : "") +
+                                    " allocation " + std::to_string(at);
+          // The result and the retry end with the attempt, the workers' scratch with their threads,
+          // and the reference above grew this thread's: an allocation left live is a leak.
+          const long live = g_live.load();
+          bool failed = false;
+          {
+            SensitivityResult got;
+            const auto call = [&] { got = evaluate_edge_failures(*g, sources, destinations, opts, workers); };
+            failed = workers_only ? fails_in_workers_at(at, call) : fails_at(at, call);
+            if (!failed) {
+              same(got, where);
+            } else {
+              same(evaluate_edge_failures(*g, sources, destinations, opts, workers), "retry after " + where);
+            }
+          }
+          EXPECT_EQ(g_live.load(), live) << where << ": a leak";
+          if (!failed) break;
+          ++failures;
+          ASSERT_FALSE(::testing::Test::HasFailure());
+          ASSERT_LT(at, 10000);
+        }
+        EXPECT_GT(failures, workers_only ? 10 : 100) << "workers " << workers << " workers_only " << workers_only;
+      }
     }
   }
 }
@@ -637,4 +641,73 @@ TEST(DeletionFaults, TheStateComparatorsCompareEveryField) {
   Saved no_results = six;
   no_results.results.clear();
   EXPECT_FALSE(holds(six.state, no_results));
+}
+
+TEST(DeletionFaults, CutClassificationFailsWithoutChangingItsInputOrOutput) {
+  const auto g = graph();
+  DeletionCapture req;
+  (void)capture(*g, g, req);
+  const DeletionState saved = *req.state;
+  const auto expected = detail::deletion_cut_edges(saved);
+  const detail::ResidualNetwork network = saved.network();
+  int failures = 0;
+  for (long at = 0;; ++at) {
+    const long live = g_live.load();
+    bool failed;
+    {
+      std::vector<std::uint8_t> got {77};
+      failed = fails_at(at, [&] { got = detail::deletion_cut_edges(saved); });
+      if (failed) {
+        ++failures;
+        EXPECT_EQ(got, (std::vector<std::uint8_t> {77}));
+        EXPECT_TRUE(identical(saved, *req.state));
+        EXPECT_TRUE(same_network(saved.network(), network));
+        got = detail::deletion_cut_edges(saved);
+      }
+      EXPECT_EQ(got, expected);
+    }
+    EXPECT_EQ(g_live.load(), live) << at;
+    if (!failed) break;
+    ASSERT_LT(at, 100);
+  }
+  EXPECT_GE(failures, 7);
+}
+
+TEST(DeletionFaults, ScalarRepairsRetryOnTheSameColdAndGrownResolver) {
+  const auto g = graph();
+  DeletionCapture req;
+  (void)capture(*g, g, req);
+  const DeletionState saved = *req.state;
+  const detail::ResidualNetwork network = saved.network();
+  for (EdgeId e : saved.network().edges) {
+    if (saved.edge_flows()[static_cast<std::size_t>(e)] == 0) continue;
+    const auto full = DeletionResolver(saved).resolve(e);
+    for (bool warm : {false, true}) {
+      DeletionResolver kept(saved);
+      if (warm) (void)kept.loss(e);
+      for (long at = 0;; ++at) {
+        const long live = g_live.load();
+        bool failed;
+        {
+          DeletionResolver fresh(saved);
+          auto& resolver = warm ? kept : fresh;
+          Amount loss = -1;
+          failed = fails_at(at, [&] { loss = resolver.loss(e); });
+          if (failed) {
+            EXPECT_EQ(loss, -1);
+            EXPECT_TRUE(identical(saved, *req.state));
+            EXPECT_TRUE(same_network(saved.network(), network));
+            loss = resolver.loss(e);
+          }
+          EXPECT_EQ(loss, saved.value() - full.value);
+          // Complete repair can retain additional heap buckets beyond the scalar
+          // path. Its disposable resolver must not count as a leak of the kept one.
+          EXPECT_TRUE(same_result(DeletionResolver(saved).resolve(e), full));
+        }
+        EXPECT_EQ(g_live.load(), live) << e << " warm " << warm << " allocation " << at;
+        if (!failed) break;
+        ASSERT_LT(at, 1000);
+      }
+    }
+  }
 }

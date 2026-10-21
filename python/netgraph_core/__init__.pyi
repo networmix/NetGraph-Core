@@ -2708,10 +2708,11 @@ def evaluate_edge_failures(
     can carry a route, so deleting it can change the result, and with the equal source allocation a deletion that
     removes a source from the roster can raise the total: a negative reduction). delivery_reduction =
     baseline.call_delivered minus the call_delivered of evaluate_demand() without the edge, in signed
-    units, never thresholded. Two
-    shortcuts give exactly that value: unrestricted optimized CentralizedTE whose baseline is a maximum flow
-    (no offer, or an offer above what it delivers) repairs a copy of the baseline's solve instead of solving
-    again (at an offer the baseline delivers, each deletion is solved at the offer), and ShortestPaths
+    units, never thresholded. Two shortcuts give exactly that value. Unrestricted optimized CentralizedTE
+    whose baseline is a maximum flow (no offer, or an offer above what it delivers) reads each loss from
+    the baseline's residual network without a new solve: a saturated edge whose endpoints lie in different
+    strongly connected components loses its whole flow, any other its flow minus what can be rerouted
+    between its endpoints. At an offer the baseline delivers, each deletion is solved at the offer. ShortestPaths
     gives reduction 0 without placing to an edge outside the static shortest-path support reachable from
     the roster sources (no route can use it). CentralizedTE with a support solves every deletion afresh; Pinned
     replays the same program under each deletion. workers as evaluate_pairs

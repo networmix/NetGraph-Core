@@ -242,9 +242,10 @@ One native integer minimum-cost flow core serves `CentralizedTE` routing, the `O
 the evaluators and T2's sizing (there with every cost taken as 0: a maximum flow): the largest flow
 up to a cap from a source set to a destination set over the eligible edges, sent at the lowest
 total cost, starting from zero flow. For `evaluate_edge_failures` of unrestricted `CentralizedTE`
-with `OPTIMIZED` source allocation it repairs the baseline's solution for each removed edge instead
-of solving again, when that baseline is a maximum flow (no offer, or an offer above it); at an
-offer that binds each deletion is solved at the offer. Its private Python entry
+with `OPTIMIZED` source allocation and a maximum baseline, exact residual certificates or the
+first deletion-repair stage give the same loss as a fresh solve. Each repair resets independently;
+unbalanced intermediate amounts are never published. At an offer that binds, each deletion is
+solved afresh at that offer. Its private Python entry
 `_netgraph_core._solve_min_cost_flow(graph, view, sources, destinations, eligibility, cap)` returns
 the payload `{flow_value, marginal_cost_curve, edge_flows, min_cut, potentials, counters}` for the flow
 checks of the test suites.

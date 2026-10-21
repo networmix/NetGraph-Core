@@ -17,6 +17,27 @@
 
 namespace netgraph::core::detail {
 
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+// Native-only controls for comparing edge-failure shortcuts with complete repairs.
+// The caller owns the probe through all worker joins; observers may not use Python.
+enum class SensitivityWork { FullRepair, FirstRepair, Cut };
+struct SensitivityProbe {
+  bool full_repair {false};
+  bool cut_edges {true};
+  void (*observe)(void*, EdgeId, SensitivityWork) {nullptr};
+  void* context {nullptr};
+};
+[[nodiscard]] const SensitivityProbe* current_edge_failure_probe() noexcept;
+void set_edge_failure_probe(const SensitivityProbe* probe) noexcept;
+struct ScopedSensitivityProbe {
+  const SensitivityProbe* previous;
+  explicit ScopedSensitivityProbe(const SensitivityProbe* probe) noexcept : previous(current_edge_failure_probe()) { set_edge_failure_probe(probe); }
+  ~ScopedSensitivityProbe() { set_edge_failure_probe(previous); }
+  ScopedSensitivityProbe(const ScopedSensitivityProbe&) = delete;
+  ScopedSensitivityProbe& operator=(const ScopedSensitivityProbe&) = delete;
+};
+#endif
+
 // evaluate_pairs's validation in its two parts: the arguments (workers, foreign objects, the
 // Pinned, the configuration), then one pair (its endpoint sets, their overlap, its
 // Eligibility's graph, the pooled single-path rule for its source count), the pairs in index

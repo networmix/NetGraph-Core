@@ -21,7 +21,9 @@
 #include <vector>
 
 #include "netgraph/core/detail/min_cost_flow.hpp"
+#include "netgraph/core/detail/evaluator_checks.hpp"
 #include "netgraph/core/evaluators.hpp"
+#include "state_comparators.hpp"
 #include "test_utils.hpp"
 
 using namespace netgraph::core;
@@ -344,6 +346,10 @@ void check_deletion(const Case& c, const DeletionState& st, EdgeId e, const std:
   ASSERT_GT(f, 0) << where;
   DeletionResolver rs(st);
   const auto r = rs.resolve(e);
+  EXPECT_EQ(rs.loss(e), st.value() - r.value) << where;
+  // A partial scalar repair never becomes the next baseline, even when the
+  // resolver is reused for a full repair immediately afterwards.
+  EXPECT_TRUE(same_result(rs.resolve(e), r)) << where;
 #if NETGRAPH_CORE_PRIVATE_HOOKS
   // rem is the remainder (the units lost) and m the units repair 1 reroutes.
   const Amount rem = st.value() - r.value;
@@ -1452,12 +1458,13 @@ TEST(Sensitivity, GlobalBaselineKeepsEveryOutputsCombination) {
                            {0}, {4});
   const auto reference = evaluate_edge_failures(*c.g, c.sources, c.destinations, EvaluationOptions {global_config()}, 1);
   ASSERT_FALSE(reference.entries.empty());
-  for (int bits = 0; bits < 16; ++bits) {
-    const OutputOptions outputs {(bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0, (bits & 8) != 0};
+  for (int bits = 0; bits < 32; ++bits) {
+    const OutputOptions outputs {(bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0, (bits & 8) != 0, (bits & 16) != 0};
     EvaluationOptions opts {global_config()};
     opts.outputs = outputs;
     const auto s = evaluate_edge_failures(*c.g, c.sources, c.destinations, opts, 1);
     const auto cap = evaluate_demand(*c.g, c.sources, c.destinations, EvaluationOptions {global_config(), nullptr, nullptr, outputs});
+    expect_same(s.baseline, cap, "complete edge-failure baseline");
     EXPECT_EQ(s.baseline.call_delivered, cap.call_delivered) << bits;
     EXPECT_EQ(s.baseline.marginal_cost_curve, cap.marginal_cost_curve) << bits;
     EXPECT_EQ(s.baseline.edge_flows, cap.edge_flows) << bits;
@@ -1477,4 +1484,211 @@ TEST(Sensitivity, GlobalBaselineKeepsEveryOutputsCombination) {
       EXPECT_EQ(s.entries[i].delivery_reduction, reference.entries[i].delivery_reduction) << bits;
     }
   }
+}
+
+TEST(Sensitivity, BaselineComparisonRejectsEveryFieldAndRedistribution) {
+  const Case c = make_case(5, {{0, 2, 3, 1}, {0, 4, 0, 5}, {1, 3, 4, 2}, {2, 4, 3, 2}, {3, 4, 4, 1}}, {0, 1}, {4});
+  const EvaluationOptions options {global_config(), nullptr, nullptr, OutputOptions {true, true, true, true, true}};
+  const auto result = evaluate_edge_failures(*c.g, c.sources, c.destinations, options, 1);
+  const auto& good = result.baseline;
+  ASSERT_EQ(good.call_delivered, 7);
+  ASSERT_EQ(good.by_source.size(), 2U);
+  ASSERT_EQ(good.by_source[0].delivered, 3);
+  ASSERT_EQ(good.by_source[1].delivered, 4);
+  expect_same(good, evaluate_demand(*c.g, c.sources, c.destinations, options), "independent baseline call");
+  ASSERT_TRUE(good.program != nullptr);
+  ASSERT_TRUE(good.edge_flows && good.residual && good.saturated_boundary_edges && good.edge_reservations && good.min_cut);
+  ASSERT_TRUE(good.total_cost && good.marginal_cost_curve && !good.marginal_cost_curve->empty());
+  const std::vector<std::function<void(PlacementResult&)>> damage = {
+      [](auto& x) { ++x.call_delivered; }, [](auto& x) { x.call_undelivered = Amount {0}; },
+      [](auto& x) { ++x.delivery_delta; }, [](auto& x) { x.call_edge_drops.emplace_back(0, 0); },
+      [](auto& x) { ++x.call_source_drops; }, [](auto& x) { x.termination = Termination::Complete; },
+      [](auto& x) { x.routes_changed = !x.routes_changed; }, [](auto& x) { x.weights_changed = !x.weights_changed; },
+      [](auto& x) { x.reservations_changed = !x.reservations_changed; }, [](auto& x) { x.program.reset(); },
+      [](auto& x) { x.plan = TunnelPlan {}; }, [](auto& x) { x.requested = Counter128 {}; },
+      [](auto& x) { x.offered = Counter128 {}; }, [](auto& x) { ++x.admitted.lo; }, [](auto& x) { ++x.delivered; },
+      [](auto& x) { x.unadmitted = Counter128 {}; }, [](auto& x) { ++x.source_drops.lo; },
+      [](auto& x) { x.edge_drops.emplace_back(0, Counter128 {}); }, [](auto& x) { x.by_source.pop_back(); },
+      [](auto& x) { ++x.by_source[0].delivered; --x.by_source[1].delivered; },
+      [](auto& x) { x.by_tunnel.emplace_back(); }, [](auto& x) { x.total_cost.reset(); },
+      [](auto& x) { ++x.total_cost->lo; }, [](auto& x) { x.marginal_cost_curve.reset(); },
+      [](auto& x) { ++x.marginal_cost_curve->back().first; }, [](auto& x) { x.edge_flows.reset(); },
+      [](auto& x) { ++(*x.edge_flows)[0]; --(*x.edge_flows)[2]; }, [](auto& x) { x.residual.reset(); },
+      [](auto& x) { ++x.residual->back(); }, [](auto& x) { x.saturated_boundary_edges.reset(); },
+      [](auto& x) { x.saturated_boundary_edges->push_back(0); }, [](auto& x) { x.edge_reservations.reset(); },
+      [](auto& x) { ++x.edge_reservations->back(); }, [](auto& x) { x.min_cut.reset(); },
+      [](auto& x) { x.min_cut->push_back(0); },
+  };
+  EXPECT_EQ(failures_of([&] { expect_same(good, good, "same baseline"); }), 0);
+  for (std::size_t i = 0; i < damage.size(); ++i) {
+    auto bad = good;
+    damage[i](bad);
+    EXPECT_GT(failures_of([&] { expect_same(bad, good, "damaged baseline"); }), 0) << i;
+  }
+}
+
+TEST(FlowCoreDeletion, CutClassificationMatchesIndependentResidualReachability) {
+  std::mt19937_64 rng(721);
+  int classified = 0, bypassed = 0, zero = 0;
+  // The first case can reroute only by visiting the virtual source.
+  for (int trial = 0; trial < 181; ++trial) {
+    const Case c = trial == 0 ? make_case(4, {{0, 2, 1, 1}, {1, 2, 1, 2}, {2, 3, 1, 1}}, {0, 1}, {3}) : random_case(rng);
+    const auto req = capture_of(c);
+    const auto& st = *req.state;
+    const auto& net = st.network();
+    const auto got = detail::deletion_cut_edges(st);
+    ASSERT_EQ(got.size(), static_cast<std::size_t>(c.g->num_edges()));
+    const auto n = static_cast<std::size_t>(net.num_nodes) + 2;
+    std::vector<std::vector<bool>> reach(n, std::vector<bool>(n, false));
+    for (std::size_t u = 0; u < n; ++u) {
+      reach[u][u] = true;
+      for (auto a = net.arc_offsets[u]; a < net.arc_offsets[u + 1]; ++a) {
+        if (st.residual()[static_cast<std::size_t>(a)] > 0) reach[u][static_cast<std::size_t>(net.arc_destinations[static_cast<std::size_t>(a)])] = true;
+      }
+    }
+    for (std::size_t k = 0; k < n; ++k) for (std::size_t u = 0; u < n; ++u) for (std::size_t v = 0; v < n; ++v) {
+      reach[u][v] = reach[u][v] || (reach[u][k] && reach[k][v]);
+    }
+    const auto flows = st.edge_flows();
+    std::vector<std::uint8_t> expected(got.size(), 0);
+    for (std::size_t k = 0; k < net.edges.size(); ++k) {
+      const auto e = static_cast<std::size_t>(net.edges[k]);
+      const auto a = static_cast<std::size_t>(net.edge_forward_arcs[k]);
+      const auto u = static_cast<std::size_t>(net.edge_sources[k]);
+      const auto v = static_cast<std::size_t>(net.edge_destinations[k]);
+      expected[e] = flows[e] > 0 && st.residual()[a] == 0 && !reach[u][v];
+      classified += expected[e] != 0;
+      bypassed += flows[e] > 0 && expected[e] == 0;
+      zero += flows[e] == 0;
+      if (got[e]) EXPECT_EQ(st.value() - fresh_without(c, net.edges[k]).flow_value, flows[e]);
+    }
+    EXPECT_EQ(got, expected) << trial;
+    if (trial == 0) {
+      EXPECT_EQ(got[0], 0);  // s0 -> s* -> s1 -> a is a positive-residual bypass
+      EXPECT_EQ(st.value() - fresh_without(c, 0).flow_value, 0);
+    }
+  }
+  EXPECT_GT(classified, 50);
+  EXPECT_GT(bypassed, 10);
+  EXPECT_GT(zero, 50);
+}
+
+TEST(FlowCoreDeletion, ScalarLossPreservesMaximumGuardAndIndependentResets) {
+  const Case c = make_case(3, {{0, 1, 3, 1}, {1, 2, 3, 2}, {1, 2, 1, 5}}, {0}, {2});
+  const auto req = capture_of(c);
+  const auto saved = req.state->edge_flows();
+  DeletionResolver resolver(*req.state);
+  const auto ids = id_of_input(*c.g);
+  for (EdgeId e : {ids[1], ids[0], ids[1], ids[0]}) {
+    EXPECT_EQ(resolver.loss(e), e == ids[1] ? 2 : 3);
+    EXPECT_EQ(req.state->edge_flows(), saved);
+    EXPECT_EQ(resolver.resolve(e).value, fresh_without(c, e).flow_value);
+  }
+  for (EdgeId e : {ids[2], static_cast<EdgeId>(c.g->num_edges())}) {
+    EXPECT_EQ(error_of([&] { (void)resolver.loss(e); }), error_of([&] { (void)resolver.resolve(e); }));
+  }
+  Case capped = make_case(2, {{0, 1, 1, 1}, {0, 1, 2, 2}}, {0}, {1});
+  capped.cap = 1;
+  const auto cap = capture_of(capped);
+  ASSERT_FALSE(cap.state->maximum());
+  DeletionResolver cap_resolver(*cap.state);
+  EXPECT_EQ(error_of([&] { (void)cap_resolver.loss(0); }), error_of([&] { (void)cap_resolver.resolve(0); }));
+  EXPECT_THROW((void)detail::deletion_cut_edges(*cap.state), std::invalid_argument);
+  EXPECT_THROW((void)detail::deletion_cut_edges(DeletionState {}), std::invalid_argument);
+  const Case parallel = make_case(2, {{0, 1, 2, 1}, {0, 1, 2, 5}}, {0}, {1});
+  for (Amount offer : {0, 1, 5}) for (std::int32_t workers : {1, 2}) {
+    EvaluationOptions options {global_config(), nullptr, nullptr, OutputOptions {true, true, true, true, true}};
+    options.offer = std::optional<Amount>(offer);
+    const auto got = evaluate_edge_failures(*parallel.g, parallel.sources, parallel.destinations, options, workers);
+    expect_same(got.baseline, evaluate_demand(*parallel.g, parallel.sources, parallel.destinations, options), "finite baseline");
+    EXPECT_EQ(got.baseline.call_delivered, std::min<Amount>(offer, 4));
+    ASSERT_EQ(got.entries.size(), offer == 0 ? 0U : offer == 1 ? 1U : 2U);
+    for (std::size_t i = 0; i < got.entries.size(); ++i) {
+      EXPECT_EQ(got.entries[i].edge, static_cast<EdgeId>(i));
+      EXPECT_EQ(got.entries[i].delivery_reduction, offer == 5 ? 2 : 0);
+    }
+  }
+}
+
+TEST(FlowCoreDeletion, ScalarRepairStopsBeforeCancellation) {
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  const Case c = make_case(3, {{0, 1, 3, 1}, {1, 2, 3, 2}, {1, 2, 1, 5}}, {0}, {2});
+  const auto req = capture_of(c);
+  DeletionResolver resolver(*req.state);
+  const auto e = id_of_input(*c.g)[1];
+  std::vector<int> stages;
+  detail::DeletionProbe probe;
+  probe.observe = [&](const detail::DeletionEvent& event) { stages.push_back(event.repair); };
+  EXPECT_EQ(resolver.loss(e, probe), 2);
+  EXPECT_FALSE(stages.empty());
+  EXPECT_NE(std::find(stages.begin(), stages.end(), 1), stages.end());
+  for (int stage : stages) EXPECT_LE(stage, 1);
+  // The same underlying repair engine's full mode must still do both cancellations.
+  stages.clear();
+  EXPECT_EQ(resolver.resolve(e, probe).value, 1);
+  EXPECT_NE(std::find(stages.begin(), stages.end(), 2), stages.end());
+  EXPECT_NE(std::find(stages.begin(), stages.end(), 3), stages.end());
+  EXPECT_NE(std::find(stages.begin(), stages.end(), 4), stages.end());
+#else
+  GTEST_SKIP() << "intermediate repair observation requires private hooks";
+#endif
+}
+
+TEST(FlowCoreDeletion, CutClassificationHandlesALongResidualChainWithoutRecursion) {
+  constexpr NodeId links = 1000000;
+  std::vector<InEdge> edges;
+  edges.reserve(static_cast<std::size_t>(links));
+  // Saturation leaves reverse residual arcs 0 -> 1 -> ... -> links. Starting
+  // at vertex 0 must descend the entire chain, regardless of component order.
+  for (NodeId v = 0; v < links; ++v) edges.push_back({v + 1, v, 1, 1});
+  const Case c = make_case(links + 1, edges, {links}, {0});
+  const auto req = capture_of(c);
+  const auto cut = detail::deletion_cut_edges(*req.state);
+  ASSERT_EQ(cut.size(), edges.size());
+  EXPECT_EQ(std::count(cut.begin(), cut.end(), 1), static_cast<std::ptrdiff_t>(edges.size()));
+}
+
+TEST(Sensitivity, ShortcutControlsPreserveEveryFieldAndClassifyCuts) {
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  const Case c = make_case(5, {{0, 1, 3, 1}, {0, 2, 3, 3}, {1, 3, 3, 1}, {2, 3, 3, 1}, {3, 4, 3, 1}}, {0}, {4});
+  const EvaluationOptions options {global_config(), nullptr, nullptr, OutputOptions {true, true, true, true, true}};
+  detail::SensitivityProbe full;
+  full.full_repair = true;
+  const auto reference = [&] {
+    detail::ScopedSensitivityProbe control(&full);
+    return evaluate_edge_failures(*c.g, c.sources, c.destinations, options, 1);
+  }();
+  ASSERT_EQ(reference.entries.size(), 3U);
+  ASSERT_EQ(reference.baseline.call_delivered, 3);
+  const std::vector<EdgeId> expected_edges {0, 2, 4};
+  const std::vector<Amount> expected_losses {0, 0, 3};
+  using Work = detail::SensitivityWork;
+  for (int mode = 0; mode < 3; ++mode) for (std::int32_t workers : {1, 2, 4}) {
+    std::vector<int> seen(static_cast<std::size_t>(c.g->num_edges()), -1);
+    detail::SensitivityProbe probe;
+    probe.cut_edges = mode != 1;
+    probe.full_repair = mode == 2;
+    probe.context = &seen;
+    probe.observe = [](void* context, EdgeId e, Work work) {
+      (*static_cast<std::vector<int>*>(context))[static_cast<std::size_t>(e)] = static_cast<int>(work);
+    };
+    detail::ScopedSensitivityProbe control(&probe);
+    const auto got = evaluate_edge_failures(*c.g, c.sources, c.destinations, options, workers);
+    expect_same(got.baseline, reference.baseline, "edge-failure full baseline");
+    ASSERT_EQ(got.entries.size(), expected_edges.size());
+    for (std::size_t i = 0; i < got.entries.size(); ++i) {
+      EXPECT_EQ(got.entries[i].edge, expected_edges[i]);
+      EXPECT_EQ(got.entries[i].delivery_reduction, expected_losses[i]);
+    }
+    if (workers == 1 && mode == 0) {
+      EXPECT_EQ(seen[0], static_cast<int>(Work::FirstRepair));
+      EXPECT_EQ(seen[2], static_cast<int>(Work::FirstRepair));
+      EXPECT_EQ(seen[4], static_cast<int>(Work::Cut));
+    }
+    if (mode == 2) for (EdgeId e : expected_edges) EXPECT_EQ(seen[static_cast<std::size_t>(e)], static_cast<int>(Work::FullRepair));
+    if (mode == 1) for (int work : seen) EXPECT_NE(work, static_cast<int>(Work::Cut));
+  }
+#else
+  GTEST_SKIP() << "edge-failure shortcut controls require private hooks";
+#endif
 }

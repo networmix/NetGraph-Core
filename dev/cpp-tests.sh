@@ -45,6 +45,7 @@ Concurrency.FrozenTallyPublishesInsideTheLease
 DeadOccurrences.ForwardingSizesWithoutThem
 FlowCoreDeletion.CheckpointsEqualTheIterativeUpdate
 FlowCoreDeletion.RerunningTheFailedSearchAddsExactlyOneSearch
+FlowCoreDeletion.ScalarRepairStopsBeforeCancellation
 ForwardingSize.TheCallChecksEachCountInOrder
 GraphLayout.CombinedKeyPassesOnlyBelowNTimesKEqualsE
 GraphLayout.HashAndFallbackBoundaryAt65536DistinctCosts
@@ -52,7 +53,9 @@ GraphLayout.ProbeBudgetFallbackInCollectionAndGrowth
 GraphLayout.ProbeBudgetIsCumulativeAcrossTheLargeTableGrowths
 GraphLayout.RadixFallbackDigitsOnBothSidesOfTheCombinedKeyBoundary
 GraphLayout.RunsOfEqualCostsSkipTheLookup
+Ksp.DeviationSkipsOnlySearchesComparedWithFullYen
 Search.QueueDispatchAtTheWidthLimit
+Sensitivity.ShortcutControlsPreserveEveryFieldAndClassifyCuts
 "
 
 die() { echo "dev/cpp-tests.sh: $*" >&2; exit 1; }

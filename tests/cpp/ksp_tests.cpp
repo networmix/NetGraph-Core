@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "netgraph/core/detail/route_builders.hpp"
+#include "netgraph/core/detail/search_detail.hpp"
 #include "netgraph/core/search.hpp"
 #include "search_reference.hpp"
 #include "test_utils.hpp"
@@ -92,7 +93,89 @@ std::vector<Cost> costs_of(const std::vector<std::pair<Cost, Path>>& r) {
   return out;
 }
 
+void expect_walks(const Graph& g, NodeId s, NodeId t, const std::vector<std::pair<Cost, Path>>& got,
+                 const std::vector<Cost>& costs, const std::vector<std::vector<EdgeId>>& walks) {
+  ASSERT_EQ(got.size(), walks.size());
+  ASSERT_EQ(costs.size(), walks.size());
+  for (std::size_t i = 0; i < got.size(); ++i) {
+    EXPECT_EQ(got[i].first, costs[i]);
+    EXPECT_EQ(got[i].second.cost(), costs[i]);
+    EXPECT_EQ(got[i].second.source(), s);
+    EXPECT_EQ(got[i].second.destination(), t);
+    EXPECT_EQ(walk_of(got[i].second), walks[i]);
+    Cost sum = 0;
+    for (EdgeId e : walks[i]) sum += g.edge_costs()[static_cast<std::size_t>(e)];
+    EXPECT_EQ(sum, costs[i]);
+  }
+}
+
 } // namespace
+
+TEST(Ksp, DeviationBoundaryIsInclusiveAndSkippedPrefixCostsRemain) {
+  const auto g = bgraph(6, {{0, 1, 5, 1}, {0, 4, 5, 5}, {1, 2, 5, 1}, {1, 3, 5, 2}, {1, 5, 5, 2},
+                            {2, 1, 5, 1}, {2, 4, 5, 2}, {3, 4, 5, 1}, {5, 4, 5, 1}});
+  for (const auto tie : {RouteTieBreak::FewerHops, RouteTieBreak::HigherCapacity,
+                         RouteTieBreak::HigherAvailableCapacity, RouteTieBreak::HigherHeadroom}) {
+    expect_walks(g, 0, 4, run(g, 0, 4, 8, sel(true, tie)), {4, 4, 4, 5}, {{0, 2, 6}, {0, 3, 7}, {0, 4, 8}, {1}});
+    expect_walks(g, 0, 4, run(g, 0, 4, 8, sel(true, tie), AbsoluteCost {4}), {4, 4, 4}, {{0, 2, 6}, {0, 3, 7}, {0, 4, 8}});
+    expect_walks(g, 0, 4, run(g, 0, 4, 1, sel(true, tie)), {4}, {{0, 2, 6}});
+  }
+}
+
+TEST(Ksp, NonzeroDeviationRetainsTheSkippedBottleneck) {
+  // The prefix caps every whole path at 1. After the cost-3 path (d=1), the cost-4
+  // suffixes must tie on score: edge 3 precedes edge 4 despite its smaller capacity.
+  const auto g = bgraph(3, {{0, 1, 1, 1}, {1, 2, 1, 1}, {1, 2, 1, 2}, {1, 2, 2, 3}, {1, 2, 3, 3}});
+  expect_walks(g, 0, 2, run(g, 0, 2, 8, sel(true, RouteTieBreak::HigherCapacity)),
+               {2, 3, 4, 4}, {{0, 1}, {0, 2}, {0, 3}, {0, 4}});
+}
+
+TEST(Ksp, NonzeroDeviationStillExcludesEveryEarlierVertex) {
+  const auto g = bgraph(6, {{0, 1, 5, 1}, {1, 2, 5, 1}, {1, 4, 5, 1}, {2, 3, 5, 1}, {2, 5, 5, 1},
+                            {3, 1, 5, 1}, {3, 5, 5, 2}, {4, 5, 5, 1}});
+  expect_walks(g, 0, 5, run(g, 0, 5, 8, sel()), {3, 3, 5}, {{0, 1, 4}, {0, 2, 7}, {0, 1, 3, 6}});
+}
+
+TEST(Ksp, PendingHeadroomOrderUsesExactWholePathRatios) {
+  constexpr Amount m = Amount {1} << 54;
+  const auto direct = bgraph(2, {{0, 1, m, 1}, {0, 1, m + 1, 1}});
+  const std::vector<Amount> dr {m - 1, m};
+  const auto tie = sel(true, RouteTieBreak::HigherHeadroom);
+  expect_walks(direct, 0, 1, run(direct, 0, 1, 3, tie, std::nullopt, &dr), {1, 1}, {{1}, {0}});
+  const auto g = bgraph(4, {{0, 1, 1, 1}, {0, 2, m + 1, 1}, {1, 3, 1, 1}, {1, 3, m, 2}, {2, 3, 1, 2}});
+  const std::vector<Amount> residual {1, m, 1, m - 1, 1};
+  expect_walks(g, 0, 3, run(g, 0, 3, 3, tie, std::nullopt, &residual), {2, 3, 3}, {{0, 2}, {1, 4}, {0, 3}});
+}
+
+TEST(Ksp, DeviationSkipsOnlySearchesComparedWithFullYen) {
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  std::vector<InEdge> rows;
+  for (NodeId v = 0; v < 40; ++v) rows.push_back({v, v + 1, 1, 1});
+  for (Cost c = 1; c <= 8; ++c) rows.push_back({40, 41, 1, c});
+  const auto g = bgraph(42, rows);
+  struct Counts { std::size_t searches {0}; std::size_t skipped {0}; };
+  auto observe = [](void* context, std::size_t d, std::size_t j) {
+    auto& counts = *static_cast<Counts*>(context);
+    ++counts.searches;
+    if (j == d) counts.skipped += d;
+  };
+  Counts lawler, yen;
+  detail::KspProbe probe;
+  probe.spur = observe;
+  probe.context = &lawler;
+  detail::ScopedKspProbe guard(&probe);
+  const auto got = run(g, 0, 41, 8, sel());
+  probe.full_yen = true;
+  probe.context = &yen;
+  const auto full = run(g, 0, 41, 8, sel());
+  EXPECT_EQ(got, full);
+  EXPECT_EQ(lawler.searches, 47U); // 41 first expansion, then six final-edge searches
+  EXPECT_EQ(yen.searches, 287U);   // seven complete 41-edge expansions
+  EXPECT_EQ(yen.searches - lawler.searches, lawler.skipped);
+#else
+  GTEST_SKIP() << "the full-Yen comparator needs private hooks";
+#endif
+}
 
 TEST(Ksp, FirstPathIsTheCanonicalSinglePathOfBothDirections) {
   auto diamond = bgraph(4, {{0, 1, 1, 9}, {0, 2, 1, 1}, {1, 3, 1, 1}, {2, 3, 1, 9}});
@@ -516,7 +599,17 @@ TEST(Ksp, RandomGraphsAgreeWithExhaustiveEnumeration) {
       q.parallel_edges = s1.parallel_edges;
       q.tie_break = s1.tie_break;
       const auto want = reference_ksp(g, q, 0, static_cast<NodeId>(n - 1), k, ceiling);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+      detail::KspProbe probe;
+      probe.duplicate = [](void*, std::size_t old_d, std::size_t new_d) { EXPECT_EQ(old_d, new_d); };
+      detail::ScopedKspProbe full_yen(&probe);
+#endif
       auto got = run(g, 0, static_cast<NodeId>(n - 1), k, s1, ceiling, use_res ? &residual : nullptr, masks ? &el : nullptr);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+      probe.full_yen = true;
+      const auto full = run(g, 0, static_cast<NodeId>(n - 1), k, s1, ceiling, use_res ? &residual : nullptr, masks ? &el : nullptr);
+      EXPECT_EQ(got, full) << "graph " << gi << " case " << c;
+#endif
       std::vector<std::vector<EdgeId>> walks;
       for (const auto& [cost, p] : got) {
         walks.push_back(walk_of(p));

@@ -97,10 +97,12 @@ struct SensitivityResult {
 // source from the roster can raise the total, a negative delivery_reduction). delivery_reduction is
 // the baseline's call_delivered minus the call_delivered with that edge deleted, using the same
 // config, offer, design and cache. When the unrestricted optimized CentralizedTE baseline is a
-// maximum flow (no offer, or an offer above what it delivers), each deletion starts from the
-// baseline solve's final state and repairs it, using one state copy per worker: the exact maximum
-// flow at minimum cost. At an offer the baseline delivers (it binds, perhaps below the maximum),
-// each deletion is solved afresh at the offer. CentralizedTE with a support solves every deletion afresh;
+// maximum flow (no offer, or an offer above what it delivers), a saturated edge whose endpoints
+// lie in different strongly connected components of the residual network loses its whole flow.
+// Any other candidate loses its flow minus what can be rerouted between its endpoints.
+// These shortcuts preserve the complete baseline result and candidate order.
+// At an offer the baseline delivers (it binds, perhaps below the maximum), each deletion is
+// solved afresh at the offer. CentralizedTE with a support solves every deletion afresh.
 // T1 sets up again for the same design under each deletion, T2 redoes its sizing, count selection
 // and objectives; Pinned replays the same program under
 // each deletion (a fixed-route failure question).

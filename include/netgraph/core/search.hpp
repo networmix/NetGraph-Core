@@ -97,6 +97,9 @@ struct KspOptions {
 // (std::invalid_argument): tie_break, source and destination in range, source == destination, k >= 1,
 // the ceiling, the residual, a foreign Eligibility. An excluded endpoint, no static route under a
 // CostStretch ceiling, or no path gives an empty list.
+// Each alternative remembers the spur index that produced it (Lawler's partition) and is
+// expanded from there; the index is not part of the path key, and those searches still count
+// the whole prefix's cost and bottleneck and exclude its vertices.
 [[nodiscard]] std::vector<std::pair<Cost, Path>> ksp(const Graph& graph, NodeId source, NodeId destination, const KspOptions& options);
 
 // The source -> destination walks of a DAG in increasing (cost, hops, edge-id sequence): a hop's

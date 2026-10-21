@@ -36,6 +36,14 @@ API.
 
 ### Changed
 
+- **Exact sensitivity**: unrestricted optimized `CentralizedTE` with a maximum baseline uses
+  residual-component certificates, or stops a deletion repair when its
+  scalar loss is known. The complete baseline, candidate order and reductions are preserved;
+  every actual repair resets independently and publishes no intermediate allocation. Binding
+  finite offers and other model domains retain their existing computation.
+- **K shortest paths**: alternatives retain their generating spur index and skip searches
+  in earlier prefix regions (Lawler’s partition), preserving complete path order, exact tie
+  keys, masks and cost ceilings.
 - **Concurrency**: native work releases the GIL. One gate per ledger protects reads and whole
   scalar/list publications; independent ledgers run in parallel. Policy construction and evaluators
   take one optional building-exclusive or frozen-shared cache lease, with FIFO lifecycle admission;

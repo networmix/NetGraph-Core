@@ -199,11 +199,16 @@ struct DeletionProbe {
 
 class MinCostFlowSolver;
 
-// The deletion re-solve on one worker's copy of a captured state: each call resets the
-// residuals and potentials from that copy, deletes a real arc e = (u, v) with flow f_e > 0 and
-// repairs the state by three fixed-origin repairs (u -> v for f_e; u -> s*, then t* -> v, for
-// the remainder). The network is read in place, shared with every copy of the state (the copy
-// keeps it alive); the working storage is the resolver's own, allocated at construction.
+// Positive-flow saturated edges crossing residual strongly connected components have
+// deletion loss equal to their baseline flow. One classification on the complete augmented
+// network, virtual arcs included; bits are per graph EdgeId. Requires a certified maximum.
+[[nodiscard]] std::vector<std::uint8_t> deletion_cut_edges(const DeletionState& state);
+
+// Deletions on one worker's copy of a captured state: every call resets the residuals and
+// potentials and deletes a real arc e = (u, v) carrying a positive amount. Full resolve() uses
+// up to three repairs with fixed endpoints (u -> v for that amount; u -> s*, then t* -> v for the remainder).
+// Scalar loss() stops after the first. The network is shared read-only with every copy of
+// the state, which keeps it alive; working buffers belong to the resolver and grow as needed.
 class DeletionResolver {
 public:
   explicit DeletionResolver(const DeletionState& state);
@@ -216,8 +221,13 @@ public:
   // Throws std::invalid_argument before any change when the state is not certified maximum or
   // e is not an edge of the view with positive flow.
   [[nodiscard]] DeletionResult resolve(EdgeId e);
+  // Scalar deletion loss after the first u -> v repair only, with the same preconditions
+  // and independent baseline reset as resolve(). The private intermediate amounts may be
+  // unbalanced and are never returned as an allocation.
+  [[nodiscard]] Amount loss(EdgeId e);
 #if NETGRAPH_CORE_PRIVATE_HOOKS
   [[nodiscard]] DeletionResult resolve(EdgeId e, const DeletionProbe& probe);
+  [[nodiscard]] Amount loss(EdgeId e, const DeletionProbe& probe);
 #endif
 
 private:

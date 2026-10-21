@@ -3,8 +3,9 @@
   evaluate(offer, design)). evaluate_pairs() runs it per pair and evaluate_edge_failures() per candidate
   deletion on `workers` threads; results follow
   input order and the lowest failing index supplies the exception. Unrestricted CentralizedTE with the
-  optimized source allocation deletes only the edges its baseline loads, repairing the baseline flow after each
-  deletion when that flow is a maximum (no offer, or an offer it does not reach) and solving afresh at a binding
+  optimized source allocation deletes only the edges its baseline loads. At a maximum baseline it
+  derives scalar losses from residual component certificates or the first deletion repair,
+  resetting each worker's private state independently, and solves afresh at a binding
   offer. ShortestPaths skips an edge that no
   roster source's reachable part of the static shortest-path support contains: removing it
   changes no route or amount. Other deletions (the equal source allocation of CentralizedTE among them: a deletion
@@ -245,6 +246,14 @@ std::vector<std::uint8_t> reachable_support(const Graph& graph, const detail::Po
 
 namespace detail {
 
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+namespace {
+thread_local const SensitivityProbe* edge_failure_probe = nullptr;
+}
+const SensitivityProbe* current_edge_failure_probe() noexcept { return edge_failure_probe; }
+void set_edge_failure_probe(const SensitivityProbe* probe) noexcept { edge_failure_probe = probe; }
+#endif
+
 std::optional<TunnelRoster> check_demand_arguments(const Graph& graph, std::span<const NodeId> sources,
     std::span<const NodeId> destinations, const EvaluationOptions& options, ArgumentWork search) {
   auto roster = check_policy_construction(graph, sources, destinations, options.config, options.eligibility, options.cache, search);
@@ -343,7 +352,8 @@ SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<c
   check_cache_mode(options.cache, workers);
   // Unrestricted CentralizedTE with the optimized source allocation skips the links its baseline leaves without
   // flow (deleting one keeps the baseline feasible, so the delivery stays). When the baseline is a maximum flow (no
-  // offer, or a finite offer above what it delivers) each deletion repairs the baseline's state; when the offer
+  // offer, or a finite offer above what it delivers) each loss uses a certificate or the first
+  // repair from an independent baseline reset; no partial allocation is published. When the offer
   // binds (the baseline delivers it, perhaps below the maximum) each deletion is solved afresh at the offer. The
   // equal source allocation, a support and T2 solve every allowed deletion afresh.
   const auto* global_routing = std::get_if<CentralizedTE>(&options.config.routing);
@@ -369,6 +379,7 @@ SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<c
     if (cost_only) on_route = reachable_support(graph, pe);
   }
   std::vector<EdgeId> candidates;
+  std::vector<Amount> baseline_flows;
   if (global) {
     // The baseline's positive-flow edges; no state, and no candidate, when no roster source
     // reaches an allowed destination (nothing is placed).
@@ -376,9 +387,9 @@ SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<c
       if (capture.state->value() != out.baseline.call_delivered) {
         throw std::logic_error("evaluate_edge_failures: the captured state differs from the baseline");
       }
-      const auto flows = capture.state->edge_flows();
+      baseline_flows = capture.state->edge_flows();
       for (EdgeId e = 0; e < graph.num_edges(); ++e) {
-        if (flows[static_cast<std::size_t>(e)] > 0) candidates.push_back(e);
+        if (baseline_flows[static_cast<std::size_t>(e)] > 0) candidates.push_back(e);
       }
     }
   } else {
@@ -390,10 +401,23 @@ SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<c
   }
   const Amount base = out.baseline.call_delivered;
   const bool repair = global && (!options.offer.has_value() || base < **options.offer);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  const auto* probe = current_edge_failure_probe();
+  const bool full_repair = probe != nullptr && probe->full_repair;
+  const bool classify = !full_repair && (probe == nullptr || probe->cut_edges);
+#else
+  constexpr bool full_repair = false;
+  constexpr bool classify = true;
+#endif
   out.entries.resize(candidates.size());
+  std::vector<std::uint8_t> cut_edges;
+  if (repair && !candidates.empty() && classify) cut_edges = detail::deletion_cut_edges(*capture.state);
+  const bool needs_resolver = repair && std::any_of(candidates.begin(), candidates.end(), [&](EdgeId e) {
+    return cut_edges.empty() || cut_edges[static_cast<std::size_t>(e)] == 0;
+  });
   // CentralizedTE: one resolver per worker (its copy of the state and its working storage), made here.
   std::vector<detail::DeletionResolver> resolvers;
-  if (repair && !candidates.empty()) {
+  if (needs_resolver) {
     const auto threads = worker_threads(candidates.size(), workers);
     resolvers.reserve(threads);
     for (std::size_t t = 0; t < threads; ++t) resolvers.emplace_back(*capture.state);
@@ -404,7 +428,16 @@ SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<c
     entry.edge = e;
     // A failed deletion fails the call: run_indexed raises the lowest failing candidate's exception.
     if (repair) {
-      entry.delivery_reduction = base - resolvers[t].resolve(e).value;
+      const auto k = static_cast<std::size_t>(e);
+      const bool cut = !cut_edges.empty() && cut_edges[k] != 0;
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+      if (probe != nullptr && probe->observe != nullptr) {
+        probe->observe(probe->context, e, full_repair ? SensitivityWork::FullRepair : cut ? SensitivityWork::Cut : SensitivityWork::FirstRepair);
+      }
+#endif
+      if (cut) entry.delivery_reduction = baseline_flows[k];
+      else if (full_repair) entry.delivery_reduction = base - resolvers[t].resolve(e).value;
+      else entry.delivery_reduction = resolvers[t].loss(e);
       return;
     }
     if (cost_only && on_route[static_cast<std::size_t>(e)] == 0) {

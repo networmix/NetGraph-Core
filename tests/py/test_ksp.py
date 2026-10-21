@@ -15,6 +15,7 @@ from helpers import (
     assert_read_only,
     build,
     exact,
+    plain,
     sweep_python_allocation,
 )
 from private_hooks import needs_hooks
@@ -35,6 +36,97 @@ def ksp(g, s, t, k, *, parallel_edges=True, tie=FEWER, **kw):
         t,
         ngc.KspOptions(k, tie_break=tie, parallel_edges=parallel_edges, **kw),
     )
+
+
+@pytest.mark.parametrize(
+    "n,rows,target,tie,residual,costs,walks",
+    [
+        (
+            6,
+            [
+                (0, 1, 5, 1),
+                (0, 4, 5, 5),
+                (1, 2, 5, 1),
+                (1, 3, 5, 2),
+                (1, 5, 5, 2),
+                (2, 1, 5, 1),
+                (2, 4, 5, 2),
+                (3, 4, 5, 1),
+                (5, 4, 5, 1),
+            ],
+            4,
+            FEWER,
+            None,
+            [4, 4, 4, 5],
+            [[0, 2, 6], [0, 3, 7], [0, 4, 8], [1]],
+        ),
+        (
+            3,
+            [(0, 1, 1, 1), (1, 2, 1, 1), (1, 2, 1, 2), (1, 2, 2, 3), (1, 2, 3, 3)],
+            2,
+            HIGHER_CAP,
+            None,
+            [2, 3, 4, 4],
+            [[0, 1], [0, 2], [0, 3], [0, 4]],
+        ),
+        (
+            6,
+            [
+                (0, 1, 5, 1),
+                (1, 2, 5, 1),
+                (1, 4, 5, 1),
+                (2, 3, 5, 1),
+                (2, 5, 5, 1),
+                (3, 1, 5, 1),
+                (3, 5, 5, 2),
+                (4, 5, 5, 1),
+            ],
+            5,
+            FEWER,
+            None,
+            [3, 3, 5],
+            [[0, 1, 4], [0, 2, 7], [0, 1, 3, 6]],
+        ),
+        (
+            4,
+            [
+                (0, 1, 1, 1),
+                (0, 2, 2**54 + 1, 1),
+                (1, 3, 1, 1),
+                (1, 3, 2**54, 2),
+                (2, 3, 1, 2),
+            ],
+            3,
+            ngc.RouteTieBreak.HIGHER_HEADROOM,
+            [1, 2**54, 1, 2**54 - 1, 1],
+            [2, 3, 3],
+            [[0, 2], [1, 4], [0, 3]],
+        ),
+    ],
+)
+def test_nonzero_deviation_keeps_the_whole_prefix(
+    n, rows, target, tie, residual, costs, walks
+):
+    g = bgraph(n, rows)
+    want = [
+        [c, [0, target, [[e] for e in walk], c]]
+        for c, walk in zip(costs, walks, strict=True)
+    ]
+    assert plain(ksp(g, 0, target, 8, tie=tie, residual=residual)) == want
+    assert plain(ksp(g, 0, target, 1, tie=tie, residual=residual)) == want[:1]
+    # A later nonzero deviation must retain the complete prefix cost at a ceiling.
+    bound = costs[1]
+    assert plain(
+        ksp(
+            g,
+            0,
+            target,
+            8,
+            tie=tie,
+            residual=residual,
+            cost_ceiling=ngc.AbsoluteCost(bound),
+        )
+    ) == [p for p in want if p[0] <= bound]
 
 
 def test_order_and_ceilings():

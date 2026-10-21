@@ -90,18 +90,15 @@ code:tests/py/tunnel_oracle.py | priority | priority | the oracle's tie score of
 dev/perf/aba.py | selection | row, and a selection has at least one (``choose_rows``). | the timing tool's row selection (--rows)
 dev/perf/aba.py | selection | selection, ``--iters`` (the pins) and the report's start. Re | the timing tool's row selection (--rows)
 dev/perf/aba.py | selection | their groups it did not, and per group the rows the whole se | the timing tool's row selection (--rows)
-dev/perf/aba_api.hpp | dst | * ksp (ksp.fabric3_k8): ksp(g, src, dst, KspOptions(k)) (FEW | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | dst | * spf_dag (spf.dag.*): spf(g, {src}, Forward, targets {dst}) | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | dst | * spf_path (spf.single.canonical16k): spf(g, {src}, Forward, | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | dst | * spf_to (spf.to.random16k): spf(g, {dst}, Reverse, no targe | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | dst | One demand's program: the optimized CentralizedTE solve of ` | the local or parameter `dst` of this file's code (a shorthand kept as an ordinary local)
-dev/perf/aba_api.hpp | g | * ksp (ksp.fabric3_k8): ksp(g, src, dst, KspOptions(k)) (FEW | the local or parameter `g` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | g | * spf_dag (spf.dag.*): spf(g, {src}, Forward, targets {dst}) | the local or parameter `g` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | g | * spf_path (spf.single.canonical16k): spf(g, {src}, Forward, | the local or parameter `g` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | g | * spf_to (spf.to.random16k): spf(g, {dst}, Reverse, no targe | the local or parameter `g` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | g | The queue a search with the default queue (Auto) takes on g: | the local or parameter `g` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | g | spf(g, {src}, Forward, no targets), the default route choice | the local or parameter `g` of this file's code (a shorthand kept as an ordinary local)
-dev/perf/aba_api.hpp | src | * ksp (ksp.fabric3_k8): ksp(g, src, dst, KspOptions(k)) (FEW | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | src | * spf_dag (spf.dag.*): spf(g, {src}, Forward, targets {dst}) | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | src | * spf_path (spf.single.canonical16k): spf(g, {src}, Forward, | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
 dev/perf/aba_api.hpp | src | One demand's program: the optimized CentralizedTE solve of ` | the local or parameter `src` of this file's code (a shorthand kept as an ordinary local)
@@ -295,10 +292,6 @@ docs/semantics.md | weights | value does not expose per-router effective weights
 docs/semantics.md | weights | weights), and forwards it hop by hop on the free capacity: e | WEIGHTED's member weights
 docs/semantics.md | weights | route allocation | a table column: the weight options of the models
 evaluate_edge_failures | placed | (NGRAPH_CORE_SENSITIVITY_THREADS). Only ShortestPaths reads | traffic placed (delivered) on a ledger
-include/netgraph/core/detail/min_cost_flow.hpp | allocated | keeps it alive); the working storage is the resolver's own, | allocated memory, storage or amounts
-include/netgraph/core/detail/min_cost_flow.hpp | f_e | repairs the state by three fixed-origin repairs (u -> v for | a math symbol of the comment's formula
-include/netgraph/core/detail/min_cost_flow.hpp | f_e | residuals and potentials from that copy, deletes a real arc | a math symbol of the comment's formula
-include/netgraph/core/detail/min_cost_flow.hpp | origin | repairs the state by three fixed-origin repairs (u -> v for | the origin of a search or a repair
 include/netgraph/core/detail/min_cost_flow.hpp | own_i | The solve on an edge subset (the Optimized kernel's replacem | a math symbol of the comment's formula
 include/netgraph/core/detail/min_cost_flow.hpp | placed | reroute flow already placed, so the pairs are not the costs | traffic placed (delivered) on a ledger
 include/netgraph/core/detail/min_cost_flow.hpp | sensitivity | Optimized uses an edge subset; exact sensitivity repairs a s | sensitivity analysis, or the env var NGRAPH_CORE_SENSITIVITY_THREADS
@@ -499,7 +492,8 @@ dev/perf/README.md | placement | | `kernel` | `kernel.{proportional,eb,lossy}.cl
 dev/perf/README.md | selection | groups it did not, and per group the rows the whole selectio | the timing tool's row selection (--rows)
 dev/perf/README.md | selection | memory rule's boundary, the bootstrap interval, the cluster  | the timing tool's row selection (--rows)
 dev/perf/README.md | selection | the side, mode and row when it comes from a block. A refusal | the timing tool's row selection (--rows)
-dev/perf/README.md | sensitivity | | `sensitivity` | `sens.exact`, `sens.policy_all_edges`, `se | a timing row's frozen group or description (the tool keeps row names)
+dev/perf/README.md | sensitivity | exact-model sensitivity; policy-model loss for every eligible edge | timing group and ordinary description of the current edge-failure analysis
+dev/perf/README.md | sensitivity | sens.exact.{cut,partial,branch,reroute,capped} | timing group and ordinary description of the current edge-failure analysis
 dev/perf/README.md | src | `OUT_DIR/src`, so a second attempt needs another or an empti | a directory or a sort key named src, or a path component
 dev/perf/README.md | src | `OUT_DIR/src`. `REV` is required (there is no default refere | a directory or a sort key named src, or a path component
 dev/perf/README.md | tunnels | | `t1` | `t1.setup.fabric`, `t1.forward.fabric` | T1 with 16 | a model's tunnels (ForwardingProgram.tunnels is the current name)

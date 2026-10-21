@@ -65,6 +65,7 @@
   else, so every vertex id, slot and offset fits.
 */
 #include "netgraph/core/detail/min_cost_flow.hpp"
+#include "netgraph/core/detail/strong_components.hpp"
 
 #include <algorithm>
 #include <array>
@@ -328,22 +329,11 @@ public:
   // The deletion re-solve of input edge k (a real arc with positive flow) from `state`, whose
   // network this solver holds (load()).
   DeletionResult resolve(const DeletionState& state, std::size_t k) {
-    std::copy(state.residual().begin(), state.residual().end(), arc_residual_.begin());
-    std::copy(state.potentials().begin(), state.potentials().end(), repair_potentials_.begin());
     DeletionResult out;
     auto& c = out.counters;
-    const auto fwd = static_cast<std::size_t>(network_->edge_forward_arcs[k]);
-    const auto bwd = static_cast<std::size_t>(network_->reverse_arcs[fwd]);
-    const Amount f = arc_residual_[bwd];
+    const Amount r = begin_deletion(state, k, c);
     const std::int32_t u = network_->edge_sources[k];
     const std::int32_t v = network_->edge_destinations[k];
-    // Removing e leaves f extra units at u and f missing units at v; conservation is broken
-    // until repairs reconnect or cancel them. Remove both residual arcs of e.
-    arc_residual_[fwd] = 0;
-    arc_residual_[bwd] = 0;
-    emit(0, false, 0, c);
-    const Amount m = repair(1, u, v, f, false, c);
-    const Amount r = f - m;
     if (r > 0) {
       bool reuse = true;
 #if NETGRAPH_CORE_PRIVATE_HOOKS
@@ -370,7 +360,33 @@ public:
     return out;
   }
 
+  Amount loss(const DeletionState& state, std::size_t k) {
+    MinCostFlowCounters counters;
+    // Loss = deleted flow minus the capped u -> v reroute. Later cancellation stages
+    // restore conservation but cannot change this value.
+    return begin_deletion(state, k, counters);
+  }
+
 private:
+  // Both full and scalar repair start from the captured maximum, never from the
+  // previous call's potentially unbalanced intermediate state.
+  Amount begin_deletion(const DeletionState& state, std::size_t k, MinCostFlowCounters& c) {
+    std::copy(state.residual().begin(), state.residual().end(), arc_residual_.begin());
+    std::copy(state.potentials().begin(), state.potentials().end(), repair_potentials_.begin());
+    const auto fwd = static_cast<std::size_t>(network_->edge_forward_arcs[k]);
+    const auto bwd = static_cast<std::size_t>(network_->reverse_arcs[fwd]);
+    const Amount f = arc_residual_[bwd];
+    const std::int32_t u = network_->edge_sources[k];
+    const std::int32_t v = network_->edge_destinations[k];
+    // Removing e leaves f extra units at u and f missing units at v; conservation is broken
+    // until repairs reconnect or cancel them. Remove both residual arcs of e.
+    arc_residual_[fwd] = 0;
+    arc_residual_[bwd] = 0;
+    emit(0, false, 0, c);
+    const Amount m = repair(1, u, v, f, false, c);
+    return f - m;
+  }
+
   // The vertex count and the virtual vertices of `net` (refused beyond the limits of
   // network_vertices(), before any change), then the scratch of that many vertices.
   void size(const ResidualNetwork& net) {
@@ -782,6 +798,28 @@ DeletionResolver& DeletionResolver::operator=(DeletionResolver&&) noexcept = def
 
 DeletionResult DeletionResolver::resolve(EdgeId e) { return solver_->resolve(state_, index_of(e)); }
 
+Amount DeletionResolver::loss(EdgeId e) { return solver_->loss(state_, index_of(e)); }
+
+std::vector<std::uint8_t> deletion_cut_edges(const DeletionState& state) {
+  if (!state.maximum()) {
+    throw std::invalid_argument("deletion cut classification requires a certified maximum");
+  }
+  const auto& net = state.network();
+  const auto residual = state.residual();
+  std::vector<std::int32_t> component;
+  strong_components(net.arc_offsets, net.arc_destinations,
+                    [residual](std::size_t a) { return residual[a] > 0; }, component);
+  std::vector<std::uint8_t> cut(static_cast<std::size_t>(state.graph().num_edges()), 0);
+  for (std::size_t k = 0; k < net.edges.size(); ++k) {
+    const auto a = static_cast<std::size_t>(net.edge_forward_arcs[k]);
+    if (residual[a] == 0 && residual[static_cast<std::size_t>(net.reverse_arcs[a])] > 0 &&
+        component[static_cast<std::size_t>(net.edge_sources[k])] != component[static_cast<std::size_t>(net.edge_destinations[k])]) {
+      cut[static_cast<std::size_t>(net.edges[k])] = 1;
+    }
+  }
+  return cut;
+}
+
 #if NETGRAPH_CORE_PRIVATE_HOOKS
 DeletionResult DeletionResolver::resolve(EdgeId e, const DeletionProbe& probe) {
   const std::size_t k = index_of(e);
@@ -791,6 +829,15 @@ DeletionResult DeletionResolver::resolve(EdgeId e, const DeletionProbe& probe) {
   } reset {*solver_};
   solver_->probe(&probe);
   return solver_->resolve(state_, k);
+}
+
+Amount DeletionResolver::loss(EdgeId e, const DeletionProbe& probe) {
+  struct Reset {
+    MinCostFlowSolver& solver;
+    ~Reset() { solver.probe(nullptr); }
+  } reset {*solver_};
+  solver_->probe(&probe);
+  return loss(e);
 }
 #endif
 

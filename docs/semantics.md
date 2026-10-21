@@ -536,6 +536,13 @@ returns a list of `(cost, Path)` pairs; every hop of every Path has one member.
   `KspOptions` keeps the ceiling as given; `ksp` checks it in this place. An excluded endpoint or
   no path gives `[]`.
 
+Internally, each pending alternative remembers the spur index that generated it. When that
+path is accepted, Lawler's partition needs searches only at that index and later ones: earlier
+prefix regions already have their pending minimum. The generating index is included in the
+expansion, and all preceding edges still contribute their cost, exact bottleneck and excluded
+vertices. The index never enters the path key. Each spur returns the minimum whole prefixed
+path under that same key, so this partition preserves the complete ordered result of full Yen.
+
 ```python
 g = graph(3, [(0, 1, 3, 1), (0, 1, 5, 1), (1, 2, 9, 1)])   # parallel members 0 and 1
 higher = ngc.RouteTieBreak.HIGHER_CAPACITY
@@ -2395,10 +2402,14 @@ on a ledger with that load.
     carries more without the edge (for example, equal splitting no longer sends a share down a
     thin path, or a source behind it no longer holds the equal allocation back). Unrestricted
     `CentralizedTE` with `OPTIMIZED` source allocation, when its baseline is a maximum flow (no
-    offer, or an offer above what it delivers), computes each deletion by repairing a copy of the
-    baseline's solve, which gives exactly the value of a fresh solve; at an offer the baseline
-    delivers (the offer binds, perhaps below the maximum), and with `EQUAL` source allocation or a
-    support, each deletion is solved afresh. T1 sets up again for the same design
+    offer, or an offer above what it delivers), obtains the same delivery reduction as a fresh solve through
+    exact residual certificates or the first repair from a private baseline copy. A positive-flow
+    saturated edge across residual strongly connected components loses exactly its flow; other
+    edges lose their flow minus the amount the first repair can reroute. The intermediate amounts
+    may violate conservation and are never published or used as a new baseline. Each actual repair
+    resets independently. These shortcuts preserve the complete baseline and the candidate entries/order.
+    At an offer the baseline delivers (the offer binds, perhaps below the maximum), and with
+    `EQUAL` source allocation or a support, each deletion is solved afresh. T1 sets up again for the same design
     under each deletion; T2 redoes its sizing, count choice and objectives, on the same
     supplied support when there is one. `Pinned` replays the same program under each deletion (a
     repaired fixed-route question, not a new optimum and not stale forwarding): deleting an edge of

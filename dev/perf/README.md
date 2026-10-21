@@ -317,6 +317,7 @@ failed.
 | `capacity` | `capacity.costonly_{eb,prop}.failures` | ShortestPaths capacity over 32 failure states x 8 pairs |
 | `maxflow` | `maxflow.exact.{totals,detailed}` | exact maximum flow over 8 failure states x 4 pairs |
 | `sensitivity` | `sens.exact`, `sens.policy_all_edges`, `sens.equal_global` | exact-model sensitivity; policy-model loss for every eligible edge; equal-source-allocation CentralizedTE, every edge solved afresh |
+| `sensitivity` | `sens.exact.{cut,partial,branch,reroute,capped}` | full exact-model sensitivity calls on a 64-link saturated chain, 32 partial-repair branches, 32 branches with a second upstream route and a shared downstream cut, 32 branches with a parallel upstream member and a downstream cut, and the chain at binding offer 1; nonuniform costs, baseline/classification/copies/results included |
 | `pooled` | `pooled.{ecmp,lossy}.clos`, `pooled.from_dag.clos`, `pooled.from_dag_build.clos` | 8 demands of 8 pooled sources on one ledger, Lossless / Lossy above capacity; the same demands by Pinned over prebuilt `from_dag` programs, and building those programs |
 | `global` | `global.equal.random` | equal-source-allocation CentralizedTE capacity, 2 demands of 4 sources |
 | `program` | `program.forward.global`, `program.replay.lossy`, `program.stale.lossy`, `program.replace.costonly`, `program.ring.lossy` | forwarding programs: a CentralizedTE program forwarded, replayed under failures (Lossy), stale under black holes, ShortestPaths re-prepared by replace; a 64-head program on a ring of 64 links whose 64 barriers form one cyclic group (6 rounds) |
@@ -325,6 +326,11 @@ failed.
 | `t2` | `t2.exact16.headroom`, `t2.exact16.cost`, `t2.upto256.headroom`, `t2.size.mesh` | T2 on the same fabric and demands: 16 tunnels per head with and without `prefer_headroom`, up to 256 with it; 16 tunnels for 10 heads on a 500-node mesh (2000 links, 5/8 to 8/8 free), sizing-dominated |
 | `msd` | `msd.loop` | the maximum-supported-demand bracket and bisection with a per-series DAG cache |
 | `ksp` | `ksp.fabric3_k8` | k = 8 shortest paths for 8 pairs |
+| `ksp` | `ksp.longprefix_k64` | 96-edge common prefix and 64 branches, k = 64; all prefix and result work timed |
+| `ksp` | `ksp.weighted_k32` | random 128 x6, seed64, four pairs, k = 32 |
+| `ksp` | `ksp.collapse` | 12-hop parallel prefix, 32 branches, HIGHER_CAPACITY Collapse |
+| `ksp` | `ksp.ties` | 64 equal-cost branches, each of the four tie rules |
+| `ksp` | `ksp.k1` | the long-prefix population with k = 1 |
 | `cache` | `cache.cold`, `cache.warm`, `cache.frozen.reads` | 64 direct lookups from a cleared, prepopulated building, or prepopulated frozen cache |
 | `concurrency` | `concurrency.place_zero`, `delivered`, `program`, `config` | 10,000 calls of one operation on a prepared one-link policy (capacity 16, cost 3, q=1, replace(4)); config is the immutable control |
 | `concurrency` | `concurrency.two_ledgers_serial`, `concurrency.two_ledgers_parallel` | 32 evaluate(32) calls on each independent ledger; 384-node/2816-edge layered graph, q=1, capacity 64, two thread launches and joins in both modes |
@@ -401,3 +407,6 @@ nothing. They test the rules of this file:
   frozen-input, root and queue checks;
 * the frozen files: both `SHA256SUMS` files, and the values compiled into `aba_rows.hpp` against
   the JSON files (each storage row on its input).
+
+The `sens.exact`, cut/repair population and `sens.policy_all_edges` rows also have
+`.w2` counterparts: the identical full query on two workers. Unsuffixed rows use one worker.

@@ -23,6 +23,7 @@
 */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -36,6 +37,26 @@
 #include "netgraph/core/types.hpp"
 
 namespace netgraph::core::detail {
+
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+// Native-only full-Yen comparator and observations. The caller owns the probe throughout
+// the call; observers run between workspace leases and may throw to test cleanup.
+struct KspProbe {
+  bool full_yen {false};
+  void (*spur)(void*, std::size_t deviation, std::size_t index) {nullptr};
+  void (*duplicate)(void*, std::size_t old_deviation, std::size_t new_deviation) {nullptr};
+  void* context {nullptr};
+};
+[[nodiscard]] const KspProbe* current_ksp_probe() noexcept;
+void set_ksp_probe(const KspProbe* probe) noexcept;
+struct ScopedKspProbe {
+  const KspProbe* previous;
+  explicit ScopedKspProbe(const KspProbe* probe) noexcept : previous(current_ksp_probe()) { set_ksp_probe(probe); }
+  ~ScopedKspProbe() { set_ksp_probe(previous); }
+  ScopedKspProbe(const ScopedKspProbe&) = delete;
+  ScopedKspProbe& operator=(const ScopedKspProbe&) = delete;
+};
+#endif
 
 // A route choice as the searches read it: the tie rule, all equal-cost walks (multipath) or the
 // canonical single path, and whether every parallel edge of a (u, v) pair is kept (parallel_edges).

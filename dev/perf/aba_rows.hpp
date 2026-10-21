@@ -879,26 +879,76 @@ inline std::vector<Row> rows() {
                "exact max-flow with edge flows, residuals and bottleneck edges, same inputs as totals",
                [=] { return exact_row(true); }});
   // ---- the failure study (evaluate_edge_failures)
-  r.push_back({"sens.exact", "sensitivity",
-               "exact-model sensitivity (candidates: the positive-flow edges), random 256 x6, 4 pairs",
-               [] {
-                 auto g = std::make_shared<Graph>(abaapi::build(gen_random(256, 6, 19)));
-                 auto el = std::make_shared<Elig>(abaapi::eligibility(*g, {}, {}));
-                 std::vector<std::pair<int, int>> pairs = {{1, 129}, {30, 200}, {77, 5}, {250, 60}};
-                 return Iter([g, el, pairs] { Digest d; for (auto [s, t] : pairs) d.add(abaapi::edge_failures_exact(*g, s, t, *el)); return d.h; });
-               }});
-  r.push_back({"sens.policy_all_edges", "sensitivity",
-               "policy-model sensitivity over every eligible edge, ShortestPaths EB, Clos 16x8 (256 edges), 2 pairs",
-               [] {
-                 auto g = std::make_shared<Graph>(abaapi::build(gen_clos(16, 8, 20)));
-                 auto el = std::make_shared<Elig>(abaapi::eligibility(*g, {}, {}));
-                 return Iter([g, el] {
-                   Digest d;
-                   d.add(abaapi::edge_failures_policy_all_edges(*g, 0, 8, *el));
-                   d.add(abaapi::edge_failures_policy_all_edges(*g, 3, 12, *el));
-                   return d.h;
-                 });
-               }});
+  for (int workers : {1, 2}) {
+    r.push_back({workers == 1 ? "sens.exact" : "sens.exact.w2", "sensitivity",
+                 "exact-model sensitivity (candidates: the positive-flow edges), random 256 x6, 4 pairs",
+                 [=] {
+                   auto g = std::make_shared<Graph>(abaapi::build(gen_random(256, 6, 19)));
+                   auto el = std::make_shared<Elig>(abaapi::eligibility(*g, {}, {}));
+                   std::vector<std::pair<int, int>> pairs = {{1, 129}, {30, 200}, {77, 5}, {250, 60}};
+                   return Iter([g, el, pairs, workers] { Digest d; for (auto [s, t] : pairs) d.add(abaapi::edge_failures_exact(*g, s, t, *el, workers)); return d.h; });
+                 }});
+  }
+  // Fixed cut/repair populations. Every timed iteration includes the full
+  // baseline and complete SensitivityResult, including all classification and copies.
+  auto edge_failure_population = [](int kind, int workers = 1) {
+    Arrays a;
+    const int blocks = 32;
+    auto add = [&](int u, int v, double capacity, std::int64_t cost) {
+      a.src.push_back(u); a.dst.push_back(v); a.cap.push_back(capacity); a.cost.push_back(cost);
+    };
+    if (kind == 0 || kind == 3) {
+      a.n = 65;
+      for (int u = 0; u < 64; ++u) add(u, u + 1, 3, 1 + u % 3);
+    } else if (kind == 1 || kind == 4) {
+      a.n = blocks + 2;
+      for (int i = 0; i < blocks; ++i) {
+        add(0, i + 1, 3, 1);
+        if (kind == 4) {
+          add(0, i + 1, 3, 3);
+          add(i + 1, a.n - 1, 3, 2);
+        } else {
+          add(i + 1, a.n - 1, 3, 2);
+          add(i + 1, a.n - 1, 1, 5);
+        }
+      }
+    } else {
+      a.n = 3 * blocks + 2;
+      for (int i = 0; i < blocks; ++i) {
+        const int u = 3 * i + 1, v = u + 1, w = u + 2;
+        add(0, u, 3, 1); add(0, v, 3, 3);
+        add(u, w, 3, 1); add(v, w, 3, 1); add(w, a.n - 1, 3, 1);
+      }
+    }
+    auto g = std::make_shared<Graph>(abaapi::build(a));
+    return Iter([g, destination = a.n - 1, kind, workers] {
+      return abaapi::edge_failures_unmasked(*g, destination, kind == 3 ? std::optional<double>(1) : std::nullopt, workers);
+    });
+  };
+  r.push_back({"sens.exact.cut", "sensitivity", "unrestricted optimized edge-failure evaluation, 64-edge nonuniform-cost saturated chain; full baseline/results", [=] { return edge_failure_population(0); }});
+  r.push_back({"sens.exact.partial", "sensitivity", "unrestricted optimized edge-failure evaluation, 32 branches with one of three deleted units reroutable; full baseline/results", [=] { return edge_failure_population(1); }});
+  r.push_back({"sens.exact.branch", "sensitivity", "32 branches; upstream deletion reroutes all 3 units through a second branch (first repair, zero loss), shared downstream is a cut; full baseline/results", [=] { return edge_failure_population(2); }});
+  r.push_back({"sens.exact.reroute", "sensitivity", "32 branches with a parallel upstream member (first repair, zero loss) and a cut downstream link; full baseline/results", [=] { return edge_failure_population(4); }});
+  r.push_back({"sens.exact.capped", "sensitivity", "same 64-edge saturated chain at binding offer 1, unchanged fresh-solve fallback; full baseline/results", [=] { return edge_failure_population(3); }});
+  r.push_back({"sens.exact.cut.w2", "sensitivity", "unrestricted optimized edge-failure evaluation, 64-edge nonuniform-cost saturated chain; full baseline/results", [=] { return edge_failure_population(0, 2); }});
+  r.push_back({"sens.exact.partial.w2", "sensitivity", "unrestricted optimized edge-failure evaluation, 32 branches with one of three deleted units reroutable; full baseline/results", [=] { return edge_failure_population(1, 2); }});
+  r.push_back({"sens.exact.branch.w2", "sensitivity", "32 branches; upstream deletion reroutes all 3 units through a second branch (first repair, zero loss), shared downstream is a cut; full baseline/results", [=] { return edge_failure_population(2, 2); }});
+  r.push_back({"sens.exact.reroute.w2", "sensitivity", "32 branches with a parallel upstream member (first repair, zero loss) and a cut downstream link; full baseline/results", [=] { return edge_failure_population(4, 2); }});
+  r.push_back({"sens.exact.capped.w2", "sensitivity", "same 64-edge saturated chain at binding offer 1, unchanged fresh-solve fallback; full baseline/results", [=] { return edge_failure_population(3, 2); }});
+  for (int workers : {1, 2}) {
+    r.push_back({workers == 1 ? "sens.policy_all_edges" : "sens.policy_all_edges.w2", "sensitivity",
+                 "policy-model sensitivity over every eligible edge, ShortestPaths EB, Clos 16x8 (256 edges), 2 pairs",
+                 [=] {
+                   auto g = std::make_shared<Graph>(abaapi::build(gen_clos(16, 8, 20)));
+                   auto el = std::make_shared<Elig>(abaapi::eligibility(*g, {}, {}));
+                   return Iter([g, el, workers] {
+                     Digest d;
+                     d.add(abaapi::edge_failures_policy_all_edges(*g, 0, 8, *el, workers));
+                     d.add(abaapi::edge_failures_policy_all_edges(*g, 3, 12, *el, workers));
+                     return d.h;
+                   });
+                 }});
+  }
   // ---- pooled sources and the equal source allocation (several sources of one demand)
   // Eight demands of eight source leaves each to one destination leaf on a Clos 64x32 (unit costs,
   // links of 10..80): demand j has the leaves 8j..8j+7 and the leaf (8j + 36) mod 64. Every source
@@ -1152,6 +1202,61 @@ inline std::vector<Row> rows() {
                  });
                }});
   // ---- k shortest paths, the DAG cache, eligibility
+  auto prefix_population = [](int stem, int width, bool ties, bool parallels) {
+    Arrays a;
+    a.n = stem + width + 2;
+    auto add = [&](int u, int v, double cap, std::int64_t cost) {
+      a.src.push_back(u); a.dst.push_back(v); a.cap.push_back(cap); a.cost.push_back(cost);
+    };
+    for (int v = 0; v < stem; ++v) {
+      add(v, v + 1, 100, 1);
+      if (parallels) add(v, v + 1, 50, 1);
+    }
+    for (int i = 0; i < width; ++i) {
+      add(stem, stem + i + 1, 1 + i % 9, 1);
+      add(stem + i + 1, a.n - 1, 1 + i % 9, ties ? 1 : 1 + i % 9);
+    }
+    return a;
+  };
+  r.push_back({"ksp.longprefix_k64", "ksp",
+               "96-edge common prefix then 64 two-edge branches, costs 2..10, k=64, FEWER_HOPS Expand; complete ordered paths",
+               [=] {
+                 auto g = std::make_shared<Graph>(abaapi::build(prefix_population(96, 64, false, false)));
+                 return Iter([g] { return abaapi::ksp(*g, 0, 161, 64); });
+               }});
+  r.push_back({"ksp.weighted_k32", "ksp",
+               "random 128 x6 seed64, costs1..31, k=32, four endpoint pairs, FEWER_HOPS Expand",
+               [] {
+                 auto g = std::make_shared<Graph>(abaapi::build(gen_random(128, 6, 64)));
+                 return Iter([g] {
+                   Digest d;
+                   for (int s : {0, 16, 32, 48}) d.add(abaapi::ksp(*g, s, 127 - s, 32));
+                   return d.h;
+                 });
+               }});
+  r.push_back({"ksp.collapse", "ksp",
+               "12-edge common prefix with two parallel members per hop, 32 branches, k=32, HIGHER_CAPACITY Collapse",
+               [=] {
+                 auto g = std::make_shared<Graph>(abaapi::build(prefix_population(12, 32, false, true)));
+                 return Iter([g] { return abaapi::ksp(*g, 0, 45, 32, false, abaapi::KspTie::Capacity); });
+               }});
+  r.push_back({"ksp.ties", "ksp",
+               "three-edge prefix and 64 equal-cost branches with varied capacities, k=64, each of the four ties, Expand",
+               [=] {
+                 auto g = std::make_shared<Graph>(abaapi::build(prefix_population(3, 64, true, false)));
+                 return Iter([g] {
+                   Digest d;
+                   for (auto tie : {abaapi::KspTie::Fewer, abaapi::KspTie::Capacity, abaapi::KspTie::Available, abaapi::KspTie::Headroom})
+                     d.add(abaapi::ksp(*g, 0, 68, 64, true, tie));
+                   return d.h;
+                 });
+               }});
+  r.push_back({"ksp.k1", "ksp",
+               "same 96-edge prefix/64 branches as ksp.longprefix_k64, k=1, unchanged first-search-only work",
+               [=] {
+                 auto g = std::make_shared<Graph>(abaapi::build(prefix_population(96, 64, false, false)));
+                 return Iter([g] { return abaapi::ksp(*g, 0, 161, 1); });
+               }});
   r.push_back({"ksp.fabric3_k8", "ksp",
                "K shortest paths, k = 8, three-tier fabric 8 pods x 16 leaves, 8 pairs",
                [] {

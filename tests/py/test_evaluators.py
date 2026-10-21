@@ -10,7 +10,7 @@ import math
 
 import numpy as np
 import pytest
-from helpers import build, exact
+from helpers import build, exact, plain
 
 import netgraph_core as ngc
 
@@ -21,6 +21,130 @@ LL = ngc.Admission.LOSSLESS
 LY = ngc.Admission.LOSSY
 T = ngc.Termination
 L62 = 1 << 62
+
+
+@pytest.mark.parametrize("workers", [1, 2, 4])
+@pytest.mark.parametrize("bits", range(32))
+def test_optimized_deletion_shortcuts_keep_complete_results(workers, bits):
+    fixtures = [
+        (
+            5,
+            [(0, 1, 3, 1), (0, 2, 3, 3), (1, 3, 3, 1), (2, 3, 3, 1), (3, 4, 3, 1)],
+            [0],
+            [4],
+            3,
+            9,
+            [(0, 0), (2, 0), (4, 3)],
+        ),
+        (
+            3,
+            [(0, 1, 3, 1), (1, 2, 3, 2), (1, 2, 1, 5)],
+            [0],
+            [2],
+            3,
+            9,
+            [(0, 3), (1, 2)],
+        ),
+        (3, [(0, 1, 2, 1), (1, 2, 2, 3)], [0], [2], 2, 8, [(0, 2), (1, 2)]),
+        (
+            4,
+            [(0, 2, 1, 1), (1, 2, 1, 2), (2, 3, 1, 1)],
+            [0, 1],
+            [3],
+            1,
+            2,
+            [(0, 0), (2, 1)],
+        ),
+        (
+            3,
+            [(0, 1, 3, 1), (1, 0, 1, 7), (1, 1, 1, 9), (1, 2, 3, 2), (1, 2, 1, 5)],
+            [0],
+            [2],
+            3,
+            9,
+            [(0, 3), (3, 2)],
+        ),
+    ]
+    outputs = ngc.OutputOptions(
+        edge_flows=bool(bits & 1),
+        residual=bool(bits & 2),
+        saturated_boundary_edges=bool(bits & 4),
+        min_cut=bool(bits & 8),
+        edge_reservations=bool(bits & 16),
+    )
+    model = ngc.CentralizedTE(source_allocation=S.OPTIMIZED)
+    for n, edges, sources, destinations, value, cost, reductions in fixtures:
+        g = build(n, edges)
+        options = opts(model, outputs=outputs)
+        got = ngc.evaluate_edge_failures(g, sources, destinations, options, workers)
+        baseline = ngc.evaluate_demand(g, sources, destinations, options)
+        assert plain(got.baseline) == plain(baseline)
+        assert (got.baseline.call_delivered, got.baseline.total_cost) == (value, cost)
+        by_input = dict(reductions)
+        expected = [
+            (e, by_input[int(position)])
+            for e, position in enumerate(g.input_positions())
+            if int(position) in by_input
+        ]
+        assert [
+            (entry.edge, entry.delivery_reduction) for entry in got.entries
+        ] == expected
+        for entry in got.entries:
+            without = opts(
+                model,
+                eligibility=g.eligibility(excluded_edges=[entry.edge]),
+                outputs=outputs,
+            )
+            fresh = ngc.evaluate_demand(g, sources, destinations, without)
+            assert entry.delivery_reduction == value - fresh.call_delivered
+            if fresh.edge_flows is not None:
+                caps = list(g.edge_capacity_units())
+                flows = list(fresh.edge_flows)
+                assert all(
+                    0 <= flow <= cap for flow, cap in zip(flows, caps, strict=True)
+                )
+
+
+def test_optimized_deletion_shortcuts_masks_finite_zero_and_wide_cost():
+    model = ngc.CentralizedTE(source_allocation=S.OPTIMIZED)
+    outputs = ngc.OutputOptions(
+        edge_flows=True,
+        residual=True,
+        min_cut=True,
+        saturated_boundary_edges=True,
+        edge_reservations=True,
+    )
+    g = build(3, [(0, 1, 3, 1), (1, 2, 3, 2), (1, 2, 1, 5)])
+    for eligibility in [
+        None,
+        g.eligibility(excluded_edges=[2]),
+        g.eligibility(excluded_nodes=[1]),
+    ]:
+        for offer in [None, 0, 1, 3, 4]:
+            options = opts(model, eligibility=eligibility, outputs=outputs, offer=offer)
+            for workers in [1, 2]:
+                got = ngc.evaluate_edge_failures(g, [0], [2], options, workers)
+                assert plain(got.baseline) == plain(
+                    ngc.evaluate_demand(g, [0], [2], options)
+                )
+                for entry in got.entries:
+                    deleted = g.eligibility(excluded_edges=[entry.edge])
+                    if eligibility is not None:
+                        deleted = ngc.Eligibility.intersect(eligibility, deleted)
+                    fresh = ngc.evaluate_demand(
+                        g, [0], [2], opts(model, eligibility=deleted, offer=offer)
+                    )
+                    assert (
+                        entry.delivery_reduction
+                        == got.baseline.call_delivered - fresh.call_delivered
+                    )
+    amount = (1 << 32) + 1
+    wide = build(2, [(0, 1, amount, amount)])
+    got = ngc.evaluate_edge_failures(wide, 0, 1, opts(model, outputs=outputs), 2)
+    assert got.baseline.total_cost == (1 << 64) + (1 << 33) + 1
+    assert [(e.edge, e.delivery_reduction) for e in got.entries] == [(0, amount)]
+
+
 DOMAIN = "offer must be an integer in [0, 2^62)"
 
 

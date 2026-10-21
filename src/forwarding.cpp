@@ -52,6 +52,7 @@
 
 #include "netgraph/core/detail/int128.hpp"
 #include "netgraph/core/detail/route_builders.hpp"
+#include "netgraph/core/detail/strong_components.hpp"
 
 namespace netgraph::core::detail {
 
@@ -1597,57 +1598,9 @@ void LossyForwardingEvaluator::build_events() {
   for (const auto& [a, b] : edges) dependencies_[static_cast<std::size_t>(fill[static_cast<std::size_t>(a)]++)] = b;
 }
 
-// Tarjan's strongly connected components, iterative (no recursion depth).
 void LossyForwardingEvaluator::find_strong_components() {
-  const auto n = static_cast<std::size_t>(num_events_);
-  scc_.assign(n, -1);
-  std::vector<std::int32_t> index(n, -1);
-  std::vector<std::int32_t> low(n, 0);
-  std::vector<std::uint8_t> on(n, 0);
-  std::vector<std::int32_t> stack;
-  std::vector<std::pair<std::int32_t, std::int32_t>> work;  // (event, next adjacency position)
-  std::int32_t counter = 0;
-  num_scc_ = 0;
-  for (std::size_t s = 0; s < n; ++s) {
-    if (index[s] >= 0) continue;
-    work.emplace_back(static_cast<std::int32_t>(s), dependency_offsets_[s]);
-    index[s] = low[s] = counter++;
-    stack.push_back(static_cast<std::int32_t>(s));
-    on[s] = 1;
-    while (!work.empty()) {
-      auto& [v, k] = work.back();
-      const auto vi = static_cast<std::size_t>(v);
-      if (k < dependency_offsets_[vi + 1]) {
-        const auto w = static_cast<std::size_t>(dependencies_[static_cast<std::size_t>(k)]);
-        ++k;
-        if (index[w] < 0) {
-          index[w] = low[w] = counter++;
-          stack.push_back(static_cast<std::int32_t>(w));
-          on[w] = 1;
-          work.emplace_back(static_cast<std::int32_t>(w), dependency_offsets_[w]);
-        } else if (on[w] != 0) {
-          low[vi] = std::min(low[vi], index[w]);
-        }
-        continue;
-      }
-      if (low[vi] == index[vi]) {
-        while (true) {
-          const auto w = static_cast<std::size_t>(stack.back());
-          stack.pop_back();
-          on[w] = 0;
-          scc_[w] = num_scc_;
-          if (w == vi) break;
-        }
-        ++num_scc_;
-      }
-      const auto done = v;
-      work.pop_back();
-      if (!work.empty()) {
-        const auto u = static_cast<std::size_t>(work.back().first);
-        low[u] = std::min(low[u], low[static_cast<std::size_t>(done)]);
-      }
-    }
-  }
+  num_scc_ = strong_components(dependency_offsets_, dependencies_,
+                               [](std::size_t) { return true; }, scc_);
 }
 
 // Amount x reaches occurrence o (a router's split, or a tunnel's injection): a dark occurrence

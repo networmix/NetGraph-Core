@@ -21,7 +21,7 @@
 // * spf_path (spf.single.canonical16k): spf(g, {src}, Forward, targets {dst}) with the row's
 //   route choice (multipath = false) and the residual: the canonical single path. Digest:
 //   target_cost and the walk.
-// * ksp (ksp.fabric3_k8): ksp(g, src, dst, KspOptions(k)) (FEWER_HOPS, every parallel edge), no
+// * ksp: K shortest paths with the row's tie and parallel-edge choices, no
 //   residual, no ceiling, no masks. Digest: the path count, then per
 //   path its cost, hop count and B' edge ids (the graph's edge ids, ordered by source, cost, target
 //   and input position).
@@ -392,20 +392,31 @@ inline std::uint64_t fold_edge_failures(const nc::SensitivityResult& r) {
 }
 
 // Exact-model failure study: CentralizedTE, optimized source allocation (candidates: the baseline's positive-flow edges).
-inline std::uint64_t edge_failures_exact(const Graph& g, int src, int dst, const Elig& el) {
+inline std::uint64_t edge_failures_exact(const Graph& g, int src, int dst, const Elig& el, std::int32_t workers = 1) {
   const nc::NodeId s[1] = {src};
   const nc::NodeId t[1] = {dst};
   nc::EvaluationOptions opts {global_config(), el.get(), nullptr, {}};
-  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), s, t, opts, 1));
+  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), s, t, opts, workers));
+}
+
+// Complete evaluator call on a fixed failure-study population. A finite offer is
+// physical, converted on both sides at the graph's common resolution.
+inline std::uint64_t edge_failures_unmasked(const Graph& g, int dst, std::optional<double> offer = std::nullopt,
+                                           std::int32_t workers = 1) {
+  const nc::NodeId sources[1] = {0};
+  const nc::NodeId destinations[1] = {dst};
+  nc::EvaluationOptions options {global_config()};
+  if (offer) options.offer = std::optional<nc::Amount>(nc::to_units(*offer, kResolution));
+  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), sources, destinations, options, workers));
 }
 
 // Policy-model failure study over every allowed edge: ShortestPaths Equal.
-inline std::uint64_t edge_failures_policy_all_edges(const Graph& g, int src, int dst, const Elig& el) {
+inline std::uint64_t edge_failures_policy_all_edges(const Graph& g, int src, int dst, const Elig& el, std::int32_t workers = 1) {
   const nc::NodeId s[1] = {src};
   const nc::NodeId t[1] = {dst};
   const auto cfg = config(nc::ShortestPaths {}, Kernel::Equal);
   nc::EvaluationOptions opts {cfg, el.get(), nullptr, {}};
-  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), s, t, opts, 1));
+  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), s, t, opts, workers));
 }
 
 // Pooled ShortestPaths placement: one Equal policy (Lossless, or Lossy) per demand of several
@@ -1017,9 +1028,17 @@ struct ParallelLedgers {
   }
 };
 
-// K shortest paths: the FEWER_HOPS tie_break, every parallel edge.
-inline std::uint64_t ksp(const Graph& g, int src, int dst, int k) {
-  const nc::KspOptions opts(k);
+// K shortest paths; defaults retain FEWER_HOPS and every parallel edge.
+enum class KspTie { Fewer, Capacity, Available, Headroom };
+inline std::uint64_t ksp(const Graph& g, int src, int dst, int k, bool parallel = true, KspTie tie = KspTie::Fewer) {
+  nc::KspOptions opts(k);
+  opts.parallel_edges = parallel;
+  switch (tie) {
+    case KspTie::Fewer: opts.tie_break = nc::RouteTieBreak::FewerHops; break;
+    case KspTie::Capacity: opts.tie_break = nc::RouteTieBreak::HigherCapacity; break;
+    case KspTie::Available: opts.tie_break = nc::RouteTieBreak::HigherAvailableCapacity; break;
+    case KspTie::Headroom: opts.tie_break = nc::RouteTieBreak::HigherHeadroom; break;
+  }
   const auto paths = nc::ksp(g.ref(), src, dst, opts);
   Digest d;
   d.add_i(static_cast<std::int64_t>(paths.size()));
