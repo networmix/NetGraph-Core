@@ -305,7 +305,6 @@ include/netgraph/core/flow_policy.hpp | count | chosen count), design_demand (nu
 include/netgraph/core/flow_policy.hpp | count | or an evaluator uses it); `up_to` (T2 only; T1 rejects it): | the tunnel count (tunnels per head)
 include/netgraph/core/flow_policy.hpp | drops | call_edge_drops (this call's drops per edge, ascending EdgeI | losses on links or at a source
 include/netgraph/core/flow_policy.hpp | edge_weights | (Capacity). edge_weights (one integer per edge in [0, 2^62), | ShortestPaths.edge_weights, where the field now lives
-include/netgraph/core/flow_policy.hpp | edge_weights | edge_weights' length and entries; then the tunnel limit; the | ShortestPaths.edge_weights, where the field now lives
 include/netgraph/core/flow_policy.hpp | placed | minimum total cost of the flow by `cost` per unit (more deli | traffic placed (delivered) on a ledger
 include/netgraph/core/flow_policy.hpp | volume | controller. A design volume D is split RR(D, H, h) over the | the design volume D of the tunnel models
 include/netgraph/core/flow_policy.hpp | weights | allocation | a table column: the weight options of the models
@@ -315,7 +314,6 @@ include/netgraph/core/flow_record.hpp | entry | that route, or kUnreachable if n
 include/netgraph/core/forwarding_program.hpp | allocated | One shared hop-by-hop program on a supplied DAG of `graph`: | allocated memory, storage or amounts
 include/netgraph/core/forwarding_program.hpp | planned | planned_bandwidth: T2's planned bandwidth u (metadata, | T2's planned bandwidth
 include/netgraph/core/forwarding_program.hpp | weights | Equal (absent) or Weighted, whose weights come from `weight_ | WEIGHTED's member weights
-include/netgraph/core/forwarding_program.hpp | weights | The captured source weights (roster source, saved supply) in | the captured source weights of a program's injection
 include/netgraph/core/forwarding_program.hpp | weights | applies only to PredecessorDAG routes`); allocation Optimize | WEIGHTED's member weights
 include/netgraph/core/forwarding_program.hpp | weights | share by highest averages over its entries' weights. Identic | a program entry's integer weight (its share among its head's entries)
 include/netgraph/core/forwarding_program.hpp | weights | the weights' combination; edge_weights' and residual's lengt | WEIGHTED's member weights
@@ -667,3 +665,21 @@ tests/py/test_programs.py | Tunnels | on rows 2, 6 and 17. Tunnels 0 and 3 reach
 docs/semantics.md | weights | `FEWER_HOPS` or `HIGHER_CAPACITY` and `EQUAL`, `CAPACITY` or `EXPLICIT` weights, a preparation | member weight values and immutable preparation
 README.md | weights | `HIGHER_CAPACITY` and static weights keeps its immutable preparation across epochs, with results | immutable member weight values, not a removed API name
 include/netgraph/core/flow_policy.hpp | weights | path), fixed for an epoch. With FewerHops or HigherCapacity and static weights the policy | immutable member weights of a ShortestPaths policy
+CentralizedTE | tunnels | of declared source_weights, only without tunnels. Zero weights receive nothing; all-zero | path tunnels of the model; the current configuration keyword is tunnel_count
+ForwardingProgram | weights | captured weights ((source, weight) for every roster source, ascending): optimized controllers' solved | declared or captured integer weight values, not a retired configuration field
+ForwardingProgram | weights | supplies, weighted CentralizedTE's declared weights, or None for equal sources (round robin). Each head splits its share by | declared or captured integer weight values, not a retired configuration field
+README.md | tunnels | (CentralizedTE without tunnels prescribes highest-averages shares of declared source weights). The routing is | path tunnels of the model; the current configuration keyword is tunnel_count
+README.md | tunnels | replay at another offer. WEIGHTED is refused with tunnels and in ShortestPaths; all-zero | path tunnels of the model; the current configuration keyword is tunnel_count
+README.md | weights | (CentralizedTE without tunnels prescribes highest-averages shares of declared source weights). The routing is | declared or captured integer weight values, not a retired configuration field
+README.md | weights | at the maximum total, then cost is minimized. Its program retains the declared weights for | declared or captured integer weight values, not a retired configuration field
+README.md | weights | roster weights deliver nothing and end NO_ACTIVE_WEIGHT on a positive live call. | declared or captured integer weight values, not a retired configuration field
+docs/semantics.md | weights | including unused and masked nodes, but only roster weights participate. Zero weights receive | declared or captured integer weight values, not a retired configuration field
+docs/semantics.md | weights | nothing; all-zero roster weights give no injection, with no equal fallback. Other source | declared or captured integer weight values, not a retired configuration field
+include/netgraph/core/detail/int128.hpp | priority | quota numerator or priority cross-product is below 2^189. Three portable words | exact rational quotient ordering for integer apportionment, not a retired route option
+include/netgraph/core/flow_policy.hpp | tunnels | Required exactly for Weighted, without tunnels: one immutable weight per graph node, | path tunnels of the model; the current configuration keyword is tunnel_count
+include/netgraph/core/forwarding_program.hpp | weights | The captured source weights (roster source, weight) in ascending NodeId, every roster | declared or captured integer weight values, not a retired configuration field
+include/netgraph/core/forwarding_program.hpp | weights | source listed, zeros included: solved supplies for Optimized, declared weights for | declared or captured integer weight values, not a retired configuration field
+src/route_kernels.cpp | priority | One rule for both widths: only quota and priority arithmetic differ. The | exact rational quotient ordering for integer apportionment, not a retired route option
+tests/cpp/weighted_source_tests.cpp | priority | One-unit-at-a-time priority oracle for small totals; test integer arithmetic | exact rational quotient ordering for integer apportionment, not a retired route option
+include/netgraph/core/flow_policy.hpp | edge_weights | edge_weights' and source_weights' lengths and entries; then the tunnel limit; then a Pinned program's endpoints. | the current routing models' validated vectors, not a retired flat configuration field
+docs/semantics.md | weights | shares (`SourceAllocation.EQUAL`), highest-averages shares of declared weights (`WEIGHTED`), | declared integer source proportions, not a retired configuration field

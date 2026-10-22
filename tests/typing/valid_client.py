@@ -328,3 +328,13 @@ units_inf = np.float32(np.inf)
 assert ng.EvaluationOptions(
     ng.FlowPolicyConfig(routing=ng.ShortestPaths()), offer=units_inf
 ).offer == float("inf")
+
+# Prescribed source weights are owned immutable node-indexed values.
+weighted_sources = ng.CentralizedTE(
+    source_allocation=ng.SourceAllocation.WEIGHTED, source_weights=range(g.num_nodes())
+)
+assert_type(weighted_sources.source_weights, tuple[int, ...] | None)
+ng.CentralizedTE(
+    source_allocation=ng.SourceAllocation.WEIGHTED,
+    source_weights=np.zeros(g.num_nodes(), dtype=np.int64),
+)

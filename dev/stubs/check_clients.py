@@ -66,6 +66,7 @@ REQUIRED = [
     'ng.to_units("1.5", 1.0)',
     "ng.FlowPolicyConfig(ng.CentralizedTE(source_allocation=opt))",
     "ng.CentralizedTE()",
+    "source_weights=[1.5]",
     "ng.FlowPolicyConfig(routing=sp, placement=None)",
     "ng.Path(g, np.zeros((1, 1), dtype=np.float64))",
     "ng.evaluate_pairs(g, float_pairs,",

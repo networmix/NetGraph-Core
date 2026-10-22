@@ -127,8 +127,9 @@ public:
   [[nodiscard]] std::span<const NodeId> sources() const noexcept;
   [[nodiscard]] std::span<const NodeId> destinations() const noexcept;
   [[nodiscard]] std::span<const Tunnel> tunnels() const noexcept;
-  // The captured source weights (roster source, saved supply) in ascending NodeId, every roster
-  // source listed; nullopt for equal sources.
+  // The captured source weights (roster source, weight) in ascending NodeId, every roster
+  // source listed, zeros included: solved supplies for Optimized, declared weights for
+  // Weighted CentralizedTE. nullopt for equal sources; an empty captured roster is engaged.
   [[nodiscard]] const std::optional<std::vector<std::pair<NodeId, Amount>>>& source_weights() const noexcept;
 
 private:

@@ -44,6 +44,7 @@ READERS = (
     "from_csr.edges",
     "Path.hop",
     "ShortestPaths.weights",
+    "CentralizedTE.weights",
     "FlowLedger.service",
     "FlowLedger.reservation",
     "reset.service",
@@ -143,6 +144,16 @@ def make(reader, kind):
 
         def check():
             return plain(obj)
+    elif reader.startswith("CentralizedTE."):
+        fn, args, obj = initialize(
+            ngc.CentralizedTE,
+            (),
+            source_allocation=ngc.SourceAllocation.WEIGHTED,
+            source_weights=array([1001, 1003]),
+        )
+
+        def check():
+            return plain(obj.source_weights)
     elif reader.startswith("ShortestPaths."):
         weights = array([1])
         fn, args, obj = initialize(

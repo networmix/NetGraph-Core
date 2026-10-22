@@ -77,6 +77,11 @@ inline std::size_t round_robin(Amount total, std::span<Amount> out) noexcept {
 // any member's allocation (house monotonicity).
 void highest_averages(Amount total, std::span<const Amount> weights, std::span<Amount> out);
 
+// The same rule for cumulative offered totals below 2^127. Weight sums stay
+// below 2^93 (fewer than 2^31 members). Quotas/priorities use exact 192-bit products.
+struct U128;
+void highest_averages(U128 total, std::span<const Amount> weights, std::span<U128> out);
+
 // ---------------------------------------------------------------- plans
 
 // Throws std::invalid_argument for a value outside its enumeration and for the unsupported

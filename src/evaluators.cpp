@@ -274,7 +274,7 @@ void check_batch_arguments(const Graph& graph, const EvaluationOptions& options,
                                                                        global->support->graph_uid() != graph.uid()) {
     throw std::invalid_argument("support belongs to another graph");
   }
-  check_config(options.config, options.cache != nullptr, graph.num_edges(), std::nullopt);
+  check_config(options.config, options.cache != nullptr, graph.num_nodes(), graph.num_edges(), std::nullopt);
   (void)evaluator_call(options.config, options.offer, options.design_demand);
 }
 
@@ -358,7 +358,7 @@ SensitivityResult evaluate_edge_failures_in_call(const Graph& graph, std::span<c
   // equal source allocation, a support and T2 solve every allowed deletion afresh.
   const auto* global_routing = std::get_if<CentralizedTE>(&options.config.routing);
   const bool global = global_routing != nullptr && !global_routing->support && !global_routing->tunnel_count.has_value() &&
-                      global_routing->source_allocation != SourceAllocation::Equal;
+                      global_routing->source_allocation == SourceAllocation::Optimized;
   const bool shortest_paths = std::holds_alternative<ShortestPaths>(options.config.routing);
   SensitivityResult out;
   std::vector<std::uint8_t> on_route;  // ShortestPaths: the baseline's reachable support

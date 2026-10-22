@@ -186,8 +186,8 @@ struct ReplayBasis {
 };
 
 // The program of a controller: one tunnel per path in decomposition order (index = position),
-// weight = amount; captured weights `supplies` (per roster source, optimized) or equal sources
-// (empty).
+// weight = amount. `supplies` holds captured per-roster weights: solved supplies for Optimized,
+// declared weights for Weighted CentralizedTE; empty selects equal source allocation.
 [[nodiscard]] std::shared_ptr<const ForwardingProgram> optimized_flow_program(
     const Graph& graph, std::span<const NodeId> sources, std::span<const NodeId> destinations,
     std::span<const NodeId> reachable_sources, std::vector<OptimizedFlowPath> paths, std::span<const Amount> supplies,

@@ -90,6 +90,7 @@ enum class Admission { Lossless, Lossy };
 // x enters as round robin over the roster (ascending NodeId, the first x mod H sources one unit
 // more); a source whose share cannot go anywhere keeps it and loses it, it never moves to another
 // source. Optimized: the controller chooses the integer injections (one virtual source).
-enum class SourceAllocation { Equal, Optimized };
+// Weighted: CentralizedTE without tunnels prescribes H(total, source_weights) instead of RR.
+enum class SourceAllocation { Equal, Optimized, Weighted };
 
 } // namespace netgraph::core

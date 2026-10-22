@@ -12,6 +12,7 @@ CONTRACT_API = {
         "__init__": [
             [
                 ("source_allocation", "kw", None),
+                ("source_weights", "kw", "None"),
                 ("support", "kw", "None"),
                 ("tunnel_count", "kw", "None"),
                 ("prefer_headroom", "kw", "False"),
@@ -19,6 +20,7 @@ CONTRACT_API = {
         ],
         "prefer_headroom": "attribute",
         "source_allocation": "attribute",
+        "source_weights": "attribute",
         "support": "attribute",
         "tunnel_count": "attribute",
     },
@@ -395,7 +397,11 @@ CONTRACT_API = {
         "tie_break": "attribute",
         "weight_basis": "attribute",
     },
-    "SourceAllocation": {"EQUAL": "attribute", "OPTIMIZED": "attribute"},
+    "SourceAllocation": {
+        "EQUAL": "attribute",
+        "OPTIMIZED": "attribute",
+        "WEIGHTED": "attribute",
+    },
     "SourceFlow": {
         "__init__": [[("_no_public_constructor", "pos", None)]],
         "admitted": "attribute",

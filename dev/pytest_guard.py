@@ -39,6 +39,8 @@ EXPECTED_OFF_SKIPS = [
     "tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[False-global]",
     "tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[True-shortest_paths]",
     "tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[True-global]",
+    "tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[False-weighted]",
+    "tests/py/test_flow_policy.py::test_python_publication_is_all_or_nothing[True-weighted]",
     "tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[ledger]",
     "tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[policy]",
     "tests/py/test_flow_policy_fixtures.py::test_a_corrupted_expectation_fails[result]",

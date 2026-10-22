@@ -38,9 +38,11 @@ void register_options(py::module_& m) {
                     "How a demand's traffic enters at its sources, separately from how it is routed. EQUAL: round\n"
                     "robin over the roster (ascending NodeId, the first sources one unit more); a source whose share\n"
                     "cannot go anywhere keeps it and loses it (LOSSLESS then admits only totals that give it\n"
-                    "nothing). OPTIMIZED: the controller chooses the injections (one virtual source).")
+                    "nothing). OPTIMIZED: the controller chooses the injections (one virtual source). WEIGHTED:\n"
+                    "CentralizedTE without tunnels prescribes highest-averages shares of declared source_weights.")
       .value("EQUAL", SourceAllocation::Equal)
-      .value("OPTIMIZED", SourceAllocation::Optimized);
+      .value("OPTIMIZED", SourceAllocation::Optimized)
+      .value("WEIGHTED", SourceAllocation::Weighted);
 
   py::enum_<WeightBasis>(m, "WeightBasis",
                          "Where WEIGHTED member weights come from (ShortestPaths WEIGHTED and supplied PredecessorDAG routes).\n"

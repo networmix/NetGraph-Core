@@ -1068,6 +1068,23 @@ inline std::vector<Row> rows() {
                  const std::vector<int> srcs = {1, 17, 33};
                  return Iter([g, srcs] { return abaapi::edge_failures_equal_global(*g, srcs, 50); });
                }});
+  r.push_back({"global.weighted.random", "global",
+               "weighted-source evaluate_demand, random 1024x6 seed23, four NodeId weights1..4; complete solve lifetime",
+               [] { auto g=std::make_shared<Graph>(abaapi::build(gen_random(1024,6,23)));
+                 return Iter([g]{return abaapi::global_weighted_capacity(*g,{1,257,513,769},600,false);}); }});
+  r.push_back({"sens.weighted_global", "sensitivity",
+               "weighted-source evaluate_edge_failures, random64x4 seed24, three source weights1..3; every allowed deletion",
+               [] { auto g=std::make_shared<Graph>(abaapi::build(gen_random(64,4,24)));
+                 return Iter([g]{return abaapi::global_weighted_capacity(*g,{1,17,33},50,true);}); }});
+  for(int mode:{0,1,2}) {
+    const std::string name=mode==0 ? "program.increment.optimized" : mode==1 ? "program.increment.weighted" : "program.increment.weighted.wide";
+    r.push_back({name,"program",
+                "controller export and Pinned LOSSY lifetime, five cap10 heads, 32 positive place calls; captured source increments",
+                [mode] { auto g=abaapi::captured_graph();return Iter([g,mode]{return abaapi::captured_series(g,mode,true);}); }});
+  }
+  r.push_back({"program.replay.weighted","program",
+               "weighted controller export and Pinned LOSSY lifetime, five cap10 heads, 32 full-offer replace calls",
+               [] { auto g=abaapi::captured_graph();return Iter([g]{return abaapi::captured_series(g,1,false);}); }});
   // ---- forwarding programs: no older Core has them; they guard later changes.
   // One demand of eight source leaves to one leaf on a Clos 32x16 (links of 10..80): its optimized
   // CentralizedTE program (paths with solved amounts, captured source weights), solved for 2,000.

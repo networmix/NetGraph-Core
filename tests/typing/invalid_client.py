@@ -133,3 +133,8 @@ class BothResolution(IndexResolution, FloatResolution):
 
 ng.Graph(2, [0], [1], [10], [1], BothResolution())  # expect: reportArgumentType
 ng.Graph(2, [0], [1], [10], [1], np.array(1.0))  # expect: reportArgumentType
+
+ng.CentralizedTE(
+    source_allocation=ng.SourceAllocation.WEIGHTED,
+    source_weights=[1.5],  # expect: reportArgumentType
+)

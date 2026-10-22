@@ -187,7 +187,14 @@ std::pair<std::shared_ptr<const PredecessorDAG>, Cost> masked_route(const Graph&
   return {out, min_route_cost(graph, *out, source, destinations)};
 }
 
+void source_weight_width(ForwardingView& v) noexcept {
+  U128 sum {};
+  for (Amount w : v.source_weights()) sum = add(sum, U128 {0, static_cast<std::uint64_t>(w)});
+  v.wide_source_weights = sum.hi != 0 || sum.lo >= static_cast<std::uint64_t>(kDomainLimit);
+}
+
 void finish_view(ForwardingView& v) {
+  source_weight_width(v);
   const ProgramData& p = *v.data;
   // The surviving entries per view head, ascending index.
   v.source_entry_offsets_.assign(v.source_indices_.size() + 1, 0);
@@ -256,7 +263,10 @@ ForwardingView make_forwarding_view(const Graph& graph, std::shared_ptr<const Fo
     // The program's own state: its roster, its routes and plans, borrowed from the program (a
     // tunnel's record route is made here; black holes change the statuses).
     v.borrowed = true;
-    if (v.black_holes == nullptr && !(records && !p.tunnels.empty())) return v;
+    if (v.black_holes == nullptr && !(records && !p.tunnels.empty())) {
+      source_weight_width(v);
+      return v;
+    }
     materialize(v);
     for (std::size_t e = 0; records && e < n; ++e) {
       if (p.entries[e].tunnel_position < 0) continue;
@@ -389,10 +399,20 @@ void source_offer_increments(const ForwardingView& view, const Counter128& X, Am
     round_robin_increments(X, v, out);
     return;
   }
+  if (view.wide_source_weights) {
+    const U128 x {X.hi, X.lo};
+    std::vector<U128> a(k), b(k);
+    highest_averages(x, weights, a);
+    highest_averages(add(x, U128 {0, static_cast<std::uint64_t>(v)}), weights, b);
+    // House monotonicity: every difference is nonnegative and at most v < 2^62.
+    for (std::size_t i = 0; i < k; ++i) out[i] = static_cast<Amount>(sub(b[i], a[i]).lo);
+    return;
+  }
   // H(X + c W) = H(X) + c w (the divisor rule's thresholds shift by c), so only r = X mod W and
   // r + v enter: H(X + v) - H(X) = floor((r + v) / W) w + H((r + v) mod W) - H(r). Captured
-  // weights are a controller's solved supplies: W is its delivery, below the graph's capacity sum
-  // (< 2^62), so W, r + v and c w fit 64 bits.
+  // weights here have sum W < 2^62 (in particular every optimized controller's
+  // solved supplies), so W, r + v and c w fit 64 bits. Declared weights with a
+  // larger sum take the wide branch above; no narrowing of their sum is allowed.
   std::uint64_t W = 0;
   for (Amount w : weights) W += static_cast<std::uint64_t>(w);
   if (W == 0) return;

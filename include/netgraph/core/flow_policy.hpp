@@ -111,9 +111,12 @@ struct DistributedTE {
 struct CentralizedTE {
   explicit CentralizedTE(SourceAllocation source_allocation_) : source_allocation(source_allocation_) {}
   SourceAllocation source_allocation;
+  bool prefer_headroom {false};
+  // Required exactly for Weighted, without tunnels: one immutable weight per graph node,
+  // each in [0, 2^62). Only capacity-blind roster members participate; every entry is validated.
+  std::shared_ptr<const std::vector<Amount>> source_weights {};
   std::shared_ptr<const PredecessorDAG> support {};
   std::optional<TunnelCount> tunnel_count {};
-  bool prefer_headroom {false};
   friend bool operator==(const CentralizedTE&, const CentralizedTE&) = default;
 };
 struct Pinned {
@@ -130,13 +133,13 @@ using Routing = std::variant<ShortestPaths, DistributedTE, CentralizedTE, Pinned
 // controls (the ineffective tie rule, then the pooled single-path rule), prefer_headroom, the
 // weight combinations and, last, a ShortestPathCache on a model that does not read it; then the
 // tunnel count, an "up to" count for DistributedTE, the ceilings, min_unreserved_bandwidth and
-// edge_weights' length and entries; then the tunnel limit; then a Pinned program's endpoints.
+// edge_weights' and source_weights' lengths and entries; then the tunnel limit; then a Pinned program's endpoints.
 //
 // | model                             | allocation    | source allocation (default / allowed)  | admission       | route choice                            | weights |
 // | ShortestPaths                     | Equal         | Equal / Equal                          | Lossless, Lossy | tie_break, multipath, parallel_edges    | none |
 // | ShortestPaths                     | Weighted      | Equal / Equal                          | Lossless, Lossy | tie_break, multipath, parallel_edges    | Capacity (default), Explicit, ResidualSnapshot |
-// | ShortestPaths                     | Optimized     | Optimized / both                       | Lossless        | tie_break, multipath, parallel_edges    | none |
-// | CentralizedTE                     | optimal       | required / both                        | Lossless        | none                                    | none |
+// | ShortestPaths                     | Optimized     | Optimized / Equal, Optimized                       | Lossless        | tie_break, multipath, parallel_edges    | none |
+// | CentralizedTE                     | optimal       | required / Equal, Optimized, Weighted   | Lossless        | none                                    | source_weights exactly with Weighted |
 // | DistributedTE (T1)                | tunnels       | Equal, fixed                           | Lossless, Lossy | tie_break, parallel_edges (single path) | none |
 // | CentralizedTE with tunnels (T2)   | tunnels       | required; Optimized only with one source | Lossless, Lossy | none                                  | none |
 // | Pinned                            | the program's | the program's                          | Lossless, Lossy | none                                    | none |
@@ -174,7 +177,10 @@ struct OutputOptions {
 // controller path or a split route) but no roster source has both a positive injection weight and
 // an entry of positive weight with a usable route (Weighted over edges of capacity 0 only, all
 // entry weights 0, every remaining captured weight 0, every up tunnel failed); a program whose
-// tunnels are all down is not this case. Then a Lossy finite request: Complete (delivery and
+// tunnels are all down is not this case. A live CentralizedTE Weighted call without tunnel_count
+// with a positive offer and a nonempty all-zero source-weight roster is also NoActiveWeight,
+// with no tunnels; Pinned replay of that empty program follows the remaining rules.
+// Then a Lossy finite request: Complete (delivery and
 // losses account for the whole offer, which does not mean nothing was lost); otherwise Complete
 // when the whole request was delivered, else Exhausted (an infinite request is Exhausted). A
 // controller whose maximum is 0 over existing routes is Exhausted, not NoRoute.
@@ -302,7 +308,7 @@ struct PlacementResult {
   // through residual arcs (free capacity plus this policy's own load, reverse arcs that cancel flow
   // included), whatever their free capacity (an allowed edge of capacity 0 is listed; an excluded
   // edge is not an edge here), ascending EdgeId. That is the minimum cut closest to the sources; an
-  // empty roster returns an empty cut. nullopt otherwise (another model, the equal source allocation, a
+  // empty roster returns an empty cut. nullopt otherwise (another model, prescribed Equal/Weighted sources, a
   // support, a call below the maximum, a zero call, forward).
   std::optional<std::vector<EdgeId>> min_cut {};
 };

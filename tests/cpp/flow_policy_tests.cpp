@@ -1427,7 +1427,7 @@ TEST(Evaluators, SensitivityEqualsTheDefinitionOnRandomGraphs) {
         continue;  // the pooled single-path rule
       }
       const bool global = std::holds_alternative<CentralizedTE>(c.routing) &&
-                          std::get<CentralizedTE>(c.routing).source_allocation != SourceAllocation::Equal;
+                          std::get<CentralizedTE>(c.routing).source_allocation == SourceAllocation::Optimized;
       const bool pinned = std::holds_alternative<Pinned>(c.routing);
       const std::vector<NodeId> cs = pinned ? std::vector<NodeId> {0} : s;
       const std::vector<NodeId> ct = pinned ? std::vector<NodeId> {t0} : t;

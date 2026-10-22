@@ -87,6 +87,9 @@ struct ForwardingView {
   // The pooled form: one context, one root per view head (equal sources, every entry weight
   // positive). Its plan is plan(0), its roots the view's heads in order.
   bool pooled {false};
+  // The immutable view's effective captured weights may be declared proportions,
+  // whose sum need not satisfy the solved-supply bound below 2^62.
+  bool wide_source_weights {false};
 
   [[nodiscard]] std::size_t num_sources() const noexcept { return borrowed ? data->reachable_sources.size() : source_indices_.size(); }
   [[nodiscard]] std::int32_t source_index(std::size_t h) const noexcept {

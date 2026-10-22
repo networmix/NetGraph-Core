@@ -163,10 +163,12 @@ ledger = ngc.FlowLedger(network)
 p = policy(ledger)
 p.replace(1)
 probe = Probe()
+wcfg = ngc.FlowPolicyConfig(routing=ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.WEIGHTED, source_weights=[2,0]))
+weighted_policy = ngc.FlowPolicy(ngc.FlowLedger(network),0,1,wcfg)
 operations = [lambda: p.place(1), lambda: p.evaluate(3), lambda: p.replace(3),
-              lambda: p.forward(3), lambda: ngc.apply_actions(ledger, [ngc.Replace(p, 3)])]
+              lambda: p.forward(3), lambda: ngc.apply_actions(ledger, [ngc.Replace(p, 3)]), lambda: weighted_policy.place(1)]
 observations = {}
-for name, operation in zip(('place', 'evaluate', 'replace', 'forward', 'ordered_list'), operations, strict=True):
+for name, operation in zip(('place', 'evaluate', 'replace', 'forward', 'ordered_list', 'weighted_place'), operations, strict=True):
     task = start(lambda: [operation() for _ in range(60)], probe)
     overlaps = 0
     while task[0].is_alive():

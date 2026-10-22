@@ -339,7 +339,7 @@ def test_route_tie_break_and_enums():
         "EQUAL",
     }
     assert set(ngc.Admission.__members__) == {"LOSSLESS", "LOSSY"}
-    assert set(ngc.SourceAllocation.__members__) == {"EQUAL", "OPTIMIZED"}
+    assert set(ngc.SourceAllocation.__members__) == {"EQUAL", "OPTIMIZED", "WEIGHTED"}
     for retired in ("PathSelection", "EdgeTieBreak", "EdgePriority"):
         assert retired not in dir(ngc), retired
 

@@ -94,7 +94,8 @@ specified in [docs/semantics.md](docs/semantics.md).
   placement engine for one demand, bound to its ledger. `FlowPolicyConfig(*, routing,
   admission=LOSSLESS)` holds the routing model and the admission; every other option belongs to
   the model that reads it. A model's source allocation is `EQUAL` (every source sends the same
-  round-robin share) or `OPTIMIZED` (a controller chooses how much enters where). The routing is
+  round-robin share), `OPTIMIZED` (a controller chooses how much enters where), or `WEIGHTED`
+  (CentralizedTE without tunnels prescribes highest-averages shares of declared source weights). The routing is
   one of:
   - `ShortestPaths(*, allocation=EQUAL, source_allocation=None, weight_basis=None,
     edge_weights=None, tie_break=FEWER_HOPS, multipath=True, parallel_edges=True)`: static
@@ -110,10 +111,15 @@ specified in [docs/semantics.md](docs/semantics.md).
     and either comes up holding its request on every link or stays down
     (`INSUFFICIENT_BANDWIDTH`, `COST_CEILING_EXCEEDED`); traffic then enters equally at the heads
     and splits equally over their up tunnels;
-  - `CentralizedTE(*, source_allocation, support=None, tunnel_count=None, prefer_headroom=False)`:
+  - `CentralizedTE(*, source_allocation, source_weights=None, support=None, tunnel_count=None, prefer_headroom=False)`:
     without a tunnel count, an ideal controller: the minimum-cost flow from all the policy's
     sources to its destinations, on the free capacity plus its own allocation, optionally only
-    over the edges of a support DAG. With `tunnel_count=TunnelCount(N)` (T2), a central controller
+    over the edges of a support DAG. `source_allocation=WEIGHTED` requires `source_weights`,
+    one integer per graph node in `[0, 2^62)`; every source must inject its highest-averages share
+    at the maximum total, then cost is minimized. Its program retains the declared weights for
+    replay at another offer. WEIGHTED is refused with tunnels and in ShortestPaths; all-zero
+    roster weights deliver nothing and end NO_ACTIVE_WEIGHT on a positive live call.
+    With `tunnel_count=TunnelCount(N)` (T2), a central controller
     (as a PCE) lays out, for every head that reaches a destination over free capacity, N
     single-path tunnels with one common whole-unit planned bandwidth: as large as possible, then
     (for a finite design) no larger than needed, then the cheapest routes, then with

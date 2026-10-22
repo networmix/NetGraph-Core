@@ -50,7 +50,8 @@ Contents:
   and removes it again.
 - **Roster.** The sources of a policy that take part in placement, fixed when the policy is built.
 - **Source allocation.** How a demand's total enters at its roster sources: in equal round-robin
-  shares (`SourceAllocation.EQUAL`) or as a controller chooses (`OPTIMIZED`).
+  shares (`SourceAllocation.EQUAL`), highest-averages shares of declared weights (`WEIGHTED`),
+  or as a controller chooses (`OPTIMIZED`).
 - **Round robin `RR(x, k, i)`.** `x` units over `k` members: `x // k` each, and one more for the
   first `x % k` members.
 - **Highest averages `H(x, w)`.** `x` units over members with integer weights `w`, given one at a
@@ -846,7 +847,7 @@ operation, `apply_actions`: one after another, or all at the same time with thei
                   parallel_edges=True)
     DistributedTE(tunnel_count, *, cost_ceiling=None, min_unreserved_bandwidth=0,
                   tie_break=RouteTieBreak.FEWER_HOPS, parallel_edges=True)          # T1
-    CentralizedTE(*, source_allocation, support=None, tunnel_count=None,
+    CentralizedTE(*, source_allocation, source_weights=None, support=None, tunnel_count=None,
                   prefer_headroom=False)                                          # T2 with tunnel_count
     Pinned(program, *, black_holes=None)
     TunnelCount(per_head, *, up_to=False)
@@ -860,7 +861,7 @@ built from one model read one `edge_weights` array).
 | --- | --- | --- |
 | `ShortestPaths()` | IGP forwarding (as OSPF or IS-IS routers do): static shortest paths, never refreshed. `ShortestPaths()` is ECMP; `allocation=WEIGHTED` is WCMP; `allocation=OPTIMIZED` is a controller restricted to those paths | `allocation`, `source_allocation`, `weight_basis`, `edge_weights` and the route choice (`tie_break`, `multipath`, `parallel_edges`) |
 | `DistributedTE(TunnelCount(N))` (T1) | distributed strict-bandwidth tunnels, as RSVP-TE head ends set them up: every head runs CSPF for its own tunnels, no controller ([T1](#t1-tunnels-set-up-by-their-heads)) | `tunnel_count`; `cost_ceiling`: `None`, `AbsoluteCost(c)` or `CostStretch(f)`; `min_unreserved_bandwidth`: a search minimum in units; `tie_break`, `parallel_edges` |
-| `CentralizedTE(source_allocation=...)` | an ideal controller that sees the whole network, or only the edges of `support`; with `tunnel_count`, T2: the controller lays out equal tunnels for every head ([T2](#t2-the-controllers-equal-tunnels)) | `source_allocation` (required); `support`: a `PredecessorDAG` of the graph, or `None` for every eligible edge; `tunnel_count`: a `TunnelCount(N)` or `TunnelCount(L, up_to=True)`, or `None`; `prefer_headroom`: T2's headroom objective after route cost |
+| `CentralizedTE(source_allocation=...)` | an ideal controller that sees the whole network, or only the edges of `support`; with `tunnel_count`, T2: the controller lays out equal tunnels for every head ([T2](#t2-the-controllers-equal-tunnels)) | `source_allocation` (required); `source_weights`: one integer per graph node, required exactly for `WEIGHTED` without tunnels; `support`: a `PredecessorDAG` of the graph, or `None` for every eligible edge; `tunnel_count`: a `TunnelCount(N)` or `TunnelCount(L, up_to=True)`, or `None`; `prefer_headroom`: T2's headroom objective after route cost |
 | `Pinned(program)` | forwarding over a given program, computing nothing | `program`: a `ForwardingProgram`; `black_holes`: an `Eligibility` whose excluded nodes and edges are black holes, or `None` |
 
 **Two stages of validation.** A constructor converts its arguments: an unknown keyword (also every
@@ -887,8 +888,8 @@ raises `ValueError`:
 | --- | --- | --- | --- | --- | --- |
 | `ShortestPaths()` | `EQUAL` (ECMP, the default) | `EQUAL` / `EQUAL` | `LOSSLESS`, `LOSSY` | `tie_break`, `multipath`, `parallel_edges` | none |
 | `ShortestPaths(allocation=WEIGHTED)` | `WEIGHTED` (WCMP) | `EQUAL` / `EQUAL` | `LOSSLESS`, `LOSSY` | the same | `weight_basis`: `CAPACITY` (default), `EXPLICIT`, `RESIDUAL_SNAPSHOT` |
-| `ShortestPaths(allocation=OPTIMIZED)` | `OPTIMIZED` | `OPTIMIZED` / both | `LOSSLESS` | the same | none |
-| `CentralizedTE(source_allocation=...)`, optionally `support` | optimal | required / both | `LOSSLESS` | none | none |
+| `ShortestPaths(allocation=OPTIMIZED)` | `OPTIMIZED` | `OPTIMIZED` / `EQUAL`, `OPTIMIZED` | `LOSSLESS` | the same | none |
+| `CentralizedTE(source_allocation=...)`, optionally `support` | optimal | required / EQUAL, OPTIMIZED, WEIGHTED | `LOSSLESS` | none | `source_weights` exactly with WEIGHTED |
 | T1: `DistributedTE(TunnelCount(N))` | tunnels | `EQUAL`, fixed | `LOSSLESS`, `LOSSY` | `tie_break`, `parallel_edges` | none |
 | T2: `CentralizedTE(source_allocation=..., tunnel_count=...)`, optionally `support` | tunnels | required; `EQUAL`; `OPTIMIZED` only with one source | `LOSSLESS`, `LOSSY` | none (`prefer_headroom`) | none |
 | `Pinned(program)` | the program's | the program's | `LOSSLESS`, `LOSSY` | none | none |
@@ -901,7 +902,8 @@ matrix, in the order they are checked:
 1. the enumeration values (`admission`, then the model's `allocation`, `source_allocation`,
    `weight_basis`, `tie_break`), each `<field>: <v> is not a value of <Enum>` (reachable with a
    value built from an integer);
-2. the route allocation and the source allocation: `ShortestPaths with EQUAL or WEIGHTED requires
+2. the route allocation and the source allocation: first `source_allocation=WEIGHTED requires
+   CentralizedTE without tunnel_count`; then `ShortestPaths with EQUAL or WEIGHTED requires
    source_allocation=EQUAL`; for T2, `CentralizedTE with tunnel_count and several sources requires
    source_allocation=EQUAL` (`OPTIMIZED` with more than one input source, counted after removing
    repeats and before any Eligibility; with one source it is the same calculation as `EQUAL`);
@@ -915,7 +917,8 @@ matrix, in the order they are checked:
    at a router the sources share);
 5. `prefer_headroom requires tunnel_count`;
 6. the weights: `weight_basis requires allocation=WEIGHTED`; `weight_basis=EXPLICIT requires
-   edge_weights`; `edge_weights require weight_basis=EXPLICIT`;
+   edge_weights`; `edge_weights require weight_basis=EXPLICIT`; for CentralizedTE,
+   `source_allocation=WEIGHTED requires source_weights` and `source_weights require source_allocation=WEIGHTED`;
 7. last, a cache given to a model that does not read one: `<DistributedTE or CentralizedTE or
    Pinned> does not use ShortestPathCache` (only `ShortestPaths` reads a `ShortestPathCache`).
 
@@ -940,6 +943,16 @@ the `ShortestPathCache` (`foreign ShortestPathCache: bound to another graph`), t
 construction); `Pinned`'s endpoints (`program endpoints do not match policy endpoints`; any number
 of each).
 
+`source_weights` uses the same conversion as `edge_weights`: first the entire shape (rank and
+nested sequences), then every integer type, then signed-int64 storage overflow. Thus `[1.5,[1]]`
+reports the second entry's shape, and `[2**64,1.5]` reports the second entry's type. Ordinary
+sequences such as range and tuples are accepted; unsigned arrays do not bypass overflow checks.
+Policy/evaluator validation checks the graph node count (`source_weights: expected <N> entries`),
+then every entry in NodeId order (`source_weights[<i>] must be an integer in [0, 2^62)`) after the
+model/cache checks, even at zero offer. Each individual weight is bounded; their sum may exceed
+64 bits. Cumulative Pinned LOSSY increments use exact wide apportionment through the existing
+counter domain below 2^127, preserving declared proportions after many offers.
+
 ### The source allocation
 
 The source allocation says how a demand's total enters at its roster sources, separately from how
@@ -954,7 +967,12 @@ it is routed:
   virtual source joined to every roster source), whatever maximises the delivery and then
   minimises its cost.
 
-There is no weighted source allocation; sources with fixed or uneven amounts are separate demands.
+- **`WEIGHTED`** (`CentralizedTE` without `tunnel_count` only): each roster source injects its
+  highest-averages share `H(x, w)` of the total. `source_weights` is required: one integer per graph
+  node in `[0, 2^62)`, copied once and exposed as an immutable tuple. Every entry is validated,
+  including unused and masked nodes, but only roster weights participate. Zero weights receive
+  nothing; all-zero roster weights give no injection, with no equal fallback. Other source
+  allocations refuse this vector; ShortestPaths and every tunnel configuration refuse WEIGHTED.
 `DistributedTE` always allocates equally and `Pinned` takes its program's injection; neither
 accepts the keyword.
 
@@ -1021,7 +1039,11 @@ per-entry records at zero.
   unchanged network. With `EQUAL` source allocation the virtual source's arc to roster source `i`
   carries exactly `RR(T, k, i)`: the delivered total `T` is the largest whose equal shares all fit
   (found by exact binary search over the totals; a total fits only when the solve reaches it), and
-  that total is solved once more from zero, so the result does not depend on the search. A
+  that total is solved from zero, so the result does not depend on the search. WEIGHTED uses
+  `H(T, w)` instead of round robin in the same exact search: every root arc must be saturated,
+  then minimum cost is chosen. Each share is nondecreasing in T, so feasible totals form a prefix.
+  Its maximum is not an unrestricted minimum-cut certificate: `min_cut` and
+  `marginal_cost_curve` are None. A
   positive call on a network beyond the flow core's size limit raises `ValueError`
   ([section 2](#2-the-graph), Size).
 - **`CentralizedTE(support=dag)`** is the same controller restricted to the edges of `dag`,
@@ -1035,7 +1057,8 @@ per-entry records at zero.
   remaining supply, subtract, repeat), one tunnel per path with its solved amount as weight
   (identifiers in decomposition order), also with a single source. With the `OPTIMIZED` source
   allocation the program keeps the solved supplies as **captured source weights**
-  (`source_weights`: every roster source, a zero supply included); with `EQUAL` it injects by
+  (`source_weights`: every roster source, a zero supply included). With `WEIGHTED` it instead
+  keeps each roster source's declared weight, zeros included; with `EQUAL` it injects by
   round robin. Forwarded on the same view, the program reproduces the solve exactly.
 - **Records of the controllers** (`CentralizedTE`, `ShortestPaths` with `OPTIMIZED`): one record
   per roster source, holding that source's share of the solved flow (its edges and its delivery),
@@ -1255,7 +1278,10 @@ A `Pinned` policy's Eligibility is the failure being studied (local repair):
   the policy's exclusions. A head that no longer reaches a destination leaves the pool (equal sources: its
   share moves to the others); a head that still reaches one but has no surviving entry keeps its
   share and loses it. Captured source weights keep the remaining heads' saved weights; when all of
-  them are 0, the whole offer is lost at the sources (`NO_ACTIVE_WEIGHT`).
+  them are 0, a positive offer is lost at the sources. The call ends NO_ACTIVE_WEIGHT when the
+  program has an entry with a path. A program without one (an all-zero WEIGHTED program) ends
+  COMPLETE under LOSSY, with the offer in demand-level `source_drops` and every per-source row
+  zero; under LOSSLESS it admits nothing and ends EXHAUSTED.
 - An edge whose capacity is now 0 is not a failure: its traffic is lost on that edge, the tunnel
   stays `UP`. Weights stay as the program froze them.
 
@@ -1884,7 +1910,12 @@ applies (an invalid call raises instead):
 | `EXHAUSTED` | otherwise: Lossless below the offer, any infinite offer (the first-hop experiment included), a controller whose maximum is 0 over existing routes |
 
 `call_undelivered` is an amount, never a status: a Lossy call can be `COMPLETE` with a positive
-`call_undelivered`. A `Pinned` replay of a program gives the same termination as its producer.
+`call_undelivered`. The live WEIGHTED controller has one additional outcome: positive offer,
+nonempty roster and all roster weights zero gives NO_ACTIVE_WEIGHT, zero delivery and all finite
+traffic unadmitted. It installs an empty program with captured zero weights. Pinned replay follows
+its fixed-program rule: LOSSY COMPLETE with the whole offer lost at the sources, LOSSLESS
+EXHAUSTED. This is the one producer/replay termination difference; empty roster is still NO_ROUTE
+and zero offer COMPLETE.
 
 ```python
 def show(r):
@@ -2539,7 +2570,7 @@ and `path_cost`, the optional outputs) is an empty `std::optional` in C++;
 numerator and a denominator (reduced on construction, `numerator()` and `denominator()`); a
 `design_demand` or an evaluator's `offer` is a `std::optional<std::optional<Amount>>`, absent for
 `None` and an empty inner value for `float('inf')`; and a `None` program, support or black holes
-a null `std::shared_ptr` (`edge_weights` is a shared array, `std::shared_ptr<const
+a null `std::shared_ptr` (`edge_weights` and `source_weights` are shared arrays, `std::shared_ptr<const
 std::vector<Amount>>`). `CentralizedTE` has no default constructor: it is built from its
 `SourceAllocation`. The epoch's amounts are `Counter128` values. A Python `ValueError` is a
 `std::invalid_argument` in C++. `spf` takes a trailing C++-only `SpfQueue` argument that chooses

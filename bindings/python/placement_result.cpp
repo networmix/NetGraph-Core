@@ -58,7 +58,9 @@ void register_placement_result(py::module_& m) {
                          "NO_ACTIVE_WEIGHT when the program has an entry with a path (an up tunnel, a controller path or\n"
                          "a split route) but no head can use one (no positive weight: WEIGHTED over edges of capacity 0\n"
                          "only, routes of weight 0, every up tunnel failed); a program whose tunnels are all down is not\n"
-                         "this case; a LOSSY finite request: COMPLETE (delivery and losses account for the whole offer,\n"
+                         "this case. A live CentralizedTE WEIGHTED call without tunnel_count with a positive offer\n"
+                         "and a nonempty all-zero source-weight roster is also NO_ACTIVE_WEIGHT, with no tunnels;\n"
+                         "Pinned replay of that empty program follows the remaining rules. A LOSSY finite request: COMPLETE (delivery and losses account for the whole offer,\n"
                          "which does not mean nothing was lost); otherwise COMPLETE when the whole request was delivered,\n"
                          "else EXHAUSTED (an infinite request is EXHAUSTED). A controller whose maximum is 0 over existing\n"
                          "routes is EXHAUSTED, not NO_ROUTE.")
@@ -284,7 +286,7 @@ void register_placement_result(py::module_& m) {
                     "cumulative flow (a zero call reports it unchanged; None before the epoch's first positive\n"
                     "call); in ascending cost, delivering `units` more raised the minimum total flow cost by `cost`\n"
                     "per unit (more delivery can reroute earlier flow, so these are not the costs of the final\n"
-                    "paths). None for the other models and the equal source allocation")
+                    "paths). None for the other models and prescribed (EQUAL or WEIGHTED) sources")
       .def_property_readonly(
 
           "edge_flows",
@@ -326,7 +328,7 @@ void register_placement_result(py::module_& m) {
                     "reached the maximum flow: the minimum cut closest to the sources, every allowed edge leaving\n"
                     "the nodes the roster sources reach in the residual network (free capacity plus the policy's\n"
                     "own allocation), an edge with nothing free (capacity 0, or held by others) included,\n"
-                    "ascending EdgeId; [] for an empty roster. None otherwise (another model, the equal source allocation, a\n"
+                    "ascending EdgeId; [] for an empty roster. None otherwise (another model, prescribed EQUAL or WEIGHTED sources, a\n"
                     "support, a call below the maximum, a zero call, forward)")
       .def("__repr__", [](const PlacementResult& r) {
         return "PlacementResult(call_delivered=" + std::to_string(r.call_delivered) + ", termination=" +

@@ -138,8 +138,8 @@ void register_program(py::module_& m) {
       m, "ForwardingProgram",
       "An immutable value: one demand's routes and integer weights. sources and destinations (the normalized\n"
       "sets); tunnels: the path entries in ascending index (split routes are not listed); source_weights: the\n"
-      "captured source supplies ((source, weight) for every roster source, ascending) of the optimized\n"
-      "controllers, None for equal sources (round robin over the roster). Each head splits its share by\n"
+      "captured weights ((source, weight) for every roster source, ascending): optimized controllers' solved\n"
+      "supplies, weighted CentralizedTE's declared weights, or None for equal sources (round robin). Each head splits its share by\n"
       "highest averages over its entries' weights; identical routes are never merged. ShortestPaths and CentralizedTE\n"
       "produce one (FlowPolicy.program, PlacementResult.program), and so do T1 and T2 (their tunnels);\n"
       "from_routes builds one from given routes; Pinned forwards one. No public constructor.")

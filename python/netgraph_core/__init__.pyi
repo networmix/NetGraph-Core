@@ -187,17 +187,21 @@ class SourceAllocation:
     How a demand's traffic enters at its sources, separately from how it is routed. EQUAL: round
     robin over the roster (ascending NodeId, the first sources one unit more); a source whose share
     cannot go anywhere keeps it and loses it (LOSSLESS then admits only totals that give it
-    nothing). OPTIMIZED: the controller chooses the injections (one virtual source).
+    nothing). OPTIMIZED: the controller chooses the injections (one virtual source). WEIGHTED:
+    CentralizedTE without tunnels prescribes highest-averages shares of declared source_weights.
 
     Members:
 
       EQUAL
 
       OPTIMIZED
+
+      WEIGHTED
     """
 
     EQUAL: typing.ClassVar[SourceAllocation]
     OPTIMIZED: typing.ClassVar[SourceAllocation]
+    WEIGHTED: typing.ClassVar[SourceAllocation]
     __members__: typing.ClassVar[dict[str, SourceAllocation]]
 
     @typing.overload
@@ -970,8 +974,8 @@ class ForwardingProgram:
     """
     An immutable value: one demand's routes and integer weights. sources and destinations (the normalized
     sets); tunnels: the path entries in ascending index (split routes are not listed); source_weights: the
-    captured source supplies ((source, weight) for every roster source, ascending) of the optimized
-    controllers, None for equal sources (round robin over the roster). Each head splits its share by
+    captured weights ((source, weight) for every roster source, ascending): optimized controllers' solved
+    supplies, weighted CentralizedTE's declared weights, or None for equal sources (round robin). Each head splits its share by
     highest averages over its entries' weights; identical routes are never merged. ShortestPaths and CentralizedTE
     produce one (FlowPolicy.program, PlacementResult.program), and so do T1 and T2 (their tunnels);
     from_routes builds one from given routes; Pinned forwards one. No public constructor.
@@ -1303,7 +1307,10 @@ class CentralizedTE:
     carries nothing), on the free capacity plus its own allocation (it may move its own traffic,
     never another's). It takes no route choice. Its source_allocation is required: OPTIMIZED, the
     controller chooses how much enters at each source; EQUAL: every roster source sends its
-    round-robin share of the largest total whose shares all fit. Its program is the solve cut into
+    round-robin share of the largest total whose shares all fit; WEIGHTED: highest-averages shares
+    of declared source_weights, only without tunnels. Zero weights receive nothing; all-zero
+    roster weights end NO_ACTIVE_WEIGHT on a positive live call. The program saves declared weights
+    for weighted sources, solved supplies for optimized sources. Its program is the solve cut into
     paths per source, each a tunnel weighted by its amount. A positive call on a network beyond the
     flow core's int32 numbering raises ValueError (see FlowPolicy.place).
     T2, CentralizedTE(source_allocation=..., tunnel_count=TunnelCount(N)) (no route choice either; with
@@ -1323,13 +1330,18 @@ class CentralizedTE:
         self,
         *,
         source_allocation: SourceAllocation,
+        source_weights: collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer]
+        | None = None,
         support: PredecessorDAG | None = None,
         tunnel_count: TunnelCount | None = None,
         prefer_headroom: bool = False,
     ) -> None:
         """
-        CentralizedTE(*, source_allocation, support=None, tunnel_count=None, prefer_headroom=False):
-        source_allocation is required (EQUAL or OPTIMIZED; None or a missing argument raises TypeError);
+        CentralizedTE(*, source_allocation, source_weights=None, support=None, tunnel_count=None, prefer_headroom=False):
+        source_allocation is required (EQUAL, OPTIMIZED or WEIGHTED; None or a missing argument raises TypeError).
+        WEIGHTED requires source_weights and no tunnel_count: one integer per graph node in [0, 2^62),
+        copied once and exposed as an immutable tuple. Other source allocations refuse source_weights.
         support a PredecessorDAG of the policy's graph (checked when a policy is built with it: `support
         belongs to another graph`) or None for every eligible edge; tunnel_count a TunnelCount (T2;
         the count in [1, 10000] is checked when a policy is built with it) or None; prefer_headroom (T2
@@ -1347,7 +1359,13 @@ class CentralizedTE:
     @property
     def source_allocation(self) -> SourceAllocation:
         """
-        the SourceAllocation: EQUAL or OPTIMIZED
+        the SourceAllocation: EQUAL, OPTIMIZED or WEIGHTED
+        """
+
+    @property
+    def source_weights(self) -> tuple[int, ...] | None:
+        """
+        declared node-indexed source weights as an immutable tuple, or None
         """
 
     @property
@@ -1483,7 +1501,9 @@ class Termination:
     NO_ACTIVE_WEIGHT when the program has an entry with a path (an up tunnel, a controller path or
     a split route) but no head can use one (no positive weight: WEIGHTED over edges of capacity 0
     only, routes of weight 0, every up tunnel failed); a program whose tunnels are all down is not
-    this case; a LOSSY finite request: COMPLETE (delivery and losses account for the whole offer,
+    this case. A live CentralizedTE WEIGHTED call without tunnel_count with a positive offer
+    and a nonempty all-zero source-weight roster is also NO_ACTIVE_WEIGHT, with no tunnels;
+    Pinned replay of that empty program follows the remaining rules. A LOSSY finite request: COMPLETE (delivery and losses account for the whole offer,
     which does not mean nothing was lost); otherwise COMPLETE when the whole request was delivered,
     else EXHAUSTED (an infinite request is EXHAUSTED). A controller whose maximum is 0 over existing
     routes is EXHAUSTED, not NO_ROUTE.
@@ -1827,7 +1847,7 @@ class PlacementResult:
         cumulative flow (a zero call reports it unchanged; None before the epoch's first positive
         call); in ascending cost, delivering `units` more raised the minimum total flow cost by `cost`
         per unit (more delivery can reroute earlier flow, so these are not the costs of the final
-        paths). None for the other models and the equal source allocation
+        paths). None for the other models and prescribed (EQUAL or WEIGHTED) sources
         """
 
     @property
@@ -1837,7 +1857,7 @@ class PlacementResult:
         reached the maximum flow: the minimum cut closest to the sources, every allowed edge leaving
         the nodes the roster sources reach in the residual network (free capacity plus the policy's
         own allocation), an edge with nothing free (capacity 0, or held by others) included,
-        ascending EdgeId; [] for an empty roster. None otherwise (another model, the equal source allocation, a
+        ascending EdgeId; [] for an empty roster. None otherwise (another model, prescribed EQUAL or WEIGHTED sources, a
         support, a call below the maximum, a zero call, forward)
         """
 
@@ -2690,7 +2710,9 @@ def evaluate_demand(
     (ShortestPaths EQUAL/WEIGHTED LOSSY without an offer: the first-hop experiment). The options are checked as
     the EvaluationOptions docstring states.
     The exact maximum flow is CentralizedTE(source_allocation=OPTIMIZED); with source_allocation=EQUAL, the largest
-    total whose round-robin source shares are all carried. A supplied frozen cache raises ShortestPathCacheMiss
+    total whose round-robin source shares are all carried; with WEIGHTED (CentralizedTE without tunnel_count),
+    the largest total whose highest-averages shares of source_weights are all carried.
+    A supplied frozen cache raises ShortestPathCacheMiss
     for an absent key, unchanged.
     A failed call raises; a supplied ShortestPathCache then behaves as the ShortestPathCache docstring states.
     """

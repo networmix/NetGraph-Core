@@ -5,7 +5,8 @@
    c*b; compute a lower quota as floor(I*w/W), where I is the total, w one weight and W the sum
    of weights.
    A cost-stretch factor is an exact fraction n/d.
-   Product operands stay below 2^63, products below 2^126, and quotients fit 64 bits.
+   Ordinary Amount operations have operands below 2^63, products below 2^126 and
+   64-bit quotients; cumulative apportionment uses the U192 operations below.
    Use __int128 when available; otherwise split products into 32-bit parts (limbs).
 
    I128 holds signed costs for deletion repairs: vertex cost offsets (potentials), distance
@@ -117,6 +118,36 @@ inline std::uint64_t div_u128(U128 n, U128 d) noexcept {
     if (!(n < ds)) {
       n = sub(n, ds);
       q |= std::uint64_t {1} << s;
+    }
+  }
+  return q;
+}
+
+// Cumulative source apportionment: total < 2^127, individual weight < 2^62, so a
+// quota numerator or priority cross-product is below 2^189. Three portable words
+// hold it without extending the ordinary Amount arithmetic's cost.
+struct U192 {
+  std::uint64_t hi {0}, mid {0}, lo {0};
+  friend auto operator<=>(const U192&, const U192&) = default;
+};
+
+inline U192 mul_wide(U128 a, std::uint64_t b) noexcept {
+  const U128 low = mul_u64(a.lo, b), high = mul_u64(a.hi, b);
+  const std::uint64_t mid = low.hi + high.lo;
+  return {high.hi + (mid < low.hi ? 1U : 0U), mid, low.lo};
+}
+
+// floor(n / d), quotient < 2^128 and 0 < d < 2^127. Source-weight sums
+// are below 2^93, so shifting a remainder (always < d) cannot overflow U128.
+inline U128 div_wide(U192 n, U128 d) noexcept {
+  U128 q {}, r {};
+  for (int i = 191; i >= 0; --i) {
+    const auto word = i >= 128 ? n.hi : i >= 64 ? n.mid : n.lo;
+    r = add(shl(r, 1), U128 {0, (word >> (i % 64)) & 1U});
+    q = shl(q, 1);
+    if (!(r < d)) {
+      r = sub(r, d);
+      q.lo |= 1;
     }
   }
   return q;

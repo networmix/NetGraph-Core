@@ -13,6 +13,12 @@ API.
 
 ### Added
 
+- `SourceAllocation.WEIGHTED` for CentralizedTE without tunnels, with immutable node-indexed
+  `source_weights`. The controller maximizes delivery at exact highest-averages source shares,
+  then minimizes cost; saved programs retain declared weights for replay. All-zero roster
+  weights produce NO_ACTIVE_WEIGHT; Pinned replay retains its existing termination rules.
+  Existing source-allocation results are unchanged.
+
 - **Several demands at once**: `apply_actions(ledger, actions, *, mode=BatchMode.ORDERED,
   outputs=None)` runs `Place(policy, offer)`, `Replace(policy, offer, *, design_demand=None)` and
   `Forward(policy, offer, *, black_holes=None)` actions of several policies of one ledger as one
@@ -132,12 +138,13 @@ API.
   edge_weights=None, tie_break=FEWER_HOPS, multipath=True, parallel_edges=True)` (ECMP by
   default; `WEIGHTED` is WCMP; `OPTIMIZED` a controller restricted to the shortest routes),
   `DistributedTE(tunnel_count, *, cost_ceiling=None, min_unreserved_bandwidth=0,
-  tie_break=FEWER_HOPS, parallel_edges=True)` (T1), `CentralizedTE(*, source_allocation,
+  tie_break=FEWER_HOPS, parallel_edges=True)` (T1), `CentralizedTE(*, source_allocation, source_weights=None,
   support=None, tunnel_count=None, prefer_headroom=False)` (the source allocation is required;
   with `tunnel_count`, T2) and `Pinned(program, *, black_holes=None)`; `TunnelCount(per_head, *,
-  up_to=False)`. `SourceAllocation` (`EQUAL`, `OPTIMIZED`) says how a demand's total enters at its
-  sources. Every configuration value is immutable (read-only fields; a model's `edge_weights` is
-  one shared array) and validated in two stages: construction raises `TypeError` for an unknown
+  up_to=False)`. `SourceAllocation` (`EQUAL`, `WEIGHTED`, `OPTIMIZED`) says how a demand's total enters at its
+  sources; `WEIGHTED` requires explicit `source_weights` and CentralizedTE without `tunnel_count`.
+  Every configuration value is immutable (read-only fields; a model's `edge_weights` and
+  `source_weights` are shared arrays) and validated in two stages: construction raises `TypeError` for an unknown
   keyword (every field of another model included), a missing required argument, `None` where none
   is allowed, a bool field given anything but a `bool` or `numpy.bool_`, and an integer field
   given a non-integer (`TunnelCount per_head must be an integer (got bool)`); a policy or an

@@ -122,6 +122,20 @@ std::vector<Mode> modes(const Graph& g) {
   out.push_back({"global", global_config(), S, D});
   // The equal source allocation of the controllers: the bisection's probe solves and the final solve.
   out.push_back({"global equal", {.routing = centralized(SourceAllocation::Equal)}, S, D});
+  for (bool support : {false, true}) {
+    CentralizedTE model(SourceAllocation::Weighted);
+    model.source_weights = std::make_shared<const std::vector<Amount>>(std::vector<Amount>{2,1,0,0,0,0,0});
+    if (support) model.support = all_edges(g);
+    out.push_back({support ? "weighted controller support" : "weighted controller", {.routing=model}, S, D});
+    model.source_weights = std::make_shared<const std::vector<Amount>>(static_cast<std::size_t>(g.num_nodes()),0);
+    out.push_back({support ? "zero weighted controller support" : "zero weighted controller", {.routing=model}, S, D});
+  }
+  {
+    CentralizedTE model(SourceAllocation::Weighted);
+    model.source_weights = std::make_shared<const std::vector<Amount>>(static_cast<std::size_t>(g.num_nodes()),kDomainLimit-1);
+    const auto program = evaluate_demand(g,S,D,EvaluationOptions{FlowPolicyConfig{model}}).program;
+    out.push_back({"wide weighted captured replay", {.routing=Pinned{program},.admission=Admission::Lossy},S,D,Amount{6}});
+  }
   out.push_back({"shortest_paths maxflow equal",
                  shortest(RouteAllocation::Optimized, Admission::Lossless,
                           [](ShortestPaths& sp) { sp.source_allocation = SourceAllocation::Equal; }),
@@ -1159,6 +1173,61 @@ TEST(PolicyFaults, ControllerScratchGrowthFailureLeavesNothingHalfGrown) {
   expect_scratch_growth_failure_leaves_nothing_half_grown("global support", [](const Graph& g) {
     return FlowPolicyConfig {.routing = centralized(SourceAllocation::Optimized, all_edges(g))};
   });
+  for (bool support : {false,true}) {
+    expect_scratch_growth_failure_leaves_nothing_half_grown("weighted controller", [support](const Graph& g) {
+      CentralizedTE model(SourceAllocation::Weighted);
+      model.source_weights=std::make_shared<const std::vector<Amount>>(static_cast<std::size_t>(g.num_nodes()),kDomainLimit-1);
+      if(support)model.support=all_edges(g);
+      return FlowPolicyConfig{model};
+    });
+  }
+}
+
+TEST(PolicyFaults, WeightedSourceHeapAndWideReplayFailAtomically) {
+  std::vector<InEdge> edges;std::vector<NodeId> heads;
+  for(int i=0;i<17;++i){edges.push_back({i,17,5,1});heads.push_back(i);}
+  const auto g=std::make_shared<const Graph>(make_graph(18,edges));
+  const auto model=[&] {
+    CentralizedTE m(SourceAllocation::Weighted);
+    m.source_weights=std::make_shared<const std::vector<Amount>>(18,kDomainLimit-1);
+    return FlowPolicyConfig{m};
+  };
+  const auto program=evaluate_demand(*g,heads,std::vector<NodeId>{17},EvaluationOptions{model()}).program;
+  for(bool replay:{false,true})for(bool support:{false,true})for(int stage:{0,1,2}) {
+    const auto setup=[&](FlowLedger& ledger) {
+      auto cfg=model();
+      if(support)std::get<CentralizedTE>(cfg.routing).support=all_edges(*g);
+      if(replay)cfg=FlowPolicyConfig{Pinned{program},Admission::Lossy};
+      auto p=std::make_shared<FlowPolicy>(ledger,heads,std::vector<NodeId>{17},cfg);
+      if(stage!=0){(void)p->place(1);if(stage==1)p->remove();}
+      auto* raw=p.get();return Staged{p,raw};
+    };
+    EXPECT_GT(sweep_placement(g,"weighted heap/wide cold removed live",setup,[&](FlowPolicy& p){return p.place(stage==2 ? 15 : 16,{true,true,true,true,true});}),0);
+    if(::testing::Test::HasFailure())return;
+  }
+  // Finite16 over17 equal weights forces a heap remainder on each evaluator worker.
+  EvaluationOptions options{model(),nullptr,nullptr,{true,true,true,true,true},{},Amount{16}};
+  for(int workers:{2,4})for(bool warm:{false,true}) {
+    const std::vector<std::pair<std::vector<NodeId>,std::vector<NodeId>>> pairs(static_cast<std::size_t>(2*workers),{heads,{17}});
+    const auto expected=evaluate_pairs(*g,pairs,options,{},workers);
+    long failures=0;
+    for(long at=0;;++at) {
+      const auto live=g_live.load();bool failed=false;
+      std::thread attempt([&] {
+        if(warm)(void)evaluate_pairs(*g,pairs,options,{},workers);
+        std::vector<PlacementResult> got;
+        failed=fails_in_workers_at(at,[&]{got=evaluate_pairs(*g,pairs,options,{},workers);});
+        if(failed){EXPECT_TRUE(got.empty());got=evaluate_pairs(*g,pairs,options,{},workers);}
+        ASSERT_EQ(got.size(),expected.size());
+        for(std::size_t i=0;i<got.size();++i)expect_same(got[i],expected[i],"weighted heap worker retry");
+      });
+      attempt.join();EXPECT_EQ(g_live.load(),live);
+      if(!failed||::testing::Test::HasFailure())break;
+      ++failures;
+    }
+    EXPECT_GT(failures,17);
+    if(::testing::Test::HasFailure())return;
+  }
 }
 
 TEST(PolicyFaults, FrozenLookupsFailWithoutCounting) {

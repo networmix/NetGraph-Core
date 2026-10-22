@@ -961,7 +961,7 @@ def test_exception_classes_of_conversions():
 
 
 @needs_hooks
-@pytest.mark.parametrize("routing", ["shortest_paths", "global"])
+@pytest.mark.parametrize("routing", ["shortest_paths", "global", "weighted"])
 @pytest.mark.parametrize("traced", [False, True])
 def test_python_publication_is_all_or_nothing(routing, traced):
     # Every Python object of a placement exists before anything is published, so the k-th
@@ -969,6 +969,13 @@ def test_python_publication_is_all_or_nothing(routing, traced):
     # call's flow in the same epoch included), never crashes, and a retry places as a call
     # without failure does.
     cfg = GLOBAL if routing == "global" else SHORTEST_PATHS
+    if routing == "weighted":
+        cfg = config(
+            ngc.CentralizedTE(
+                source_allocation=ngc.SourceAllocation.WEIGHTED,
+                source_weights=[1001, 0],
+            )
+        )
     g = build(2, [(0, 1, 10, 1)])
 
     for entry in (

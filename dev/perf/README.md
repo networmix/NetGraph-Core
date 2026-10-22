@@ -414,3 +414,14 @@ nothing. They test the rules of this file:
 
 The `sens.exact`, cut/repair population and `sens.policy_all_edges` rows also have
 `.w2` counterparts: the identical full query on two workers. Unsuffixed rows use one worker.
+
+### Captured source weights
+
+`program.increment.optimized` includes controller computation/export, a Pinned LOSSY policy,
+32 positive `place` calls and teardown. It reaches cumulative captured-weight injection and is
+a common baseline/candidate regression row. `program.increment.weighted` exercises declared
+unequal weights; `.wide` uses five weights `2^62-1` and crosses 64-bit cumulative totals.
+`program.replay.weighted` is the separate full-offer `replace` control. `global.weighted.random`
+and `sens.weighted_global` cover weighted-source optimization and fresh deletion solves.
+The new model rows have no pre-feature baseline; run them separately. Tool correctness checks
+all source quotas and complete row digests against independent ordinary/wide histories.

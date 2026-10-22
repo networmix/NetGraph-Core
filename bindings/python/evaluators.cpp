@@ -135,7 +135,9 @@ void register_evaluators(py::module_& m) {
       "(ShortestPaths EQUAL/WEIGHTED LOSSY without an offer: the first-hop experiment). The options are checked as\n"
       "the EvaluationOptions docstring states.\n"
       "The exact maximum flow is CentralizedTE(source_allocation=OPTIMIZED); with source_allocation=EQUAL, the largest\n"
-      "total whose round-robin source shares are all carried. A supplied frozen cache raises ShortestPathCacheMiss\n"
+      "total whose round-robin source shares are all carried; with WEIGHTED (CentralizedTE without tunnel_count),\n"
+      "the largest total whose highest-averages shares of source_weights are all carried.\n"
+      "A supplied frozen cache raises ShortestPathCacheMiss\n"
       "for an absent key, unchanged.\n"
       "A failed call raises; a supplied ShortestPathCache then behaves as the ShortestPathCache docstring states.");
 

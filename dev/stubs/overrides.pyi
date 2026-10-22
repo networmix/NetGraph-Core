@@ -350,16 +350,23 @@ class ShortestPaths:
     def edge_weights(self) -> tuple[int, ...] | None: ...
 
 class CentralizedTE:
-    # reason: support is a PredecessorDAG or None; tunnel_count (T2) a TunnelCount or None
-    # generated: def __init__(self, *, source_allocation: SourceAllocation, support: typing.Any = None, tunnel_count: typing.Any = None, prefer_headroom: bool = False) -> None:
+    # reason: node-indexed source weights; typed support and tunnel count
+    # generated: def __init__(self, *, source_allocation: SourceAllocation, source_weights: typing.Any = None, support: typing.Any = None, tunnel_count: typing.Any = None, prefer_headroom: bool = False) -> None:
     def __init__(
         self,
         *,
         source_allocation: SourceAllocation,
+        source_weights: collections.abc.Sequence[typing.SupportsIndex]
+        | numpy.typing.NDArray[numpy.integer]
+        | None = None,
         support: PredecessorDAG | None = None,
         tunnel_count: TunnelCount | None = None,
         prefer_headroom: bool = False,
     ) -> None: ...
+    # reason: owned immutable node-indexed weights
+    # generated: def source_weights(self) -> typing.Any:
+    @property
+    def source_weights(self) -> tuple[int, ...] | None: ...
 
 class Pinned:
     # reason: black_holes may be None

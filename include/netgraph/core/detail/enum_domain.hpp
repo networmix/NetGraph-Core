@@ -36,7 +36,8 @@ inline void check_member(Admission v, const char* field) {
 inline void check_member(SourceAllocation v, const char* field) {
   switch (v) {
     case SourceAllocation::Equal:
-    case SourceAllocation::Optimized: return;
+    case SourceAllocation::Optimized:
+    case SourceAllocation::Weighted: return;
   }
   not_a_member(field, static_cast<int>(v), "SourceAllocation");
 }

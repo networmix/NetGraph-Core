@@ -287,6 +287,27 @@ TEST(Concurrency, IndependentLedgersDoNotShareAGate) {
   EXPECT_EQ(result.get(), 3);
 }
 
+TEST(Concurrency, WeightedSourceCallsSerializeAndDoNotShareAGateAcrossLedgers) {
+  const auto graph=std::make_shared<const Graph>(3,std::vector<NodeId>{0,1},std::vector<NodeId>{2,2},
+      std::vector<Amount>{10,10},std::vector<Cost>{1,3},1.0);
+  CentralizedTE model(SourceAllocation::Weighted);
+  model.source_weights=std::make_shared<const std::vector<Amount>>(std::vector<Amount>{2,1,0});
+  FlowLedger a(graph),b(graph);
+  FlowPolicy p(a,std::vector<NodeId>{0,1},std::vector<NodeId>{2},FlowPolicyConfig{model});
+  FlowPolicy q(b,std::vector<NodeId>{0,1},std::vector<NodeId>{2},FlowPolicyConfig{model});
+  {
+    const auto gate=LedgerAccess::lock(a);
+    auto result=std::async(std::launch::async,[&]{return q.place(3).call_delivered;});
+    EXPECT_EQ(result.wait_for(5s),std::future_status::ready);EXPECT_EQ(result.get(),3);
+  }
+  std::vector<std::future<Amount>> tasks;
+  for(int i=0;i<4;++i)tasks.push_back(std::async(std::launch::async,[&]{Amount sum=0;for(int j=0;j<10;++j)sum+=p.place(1).call_delivered;return sum;}));
+  Amount sum=0;for(auto& t:tasks)sum+=t.get();
+  EXPECT_EQ(sum,15);EXPECT_EQ(p.delivered(),15);
+  const auto r=p.replace(15);
+  EXPECT_EQ(r.by_source[0].delivered,10);EXPECT_EQ(r.by_source[1].delivered,5);
+}
+
 TEST(Concurrency, ScalarAndListsDoNotLeaseTheConstructionCache) {
   const auto graph = one_link();
   ShortestPathCache cache(*graph);

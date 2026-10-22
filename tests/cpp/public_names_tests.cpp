@@ -136,7 +136,7 @@ TEST(PublicNames, Enumerations) {
   static_assert(declared_in_order({RouteTieBreak::FewerHops, RouteTieBreak::HigherCapacity,
                                    RouteTieBreak::HigherAvailableCapacity, RouteTieBreak::HigherHeadroom}));
   static_assert(declared_in_order({RouteAllocation::Equal, RouteAllocation::Weighted, RouteAllocation::Optimized}));
-  static_assert(declared_in_order({SourceAllocation::Equal, SourceAllocation::Optimized}));
+  static_assert(declared_in_order({SourceAllocation::Equal, SourceAllocation::Optimized, SourceAllocation::Weighted}));
   static_assert(declared_in_order({WeightBasis::Capacity, WeightBasis::Explicit, WeightBasis::ResidualSnapshot}));
   static_assert(declared_in_order({Admission::Lossless, Admission::Lossy}));
   static_assert(declared_in_order({Direction::Forward, Direction::Reverse}));

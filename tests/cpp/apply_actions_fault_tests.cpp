@@ -209,6 +209,29 @@ TEST(PolicyFaults, EveryAllocationOfASimultaneousListFailsAtomically) {
   EXPECT_GT(cyclic, 50);
 }
 
+TEST(PolicyFaults, WeightedSourceListsPublishAllOwnersOrNone) {
+  const auto g=mixed_graph();
+  CentralizedTE model(SourceAllocation::Weighted);
+  model.source_weights=std::make_shared<const std::vector<Amount>>(std::vector<Amount>{2,1,0,0,0,0,0,0});
+  FlowLedger producer(g);
+  FlowPolicy p(producer,kS,kD,FlowPolicyConfig{model});
+  const auto program=p.replace(6).program;
+  for(auto mode:{BatchMode::Ordered,BatchMode::Simultaneous})for(bool warm:{false,true}) {
+    const auto injected=sweep_list(g,"weighted list",[&](FlowLedger& ledger) {
+      ListScenario s;
+      for(int i=0;i<2;++i) {
+        FlowPolicyConfig cfg=mode==BatchMode::Ordered ? FlowPolicyConfig{model} : pinned_config(program);
+        s.policies.push_back(std::make_unique<FlowPolicy>(ledger,kS,kD,cfg));
+        if(warm)(void)s.policies.back()->replace(2);
+        s.actions.push_back(Replace{*s.policies.back(),6});
+      }
+      s.mode=mode;return s;
+    });
+    EXPECT_GT(injected,10);
+    if(::testing::Test::HasFailure())return;
+  }
+}
+
 // Both modes on a fresh thread, the scratch grown from a 3-node to a 3,000-node chain, each
 // allocation failing once; the retry on that thread equals the reference.
 TEST(PolicyFaults, ListScratchGrowthFailureLeavesNothingHalfGrown) {

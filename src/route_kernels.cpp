@@ -1,12 +1,13 @@
 /*
   Apportionment and the placement kernels in units. T is a plan's total injection.
 
-  Every amount is an int64 number of units below 2^62: T is bounded by the view on the roots'
+  Every forwarded Amount is an int64 number of units below 2^62: T is bounded by the view on the roots'
   members (the graph's capacities sum below 2^62), each node's inflow by T, and each share by that
   inflow. Highest averages compares
   w_i/d_i and w_j/d_j through w_i*d_j and w_j*d_i (operands < 2^63, products < 2^126). The
   lower quota floor(I*w/W) uses a 128-bit product, with inflow I, weight w < 2^62 and the exact
   128-bit weight sum W (explicit weights are each below 2^62, not their sum).
+  Cumulative source apportionment instead uses totals below 2^127 and 192-bit products.
 */
 #include "netgraph/core/detail/route_kernels.hpp"
 
@@ -37,38 +38,58 @@ bool before(std::uint64_t wi, std::uint64_t di, std::size_t i, std::uint64_t wj,
   return i < j;
 }
 
-} // namespace
+Amount quota(Amount total, Amount w, U128 sum) noexcept {
+  return static_cast<Amount>(div_u128(mul_u64(static_cast<std::uint64_t>(total), static_cast<std::uint64_t>(w)), sum));
+}
+U128 quota(U128 total, Amount w, U128 sum) noexcept {
+  return div_wide(mul_wide(total, static_cast<std::uint64_t>(w)), sum);
+}
+Amount plus(Amount a, Amount b) noexcept { return a + b; }
+U128 plus(U128 a, U128 b) noexcept { return add(a, b); }
+Amount remainder(Amount a, Amount b) noexcept { return a - b; }
+Amount remainder(U128 a, U128 b) noexcept { return static_cast<Amount>(sub(a, b).lo); }
+void award(Amount& a) noexcept { ++a; }
+void award(U128& a) noexcept { a = add(a, U128 {0, 1}); }
+bool next_before(Amount wi, Amount ai, std::size_t i, Amount wj, Amount aj, std::size_t j) noexcept {
+  return before(static_cast<std::uint64_t>(wi), static_cast<std::uint64_t>(ai) + 1, i,
+                static_cast<std::uint64_t>(wj), static_cast<std::uint64_t>(aj) + 1, j);
+}
+bool next_before(Amount wi, U128 ai, std::size_t i, Amount wj, U128 aj, std::size_t j) noexcept {
+  const auto left = mul_wide(add(aj, U128 {0, 1}), static_cast<std::uint64_t>(wi));
+  const auto right = mul_wide(add(ai, U128 {0, 1}), static_cast<std::uint64_t>(wj));
+  return left != right ? left > right : i < j;
+}
 
-void highest_averages(Amount total, std::span<const Amount> weights, std::span<Amount> out) {
+// One rule for both widths: only quota and priority arithmetic differ. The
+// unassigned remainder is less than k, even for a cumulative 127-bit total.
+template<class Share>
+void apportion(Share total, std::span<const Amount> weights, std::span<Share> out) {
   const std::size_t k = weights.size();
   U128 wsum {};
   for (Amount w : weights) wsum = add(wsum, U128 {0, static_cast<std::uint64_t>(w)});
   if (wsum == U128 {}) {  // all-zero weights give nothing
-    std::fill(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(k), 0);
+    std::fill(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(k), Share {});
     return;
   }
-  Amount given = 0;
+  Share given {};
   for (std::size_t m = 0; m < k; ++m) {
     // Lower quota floor(total * w / W): exactly the quotients w / j >= W / total.
-    out[m] = static_cast<Amount>(div_u128(mul_u64(static_cast<std::uint64_t>(total),
-                                                  static_cast<std::uint64_t>(weights[m])),
-                                          wsum));
-    given += out[m];
+    out[m] = quota(total, weights[m], wsum);
+    given = plus(given, out[m]);
   }
   // Fewer than k (the positive weights' count) units are left; a zero weight's quotient 0 never
   // beats a positive one, so it gets none of them.
-  Amount left = total - given;
+  Amount left = remainder(total, given);
   if (left == 0) return;
   if (k <= 16) {
     while (left-- > 0) {
       std::size_t best = 0;
       for (std::size_t m = 1; m < k; ++m) {
-        if (before(static_cast<std::uint64_t>(weights[m]), static_cast<std::uint64_t>(out[m]) + 1, m,
-                   static_cast<std::uint64_t>(weights[best]), static_cast<std::uint64_t>(out[best]) + 1, best)) {
+        if (next_before(weights[m], out[m], m, weights[best], out[best], best)) {
           best = m;
         }
       }
-      ++out[best];
+      award(out[best]);
     }
     return;
   }
@@ -76,15 +97,24 @@ void highest_averages(Amount total, std::span<const Amount> weights, std::span<A
   std::iota(heap.begin(), heap.end(), std::size_t{0});
   // std heaps put the largest first: "a < b" when b goes first.
   auto later = [&](std::size_t a, std::size_t b) {
-    return before(static_cast<std::uint64_t>(weights[b]), static_cast<std::uint64_t>(out[b]) + 1, b,
-                  static_cast<std::uint64_t>(weights[a]), static_cast<std::uint64_t>(out[a]) + 1, a);
+    return next_before(weights[b], out[b], b, weights[a], out[a], a);
   };
   std::make_heap(heap.begin(), heap.end(), later);
   while (left-- > 0) {
     std::pop_heap(heap.begin(), heap.end(), later);
-    ++out[heap.back()];
+    award(out[heap.back()]);
     std::push_heap(heap.begin(), heap.end(), later);
   }
+}
+
+} // namespace
+
+void highest_averages(Amount total, std::span<const Amount> weights, std::span<Amount> out) {
+  apportion(total, weights, out);
+}
+
+void highest_averages(U128 total, std::span<const Amount> weights, std::span<U128> out) {
+  apportion(total, weights, out);
 }
 
 void round_robin_increments(const Counter128& total, Amount v, std::span<Amount> out) noexcept {

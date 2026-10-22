@@ -777,6 +777,59 @@ inline std::uint64_t edge_failures_equal_global(const Graph& g, const std::vecto
   return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), sv, tv, nc::EvaluationOptions {global_equal_config()}, 1));
 }
 
+// Keep the historical-build adapter compilable against a Core preceding declared
+// source weights. New weighted rows are run only on builds that implement them;
+// the common optimized-increment row executes exactly the same work on both.
+template<class Model = nc::CentralizedTE>
+inline nc::FlowPolicyConfig captured_config(const std::vector<nc::Amount>& weights, bool weighted) {
+  Model model(nc::SourceAllocation::Optimized);
+  if (weighted) {
+    if constexpr (requires(Model m) { m.source_weights; }) {
+      using Allocation = decltype(model.source_allocation);
+      model.source_allocation = Allocation::Weighted;
+      model.source_weights = std::make_shared<const std::vector<nc::Amount>>(weights);
+    } else {
+      throw std::invalid_argument("this Core does not implement weighted source allocation");
+    }
+  }
+  return nc::FlowPolicyConfig{std::move(model)};
+}
+
+inline std::uint64_t global_weighted_capacity(const Graph& g, const std::vector<int>& srcs, int dst, bool failures) {
+  const std::vector<nc::NodeId> sv(srcs.begin(),srcs.end());
+  const nc::NodeId tv[1]={dst};
+  std::vector<nc::Amount> weights(static_cast<std::size_t>(g.ref().num_nodes()),0);
+  for(std::size_t i=0;i<sv.size();++i)weights[static_cast<std::size_t>(sv[i])]=static_cast<nc::Amount>(i+1);
+  const nc::EvaluationOptions options{captured_config(weights,true),nullptr,nullptr,{true,true,true,true,true}};
+  if(failures)return fold_edge_failures(nc::evaluate_edge_failures(g.ref(),sv,tv,options,1));
+  Digest d;add_rows(d,nc::evaluate_demand(g.ref(),sv,tv,options));return d.h;
+}
+
+inline std::shared_ptr<const nc::Graph> captured_graph() {
+  return std::make_shared<const nc::Graph>(6,std::vector<nc::NodeId>{0,1,2,3,4},std::vector<nc::NodeId>(5,5),
+      std::vector<nc::Amount>(5,10),std::vector<nc::Cost>(5,1),1.0);
+}
+
+// A complete lifetime: controller computation/export, Pinned LOSSY construction,
+// 32 calls, result materialization and teardown. Incremental calls enter
+// source_offer_increments; replace calls are a distinct full-offer control.
+inline std::uint64_t captured_series(const std::shared_ptr<const nc::Graph>& g,int mode,bool incremental) {
+  const bool weighted=mode!=0,wide=mode==2;
+  const nc::Amount m=nc::kDomainLimit-1;
+  const std::vector<nc::Amount> weights=wide ? std::vector<nc::Amount>{m,m,m,m,m,0} : std::vector<nc::Amount>{2,1,3,1,2,0};
+  const std::vector<nc::NodeId> sv{0,1,2,3,4},tv{5};
+  const auto program=nc::evaluate_demand(*g,sv,tv,nc::EvaluationOptions{captured_config(weights,weighted)}).program;
+  nc::FlowLedger ledger(g);
+  nc::FlowPolicy p(ledger,sv,tv,nc::FlowPolicyConfig{nc::Pinned{program},nc::Admission::Lossy});
+  Digest d;
+  for(int i=0;i<32;++i) {
+    const nc::Amount offer=wide && i<4 ? m : wide && i==4 ? 5 : 17;
+    const auto r=incremental ? p.place(offer) : p.replace(offer);
+    add_rows(d,r);
+  }
+  return d.h;
+}
+
 // T1: one DistributedTE(TunnelCount(tunnels)) policy per pair on one shared ledger, Lossless, each head
 // setting up its tunnels by CSPF on the unreserved view (the earlier pairs' holds count).
 struct T1Fabric {

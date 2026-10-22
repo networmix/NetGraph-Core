@@ -3085,7 +3085,44 @@ int test_msd_epochs() {
 }
 }  // namespace
 
+int test_captured_sources() {
+  auto network=abaapi::captured_graph();
+  for(int mode:{0,1,2})for(bool incremental:{false,true}) {
+    const auto m=netgraph::core::kDomainLimit-1;
+    std::vector<netgraph::core::Amount> weights=mode==2 ? std::vector<netgraph::core::Amount>{m,m,m,m,m,0} : std::vector<netgraph::core::Amount>{2,1,3,1,2,0};
+    const std::vector<netgraph::core::NodeId> heads{0,1,2,3,4},destinations{5};
+    auto saved=netgraph::core::evaluate_demand(*network,heads,destinations,netgraph::core::EvaluationOptions{abaapi::captured_config(weights,mode!=0)}).program;
+    netgraph::core::FlowLedger ledger(network);
+    netgraph::core::FlowPolicy policy(ledger,heads,destinations,netgraph::core::FlowPolicyConfig{netgraph::core::Pinned{saved},netgraph::core::Admission::Lossy});
+    Digest expected;
+    unsigned __int128 total=0;
+    for(int i=0;i<32;++i) {
+      const netgraph::core::Amount offer=mode==2&&i<4 ? m : mode==2&&i==4 ? 5 : 17;
+      total=incremental ? total+static_cast<unsigned __int128>(offer) : static_cast<unsigned __int128>(offer);
+      const auto result=incremental ? policy.place(offer) : policy.replace(offer);
+      std::vector<unsigned __int128> share(5,0);
+      if(mode==1) {
+        const unsigned w[]={2,1,3,1,2};
+        for(unsigned __int128 u=0;u<total;++u) {
+          std::size_t best=0;
+          for(std::size_t j=1;j<5;++j)if(w[j]*(share[best]+1)>w[best]*(share[j]+1))best=j;
+          ++share[best];
+        }
+      } else for(std::size_t j=0;j<5;++j)share[j]=total/5+(j<total%5);
+      for(std::size_t j=0;j<5;++j) {
+        const auto actual=*result.by_source[j].offered;
+        if(((static_cast<unsigned __int128>(actual.hi)<<64)|actual.lo)!=share[j])throw std::runtime_error("captured-source series quota mismatch");
+      }
+      abaapi::add_rows(expected,result);
+    }
+    if(abaapi::captured_series(network,mode,incremental)!=expected.h)throw std::runtime_error("captured-source timing row omits or changes work");
+  }
+  std::puts("captured sources: all 32-step ordinary/wide histories and row digests match");
+  return 0;
+}
+
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string(argv[1]) == "test-captured-sources") return test_captured_sources();
   if (argc == 2 && std::string(argv[1]) == "test-times") return test_times();
   if (argc == 2 && std::string(argv[1]) == "test-msd-epochs") return test_msd_epochs();
   auto r = rows();
@@ -3174,6 +3211,16 @@ class Harness(unittest.TestCase):
         cmd = [str(self.binary), *args]
         return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
+    def test_captured_source_rows_match_independent_quotas(self):
+        result = subprocess.run(
+            [str(self.binary), "test-captured-sources"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("all 32-step", result.stdout)
+
     def test_compiles_without_a_diagnostic(self):
         self.assertEqual(self.compiled.returncode, 0, self.compiled.stderr[-2000:])
         self.assertEqual(self.compiled.stderr, "")
@@ -3183,7 +3230,7 @@ class Harness(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = aba.row_list(proc.stdout.encode(), "aba-list")
         real = {k: v for k, v in rows.items() if not k.startswith("test.")}
-        self.assertEqual(len(real), 95)
+        self.assertEqual(len(real), 101)
         sums = sha256sums(HERE / "queries")
         lists = {}
         for name in sums:
@@ -3217,7 +3264,7 @@ class Harness(unittest.TestCase):
         real = [row for row in listed if not row.startswith("test.")]
         with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 1) as pool:
             procs = list(pool.map(lambda row: self.harness("aba-run", row, "1"), real))
-        self.assertEqual(len(procs), 95)
+        self.assertEqual(len(procs), 101)
         for row, proc in zip(real, procs, strict=True):
             self.assertEqual(proc.returncode, 0, (row, proc.stderr))
             self.assertEqual(

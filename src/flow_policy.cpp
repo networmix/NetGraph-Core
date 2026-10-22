@@ -19,8 +19,8 @@
   * The controllers (place_optimized_flow): unrestricted CentralizedTE over every eligible edge, CentralizedTE with a
     support over that support trimmed, ShortestPaths Optimized over the union of the roster's routes
     (prepared as above). A minimum-cost flow of the cumulative value on V = W + own, from one
-    virtual source (the optimized source allocation) or with source i's arc capped at its round-robin share of
-    the largest total whose shares all fit (the equal source allocation, integer bisection), cut into paths
+    virtual source (the optimized source allocation) or with source i's arc capped at its RR or H share of
+    the largest total whose shares all fit (equal or weighted source allocation, integer bisection), cut into paths
     per source (decompose()): the program, each path a tunnel weighted by its amount; each source's
     record is the sum of its paths.
   * Pinned (place_pinned): forwarding its program as the policy's view replays it under its mask
@@ -1029,7 +1029,7 @@ PendingPolicyUpdate place_pooled(const PolicyEngine& pe, const PolicyEpoch& cur,
 // ---------------------------------------------------------------- the controllers
 
 // One solve of a controller from zero on the view V with value cap `cap` (nullopt: uncapped);
-// `caps` (the equal source allocation) caps source i's arc at caps[i]. Unrestricted CentralizedTE solves over every
+// `caps` (prescribed source allocation) caps source i's arc at caps[i]. Unrestricted CentralizedTE solves over every
 // eligible edge, its V and flows per EdgeId; CentralizedTE with a support and ShortestPaths Optimized over
 // `support`, their V and flows aligned with it.
 struct OptimizedFlowResult {
@@ -1054,17 +1054,18 @@ OptimizedFlowResult solve(const PolicyEngine& pe, std::span<const EdgeId> suppor
   return out;
 }
 
-// The equal source allocation: the largest total T in [lo, hi] whose round-robin supplies RR(T, H, i) are all
+// Prescribed source allocation: the largest total T in [lo, hi] whose RR or H supplies are all
 // carried (a solve capped at T with source i's arc capped at its share reaches T), given that lo's
 // are. Feasible totals form a prefix (each share never decreases in T, and a smaller supply
 // vector stays feasible), so integer bisection is exact; T's solve from zero is returned, so the
 // result does not depend on the probes.
-OptimizedFlowResult solve_equal(const PolicyEngine& pe, std::span<const EdgeId> support, std::span<const Amount> V, Amount lo,
-                  Amount hi, Trace* probes) {
+OptimizedFlowResult solve_prescribed(const PolicyEngine& pe, std::span<const EdgeId> support, std::span<const Amount> V, Amount lo,
+                  Amount hi, std::span<const Amount> weights, Trace* probes) {
   std::vector<Amount> caps(pe.reachable_sources.size());
   auto attempt = [&](Amount t) -> std::optional<OptimizedFlowResult> {
     std::fill(caps.begin(), caps.end(), 0);
-    round_robin(t, caps);
+    if (weights.empty()) round_robin(t, caps);
+    else highest_averages(t, weights, caps);
     auto s = solve(pe, support, V, t, caps);
     if (kTraced && probes != nullptr) probes->push(Trace::integer(t));
     if (s.flow_value != t) return std::nullopt;
@@ -1082,11 +1083,11 @@ OptimizedFlowResult solve_equal(const PolicyEngine& pe, std::span<const EdgeId> 
     }
   }
   if (!best) best = attempt(lo);
-  if (!best) throw std::logic_error("equal source allocation: the admitted total is no longer carried");
+  if (!best) throw std::logic_error("prescribed source allocation: the admitted total is no longer carried");
   return std::move(*best);
 }
 
-// The upper end of the equal search: the view summed over the edges leaving the roster sources
+// The upper end of a prescribed-supply search: the view summed over the edges leaving the roster sources
 // (unrestricted CentralizedTE: the eligible ones, V per EdgeId; otherwise the support's, V aligned with
 // it); the supplies leave through them.
 Amount source_outgoing_capacity_bound(const PolicyEngine& pe, std::span<const EdgeId> support, std::span<const Amount> V) {
@@ -1133,8 +1134,16 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
   Trace* trace = rq.trace;
   const bool dense = is_unrestricted_centralized_te(pe);
   const bool global = is<CentralizedTE>(pe);
-  const bool equal = pe.source_allocation == SourceAllocation::Equal;
+  const bool prescribed = pe.source_allocation != SourceAllocation::Optimized;
+  const bool weighted = pe.source_allocation == SourceAllocation::Weighted;
   const std::size_t k = pe.reachable_sources.size();
+  std::vector<Amount> source_weights;
+  if (weighted) {
+    const auto& declared = *std::get<CentralizedTE>(pe.config.routing).source_weights;
+    source_weights.reserve(k);
+    for (NodeId src : pe.reachable_sources) source_weights.push_back(declared[static_cast<std::size_t>(src)]);
+  }
+  const bool no_active_source_weight = weighted && std::none_of(source_weights.begin(), source_weights.end(), [](Amount w) { return w != 0; });
   const bool created = cur.record_groups.front().empty();
   // ShortestPaths Optimized: the support of the epoch (its routes, prepared at its first call).
   PreparedShortestPaths prep;
@@ -1183,14 +1192,14 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
   }
   const std::optional<Amount> cap = v.has_value() ? std::optional<Amount>(P + *v) : std::nullopt;
   if (pe.capture != nullptr) {
-    if (equal || !dense) throw std::logic_error("a deletion capture of a controller other than optimized CentralizedTE");
+    if (prescribed || !dense) throw std::logic_error("a deletion capture of a controller other than optimized CentralizedTE");
     pe.capture->graph = pe.graph;
   }
   Trace probes = Trace::list();
   OptimizedFlowResult sol;
-  if (equal) {
-    const Amount top = source_outgoing_capacity_bound(pe, support, V);
-    sol = solve_equal(pe, support, V, P, cap.has_value() ? std::min(*cap, top) : top, &probes);
+  if (prescribed) {
+    const Amount top = no_active_source_weight ? 0 : source_outgoing_capacity_bound(pe, support, V);
+    sol = solve_prescribed(pe, support, V, P, cap.has_value() ? std::min(*cap, top) : top, source_weights, &probes);
   } else {
     sol = solve(pe, support, V, cap, {});
   }
@@ -1234,7 +1243,7 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
   }
   const auto& supplies = dec.supplies;
   auto program = optimized_flow_program(g, pe.sources, pe.destinations, pe.reachable_sources, std::move(dec.paths),
-                                    equal ? std::span<const Amount> {} : std::span<const Amount>(supplies),
+                                    weighted ? std::span<const Amount>(source_weights) : prescribed ? std::span<const Amount> {} : std::span<const Amount>(supplies),
                                     optimized_flow_replay_basis(pe, flows));
   const Counter128 requested = requested_after(cur, v);
   PlacementResult& out = s.result;
@@ -1242,18 +1251,21 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
   if (v.has_value()) out.call_undelivered = *v - out.call_delivered;
   out.delivery_delta = out.call_delivered;
   out.termination = v.has_value() && out.call_delivered == *v ? Termination::Complete : Termination::Exhausted;
+  if (no_active_source_weight && (!v.has_value() || *v != 0)) {
+    out.termination = Termination::NoActiveWeight;
+  }
   set_flags(out, before_program, program.get(), false);
   out.program = program;
   out.by_tunnel = optimized_flow_tunnel_rows(*program);
   const auto after = draft_records(s.drafts);
   fill_state(pe, after, requested, cur.infinite || !v.has_value(), Counter128 {}, out);
   out.total_cost = total_cost_of(g, after);
-  const bool curve = dense && !equal;
+  const bool curve = dense && !prescribed;
   if (curve) out.marginal_cost_curve = sol.payload.marginal_cost_curve;
   if (curve && rq.outputs != nullptr && rq.outputs->min_cut) out.min_cut = sol.payload.min_cut;
   if (kTraced && trace) {
     if (!global) trace->set("prepare", created ? routes_trace(prep) : Trace::null());
-    if (equal) trace->set("probes", std::move(probes));
+    if (prescribed) trace->set("probes", std::move(probes));
     if (dense) trace->set("V", Trace::ints(V));
     trace->set("cap", cap.has_value() ? Trace::integer(*cap) : Trace::null());
     Trace fc = Trace::map();
@@ -1752,7 +1764,7 @@ void check_pooled_single_path(const Routing& r, std::size_t num_sources) {
 
 } // namespace
 
-void check_config(const FlowPolicyConfig& config, bool cache, std::int32_t num_edges, std::optional<std::size_t> num_sources) {
+void check_config(const FlowPolicyConfig& config, bool cache, std::int32_t num_nodes, std::int32_t num_edges, std::optional<std::size_t> num_sources) {
   const auto& r = config.routing;
   if (r.valueless_by_exception()) invalid("routing: the variant holds no routing mode");
   // The enumeration values.
@@ -1772,6 +1784,10 @@ void check_config(const FlowPolicyConfig& config, bool cache, std::int32_t num_e
   const bool lossy = config.admission == Admission::Lossy;
   // The model matrix in its order: route and source allocation, admission, the route-choice
   // controls, prefer_headroom, the weight combinations, then a cache on a model that does not read it.
+  if ((sp != nullptr && sp->source_allocation == SourceAllocation::Weighted) ||
+      (gl != nullptr && t2 && gl->source_allocation == SourceAllocation::Weighted)) {
+    invalid("source_allocation=WEIGHTED requires CentralizedTE without tunnel_count");
+  }
   if (sp != nullptr) {
     const bool optimized = sp->allocation == RouteAllocation::Optimized;
     if (!optimized && sp->source_allocation == SourceAllocation::Optimized) {
@@ -1791,6 +1807,8 @@ void check_config(const FlowPolicyConfig& config, bool cache, std::int32_t num_e
     if (num_sources.has_value()) check_t2_sources(r, *num_sources);
     if (!t2 && lossy) invalid("CentralizedTE without tunnel_count requires admission=LOSSLESS");
     if (gl->prefer_headroom && !t2) invalid("prefer_headroom requires tunnel_count");
+    if (gl->source_allocation == SourceAllocation::Weighted && !gl->source_weights) invalid("source_allocation=WEIGHTED requires source_weights");
+    if (gl->source_allocation != SourceAllocation::Weighted && gl->source_weights) invalid("source_weights require source_allocation=WEIGHTED");
   }
   if (cache && sp == nullptr) invalid(std::string(model_class(r)) + " does not use ShortestPathCache");
   // Then the tunnel count, an "up to" count for DistributedTE, the ceilings, the search minimum and
@@ -1809,6 +1827,13 @@ void check_config(const FlowPolicyConfig& config, bool cache, std::int32_t num_e
     if (w.size() != static_cast<std::size_t>(num_edges)) invalid("edge_weights: expected " + str(num_edges) + " entries");
     for (std::size_t e = 0; e < w.size(); ++e) {
       if (w[e] < 0 || w[e] >= kDomainLimit) invalid("edge_weights[" + std::to_string(e) + "] must be an integer in [0, 2^62)");
+    }
+  }
+  if (gl != nullptr && gl->source_weights) {
+    const auto& w = *gl->source_weights;
+    if (w.size() != static_cast<std::size_t>(num_nodes)) invalid("source_weights: expected " + str(num_nodes) + " entries");
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      if (w[i] < 0 || w[i] >= kDomainLimit) invalid("source_weights[" + std::to_string(i) + "] must be an integer in [0, 2^62)");
     }
   }
 }
@@ -1899,7 +1924,7 @@ void prepare_arguments(Prepared& pe, const Graph& g, std::span<const NodeId> sou
     throw std::invalid_argument("black_holes belongs to another graph");
   }
   pe.eligibility = eligibility;
-  detail::check_config(pe.config, cache != nullptr, g.num_edges(), pe.sources.size());
+  detail::check_config(pe.config, cache != nullptr, g.num_nodes(), g.num_edges(), pe.sources.size());
   // Only ShortestPaths has absent defaults to resolve. The other models keep
   // their already-validated snapshot without moving the routing variant.
   if (std::holds_alternative<ShortestPaths>(pe.config.routing)) {
@@ -2105,7 +2130,7 @@ namespace {
 // The program a computing model installs for an empty roster: an empty one. Pinned never
 // comes here: its forwarding with no head is place_pinned's.
 std::shared_ptr<const ForwardingProgram> empty_roster_program(const PolicyEngine& pe) {
-  return empty_program(pe.graph->uid(), pe.sources, pe.destinations, uses_optimized_flow(pe) && pe.source_allocation == SourceAllocation::Optimized);
+  return empty_program(pe.graph->uid(), pe.sources, pe.destinations, uses_optimized_flow(pe) && pe.source_allocation != SourceAllocation::Equal);
 }
 
 // The current state of a zero call: its records, its program and rows, every flag false; before

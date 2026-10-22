@@ -55,6 +55,7 @@ const char* source_allocation_repr(SourceAllocation a) {
   switch (a) {
     case SourceAllocation::Equal: return "SourceAllocation.EQUAL";
     case SourceAllocation::Optimized: return "SourceAllocation.OPTIMIZED";
+    case SourceAllocation::Weighted: return "SourceAllocation.WEIGHTED";
   }
   return "SourceAllocation(?)";
 }
@@ -67,15 +68,15 @@ const char* weight_basis_repr(WeightBasis b) {
   return "WeightBasis(?)";
 }
 
-// Explicit WCMP weights, one integer per edge, converted once and shared by every policy built from
-// the model: a length or type defect raises here; an entry beyond int64 is outside the domain
-// (ValueError); the policy checks the length against its graph and the range [0, 2^62).
-std::shared_ptr<const std::vector<Amount>> edge_weights_of(const py::object& edge_weights) {
-  if (edge_weights.is_none()) return {};
-  (void)sequence_length(edge_weights, "edge_weights");
-  const auto w = wide_integers(edge_weights, "edge_weights");
+// Explicit edge or source weights, converted once and shared by policies built from the model.
+// Scan all shape defects, then integer types, then int64 storage overflow (ValueError).
+// The policy checks graph-sized length and the range [0, 2^62); only the diagnostic name differs.
+std::shared_ptr<const std::vector<Amount>> weights_of(const py::object& weights, const char* name) {
+  if (weights.is_none()) return {};
+  (void)sequence_length(weights, name);
+  const auto w = wide_integers(weights, name);
   for (std::size_t e = 0; e < w.size(); ++e) {
-    if (w.sign(e) != 0) throw py::value_error("edge_weights[" + std::to_string(e) + "] must be an integer in [0, 2^62)");
+    if (w.sign(e) != 0) throw py::value_error(std::string(name) + "[" + std::to_string(e) + "] must be an integer in [0, 2^62)");
   }
   return std::make_shared<const std::vector<Amount>>(w.narrow<Amount>());
 }
@@ -202,7 +203,7 @@ void register_routing(py::module_& m) {
              sp.allocation = allocation;
              sp.source_allocation = source_allocation;
              sp.weight_basis = weight_basis;
-             sp.edge_weights = edge_weights_of(edge_weights);
+             sp.edge_weights = weights_of(edge_weights, "edge_weights");
              sp.tie_break = tie_break;
              sp.multipath = multipath;
              sp.parallel_edges = parallel_edges;
@@ -319,7 +320,10 @@ void register_routing(py::module_& m) {
                      "carries nothing), on the free capacity plus its own allocation (it may move its own traffic,\n"
                      "never another's). It takes no route choice. Its source_allocation is required: OPTIMIZED, the\n"
                      "controller chooses how much enters at each source; EQUAL: every roster source sends its\n"
-                     "round-robin share of the largest total whose shares all fit. Its program is the solve cut into\n"
+                     "round-robin share of the largest total whose shares all fit; WEIGHTED: highest-averages shares\n"
+                     "of declared source_weights, only without tunnels. Zero weights receive nothing; all-zero\n"
+                     "roster weights end NO_ACTIVE_WEIGHT on a positive live call. The program saves declared weights\n"
+                     "for weighted sources, solved supplies for optimized sources. Its program is the solve cut into\n"
                      "paths per source, each a tunnel weighted by its amount. A positive call on a network beyond the\n"
                      "flow core's int32 numbering raises ValueError (see FlowPolicy.place).\n"
                      "T2, CentralizedTE(source_allocation=..., tunnel_count=TunnelCount(N)) (no route choice either; with\n"
@@ -333,9 +337,10 @@ void register_routing(py::module_& m) {
                      "live-share score, then the smallest count); no promise of whole-demand lossless delivery.\n"
                      "Traffic splits equally over the heads and over each head's tunnels; planned bandwidth is never\n"
                      "held.")
-      .def(py::init([](SourceAllocation source_allocation, const py::object& support, const py::object& tunnels,
+      .def(py::init([](SourceAllocation source_allocation, const py::object& source_weights, const py::object& support, const py::object& tunnels,
                        StrictBool prefer_headroom) {
              CentralizedTE gl(source_allocation);
+             gl.source_weights = weights_of(source_weights, "source_weights");
              gl.prefer_headroom = prefer_headroom;
              if (!support.is_none()) {
                if (!py::isinstance<PredecessorDAG>(support)) throw py::type_error("CentralizedTE support must be a PredecessorDAG or None");
@@ -347,16 +352,22 @@ void register_routing(py::module_& m) {
              }
              return gl;
            }),
-           py::kw_only(), py::arg("source_allocation"), py::arg("support") = py::none(),
+           py::kw_only(), py::arg("source_allocation"), py::arg("source_weights") = py::none(), py::arg("support") = py::none(),
            py::arg("tunnel_count") = py::none(), py::arg("prefer_headroom") = StrictBool {false},
-           "CentralizedTE(*, source_allocation, support=None, tunnel_count=None, prefer_headroom=False):\n"
-           "source_allocation is required (EQUAL or OPTIMIZED; None or a missing argument raises TypeError);\n"
+           "CentralizedTE(*, source_allocation, source_weights=None, support=None, tunnel_count=None, prefer_headroom=False):\n"
+           "source_allocation is required (EQUAL, OPTIMIZED or WEIGHTED; None or a missing argument raises TypeError).\n"
+           "WEIGHTED requires source_weights and no tunnel_count: one integer per graph node in [0, 2^62),\n"
+           "copied once and exposed as an immutable tuple. Other source allocations refuse source_weights.\n"
            "support a PredecessorDAG of the policy's graph (checked when a policy is built with it: `support\n"
            "belongs to another graph`) or None for every eligible edge; tunnel_count a TunnelCount (T2;\n"
            "the count in [1, 10000] is checked when a policy is built with it) or None; prefer_headroom (T2\n"
            "only; True without tunnel_count raises `prefer_headroom requires tunnel_count` when a policy is\n"
            "built with it): the headroom penalty as T2's objective after route cost")
-      .def_property_readonly("source_allocation", field_object(&CentralizedTE::source_allocation), "the SourceAllocation: EQUAL or OPTIMIZED")
+      .def_property_readonly("source_allocation", field_object(&CentralizedTE::source_allocation), "the SourceAllocation: EQUAL, OPTIMIZED or WEIGHTED")
+      .def_property_readonly("source_weights", [](const CentralizedTE& gl) -> py::object {
+        if (!gl.source_weights) return py::none();
+        return amounts_tuple(*gl.source_weights);
+      }, "declared node-indexed source weights as an immutable tuple, or None")
       .def_property_readonly(
           "support",
           [](const CentralizedTE& gl) {
@@ -373,6 +384,7 @@ void register_routing(py::module_& m) {
         std::string out;
         const auto add = [&](const std::string& part) { out += (out.empty() ? "" : ", ") + part; };
         add("source_allocation=" + std::string(source_allocation_repr(gl.source_allocation)));
+        if (gl.source_weights) add("source_weights=...");
         if (gl.support) add("support=...");
         if (gl.tunnel_count.has_value()) {
           add("tunnel_count=TunnelCount(" + std::to_string(gl.tunnel_count->per_head) + (gl.tunnel_count->up_to ? ", up_to=True)" : ")"));

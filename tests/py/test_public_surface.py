@@ -141,7 +141,7 @@ def test_enum_declaration_order():
             "HIGHER_HEADROOM",
         ],
         ngc.RouteAllocation: ["EQUAL", "WEIGHTED", "OPTIMIZED"],
-        ngc.SourceAllocation: ["EQUAL", "OPTIMIZED"],
+        ngc.SourceAllocation: ["EQUAL", "OPTIMIZED", "WEIGHTED"],
         ngc.WeightBasis: ["CAPACITY", "EXPLICIT", "RESIDUAL_SNAPSHOT"],
         ngc.Admission: ["LOSSLESS", "LOSSY"],
         ngc.Direction: ["FORWARD", "REVERSE"],

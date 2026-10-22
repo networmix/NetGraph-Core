@@ -92,6 +92,10 @@ def values():
         "ShortestPaths": wcmp,
         "DistributedTE": dte,
         "CentralizedTE": t2,
+        "CentralizedTEWeighted": ngc.CentralizedTE(
+            source_allocation=ngc.SourceAllocation.WEIGHTED,
+            source_weights=[1001, 1003, 0, 0],
+        ),
         "Pinned": ngc.Pinned(t1_result.program, black_holes=mask),
         "TunnelCount": ngc.TunnelCount(2, up_to=True),
         "AbsoluteCost": ngc.AbsoluteCost(3),

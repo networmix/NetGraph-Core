@@ -136,12 +136,12 @@ struct PolicyAccess {
 // The configuration checks of FlowPolicy, shared with the evaluators' argument checks, in
 // FlowPolicyConfig's order (flow_policy.hpp): the enumeration values, the model matrix with a
 // supplied ShortestPathCache last (`cache` says whether one is supplied), the tunnel models'
-// parameters and edge_weights' length and entries against `num_edges`. With `num_sources` (the
+// parameters, edge_weights against num_edges and source_weights against num_nodes. With num_sources (the
 // normalized input sources) the two source-count rules run at their places in the matrix (T2's
 // several-sources rule first, the pooled single-path rule after the ineffective tie rule);
 // evaluate_pairs checks them per pair with check_source_count. Then, with the roster size, the
 // tunnel limit (check_tunnel_limit).
-void check_config(const FlowPolicyConfig& config, bool cache, std::int32_t num_edges, std::optional<std::size_t> num_sources);
+void check_config(const FlowPolicyConfig& config, bool cache, std::int32_t num_nodes, std::int32_t num_edges, std::optional<std::size_t> num_sources);
 void check_source_count(const FlowPolicyConfig& config, std::size_t num_sources);
 // The policy's snapshot: ShortestPaths' absent source_allocation and an absent weight_basis of
 // Weighted resolved.
