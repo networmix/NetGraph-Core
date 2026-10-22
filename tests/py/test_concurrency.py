@@ -796,11 +796,13 @@ def test_failure_does_not_strand_waiters():
 for operation in (lambda: p.place(3), lambda: p.replace(3), lambda: p.forward(3),
                   lambda: ngc.apply_actions(ledger, [ngc.Replace(p, 3)])):
     p.replace(1)
-    before = (ledger.carried().tolist(), p.program, [r.flow_id for r in p.records()])
+    before = (ledger.carried().tolist(), p.place(0), [r.flow_id for r in p.records()])
     failure = Probe(fail='before_publication')
     with pytest.raises(RuntimeError, match='injected native failure'):
         failure.run(operation)
-    assert ledger.carried().tolist() == before[0] and p.program is before[1]
+    assert ledger.carried().tolist() == before[0]
+    after = p.place(0)
+    assert (after.requested, after.admitted, after.delivered) == (before[1].requested, before[1].admitted, before[1].delivered)
     assert [r.flow_id for r in p.records()] == before[2]
     assert p.replace(2).delivered == 2
 """)

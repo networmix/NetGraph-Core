@@ -684,6 +684,18 @@ PreparedShortestPaths prepare_shortest_path_program(PolicyCallContext& c) {
   const RouteAllocation allocation = std::get<ShortestPaths>(pe.config.routing).allocation;
   PreparedShortestPaths out;
   out.flows.resize(k);
+  if (pe.kept_program) {
+    // Static split programs own each source's unpruned route and cost as well as
+    // the plan. Only fresh descriptors are needed; no retired record id is kept.
+    const auto& entries = ProgramAccess::data(*pe.kept_program).entries;
+    for (std::size_t i = 0; i < k; ++i) {
+      out.flows[i].source = pe.reachable_sources[i];
+      out.flows[i].route = entries[i].route;
+      out.flows[i].min_route_cost = entries[i].min_route_cost;
+    }
+    out.program = pe.kept_program;
+    return out;
+  }
   std::vector<std::vector<EdgeId>> routes(k);
   std::shared_ptr<const PreparedRoute> single;  // one source's plan from its one-pass creation
   for (std::size_t i = 0; i < k; ++i) {
@@ -2048,6 +2060,11 @@ std::unique_ptr<PolicyEngine> detail::PolicyAccess::prepare(FlowLedger& ledger, 
   auto pe = std::make_unique<PolicyEngine>(ledger, std::move(config));
   pe->graph = LedgerAccess::graph(ledger);
   prepare_arguments(*pe, *pe->graph, sources, destinations, eligibility, cache, roster, search);
+  if (const auto* sp = std::get_if<ShortestPaths>(&pe->config.routing)) {
+    pe->static_preparation = sp->allocation != RouteAllocation::Optimized &&
+        (sp->tie_break == RouteTieBreak::FewerHops || sp->tie_break == RouteTieBreak::HigherCapacity) &&
+        sp->weight_basis != WeightBasis::ResidualSnapshot;
+  }
   return pe;
 }
 
@@ -2261,6 +2278,14 @@ PendingPolicyUpdate compute(const PolicyEngine& pe, const PolicyCall& rq) {
   return s;
 }
 
+// Only publication acquires the retained owner. The program and its control block
+// already exist; these moves/owner copies cannot allocate or fail. evaluate never
+// reaches this step. Empty-roster programs keep their existing separate path.
+void publish_epoch(PolicyEngine& pe, PolicyEpoch&& epoch) noexcept {
+  if (pe.static_preparation && !pe.kept_program && !pe.reachable_sources.empty()) pe.kept_program = epoch.program;
+  pe.epoch = std::move(epoch);
+}
+
 // The publication: the ledger's one atomic exchange (a place commits every live record and the new
 // ones; a full-offer call retires the live ones and creates the new ones), then the epoch.
 void publish(PolicyEngine& pe, PendingPolicyUpdate& s, bool full) {
@@ -2269,7 +2294,7 @@ void publish(PolicyEngine& pe, PendingPolicyUpdate& s, bool full) {
   publication_event(ConcurrentStage::AfterLedgerExchange, &pe.ledger);
   // Committed: the epoch state follows (nothing below throws).
   for (std::size_t n = 0; n < s.fresh.size(); ++n) s.next_epoch.record_groups[s.fresh[n].first][s.fresh[n].second].record_counter = ids[n].second;
-  pe.epoch = std::move(s.next_epoch);
+  publish_epoch(pe, std::move(s.next_epoch));
 }
 
 // A publishing call: compute and finish every fallible result/trace step before
@@ -2365,7 +2390,7 @@ void publish_list(FlowLedger& ledger, std::span<ListAction> list, std::span<Pend
   for (std::size_t k = 0; k < which.size(); ++k) {
     PendingPolicyUpdate& s = pending[which[k]];
     for (std::size_t n = 0; n < s.fresh.size(); ++n) s.next_epoch.record_groups[s.fresh[n].first][s.fresh[n].second].record_counter = created[k][n].second;
-    list[which[k]].engine->epoch = std::move(s.next_epoch);
+    publish_epoch(*list[which[k]].engine, std::move(s.next_epoch));
   }
 }
 

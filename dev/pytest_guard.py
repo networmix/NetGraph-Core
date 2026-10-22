@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # replay of the fixtures produced by the reference under tests/reference/policy/ (the
 # parametrizations of test_fixture) skips as well.
 EXPECTED_OFF_SKIPS = [
+    "tests/py/test_epoch_static.py::test_reused_prepare_trace_is_non_null_and_equal_to_fresh[False]",
+    "tests/py/test_epoch_static.py::test_reused_prepare_trace_is_non_null_and_equal_to_fresh[True]",
     "tests/py/test_integer_array_allocation.py::test_integer_array_readers_propagate_allocation_failure_in_separate_processes",
     "tests/py/test_apportionment.py::test_apportionment_entries",
     (

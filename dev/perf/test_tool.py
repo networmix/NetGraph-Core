@@ -3034,10 +3034,60 @@ int test_times() {
   std::printf("IterationTimes equals the sorted list in %d cases\n", cases);
   return 0;
 }
+
+// Check every probe's complete delivery vector, not just the final bracket digest.
+int test_msd_epochs() {
+  auto network = abaapi::build(gen_clos(32, 16, 22));
+  auto el = abaapi::eligibility(network, {}, {});
+  std::mt19937 rng(23);
+  std::vector<std::pair<int, int>> demands;
+  std::vector<double> base;
+  while (demands.size() < 64) {
+    int s = int(rng() % 32), t = int(rng() % 32);
+    if (s != t) { demands.push_back({s, t}); base.push_back(double(1 + rng() % 5)); }
+  }
+  abaapi::ShortestPathsSeries fresh(network, el);
+  abaapi::ShortestPathsEpochSeries epochs(network, el, demands);
+  const auto uid = epochs.ledger.uid();
+  std::int64_t last_id = -1;
+  int probes = 0;
+  auto feasible = [&](double alpha) {
+    ++probes;
+    std::vector<double> offers(base.size());
+    for (std::size_t i = 0; i < base.size(); ++i) offers[i] = base[i] * alpha;
+    const auto expected = fresh.place_all(demands, offers);
+    const auto actual = epochs.place_all(offers);
+    if (actual != expected) throw std::runtime_error("MSD epoch probe differs from fresh ledger");
+    const auto records = epochs.ledger.records();
+    if (records.size() != 64 || epochs.ledger.uid() != uid || records.front().flow_id.second <= last_id)
+      throw std::runtime_error("MSD epochs did not retain the ledger and retire all previous records");
+    last_id = records.back().flow_id.second;
+    bool fits = true;
+    for (std::size_t i = 0; i < base.size(); ++i)
+      if (offers[i] - actual[i] > abaapi::grid_resolution()) fits = false;
+    return fits;
+  };
+  double lo = 0, hi = 0, alpha = 1;
+  if (feasible(alpha)) { lo = alpha; for (int k = 0; k < 32; ++k) { alpha *= 2; if (!feasible(alpha)) { hi = alpha; break; } lo = alpha; } }
+  else { hi = alpha; for (int k = 0; k < 32; ++k) { alpha /= 2; if (feasible(alpha)) { lo = alpha; break; } hi = alpha; } }
+  for (int k = 0; k < 32 && hi - lo > 0.01; ++k) { double mid = (lo + hi) / 2; (feasible(mid) ? lo : hi) = mid; }
+  for (const auto& policy : epochs.policies) {
+    policy->remove();
+    if (policy->program() || !policy->records().empty()) throw std::runtime_error("MSD remove left a visible epoch");
+  }
+  const auto carried = epochs.ledger.carried(), reserved = epochs.ledger.reserved();
+  if (!epochs.ledger.records().empty() ||
+      std::any_of(carried.begin(), carried.end(), [](auto n) { return n != 0; }) ||
+      std::any_of(reserved.begin(), reserved.end(), [](auto n) { return n != 0; }))
+    throw std::runtime_error("MSD remove did not restore the ledger");
+  std::printf("MSD epochs: 64 demands, %d probes, lo %.8f; every delivery vector equals fresh\n", probes, lo);
+  return 0;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
   if (argc == 2 && std::string(argv[1]) == "test-times") return test_times();
+  if (argc == 2 && std::string(argv[1]) == "test-msd-epochs") return test_msd_epochs();
   auto r = rows();
   r.push_back({"test.constant", "test", "every iteration the same digest", [] { return constant(); }});
   r.push_back({"test.fast", "test", "every iteration the same digest, at once", [] {
@@ -3133,7 +3183,7 @@ class Harness(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = aba.row_list(proc.stdout.encode(), "aba-list")
         real = {k: v for k, v in rows.items() if not k.startswith("test.")}
-        self.assertEqual(len(real), 94)
+        self.assertEqual(len(real), 95)
         sums = sha256sums(HERE / "queries")
         lists = {}
         for name in sums:
@@ -3167,7 +3217,7 @@ class Harness(unittest.TestCase):
         real = [row for row in listed if not row.startswith("test.")]
         with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 1) as pool:
             procs = list(pool.map(lambda row: self.harness("aba-run", row, "1"), real))
-        self.assertEqual(len(procs), 94)
+        self.assertEqual(len(procs), 95)
         for row, proc in zip(real, procs, strict=True):
             self.assertEqual(proc.returncode, 0, (row, proc.stderr))
             self.assertEqual(
@@ -3192,6 +3242,17 @@ class Harness(unittest.TestCase):
         self.assertEqual(
             digest("batch.simultaneous.clos"), digest("batch.ordered.clos")
         )
+
+    def test_msd_epoch_row_matches_fresh_probes(self):
+        proc = self.harness("test-msd-epochs")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("every delivery vector equals fresh", proc.stdout)
+        results = []
+        for row in ("msd.loop", "msd.loop.epochs"):
+            proc = self.harness("aba-run", row, "2")
+            self.assertEqual(proc.returncode, 0, (row, proc.stderr))
+            results.append(aba.parse_block(proc.stdout.encode(), row, row)["digest"])
+        self.assertEqual(*results)
 
     def test_concurrency_rows_have_fixed_work_and_equal_serial_results(self):
         expected = {

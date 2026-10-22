@@ -110,6 +110,7 @@ struct ProgramSnapshot {
   std::vector<std::vector<EdgeId>> members;
   std::vector<std::vector<Amount>> weights;
   std::vector<std::vector<NodeId>> roots;
+  std::vector<std::int64_t> structure;
   bool operator==(const ProgramSnapshot&) const = default;
 };
 
@@ -121,10 +122,44 @@ inline ProgramSnapshot program_snapshot(const ForwardingProgram* p) {
   s.destinations.assign(p->destinations().begin(), p->destinations().end());
   s.tunnels.assign(p->tunnels().begin(), p->tunnels().end());
   s.source_weights = p->source_weights();
-  for (const auto& c : detail::ProgramAccess::data(*p).split_contexts) {
+  const auto& data = detail::ProgramAccess::data(*p);
+  auto scalar = [&](auto value) { s.structure.push_back(static_cast<std::int64_t>(value)); };
+  auto array = [&](const auto& values) {
+    scalar(values.size());
+    for (auto value : values) scalar(value);
+  };
+  scalar(data.pools_source_inflows);
+  scalar(data.uses_topology_basis);
+  array(data.block());
+  array(data.source_weight_values);
+  scalar(data.entries.size());
+  for (const auto& e : data.entries) {
+    for (auto value : {e.entry_id, e.head, e.roster_index, e.local_index, e.tunnel_position, e.split_context_position}) scalar(value);
+    scalar(e.weight);
+    scalar(e.min_route_cost);
+    scalar(e.route != nullptr);
+    if (e.route) {
+      array(e.route->parent_offsets());
+      array(e.route->parents());
+      array(e.route->via_edges());
+    }
+  }
+  for (const auto& c : data.split_contexts) {
     s.members.push_back(c.prepared_route->forwarding_edges);
     s.weights.push_back(c.prepared_route->weights);
     s.roots.emplace_back(c.prepared_route->sources.begin(), c.prepared_route->sources.end());
+    const auto& plan = *c.prepared_route;
+    scalar(plan.allocation);
+    array(plan.support_edges);
+    array(plan.sources);
+    array(plan.source_positions);
+    array(plan.destinations);
+    array(plan.topological_order);
+    array(plan.outgoing_begin);
+    array(plan.outgoing_end);
+    array(plan.edge_destination_positions);
+    array(plan.is_destination);
+    array(c.source_entry_positions);
   }
   return s;
 }
@@ -188,6 +223,8 @@ struct Epoch {
   std::vector<Counter128> source_drops_by_source;
   std::vector<TunnelFlow> by_tunnel;
   std::vector<std::vector<FlowSnapshot>> record_groups;
+  ProgramSnapshot kept_program;
+  const ForwardingProgram* kept_id {nullptr};
 };
 
 inline Epoch epoch(const FlowPolicy& p) {
@@ -195,7 +232,7 @@ inline Epoch epoch(const FlowPolicy& p) {
   const auto& ep = pe.epoch;
   Epoch e {ep.requested, ep.offered, ep.infinite, ep.prepared, p.delivered(), ep.marginal_cost_curve, ep.program.get(),
            program_snapshot(ep.program.get()), ep.plan ? std::optional<TunnelPlan>(*ep.plan) : std::nullopt, ep.support,
-           ep.source_drops_by_source, ep.by_tunnel, {}};
+           ep.source_drops_by_source, ep.by_tunnel, {}, program_snapshot(pe.kept_program.get()), pe.kept_program.get()};
   for (const auto& c : ep.record_groups) {
     auto& out = e.record_groups.emplace_back();
     for (const auto& f : c) out.push_back({f.record_counter, f.min_route_cost, f.route ? ascending_edges(*f.route) : std::vector<EdgeId> {}, f.entry_id});
@@ -216,6 +253,7 @@ inline void expect_same(const Epoch& a, const Epoch& b, const std::string& where
   EXPECT_EQ(a.source_drops_by_source, b.source_drops_by_source) << where;
   EXPECT_TRUE(a.by_tunnel == b.by_tunnel) << where;
   EXPECT_TRUE(a.record_groups == b.record_groups) << where;
+  EXPECT_TRUE(a.kept_program == b.kept_program) << where;
 }
 
 // The same state on the same policy: also the same program object (a failed call installs none).

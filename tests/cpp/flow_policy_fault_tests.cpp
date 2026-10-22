@@ -1978,3 +1978,65 @@ TEST(PolicyFaults, ParallelRosterPreparationFailsCleanly) {
     }
   }
 }
+
+TEST(PolicyFaults, StaticPreparationFirstAndRetainedEpochsAreAtomic) {
+  const auto g = graph();
+  const OutputOptions all {true, true, true, true, true};
+  for (bool pooled : {false, true}) for (bool weighted : {false, true}) for (int stage = 0; stage < 3; ++stage) {
+    const auto setup = [&](FlowLedger& ledger) {
+      ShortestPaths sp;
+      if (weighted) { sp.allocation = RouteAllocation::Weighted; sp.weight_basis = WeightBasis::Explicit;
+        sp.edge_weights = std::make_shared<const std::vector<Amount>>(static_cast<std::size_t>(g->num_edges()), 1); }
+      auto p = std::make_shared<FlowPolicy>(ledger, pooled ? std::vector<NodeId>{0, 1} : std::vector<NodeId>{0},
+          std::vector<NodeId>{5, 6}, FlowPolicyConfig {sp, Admission::Lossy});
+      if (stage != 0) { (void)p->place(3); if (stage == 1) p->remove(); }
+      return Staged {p, p.get()};
+    };
+    for (int operation = 0; operation < 4; ++operation) {
+      const auto call = [&](FlowPolicy& p) {
+        if (operation == 0) return p.place(7, all);
+        if (operation == 1) return p.replace(7, {}, all);
+        if (operation == 2) return p.evaluate(7, {}, all);
+        const Action action = Replace {p, 7};
+        auto results = apply_actions(detail::PolicyAccess::engine(p).ledger, std::span(&action, 1), BatchMode::Simultaneous, all);
+        return std::move(results.front());
+      };
+      EXPECT_GT(sweep_placement(g, "static first/removed/live epoch", setup, call), 0);
+    }
+  }
+}
+
+TEST(PolicyFaults, StaticPreparationBatchRollbackIncludesEveryPrivateOwner) {
+  const auto g = graph();
+  const OutputOptions all {true, true, true, true, true};
+  for (auto mode : {BatchMode::Ordered, BatchMode::Simultaneous}) for (bool warm : {false, true}) {
+    bool completed = false;
+    long failures = 0;
+    for (long at = 0; at < 1000 && !completed; ++at) {
+      FlowLedger ledger(g);
+      const FlowPolicyConfig cfg {ShortestPaths {}, Admission::Lossy};
+      FlowPolicy a(ledger, std::vector<NodeId>{0}, std::vector<NodeId>{5}, cfg);
+      FlowPolicy b(ledger, std::vector<NodeId>{0, 1}, std::vector<NodeId>{5, 6}, cfg);
+      if (warm) { (void)a.place(2); (void)b.place(2); a.remove(); b.remove(); }
+      const auto before = ledger_state(ledger);
+      const auto a_before = epoch(a), b_before = epoch(b);
+      const std::vector<Action> actions {Replace {a, 7}, Replace {b, 5}};
+      std::vector<PlacementResult> result;
+      if (fails_at(at, [&] { result = apply_actions(ledger, actions, mode, all); })) {
+        ++failures;
+        expect_same(ledger_state(ledger), before, "batch rollback ledger");
+        expect_same(epoch(a), a_before, "batch rollback first owner");
+        expect_same(epoch(b), b_before, "batch rollback second owner");
+        EXPECT_EQ(detail::PolicyAccess::engine(a).kept_program.get(), a_before.kept_id);
+        EXPECT_EQ(detail::PolicyAccess::engine(b).kept_program.get(), b_before.kept_id);
+        result = apply_actions(ledger, actions, mode, all);
+      } else completed = true;
+      ASSERT_EQ(result.size(), 2U);
+      EXPECT_TRUE(detail::PolicyAccess::engine(a).kept_program);
+      EXPECT_TRUE(detail::PolicyAccess::engine(b).kept_program);
+      expect_balanced(ledger, "batch retry");
+      if (::testing::Test::HasFailure()) break;
+    }
+    EXPECT_TRUE(completed); EXPECT_GT(failures, 0);
+  }
+}

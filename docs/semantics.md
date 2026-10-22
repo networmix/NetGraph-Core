@@ -992,9 +992,16 @@ per-entry records at zero.
   route. A roster of one source with `multipath=True` and a static weight basis (not
   `RESIDUAL_SNAPSHOT`) takes a one-pass preparation instead, which selects the route and builds its
   split in the same pass; its plan is the one the pooled builder makes of that route, so the
-  program is the same. The program is never refreshed or recomputed within the epoch. It is the policy's
-  `program`: one split context pooled over the roster, one split route per roster source (entry
-  identifier = roster position, weight 1), equal sources; it lists no tunnel.
+  program is the same. The program is never refreshed or recomputed within the epoch. It is the
+  policy's `program`: one split context pooled over the roster, one split route per roster source
+  (entry identifier = roster position, weight 1), equal sources; it lists no tunnel. With
+  `FEWER_HOPS` or `HIGHER_CAPACITY` and `EQUAL`, `CAPACITY` or `EXPLICIT` weights, a preparation
+  reads nothing that changes while the policy lives, so the policy keeps the program it first
+  published and uses it again at each later epoch's preparation: routes, order, costs and splits
+  equal a fresh preparation. Each policy keeps only its own program, until it is destroyed;
+  nothing is added to the cache or its statistics. `evaluate` uses a kept program but never keeps
+  one. `HIGHER_AVAILABLE_CAPACITY`, `HIGHER_HEADROOM` and `RESIDUAL_SNAPSHOT` prepare afresh at
+  every epoch.
 - **`ShortestPaths` with `OPTIMIZED`** is a controller restricted to shortest paths: it solves like
   `CentralizedTE` (below), but only over the union of the roster sources' routes prepared as
   above, edges of capacity 0 included (so a zero-capacity shortest route is never bypassed).
@@ -1780,8 +1787,10 @@ What the call guarantees:
 `remove()` takes every flow of the policy out of the ledger (allocations reverted, records gone,
 ids retired), clears the installed program and starts a new epoch: the cumulative request, the
 round-robin position of the source split and the finite-or-infinite state are reset. The next
-positive offer prepares again and creates new flows with new ids; ids are never reused. A
-repeated `remove()` does nothing. A policy destroyed without `remove()` leaves its traffic and
+positive offer prepares again (a `ShortestPaths` policy with a static route choice uses its kept,
+equal program; see Routing models) and creates new flows with new ids; ids are never reused.
+Until the next positive `place` or a `replace`, `program` reads empty, also when the policy keeps
+a program. A repeated `remove()` does nothing. A policy destroyed without `remove()` leaves its traffic and
 holds in the ledger as orphans until `FlowLedger.reset()`; nothing is redistributed.
 `replace` and `forward` also start a new epoch (below).
 

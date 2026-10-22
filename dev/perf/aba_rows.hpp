@@ -1103,7 +1103,7 @@ inline std::vector<Row> rows() {
                [=] { return failure_row(true); }});
   r.push_back({"program.replace.costonly", "program",
                "ShortestPaths Equal replace() of 8 source leaves to one leaf, Clos 32x16, under 16 changing loads of "
-               "an outside demand (re-preparation on the released view, the retiring commit)",
+               "an outside demand (static preparation retained across replacements, the released view and retiring commit)",
                [=] {
                  auto g = std::make_shared<Graph>(abaapi::build(gen_clos(32, 16, 25)));
                  std::vector<double> loads;
@@ -1187,6 +1187,40 @@ inline std::vector<Row> rows() {
                      std::vector<double> v(base.size());
                      for (std::size_t i = 0; i < v.size(); ++i) v[i] = base[i] * alpha;
                      auto delivered = series.place_all(dem, v);
+                     for (std::size_t i = 0; i < v.size(); ++i) if (v[i] - delivered[i] > abaapi::grid_resolution()) return false;
+                     return true;
+                   };
+                   // NetGraph MaximumSupportedDemand: start 1, growth 2, resolution 0.01.
+                   double lo = 0, hi = 0, alpha = 1;
+                   if (feasible(alpha)) { lo = alpha; for (int k = 0; k < 32; ++k) { alpha *= 2; if (!feasible(alpha)) { hi = alpha; break; } lo = alpha; } }
+                   else { hi = alpha; for (int k = 0; k < 32; ++k) { alpha /= 2; if (feasible(alpha)) { lo = alpha; break; } hi = alpha; } }
+                   for (int k = 0; k < 32 && hi - lo > 0.01; ++k) { double mid = (lo + hi) / 2; (feasible(mid) ? lo : hi) = mid; }
+                   Digest d;
+                   d.add_d(lo);
+                   d.add_i(probes);
+                   return d.h;
+                 });
+               }});
+  r.push_back({"msd.loop.epochs", "msd",
+               "MSD bracket and bisection over ShortestPaths EB placement, one ledger and 64 policies per series, remove all before each probe, Clos 32x16",
+               [] {
+                 auto g = std::make_shared<Graph>(abaapi::build(gen_clos(32, 16, 22)));
+                 auto el = std::make_shared<Elig>(abaapi::eligibility(*g, {}, {}));
+                 std::mt19937 rng(23);
+                 std::vector<std::pair<int, int>> dem;
+                 std::vector<double> base;
+                 while (dem.size() < 64) {
+                   int s = int(rng() % 32), t = int(rng() % 32);
+                   if (s != t) { dem.push_back({s, t}); base.push_back(double(1 + rng() % 5)); }
+                 }
+                 return Iter([g, el, dem, base] {
+                   abaapi::ShortestPathsEpochSeries series(*g, *el, dem);
+                   int probes = 0;
+                   auto feasible = [&](double alpha) {
+                     ++probes;
+                     std::vector<double> v(base.size());
+                     for (std::size_t i = 0; i < v.size(); ++i) v[i] = base[i] * alpha;
+                     auto delivered = series.place_all(v);
                      for (std::size_t i = 0; i < v.size(); ++i) if (v[i] - delivered[i] > abaapi::grid_resolution()) return false;
                      return true;
                    };
@@ -1310,7 +1344,7 @@ inline std::vector<Row> rows() {
     }});
   for (bool parallel : {false, true}) {
     r.push_back({parallel ? "concurrency.two_ledgers_parallel" : "concurrency.two_ledgers_serial", "concurrency",
-      "Two independent ledgers, 32 evaluate(32) calls each; two thread launches/joins in both modes; layered graph 384 nodes/2816 edges",
+      "Two independent ledgers, 32 evaluate(32) calls each using static preparation installed in setup; two thread launches/joins in both modes; layered graph 384 nodes/2816 edges",
       [parallel] {
         auto fixture = std::make_shared<abaapi::ParallelLedgers>();
         return Iter([fixture, parallel] { return fixture->run(parallel); });

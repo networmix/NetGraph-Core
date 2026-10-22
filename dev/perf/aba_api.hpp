@@ -722,8 +722,8 @@ inline std::uint64_t pinned_failures(const Graph& g, const Program& prog, const 
 }
 
 // A ShortestPaths Equal demand replaced while an outside ShortestPaths demand changes its load: for
-// each load, the outside policy replaces its offer, then the demand replace(offer) re-prepares its
-// program on the new released view and retires its records. One ledger for the row's iteration.
+// each load, the outside policy replaces its offer, then the demand replace(offer) uses its static
+// program on the new released view and retires its records (first preparation included). One ledger for the row's iteration.
 inline std::uint64_t replace_under_load(const Graph& g, const std::vector<int>& srcs, int dst,
                                         const std::vector<int>& outside_srcs, int outside_dst,
                                         const std::vector<double>& loads, double offer) {
@@ -911,6 +911,32 @@ struct ShortestPathsSeries {
   }
 };
 
+// One ledger and one policy per demand for the whole MSD series. Every probe begins
+// by removing every policy, including before the first probe, then places in demand order.
+struct ShortestPathsEpochSeries {
+  nc::ShortestPathCache cache;
+  nc::FlowLedger ledger;
+  std::vector<std::unique_ptr<nc::FlowPolicy>> policies;
+  ShortestPathsEpochSeries(const Graph& graph, const Elig& elig,
+                          const std::vector<std::pair<int, int>>& demands)
+      : cache(graph.ref()), ledger(graph.g) {
+    const auto cfg = config(nc::ShortestPaths {}, Kernel::Equal);
+    policies.reserve(demands.size());
+    for (auto [source, destination] : demands) {
+      const nc::NodeId s[1] = {source};
+      const nc::NodeId t[1] = {destination};
+      policies.push_back(std::make_unique<nc::FlowPolicy>(ledger, s, t, cfg, elig.get(), &cache));
+    }
+  }
+  std::vector<double> place_all(const std::vector<double>& offers) {
+    for (const auto& policy : policies) policy->remove();
+    std::vector<double> delivered(policies.size());
+    for (std::size_t i = 0; i < policies.size(); ++i)
+      delivered[i] = nc::as_float(policies[i]->place(nc::to_units(offers[i], kResolution)).call_delivered, kResolution);
+    return delivered;
+  }
+};
+
 inline double grid_resolution() { return kResolution; }
 
 // ShortestPathCache series: lookups (roots {r}, Reverse, no eligibility) for every root; cold: a fresh
@@ -1003,6 +1029,7 @@ struct ParallelLedgers {
     auto worker = [&](std::size_t i) noexcept {
       try {
         for (int call = 0; call < 32; ++call) {
+          // evaluate reads the static preparation installed during setup, without publishing it.
           const auto r = policies[i]->evaluate(32);
           if (r.delivered != 32 || r.call_delivered != 32 || r.delivery_delta != 0 || r.by_source.size() != 32) {
             throw std::runtime_error("parallel evaluation differs");

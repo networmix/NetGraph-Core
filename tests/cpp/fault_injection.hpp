@@ -104,6 +104,7 @@ inline long sweep_placement(const std::shared_ptr<const Graph>& g, const std::st
       FlowPolicy& p = *staged.policy;
       expect_same(ledger_state(fg), initial, w + " (setup)");
       expect_same(epoch(p), initial_epoch, w + " (setup)");
+      const auto* initial_kept = detail::PolicyAccess::engine(p).kept_program.get();
       PlacementResult got;
       if (!fails_at(at, [&] { got = call(p); })) {
         expect_same(got, want, w + " (no failure)");
@@ -115,6 +116,7 @@ inline long sweep_placement(const std::shared_ptr<const Graph>& g, const std::st
         // Failed: nothing changed, ledger and policy.
         expect_same(ledger_state(fg), initial, w + " (failed call)");
         expect_same(epoch(p), initial_epoch, w + " (failed call)");
+        EXPECT_EQ(detail::PolicyAccess::engine(p).kept_program.get(), initial_kept) << w;
         expect_balanced(fg, w + " (failed call)");
         // A clean retry is the reference call (no poisoned per-thread scratch).
         expect_same(call(p), want, w + " (retry)");

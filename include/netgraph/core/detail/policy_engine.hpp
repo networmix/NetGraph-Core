@@ -102,6 +102,10 @@ struct PolicyEngine {
   bool can_forward {false};
   std::int64_t policy_id {0};
   PolicyEpoch epoch {};
+  // Argument-only classification, fixed at construction. A successful static split
+  // preparation is owned across epochs, separately from the visible installed program.
+  bool static_preparation {false};
+  std::shared_ptr<const ForwardingProgram> kept_program {};
   // CentralizedTE: a capture request for the next solve's final state (the exact sensitivity model's
   // baseline); set and cleared by the evaluator.
   DeletionCapture* capture {nullptr};

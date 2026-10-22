@@ -42,7 +42,9 @@ struct TunnelCount {
 // Each routing mode has only the fields it uses.
 // ShortestPaths: hop-by-hop routing on each roster source's static shortest routes (all shortest
 //   paths, with no directed cycles, edges of capacity 0 included, or the canonical single
-//   path), prepared once per epoch and fixed for it. The sources of the demand are pooled: a
+//   path), fixed for an epoch. With FewerHops or HigherCapacity and static weights the policy
+//   keeps its first program and uses it again at later epochs (values equal a fresh preparation).
+//   The sources of the demand are pooled: a
 //   router shared by several sources adds their traffic and splits it once. Equal and Weighted forward the equal source allocation; Optimized is a controller
 //   restricted to the union of those routes. Its program: one split route per roster source,
 //   pooled into one split context (Equal, Weighted), or the controller's paths (Optimized). Its
@@ -143,7 +145,7 @@ using Routing = std::variant<ShortestPaths, DistributedTE, CentralizedTE, Pinned
 // choose and is rejected. The policy's snapshot (config()) resolves ShortestPaths' absent
 // source_allocation (Optimized for Optimized, else Equal) and an absent weight_basis of Weighted
 // (Capacity). edge_weights (one integer per edge in [0, 2^62), shared by every configuration
-// copied from this one) is given exactly when weight_basis is Explicit. T2's headroom objective is
+// copied from this one) is given exactly when weight_basis is Explicit and must not change while a policy holds it. T2's headroom objective is
 // CentralizedTE's prefer_headroom (true needs tunnels); a tie rule never enables a controller
 // objective. Pooled single-path rule: ShortestPaths with more than one input source (normalized,
 // before any Eligibility) and multipath = false requires tie_break = FewerHops. The tunnel limit
@@ -310,7 +312,10 @@ struct PlacementResult {
 // every policy call and mutable read; config() is immutable and lock-free.
 // place(offer) adds offer to the epoch: ShortestPaths prepares its program at the epoch's first positive call
 // (every roster source's shortest routes on the ledger's residual at that call's entry) and keeps
-// it for the epoch; Equal and Weighted forward the equal source allocation over the pooled routes:
+// it for the epoch. Equal/Weighted with FewerHops or HigherCapacity and static weights retain
+// that immutable preparation across epochs, with fresh-equivalent values. evaluate reads an
+// already retained preparation but never installs one; remove still clears the visible program.
+// Equal and Weighted forward the equal source allocation over the pooled routes:
 // Lossless admits the largest total a in [admitted, admitted + offer] whose no-drop forwarding fits
 // the residual plus the policy's own load (a refused unit is not offered again), Lossy forwards
 // the new round-robin injections on the residual at call entry (earlier drops are not offered

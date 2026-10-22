@@ -36,6 +36,13 @@ API.
 
 ### Changed
 
+- **Static ShortestPaths preparation**: an EQUAL or WEIGHTED `ShortestPaths` policy with
+  `FEWER_HOPS` or `HIGHER_CAPACITY` and static weights keeps its own program across epochs instead
+  of preparing it again. Removal still clears
+  the installed program and retires records; later calls forward on the current residual with
+  fresh record IDs and results equal to fresh preparation. Dynamic scores, residual snapshot
+  weights and OPTIMIZED allocation retain their existing computation. `evaluate` reads an
+  already retained preparation without installing one; ShortestPathCache behavior is unchanged.
 - **Performance tooling**: A/B/A harness builds use 64-byte function alignment on both the
   reference and candidate to reduce timing variation due to code placement. Wheel build flags are unchanged.
 - **Exact sensitivity**: unrestricted optimized `CentralizedTE` with a maximum baseline uses

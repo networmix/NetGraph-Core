@@ -663,3 +663,7 @@ tests/cpp/joint_forwarding_tests.cpp | g | ledger of g. | the local or parameter
 tests/cpp/program_tests.cpp | Tunnels | black holes on rows 2, 6 and 17. Tunnels 0 and 3 | a model's tunnels (ForwardingProgram.tunnels is the current name)
 tests/py/test_apply_actions.py | g | alike). g: the first copy's graph | the local or parameter `g` of this file's code (a shorthand kept as an ordinary local)
 tests/py/test_programs.py | Tunnels | on rows 2, 6 and 17. Tunnels 0 and 3 reach a black hole | a model's tunnels (ForwardingProgram.tunnels is the current name)
+
+docs/semantics.md | weights | `FEWER_HOPS` or `HIGHER_CAPACITY` and `EQUAL`, `CAPACITY` or `EXPLICIT` weights, a preparation | member weight values and immutable preparation
+README.md | weights | `HIGHER_CAPACITY` and static weights keeps its immutable preparation across epochs, with results | immutable member weight values, not a removed API name
+include/netgraph/core/flow_policy.hpp | weights | path), fixed for an epoch. With FewerHops or HigherCapacity and static weights the policy | immutable member weights of a ShortestPaths policy

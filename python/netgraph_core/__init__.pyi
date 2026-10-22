@@ -2119,6 +2119,8 @@ class FlowPolicy:
         Requests add up within an epoch (from construction, the last remove(), replace() or forward());
         after float('inf') any finite request is rejected, 0 included. A request of 0 places nothing and
         reports the current state. ShortestPaths prepares its program at the epoch's first positive request;
+        with FEWER_HOPS or HIGHER_CAPACITY and EQUAL, CAPACITY or EXPLICIT weights the policy uses again the
+        program it prepared before (equal values; evaluate never keeps one, and remove still empties program).
         LOSSLESS admits the largest total in [admitted, admitted + offer] that the program carries with no
         loss (a refused unit is not offered again); LOSSY forwards the new round-robin (or captured-weight)
         injections, each head splitting its increment afresh (earlier drops are not offered again); a
@@ -2162,8 +2164,9 @@ class FlowPolicy:
         Recompute from the policy's own released view and forward the full offer, published atomically ->
         PlacementResult: the old records and holds are retired (their ids never live again), new ones
         created, and a new epoch starts at this offer (delivery may go down: delivery_delta). ShortestPaths
-        prepares its routes again; a controller re-solves; T1 sets its tunnels up again for the design and
-        books their holds; T2 lays its tunnels out again for the design (planned bandwidth, never held);
+        prepares its routes again on that view (a static route choice uses its kept, equal program); a
+        controller re-solves; T1 sets its tunnels up again for the design and books their holds; T2 lays its
+        tunnels out again for the design (planned bandwidth, never held);
         Pinned forwards its program. design_demand (T1 and T2: int units, or float('inf'); None: equal to
         the offer): T1 needs a finite design (`DistributedTE requires a finite design demand`), T2 takes an unlimited
         one (its largest common size); every other model raises `<model> does not accept design_demand`.

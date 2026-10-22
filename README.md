@@ -136,7 +136,7 @@ specified in [docs/semantics.md](docs/semantics.md).
   `ForwardingProgram.from_dag(graph, sources, destinations, dag)` builds one shared hop-by-hop
   program on a DAG whose sources are pooled exactly as `ShortestPaths` pools them.
 - **`place(offer, outputs=None)`** adds `offer` to the policy's request as one all-or-nothing step
-  (`ShortestPaths` forwards over the program it prepares once per epoch; the controllers re-solve
+  (`ShortestPaths` forwards over the program fixed for its epoch; the controllers re-solve
   what they already deliver plus this request; T1 and T2 have no `place`) and returns a
   `PlacementResult`: this call's `call_delivered`, `call_undelivered`, `delivery_delta`,
   `call_edge_drops`, `call_source_drops`, `termination` and flags; the demand's `requested`,
@@ -151,6 +151,12 @@ specified in [docs/semantics.md](docs/semantics.md).
   program (T1 keeps its tunnels and holds, T2 its tunnels and plan); `remove()` reverts the
   policy's flows and holds; `records()`, `record(flow_id)`, `delivered()`, `config` and `program`
   read its state.
+- **Static preparation**: a `ShortestPaths` `EQUAL` or `WEIGHTED` policy with `FEWER_HOPS` or
+  `HIGHER_CAPACITY` and static weights keeps its immutable preparation across epochs, with results
+  equal to fresh preparation. Dynamic route scores, `RESIDUAL_SNAPSHOT` and `OPTIMIZED` still
+  prepare afresh. `remove()` clears the visible program and retires records; the private
+  preparation remains until policy destruction. `evaluate` reads it without installing one.
+  `ShortestPathCache` behavior and statistics are unchanged.
 - **`apply_actions(ledger, actions, *, mode=BatchMode.ORDERED, outputs=None)`**: the actions of
   several policies of one ledger (`Place(policy, offer)`, `Replace(policy, offer, *,
   design_demand=None)`, `Forward(policy, offer, *, black_holes=None)`, immutable values) as one
