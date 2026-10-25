@@ -120,7 +120,7 @@ void register_placement_result(py::module_& m) {
 
   py::class_<TunnelPlan>(m, "TunnelPlan",
                          "The tunnel models' setup summary (read-only): tunnels_per_head (T2 up to: the chosen count),\n"
-                         "design_demand (the design volume D in units), design_by_head ((head, RR(D, H, i)) for every\n"
+                         "design_demand (the design demand D in units), design_by_head ((head, RR(D, H, i)) for every\n"
                          "roster head in ascending NodeId) and total_reserved_bandwidth (T1's strict holds, counted once\n"
                          "per up tunnel: the sum of their requests; 0 for T2). T2 only (None for T1): heads_with_capacity,\n"
                          "insufficient_resolution (live heads exist but no whole unit per tunnel fits, U == 0: the\n"
@@ -128,7 +128,9 @@ void register_placement_result(py::module_& m) {
                          "Fraction), max_bandwidth_per_tunnel (U), planned_bandwidth_per_tunnel (u),\n"
                          "total_planned_bandwidth (K*u), total_tunnel_cost (the route-cost sum, can exceed 2^64),\n"
                          "headroom_penalty (with prefer_headroom only) and max_lossless_offer (the program's lossless\n"
-                         "maximum; a dead head's share blocks it). Exact ints.")
+                         "maximum on the view it was planned on; a dead head's share blocks it). Exact ints. A plan\n"
+                         "describes the computation that installed the tunnels: forward returns it unchanged, its\n"
+                         "bounds not recomputed for the new offer, load or black holes.")
       .def_property_readonly("tunnels_per_head", int_reader(&TunnelPlan::tunnels_per_head), "the tunnels per head (T2 up to: the chosen count)")
       .def_property_readonly(
 
@@ -172,7 +174,8 @@ void register_placement_result(py::module_& m) {
           "T2 with prefer_headroom: the sum over the links' tunnel slots j of floor(2^32 (B - V + j*u) / B)\n"
           "(B: static capacity; V: free capacity); None without prefer_headroom and for T1")
       .def_property_readonly("max_lossless_offer", optional_int_reader(&TunnelPlan::max_lossless_offer),
-                    "T2: F, the program's lossless maximum on the call's view (a dead head's share blocks it)")
+                    "T2: F, the program's lossless maximum on the view it was planned on (a dead head's share blocks\n"
+                    "it); forward keeps the plan unchanged")
       .def("__repr__", [](const TunnelPlan& p) {
         return "TunnelPlan(tunnels_per_head=" + std::to_string(p.tunnels_per_head) + ", total_reserved_bandwidth=" + std::to_string(p.total_reserved_bandwidth) + ")";
       });
@@ -192,9 +195,10 @@ void register_placement_result(py::module_& m) {
       "NodeId), by_tunnel (one TunnelFlow per program tunnel, ascending entry_id; an alternative view, never\n"
       "added to by_source), total_cost (controllers: CentralizedTE and ShortestPaths OPTIMIZED; else None)\n"
       "and marginal_cost_curve (unrestricted CentralizedTE with the optimized source allocation only).\n"
-      "LOSSY: offered = source_drops + sum(edge_drops) + delivered. The rows sum to the totals, except for\n"
-      "LOSSY with an empty roster, where the whole offer is the demand's source drops and every row is\n"
-      "zero. Optional outputs, None unless requested: edge_flows, residual and edge_reservations\n"
+      "LOSSY: offered = source_drops + sum(edge_drops) + delivered. The rows sum to the totals, except, under\n"
+      "LOSSY, for an empty roster and for a forwarding whose remaining captured source weights are all 0\n"
+      "(a controller program that sent nothing, or a mask that left only zero-weight heads): the whole\n"
+      "offer is then the demand's source drops and every row is zero. Optional outputs, None unless requested: edge_flows, residual and edge_reservations\n"
       "(int64[E]), saturated_boundary_edges, min_cut (they describe the same\n"
       "state; evaluate: the evaluated one). Amounts that accumulate are exact ints (they may exceed 64 bits).")
       .def_property_readonly("call_delivered", int_reader(&PlacementResult::call_delivered), "the units placed (delivered) by this call")
@@ -222,7 +226,7 @@ void register_placement_result(py::module_& m) {
                     "absent entry weighs 0)")
       .def_readonly("reservations_changed", &PlacementResult::reservations_changed,
                     "True when a tunnel's requested or reserved amount differs from the installed program's, by\n"
-                    "index (an absent tunnel holds 0): only T1 sets it; forward and Pinned never do")
+                    "entry_id (an absent tunnel holds 0): only T1 sets it; forward and Pinned never do")
       .def_property_readonly(
 
           "program",
@@ -269,7 +273,7 @@ void register_placement_result(py::module_& m) {
       .def_property_readonly(
 
           "by_tunnel", [](const PlacementResult& r) { return tuple_of(r.by_tunnel); },
-          "one TunnelFlow per program tunnel, ascending index (empty without tunnels)")
+          "one TunnelFlow per program tunnel, ascending entry_id (empty without tunnels)")
       .def_property_readonly(
 
           "total_cost", [](const PlacementResult& r) { return counter_or_none(r.total_cost); },
@@ -283,8 +287,11 @@ void register_placement_result(py::module_& m) {
                 r.marginal_cost_curve ? pairs_list<Curve>(*r.marginal_cost_curve).release() : py::none().release());
           },
                     "unrestricted CentralizedTE with the optimized source allocation: the marginal cost curve [(cost, units)] of the policy's\n"
-                    "cumulative flow (a zero call reports it unchanged; None before the epoch's first positive\n"
-                    "call); in ascending cost, delivering `units` more raised the minimum total flow cost by `cost`\n"
+                    "flow as the call's solve computed it (a positive place: the cumulative flow; evaluate and replace,\n"
+                    "a zero offer included: the whole offer); place(0) keeps the stored curve (None before the epoch's\n"
+                    "first solve or forward; after a forward, None for a nonempty roster and [] for an empty one);\n"
+                    "a forward with a nonempty roster solves nothing and reports None; with an empty roster every\n"
+                    "call but place(0) reports []; in ascending cost, delivering `units` more raised the minimum total flow cost by `cost`\n"
                     "per unit (more delivery can reroute earlier flow, so these are not the costs of the final\n"
                     "paths). None for the other models and prescribed (EQUAL or WEIGHTED) sources")
       .def_property_readonly(
@@ -328,8 +335,9 @@ void register_placement_result(py::module_& m) {
                     "reached the maximum flow: the minimum cut closest to the sources, every allowed edge leaving\n"
                     "the nodes the roster sources reach in the residual network (free capacity plus the policy's\n"
                     "own allocation), an edge with nothing free (capacity 0, or held by others) included,\n"
-                    "ascending EdgeId; [] for an empty roster. None otherwise (another model, prescribed EQUAL or WEIGHTED sources, a\n"
-                    "support, a call below the maximum, a zero call, forward)")
+                    "ascending EdgeId; [] for an empty roster, place(0) excepted. None otherwise (another model,\n"
+                    "prescribed EQUAL or WEIGHTED sources, a support, a solve stopped below the maximum, place(0),\n"
+                    "a forward with a nonempty roster)")
       .def("__repr__", [](const PlacementResult& r) {
         return "PlacementResult(call_delivered=" + std::to_string(r.call_delivered) + ", termination=" +
                termination_name(r.termination) + ")";

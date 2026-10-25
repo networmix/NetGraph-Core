@@ -1,4 +1,4 @@
-"""One rule for the names this release removed (the old spellings of CHANGELOG's Removed tables:
+"""One rule for the names this release removed (the old spellings of removed_names.txt's tables:
 the two-column table of public names and the three-column tables of members and C++
 declarations), over every kind of text: the public docstrings (the callable behind a staticmethod
 or classmethod included), the C++ comments and string literals of include/, src/, bindings/,
@@ -7,8 +7,8 @@ the comments, docstrings and string literals of the Python files and stubs (.py,
 python/, tests/ and dev/ (not the frozen reference under tests/reference/ and not the fixture
 replay's key mapping), the comments of the shell scripts, workflows, Makefile, CMake and TOML
 files, and the prose of the Markdown documents (fenced code excluded: the docs tests run it
-against the current API; not CHANGELOG.md, which lists the names, nor the frozen reference's
-README).
+against the current API; not CHANGELOG.md, which names the removed 0.11 API, nor the frozen
+reference's README).
 
 1. A removed name that the API no longer has anywhere and that is not an ordinary word of this
    domain's prose is a stale name wherever it stands as a word.
@@ -18,7 +18,7 @@ README).
    docstring and of the docs that name it.
 3. In a C++ comment, a snake_case name with an underscore, or a name written as a call, that no code
    of the repository declares or uses (C++ and Python identifiers, the API, file names) is a stale
-   name: a renamed internal helper or member (the CHANGELOG lists only the public ones).
+   name: a renamed internal helper or member (removed_names.txt lists only the public ones).
 4. No code identifier (C++ outside comments and string literals, not a std:: name; Python names,
    attributes, definitions, parameters and keywords) of src/, include/, bindings/, tests/ (not the
    frozen fixture replay or reference), python/ and dev/ holds a rule-1 name as itself or as a
@@ -51,6 +51,7 @@ import netgraph_core as ngc
 
 ROOT = Path(__file__).resolve().parents[2]
 REVIEWED_FILE = Path(__file__).with_name("removed_names_reviewed.txt")
+REMOVED_FILE = Path(__file__).with_name("removed_names.txt")
 
 # Planted text for the rule's own controls: {relative path: text read in place of the file's}.
 PLANTED = {}
@@ -125,13 +126,10 @@ def _split(spelling):
 
 
 def removed():
-    """(old owner, leaf, new owners) for every old spelling of CHANGELOG's Removed table (this
-    release's section; files excluded)."""
-    text = read(ROOT / "CHANGELOG.md")
-    start = text.index("## [Unreleased]")
-    section = text[start : text.index("\n## [", start + 1)]
+    """(old owner, leaf, new owners) for every old spelling of removed_names.txt's tables (files
+    excluded)."""
     out = []
-    for row in section[section.index("### Removed") :].splitlines():
+    for row in REMOVED_FILE.read_text().splitlines():
         cells = [c.strip() for c in row.strip().strip("|").split("|")]
         if (
             not row.startswith("|")
@@ -483,8 +481,8 @@ def _paragraphs(lines):
         yield paragraph
 
 
-# The documents read: every Markdown file but CHANGELOG.md (it lists the names) and the frozen
-# reference's README.
+# The documents read: every Markdown file but CHANGELOG.md (it names the removed 0.11 API) and the
+# frozen reference's README.
 def _markdown_files():
     for path in tree_files():
         rel = path.relative_to(ROOT)

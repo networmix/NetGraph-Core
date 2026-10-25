@@ -270,27 +270,23 @@ void register_units(py::module_& m) {
         return int64_array(result);
       },
       py::arg("x"), py::arg("resolution"),
-      "Physical value(s) to units of resolution q. Each input becomes binary64 b: float32 widens\n"
-      "exactly; integers become the nearest double, ties to even. Return floor(b/q + 1/2),\n"
-      "evaluated exactly, never by floating addition of 1/2 or by reading the printed decimal.\n"
-      "Ties are b=(2n+1)*q/2, 0 <= n < 2^52; each gives n+1, never the even neighbour. Scaling\n"
-      "by q=2^k is exact while normal; underflow only affects values rounding to zero. Below\n"
-      "2^52 scaled units the fractional comparison is exact; above it doubles are integral.\n"
+      "Physical value(s) to whole units of the resolution q: each input is read as its binary64 value b,\n"
+      "and b/q is rounded half up to an integer, exactly. Converted back, a result differs from b by at\n"
+      "most q/2 (+q/2 exactly at a tie, which goes up).\n"
+      "float32 widens exactly; integers become the nearest double, ties to even, so an integer above 2^53\n"
+      "can change before the rounding (2^53+1 at q=1 gives 2^53). The result is floor(b/q + 1/2),\n"
+      "evaluated exactly, never by floating addition of 1/2 or by reading the printed decimal. Ties are\n"
+      "b=(2n+1)*q/2, 0 <= n < 2^52; each gives n+1, never the even neighbour.\n"
       "A scalar or 0-d array gives an int; a sequence or 1-d array gives an int64 array. Negative\n"
       "zero gives 0. NaN, infinity, negative values, an integer too large for NumPy and results\n"
       "at or above 2^62 units raise ValueError. A bool, string, wrong dtype/rank or type other\n"
       "than int, float or NumPy numbers raises TypeError; int/float subclasses use stored values.\n"
       "q must be a power of two in [2^-32, 2^32]: a float, NumPy float or integer (another type\n"
       "raises TypeError, an integer beyond the float range ValueError).\n"
-      "Every result u is exactly representable, so as_float(u,q) adds no error: against b,\n"
-      "-q/2 < as_float(u,q)-b <= q/2, with +q/2 exactly at ties. Against an original argument a\n"
-      "changed by promotion, add b-a (2^53+1 at q=1 loses 1 before quantization). N separately\n"
-      "rounded values have total error in (-N*q/2,N*q/2]; no sign is promised. With symmetric\n"
-      "non-tie fractional parts, mean error is (q/2)*P(tie); continuous uniform parts have none.\n"
-      "Round a demand once, then split whole units. 2^53 is no decimal precision threshold: a\n"
-      "decimal is exact only if its reduced denominator is a power of two and it fits binary64.\n"
-      "A decimal and its parsed double agree only in the same half-up cell; 5501195.1796 at\n"
-      "q=2^-21 gives 11536842473289, whereas its decimal reading would give 11536842473288.\n"
+      "N separately rounded values have a total error in (-N*q/2, N*q/2], with no promised sign: round a\n"
+      "demand once, then split whole units. A decimal and the double it parses to give the same units\n"
+      "only when both lie in the same half-up cell: 5501195.1796 at q=2^-21 gives 11536842473289, whereas\n"
+      "its decimal reading would give 11536842473288 (docs/semantics.md, section 1, has the full rule).\n"
       "CostStretch deliberately reads printed decimals for ratios; physical amounts use b.");
 
   m.def(
@@ -323,7 +319,7 @@ void register_units(py::module_& m) {
       },
       py::arg("x"), py::arg("resolution"),
       "Units to physical value(s): the exact product x*q correctly rounded to binary64, nearest\n"
-      "with ties to even. x is any signed, unbounded integer: an int or NumPy integer gives a\n"
+      "with ties to even; exact for abs(x) <= 2^53. x is any signed, unbounded integer: an int or NumPy integer gives a\n"
       "float, an integer vector a float64 array. An int or NumPy integer, a subclass included,\n"
       "is never read as a sequence. An integer position accepts __index__, never\n"
       "a bool; other types raise TypeError. q is a power of two in [2^-32, 2^32] (float, NumPy\n"

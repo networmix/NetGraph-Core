@@ -138,7 +138,8 @@ void register_routing(py::module_& m) {
 
   py::class_<CostStretch>(m, "CostStretch",
                       "Cost ceiling: a path qualifies when cost * d <= n * base, exactly, where n/d is the factor as\n"
-                      "one reduced fraction and base the static shortest cost under the Eligibility.")
+                      "one reduced fraction and base the static shortest cost under the Eligibility (T1: the smallest\n"
+                      "over all roster heads).")
       .def(py::init([](const py::object& factor) { return cost_stretch_of(factor); }), py::arg("factor"),
            "CostStretch(factor): in this order, a bool (or numpy.bool_) raises TypeError; a fractions.Fraction\n"
            "is taken as it is; a Python float or any NumPy floating value is Fraction(str(f)), the shortest\n"
@@ -190,8 +191,9 @@ void register_routing(py::module_& m) {
 
   py::class_<ShortestPaths>(m, "ShortestPaths",
                        "Routing like IGP forwarding (OSPF, IS-IS routers) on each roster source's static shortest-path\n"
-                       "DAG (read from the ShortestPathCache; the route choice is applied at the epoch's first positive call),\n"
-                       "fixed for the epoch; one record per roster source. EQUAL (ECMP, the default) and WEIGHTED\n"
+                       "DAG (read from the ShortestPathCache; the route choice is applied when the program is prepared:\n"
+                       "a positive place of an epoch without one, or any replace or evaluate), fixed for the epoch;\n"
+                       "one record per roster source. EQUAL (ECMP, the default) and WEIGHTED\n"
                        "(WCMP) pool the sources (source allocation EQUAL): where their routes meet, a router splits\n"
                        "their traffic once. OPTIMIZED is a controller on the union of those routes (source allocation\n"
                        "OPTIMIZED by default, or EQUAL). An edge of capacity 0 stays in the DAG: EQUAL still sends it\n"
@@ -253,7 +255,7 @@ void register_routing(py::module_& m) {
       m, "DistributedTE",
       "T1: every head sets up its own strict tunnels by CSPF, no controller (like RSVP-TE head ends).\n"
       "The design volume D is split equally over the roster heads and each head's share equally over its\n"
-      "tunnel_count.per_head tunnels; in round order (round j, heads ascending: tunnel index j*H + i) each tunnel\n"
+      "tunnel_count.per_head tunnels; in round order (round j, heads ascending: entry_id j*H + i) each tunnel\n"
       "keeps the allowed links whose unreserved capacity (the ledger's, minus the holds of every other\n"
       "owner and of this setup's earlier tunnels) is at least max(request, min_unreserved_bandwidth) (a\n"
       "request of 0 with a minimum of 0 has no filter) and takes the shortest path in the tie_break's\n"
@@ -312,31 +314,33 @@ void register_routing(py::module_& m) {
       });
 
   py::class_<CentralizedTE>(m, "CentralizedTE",
-                     "Routing: an ideal central controller that sees the whole network (with `tunnel_count`: T2, below).\n"
-                     "Every positive call re-solves the minimum-cost flow of what the policy already delivers plus this\n"
-                     "call's request (delivered() + offer; what an earlier call could not place is not requested\n"
-                     "again) over the eligible graph, or exactly over `support` (a PredecessorDAG of the policy's graph, trimmed to the\n"
-                     "walks from the sources to the allowed destinations under the Eligibility; every other edge\n"
-                     "carries nothing), on the free capacity plus its own allocation (it may move its own traffic,\n"
-                     "never another's). It takes no route choice. Its source_allocation is required: OPTIMIZED, the\n"
-                     "controller chooses how much enters at each source; EQUAL: every roster source sends its\n"
-                     "round-robin share of the largest total whose shares all fit; WEIGHTED: highest-averages shares\n"
-                     "of declared source_weights, only without tunnels. Zero weights receive nothing; all-zero\n"
-                     "roster weights end NO_ACTIVE_WEIGHT on a positive live call. The program saves declared weights\n"
-                     "for weighted sources, solved supplies for optimized sources. Its program is the solve cut into\n"
-                     "paths per source, each a tunnel weighted by its amount. A positive call on a network beyond the\n"
-                     "flow core's int32 numbering raises ValueError (see FlowPolicy.place).\n"
-                     "T2, CentralizedTE(source_allocation=..., tunnel_count=TunnelCount(N)) (no route choice either; with\n"
-                     "support, every step uses only the support's edges allowed by the policy's mask): a controller (like\n"
-                     "a PCE) lays out, for every live head (one reaching a destination over links with free capacity\n"
-                     ">= 1; the other heads are dead and lose their share), N single-path tunnels with one common\n"
-                     "whole-unit planned bandwidth: first as large as possible (U), then for a finite design no larger\n"
-                     "than needed (u), then the cheapest routes, then with prefer_headroom=True the routes that leave\n"
-                     "the most spare capacity, then one fixed unit-by-unit tie. TunnelCount(L, up_to=True): the smallest\n"
-                     "common count k <= L whose program carries the live heads' design shares (else the largest\n"
-                     "live-share score, then the smallest count); no promise of whole-demand lossless delivery.\n"
-                     "Traffic splits equally over the heads and over each head's tunnels; planned bandwidth is never\n"
-                     "held.")
+                     "Routing: an ideal central controller that sees the whole network, or only a support DAG. It takes\n"
+                     "no route choice, and its source_allocation is required.\n"
+                     "Without tunnel_count: a positive place re-solves the minimum-cost flow of what the policy\n"
+                     "already delivers plus this call's request (delivered() + offer; what an earlier call could not\n"
+                     "place is not requested again); evaluate and replace solve their whole offer afresh, and forward\n"
+                     "sends its offer over the installed paths without a solve. A solve runs over the eligible graph,\n"
+                     "or exactly over `support` (a\n"
+                     "PredecessorDAG of the policy's graph, trimmed to the walks from the sources to the allowed\n"
+                     "destinations under the Eligibility; every other edge carries nothing), on the free capacity\n"
+                     "plus its own allocation: it may move its own traffic, never another's. OPTIMIZED: the controller\n"
+                     "chooses how much enters at each source. EQUAL: every roster source sends its round-robin share\n"
+                     "of the largest total whose shares all fit. WEIGHTED: highest-averages shares of the declared\n"
+                     "source_weights; zero weights receive nothing, and all-zero roster weights end NO_ACTIVE_WEIGHT\n"
+                     "on a positive live call. The program is the solve cut into paths per source, each a tunnel\n"
+                     "weighted by its amount; it keeps the declared weights for weighted sources and the solved\n"
+                     "supplies for optimized ones. A positive call on a network beyond the flow core's int32\n"
+                     "numbering raises ValueError (see FlowPolicy.place).\n"
+                     "With tunnel_count=TunnelCount(N) (T2; with support, every step uses only the support's edges\n"
+                     "allowed by the policy's mask): a controller (like a PCE) lays out, for every live head (one\n"
+                     "reaching a destination over links with free capacity >= 1; the other heads are dead and lose\n"
+                     "their share), N single-path tunnels with one common whole-unit planned bandwidth: first as\n"
+                     "large as possible (U), then for a finite design no larger than needed (u), then the cheapest\n"
+                     "routes, then with prefer_headroom=True the routes that leave the most spare capacity, then one\n"
+                     "fixed unit-by-unit tie. TunnelCount(L, up_to=True): the smallest common count k <= L whose\n"
+                     "program carries the live heads' design shares (else the largest live-share score, then the\n"
+                     "smallest count); no promise of whole-demand lossless delivery. Traffic splits equally over the\n"
+                     "heads and over each head's tunnels; planned bandwidth is never held.")
       .def(py::init([](SourceAllocation source_allocation, const py::object& source_weights, const py::object& support, const py::object& tunnels,
                        StrictBool prefer_headroom) {
              CentralizedTE gl(source_allocation);

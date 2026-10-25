@@ -137,12 +137,13 @@ void register_program(py::module_& m) {
   py::class_<ForwardingProgram, std::shared_ptr<ForwardingProgram>>(
       m, "ForwardingProgram",
       "An immutable value: one demand's routes and integer weights. sources and destinations (the normalized\n"
-      "sets); tunnels: the path entries in ascending index (split routes are not listed); source_weights: the\n"
+      "sets); tunnels: the path entries in ascending entry_id (split routes are not listed); source_weights: the\n"
       "captured weights ((source, weight) for every roster source, ascending): optimized controllers' solved\n"
       "supplies, weighted CentralizedTE's declared weights, or None for equal sources (round robin). Each head splits its share by\n"
       "highest averages over its entries' weights; identical routes are never merged. ShortestPaths and CentralizedTE\n"
       "produce one (FlowPolicy.program, PlacementResult.program), and so do T1 and T2 (their tunnels);\n"
-      "from_routes builds one from given routes; Pinned forwards one. No public constructor.")
+      "from_routes builds one from given routes and from_dag one shared hop-by-hop program on a DAG; Pinned\n"
+      "forwards one. No public constructor.")
       .def_property_readonly(
 
           "sources", [](const ForwardingProgram& p) { return ints_tuple(p.sources()); }, "the source set, ascending")
@@ -157,7 +158,7 @@ void register_program(py::module_& m) {
             const auto t = p.tunnels();
             return tuple_of(std::vector<Tunnel>(t.begin(), t.end()));
           },
-          "the program's tunnels (Tunnel), ascending index")
+          "the program's tunnels (Tunnel), ascending entry_id")
       .def_property_readonly(
 
           "source_weights",

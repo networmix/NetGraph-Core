@@ -1,4 +1,4 @@
-"""The ShortestPathCache's modes through the binding (docs/semantics.md#9-the-dag-cache): the
+"""The ShortestPathCache's modes through the binding (docs/semantics.md#9-the-shortest-path-cache): the
 transition table, ShortestPathCacheMiss as a dedicated exception propagated unchanged by the evaluators,
 the evaluators' sharing rules (a frozen cache shared by every worker, a
 building one rejected with two or more), the reuse of prepopulated Eligibility uids, frozen

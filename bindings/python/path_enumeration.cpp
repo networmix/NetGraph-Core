@@ -78,7 +78,7 @@ void register_paths(py::module_& m) {
       "AbsoluteCost(c) with c >= 0, or CostStretch(n/d) with n/d >= 1 times the static shortest\n"
       "cost under the eligibility, compared exactly, residual ignored; inclusive); residual (int64 units per\n"
       "EdgeId, each in [0, edge_capacity_units]: edges with less than 1 unit are skipped, and the values\n"
-      "feed the availability; it is the only capacity filter, and without it an edge of capacity 0 is\n"
+      "feed the availability; it is the only capacity threshold, and without it an edge of capacity 0 is\n"
       "searched like any other); eligibility (None: everything allowed). A parallel_edges that is not a\n"
       "bool raises TypeError here; the other fields are validated by ksp, in the order its docstring\n"
       "gives.")
@@ -98,7 +98,7 @@ void register_paths(py::module_& m) {
                     "the inclusive cost ceiling as given: None, AbsoluteCost or CostStretch (validated by ksp)")
       .def_readonly("residual", &PyKspOptions::residual,
                     "the residual units per EdgeId as given (validated by ksp); None: no capacity filter;\n"
-                    "priorities read static capacity")
+                    "the tie scores read static capacity")
       .def_property_readonly("eligibility", shared_field(&PyKspOptions::eligibility), "the static Eligibility; None: everything allowed");
 
   m.def(
@@ -140,7 +140,7 @@ void register_paths(py::module_& m) {
       "The k shortest simple source -> destination paths over the eligible edges (only those with residual >= 1 when\n"
       "a residual is given; an edge of capacity 0 is searched like any other) -> [(cost, Path)], each hop\n"
       "a single edge. Order: lowest cost; then, under a HIGHER_* tie_break only, the highest bottleneck\n"
-      "(the smallest tie value along the path); then fewest hops; then the smallest EdgeId\n"
+      "(the smallest edge score along the path); then fewest hops; then the smallest EdgeId\n"
       "sequence. The result is the first k paths of that order\n"
       "within the inclusive cost ceiling. A wrong type raises TypeError; structural, range and combination\n"
       "defects raise ValueError. Validated in this order before any work: source and\n"

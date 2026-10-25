@@ -72,7 +72,7 @@ void register_search(py::module_& m) {
       "parallel_edges both True is rejected by spf; residual (int64 units per EdgeId, each in [0,\n"
       "edge_capacity_units]) makes the search skip edges with fewer than min_residual residual units\n"
       "(an integer >= 1; without a residual it has no effect) and supplies the availability: it is the\n"
-      "only capacity filter, and without it an edge of capacity 0 is searched like any other;\n"
+      "only capacity threshold, and without it an edge of capacity 0 is searched like any other;\n"
       "eligibility (None: everything allowed). A direction outside its enumeration raises ValueError\n"
       "here, a multipath or parallel_edges that is not a bool TypeError; the other fields are validated\n"
       "by spf, in the order its docstring gives.")
@@ -95,7 +95,7 @@ void register_search(py::module_& m) {
       .def_readonly("targets", &PySpfOptions::targets, "the targets as given (validated by spf); None: a full search")
       .def_readonly("residual", &PySpfOptions::residual,
                     "the residual units per EdgeId as given (validated by spf); None: no capacity filter;\n"
-                    "priorities read static capacity")
+                    "the tie scores read static capacity")
       .def_readonly("min_residual", &PySpfOptions::min_residual,
                     "the gating threshold in units as given (validated by spf: an integer >= 1)")
       .def_property_readonly("eligibility", shared_field(&PySpfOptions::eligibility), "the static Eligibility; None: everything allowed");

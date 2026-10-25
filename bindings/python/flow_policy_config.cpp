@@ -69,9 +69,10 @@ void register_policy_config(py::module_& m) {
                             "Optional outputs of a placement (all false by default; absent outputs are None):\n"
                             "edge_flows (the policy's own allocation per edge after the call), residual and\n"
                             "saturated_boundary_edges (the ledger's after the call), edge_reservations (the policy's own\n"
-                            "strict holds per edge after the call; zeros for a model without holds), and min_cut (CentralizedTE with\n"
-                            "the optimized source allocation, when its solve reached the maximum flow; None for every other\n"
-                            "model, source allocation or call).")
+                            "strict holds per edge after the call; zeros for a model without holds), and min_cut (unrestricted\n"
+                            "CentralizedTE with the optimized source allocation, when the call's solve reached the maximum\n"
+                            "flow; [] for an empty roster, place(0) excepted; None for every other model or source allocation,\n"
+                            "for place(0) and for a forward with a nonempty roster).")
       .def(py::init([](StrictBool edge_flows, StrictBool residual, StrictBool saturated_boundary_edges, StrictBool edge_reservations,
                        StrictBool min_cut) {
              OutputOptions o;

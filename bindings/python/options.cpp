@@ -14,8 +14,8 @@ namespace netgraph::core::bindings {
 
 void register_options(py::module_& m) {
   py::enum_<RouteAllocation>(m, "RouteAllocation",
-                           "How traffic spreads over the routes (ShortestPaths's kernel; the interior split of supplied PredecessorDAG\n"
-                           "routes, EQUAL or WEIGHTED).\n"
+                           "How a demand's traffic is split at every router of its routes (ShortestPaths; also the interior split\n"
+                           "of supplied PredecessorDAG routes, EQUAL or WEIGHTED).\n"
                            "OPTIMIZED: the minimum-cost flow core over the routes (a controller restricted to them), re-solved\n"
                            "over the free capacity plus the policy's own allocation (it may move its own earlier placement,\n"
                            "never another's). WEIGHTED (WCMP, weighted-cost multipath): every node splits in proportion to\n"

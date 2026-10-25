@@ -1,5 +1,5 @@
 """PredecessorDAG, Path, RouteTieBreak, the enums and Eligibility.intersect through the bindings
-(docs/semantics.md#3-route-values-preddag-and-path): validation in the documented order on
+(docs/semantics.md#3-route-values-predecessordag-and-path): validation in the documented order on
 unnarrowed values, read-only views, structural equality."""
 
 from __future__ import annotations
