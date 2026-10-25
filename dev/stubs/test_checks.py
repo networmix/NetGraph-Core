@@ -51,7 +51,12 @@ SHIPPED = [
     "pyproject.toml",
     "bindings/python/module.cpp",
     "docs/semantics.md",
+    "docs/formal/theorems/round-robin.md",
     "include/netgraph/core/graph.hpp",
+    "proofs/lean-toolchain",
+    "proofs/lake-manifest.json",
+    "proofs/NetGraphCore.lean",
+    "proofs/Checks/audit.py",
     "python/netgraph_core/__init__.py",
     "python/netgraph_core/__init__.pyi",
     "python/netgraph_core/py.typed",
@@ -69,7 +74,10 @@ LEFT_OUT = [
     ".github/workflows/tests.yml",
     ".superset/config.json",
     "dev/run-checks.sh",
+    "dev/proofs/README.md",
     "tests/reference/policy/README.md",
+    "proofs/.lake/build/lib/lean/NetGraphCore.olean",
+    "proofs/.lake/packages/mathlib/Mathlib.lean",
 ]
 INFO = "netgraph_core-0.12.0.dist-info/"
 WHEEL = [

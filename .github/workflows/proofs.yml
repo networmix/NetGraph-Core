@@ -1,0 +1,187 @@
+name: Lean verification
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      sdist-artifact:
+        description: Existing source artifact to check, rather than building a new archive
+        type: string
+        default: ""
+      wheels-pattern:
+        description: Existing release wheel artifacts corresponding to that archive
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  LEAN_NUM_THREADS: "2"
+  PROOFS_DEPENDENCY_ORIGIN: cache+local
+
+jobs:
+  model:
+    name: Lean proofs
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Official action, pinned to its reviewed source. The package's own entry point
+      # controls build/audit/replay; the action supplies Elan and the pinned mathlib cache.
+      - uses: leanprover/lean-action@24581d74d674803a25a81b10b059c5c0cdd344c6
+        with:
+          lake-package-directory: proofs
+          auto-config: "false"
+          build: "false"
+          test: "false"
+          lint: "false"
+          use-github-cache: "false"
+          use-mathlib-cache: "true"
+      - name: Model proofs, fingerprints and fresh kernel replay
+        run: bash dev/proofs/run.sh replay
+      - name: Real-discovery negative controls
+        run: bash dev/proofs/run.sh test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lean-model-evidence
+          path: |
+            build/proofs/check.json
+            build/proofs/replay.json
+            build/proofs/*.log
+          if-no-files-found: error
+
+  distribution:
+    name: Lean distribution
+    runs-on: ubuntu-22.04
+    env:
+      PIP_CONSTRAINT: ${{ github.workspace }}/.github/ci-constraints.txt
+      PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/.github/ci-constraints.txt
+      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Pinned packaging tools
+        run: |
+          python -m pip install -U -c .github/ci-constraints.txt pip
+          python -m pip install -c .github/ci-constraints.txt build
+      - uses: actions/download-artifact@v4
+        if: inputs.sdist-artifact != ''
+        with:
+          name: ${{ inputs.sdist-artifact }}
+          path: build/proofs/dist
+      - uses: actions/download-artifact@v4
+        if: inputs.wheels-pattern != ''
+        with:
+          pattern: ${{ inputs.wheels-pattern }}
+          merge-multiple: true
+          path: build/proofs/dist
+      - name: Build candidate distributions with excluded local by-products present
+        if: inputs.sdist-artifact == ''
+        run: |
+          mkdir -p proofs/.lake build/proofs
+          echo must-not-ship > proofs/.lake/packaging-plant.keep
+          echo must-not-ship > build/proofs/generated-report.keep
+          python -m build --sdist --wheel --outdir build/proofs/dist \
+            --config-setting=build-dir=build/proofs/wheel-build
+      - name: Check exact members, record archive identity and extract
+        shell: bash
+        run: |
+          sdists=(build/proofs/dist/*.tar.gz)
+          wheels=(build/proofs/dist/*.whl)
+          [[ ${#sdists[@]} -eq 1 && -f ${sdists[0]} ]]
+          [[ -f ${wheels[0]} ]]
+          proof_extract="$RUNNER_TEMP/netgraph-core-proofs-sdist"
+          echo "PROOFS_EXTRACTED=$proof_extract" >> "$GITHUB_ENV"
+          args=(--sdist "${sdists[0]}" --receipt build/proofs/receipt.json --extract "$proof_extract")
+          for wheel in "${wheels[@]}"; do args+=(--wheel "$wheel"); done
+          python -I -B dev/proofs/package.py "${args[@]}"
+          test ! -e "$proof_extract/.git"
+          test ! -e "$proof_extract/dev"
+          test ! -e "$proof_extract/proofs/.lake"
+          ! git -C "$proof_extract" rev-parse --show-toplevel
+      - uses: leanprover/lean-action@24581d74d674803a25a81b10b059c5c0cdd344c6
+        with:
+          lake-package-directory: ${{ env.PROOFS_EXTRACTED }}/proofs
+          auto-config: "false"
+          build: "false"
+          test: "false"
+          lint: "false"
+          use-github-cache: "false"
+          use-mathlib-cache: "true"
+      - name: Check proofs using only the extracted source and pinned dependencies
+        run: |
+          cd "$PROOFS_EXTRACTED/proofs"
+          lake --wfail build
+          lake exe proof-audit --output "$GITHUB_WORKSPACE/build/proofs/sdist-check.json"
+          lake env leanchecker --fresh Checks > "$GITHUB_WORKSPACE/build/proofs/sdist-replay.log" 2>&1
+          python -I -B Checks/audit.py --verify-report "$GITHUB_WORKSPACE/build/proofs/sdist-check.json"
+      - name: Recheck artifact identities after proof execution
+        shell: bash
+        run: |
+          args=(--verify --sdist build/proofs/dist/*.tar.gz --receipt build/proofs/receipt.json)
+          for wheel in build/proofs/dist/*.whl; do args+=(--wheel "$wheel"); done
+          python -I -B dev/proofs/package.py "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proof-distribution-receipt
+          path: |
+            build/proofs/receipt.json
+            build/proofs/sdist-check.json
+            build/proofs/sdist-replay.log
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lean-native-wheels
+          path: build/proofs/dist/*.whl
+          if-no-files-found: error
+
+  bridge:
+    name: Lean bridge
+    needs: [model, distribution]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: lean-model-evidence
+          path: build/proofs
+      - uses: actions/download-artifact@v4
+        with:
+          name: lean-native-wheels
+          path: build/proofs/wheels
+      - name: Install the selected native wheel
+        run: |
+          python -m pip install -U -c .github/ci-constraints.txt pip
+          python -m pip install -c .github/ci-constraints.txt numpy
+          python -m pip install --no-index --no-deps --find-links build/proofs/wheels \
+            --report build/proofs/install.json netgraph-core
+          python - <<'PY'
+          import json, os
+          from urllib.parse import unquote, urlparse
+          data = json.load(open('build/proofs/install.json'))
+          installed = [x for x in data['install'] if x['metadata']['name'] == 'netgraph-core']
+          assert len(installed) == 1
+          url = urlparse(installed[0]['download_info']['url'])
+          assert url.scheme == 'file'
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('PROOFS_WHEEL=' + unquote(url.path) + '\n')
+          PY
+      - name: Exact native comparisons against current model evidence
+        run: PROOFS_NATIVE_PYTHON=$(command -v python) bash dev/proofs/run.sh bridge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lean-bridge-evidence
+          path: build/proofs/bridge.json
+          if-no-files-found: error

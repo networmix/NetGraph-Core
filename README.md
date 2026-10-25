@@ -240,6 +240,7 @@ src/                    # C++ implementation
 include/netgraph/core/  # Public C++ headers
 bindings/python/        # pybind11 bindings
 python/netgraph_core/   # Python package
+proofs/                 # Lean proofs of the round-robin rule (not in the wheel)
 tests/cpp/              # C++ tests (googletest)
 tests/py/               # Python tests (pytest)
 dev/                    # Developer scripts (not shipped): checks, coverage,
@@ -267,6 +268,11 @@ make format        # Apply ruff formatting (make hooks runs every pre-commit fix
 Performance claims are timed with the A/B/A tool (old build, new build, then the old build again
 on one machine, so drift shows), described in [dev/perf/README.md](dev/perf/README.md)
 (`make perf-tool-test` tests the tool itself).
+
+[proofs/](proofs/README.md) holds machine-checked Lean proofs of the round-robin splitting rule,
+explained with worked examples in [docs/formal/theorems/](docs/formal/theorems/round-robin.md).
+They prove properties of the mathematical rule, not of the C++ code, and nothing in the build or
+the installed package needs Lean.
 
 The editable development build (`make install`, `make dev`) carries the private test hooks
 (CMake option `NETGRAPH_CORE_PRIVATE_HOOKS`; a wheel build does not); the test suites skip the

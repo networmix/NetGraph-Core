@@ -1,0 +1,840 @@
+{
+  "audit_sources": {
+    "Checks/Examples.lean": "b0529783d314ea0f8ef553d5e2b2851f52020f325596a99897d8d217fdaad686",
+    "Checks/Main.lean": "e4914f8f1cf7baee4b0b8d587ae8266fa1d78511839a63e7d9fb0442040d29db",
+    "Checks/audit.py": "c9a7dfd4c0e723e67aa1cd1f17a1f379df635e3217e57db7d486fe543611a547"
+  },
+  "modules": [
+    "NetGraphCore.lean",
+    "NetGraphCore/Apportionment/RoundRobin.lean",
+    "Checks.lean",
+    "Checks/Examples.lean",
+    "Checks/Main.lean"
+  ],
+  "pins": {
+    "lake-manifest.json": "46c58fbac02a956ef4ef542d3e40bdd1c38cbec200e441509577966f5cf30e16",
+    "lakefile.toml": "9cef8962297498de2978401676cfa6cb640c6eef403b705ba21c67215d2b5fde",
+    "lean-toolchain": "ca5f1f601d34c49079e38d7e7041eb0f2a9c227fbc1df0f404820069a052330c"
+  },
+  "schema": 1,
+  "theorems": [
+    {
+      "binding": {
+        "axioms": [
+          "Classical.choice",
+          "Quot.sound",
+          "propext"
+        ],
+        "local_closure": {
+          "NetGraphCore.Apportionment.roundRobin": "dc749bd9bd63572c3386bec4e1714076996a3bb4593ad8112c20b9d06c450da9",
+          "NetGraphCore.Apportionment.roundRobin_succ": "6b1823356caa1c0d70c5a12cc072a7aa571d6a597201cec7654ac26163959b35",
+          "NetGraphCore.Apportionment.sequential": "990dc0bc227d2d11a2abebbf679aafc1e4a2acc5ae0cd2c2361d2a342406148a",
+          "NetGraphCore.Apportionment.sequential._f": "0709e65e4e8266af94d460c77935c5f42172c7f72a0336556f5300abf4b28d4c",
+          "NetGraphCore.Apportionment.sequential.match_1": "c4cfd22dd3ba33f63f8ec7346bc1921e58258965e094900c9ad0e30aa33adf6e",
+          "NetGraphCore.Apportionment.sequential_eq_roundRobin": "8c3be82f108d7caec6542ccadad33800dd84346d7170f0479dddb4a0f609ae65",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_1": "780b5c06f72403eeac317af4edfd676d169d0a737301581a5b28cf1eab138373",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_10": "f9f4ce42ccdf9635edd5004033d8bdc5431b9882052f3b8871cc923930014609",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_11": "15fc502818e4568cf53410206b5e3cc9cb2a5715a9d81fd4b918284ca8550212",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_4": "42dbc1929ce8d93917ce04c7f05003442b78d5cfc3bc089c1caba5996e9294df",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_5": "46064f3cf69d1f1a2b3ee9c7eb5bc9c62461ffcc88dd958b8feb727ef98c37cc",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_6": "e7668e8b2eb0b3a4c0628ad25dac5a0b6b13fb658c53f73a4ee2599f6696e578",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_7": "3d848f854d4eabc3c26d316c701aeb16126a01e84eae966accdfc7bbaafe7181",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_8": "6486cea51fc4d24ce105eb56d4e8cd5718c67e9e4f32a1655d8982b6fdec804c",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_9": "0c0e6cf21f118ba73e99205e355ac1d1442f24f11473c0bcad8fd9a8be5ec26f",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._simp_1_3": "ef44910ff7d236788555912069667d77bcc9fe7ce2aedc7a1a6e5ceaa4574796"
+        },
+        "type_sha256": "35ba6fffd546dd366925103ec80b07c0021bf65fe5484136fec0e02b32928336"
+      },
+      "claim": "The unit-by-unit circle equals the direct division formula.",
+      "declaration": "NetGraphCore.Apportionment.sequential_eq_roundRobin",
+      "domain": "Nonnegative total; positive member count; recipient index below the member count.",
+      "examples": [
+        "rr-ten",
+        "rr-zero",
+        "rr-short",
+        "rr-circle"
+      ],
+      "explanation": {
+        "anchor": "NGC-AP-001",
+        "file": "docs/formal/theorems/round-robin.md"
+      },
+      "id": "NGC-AP-001",
+      "implementation": {
+        "bridge": "round-robin",
+        "sources": [
+          {
+            "file": "include/netgraph/core/detail/route_kernels.hpp",
+            "symbols": [
+              "round_robin_share",
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/route_kernels.cpp",
+            "symbols": [
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/forwarding.cpp",
+            "symbols": [
+              "source_offer_increments"
+            ]
+          },
+          {
+            "file": "include/netgraph/core/types.hpp",
+            "symbols": [
+              "kDomainLimit"
+            ]
+          }
+        ],
+        "status": "tested"
+      },
+      "mapped_inputs": {
+        "explanation": {
+          "anchor": "NGC-AP-001",
+          "file": "docs/formal/theorems/round-robin.md",
+          "sha256": "130ee173864d1101076a3f3fcf6637b4886ced0e91c81f8b7ef38cac74b494da"
+        },
+        "implementation": [
+          {
+            "file": "include/netgraph/core/detail/route_kernels.hpp",
+            "sha256": "c44e37d755d80182b074e6a34179e8aa5b172a9c94b4931ce4f69a67be636224",
+            "symbols": [
+              "round_robin_share",
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/route_kernels.cpp",
+            "sha256": "00d5cc2df8dbe2f831dc9b7a01c0bf900ca65f2f08617447d8af8b242ade46db",
+            "symbols": [
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/forwarding.cpp",
+            "sha256": "2428b4dadaec9c3acd0fe3f9b87520ec1a0e46751e5271f999d211a4e514f592",
+            "symbols": [
+              "source_offer_increments"
+            ]
+          },
+          {
+            "file": "include/netgraph/core/types.hpp",
+            "sha256": "9d4cc4c6055dea36e3cb28cd8167ed996c0ae3c081746d4d77c5309de11f7823",
+            "symbols": [
+              "kDomainLimit"
+            ]
+          }
+        ],
+        "semantics": [
+          {
+            "file": "docs/semantics.md",
+            "heading": "### Splitting whole units",
+            "sha256": "c78d73f278b5e3497314d983bb48f057084bc397eed7957d89ce0cdb1ab0f220"
+          },
+          {
+            "file": "docs/semantics.md",
+            "heading": "### Epochs",
+            "sha256": "5fe3f528a9f6150adcefff2a190a3e3ae7523bd622a730791d4079fc2fb0dfd2"
+          }
+        ]
+      },
+      "module": "NetGraphCore.Apportionment.RoundRobin",
+      "semantics": [
+        {
+          "file": "docs/semantics.md",
+          "heading": "### Splitting whole units"
+        },
+        {
+          "file": "docs/semantics.md",
+          "heading": "### Epochs"
+        }
+      ]
+    },
+    {
+      "binding": {
+        "axioms": [
+          "Classical.choice",
+          "Quot.sound",
+          "propext"
+        ],
+        "local_closure": {
+          "NetGraphCore.Apportionment.roundRobin": "dc749bd9bd63572c3386bec4e1714076996a3bb4593ad8112c20b9d06c450da9",
+          "NetGraphCore.Apportionment.roundRobin_mono": "d58697c4e5eddb1f32fbf5d2483003acfe0f7b40a76080cb9bdc7650f964c490",
+          "NetGraphCore.Apportionment.roundRobin_succ": "6b1823356caa1c0d70c5a12cc072a7aa571d6a597201cec7654ac26163959b35",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_mono._proof_1_1": "b5c1ba46ddbc8b13c0542a024a4d591ff90ce51745ee54c67eac7b8456b21d47",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_mono._proof_1_2": "047e4b753a0c5a810c5f70f00fbeb2321d8d965117139e99ebf582b9809146b1",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_1": "780b5c06f72403eeac317af4edfd676d169d0a737301581a5b28cf1eab138373",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_10": "f9f4ce42ccdf9635edd5004033d8bdc5431b9882052f3b8871cc923930014609",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_11": "15fc502818e4568cf53410206b5e3cc9cb2a5715a9d81fd4b918284ca8550212",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_4": "42dbc1929ce8d93917ce04c7f05003442b78d5cfc3bc089c1caba5996e9294df",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_5": "46064f3cf69d1f1a2b3ee9c7eb5bc9c62461ffcc88dd958b8feb727ef98c37cc",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_6": "e7668e8b2eb0b3a4c0628ad25dac5a0b6b13fb658c53f73a4ee2599f6696e578",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_7": "3d848f854d4eabc3c26d316c701aeb16126a01e84eae966accdfc7bbaafe7181",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_8": "6486cea51fc4d24ce105eb56d4e8cd5718c67e9e4f32a1655d8982b6fdec804c",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_9": "0c0e6cf21f118ba73e99205e355ac1d1442f24f11473c0bcad8fd9a8be5ec26f",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._simp_1_3": "ef44910ff7d236788555912069667d77bcc9fe7ce2aedc7a1a6e5ceaa4574796"
+        },
+        "type_sha256": "901305bb6ca743a16179b8a4d6fb27ee98229507f9201f53a799fbb4b7fc427d"
+      },
+      "claim": "Adding units never decreases a recipient share.",
+      "declaration": "NetGraphCore.Apportionment.roundRobin_mono",
+      "domain": "Nonnegative total and addition; positive fixed member count and valid recipient index.",
+      "examples": [
+        "inc-continue",
+        "inc-zero"
+      ],
+      "explanation": {
+        "anchor": "NGC-AP-002",
+        "file": "docs/formal/theorems/round-robin.md"
+      },
+      "id": "NGC-AP-002",
+      "implementation": {
+        "bridge": "round-robin",
+        "sources": [
+          {
+            "file": "include/netgraph/core/detail/route_kernels.hpp",
+            "symbols": [
+              "round_robin_share",
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/route_kernels.cpp",
+            "symbols": [
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/forwarding.cpp",
+            "symbols": [
+              "source_offer_increments"
+            ]
+          },
+          {
+            "file": "include/netgraph/core/types.hpp",
+            "symbols": [
+              "kDomainLimit"
+            ]
+          }
+        ],
+        "status": "tested"
+      },
+      "mapped_inputs": {
+        "explanation": {
+          "anchor": "NGC-AP-002",
+          "file": "docs/formal/theorems/round-robin.md",
+          "sha256": "130ee173864d1101076a3f3fcf6637b4886ced0e91c81f8b7ef38cac74b494da"
+        },
+        "implementation": [
+          {
+            "file": "include/netgraph/core/detail/route_kernels.hpp",
+            "sha256": "c44e37d755d80182b074e6a34179e8aa5b172a9c94b4931ce4f69a67be636224",
+            "symbols": [
+              "round_robin_share",
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/route_kernels.cpp",
+            "sha256": "00d5cc2df8dbe2f831dc9b7a01c0bf900ca65f2f08617447d8af8b242ade46db",
+            "symbols": [
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/forwarding.cpp",
+            "sha256": "2428b4dadaec9c3acd0fe3f9b87520ec1a0e46751e5271f999d211a4e514f592",
+            "symbols": [
+              "source_offer_increments"
+            ]
+          },
+          {
+            "file": "include/netgraph/core/types.hpp",
+            "sha256": "9d4cc4c6055dea36e3cb28cd8167ed996c0ae3c081746d4d77c5309de11f7823",
+            "symbols": [
+              "kDomainLimit"
+            ]
+          }
+        ],
+        "semantics": [
+          {
+            "file": "docs/semantics.md",
+            "heading": "### Splitting whole units",
+            "sha256": "c78d73f278b5e3497314d983bb48f057084bc397eed7957d89ce0cdb1ab0f220"
+          },
+          {
+            "file": "docs/semantics.md",
+            "heading": "### Epochs",
+            "sha256": "5fe3f528a9f6150adcefff2a190a3e3ae7523bd622a730791d4079fc2fb0dfd2"
+          }
+        ]
+      },
+      "module": "NetGraphCore.Apportionment.RoundRobin",
+      "semantics": [
+        {
+          "file": "docs/semantics.md",
+          "heading": "### Splitting whole units"
+        },
+        {
+          "file": "docs/semantics.md",
+          "heading": "### Epochs"
+        }
+      ]
+    },
+    {
+      "binding": {
+        "axioms": [
+          "Classical.choice",
+          "Quot.sound",
+          "propext"
+        ],
+        "local_closure": {
+          "NetGraphCore.Apportionment.roundRobin": "dc749bd9bd63572c3386bec4e1714076996a3bb4593ad8112c20b9d06c450da9",
+          "NetGraphCore.Apportionment.roundRobin_conservation": "a8e2a740aafce826a542120865ed72933d2299bd85de5b3f5f3b047078212408",
+          "NetGraphCore.Apportionment.roundRobin_succ": "6b1823356caa1c0d70c5a12cc072a7aa571d6a597201cec7654ac26163959b35",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_1": "780b5c06f72403eeac317af4edfd676d169d0a737301581a5b28cf1eab138373",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_10": "f9f4ce42ccdf9635edd5004033d8bdc5431b9882052f3b8871cc923930014609",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_11": "15fc502818e4568cf53410206b5e3cc9cb2a5715a9d81fd4b918284ca8550212",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_4": "42dbc1929ce8d93917ce04c7f05003442b78d5cfc3bc089c1caba5996e9294df",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_5": "46064f3cf69d1f1a2b3ee9c7eb5bc9c62461ffcc88dd958b8feb727ef98c37cc",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_6": "e7668e8b2eb0b3a4c0628ad25dac5a0b6b13fb658c53f73a4ee2599f6696e578",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_7": "3d848f854d4eabc3c26d316c701aeb16126a01e84eae966accdfc7bbaafe7181",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_8": "6486cea51fc4d24ce105eb56d4e8cd5718c67e9e4f32a1655d8982b6fdec804c",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_9": "0c0e6cf21f118ba73e99205e355ac1d1442f24f11473c0bcad8fd9a8be5ec26f",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._simp_1_3": "ef44910ff7d236788555912069667d77bcc9fe7ce2aedc7a1a6e5ceaa4574796"
+        },
+        "type_sha256": "3a259d9c5d52afcb3cff79c6c0fca0fcb7f694f758808fd8914f615a4918ea6d"
+      },
+      "claim": "The sum over all valid recipient shares equals the input total.",
+      "declaration": "NetGraphCore.Apportionment.roundRobin_conservation",
+      "domain": "Nonnegative total; positive member count; sum over exactly the valid recipient indices.",
+      "examples": [
+        "rr-ten",
+        "rr-zero",
+        "rr-short"
+      ],
+      "explanation": {
+        "anchor": "NGC-AP-003",
+        "file": "docs/formal/theorems/round-robin.md"
+      },
+      "id": "NGC-AP-003",
+      "implementation": {
+        "bridge": "round-robin",
+        "sources": [
+          {
+            "file": "include/netgraph/core/detail/route_kernels.hpp",
+            "symbols": [
+              "round_robin_share",
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/route_kernels.cpp",
+            "symbols": [
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/forwarding.cpp",
+            "symbols": [
+              "source_offer_increments"
+            ]
+          },
+          {
+            "file": "include/netgraph/core/types.hpp",
+            "symbols": [
+              "kDomainLimit"
+            ]
+          }
+        ],
+        "status": "tested"
+      },
+      "mapped_inputs": {
+        "explanation": {
+          "anchor": "NGC-AP-003",
+          "file": "docs/formal/theorems/round-robin.md",
+          "sha256": "130ee173864d1101076a3f3fcf6637b4886ced0e91c81f8b7ef38cac74b494da"
+        },
+        "implementation": [
+          {
+            "file": "include/netgraph/core/detail/route_kernels.hpp",
+            "sha256": "c44e37d755d80182b074e6a34179e8aa5b172a9c94b4931ce4f69a67be636224",
+            "symbols": [
+              "round_robin_share",
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/route_kernels.cpp",
+            "sha256": "00d5cc2df8dbe2f831dc9b7a01c0bf900ca65f2f08617447d8af8b242ade46db",
+            "symbols": [
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/forwarding.cpp",
+            "sha256": "2428b4dadaec9c3acd0fe3f9b87520ec1a0e46751e5271f999d211a4e514f592",
+            "symbols": [
+              "source_offer_increments"
+            ]
+          },
+          {
+            "file": "include/netgraph/core/types.hpp",
+            "sha256": "9d4cc4c6055dea36e3cb28cd8167ed996c0ae3c081746d4d77c5309de11f7823",
+            "symbols": [
+              "kDomainLimit"
+            ]
+          }
+        ],
+        "semantics": [
+          {
+            "file": "docs/semantics.md",
+            "heading": "### Splitting whole units",
+            "sha256": "c78d73f278b5e3497314d983bb48f057084bc397eed7957d89ce0cdb1ab0f220"
+          },
+          {
+            "file": "docs/semantics.md",
+            "heading": "### Epochs",
+            "sha256": "5fe3f528a9f6150adcefff2a190a3e3ae7523bd622a730791d4079fc2fb0dfd2"
+          }
+        ]
+      },
+      "module": "NetGraphCore.Apportionment.RoundRobin",
+      "semantics": [
+        {
+          "file": "docs/semantics.md",
+          "heading": "### Splitting whole units"
+        },
+        {
+          "file": "docs/semantics.md",
+          "heading": "### Epochs"
+        }
+      ]
+    },
+    {
+      "binding": {
+        "axioms": [
+          "Quot.sound",
+          "propext"
+        ],
+        "local_closure": {
+          "NetGraphCore.Apportionment.increments": "0bb02814920d7c71f82b8e86bf08a47aeb4912a7727749e55ffc247d34bc579e",
+          "NetGraphCore.Apportionment.increments_eq_difference": "95a1e4b309e3af2410f06c5a774a40662eee392a4ceeb3c72956669bd20b6580",
+          "NetGraphCore.Apportionment.roundRobin": "dc749bd9bd63572c3386bec4e1714076996a3bb4593ad8112c20b9d06c450da9",
+          "NetGraphCore.Apportionment.roundRobin_periodic": "18861b48b8af2aeeb4cb5193401def6fd065763861cefb2f3fc2c197b46e7211",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_1": "90afa03d554ba0c06c708ca144a51bf32b86bb1bb49f7d4eb1f73f5ba1707116",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_2": "31412041e5648e0aa5810c9b66617f08f22f15872c9c69b69979e080f7cc2405",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_3": "e215ee348f6ee72394d21c97f32309284105d50c2ad6db8224340938c2d38f65",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_4": "74a111449c6f46e75217a604b37a67064dd543b3965e654be29582b157cac181",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_5": "dea610db31b9b4bd0486ad9cbca1b5178faac44f53f847c0631cdd386855a9d4",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_periodic._proof_1_2": "1803e0e1b3807a6bc7574def5c49d448fe4fbd4fe5e6ee3ebd81c87f3954ea94"
+        },
+        "type_sha256": "a2a41386dd10fc3b9b695cd2f9cb2ce3448d902914af40b6b3942f647fa7f471"
+      },
+      "claim": "The remainder-only increment equals the difference of cumulative shares.",
+      "declaration": "NetGraphCore.Apportionment.increments_eq_difference",
+      "domain": "Nonnegative previous total, addition and recipient index; positive member count. This identity alone does not require a valid recipient index.",
+      "examples": [
+        "inc-continue",
+        "inc-zero",
+        "inc-wrap",
+        "inc-wide",
+        "inc-limit"
+      ],
+      "explanation": {
+        "anchor": "NGC-AP-004",
+        "file": "docs/formal/theorems/round-robin.md"
+      },
+      "id": "NGC-AP-004",
+      "implementation": {
+        "bridge": "round-robin",
+        "sources": [
+          {
+            "file": "include/netgraph/core/detail/route_kernels.hpp",
+            "symbols": [
+              "round_robin_share",
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/route_kernels.cpp",
+            "symbols": [
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/forwarding.cpp",
+            "symbols": [
+              "source_offer_increments"
+            ]
+          },
+          {
+            "file": "include/netgraph/core/types.hpp",
+            "symbols": [
+              "kDomainLimit"
+            ]
+          }
+        ],
+        "status": "tested"
+      },
+      "mapped_inputs": {
+        "explanation": {
+          "anchor": "NGC-AP-004",
+          "file": "docs/formal/theorems/round-robin.md",
+          "sha256": "130ee173864d1101076a3f3fcf6637b4886ced0e91c81f8b7ef38cac74b494da"
+        },
+        "implementation": [
+          {
+            "file": "include/netgraph/core/detail/route_kernels.hpp",
+            "sha256": "c44e37d755d80182b074e6a34179e8aa5b172a9c94b4931ce4f69a67be636224",
+            "symbols": [
+              "round_robin_share",
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/route_kernels.cpp",
+            "sha256": "00d5cc2df8dbe2f831dc9b7a01c0bf900ca65f2f08617447d8af8b242ade46db",
+            "symbols": [
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/forwarding.cpp",
+            "sha256": "2428b4dadaec9c3acd0fe3f9b87520ec1a0e46751e5271f999d211a4e514f592",
+            "symbols": [
+              "source_offer_increments"
+            ]
+          },
+          {
+            "file": "include/netgraph/core/types.hpp",
+            "sha256": "9d4cc4c6055dea36e3cb28cd8167ed996c0ae3c081746d4d77c5309de11f7823",
+            "symbols": [
+              "kDomainLimit"
+            ]
+          }
+        ],
+        "semantics": [
+          {
+            "file": "docs/semantics.md",
+            "heading": "### Splitting whole units",
+            "sha256": "c78d73f278b5e3497314d983bb48f057084bc397eed7957d89ce0cdb1ab0f220"
+          },
+          {
+            "file": "docs/semantics.md",
+            "heading": "### Epochs",
+            "sha256": "5fe3f528a9f6150adcefff2a190a3e3ae7523bd622a730791d4079fc2fb0dfd2"
+          }
+        ]
+      },
+      "module": "NetGraphCore.Apportionment.RoundRobin",
+      "semantics": [
+        {
+          "file": "docs/semantics.md",
+          "heading": "### Splitting whole units"
+        },
+        {
+          "file": "docs/semantics.md",
+          "heading": "### Epochs"
+        }
+      ]
+    },
+    {
+      "binding": {
+        "axioms": [
+          "Classical.choice",
+          "Quot.sound",
+          "propext"
+        ],
+        "local_closure": {
+          "NetGraphCore.Apportionment.increments": "0bb02814920d7c71f82b8e86bf08a47aeb4912a7727749e55ffc247d34bc579e",
+          "NetGraphCore.Apportionment.increments_bounds": "bf939c74db8afaa9569a6912675ffb5862d1ac6a2bd180fa258d89b5be12a513",
+          "NetGraphCore.Apportionment.increments_eq_difference": "95a1e4b309e3af2410f06c5a774a40662eee392a4ceeb3c72956669bd20b6580",
+          "NetGraphCore.Apportionment.roundRobin": "dc749bd9bd63572c3386bec4e1714076996a3bb4593ad8112c20b9d06c450da9",
+          "NetGraphCore.Apportionment.roundRobin_add_le": "bb14437fd83fc0377ab0a21f36d304acb08953ae48d425f0ff10618bec0b7721",
+          "NetGraphCore.Apportionment.roundRobin_mono": "d58697c4e5eddb1f32fbf5d2483003acfe0f7b40a76080cb9bdc7650f964c490",
+          "NetGraphCore.Apportionment.roundRobin_periodic": "18861b48b8af2aeeb4cb5193401def6fd065763861cefb2f3fc2c197b46e7211",
+          "NetGraphCore.Apportionment.roundRobin_succ": "6b1823356caa1c0d70c5a12cc072a7aa571d6a597201cec7654ac26163959b35",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_bounds._proof_1_1": "1e5dfefaa0b8c6103694878f55965e06875f4686a7e1406d3bd26b2573bb3b1f",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_1": "90afa03d554ba0c06c708ca144a51bf32b86bb1bb49f7d4eb1f73f5ba1707116",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_2": "31412041e5648e0aa5810c9b66617f08f22f15872c9c69b69979e080f7cc2405",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_3": "e215ee348f6ee72394d21c97f32309284105d50c2ad6db8224340938c2d38f65",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_4": "74a111449c6f46e75217a604b37a67064dd543b3965e654be29582b157cac181",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_5": "dea610db31b9b4bd0486ad9cbca1b5178faac44f53f847c0631cdd386855a9d4",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_add_le._proof_1_1": "07e35fee1e85c51ecda9e82861dab0d2f1bbf08d4f131551c1e16212a04af3c9",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_add_le._proof_1_2": "5b9e706a14a8a61631e1ad32391c6e9fbe8b676fa6cb942a68b2231063f5fa10",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_add_le._proof_1_3": "42d22dd170abb7fc328a0a3a70950d7f67c199b785287c1b707f2c44dc8f79f4",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_mono._proof_1_1": "b5c1ba46ddbc8b13c0542a024a4d591ff90ce51745ee54c67eac7b8456b21d47",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_mono._proof_1_2": "047e4b753a0c5a810c5f70f00fbeb2321d8d965117139e99ebf582b9809146b1",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_periodic._proof_1_2": "1803e0e1b3807a6bc7574def5c49d448fe4fbd4fe5e6ee3ebd81c87f3954ea94",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_1": "780b5c06f72403eeac317af4edfd676d169d0a737301581a5b28cf1eab138373",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_10": "f9f4ce42ccdf9635edd5004033d8bdc5431b9882052f3b8871cc923930014609",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_11": "15fc502818e4568cf53410206b5e3cc9cb2a5715a9d81fd4b918284ca8550212",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_4": "42dbc1929ce8d93917ce04c7f05003442b78d5cfc3bc089c1caba5996e9294df",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_5": "46064f3cf69d1f1a2b3ee9c7eb5bc9c62461ffcc88dd958b8feb727ef98c37cc",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_6": "e7668e8b2eb0b3a4c0628ad25dac5a0b6b13fb658c53f73a4ee2599f6696e578",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_7": "3d848f854d4eabc3c26d316c701aeb16126a01e84eae966accdfc7bbaafe7181",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_8": "6486cea51fc4d24ce105eb56d4e8cd5718c67e9e4f32a1655d8982b6fdec804c",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_9": "0c0e6cf21f118ba73e99205e355ac1d1442f24f11473c0bcad8fd9a8be5ec26f",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._simp_1_3": "ef44910ff7d236788555912069667d77bcc9fe7ce2aedc7a1a6e5ceaa4574796"
+        },
+        "type_sha256": "e71c526aa3664b8a18209b6e5674c0fee8ea74f1381c92a3a277a653da9e4e91"
+      },
+      "claim": "A valid recipient increment is nonnegative and at most the added offer.",
+      "declaration": "NetGraphCore.Apportionment.increments_bounds",
+      "domain": "Nonnegative previous total and addition; positive fixed member count and valid recipient index.",
+      "examples": [
+        "inc-wrap",
+        "inc-zero"
+      ],
+      "explanation": {
+        "anchor": "NGC-AP-005",
+        "file": "docs/formal/theorems/round-robin.md"
+      },
+      "id": "NGC-AP-005",
+      "implementation": {
+        "bridge": "round-robin",
+        "sources": [
+          {
+            "file": "include/netgraph/core/detail/route_kernels.hpp",
+            "symbols": [
+              "round_robin_share",
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/route_kernels.cpp",
+            "symbols": [
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/forwarding.cpp",
+            "symbols": [
+              "source_offer_increments"
+            ]
+          },
+          {
+            "file": "include/netgraph/core/types.hpp",
+            "symbols": [
+              "kDomainLimit"
+            ]
+          }
+        ],
+        "status": "tested"
+      },
+      "mapped_inputs": {
+        "explanation": {
+          "anchor": "NGC-AP-005",
+          "file": "docs/formal/theorems/round-robin.md",
+          "sha256": "130ee173864d1101076a3f3fcf6637b4886ced0e91c81f8b7ef38cac74b494da"
+        },
+        "implementation": [
+          {
+            "file": "include/netgraph/core/detail/route_kernels.hpp",
+            "sha256": "c44e37d755d80182b074e6a34179e8aa5b172a9c94b4931ce4f69a67be636224",
+            "symbols": [
+              "round_robin_share",
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/route_kernels.cpp",
+            "sha256": "00d5cc2df8dbe2f831dc9b7a01c0bf900ca65f2f08617447d8af8b242ade46db",
+            "symbols": [
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/forwarding.cpp",
+            "sha256": "2428b4dadaec9c3acd0fe3f9b87520ec1a0e46751e5271f999d211a4e514f592",
+            "symbols": [
+              "source_offer_increments"
+            ]
+          },
+          {
+            "file": "include/netgraph/core/types.hpp",
+            "sha256": "9d4cc4c6055dea36e3cb28cd8167ed996c0ae3c081746d4d77c5309de11f7823",
+            "symbols": [
+              "kDomainLimit"
+            ]
+          }
+        ],
+        "semantics": [
+          {
+            "file": "docs/semantics.md",
+            "heading": "### Splitting whole units",
+            "sha256": "c78d73f278b5e3497314d983bb48f057084bc397eed7957d89ce0cdb1ab0f220"
+          },
+          {
+            "file": "docs/semantics.md",
+            "heading": "### Epochs",
+            "sha256": "5fe3f528a9f6150adcefff2a190a3e3ae7523bd622a730791d4079fc2fb0dfd2"
+          }
+        ]
+      },
+      "module": "NetGraphCore.Apportionment.RoundRobin",
+      "semantics": [
+        {
+          "file": "docs/semantics.md",
+          "heading": "### Splitting whole units"
+        },
+        {
+          "file": "docs/semantics.md",
+          "heading": "### Epochs"
+        }
+      ]
+    },
+    {
+      "binding": {
+        "axioms": [
+          "Classical.choice",
+          "Quot.sound",
+          "propext"
+        ],
+        "local_closure": {
+          "NetGraphCore.Apportionment.amountLimit": "2861fe4aa660d49998c59e11ec15641d72a372cdfed34a39de4592feca784577",
+          "NetGraphCore.Apportionment.increments": "0bb02814920d7c71f82b8e86bf08a47aeb4912a7727749e55ffc247d34bc579e",
+          "NetGraphCore.Apportionment.increments_bounds": "bf939c74db8afaa9569a6912675ffb5862d1ac6a2bd180fa258d89b5be12a513",
+          "NetGraphCore.Apportionment.increments_eq_difference": "95a1e4b309e3af2410f06c5a774a40662eee392a4ceeb3c72956669bd20b6580",
+          "NetGraphCore.Apportionment.native_increment_bounds": "c5e069e7693881f890a82290542a6c08ca87fd3e04ba9c332208ebd1e7e0f80f",
+          "NetGraphCore.Apportionment.roundRobin": "dc749bd9bd63572c3386bec4e1714076996a3bb4593ad8112c20b9d06c450da9",
+          "NetGraphCore.Apportionment.roundRobin_add_le": "bb14437fd83fc0377ab0a21f36d304acb08953ae48d425f0ff10618bec0b7721",
+          "NetGraphCore.Apportionment.roundRobin_mono": "d58697c4e5eddb1f32fbf5d2483003acfe0f7b40a76080cb9bdc7650f964c490",
+          "NetGraphCore.Apportionment.roundRobin_periodic": "18861b48b8af2aeeb4cb5193401def6fd065763861cefb2f3fc2c197b46e7211",
+          "NetGraphCore.Apportionment.roundRobin_succ": "6b1823356caa1c0d70c5a12cc072a7aa571d6a597201cec7654ac26163959b35",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_bounds._proof_1_1": "1e5dfefaa0b8c6103694878f55965e06875f4686a7e1406d3bd26b2573bb3b1f",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_1": "90afa03d554ba0c06c708ca144a51bf32b86bb1bb49f7d4eb1f73f5ba1707116",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_2": "31412041e5648e0aa5810c9b66617f08f22f15872c9c69b69979e080f7cc2405",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_3": "e215ee348f6ee72394d21c97f32309284105d50c2ad6db8224340938c2d38f65",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_4": "74a111449c6f46e75217a604b37a67064dd543b3965e654be29582b157cac181",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.increments_eq_difference._proof_1_5": "dea610db31b9b4bd0486ad9cbca1b5178faac44f53f847c0631cdd386855a9d4",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.native_increment_bounds._proof_1_2": "c0f4cda41d1434e6c814e0954851eec47fc1de51da2ff222df9b261ecda3ec9a",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_add_le._proof_1_1": "07e35fee1e85c51ecda9e82861dab0d2f1bbf08d4f131551c1e16212a04af3c9",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_add_le._proof_1_2": "5b9e706a14a8a61631e1ad32391c6e9fbe8b676fa6cb942a68b2231063f5fa10",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_add_le._proof_1_3": "42d22dd170abb7fc328a0a3a70950d7f67c199b785287c1b707f2c44dc8f79f4",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_mono._proof_1_1": "b5c1ba46ddbc8b13c0542a024a4d591ff90ce51745ee54c67eac7b8456b21d47",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_mono._proof_1_2": "047e4b753a0c5a810c5f70f00fbeb2321d8d965117139e99ebf582b9809146b1",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_periodic._proof_1_2": "1803e0e1b3807a6bc7574def5c49d448fe4fbd4fe5e6ee3ebd81c87f3954ea94",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_1": "780b5c06f72403eeac317af4edfd676d169d0a737301581a5b28cf1eab138373",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_10": "f9f4ce42ccdf9635edd5004033d8bdc5431b9882052f3b8871cc923930014609",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_11": "15fc502818e4568cf53410206b5e3cc9cb2a5715a9d81fd4b918284ca8550212",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_4": "42dbc1929ce8d93917ce04c7f05003442b78d5cfc3bc089c1caba5996e9294df",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_5": "46064f3cf69d1f1a2b3ee9c7eb5bc9c62461ffcc88dd958b8feb727ef98c37cc",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_6": "e7668e8b2eb0b3a4c0628ad25dac5a0b6b13fb658c53f73a4ee2599f6696e578",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_7": "3d848f854d4eabc3c26d316c701aeb16126a01e84eae966accdfc7bbaafe7181",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_8": "6486cea51fc4d24ce105eb56d4e8cd5718c67e9e4f32a1655d8982b6fdec804c",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._proof_1_9": "0c0e6cf21f118ba73e99205e355ac1d1442f24f11473c0bcad8fd9a8be5ec26f",
+          "_private.NetGraphCore.Apportionment.RoundRobin.0.NetGraphCore.Apportionment.roundRobin_succ._simp_1_3": "ef44910ff7d236788555912069667d77bcc9fe7ce2aedc7a1a6e5ceaa4574796"
+        },
+        "type_sha256": "6e9ef2e07a5ec58cee900fe9a7b58bc307f54764cdd21bc6cdff40a462687997"
+      },
+      "claim": "The remainder-plus-offer intermediate and final increment fit the stated amount bounds.",
+      "declaration": "NetGraphCore.Apportionment.native_increment_bounds",
+      "domain": "Positive member count below 2^31; valid recipient index; nonnegative offer below 2^62; unrestricted nonnegative previous total. No mod_u128 refinement is asserted.",
+      "examples": [
+        "inc-wrap",
+        "inc-limit"
+      ],
+      "explanation": {
+        "anchor": "NGC-AP-006",
+        "file": "docs/formal/theorems/round-robin.md"
+      },
+      "id": "NGC-AP-006",
+      "implementation": {
+        "bridge": "round-robin",
+        "sources": [
+          {
+            "file": "include/netgraph/core/detail/route_kernels.hpp",
+            "symbols": [
+              "round_robin_share",
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/route_kernels.cpp",
+            "symbols": [
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/forwarding.cpp",
+            "symbols": [
+              "source_offer_increments"
+            ]
+          },
+          {
+            "file": "include/netgraph/core/types.hpp",
+            "symbols": [
+              "kDomainLimit"
+            ]
+          }
+        ],
+        "status": "tested"
+      },
+      "mapped_inputs": {
+        "explanation": {
+          "anchor": "NGC-AP-006",
+          "file": "docs/formal/theorems/round-robin.md",
+          "sha256": "130ee173864d1101076a3f3fcf6637b4886ced0e91c81f8b7ef38cac74b494da"
+        },
+        "implementation": [
+          {
+            "file": "include/netgraph/core/detail/route_kernels.hpp",
+            "sha256": "c44e37d755d80182b074e6a34179e8aa5b172a9c94b4931ce4f69a67be636224",
+            "symbols": [
+              "round_robin_share",
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/route_kernels.cpp",
+            "sha256": "00d5cc2df8dbe2f831dc9b7a01c0bf900ca65f2f08617447d8af8b242ade46db",
+            "symbols": [
+              "round_robin_increments"
+            ]
+          },
+          {
+            "file": "src/forwarding.cpp",
+            "sha256": "2428b4dadaec9c3acd0fe3f9b87520ec1a0e46751e5271f999d211a4e514f592",
+            "symbols": [
+              "source_offer_increments"
+            ]
+          },
+          {
+            "file": "include/netgraph/core/types.hpp",
+            "sha256": "9d4cc4c6055dea36e3cb28cd8167ed996c0ae3c081746d4d77c5309de11f7823",
+            "symbols": [
+              "kDomainLimit"
+            ]
+          }
+        ],
+        "semantics": [
+          {
+            "file": "docs/semantics.md",
+            "heading": "### Splitting whole units",
+            "sha256": "c78d73f278b5e3497314d983bb48f057084bc397eed7957d89ce0cdb1ab0f220"
+          },
+          {
+            "file": "docs/semantics.md",
+            "heading": "### Epochs",
+            "sha256": "5fe3f528a9f6150adcefff2a190a3e3ae7523bd622a730791d4079fc2fb0dfd2"
+          }
+        ]
+      },
+      "module": "NetGraphCore.Apportionment.RoundRobin",
+      "semantics": [
+        {
+          "file": "docs/semantics.md",
+          "heading": "### Splitting whole units"
+        },
+        {
+          "file": "docs/semantics.md",
+          "heading": "### Epochs"
+        }
+      ]
+    }
+  ]
+}

@@ -173,23 +173,50 @@ jobs:
           /tmp/wheel-venv/bin/python -m pip install --no-index --find-links wheelhouse/ netgraph-core
           PYTHON=/tmp/wheel-venv/bin/python bash dev/run-checks.sh pytest off -p no:cacheprovider
 
+  proofs:
+    name: Verify release proofs and distributions
+    needs: [build_sdist, build_wheels]
+    uses: ./.github/workflows/proofs.yml
+    with:
+      sdist-artifact: cibw-sdist
+      wheels-pattern: cibw-wheels-*
+
   publish_pypi:
     name: Publish to PyPI
-    needs: [check_version, build_wheels, build_sdist, test_sdist, test_wheels_centos_stream_9]
+    needs: [check_version, build_wheels, build_sdist, test_sdist, test_wheels_centos_stream_9, proofs]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      contents: read # Checkout the same tag's artifact-identity verifier.
       id-token: write # Required for Trusted Publishing (OIDC)
 
     # Only publish on tag pushes
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
 
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: actions/download-artifact@v4
         with:
           pattern: cibw-*
           path: dist
           merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: proof-distribution-receipt
+          path: proof-evidence
+
+      - name: Publish exactly the artifacts whose proof distribution was checked
+        shell: bash
+        run: |
+          sdists=(dist/*.tar.gz)
+          [[ ${#sdists[@]} -eq 1 && -f ${sdists[0]} ]]
+          args=(--verify --sdist "${sdists[0]}" --receipt proof-evidence/receipt.json)
+          for wheel in dist/*.whl; do args+=(--wheel "$wheel"); done
+          python -I -B dev/proofs/package.py "${args[@]}"
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

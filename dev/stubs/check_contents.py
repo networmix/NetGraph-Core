@@ -4,10 +4,11 @@ Run by ``bash dev/stubs/run.sh check`` with the wheel and the sdist it built fro
 
 * the sdist holds exactly the intended source files, plus the PKG-INFO the backend writes. The
   intended files are the checkout's files that git tracks or would track (new files git does
-  not ignore) under the top-level entries of SDIST_TOP, without tests/reference/. That rule is
-  the one of pyproject.toml's sdist.include and sdist.exclude, repeated here so that a change
-  to that list is caught. A file git ignores (a cache, a compiled module, a local tool's
-  output) or a file outside those entries is refused, and so is an intended file left out;
+  not ignore) under the top-level entries of SDIST_TOP, without tests/reference/ or
+  proofs/.lake/. That rule is the one of pyproject.toml's sdist.include and sdist.exclude,
+  repeated here so that a change to that list is caught. A file git ignores (a cache, a
+  compiled module, a local tool's output) or a file outside those entries is refused, and so is
+  an intended file left out;
 * the wheel holds exactly the package files of the sdist's python/netgraph_core/ under
   netgraph_core/, one compiled extension module, and its .dist-info directory with the
   metadata files and both licence notices (the project's and pybind11's);
@@ -44,12 +45,13 @@ SDIST_TOP = (
     "bindings/",
     "docs/",
     "include/",
+    "proofs/",
     "python/",
     "src/",
     "tests/",
     "third_party/",
 )
-SDIST_LEFT_OUT = ("tests/reference/",)
+SDIST_LEFT_OUT = ("tests/reference/", "proofs/.lake/")
 PACKAGE = "python/netgraph_core/"
 NEED = {
     "wheel": [

@@ -64,6 +64,11 @@ the new behaviour exactly.
 - **Guarantees**: every public call either completes or changes nothing, with two stated limits;
   native work releases the GIL, placements included, and calls on one ledger take effect one at a
   time.
+- **Proofs**: the round-robin rule that splits whole units among members in order, and the
+  increments it gives when an offer grows over several calls, have machine-checked Lean proofs of
+  their stated properties, explained with worked examples in
+  [docs/formal/theorems/round-robin.md](docs/formal/theorems/round-robin.md). Nothing changes at
+  run time, and installing the package does not need Lean.
 - **Typing**: the package ships `py.typed` and a type stub that carries the docstrings.
 - **C++**: the same API in self-contained headers under `netgraph/core/` (`types.hpp`, `graph.hpp`,
   `eligibility.hpp`, `options.hpp`, `route_structures.hpp`, `forwarding_program.hpp`, `search.hpp`,

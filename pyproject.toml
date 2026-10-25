@@ -57,9 +57,10 @@ build-dir = "build/{wheel_tag}"
 cmake.version = ">=3.23"
 # The sdist holds exactly the files listed here ("explicit": nothing outside them is taken, so a
 # local file elsewhere in the checkout never ships): the build's sources, the package, the tests
-# with their data, the documents and the licence notices. Left out: the developer tooling (dev/),
-# the entrypoints that only run it (the Makefile, the CI workflows, the pre-commit
-# configuration), the agent/workspace configuration, and the frozen reference that regenerates
+# with their data, the documents, the Lean proofs and the licence notices. Left out: the
+# developer tooling (dev/), the entrypoints that only run it (the Makefile, the CI workflows, the
+# pre-commit configuration), the agent/workspace configuration, Lake's downloaded dependencies and
+# build products (proofs/.lake/), and the frozen reference that regenerates
 # tests/data/policy_fixtures.json (tests/reference/, see its README; no test reads it). Release
 # CI runs the same commit's tests from its checkout against an installation built from the
 # sdist. This mode does not read .gitignore, so the local by-products it names that appear
@@ -81,6 +82,7 @@ sdist.include = [
     "/bindings/",
     "/docs/",
     "/include/",
+    "/proofs/",
     "/python/",
     "/src/",
     "/tests/",
@@ -88,6 +90,7 @@ sdist.include = [
 ]
 sdist.exclude = [
     "/tests/reference/",
+    "/proofs/.lake/",
     "__pycache__/",
     "*.py[codz]",
     "*.so",
@@ -150,6 +153,7 @@ exclude = [
     "build/**",
     "dist/**",
     "dev/**",
+    "proofs/.lake/**",
     "**/__pycache__/**",
     "**/*.egg-info/**",
 ]

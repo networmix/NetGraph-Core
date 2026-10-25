@@ -86,6 +86,16 @@ A change to observable behaviour (a result, an order, an outcome, an error, a de
 in the same change, and its examples must still print what the document shows:
 `tests/py/test_docs_examples.py` runs them, and README's quick start, in the Python tests.
 
+### Mathematical Proofs
+
+`proofs/` is a Lean project that proves properties of the round-robin rule;
+[proofs/README.md](proofs/README.md) gives the commands and
+[dev/proofs/README.md](dev/proofs/README.md) the rules for adding or changing a theorem. Ordinary
+native and Python development does not need Lean. A theorem is accepted only with a plain
+explanation of its statement and its proof, supporting lemmas included, that an engineer without
+mathematical training can follow: a worked example and a boundary example, and a failing case
+for each assumption that can fail, with every input, step and result explained.
+
 ## Release Process
 
 Releases are automated via GitHub Actions when a new tag is pushed.
@@ -94,7 +104,8 @@ Releases are automated via GitHub Actions when a new tag is pushed.
    dated the day you tag. Mark anything that breaks consumers as **BREAKING**.
 2. Bump `version` in `pyproject.toml` to the same `X.Y.Z`. Release CI compares the tag
    with this value and refuses to publish on a mismatch.
-3. Commit and push.
+3. Commit and push, then wait for the `Lean verification` workflow to pass on the pushed
+   branch: publication waits for the same workflow on the tag, so a failure there blocks it.
 4. Create and push a matching tag:
 
    ```bash

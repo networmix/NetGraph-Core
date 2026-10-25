@@ -33,3 +33,6 @@ dist/
 
 # The performance tool's default output directory
 /dev/perf/results/
+
+# Lean dependencies, compiled declarations and local cache state.
+/proofs/.lake/

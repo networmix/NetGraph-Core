@@ -72,11 +72,13 @@ SKIPPED_DIRS = {
     "_deps",
     "__pycache__",
     ".ruff_cache",
+    ".lake",
 }
 
 
 def tree_files():
-    """Every file of the checkout outside build output, environments and the design tree."""
+    """Every file of the checkout outside build output, environments, Lake's dependencies and
+    builds (proofs/.lake), and the design tree."""
     for top, dirs, files in os.walk(ROOT):
         dirs[:] = sorted(
             d for d in dirs if d not in SKIPPED_DIRS and not d.endswith(".noindex")
