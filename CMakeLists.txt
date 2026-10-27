@@ -213,9 +213,9 @@ if(NETGRAPH_CORE_BUILD_TESTS)
   include(GoogleTest)
   gtest_discover_tests(netgraph_core_tests)
   # The fault sweeps fail every allocation of a call in turn, each with a clean retry, and some
-  # create and join worker threads: under a sanitizer on a small runner one test can exceed the
-  # 120-second default. Every attempt is kept; each fault test gets ten minutes.
-  gtest_discover_tests(netgraph_core_fault_tests PROPERTIES TIMEOUT 600)
+  # create and join worker threads: under ASan on a CI runner one sweep took nearly ten minutes.
+  # Every attempt is kept; each fault test gets thirty minutes.
+  gtest_discover_tests(netgraph_core_fault_tests PROPERTIES TIMEOUT 1800)
 endif()
 
 # Warnings: the project's set on the library, the extension and the test executables (the list
