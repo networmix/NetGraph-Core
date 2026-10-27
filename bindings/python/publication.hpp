@@ -12,6 +12,7 @@
 
 #include <memory>
 #include <optional>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -167,6 +168,12 @@ template <class T>
 py::typing::Optional<T> optional_of(const std::optional<T>& value) {
   return py::reinterpret_steal<py::typing::Optional<T>>(value.has_value() ? object_of<T>(*value).release()
                                                                           : py::none().release());
+}
+
+// The repr of a bound value through its class's own __repr__. PyObject_Repr (py::repr) on Python
+// 3.13 and older returns the default repr when the lookup of the method fails to allocate.
+inline std::string own_repr(const py::handle& value) {
+  return std::string(py::str(py::type::of(value).attr("__repr__")(value)));
 }
 
 // shared_object(holder) as a T (holder not null) or as T | None.

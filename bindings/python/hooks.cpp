@@ -78,6 +78,25 @@ void* failing_realloc(void*, void* ptr, std::size_t n) {
 }
 void forwarding_free(void*, void* ptr) { g_saved_allocator.free(g_saved_allocator.ctx, ptr); }
 
+// The calling thread's trace function (a coverage tool's tracer) suspended while the guard lives:
+// a tracer allocates at the calls and lines of the swept function and absorbs or translates its
+// own failures, which are not the function's.
+class Untraced {
+ public:
+  Untraced()
+      : trace_(PyThreadState_Get()->c_tracefunc),
+        arg_(py::reinterpret_borrow<py::object>(PyThreadState_Get()->c_traceobj)) {
+    PyEval_SetTrace(nullptr, nullptr);
+  }
+  ~Untraced() { PyEval_SetTrace(trace_, arg_.ptr()); }
+  Untraced(const Untraced&) = delete;
+  Untraced& operator=(const Untraced&) = delete;
+
+ private:
+  Py_tracefunc trace_;
+  py::object arg_;
+};
+
 // The native allocation-failure hook: while armed for one call, the k-th allocation of
 // the calling thread through the extension's global operator new (the bindings and the library
 // linked into the extension) throws std::bad_alloc, and the thread's allocations and deletions
@@ -153,6 +172,7 @@ void register_private_hooks(py::module_& m) {
         // Calls fn(*args) with the k-th Python object allocation (from 0) failing, then
         // restores the allocator. Returns (hit, allocations seen, result or None, exception or
         // None). One caller at a time: the allocator is process-wide while the call runs.
+        const Untraced untraced;
         g_numpy_only.store(numpy_only);
         PyMem_GetAllocator(PYMEM_DOMAIN_OBJ, &g_saved_allocator);
         PyMemAllocatorEx hook {nullptr, failing_malloc, failing_calloc, failing_realloc, forwarding_free};

@@ -148,9 +148,17 @@ py::dict state_obj(const py::object& self) {
 
 } // namespace
 
+// A policy's destructor waits for its ledger gate: it runs detached, as native work does.
+struct DetachedDelete {
+  void operator()(FlowPolicy* policy) const noexcept {
+    const Detached detached;
+    delete policy;
+  }
+};
+
 void register_flow_policy(py::module_& m) {
-  [[maybe_unused]] auto flow_policy = py::class_<FlowPolicy>(
-      m, "FlowPolicy", py::is_final(), py::release_gil_before_calling_cpp_dtor(),
+  [[maybe_unused]] auto flow_policy = py::class_<FlowPolicy, std::unique_ptr<FlowPolicy, DetachedDelete>>(
+      m, "FlowPolicy", py::is_final(),
       "The placement engine for one demand, bound to its ledger at construction. A final Python class.\n"
       "Native computation releases the GIL; one ledger gate serializes calls and mutable reads. Every call (place,\n"
       "evaluate, replace, forward) is all-or-nothing: a failed call raises and leaves the ledger and the\n"
@@ -173,7 +181,7 @@ void register_flow_policy(py::module_& m) {
              auto prepared = detail::PolicyAccess::prepare(*ledger, s, d, config, elig.get(), cache.get(), nullptr, detached_argument_work);
              // Registration and holder construction can allocate. Complete them while the
              // shell is unbound; no Python work remains after native construction publishes.
-             auto holder = detail::PolicyAccess::shell();
+             std::unique_ptr<FlowPolicy, DetachedDelete> holder(detail::PolicyAccess::shell().release());
              auto* policy = holder.get();
              instance.inst->owned = false;
              instance.value_ptr() = policy;

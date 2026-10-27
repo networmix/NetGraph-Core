@@ -114,9 +114,20 @@ def test_cache_lifecycle_and_retained_values():
 
 
 def test_public_policy_teardown():
-    run_python("""
+    # The keeper's __del__ runs in interpreter teardown, on the finalizing thread after
+    # Py_IsInitialized() is already 0: its native read must retake the GIL there.
+    output = run_python(
+        """
+        class Keeper:
+            def __init__(self, ledger):
+                self.ledger = ledger
+
+            def __del__(self):
+                print("CHILD: teardown read", self.ledger.carried().tolist(), flush=True)
+
         network = graph()
         ledger = ngc.FlowLedger(network)
+        keeper = Keeper(ledger)
         p = policy(ledger)
         p.place(3)
         record = ledger.records()[0]
@@ -130,7 +141,10 @@ def test_public_policy_teardown():
         ledger.reset()
         assert ledger.records() == []
         assert ledger.residual().tolist() == [10]
-    """)
+    """,
+        cleanup=False,
+    )
+    assert "CHILD: teardown read [0]" in output.splitlines()
 
 
 def test_final_policy_rejects_swallowed_constructor_error():

@@ -299,8 +299,9 @@ def reads(value):
 
 
 def shown(value):
-    # A bound value without its own repr prints its address, which a fresh wrapper changes.
-    return re.sub(r" at 0x[0-9a-f]+", "", repr(value))
+    # A bound value without its own repr prints its address, which a fresh wrapper changes
+    # (upper-case hex digits on Windows).
+    return re.sub(r" at 0x[0-9a-fA-F]+", "", repr(value))
 
 
 def sweep(name, wide=False):
@@ -315,16 +316,18 @@ def sweep(name, wide=False):
         names = [a for a in properties(value) if number(getattr(value, a))]
         names += [a for a in reads(value) if a == "__hash__"]
     injected = 0
+    # The repr and the hash are called on the type: Python 3.13 and older turn a failed method
+    # lookup in repr() into the default repr and in hash() into a TypeError.
     for attr in names:
         if attr == "__repr__":
 
             def read():
-                return repr(value)
+                return type(value).__repr__(value)
 
         elif attr == "__hash__":
 
             def read():
-                return hash(value)
+                return type(value).__hash__(value)
 
         else:
 

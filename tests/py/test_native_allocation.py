@@ -710,7 +710,10 @@ if __name__ != "__main__":
                 assert row["state_ok"], row
             else:
                 assert row["error"].startswith("MemoryError"), row
-                assert row["live"] == 0, row
+                # A failed call may free a buffer the C++ library's own code allocated (libc++ 21
+                # grows a long std::string inside libc++.dylib), which the hook counts only as a
+                # deletion; an allocation the call left behind still counts as live > 0.
+                assert row["live"] <= 0, row
                 assert row["state_ok"], row
         assert proc.returncode == 0, (
             f"{name}: the child died (rc {proc.returncode}) in attempt {started}\n"
@@ -808,6 +811,38 @@ if __name__ != "__main__":
             assert hook(lambda: 7, (), -1)[2:4] == (7, None)
 
     @needs_hooks
+    def test_python_allocation_hook_runs_the_call_untraced():
+        # A trace function's own allocations (a coverage tracer's) are not the call's: the hook
+        # suspends the thread's trace function for the call and restores it, also after a raise.
+        events = []
+
+        def tracer(frame, event, arg):
+            events.append(frame.f_code.co_name)
+            return tracer
+
+        def returns():
+            return 7
+
+        def raises():
+            raise LookupError("raised")
+
+        previous = sys.gettrace()
+        sys.settrace(tracer)
+        try:
+            returns()  # the tracer sees a direct call
+            seen_direct = "returns" in events
+            events.clear()
+            done = ext._fail_python_allocation(returns, (), -1)
+            failed = ext._fail_python_allocation(raises, (), -1)
+            after = sys.gettrace()
+        finally:
+            sys.settrace(previous)
+        assert seen_direct
+        assert done[2] == 7 and type(failed[3]) is LookupError
+        assert "returns" not in events and "raises" not in events, events
+        assert after is tracer
+
+    @needs_hooks
     @pytest.mark.parametrize("name", list(SCENARIOS))
     def test_native_allocation_failure_raises_and_changes_nothing(name):
         check(name, *run_child(name))
@@ -826,7 +861,7 @@ if __name__ != "__main__":
         for name, clause in (
             ("control.absorbs", 'assert row["value_ok"], row'),
             ("control.replaces", 'assert row["error"].startswith("MemoryError"), row'),
-            ("control.leaks", 'assert row["live"] == 0, row'),
+            ("control.leaks", 'assert row["live"] <= 0, row'),
             ("control.changes_state", 'assert row["state_ok"], row'),
             ("control.crashes", "assert proc.returncode == 0, ("),
             (

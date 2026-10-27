@@ -903,16 +903,59 @@ finish(task)
 
 
 def test_daemon_exit_releases_native_resources():
-    # Py_AtExit runs after Python teardown. Its native waiter owns a different
-    # policy on the busy ledger, or queues thaw against the daemon's outer lease.
-    for resource in ("ledger", "cache"):
+    # A daemon thread's engine work ends after interpreter finalization began; the thread must
+    # neither retake the GIL nor end the process (it parks). Py_AtExit runs after Python teardown:
+    # its native waiter owns a different policy on the busy ledger, or queues thaw against the
+    # daemon's outer lease. destruction: a second daemon drops the last reference to a policy on
+    # the busy ledger, whose destructor waits for the gate and ends while the finalizing thread
+    # stays in module teardown (an object of a module teardown wipes sleeps there). window: the
+    # last exit function holds the GIL past the daemon's pause, so the daemon finds Python
+    # initialized, waits for the GIL, and finalization begins during that wait.
+    for case in ("ledger", "cache", "destruction", "window"):
         output = run_python(
-            SETUP
-            + f"\nresource = {resource!r}\n"
+            f"\ncase = {case!r}\n"
             + """
-if resource == 'ledger':
+if case == 'window':
+    import atexit
+    # The only exit function, so the last: no bytecode runs between it and finalization (the
+    # preamble's imports registered one: logging's, imported by concurrent.futures; this child
+    # needs neither).
+    atexit._clear()
+    atexit.register(sum, range(4 * 10**8))
+"""
+            + SETUP
+            + """
+if case == 'ledger':
     probe = Probe(pause='ledger_acquired', auto_release_ms=1000)
     ext._at_native_exit(ledger, None, probe)
+    operation = lambda: p.replace(3)
+    stage = 'ledger_acquired'
+elif case == 'destruction':
+    import time
+    import types
+    class Keeper:
+        def __del__(self, sleep=time.sleep, out=sys.stdout):
+            sleep(4)
+            out.write('CHILD: teardown waited for the daemons\\n')
+            out.flush()
+    sys.modules['teardown_keeper'] = types.ModuleType('teardown_keeper')
+    sys.modules['teardown_keeper'].keeper = Keeper()
+    # Made and dropped on one daemon thread: free-threaded CPython hands a final decref from
+    # another thread back to the thread that made the object.
+    made, drop = threading.Event(), threading.Event()
+    def lifetime():
+        owned = policy(ledger)
+        made.set()
+        drop.wait()
+        del owned
+    dropping = threading.Thread(target=lifetime, daemon=True)
+    dropping.start()
+    assert made.wait(5)
+    probe = Probe(pause='ledger_acquired', auto_release_ms=2000)
+    operation = lambda: p.replace(3)
+    stage = 'ledger_acquired'
+elif case == 'window':
+    probe = Probe(pause='ledger_acquired', auto_release_ms=1000)
     operation = lambda: p.replace(3)
     stage = 'ledger_acquired'
 else:
@@ -927,12 +970,20 @@ else:
 task = start(operation, probe)
 assert probe.wait(stage)
 assert probe.counts()['pause_begin'] == 1 and probe.counts()['pause_end'] == 0
-print('CHILD: finalizing with daemon holding', resource, flush=True)
+if case == 'destruction':
+    drop.set()
+    dropping.join(0.3)
+    assert dropping.is_alive(), 'the destructor did not wait for the gate'
+print('CHILD: finalizing with daemon holding', case, flush=True)
 """,
             cleanup=False,
+            seconds=60 if case == "window" else 25,
         )
-        assert "CHILD: native finalizer waiting after Python teardown" in output
-        assert "CHILD: native finalizer completed" in output
+        if case in ("ledger", "cache"):
+            assert "CHILD: native finalizer waiting after Python teardown" in output
+            assert "CHILD: native finalizer completed" in output
+        if case == "destruction":
+            assert "CHILD: teardown waited for the daemons" in output
 
 
 def test_every_program_representation_uses_the_transaction_gate():

@@ -1705,7 +1705,9 @@ print("failures", k)
         "r.plan.headroom_penalty",
         "r.program.tunnels",
         "gl.tunnel_count",
-        "repr(r)",
+        # A repr is called on the type: repr() on Python 3.13 and older returns the default repr
+        # when its method lookup fails.
+        "type(r).__repr__(r)",
     ],
 )
 def test_t2_getters_survive_python_allocation_failures(getter):

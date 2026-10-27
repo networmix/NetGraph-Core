@@ -289,8 +289,7 @@ def test_the_python_allocation_sweep_rejects_a_wrong_call():
 
     def fewer_allocations():
         made = itertools.count()
-        # This C callable returns the existing result without allocating a Python object
-        # or entering a Python frame, so a tracer cannot add allocations to that call.
+        # This C callable returns the existing result without allocating a Python object.
         prebuilt = operator.itemgetter(0)
 
         def make():
@@ -310,9 +309,8 @@ def test_the_python_allocation_sweep_rejects_a_wrong_call():
             injected_call = False
 
             def snapshot():
-                # The sweep reads this before injection and again before a clean retry.
-                # A tracer can fail before raises() enters its body, so body-entry counts
-                # cannot distinguish those two calls.
+                # The sweep reads this before injection and again before a clean retry, so it
+                # tells those two calls apart whether or not the failure reaches raises().
                 nonlocal injected_call
                 injected_call = not injected_call
                 return []
@@ -329,7 +327,7 @@ def test_the_python_allocation_sweep_rejects_a_wrong_call():
 
     def by_turn(turns):
         # m = 0 is the reference, c = 0 the injected call, c = 1 its clean retry.
-        # Advance at snapshot boundaries, even if a tracer failed before entering the call.
+        # Advance at snapshot boundaries, which the sweep crosses once per call.
         made = itertools.count()
 
         def make():

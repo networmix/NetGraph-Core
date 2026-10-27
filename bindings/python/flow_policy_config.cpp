@@ -61,7 +61,7 @@ void register_policy_config(py::module_& m) {
           "the routing model: ShortestPaths, DistributedTE, CentralizedTE or Pinned")
       .def_property_readonly("admission", field_object(&FlowPolicyConfig::admission), "LOSSLESS or LOSSY")
       .def("__repr__", [](const FlowPolicyConfig& c) {
-        return "FlowPolicyConfig(routing=" + std::string(py::repr(routing_obj(c.routing))) + ", admission=" +
+        return "FlowPolicyConfig(routing=" + own_repr(routing_obj(c.routing)) + ", admission=" +
                (c.admission == Admission::Lossy ? "Admission.LOSSY" : "Admission.LOSSLESS") + ")";
       });
 

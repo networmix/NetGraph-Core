@@ -305,7 +305,7 @@ void register_routing(py::module_& m) {
       .def("__repr__", [](const DistributedTE& ca) {
         std::string ceiling = "None";
         if (ca.cost_ceiling.has_value()) {
-          ceiling = std::visit([](const auto& x) { return std::string(py::repr(typed_object(x))); }, *ca.cost_ceiling);
+          ceiling = std::visit([](const auto& x) { return own_repr(typed_object(x)); }, *ca.cost_ceiling);
         }
         return "DistributedTE(TunnelCount(" + std::to_string(ca.tunnel_count.per_head) + (ca.tunnel_count.up_to ? ", up_to=True)" : ")") +
                ", cost_ceiling=" + ceiling + ", min_unreserved_bandwidth=" + std::to_string(ca.min_unreserved_bandwidth) +
