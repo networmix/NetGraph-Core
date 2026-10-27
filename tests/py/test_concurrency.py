@@ -169,12 +169,18 @@ operations = [lambda: p.place(1), lambda: p.evaluate(3), lambda: p.replace(3),
               lambda: p.forward(3), lambda: ngc.apply_actions(ledger, [ngc.Replace(p, 3)]), lambda: weighted_policy.place(1)]
 observations = {}
 for name, operation in zip(('place', 'evaluate', 'replace', 'forward', 'ordered_list', 'weighted_place'), operations, strict=True):
-    task = start(lambda: [operation() for _ in range(60)], probe)
     overlaps = 0
-    while task[0].is_alive():
-        counts = probe.counts()
-        overlaps += counts['native_begin'] > counts['native_complete']
-    finish(task)
+    for _ in range(50):
+        task = start(lambda: [operation() for _ in range(60)], probe)
+        while task[0].is_alive():
+            counts = probe.counts()
+            if counts['native_begin'] > counts['native_complete']:
+                # A snapshot can become stale while counts() reacquires the GIL.
+                second = probe.counts()
+                overlaps += (counts['native_begin'], counts['native_complete']) == (second['native_begin'], second['native_complete'])
+        finish(task)
+        if overlaps:
+            break
     observations[name] = overlaps
 
 # Each lock-wait entry has a finite native pause, so a retained-GIL plant
