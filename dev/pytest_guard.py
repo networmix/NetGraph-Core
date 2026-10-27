@@ -61,6 +61,7 @@ EXPECTED_OFF_SKIPS = [
     ),
     "tests/py/test_number_types.py::test_a_cold_conversion_raises_memory_error",
     "tests/py/test_native_allocation.py::test_allocation_hooks_preserve_exception_identity",
+    "tests/py/test_native_allocation.py::test_python_allocation_hook_runs_the_call_untraced",
     "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[evaluate_pairs.t1]",
     "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[evaluate_pairs.t2]",
     "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[evaluate_pairs.t2_support]",
@@ -189,10 +190,10 @@ EXPECTED_OFF_SKIPS = [
         "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[r.program.tunnels]"
     ),
     (
-        "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[repr(abs3)]"
+        "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[type(abs3).__repr__(abs3)]"
     ),
     (
-        "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[repr(st2)]"
+        "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[type(st2).__repr__(st2)]"
     ),
     (
         "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[st2.cost_ceiling.factor]"
@@ -203,8 +204,8 @@ EXPECTED_OFF_SKIPS = [
     (
         "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[cfg.routing]"
     ),
-    "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[repr(r)]",
-    "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[repr(sp)]",
+    "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[type(r).__repr__(r)]",
+    "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[type(sp).__repr__(sp)]",
     (
         "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[t0.status]"
     ),
@@ -216,7 +217,7 @@ EXPECTED_OFF_SKIPS = [
         "tests/py/test_centralized_te_tunnels.py::test_t2_getters_survive_python_allocation_failures[gl.tunnel_count]"
     ),
     (
-        "tests/py/test_centralized_te_tunnels.py::test_t2_getters_survive_python_allocation_failures[repr(r)]"
+        "tests/py/test_centralized_te_tunnels.py::test_t2_getters_survive_python_allocation_failures[type(r).__repr__(r)]"
     ),
     (
         "tests/py/test_centralized_te_tunnels.py::test_t2_getters_survive_python_allocation_failures[r.plan.max_fractional_bandwidth_per_tunnel]"

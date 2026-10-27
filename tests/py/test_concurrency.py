@@ -908,7 +908,7 @@ def test_daemon_exit_releases_native_resources():
     # its native waiter owns a different policy on the busy ledger, or queues thaw against the
     # daemon's outer lease. destruction: a second daemon drops the last reference to a policy on
     # the busy ledger, whose destructor waits for the gate and ends while the finalizing thread
-    # stays in module teardown (an object of a module teardown wipes sleeps there). window: the
+    # stays in module teardown (an object that module teardown wipes waits there). window: the
     # last exit function holds the GIL past the daemon's pause, so the daemon finds Python
     # initialized, waits for the GIL, and finalization begins during that wait.
     for case in ("ledger", "cache", "destruction", "window"):
@@ -934,8 +934,11 @@ elif case == 'destruction':
     import time
     import types
     class Keeper:
-        def __del__(self, sleep=time.sleep, out=sys.stdout):
-            sleep(4)
+        def __del__(self, clock=time.monotonic, out=sys.stdout):
+            # A busy wait: time.sleep fails in module teardown on Windows (its SIGINT event is closed).
+            end = clock() + 4
+            while clock() < end:
+                pass
             out.write('CHILD: teardown waited for the daemons\\n')
             out.flush()
     sys.modules['teardown_keeper'] = types.ModuleType('teardown_keeper')
