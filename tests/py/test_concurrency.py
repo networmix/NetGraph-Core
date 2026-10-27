@@ -156,7 +156,7 @@ assert r.residual.tolist() == [7] and r.edge_flows.tolist() == [3]
 @GIL_ONLY
 def test_native_phase_allows_heartbeat():
     run("""
-assert sys._is_gil_enabled()
+assert getattr(sys, "_is_gil_enabled", lambda: True)()
 sys.setswitchinterval(0.000001)
 network = ngc.Graph(2, [0]*3000, [1]*3000, [1000]*3000, [1]*3000, 1.0)
 ledger = ngc.FlowLedger(network)
@@ -831,7 +831,7 @@ assert p.place(0).program is before.program
 @GIL_ONLY
 def test_immutable_native_operations_overlap_heartbeat():
     run("""
-assert sys._is_gil_enabled()
+assert getattr(sys, "_is_gil_enabled", lambda: True)()
 sys.setswitchinterval(0.000001)
 big = ngc.Graph(2, [0]*30000, [1]*30000, [10]*30000, [1]*30000, 1.0)
 probe = Probe()

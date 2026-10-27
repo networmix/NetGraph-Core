@@ -54,7 +54,7 @@ constexpr Admission LL = Admission::Lossless;
 constexpr Admission LY = Admission::Lossy;
 constexpr Amount kBig = Amount {1} << 40;  // a link that never limits anything
 
-DesignArg finite(Amount x) { return DesignArg {std::in_place, x}; }
+DesignArg design_of(Amount x) { return DesignArg {std::in_place, x}; }
 const DesignArg kUnlimited {std::in_place, std::nullopt};
 
 Amount lo(const Counter128& c) {
@@ -322,7 +322,7 @@ T1Out t1(const T1In& in) {
   out.error = error_of([&] { (void)policy(n, in.heads, in.destinations, {.routing = dte, .admission = LL}, mask); });
   if (!out.error.empty()) return out;
   auto bound = policy(n, in.heads, in.destinations, {.routing = dte, .admission = LL}, mask);
-  const auto b = bound->replace(std::nullopt, finite(in.design_demand), OutputOptions {.edge_reservations = true});
+  const auto b = bound->replace(std::nullopt, design_of(in.design_demand), OutputOptions {.edge_reservations = true});
   out.bound = b.call_delivered;
   out.reserved = b.plan->total_reserved_bandwidth;
   out.edge_reservations = n.in_order(*b.edge_reservations);
@@ -336,7 +336,7 @@ T1Out t1(const T1In& in) {
   out.routes = paths;
   if (!in.offer.has_value()) return out;
   auto lossy = policy(n, in.heads, in.destinations, {.routing = dte, .admission = LY}, mask);
-  const auto r = lossy->replace(*in.offer, finite(in.design_demand));
+  const auto r = lossy->replace(*in.offer, design_of(in.design_demand));
   out.no_drop_load.assign(n.m(), 0);
   for (std::size_t i = 0; i < r.by_tunnel.size(); ++i) {
     const Amount a = lo(r.by_tunnel[i].assigned);
@@ -347,7 +347,7 @@ T1Out t1(const T1In& in) {
   out.lossy_delivery = r.call_delivered;
   out.lossy_edge_drops = n.per_edge(r.call_edge_drops);
   auto lossless = policy(n, in.heads, in.destinations, {.routing = dte, .admission = LL}, mask);
-  out.lossless_admitted = lossless->replace(*in.offer, finite(in.design_demand)).call_delivered;
+  out.lossless_admitted = lossless->replace(*in.offer, design_of(in.design_demand)).call_delivered;
   out.lossless_unadmitted = *in.offer - out.lossless_admitted;
   return out;
 }
@@ -386,7 +386,7 @@ T2Out t2(const T2In& in) {
   const auto support = in.support.has_value() ? n.dag(*in.support) : nullptr;
   const auto cte = centralized(SourceAllocation::Equal, support, TunnelCount {in.per_head, in.up_to}, in.prefer_headroom);
   const auto mask = n.mask({}, in.excluded);
-  const DesignArg design = in.design_demand.has_value() ? finite(*in.design_demand) : kUnlimited;
+  const DesignArg design = in.design_demand.has_value() ? design_of(*in.design_demand) : kUnlimited;
   auto p = policy(n, in.heads, in.destinations, {.routing = cte, .admission = LL}, mask, ledger_of(n, in.cap));
   const auto r = p->replace(in.design_demand, design);
   T2Out out;
@@ -699,7 +699,7 @@ std::string config_case(Routing routing, int sources = 1, Admission admission = 
                          (std::holds_alternative<CentralizedTE>(p.config().routing) &&
                           std::get<CentralizedTE>(p.config().routing).tunnel_count.has_value());
     if (tunnels) {
-      (void)p.replace(0, finite(0));
+      (void)p.replace(0, design_of(0));
     } else {
       (void)p.place(0);
     }
@@ -1887,12 +1887,12 @@ TEST(ContractExamples, D_C2) {
 TEST(ContractExamples, E_ledger) {
   const Net n({{0, 1, 10, 1}});
   auto p = policy(n, v({0}), v({1}), {.routing = dte_with(1), .admission = LY});
-  (void)p->replace(4, finite(6));
+  (void)p->replace(4, design_of(6));
   EXPECT_EQ(p.ledger->carried(), (Amounts {4}));
   EXPECT_EQ(p.ledger->residual(), (Amounts {6}));
   EXPECT_EQ(p.ledger->reserved(), (Amounts {6}));
   EXPECT_EQ(p.ledger->unreserved(), (Amounts {4}));
-  EXPECT_EQ(p->replace(2, finite(6)).delivery_delta, -2);
+  EXPECT_EQ(p->replace(2, design_of(6)).delivery_delta, -2);
 }
 
 void expect_epoch(const EpochOut& r, Amount requested, Amount delivered, Amount drops, const Amounts& flows, const Amounts& residual,
@@ -2000,7 +2000,7 @@ TEST(ContractExamples, FLAGS_fixed_offer) {
 
 TEST(ContractExamples, TERM_T1_all_down) {
   const Net n(kX7);
-  const auto r = termination(n, v({0}), v({3}), dte_with(2), 14, finite(14));
+  const auto r = termination(n, v({0}), v({3}), dte_with(2), 14, design_of(14));
   EXPECT_EQ(r.tunnels, 2U);
   EXPECT_EQ(r.lossy, "COMPLETE");
   EXPECT_EQ(r.lossless, "EXHAUSTED");
@@ -2009,7 +2009,7 @@ TEST(ContractExamples, TERM_T1_all_down) {
 }
 TEST(ContractExamples, TERM_T2_all_dead) {
   const Net n({{0, 2, 0, 1}, {1, 2, 0, 1}});
-  const auto r = termination(n, v({0, 1}), v({2}), centralized(SourceAllocation::Equal, {}, TunnelCount {2}), 10, finite(10));
+  const auto r = termination(n, v({0, 1}), v({2}), centralized(SourceAllocation::Equal, {}, TunnelCount {2}), 10, design_of(10));
   EXPECT_EQ(r.tunnels, 0U);
   EXPECT_EQ(r.lossy, "COMPLETE");
   EXPECT_EQ(r.lossless, "EXHAUSTED");
@@ -2205,18 +2205,18 @@ TEST(ContractExamples, EVAL_first_error) {
   const Net& n = config_net();
   const DesignArg inf {std::in_place, std::nullopt};
   const Texts got = {
-      evaluation_case(centralized(SourceAllocation::Equal, {}, std::nullopt, true), LL, finite(-1), std::nullopt),
-      evaluation_case(dte_with(4), LY, finite(-1), inf),
-      evaluation_case(dte_with(4), LY, finite(5), inf),
+      evaluation_case(centralized(SourceAllocation::Equal, {}, std::nullopt, true), LL, design_of(-1), std::nullopt),
+      evaluation_case(dte_with(4), LY, design_of(-1), inf),
+      evaluation_case(dte_with(4), LY, design_of(5), inf),
       evaluation_case(dte_with(4), LY, std::nullopt, std::nullopt),
-      evaluation_case(dte_with(4), LY, std::nullopt, finite(10)),
-      evaluation_case(ShortestPaths {}, LL, inf, finite(5)),
-      evaluation_case(ShortestPaths {}, LL, std::nullopt, finite(5)),
+      evaluation_case(dte_with(4), LY, std::nullopt, design_of(10)),
+      evaluation_case(ShortestPaths {}, LL, inf, design_of(5)),
+      evaluation_case(ShortestPaths {}, LL, std::nullopt, design_of(5)),
       evaluation_case(centralized(SourceAllocation::Equal, {}, TunnelCount {16}), LY, std::nullopt, std::nullopt),
-      evaluation_case(centralized(SourceAllocation::Equal, {}, TunnelCount {16}), LY, std::nullopt, finite(10)),
+      evaluation_case(centralized(SourceAllocation::Equal, {}, TunnelCount {16}), LY, std::nullopt, design_of(10)),
       evaluation_case(config_pinned(n, 2), LY, std::nullopt, std::nullopt),
       evaluation_case(ShortestPaths {}, LY, std::nullopt, std::nullopt),
-      evaluation_case(ShortestPaths {}, LY, finite(4), std::nullopt),
+      evaluation_case(ShortestPaths {}, LY, design_of(4), std::nullopt),
   };
   EXPECT_EQ(got, (Texts {
                      "prefer_headroom requires tunnel_count",
@@ -2268,7 +2268,7 @@ OfferOut evaluate_offer(const Amounts& caps, DesignArg offer) {
           n.per_edge(s.baseline.edge_drops)};
 }
 TEST(ContractExamples, EVAL_fixed_offer) {
-  const auto r = evaluate_offer({10, 10}, finite(4));
+  const auto r = evaluate_offer({10, 10}, design_of(4));
   EXPECT_EQ(r.baseline, 4);
   EXPECT_EQ(r.reductions, (Amounts {0, 0}));
 }
@@ -2283,7 +2283,7 @@ TEST(ContractExamples, EVAL_first_hop_unequal) {
 }
 // A finite offer splits by round robin: 6 per link, 2 dropped on the link of 4.
 TEST(ContractExamples, EVAL_fixed_offer_unequal) {
-  EXPECT_EQ(evaluate_offer({4, 10}, finite(12)), (OfferOut {10, {0, 6}, 12, 12, {2, 0}}));
+  EXPECT_EQ(evaluate_offer({4, 10}, design_of(12)), (OfferOut {10, {0, 6}, 12, 12, {2, 0}}));
 }
 
 // ================================================================ CostStretch's exact fraction
@@ -3295,7 +3295,7 @@ TEST(ContractExamples, LIST_first_error) {
       first(ledger, {Place {t, -1}}, O),
       first(ledger, {Forward {p, std::nullopt}}, O),
       first(ledger, {Place {inf, 5}, Replace {x, 1}}, O),
-      first(ledger, {Replace {a, 1, finite(5)}, Replace {x, 1}}, O),
+      first(ledger, {Replace {a, 1, design_of(5)}, Replace {x, 1}}, O),
       first(ledger, {Forward {fw, 1, foreign_black.get()}, Replace {x, 1}}, O),
       first(ledger, {}, S),
   };

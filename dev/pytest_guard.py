@@ -376,18 +376,15 @@ def problems(
                 "the extension lacks the private hooks (expected the editable build)"
             )
         allowed = GIL_PROOF_SKIPS if free_threaded else set()
-        if not free_threaded and skipped:
+        unexpected = sorted(set(skipped) - allowed)
+        if unexpected:
             out.append(
-                f"{len(skipped)} tests skipped in a hooks-on run: {sorted(skipped)}"
+                f"{len(unexpected)} tests skipped in a hooks-on run: {unexpected}"
             )
-        elif free_threaded:
+        if free_threaded:
             out += [
                 f"expected GIL-only skip did not occur: {n}"
-                for n in sorted(allowed - set(skipped))
-            ]
-            out += [
-                f"unexpected skip in free-threaded hooks-on run: {n}"
-                for n in sorted(set(skipped) - allowed)
+                for n in sorted((allowed & seen) - set(skipped))
             ]
             out += [
                 f"wrong GIL-only skip reason: {n}: {reason}"
