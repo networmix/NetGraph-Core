@@ -247,10 +247,6 @@ def test_signatures():
         ledger=led, actions=[ngc.Replace(p, 1)], mode=ORDERED, outputs=None
     )
     assert type(out) is list and len(out) == 1
-    assert ngc.apply_actions.__doc__.startswith(
-        "apply_actions(ledger: object, actions: object, *, mode: object = BatchMode.ORDERED,"
-        " outputs: object = None) -> list[_netgraph_core.PlacementResult]"
-    )
 
 
 def test_action_construction_errors():

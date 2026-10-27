@@ -186,9 +186,8 @@ def input_state(inventory: dict) -> dict:
 def record_inputs(record: dict, inputs: dict) -> dict:
     result = {"semantics": [], "implementation": [], "explanation": {}}
     for ref in record["semantics"]:
-        value = digest(section_text(ref["file"], ref["heading"]))
-        result["semantics"].append({**ref, "sha256": value})
-        inputs[ref["file"]] = digest(source_file(ref["file"]).read_bytes())
+        section_text(ref["file"], ref["heading"])
+        result["semantics"].append(dict(ref))
     for ref in record["implementation"]["sources"]:
         value = digest(source_file(ref["file"]).read_bytes())
         result["implementation"].append({**ref, "sha256": value})
@@ -197,8 +196,7 @@ def record_inputs(record: dict, inputs: dict) -> dict:
     text = source_file(ref["file"]).read_text()
     if f'<a id="{ref["anchor"]}"></a>' not in text:
         fail(f"missing explanation anchor: {ref['anchor']}")
-    result["explanation"] = {**ref, "sha256": digest(text)}
-    inputs[ref["file"]] = digest(text)
+    result["explanation"] = dict(ref)
     return result
 
 

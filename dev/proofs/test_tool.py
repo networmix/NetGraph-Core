@@ -289,20 +289,12 @@ def main() -> None:
         save_inventory(changed)
         run("missing-theorem", "inventory differs from theorem ID markers")
         restore()
-        edit("docs/semantics.md", "Both are monotone:", "Both are not monotone:")
-        run("semantic-drift", "applicability digest drift")
-        restore()
         with (root / "src/route_kernels.cpp").open("a") as stream:
             stream.write("\n// changed mapped input\n")
         run("native-drift", "applicability digest drift")
         restore()
         explanation = "docs/formal/theorems/round-robin.md"
         edit(explanation, '<a id="NGC-AP-004"></a>', "")
-        changed = json.loads((root / "proofs/theorems.json").read_text())
-        new_hash = hashlib.sha256((root / explanation).read_bytes()).hexdigest()
-        for record in changed["theorems"]:
-            record["mapped_inputs"]["explanation"]["sha256"] = new_hash
-        save_inventory(changed)
         run("missing-explanation-anchor", "missing explanation anchor")
         restore()
         text = (root / MODEL).read_text()

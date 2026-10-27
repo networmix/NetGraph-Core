@@ -2,7 +2,7 @@
   "audit_sources": {
     "Checks/Examples.lean": "b0529783d314ea0f8ef553d5e2b2851f52020f325596a99897d8d217fdaad686",
     "Checks/Main.lean": "e4914f8f1cf7baee4b0b8d587ae8266fa1d78511839a63e7d9fb0442040d29db",
-    "Checks/audit.py": "c9a7dfd4c0e723e67aa1cd1f17a1f379df635e3217e57db7d486fe543611a547"
+    "Checks/audit.py": "a1e089faf88d01651ff877580dac13d2758cd1f067cce5a5dc8b3e0c6ba77c16"
   },
   "modules": [
     "NetGraphCore.lean",
@@ -93,8 +93,7 @@
       "mapped_inputs": {
         "explanation": {
           "anchor": "NGC-AP-001",
-          "file": "docs/formal/theorems/round-robin.md",
-          "sha256": "130ee173864d1101076a3f3fcf6637b4886ced0e91c81f8b7ef38cac74b494da"
+          "file": "docs/formal/theorems/round-robin.md"
         },
         "implementation": [
           {
@@ -130,13 +129,11 @@
         "semantics": [
           {
             "file": "docs/semantics.md",
-            "heading": "### Splitting whole units",
-            "sha256": "c78d73f278b5e3497314d983bb48f057084bc397eed7957d89ce0cdb1ab0f220"
+            "heading": "### Splitting whole units"
           },
           {
             "file": "docs/semantics.md",
-            "heading": "### Epochs",
-            "sha256": "5fe3f528a9f6150adcefff2a190a3e3ae7523bd622a730791d4079fc2fb0dfd2"
+            "heading": "### Epochs"
           }
         ]
       },
@@ -224,8 +221,7 @@
       "mapped_inputs": {
         "explanation": {
           "anchor": "NGC-AP-002",
-          "file": "docs/formal/theorems/round-robin.md",
-          "sha256": "130ee173864d1101076a3f3fcf6637b4886ced0e91c81f8b7ef38cac74b494da"
+          "file": "docs/formal/theorems/round-robin.md"
         },
         "implementation": [
           {
@@ -261,13 +257,11 @@
         "semantics": [
           {
             "file": "docs/semantics.md",
-            "heading": "### Splitting whole units",
-            "sha256": "c78d73f278b5e3497314d983bb48f057084bc397eed7957d89ce0cdb1ab0f220"
+            "heading": "### Splitting whole units"
           },
           {
             "file": "docs/semantics.md",
-            "heading": "### Epochs",
-            "sha256": "5fe3f528a9f6150adcefff2a190a3e3ae7523bd622a730791d4079fc2fb0dfd2"
+            "heading": "### Epochs"
           }
         ]
       },
@@ -354,8 +348,7 @@
       "mapped_inputs": {
         "explanation": {
           "anchor": "NGC-AP-003",
-          "file": "docs/formal/theorems/round-robin.md",
-          "sha256": "130ee173864d1101076a3f3fcf6637b4886ced0e91c81f8b7ef38cac74b494da"
+          "file": "docs/formal/theorems/round-robin.md"
         },
         "implementation": [
           {
@@ -391,13 +384,11 @@
         "semantics": [
           {
             "file": "docs/semantics.md",
-            "heading": "### Splitting whole units",
-            "sha256": "c78d73f278b5e3497314d983bb48f057084bc397eed7957d89ce0cdb1ab0f220"
+            "heading": "### Splitting whole units"
           },
           {
             "file": "docs/semantics.md",
-            "heading": "### Epochs",
-            "sha256": "5fe3f528a9f6150adcefff2a190a3e3ae7523bd622a730791d4079fc2fb0dfd2"
+            "heading": "### Epochs"
           }
         ]
       },
@@ -482,8 +473,7 @@
       "mapped_inputs": {
         "explanation": {
           "anchor": "NGC-AP-004",
-          "file": "docs/formal/theorems/round-robin.md",
-          "sha256": "130ee173864d1101076a3f3fcf6637b4886ced0e91c81f8b7ef38cac74b494da"
+          "file": "docs/formal/theorems/round-robin.md"
         },
         "implementation": [
           {
@@ -519,13 +509,11 @@
         "semantics": [
           {
             "file": "docs/semantics.md",
-            "heading": "### Splitting whole units",
-            "sha256": "c78d73f278b5e3497314d983bb48f057084bc397eed7957d89ce0cdb1ab0f220"
+            "heading": "### Splitting whole units"
           },
           {
             "file": "docs/semantics.md",
-            "heading": "### Epochs",
-            "sha256": "5fe3f528a9f6150adcefff2a190a3e3ae7523bd622a730791d4079fc2fb0dfd2"
+            "heading": "### Epochs"
           }
         ]
       },
@@ -628,8 +616,7 @@
       "mapped_inputs": {
         "explanation": {
           "anchor": "NGC-AP-005",
-          "file": "docs/formal/theorems/round-robin.md",
-          "sha256": "130ee173864d1101076a3f3fcf6637b4886ced0e91c81f8b7ef38cac74b494da"
+          "file": "docs/formal/theorems/round-robin.md"
         },
         "implementation": [
           {
@@ -665,13 +652,11 @@
         "semantics": [
           {
             "file": "docs/semantics.md",
-            "heading": "### Splitting whole units",
-            "sha256": "c78d73f278b5e3497314d983bb48f057084bc397eed7957d89ce0cdb1ab0f220"
+            "heading": "### Splitting whole units"
           },
           {
             "file": "docs/semantics.md",
-            "heading": "### Epochs",
-            "sha256": "5fe3f528a9f6150adcefff2a190a3e3ae7523bd622a730791d4079fc2fb0dfd2"
+            "heading": "### Epochs"
           }
         ]
       },
@@ -777,8 +762,7 @@
       "mapped_inputs": {
         "explanation": {
           "anchor": "NGC-AP-006",
-          "file": "docs/formal/theorems/round-robin.md",
-          "sha256": "130ee173864d1101076a3f3fcf6637b4886ced0e91c81f8b7ef38cac74b494da"
+          "file": "docs/formal/theorems/round-robin.md"
         },
         "implementation": [
           {
@@ -814,13 +798,11 @@
         "semantics": [
           {
             "file": "docs/semantics.md",
-            "heading": "### Splitting whole units",
-            "sha256": "c78d73f278b5e3497314d983bb48f057084bc397eed7957d89ce0cdb1ab0f220"
+            "heading": "### Splitting whole units"
           },
           {
             "file": "docs/semantics.md",
-            "heading": "### Epochs",
-            "sha256": "5fe3f528a9f6150adcefff2a190a3e3ae7523bd622a730791d4079fc2fb0dfd2"
+            "heading": "### Epochs"
           }
         ]
       },

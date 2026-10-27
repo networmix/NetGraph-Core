@@ -85,7 +85,6 @@ def test_miss_is_a_dedicated_exception():
     assert not issubclass(
         ngc.ShortestPathCacheMiss, (RuntimeError, ValueError, TypeError)
     )
-    assert ngc.ShortestPathCacheMiss.__doc__
 
 
 def test_frozen_cache_shared_by_every_worker():

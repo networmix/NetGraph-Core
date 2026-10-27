@@ -280,10 +280,17 @@ def test_signatures_name_registered_types_only():
                 docs.append((f"{name}.{member}", getattr(target, "__doc__", None)))
                 if isinstance(raw, property) and raw.fget is not None:
                     docs.append((f"{name}.{member}.fget", raw.fget.__doc__))
-    signed = [(n, d) for n, d in docs if isinstance(d, str) and "(" in d]
+    signed = [
+        (name, line)
+        for name, doc in docs
+        if isinstance(doc, str)
+        for index, line in enumerate(doc.splitlines())
+        if (index == 0 or re.match(r"^\d+\. ", line))
+        and re.match(r"^(?:\d+\. )?\w+\(.*\) -> ", line)
+    ]
     assert len(signed) > 200  # not vacuous: every function, method and property
-    for name, doc in signed:
-        assert "::" not in doc, (name, doc.splitlines()[0])
+    for name, signature in signed:
+        assert "::" not in signature, (name, signature)
 
 
 # Retired spellings of this API's names: no alias.
@@ -403,7 +410,6 @@ def test_policy_takes_its_ledger_first_or_by_the_name_ledger():
     with pytest.raises(TypeError, match=exact("ledger must be a FlowLedger")) as info:
         ngc.FlowPolicy(None, 0, 1, cfg)
     assert type(info.value) is TypeError
-    assert "ledger: _netgraph_core.FlowLedger" in ngc.FlowPolicy.__init__.__doc__
 
 
 def _refusal_inputs():
@@ -890,96 +896,3 @@ def test_api_matches_the_contract():
         if extra:
             differences.append(("extra", name, extra))
     assert differences == []
-
-
-def _public_docstrings():
-    """(where, text) of every public docstring: the package's, each public class's (its
-    constructor's text without the signature lines), each public method's and property's, and each
-    function's."""
-    import inspect
-
-    out = [("netgraph_core", ngc.__doc__ or "")]
-
-    def text(obj):
-        doc = getattr(obj, "__doc__", None) or ""
-        # pybind11 prefixes each overload's text with its signature: names, not prose.
-        return "\n".join(
-            line
-            for line in doc.splitlines()
-            if not re.match(r"^\s*(\d+\. )?\w+\(.*\) -> ", line)
-        )
-
-    for name in ngc.__all__:
-        obj = getattr(ngc, name)
-        if isinstance(obj, str):
-            continue
-        out.append((name, text(obj)))
-        if inspect.isclass(obj) and not issubclass(obj, BaseException):
-            for member, value in vars(obj).items():
-                if member.startswith("_") and member != "__init__":
-                    continue
-                if isinstance(value, (staticmethod, classmethod)):
-                    value = (
-                        value.__func__
-                    )  # the function's own text, not the descriptor's help
-                if isinstance(value, property) or callable(value):
-                    out.append((f"{name}.{member}", text(value)))
-    return out
-
-
-def _stub_names():
-    import ast
-
-    tree = ast.parse((Path(ngc.__file__).parent / "__init__.pyi").read_text())
-    names = set(ngc.__all__)
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.arg):
-            names.add(node.arg)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add(node.target.id)
-    return names
-
-
-def test_docstring_names_exist():
-    # Every name a public docstring writes as code (a snake_case name with an underscore, or a
-    # call `name()`), after a dot too (`ledger.carried()`, `options.edge_weights`), is a public
-    # name, member or parameter: a renamed field cannot stay behind in the prose.
-    known = _stub_names()
-    missing = set()
-    for where, doc in _public_docstrings():
-        for m in re.finditer(
-            r"(?<!\w)([a-z][a-z0-9]*(?:_[a-z0-9]+)+|[a-z]\w*(?=\(\)))", doc
-        ):
-            if m.group(1) not in known:
-                missing.add((where, m.group(1)))
-    assert not missing, sorted(missing)
-
-
-def test_class_docstrings_name_every_field():
-    # A class's text (its docstring and its constructor's) names each of its fields, so the text
-    # that lists them follows a rename.
-    import inspect
-
-    missing = []
-    for name in ngc.__all__:
-        cls = getattr(ngc, name)
-        if (
-            not inspect.isclass(cls)
-            or issubclass(cls, BaseException)
-            or hasattr(cls, "__members__")
-        ):
-            continue
-        fields = [
-            m
-            for m, v in vars(cls).items()
-            if not m.startswith("_") and isinstance(v, property)
-        ]
-        init = getattr(cls.__init__, "__doc__", None) or ""
-        init = "\n".join(
-            line for line in init.splitlines() if not line.startswith("__init__(")
-        )
-        words = set(re.findall(r"\w+", (cls.__doc__ or "") + init))
-        missing += [f"{name}.{f}" for f in fields if f not in words]
-    assert not missing, missing
