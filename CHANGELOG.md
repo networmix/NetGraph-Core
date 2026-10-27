@@ -23,14 +23,15 @@ the new behaviour exactly.
 - **BREAKING: edge numbering.** EdgeIds sort the edges by source, cost and destination, ties kept in
   input order, and `input_positions()` maps an EdgeId to its input position. 0.11 sorted by cost,
   source and destination and carried caller-supplied external ids.
-- **BREAKING: zero-capacity edges stay in routing.** Searches, routes, rosters and equal splits keep
-  an edge of capacity 0 (an equal split sends it its share, which is lost): zero capacity alone
-  never excludes an edge. 0.11's equal split left such edges out.
+- **BREAKING: zero-capacity edges stay in routing.** Searches and routes use an edge of capacity 0,
+  a source that reaches a destination only over it still takes part, and an equal split sends it its
+  share, which is lost: zero capacity alone never excludes an edge. 0.11's equal split left such
+  edges out.
 - **BREAKING: distances** are `int64`, with `UNREACHABLE` for a node not reached; 0.11 returned
   `float64` distances with `inf` by default.
-- **BREAKING: failure sensitivity** reports, with its baseline, a signed and exact
-  `delivery_reduction` for every candidate edge, zero and negative values included. 0.11 tested
-  only saturated edges and returned only the reductions above 1/4096.
+- **BREAKING: failure sensitivity** (`evaluate_edge_failures`) reports, with its baseline, a signed
+  and exact `delivery_reduction` for every candidate edge, zero and negative values included. 0.11
+  tested only saturated edges and returned only the reductions above 1/4096.
 - **Worker counts.** Without an explicit `workers`, `evaluate_pairs` and `evaluate_edge_failures`
   take their worker count from `NGRAPH_CORE_BATCH_THREADS` and `NGRAPH_CORE_SENSITIVITY_THREADS`,
   and use 1 when the variable is unset or invalid (0.11: the hardware concurrency); a supplied
@@ -38,32 +39,36 @@ the new behaviour exactly.
 
 ### Added
 
-- **Graph and units**: `Graph`, `Eligibility` (an immutable mask built from excluded node and edge
-  ids), `to_units`, `as_float`.
+- **Graph and units**: `Graph`, `Eligibility` (the nodes and edges a call may use, built from
+  excluded node and edge ids; a failure is an exclusion), `to_units`, `as_float`.
 - **Routes and searches**: `PredecessorDAG` and `Path`; `spf` (forward or reverse, to every node or
-  to the nearest targets, a DAG or one canonical path), `ksp` with exact cost ceilings
-  (`AbsoluteCost`, `CostStretch`) and `resolve_to_paths`; one tie rule, `RouteTieBreak`.
-- **Ledger**: `FlowLedger`, which keeps carried traffic and strict tunnel holds apart, and its
-  `FlowRecord` snapshots.
-- **Policies**: `FlowPolicy`, one demand of several sources and destinations, configured by
-  `FlowPolicyConfig` with one routing model and one admission (`LOSSLESS`, `LOSSY`). The models:
-  `ShortestPaths` (ECMP, WCMP, or a controller restricted to the shortest routes), `DistributedTE`
-  (T1: tunnels set up by their heads), `CentralizedTE` (an ideal controller; with a tunnel count,
-  T2: the controller's equal tunnels) and `Pinned` (forwarding over a given program, repaired under
-  a mask or stale with black holes). Source allocations `EQUAL`, `OPTIMIZED` and `WEIGHTED`. The
-  calls `place`, `evaluate`, `replace` and `forward`, each returning a `PlacementResult`, and
-  `remove`.
+  to the nearest targets, the structure containing every shortest route or one canonical path),
+  `ksp` with exact cost ceilings (`AbsoluteCost`, `CostStretch`) and `resolve_to_paths`;
+  `RouteTieBreak`, the one rule that orders equal-cost choices.
+- **Ledger**: `FlowLedger`, which keeps the traffic each edge carries apart from the bandwidth T1
+  tunnels reserve on it, and its `FlowRecord` snapshots.
+- **Policies**: `FlowPolicy` and `FlowPolicyConfig` route one demand from source nodes to
+  destination nodes with `LOSSLESS` or `LOSSY` admission. Choose `ShortestPaths` (ECMP, WCMP or a
+  controller on shortest routes), `DistributedTE` (T1 in the docs: RSVP-TE-style tunnels set up by
+  each source router), `CentralizedTE` (an ideal controller, optionally with equal-bandwidth
+  tunnels, T2 in the docs) or `Pinned` (replay of a saved program).
+- **Source allocation**: `EQUAL` splits the demand equally between its sources, `OPTIMIZED` lets
+  the controller choose, and `WEIGHTED` follows declared weights.
+- **Policy operations**: `place`, `evaluate`, `replace` and `forward` return a `PlacementResult`;
+  `remove` takes the policy's traffic out.
 - **Forwarding programs**: `ForwardingProgram`, produced by every computing model and built by
   `ForwardingProgram.from_routes` and `ForwardingProgram.from_dag`.
-- **Several demands at once**: `apply_actions` with `Place`, `Replace` and `Forward` actions,
-  `ORDERED`, or `SIMULTANEOUS` with the losses on shared links divided between the demands.
+- **Several demands at once**: `apply_actions` with `Place`, `Replace` and `Forward` actions, one
+  after another (`ORDERED`) or at the same time (`SIMULTANEOUS`) with the losses on shared links
+  divided between the demands.
 - **Shortest-path cache**: `ShortestPathCache`, building or frozen, shared by the evaluators'
   workers.
 - **Evaluators**: `evaluate_demand`, `evaluate_pairs` and `evaluate_edge_failures`, with one
-  `EvaluationOptions` and a finite offer for every model.
-- **Guarantees**: every public call either completes or changes nothing, with two stated limits;
-  native work releases the GIL, placements included, and calls on one ledger take effect one at a
-  time.
+  `EvaluationOptions` and an optional finite offer, which every model accepts.
+- **Guarantees**: every public call either completes or changes nothing, except that running out of
+  memory inside pybind11's own object construction may crash the process, and a supplied
+  shortest-path cache may keep completed entries and lookup statistics; native work releases the
+  GIL, placements included, and calls on one ledger take effect one at a time.
 - **Proofs**: the round-robin rule that splits whole units among members in order, and the
   increments it gives when an offer grows over several calls, have machine-checked Lean proofs of
   their stated properties, explained with worked examples in

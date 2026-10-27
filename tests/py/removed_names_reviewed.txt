@@ -31,9 +31,6 @@ PlacementResult.edge_drops | drops | the epoch's drops on links [(EdgeId, units)
 PredecessorDAG.from_csr | via | len(via_edges); then every parent and via edge in range, eve | the via edge of a DAG entry
 PredecessorDAG.from_csr | via | no duplicate (child, via edge), acyclic; within a node the e | the via edge of a DAG entry
 PredecessorDAG.via_edges | via | int32 via EdgeId per entry (read-only view) | the via edge of a DAG entry
-README.md | Route | ### Route structures | a route or routes (a heading such as 'Route structures' or 'Routes')
-README.md | Route | - **Route choice**: one tie rule, `RouteTieBreak` (`FEWER_HO | a route or routes (a heading such as 'Route structures' or 'Routes')
-README.md | weights | - **`ForwardingProgram`**: the routes and integer weights of | a program entry's integer weight (its share among its head's entries)
 ShortestPaths.edge_weights | weights | the explicit weights (one int per edge, a tuple), or None | WEIGHTED's member weights
 SourceFlow.total_edge_drops | dropped | LOSSY: its units dropped on links; 0 when LOSSLESS | traffic dropped on a link or at a black hole
 Tunnel | planned | planned_bandwidth: T2's planned bandwidth | T2's planned bandwidth
@@ -599,13 +596,6 @@ docs/semantics.md | weights | shares (`SourceAllocation.EQUAL`), highest-average
 CentralizedTE | tunnels | heads and over each head's tunnels; planned bandwidth is nev | a model's tunnels (ForwardingProgram.tunnels is the current name)
 CentralizedTE | tunnels | their share), N single-path tunnels with one common whole-un | a model's tunnels (ForwardingProgram.tunnels is the current name)
 PlacementResult | drops | offer is then the demand's source drops and every row is zer | losses on links or at a source
-README.md | Route | - **Route allocations** (`RouteAllocation`) say how a demand | a route or routes (a heading such as 'Route structures' or 'Routes')
-README.md | tunnels | ([T1](docs/semantics.md#t1-tunnels-set-up-by-their-heads)). | a model's tunnels (ForwardingProgram.tunnels is the current name)
-README.md | tunnels | ([T2](docs/semantics.md#t2-the-controllers-equal-tunnels)). | a model's tunnels (ForwardingProgram.tunnels is the current name)
-README.md | tunnels | lays out N single-path tunnels per head with one common whol | a model's tunnels (ForwardingProgram.tunnels is the current name)
-README.md | tunnels | tunnels by CSPF, as RSVP-TE head ends do, with no controller | a model's tunnels (ForwardingProgram.tunnels is the current name)
-README.md | tunnels | without tunnels: highest-averages shares of declared source | a model's tunnels (ForwardingProgram.tunnels is the current name)
-README.md | weights | without tunnels: highest-averages shares of declared source | the declared source weights of WEIGHTED sources
 docs/semantics.md | Residual | - **Residual.** The free capacity of an edge: in a ledger, i | the term 'Residual' (an edge's free capacity)
 docs/semantics.md | Route | - **Route allocation.** How a demand's traffic is split at e | a route or routes (a heading such as 'Route structures' or 'Routes')
 docs/semantics.md | Route | - **Routes.** At u, the count vectors `x` (the tunnels on ea | a route or routes (a heading such as 'Route structures' or 'Routes')
@@ -649,3 +639,9 @@ PlacementResult | remaining | LOSSY, for an empty roster and for a forwarding wh
 docs/semantics.md | weights | - `forward` solves nothing: it sends its offer over the inst | a program entry's integer weight (its share among its head's entries)
 docs/semantics.md | weights | and a forwarding whose remaining captured source weights are | the captured source weights of a program's injection
 docs/semantics.md | weights | weights** (`source_weights`: every roster source, a zero sup | the captured source weights of a program's injection
+README.md | cost | an integer cost of at least 1. Edges are numbered (their `Ed | an edge's or a path's cost (Path.cost is the current name)
+README.md | cost | the exact maximum flow, its cost curve and its minimum cut), | the marginal cost curve of a solve (marginal_cost_curve is the current name)
+README.md | tunnels | - `DistributedTE` (called T1 in the docs): each source route | a model's tunnels (ForwardingProgram.tunnels is the current name)
+README.md | tunnels | tunnel count (T2), it lays out the same number of single-pat | a model's tunnels (ForwardingProgram.tunnels is the current name)
+README.md | weights | weights (WCMP), or a controller restricted to those paths; | WCMP's integer split weights
+README.md | weights | weights that split traffic over them. `place`, `evaluate`, ` | a program entry's integer weight (its share among its head's entries)
