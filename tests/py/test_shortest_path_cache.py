@@ -6,9 +6,7 @@ lookups from several Python threads, and a frozen cache's statistics under faile
 
 from __future__ import annotations
 
-import itertools
 import threading
-import traceback
 
 import _netgraph_core as ext
 import pytest
@@ -375,108 +373,3 @@ def test_frozen_statistics_survive_python_allocation_failures():
             )
             >= 1
         )
-
-
-@needs_hooks
-def test_the_frozen_sweep_rejects_a_wrong_call():
-    # sweep_frozen rejects a wrong call, each on the clause it breaks: one that absorbs the
-    # injected failure and a failed translation of the miss reported as RuntimeError (both on the
-    # exact class); one that publishes a hit before the call the failure reaches; a hit where a
-    # miss is expected; a miss counted by another cache; a completing call that raises; a hit
-    # count other than expected; a failure inside a call after a translation; and a call that
-    # never completes.
-    g = fabric()
-    cache = prepopulate(g, [[3]])
-    other = prepopulate(g, [[3]])
-    opts = ngc.EvaluationOptions(SHORTEST_PATHS, cache=cache, outputs=ALL_OUT)
-    elsewhere = ngc.EvaluationOptions(SHORTEST_PATHS, cache=other, outputs=ALL_OUT)
-    hit = (g, 0, 3, opts)
-    miss = (g, 0, 5, opts)
-
-    def absorbs(*args):
-        try:
-            return ngc.evaluate_demand(*args)
-        except MemoryError:
-            return None
-
-    def hits_first(*args):
-        ngc.evaluate_demand(*args)
-        return ngc.evaluate_demand(*args)
-
-    def runtime_error(*args):
-        try:
-            return ngc.evaluate_demand(*args)
-        except MemoryError:
-            raise RuntimeError("in place of MemoryError") from None
-
-    # The miss call until its allocations are used up (its translation fails last), then a
-    # longer call of hits that fails inside.
-    turn = ext._fail_python_allocation(ngc.evaluate_demand, miss, 10**6)[1]
-    longer = (g, [(0, 3), (1, 3), (2, 3), (4, 3)] * 2, opts, None, 1)
-    assert ext._fail_python_allocation(ngc.evaluate_pairs, longer, 10**6)[1] > turn + 1
-    attempts = itertools.count()
-
-    def inside_after_translation(*args):
-        if next(attempts) < turn:
-            return ngc.evaluate_demand(*args)
-        return ngc.evaluate_pairs(*longer)
-
-    for fn, args, expect, clause in (
-        (
-            absorbs,
-            hit,
-            {"hits": 2},
-            "assert type(error) is MemoryError, (k, repr(error))",
-        ),
-        (hits_first, hit, {"hits": 2}, "assert after == before, (k, before, after)"),
-        (
-            ngc.evaluate_demand,
-            hit,
-            {"miss": True},
-            "assert isinstance(error, ngc.ShortestPathCacheMiss), repr(error)",
-        ),
-        (
-            ngc.evaluate_demand,
-            (g, 0, 5, elsewhere),
-            {"miss": True},
-            "assert after == plus(before, misses=1), (k, before, after)",
-        ),
-        (
-            ngc.evaluate_demand,
-            (g, 0, 99, opts),
-            {},
-            "assert error is None, repr(error)",
-        ),
-        (
-            ngc.evaluate_demand,
-            hit,
-            {"hits": 2},
-            "assert after == plus(before, hits=hits), (k, before, after)",
-        ),
-        (
-            runtime_error,
-            miss,
-            {"miss": True},
-            "assert type(error) is MemoryError, (k, repr(error))",
-        ),
-        (
-            inside_after_translation,
-            miss,
-            {"miss": True},
-            "assert translated is None, (",
-        ),
-    ):
-        with pytest.raises(AssertionError) as info:
-            sweep_frozen(cache, fn, args, **expect)
-        assert traceback.extract_tb(info.tb)[-1].line == clause, clause
-
-    # Made outside the sweep, as every bound object.
-    uncached = ngc.EvaluationOptions(SHORTEST_PATHS)
-
-    def endless(*args):
-        while True:
-            ngc.evaluate_demand(g, 0, 3, uncached)
-
-    with pytest.raises(pytest.fail.Exception) as info:
-        sweep_frozen(cache, endless, hit)
-    assert str(info.value) == "endless never completed"

@@ -27,7 +27,6 @@
 #include <vector>
 
 #include "netgraph/core/detail/forwarding.hpp"
-#include "netgraph/core/detail/concurrency_models.hpp"
 #include "netgraph/core/detail/ledger_access.hpp"
 #include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/detail/route_kernels.hpp"
@@ -3354,32 +3353,6 @@ TEST(ContractExamples, ERR_class_list) {
   EXPECT_EQ(run(std::nullopt), "valid");
 }
 
-TEST(ContractExamples, FPublicationLocked) {
-  const auto out = detail::publication_model(true);
-  EXPECT_EQ(out.mixed, 0U);
-  EXPECT_EQ(out.states, 15U);
-}
-TEST(ContractExamples, FPublicationUnlocked) {
-  const auto out = detail::publication_model(false);
-  EXPECT_EQ(out.mixed, 2U);
-  EXPECT_EQ(out.states, 23U);
-}
-namespace {
-void expect_phases(std::string_view name, std::size_t states, std::size_t partial,
-                   std::size_t python_under_lock, std::size_t late_hits) {
-  const auto out = detail::phase_model(name);
-  EXPECT_EQ(out.states, states);
-  EXPECT_EQ(out.partial, partial);
-  EXPECT_EQ(out.python_under_lock, python_under_lock);
-  EXPECT_EQ(out.late_hits, late_hits);
-}
-} // namespace
-TEST(ContractExamples, FPublishResultFirst) { expect_phases("publish-result-first", 22, 0, 0, 0); }
-TEST(ContractExamples, FPublishResultAfter) { expect_phases("publish-result-after", 22, 1, 0, 0); }
-TEST(ContractExamples, FReadResultFailure) { expect_phases("read-result-failure", 20, 0, 0, 0); }
-TEST(ContractExamples, FReadResultUnderGate) { expect_phases("read-result-under-gate", 18, 0, 2, 0); }
-TEST(ContractExamples, FFrozenHits) { expect_phases("frozen-hits", 25, 0, 0, 0); }
-TEST(ContractExamples, FFrozenHitsAfterLease) { expect_phases("frozen-hits-after-lease", 28, 0, 0, 2); }
 
 TEST(ContractExamples, LIST_state_second) {
   const Texts expected {

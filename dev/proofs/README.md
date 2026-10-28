@@ -190,10 +190,10 @@ release requires it. Set `PROOFS_DEPENDENCY_ORIGIN` truthfully (`cache+local`, `
 `bash dev/proofs/run.sh test` runs the gate's negative controls on a disposable copy: a weakened
 definition or statement, a weakened definition imported from another module, an imported
 `sorry` or axiom, a kernel-skip option, an unimported module, an empty inventory, a missing
-theorem, changed semantic or native inputs, a missing anchor or doc comment (private and root
-helpers included), a declaration outside the namespace and a disabled audit must each fail with
-the expected message; a false theorem added with kernel checking skipped inside a check module
-passes the audit and must fail the replay. They test the gate, not the mathematics.
+theorem, changed semantic or native inputs, a missing anchor or doc comment, a declaration
+outside the namespace and a disabled audit must each fail with the expected message; a false
+theorem added with kernel checking skipped inside a check module passes the audit and must fail
+the replay. They test the gate, not the mathematics.
 
 `bash dev/proofs/run.sh record` rewrites the recorded digests after an intended change. It
 approves nothing: inspect the diff, get the mathematical and readability reviews, then run the

@@ -83,7 +83,6 @@ HOOK_FUNCTIONS = {
     "_ConcurrencyProbe",
     "_at_native_exit",
     "_PlacementTrace",
-    "_concurrency_model",
     "_fail_python_allocation",
     "_fail_native_allocation",
     "_with_forwarding_limits",

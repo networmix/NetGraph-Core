@@ -17,7 +17,6 @@
 #include <vector>
 
 #include "netgraph/core/detail/concurrency.hpp"
-#include "netgraph/core/detail/concurrency_models.hpp"
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/shortest_path_cache.hpp"
@@ -178,21 +177,6 @@ void register_concurrency_hooks(py::module_& m) {
     }
     (void)state.release();
   });
-  m.def("_concurrency_model", [](const std::string& name) {
-    py::dict out;
-    if (name == "publication-locked" || name == "publication-unlocked") {
-      const auto result = detail::publication_model(name == "publication-locked");
-      out["states"] = result.states;
-      out["mixed"] = result.mixed;
-    } else {
-      const auto result = detail::phase_model(name);
-      out["states"] = result.states;
-      out["partial"] = result.partial;
-      out["python_under_lock"] = result.python_under_lock;
-      out["late_hits"] = result.late_hits;
-    }
-    return out;
-  }, py::arg("protocol"));
 }
 } // namespace netgraph::core::bindings
 #endif

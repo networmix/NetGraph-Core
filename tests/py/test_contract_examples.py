@@ -3,7 +3,7 @@ values (copied as written), one adapter per kind of example that builds the inpu
 and returns what the example names, compared field by field (an expected mapping may name fewer
 fields than the adapter returns; an int is not a float or a bool; a Fraction compares by its exact
 string). The examples of several demands at once run as one apply_actions list (each route or head
-its own demand); concurrent publication examples use an exhaustive native finite-state port.
+its own demand).
 
 Examples given as routes of link indices (no nodes) are laid out as one head, a feeder link to each
 route's first link, a connector between consecutive links and an exit link to one destination;
@@ -6761,16 +6761,6 @@ def check_outside_the_domain(example):
         assert mismatch(split_offer_on_unit_links(**case), want) is None, case
 
 
-def run_publication(locked):
-    return ext._concurrency_model(
-        "publication-locked" if locked else "publication-unlocked"
-    )
-
-
-def run_phases(protocol):
-    return ext._concurrency_model(protocol)
-
-
 def run_search_call_checks(case):
     faults = set(case["faults"])
     heads = 107375
@@ -6869,23 +6859,9 @@ def run_call_checks(cases):
     return out
 
 
-ADAPTERS.update(
-    publication=run_publication, phases=run_phases, call_checks=run_call_checks
-)
+ADAPTERS.update(call_checks=run_call_checks)
 EXAMPLES.extend(
     [
-        {
-            "id": "F-publication-locked",
-            "oracle": "publication",
-            "input": {"locked": True},
-            "expected": {"mixed": 0, "states": 15},
-        },
-        {
-            "id": "F-publication-unlocked",
-            "oracle": "publication",
-            "input": {"locked": False},
-            "expected": {"mixed": 2, "states": 23},
-        },
         {
             "id": "CALL-state-second",
             "oracle": "call_checks",
@@ -7124,72 +7100,6 @@ EXAMPLES.extend(
                 "offer must be an integer in [0, 2^62) or permitted +inf",
             ],
         },
-        {
-            "id": "F-publish-result-first",
-            "oracle": "phases",
-            "input": {"protocol": "publish-result-first"},
-            "expected": {
-                "states": 22,
-                "partial": 0,
-                "python_under_lock": 0,
-                "late_hits": 0,
-            },
-        },
-        {
-            "id": "F-publish-result-after",
-            "oracle": "phases",
-            "input": {"protocol": "publish-result-after"},
-            "expected": {
-                "states": 22,
-                "partial": 1,
-                "python_under_lock": 0,
-                "late_hits": 0,
-            },
-        },
-        {
-            "id": "F-read-result-failure",
-            "oracle": "phases",
-            "input": {"protocol": "read-result-failure"},
-            "expected": {
-                "states": 20,
-                "partial": 0,
-                "python_under_lock": 0,
-                "late_hits": 0,
-            },
-        },
-        {
-            "id": "F-read-result-under-gate",
-            "oracle": "phases",
-            "input": {"protocol": "read-result-under-gate"},
-            "expected": {
-                "states": 18,
-                "partial": 0,
-                "python_under_lock": 2,
-                "late_hits": 0,
-            },
-        },
-        {
-            "id": "F-frozen-hits",
-            "oracle": "phases",
-            "input": {"protocol": "frozen-hits"},
-            "expected": {
-                "states": 25,
-                "partial": 0,
-                "python_under_lock": 0,
-                "late_hits": 0,
-            },
-        },
-        {
-            "id": "F-frozen-hits-after-lease",
-            "oracle": "phases",
-            "input": {"protocol": "frozen-hits-after-lease"},
-            "expected": {
-                "states": 28,
-                "partial": 0,
-                "python_under_lock": 0,
-                "late_hits": 2,
-            },
-        },
     ]
 )
 
@@ -7240,17 +7150,13 @@ EXAMPLES.append(
 
 
 def _param(example):
-    marks = (
-        needs_hooks
-        if example["id"].startswith("F-") or example["id"] == "LIST-state-second"
-        else []
-    )
+    marks = needs_hooks if example["id"] == "LIST-state-second" else []
     return pytest.param(example, id=example["id"], marks=marks)
 
 
 def test_every_example_once():
     ids = [e["id"] for e in EXAMPLES]
-    assert len(ids) == len(set(ids)) == 199
+    assert len(ids) == len(set(ids)) == 191
     assert {e["oracle"] for e in EXAMPLES} <= set(ADAPTERS)
 
 

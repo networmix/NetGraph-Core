@@ -139,6 +139,7 @@ check:
 
 # The fixture data check: tests/data/policy_fixtures.json still equals what its frozen reference
 # computes (tests/reference/policy/README.md; standard library only; -B writes no __pycache__).
+# Other interpreters in tests.yml repeat the non-C++ lines below; add new lines in both.
 check-ci:
 	@$(MAKE) lint
 	@$(PYTHON) -I -B tests/reference/policy/export_policy_fixtures.py --check

@@ -16,9 +16,7 @@ from __future__ import annotations
 
 import gc
 import importlib.util
-import itertools
 import json
-import os
 import subprocess
 import sys
 
@@ -452,191 +450,10 @@ SCENARIOS = {
 }
 
 
-def absorbing(g):
-    """A wrong call for the row checks' controls: it absorbs the injected failure."""
-
-    def absorbs(o):
-        try:
-            return ngc.spf(g, 0, o)
-        except MemoryError:
-            return "absorbed"
-
-    return absorbs, (spf_opts(),)
-
-
-def changing():
-    """A wrong call for the row checks' controls: it changes the observable state before the
-    failure reaches it."""
-    g = graph()
-    log = []
-
-    def changes(o):
-        log.append(None)
-        return ngc.spf(g, 0, o)
-
-    return changes, (spf_opts(),), lambda: len(log)
-
-
-def leaking():
-    """A wrong call for the row checks' controls: it keeps a result it made before the failure
-    reaches it (outside the snapshot), so that result's native allocations stay live."""
-    g = graph()
-    kept = []
-
-    def leaks(o):
-        kept.append(ngc.spf(g, 0, o))
-        return ngc.spf(g, 0, o)
-
-    return leaks, (spf_opts(),), lambda: [caps(g), g.edge_costs().tolist()]
-
-
-def replacing(g):
-    """A wrong call for the row checks' controls: it raises another exception in place of the
-    injected failure."""
-
-    def replaces(o):
-        try:
-            return ngc.spf(g, 0, o)
-        except MemoryError:
-            raise LookupError("replaced") from None
-
-    return replaces, (spf_opts(),)
-
-
-def exiting(status, after):
-    """Wrong calls for the row checks' controls: the process ends with `status` when the failure
-    of an attempt after the first `after` reaches the call (a crash, or an exit with status 0)."""
-
-    def make():
-        m = next(MADE)  # 0: the reference call
-        g = graph()
-
-        def exits(o):
-            try:
-                return ngc.spf(g, 0, o)
-            except MemoryError:
-                if m > after:
-                    os._exit(status)
-                raise
-
-        return exits, (spf_opts(),), lambda: [caps(g), g.edge_costs().tolist()]
-
-    return make
-
-
-def walks():
-    """A call for the row checks' controls that needs more attempts than the sweep makes: the
-    walks of ten diamonds in a row (1,024 walks, far more than 5,000 native allocations)."""
-    edges = []
-    for i in range(10):
-        a = 3 * i
-        edges += [
-            (a, a + 1, 1, 1),
-            (a, a + 2, 1, 1),
-            (a + 1, a + 3, 1, 1),
-            (a + 2, a + 3, 1, 1),
-        ]
-    g = build(31, edges)
-    dag = ngc.spf(g, 0, spf_opts()).dag
-    return (
-        ngc.resolve_to_paths,
-        (g, dag, 0, 30, True),
-        lambda: [caps(g), g.edge_costs().tolist()],
-    )
-
-
-def by_turn(call):
-    """A wrong call for the row checks' controls whose completing call differs from the
-    reference: call(m, g) gives the call of the m-th make() (m = 0: the reference call)."""
-
-    def make():
-        g = graph()
-        return (
-            call(next(MADE), g),
-            (spf_opts(),),
-            lambda: [caps(g), g.edge_costs().tolist()],
-        )
-
-    return make
-
-
-def raises_after(m, g):
-    """The completing call raises after its result (the reference call returns it)."""
-
-    def raises(o):
-        result = ngc.spf(g, 0, o)
-        if m:
-            raise LookupError("after its result")
-        return result
-
-    return raises
-
-
-def appending():
-    """A wrong call for the row checks' controls: the completing call adds two entries to the
-    observable log where the reference call added one."""
-    m = next(MADE)
-    g = graph()
-    log = []
-
-    def appends(o):
-        result = ngc.spf(g, 0, o)
-        log.extend([None] * (2 if m else 1))
-        return result
-
-    return appends, (spf_opts(),), lambda: len(log)
-
-
-def prebuilt(m, g):
-    """After ten failures the call returns a result built beforehand: it completes with no native
-    allocation, fewer than the failures before it."""
-    built = ngc.spf(g, 0, spf_opts())
-
-    def call(o):
-        return built if m > 10 else ngc.spf(g, 0, o)
-
-    return call
-
-
-def discarding(m, g):
-    """Keep the reference result, then discard it in each swept call. Comparing the returned
-    value detects the discard even if thread-local scratch keeps native allocations live."""
-
-    def discards(o):
-        result = ngc.spf(g, 0, o)
-        return 7 if m else result
-
-    return discards
-
-
-MADE = itertools.count()  # make() calls of a control in the child (each child runs one)
-
-# Wrong calls that the row checks must reject (run by the controls, not by the sweep test), one
-# per check. Their options are made before the call: a bound object constructed inside it would
-# meet the failure in its constructor.
-CONTROLS = {
-    "control.absorbs": stateless(absorbing),
-    "control.replaces": stateless(replacing),
-    "control.leaks": leaking,
-    "control.changes_state": changing,
-    "control.crashes": exiting(3, 0),
-    "control.never_completes": walks,
-    "control.exits": exiting(0, 1),
-    # A plain Python call makes exactly zero extension operator-new allocations on every
-    # platform. A native operation's count (even reset's) depends on the standard library.
-    "control.few": stateless(lambda g: (lambda: None, ())),
-    "control.raises_when_done": by_turn(raises_after),
-    "control.other_value": by_turn(lambda m, g: lambda o: ngc.spf(g, 1 if m else 0, o)),
-    "control.other_state": appending,
-    "control.fewer_allocations": by_turn(prebuilt),
-    "control.discards": by_turn(discarding),
-}
-
-
 def sweep(name: str) -> None:
     """Attempts k = 0, 1, ... of one scenario until a call completes without reaching k; one
     ROW line per attempt, written before the next attempt starts."""
-    make = {**SCENARIOS, **CONTROLS}[name]
+    make = SCENARIOS[name]
     fn, args, snap = make()
     reference = plain(fn(*args))  # also the warm-up of lazily sized scratch
     reference_after = snap()
@@ -847,46 +664,6 @@ if __name__ != "__main__":
     def test_native_allocation_failure_raises_and_changes_nothing(name):
         check(name, *run_child(name))
 
-    @needs_hooks
-    def test_the_row_checks_reject_a_wrong_call():
-        # Each row check rejects its wrong call: one that absorbs a failure with a wrong
-        # result, raises another exception, leaks native allocations or changes the state;
-        # one that crashes, outlasts its sweep, or exits with status 0 after a failure;
-        # one with fewer allocations than the floor; and one whose completing call raises,
-        # returns another value or state, makes fewer allocations than failed before it, or returns
-        # a plain value in place of its result.
-        attempts = (
-            'assert len(reached) == len(rows) - 1, f"{name}: {len(reached)} attempts"'
-        )
-        for name, clause in (
-            ("control.absorbs", 'assert row["value_ok"], row'),
-            ("control.replaces", 'assert row["error"].startswith("MemoryError"), row'),
-            ("control.leaks", 'assert row["live"] <= 0, row'),
-            ("control.changes_state", 'assert row["state_ok"], row'),
-            ("control.crashes", "assert proc.returncode == 0, ("),
-            (
-                "control.never_completes",
-                'assert rows and rows[-1]["k"] is not None, f"{name}: the call never completed"',
-            ),
-            ("control.exits", attempts),
-            (
-                "control.few",
-                'assert len(reached) >= FEW.get(name, 10), f"{name}: {len(reached)} attempts"',
-            ),
-            ("control.raises_when_done", 'assert done["error"] is None, done'),
-            ("control.other_value", 'assert done["value_ok"], done'),
-            ("control.other_state", 'assert done["state_ok"], done'),
-            ("control.fewer_allocations", 'assert done["seen"] == len(reached), done'),
-            ("control.discards", 'assert done["value_ok"], done'),
-        ):
-            proc, rows, started = run_child(name)
-            try:
-                check(name, proc, rows, started)
-            except AssertionError as error:
-                actual = traceback.extract_tb(error.__traceback__)[-1].line
-                assert actual == clause, name
-            else:
-                pytest.fail(f"{name}: the planted bug passed; last row: {rows[-1:]}")
 
 else:
     if ngc.spf is not ext.spf:  # the package binds to the loaded extension

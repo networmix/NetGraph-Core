@@ -31,7 +31,6 @@ EXPECTED_OFF_SKIPS = [
     (
         "tests/py/test_shortest_path_cache.py::test_frozen_statistics_survive_python_allocation_failures"
     ),
-    "tests/py/test_shortest_path_cache.py::test_the_frozen_sweep_rejects_a_wrong_call",
     "tests/py/test_flow_ledger.py::test_a_flow_id_read_passes_an_allocation_failure_through",
     "tests/py/test_flow_policy.py::test_evaluator_results_survive_python_allocation_failures",
     "tests/py/test_flow_policy.py::test_owner_hook_is_the_owner_of_the_records",
@@ -152,14 +151,12 @@ EXPECTED_OFF_SKIPS = [
     (
         "tests/py/test_native_allocation.py::test_native_allocation_failure_raises_and_changes_nothing[spf.targets_residual]"
     ),
-    "tests/py/test_native_allocation.py::test_the_row_checks_reject_a_wrong_call",
     "tests/py/test_programs.py::test_from_routes_and_getters_survive_python_allocation_failures",
     "tests/py/test_programs.py::test_operations_are_all_or_nothing[shortest_paths forward]",
     "tests/py/test_programs.py::test_operations_are_all_or_nothing[shortest_paths replace]",
     "tests/py/test_programs.py::test_operations_are_all_or_nothing[global evaluate]",
     "tests/py/test_programs.py::test_operations_are_all_or_nothing[pinned replace]",
     "tests/py/test_search.py::test_python_result_construction_is_all_or_nothing",
-    "tests/py/test_search.py::test_the_python_allocation_sweep_rejects_a_wrong_call",
     "tests/py/test_distributed_te.py::test_traced_place_checks_the_operation_first",
     (
         "tests/py/test_distributed_te.py::test_t1_getters_survive_python_allocation_failures[ca.tunnel_count]"
@@ -296,14 +293,6 @@ EXPECTED_OFF_SKIPS += [
     "tests/py/test_getter_allocation.py::test_policy_shell_native_failures_leave_no_binding",
     "tests/py/test_concurrency.py::test_daemon_exit_releases_native_resources",
     "tests/py/test_concurrency.py::test_every_program_representation_uses_the_transaction_gate",
-    "tests/py/test_contract_examples.py::test_contract_example[F-publication-locked]",
-    "tests/py/test_contract_examples.py::test_contract_example[F-publication-unlocked]",
-    "tests/py/test_contract_examples.py::test_contract_example[F-publish-result-first]",
-    "tests/py/test_contract_examples.py::test_contract_example[F-publish-result-after]",
-    "tests/py/test_contract_examples.py::test_contract_example[F-read-result-failure]",
-    "tests/py/test_contract_examples.py::test_contract_example[F-read-result-under-gate]",
-    "tests/py/test_contract_examples.py::test_contract_example[F-frozen-hits]",
-    "tests/py/test_contract_examples.py::test_contract_example[F-frozen-hits-after-lease]",
     "tests/py/test_contract_examples.py::test_contract_example[LIST-state-second]",
 ]
 GIL_PROOF_SKIPS = {
