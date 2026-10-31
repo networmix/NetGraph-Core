@@ -1,7 +1,8 @@
 """The documented examples print what the documents show (CONTRIBUTING, "Behaviour
 Documentation"): every Python example of docs/semantics.md, run in order in one namespace as the
 document says, against the ``text`` block that follows it (an example without one prints
-nothing), and README's quick start against the output written in the comment of each print."""
+nothing), and the Python blocks of README's quick start against the output written in the comment
+of each print."""
 
 from __future__ import annotations
 
@@ -88,19 +89,30 @@ def check_examples(text: str, name: str) -> tuple[int, int]:
 
 
 def check_quick_start(text: str) -> int:
-    """Runs README's quick start (the first fenced block after its heading, a Python block) and
-    compares every line it prints with the comment of its print. Returns the prints compared."""
+    """Runs the Python blocks of README's quick start (its heading up to the next ``## ``
+    heading; its other blocks are ``text`` pictures) in order in one namespace, and compares
+    every line each block prints with the comment of its print. Returns the prints compared."""
     heading = text.index("\n## Quick Start\n")
-    line, lang, code, *_ = next(b for b in blocks(text) if b[3] > heading)
-    assert lang == "python", f"README.md:{line}: the quick start is not a Python block"
-    prints = [ln for ln in code.splitlines() if ln.startswith("print(")]
-    expected = [re.fullmatch(r"print\(.*\)\s+# (.*)", ln) for ln in prints]
-    assert prints and all(expected), (
-        f"README.md:{line}: a print without its output comment"
-    )
-    got = run(code, f"README.md:{line}", {}).splitlines()
-    assert got == [m.group(1) for m in expected if m]
-    return len(prints)
+    end = text.find("\n## ", heading + 1)
+    section = [
+        b for b in blocks(text) if heading < b[3] < (len(text) if end < 0 else end)
+    ]
+    langs = {lang for _, lang, *_ in section}
+    assert "python" in langs and langs <= {"python", "text"}, "the quick start's blocks"
+    namespace: dict = {}
+    compared = 0
+    for line, lang, code, *_ in section:
+        if lang != "python":
+            continue
+        prints = [ln for ln in code.splitlines() if ln.startswith("print(")]
+        expected = [re.fullmatch(r"print\(.*\)\s+# (.*)", ln) for ln in prints]
+        assert prints and all(expected), (
+            f"README.md:{line}: a print without its output comment"
+        )
+        got = run(code, f"README.md:{line}", namespace).splitlines()
+        assert got == [m.group(1) for m in expected if m]
+        compared += len(prints)
+    return compared
 
 
 def test_semantics_examples_print_their_documented_output():
@@ -179,20 +191,23 @@ def test_the_checks_reject_a_broken_document():
         with pytest.raises(AssertionError) as info:
             check_examples(text, what)
         assert traceback.extract_tb(info.tb)[-1].line == clause, what
-    quick = "# Title\n\n## Quick Start\n\n```python\nprint(1 + 1)  # 2\n```\n"
-    assert check_quick_start(quick) == 1
+    second = "```python\nx = 3\nprint(x + 1)  # 4\n```\n"
+    quick = (
+        "# Title\n\n## Quick Start\n\n```text\nA-B\n```\n\n```python\nprint(1 + 1)  # 2\n```\n"
+        f"\n### More\n\n{second}\n## Next\n\n```bash\nmake\n```\n"
+    )
+    assert check_quick_start(quick) == 2
     commented = "assert prints and all(expected), ("
+    wrong = "assert got == [m.group(1) for m in expected if m]"
+    langs = 'assert "python" in langs and langs <= {"python", "text"}, "the quick start\'s blocks"'
     for text, clause in (
-        (
-            quick.replace("# 2", "# 3"),  # a wrong output comment
-            "assert got == [m.group(1) for m in expected if m]",
-        ),
+        (quick.replace("# 2", "# 3"), wrong),  # a wrong output comment
+        (quick.replace("# 4", "# 5"), wrong),  # a wrong output comment in a later block
         (quick.replace("  # 2", ""), commented),  # a print without its comment
         (quick.replace("print(1 + 1)  # 2", "x = 1"), commented),  # no print at all
-        (
-            quick.replace("```python", "```bash"),  # the quick start not a Python block
-            'assert lang == "python", f"README.md:{line}: the quick start is not a Python block"',
-        ),
+        # The quick start has no Python block; a later block is in another language.
+        (quick.replace("```python", "```bash"), langs),
+        (quick.replace("```python\nx", "```py\nx"), langs),
     ):
         with pytest.raises(AssertionError) as info:
             check_quick_start(text)
