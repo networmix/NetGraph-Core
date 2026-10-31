@@ -310,7 +310,7 @@ TEST(ShortestPaths, RejectsMaskLengthMismatch) {
 // (both relaxations see an "equal cost" path), producing a cyclic PredDAG.
 // EqualBalanced placement then stalled (returned 0 flow) and path enumeration
 // walked the cycle forever. Equal-cost predecessors are now only accepted while
-// the child is unsettled, which keeps the DAG acyclic by settle order.
+// the child is unsettled, except at terminals, which cannot close a cycle.
 TEST(ShortestPaths, ZeroCostEdges_PredDAGIsAcyclic) {
   std::int32_t src_arr[4] = {0, 1, 2, 2};
   std::int32_t dst_arr[4] = {1, 2, 1, 3};
@@ -442,6 +442,24 @@ TEST(ShortestPathsTo, FanoutFromInteriorNodeIsRejected) {
   EdgeId bad[1] = {99};
   EXPECT_THROW((void)shortest_paths_to(g, 4, true, cost_only_sel(), {}, {}, {}, std::span<const EdgeId>(bad, 1)),
                std::invalid_argument);
+
+  // u=0 settles via its wide direct route before x=1. The tied u->x entry
+  // arrives later; it must still prevent a forced fanout edge from leaving x.
+  std::vector<NodeId> src{0, 0, 1, 2, 1}, dst{1, 3, 3, 3, 2};
+  std::vector<Cap> cap{10, 100, 10, 10, 10};
+  std::vector<Cost> cost{0, 1, 1, 1, 5};
+  auto tied = StrictMultiDiGraph::from_arrays(4, src, dst, cap, cost);
+  EdgeId late_fan[1] = {4};  // x->y, the only cost-5 edge after compaction
+  for (auto q : {SpfQueue::Heap, SpfQueue::Bucket}) {
+    auto [dist, dag] = shortest_paths_to(tied, 3, true, cost_only_sel(), {}, {}, {}, {}, q);
+    EXPECT_EQ(dist, (std::vector<Cost>{1, 1, 1, 0}));
+    ASSERT_EQ(dag.parent_offsets[2] - dag.parent_offsets[1], 1);
+    const auto entry = static_cast<std::size_t>(dag.parent_offsets[1]);
+    EXPECT_EQ(dag.parents[entry], 0);
+    EXPECT_EQ(dag.via_edges[entry], 0);  // u->x, the only cost-0 edge
+    EXPECT_THROW((void)shortest_paths_to(tied, 3, true, cost_only_sel(), {}, {}, {},
+                                       std::span<const EdgeId>(late_fan, 1), q), std::invalid_argument);
+  }
 }
 
 TEST(ShortestPathsTo, SinglePathModeKeepsOneSuccessorPerNode) {
@@ -697,5 +715,109 @@ TEST(ShortestPaths, WorkspaceReuseAcrossGraphSizesAndEmptyGraphs) {
     for (auto dv : m.first) EXPECT_EQ(dv, std::numeric_limits<Cost>::max());
     auto s3 = shortest_paths(small.g, 1, std::nullopt, true, sel, small.residual, small.nm(), small.em(), q);
     EXPECT_TRUE(same_result(s1, s3));
+  }
+}
+
+namespace {
+// A terminal at 3 is reached first through the wider branch at 1. Transposing
+// the graph gives exactly the same tie in reverse search (toward node 0).
+StrictMultiDiGraph terminal_tie_graph(bool reverse, bool onward = false,
+                                    Cap onward_cap = 1, bool self_loop = false) {
+  std::vector<NodeId> src{0, 0, 1, 2}, dst{1, 2, 3, 3};
+  std::vector<Cap> caps{10, 8, 1000, 1000};
+  std::vector<Cost> costs{1, 1, 0, 0};
+  std::vector<std::int64_t> ext{0, 1, 2, 3};
+  if (onward) {
+    src.push_back(3); dst.push_back(self_loop ? 3 : 4);
+    caps.push_back(onward_cap); costs.push_back(0); ext.push_back(4);
+  }
+  if (reverse) src.swap(dst);
+  return StrictMultiDiGraph::from_arrays(5, src, dst, caps, costs, ext);
+}
+
+std::vector<std::int64_t> external_entries(const StrictMultiDiGraph& g, const PredDAG& dag) {
+  std::vector<std::int64_t> out;
+  for (auto e : dag.via_edges) out.push_back(g.ext_edge_ids_view()[static_cast<std::size_t>(e)]);
+  return out;
+}
+} // namespace
+
+TEST(ShortestPaths, TerminalTieHasEveryParentInBothQueuesAndDirections) {
+  for (bool reverse : {false, true}) {
+    auto g = terminal_tie_graph(reverse);
+    for (auto q : {SpfQueue::Heap, SpfQueue::Bucket, SpfQueue::Auto}) {
+      for (bool multipath : {true, false}) {
+        for (bool early : {false, true}) {
+          auto result = reverse
+              ? shortest_paths_to(g, 0, multipath, cost_only_sel(), {}, {}, {}, {}, q)
+              : shortest_paths(g, 0, early ? std::optional<NodeId>(3) : std::nullopt,
+                               multipath, cost_only_sel(), {}, {}, {}, q);
+          EXPECT_EQ(result.first, (std::vector<Cost>{0, 1, 1, 1, std::numeric_limits<Cost>::max()}));
+          const auto& dag = result.second;
+          if (reverse) {
+            EXPECT_EQ(dag.parent_offsets, (std::vector<std::int32_t>{0, 2, 3, multipath ? 4 : 3, multipath ? 4 : 3, multipath ? 4 : 3}));
+            EXPECT_EQ(dag.parents, multipath ? (std::vector<NodeId>{1, 2, 3, 3}) : (std::vector<NodeId>{1, 2, 3}));
+          } else {
+            EXPECT_EQ(dag.parent_offsets, (std::vector<std::int32_t>{0, 0, 1, 2, multipath ? 4 : 3, multipath ? 4 : 3}));
+            EXPECT_EQ(dag.parents, multipath ? (std::vector<NodeId>{0, 0, 1, 2}) : (std::vector<NodeId>{0, 0, 1}));
+          }
+          EXPECT_EQ(external_entries(g, dag), multipath ? (std::vector<std::int64_t>{0, 1, 2, 3}) : (std::vector<std::int64_t>{0, 1, 2}));
+          auto paths = resolve_to_paths(dag, reverse ? 3 : 0, reverse ? 0 : 3);
+          ASSERT_EQ(paths.size(), multipath ? 2u : 1u);
+          for (std::size_t k = 0; k < paths.size(); ++k) {
+            ASSERT_EQ(paths[k].size(), 3u);
+            EXPECT_EQ(paths[k][0].first, reverse ? 3 : 0);
+            EXPECT_EQ(paths[k][1].first, static_cast<NodeId>(k + 1));
+            EXPECT_EQ(paths[k][2].first, reverse ? 0 : 3);
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(ShortestPaths, TerminalClassificationUsesMasksAndCapacityAndIsReset) {
+  for (bool reverse : {false, true}) {
+    for (auto q : {SpfQueue::Heap, SpfQueue::Bucket}) {
+      // Alternate nonterminal/terminal repeatedly on graphs of the same size.
+      // A static-zero edge stays eligible for cost-only search. Nonempty
+      // residuals force capacity filtering even if selection says otherwise.
+      for (int repeat = 0; repeat < 2; ++repeat) {
+        for (int mode : {0, 1, 0, 2, 3, 4, 5, 6, 7, 8, 9}) {
+          const bool self = mode == 8;
+          auto g = terminal_tie_graph(reverse, true, mode == 3 || mode == 4 ? 0 : 1, self);
+          auto nm = make_bool_mask(5);
+          auto em = make_bool_mask(static_cast<std::size_t>(g.num_edges()));
+          std::vector<Cap> residual;
+          auto sel = cost_only_sel();
+          for (EdgeId e = 0; e < g.num_edges(); ++e) {
+            if (g.ext_edge_ids_view()[static_cast<std::size_t>(e)] == 4) {
+              if (mode == 1) em[static_cast<std::size_t>(e)] = false;
+              if (mode >= 5 && mode <= 7) {
+                residual.assign(g.capacity_view().begin(), g.capacity_view().end());
+                residual[static_cast<std::size_t>(e)] = mode == 5 ? 0 : mode == 6 ? kMinCap : kMinCap / 2;
+              }
+            }
+            // Candidate parent itself must obey its edge mask too.
+            if (mode == 9 && g.ext_edge_ids_view()[static_cast<std::size_t>(e)] == 3) em[static_cast<std::size_t>(e)] = false;
+          }
+          if (mode == 2) nm[4] = false;
+          if (mode == 4) sel.require_capacity = true;
+          const bool terminal = mode == 1 || mode == 2 || mode == 4 || mode == 5 || mode == 7;
+          for (bool early : {false, true}) {
+            auto result = reverse
+                ? shortest_paths_to(g, 0, true, sel, residual, {nm.get(), 5}, {em.get(), static_cast<std::size_t>(g.num_edges())}, {}, q)
+                : shortest_paths(g, 0, early ? std::optional<NodeId>(3) : std::nullopt, true, sel, residual,
+                                 {nm.get(), 5}, {em.get(), static_cast<std::size_t>(g.num_edges())}, q);
+            EXPECT_EQ(result.first[3], 1);
+            auto ext = external_entries(g, result.second);
+            EXPECT_EQ(std::count(ext.begin(), ext.end(), 2), 1);
+            EXPECT_EQ(std::count(ext.begin(), ext.end(), 3), terminal ? 1 : 0)
+                << "reverse=" << reverse << " mode=" << mode;
+            EXPECT_EQ(resolve_to_paths(result.second, reverse ? 3 : 0, reverse ? 0 : 3).size(), terminal ? 2u : 1u);
+          }
+        }
+      }
+    }
   }
 }

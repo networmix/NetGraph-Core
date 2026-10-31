@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Flow Placement**: Equal-balanced placements retain zero-capacity route edges in their equal split: lossless admission is blocked and lossy placement records the share dropped on the zero edge.
 - **Flow Policy**: Lossy calls send their whole volume afresh, split equally over the usable pinned bundles or the seeded records (each once, also with `shortest_path=true`; no records are added up to `max_flow_count`), without source-capacity clipping or subtracting earlier delivery; explicit targets and lossless placement are unchanged.
+- **Shortest Paths**: Multipath searches keep every equal-cost parent of a node that has no usable onward edge, even after the node is settled, so a destination set behind a cost-0 pseudo sink keeps all equally near destinations: lossy `combine`, cost-only ECMP max-flow and sensitivity split over all of them. Single-path searches and other nodes are unchanged.
 
 ## [0.11.0] - 2026-10-02
 

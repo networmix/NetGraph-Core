@@ -267,6 +267,29 @@ namespace {
 constexpr Cost kInf = std::numeric_limits<Cost>::max();
 constexpr std::size_t kMaxBucketWidth = std::size_t{1} << 16;
 
+// Nonzero settled states cache terminal classification only within one search.
+constexpr char kSettled = 1, kTerminal = 2, kNonterminal = 3;
+
+bool is_terminal(char& state, NodeId node,
+                 std::span<const std::int32_t> row, std::span<const NodeId> col,
+                 std::span<const EdgeId> aei, std::span<const Cap> capacity,
+                 std::span<const Cap> residual, std::span<const bool> node_mask,
+                 std::span<const bool> edge_mask, bool require_cap) {
+  if (state != kSettled) return state == kTerminal;
+  const auto n = static_cast<std::size_t>(node);
+  for (auto j = row[n]; j < row[n + 1]; ++j) {
+    const auto e = static_cast<std::size_t>(aei[static_cast<std::size_t>(j)]);
+    if (!node_mask.empty() && !node_mask[static_cast<std::size_t>(col[static_cast<std::size_t>(j)])]) continue;
+    if (!edge_mask.empty() && !edge_mask[e]) continue;
+    const Cap rem = residual.empty() ? capacity[e] : residual[e];
+    if (require_cap && rem < kMinCap) continue;
+    state = kNonterminal;
+    return false;
+  }
+  state = kTerminal;
+  return true;
+}
+
 using QItem = std::tuple<Cost, Cap, NodeId>;
 
 // Reference queue: binary heap on (cost, -bottleneck, node). Keys are unique per
@@ -462,7 +485,9 @@ void drop(Vec& v) { Vec fresh; v.swap(fresh); }
 
 // Forward search scratch. Invariant between searches: dist == kInf,
 // min_res == 0, pred_head/pred_tail == -1, pred_count == 0, settled == 0 for
-// every node; the entry arrays, touched list and queues are empty.
+// every node; the entry arrays, touched list and queues are empty. During a
+// search, settled is kSettled until a zero-cost late tie classifies that node
+// as kTerminal or kNonterminal. All three states mean settled.
 //
 // Retention: the node arrays are sized to the current graph and released when
 // a graph less than a quarter the size is searched; at that point the entry
@@ -635,10 +660,12 @@ void run_forward(Queue& pq, ForwardWorkspace& ws, const StrictMultiDiGraph& g, N
   const NodeId dst_node = dst.value_or(-1);
 
   // settled[v] is set once v is popped at its final distance. Equal-cost
-  // predecessor updates are only accepted while v is unsettled: with positive
+  // predecessor updates are accepted while v is unsettled: with positive
   // edge costs every equal-cost parent is discovered before v settles, and with
   // zero-cost edges this guard is what keeps the PredDAG acyclic (previously a
-  // zero-cost pair u<->v recorded each node as the other's parent).
+  // zero-cost pair u<->v recorded each node as the other's parent). A terminal
+  // node may also accept late equal-cost parents: with no eligible outgoing
+  // edge it cannot be an ancestor, so these entries cannot close a cycle.
   std::vector<EdgeId>& selected_edges = ws.sel_buf;
   while (!pq.empty()) {
     auto [d_u, neg_res_u, u] = pq.pop();
@@ -648,7 +675,7 @@ void run_forward(Queue& pq, ForwardWorkspace& ws, const StrictMultiDiGraph& g, N
     // Skip residual-stale entries in single-path mode (same cost but outdated residual).
     if (!multipath && d_u == dist[static_cast<std::size_t>(u)] &&
         -neg_res_u < min_residual_to_node[static_cast<std::size_t>(u)] - kEpsilon) continue;
-    settled[static_cast<std::size_t>(u)] = 1;
+    settled[static_cast<std::size_t>(u)] = kSettled;
 
     if (early_exit && u == dst_node && !have_best_dst) { best_dst_cost = d_u; have_best_dst = true; }
     if (early_exit && u == dst_node) {
@@ -659,12 +686,14 @@ void run_forward(Queue& pq, ForwardWorkspace& ws, const StrictMultiDiGraph& g, N
     auto end   = static_cast<std::size_t>(row[static_cast<std::size_t>(u)+1]);
     std::size_t i = start;
     // Process edges grouped by destination node (parallel edges are consecutive in CSR).
-    // A settled neighbour cannot be improved (costs are non-negative) and no
-    // longer accepts equal-cost or capacity-tie updates, so its whole parallel
-    // group is skipped before any edge is examined.
+    // A settled neighbour can only gain a multipath parent at the same distance
+    // through a zero-cost edge. Reject other groups before examining edges;
+    // terminal classification waits until edge selection confirms that tie.
     while (i < end) {
       NodeId v = col[i];
-      if (settled[static_cast<std::size_t>(v)] || (use_node_mask && !node_mask[static_cast<std::size_t>(v)])) {
+      const auto vi = static_cast<std::size_t>(v);
+      if ((settled[vi] && (!multipath || d_u != dist[vi])) ||
+          (use_node_mask && !node_mask[vi])) {
         std::size_t j_skip = i; while (j_skip < end && col[j_skip] == v) ++j_skip; i = j_skip; continue;
       }
 
@@ -739,10 +768,12 @@ void run_forward(Queue& pq, ForwardWorkspace& ws, const StrictMultiDiGraph& g, N
           for (auto sel_e : selected_edges) pred_append(v_idx, u, sel_e);
           pq.push(new_cost, -path_residual, v);
         }
-        // Multipath: equal-cost alternative (only while v is unsettled; see above).
+        // Late multipath alternatives are safe only at a terminal (see above).
         // min_residual_to_node is not updated here: all equal-cost paths are kept,
         // none is chosen by residual.
-        else if (multipath && new_cost == dist[v_idx] && !settled[v_idx]) {
+        else if (multipath && new_cost == dist[v_idx] &&
+                 (!settled[v_idx] || is_terminal(settled[v_idx], v, row, col, aei,
+                                                cap, residual, node_mask, edge_mask, require_cap))) {
           for (auto sel_e : selected_edges) pred_append(v_idx, u, sel_e);
         }
       }
@@ -856,8 +887,9 @@ shortest_paths(const StrictMultiDiGraph& g, NodeId src,
   to dst, edge selection runs per (u -> v) parallel group exactly as in the
   forward variant, and node-level tie-breaking in single-path mode prefers the
   higher bottleneck capacity toward dst. Successor entries (v, e) are kept per
-  tail node u while u is unsettled, then bucketed by v into the forward PredDAG
-  layout that placement consumes. The same two queues apply.
+  tail node u while u is unsettled, or in multipath mode after settlement when
+  u has no eligible incoming edge. They are then bucketed by v into the forward
+  PredDAG layout that placement consumes. The same two queues apply.
 */
 namespace netgraph::core {
 
@@ -909,7 +941,7 @@ void run_reverse(Queue& pq, ReverseWorkspace& ws, const StrictMultiDiGraph& g, N
     if (d_v > dist[static_cast<std::size_t>(v)]) continue;
     if (!multipath && d_v == dist[static_cast<std::size_t>(v)] &&
         -neg_res_v < min_residual_to_dst[static_cast<std::size_t>(v)] - kEpsilon) continue;
-    settled[static_cast<std::size_t>(v)] = 1;
+    settled[static_cast<std::size_t>(v)] = kSettled;
 
     // In-edges of v, clustered by tail node u (edges are sorted by (src, dst)).
     auto start = static_cast<std::size_t>(irow[static_cast<std::size_t>(v)]);
@@ -917,7 +949,9 @@ void run_reverse(Queue& pq, ReverseWorkspace& ws, const StrictMultiDiGraph& g, N
     std::size_t i = start;
     while (i < end) {
       NodeId u = icol[i];
-      if (settled[static_cast<std::size_t>(u)] || (use_node_mask && !node_mask[static_cast<std::size_t>(u)])) {
+      const auto ui = static_cast<std::size_t>(u);
+      if ((settled[ui] && (!multipath || d_v != dist[ui])) ||
+          (use_node_mask && !node_mask[ui])) {
         std::size_t j_skip = i; while (j_skip < end && icol[j_skip] == u) ++j_skip; i = j_skip; continue;
       }
       Cost min_edge_cost = kInf;
@@ -979,7 +1013,9 @@ void run_reverse(Queue& pq, ReverseWorkspace& ws, const StrictMultiDiGraph& g, N
           for (auto sel_e : selected_edges) succ_append(u_idx, v, sel_e);
           has_in_entry[static_cast<std::size_t>(v)] = 1;
           pq.push(new_cost, -path_residual, u);
-        } else if (multipath && new_cost == dist[u_idx] && !settled[u_idx]) {
+        } else if (multipath && new_cost == dist[u_idx] &&
+                   (!settled[u_idx] || is_terminal(settled[u_idx], u, irow, icol, iaei,
+                                                  cap, residual, node_mask, edge_mask, require_cap))) {
           for (auto sel_e : selected_edges) succ_append(u_idx, v, sel_e);
           has_in_entry[static_cast<std::size_t>(v)] = 1;
         }

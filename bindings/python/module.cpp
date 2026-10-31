@@ -218,7 +218,8 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
         } else {
           throw py::value_error("dtype must be 'float64' or 'int64'");
         }
-      }, py::arg("graph"), py::arg("src"), py::arg("dst") = py::none(), py::kw_only(), py::arg("selection") = py::none(), py::arg("residual") = py::none(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none(), py::arg("multipath") = true, py::arg("dtype") = "float64")
+      }, py::arg("graph"), py::arg("src"), py::arg("dst") = py::none(), py::kw_only(), py::arg("selection") = py::none(), py::arg("residual") = py::none(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none(), py::arg("multipath") = true, py::arg("dtype") = "float64",
+         "Shortest paths from src. In multipath mode, an equal-cost parent found after a node is settled (possible only through a zero-cost edge) is kept only if that node has no outgoing edge passing the masks and capacity gate; elsewhere settle order decides. A residual array forces capacity gating. Single-path results are unchanged (see shortest_paths.hpp).")
       .def("spf_to", [](const Algorithms& algs, const PyGraph& pg, std::int32_t dst,
                           py::object selection_obj, py::object residual_obj,
                           py::object node_mask, py::object edge_mask, bool multipath,
@@ -268,7 +269,7 @@ PYBIND11_MODULE(_netgraph_core, m, py::mod_gil_not_used()) {
           throw py::value_error("dtype must be 'float64' or 'int64'");
         }
       }, py::arg("graph"), py::arg("dst"), py::kw_only(), py::arg("selection") = py::none(), py::arg("residual") = py::none(), py::arg("node_mask") = py::none(), py::arg("edge_mask") = py::none(), py::arg("multipath") = true, py::arg("fanout_edges") = py::none(), py::arg("dtype") = "float64",
-         "Shortest paths from every node to dst (reverse SPF). Returns (distances_to_dst, dag); the DAG is forward-oriented and valid for placement from any node toward dst. fanout_edges are added to the DAG regardless of cost (see shortest_paths.hpp).")
+         "Shortest paths from every node to dst (reverse SPF). Returns (distances_to_dst, dag); the DAG is forward-oriented and valid for placement from any node toward dst. With zero-cost edges, late multipath successors are accepted only at tails with no incoming edge passing masks and capacity gating; other nodes keep settle order. A residual array forces capacity gating. Single-path ties are unchanged. fanout_edges are added to the DAG regardless of cost (see shortest_paths.hpp).")
       .def("ksp", [](const Algorithms& algs, const PyGraph& pg, std::int32_t src, std::int32_t dst,
                        int k, py::object max_cost_factor, bool unique, py::object node_mask, py::object edge_mask, std::string dtype){
         if (src < 0 || src >= pg.num_nodes || dst < 0 || dst >= pg.num_nodes) throw py::value_error("src/dst out of range");

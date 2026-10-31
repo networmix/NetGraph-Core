@@ -15,9 +15,14 @@ namespace netgraph::core {
 // shortest paths from a source node. Stored in CSR format for efficiency.
 //
 // The DAG is always acyclic. With strictly positive edge costs it captures *every*
-// equal-cost shortest path. Zero-cost edges are the one exception: a predecessor is
-// recorded only while the child is still unsettled, so among nodes that are mutually
-// reachable at equal distance the settle order decides which alternatives are kept.
+// equal-cost shortest path. Zero-cost edges are the one exception: in multipath
+// mode a predecessor is recorded while the child is still unsettled, or after
+// settlement if the child has no eligible outgoing edge (one that passes the
+// search's masks and capacity gate; a nonempty residual span forces that gate;
+// an eligible self-loop counts). Such a child cannot be an ancestor, so these
+// late entries cannot close a cycle.
+// Among other nodes at equal distance, settle order decides which alternatives
+// are kept, even when their zero-cost edges do not form a cycle.
 // Without that rule a zero-cost pair u<->v would record each node as the other's
 // parent, making the structure cyclic and path enumeration non-terminating.
 //
@@ -119,8 +124,9 @@ namespace netgraph::core {
 // Parameters mirror shortest_paths(): multipath keeps every equal-cost successor per
 // node (false keeps one, preferring higher bottleneck capacity toward dst);
 // selection, residual, node_mask and edge_mask apply as there. Zero-cost edges get
-// the same acyclicity guard (a successor is recorded only while its node is
-// unsettled).
+// the same acyclicity guard: a successor is recorded while its tail node is
+// unsettled, or after settlement when that tail has no eligible incoming edge.
+// The exception applies only in multipath mode; single-path ties are unchanged.
 //
 // fanout_edges: edges to add to the DAG regardless of cost, modelling an origin
 // whose first hop is decided by a traffic split rather than by routing (e.g. a

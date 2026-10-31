@@ -706,6 +706,14 @@ class Algorithms:
             (distances, predecessor_dag)
 
         Note:
+            With zero-cost edges, multipath search accepts a late equal-cost
+            parent of a settled node only if that node has no outgoing edge
+            passing the masks and capacity gate. A nonempty residual array
+            forces that gate; an eligible self-loop counts as outgoing. Other
+            zero-cost alternatives follow settle order to keep the DAG acyclic.
+            Single-path ties are unchanged. Providing dst does not make it
+            terminal: the same outgoing-edge rule applies.
+
             When the source node is masked out (node_mask[src] == False), the algorithm
             immediately returns an empty predecessor DAG with all distances set to infinity,
             as no traversal can begin from an excluded source.
@@ -757,6 +765,13 @@ class Algorithms:
                 masks and capacity gate and its head has a finite distance;
                 its tail must have no incoming DAG entry
             dtype: "float64" (inf for unreachable) or "int64" (max for unreachable)
+
+        Note:
+            With zero-cost edges, multipath search accepts a late equal-cost
+            successor of a settled tail only if that tail has no incoming edge
+            passing the masks and capacity gate (including forced residual
+            gating). An eligible self-loop counts as incoming. Other zero-cost
+            alternatives follow settle order; single-path ties are unchanged.
 
         Raises:
             TypeError: If arrays have wrong dtype, ndim, or length.
