@@ -49,6 +49,25 @@
 using namespace netgraph::core;
 using namespace netgraph::core::test;
 
+TEST(MaxFlow, ZeroRouteMemberBlocksCostOnlyAdmissionAndSensitivity) {
+  std::int32_t src[] = {0, 0, 1, 2}, dst[] = {1, 2, 3, 3};
+  double cap[] = {10, 10, 10, 0};
+  std::int64_t cost[] = {1, 2, 2, 1}, ext[] = {0, 1, 2, 3};
+  auto g = StrictMultiDiGraph::from_arrays(4, src, dst, cap, cost, ext);
+  for (bool shortest : {false, true}) {
+    auto [value, summary] = calc_max_flow(g, 0, 3, FlowPlacement::EqualBalanced, shortest, false, true, true, true);
+    EXPECT_DOUBLE_EQ(value, 0);
+    EXPECT_DOUBLE_EQ(summary.total_flow, 0);
+    EXPECT_TRUE(summary.costs.empty());
+    EXPECT_TRUE(summary.flows.empty());
+    for (EdgeId e = 0; e < g.num_edges(); ++e) {
+      EXPECT_DOUBLE_EQ(summary.edge_flows[e], 0);
+      EXPECT_DOUBLE_EQ(summary.residual_capacity[e], cap[g.ext_edge_ids_view()[e]]);
+    }
+    EXPECT_TRUE(sensitivity_analysis(g, 0, 3, FlowPlacement::EqualBalanced, shortest, false).empty());
+  }
+}
+
 //=============================================================================
 // SECTION 1: BASIC CORRECTNESS - SINGLE PATH SCENARIOS
 //=============================================================================

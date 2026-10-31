@@ -1,7 +1,7 @@
 """EQUAL_BALANCED and EQUAL_BALANCED_LOSSY placement semantics.
 
 Both model a hop-by-hop forwarding table that does not react to load: the
-split set is every shortest-path edge with capacity. EQUAL_BALANCED admits
+split set is every route edge, including capacity 0. EQUAL_BALANCED admits
 losslessly (a full member blocks admission on that DAG), EQUAL_BALANCED_LOSSY
 forwards best-effort (each member carries what it can and the rest is dropped).
 """

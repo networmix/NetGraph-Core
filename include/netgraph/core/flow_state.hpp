@@ -49,12 +49,13 @@ public:
   //      where cap_rev[g] = min_edge_residual(g) * |E_g|
   //        (enforces equal per-edge shares),
   //            assigned[g] = unit-demand load on group g under equal splits.
-  //  - Place once and return. The split set is every DAG edge with capacity,
-  //    so a member filled since the DAG was built yields scale 0 and nothing
+  //  - Place once and return. Every route edge in the DAG stays in the split,
+  //    so a zero-capacity or full member yields scale 0 and nothing
   //    is placed; progression past a full member comes from recomputing the
   //    DAG with a residual-aware SPF, not from re-invoking this on a stale one.
   //
-  // EqualBalancedLossy splits over the same capacity-based set without scaling:
+  // Capacities below the 2^-12 capacity resolution (kMinCap) can also yield scale 0.
+  // EqualBalancedLossy splits over the same fixed set without scaling:
   // each edge carries min(share, residual), the excess is dropped, and the
   // returned amount is what reaches dst. When `drops` is given it receives one
   // (edge, dropped) entry per edge that dropped flow. Drops are recorded only

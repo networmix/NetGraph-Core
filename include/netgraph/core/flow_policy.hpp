@@ -111,6 +111,19 @@ public:
   // across calls, since rebalancing re-places previously placed volume too) and
   // `placed + remaining` can therefore exceed this call's `volume`. Use
   // placed_demand() deltas for strict per-call accounting.
+  //
+  // Ordinary EqualBalancedLossy calls offer volume afresh, shared equally over
+  // usable pinned bundles or the existing seeded dynamic records. Source residual
+  // capacity limits carriage, not the offer. Every record is visited once, even
+  // with shortest_path=true. +inf fills source edges and records no drops.
+  // An explicit target_per_flow instead keeps its cumulative delivered target per
+  // record: only the deficit from that target is offered, without another division.
+  // With shortest_path=true an explicit target reaches the first record only,
+  // so rebalance_demand re-places one record's target.
+  // Optional lossy reoptimization re-places each record's delivered volume:
+  // the ledger can then end below the delivery returned before reoptimization.
+  // Only aggregate delivery/remaining is exposed here; per-edge drops are available
+  // from FlowGraph's drop-observing placement.
   [[nodiscard]] std::pair<double,double> place_demand(FlowGraph& fg,
                                         NodeId src, NodeId dst,
                                         FlowClass flowClass,
@@ -118,7 +131,9 @@ public:
                                         std::optional<double> target_per_flow = std::nullopt,
                                         std::optional<double> min_flow = std::nullopt);
 
-  // Re-places the currently placed volume so each flow carries ~target_per_flow.
+  // Re-places the currently placed volume toward the per-record delivered target.
+  // With shortest_path=true only the first record receives its explicit target,
+  // so a demand with multiple records can shed volume.
   // (src, dst) must match the demand this policy already manages.
   [[nodiscard]] std::pair<double,double> rebalance_demand(FlowGraph& fg,
                                             NodeId src, NodeId dst,

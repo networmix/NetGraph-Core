@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include <cmath>
+#include <limits>
 
 #include "netgraph/core/flow_graph.hpp"
 #include "netgraph/core/flow_policy.hpp"
@@ -9,6 +11,104 @@
 #include "test_utils.hpp"
 
 using namespace netgraph::core;
+
+TEST(FlowPolicyCore, LossyFiniteCallsAreFreshAcrossEverySeededRecord) {
+  std::int32_t src[] = {0, 0}, dst[] = {1, 1};
+  double cap[] = {100, 100};
+  std::int64_t cost[] = {3, 3};
+  auto g = StrictMultiDiGraph::from_arrays(2, src, dst, cap, cost);
+  auto algs = std::make_shared<Algorithms>(make_cpu_backend());
+  auto gh = algs->build_graph(g);
+  ExecutionContext ctx(algs, gh);
+  for (auto [minimum, maximum] : {std::pair{1, 1}, std::pair{2, 2}, std::pair{1, 3}}) {
+    FlowPolicyConfig cfg;
+    cfg.flow_placement = FlowPlacement::EqualBalancedLossy;
+    cfg.selection.require_capacity = cfg.require_capacity = false;
+    cfg.selection.multi_edge = true;
+    cfg.shortest_path = true;
+    cfg.min_flow_count = minimum;
+    cfg.max_flow_count = maximum;
+    FlowGraph fg(g);
+    FlowPolicy policy(ctx, cfg);
+    for (int call = 1; call <= 2; ++call) {
+      auto [placed, remaining] = policy.place_demand(fg, 0, 1, 0, 20);
+      EXPECT_DOUBLE_EQ(placed, 20);
+      EXPECT_DOUBLE_EQ(remaining, 0);
+      EXPECT_EQ(policy.flow_count(), minimum);
+      for (EdgeId e = 0; e < g.num_edges(); ++e) {
+        EXPECT_DOUBLE_EQ(fg.edge_flow_view()[e], call * 10);
+        EXPECT_DOUBLE_EQ(fg.residual_view()[e], 100 - call * 10);
+      }
+    }
+    policy.remove_demand(fg);
+    for (auto residual : fg.residual_view()) EXPECT_DOUBLE_EQ(residual, 100);
+  }
+}
+
+TEST(FlowPolicyCore, LossySourceCapacityDoesNotClipFiniteOrUnlimitedOffers) {
+  std::int32_t src[] = {0, 0}, dst[] = {1, 1};
+  std::int64_t cost[] = {3, 3};
+  for (double low : {0.0, 1.0}) {
+    double cap[] = {low, 10};
+    auto g = StrictMultiDiGraph::from_arrays(2, src, dst, cap, cost);
+    auto algs = std::make_shared<Algorithms>(make_cpu_backend());
+    auto gh = algs->build_graph(g);
+    ExecutionContext ctx(algs, gh);
+    for (bool pinned : {false, true}) {
+      for (double offer : {20.0, std::numeric_limits<double>::infinity()}) {
+        FlowPolicyConfig cfg;
+        cfg.flow_placement = FlowPlacement::EqualBalancedLossy;
+        cfg.selection.require_capacity = cfg.require_capacity = false;
+        cfg.selection.multi_edge = true;
+        cfg.shortest_path = !pinned;
+        cfg.max_flow_count = 1;
+        FlowPolicy policy(ctx, cfg);
+        FlowGraph fg(g);
+        if (pinned) {
+          SpfOptions opts;
+          opts.selection = cfg.selection;
+          opts.dst = 1;
+          policy.set_static_paths(0, 1, {algs->spf(gh, 0, opts).second});
+        }
+        auto [placed, remaining] = policy.place_demand(fg, 0, 1, 0, offer);
+        EXPECT_DOUBLE_EQ(placed, low + 10);
+        if (std::isfinite(offer)) EXPECT_DOUBLE_EQ(remaining, offer - placed);
+        else EXPECT_TRUE(std::isinf(remaining));
+        for (EdgeId e = 0; e < g.num_edges(); ++e) {
+          EXPECT_DOUBLE_EQ(fg.edge_flow_view()[e], g.capacity_view()[e]);
+          EXPECT_DOUBLE_EQ(fg.residual_view()[e], 0);
+        }
+      }
+    }
+  }
+}
+
+TEST(FlowPolicyCore, LossySmallSharesStillVisitEverySeededRecord) {
+  std::int32_t src[] = {0, 0}, dst[] = {1, 1};
+  double cap[] = {1, 1};
+  std::int64_t cost[] = {3, 3};
+  auto g = StrictMultiDiGraph::from_arrays(2, src, dst, cap, cost);
+  auto algs = std::make_shared<Algorithms>(make_cpu_backend());
+  ExecutionContext ctx(algs, algs->build_graph(g));
+  for (double offer : {1.0 / 4096.0, 1.0 / 8192.0}) {
+    FlowPolicyConfig cfg;
+    cfg.flow_placement = FlowPlacement::EqualBalancedLossy;
+    cfg.selection.require_capacity = cfg.require_capacity = false;
+    cfg.selection.multi_edge = true;
+    cfg.shortest_path = true;
+    cfg.min_flow_count = 2;
+    cfg.max_flow_count = 2;
+    FlowGraph fg(g);
+    FlowPolicy policy(ctx, cfg);
+    auto [placed, remaining] = policy.place_demand(fg, 0, 1, 0, offer);
+    EXPECT_DOUBLE_EQ(placed, offer);
+    EXPECT_DOUBLE_EQ(remaining, 0);
+    for (EdgeId e = 0; e < g.num_edges(); ++e) {
+      EXPECT_DOUBLE_EQ(fg.edge_flow_view()[e], offer / 2);
+      EXPECT_DOUBLE_EQ(fg.residual_view()[e], 1 - offer / 2);
+    }
+  }
+}
 
 namespace {
 

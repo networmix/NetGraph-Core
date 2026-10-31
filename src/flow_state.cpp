@@ -6,12 +6,12 @@
     - Proportional: distribute flow proportionally to residual capacity,
       processing nodes in topological order from source to destination.
     - EqualBalanced: *single-pass ECMP admission* on a fixed DAG. The split set
-      is the DAG's edges with capacity (the topology's next-hop set); we
+      is every route edge in the DAG, including capacity 0; we
       compute a single global scale so no edge is oversubscribed, then return.
       A member filled since the DAG was built yields scale 0: a forwarding
       table does not react to load. place_max_flow() progresses by recomputing
       the DAG with a residual-aware SPF.
-    - EqualBalancedLossy: equal split over the same capacity-based set with no
+    - EqualBalancedLossy: equal split over the same fixed set with no
       scaling; each edge carries min(share, residual) and drops the excess,
       deficits propagate downstream, and the placed amount is what reaches
       dst (best-effort hash-ECMP forwarding).
@@ -129,17 +129,16 @@ struct GroupSet {
 
 // Build grouped edges by (parent u, child v) that can reach destination t.
 // Membership is decided by residual (edges that can still carry flow) for
-// Proportional placement, or by capacity when members_by_capacity is set: every
-// DAG edge with capacity is a member and sum_cap/min_cap still reflect the
-// current residual, so a member filled since the DAG was built contributes
-// min_cap = 0. The equal-balanced placements use the latter to model a
+// Proportional placement, or by the DAG when fixed_members is set: every
+// route edge is a member, including capacity 0. sum_cap/min_cap still reflect
+// the current residual, so a zero or full member contributes min_cap = 0.
+// The equal-balanced placements use the latter to model a
 // forwarding table that does not react to load.
 static void build_groups_residual(const StrictMultiDiGraph& g,
                                   const PredDAG& dag, NodeId t,
                                   const std::vector<Cap>& residual,
-                                  bool members_by_capacity,
+                                  bool fixed_members,
                                   GroupSet& gs) {
-  const auto capacity = g.capacity_view();
   gs.groups.clear();
   gs.eids.clear();
   const auto& offsets = dag.parent_offsets;
@@ -190,8 +189,7 @@ static void build_groups_residual(const StrictMultiDiGraph& g,
         if (parents[i] != u) continue;
         const auto eid0 = via[i];
         const Cap c = residual[static_cast<std::size_t>(eid0)];
-        const Cap gate = members_by_capacity ? capacity[static_cast<std::size_t>(eid0)] : c;
-        if (gate >= kMinCap) {
+        if (fixed_members || c >= kMinCap) {
           gs.eids.push_back(eid0);
           gr.sum_cap += c;
           gr.min_cap = std::min(gr.min_cap, c);
@@ -261,7 +259,7 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
   if (src < 0 || src >= N || dst < 0 || dst >= N || src == dst) return 0.0;
 
   // The equal-balanced placements model a forwarding table that does not
-  // react to load: their split set is every DAG edge with capacity, full or not.
+  // react to load: their split set is every route edge in the DAG, zero or full.
   const bool fixed_members = (placement != FlowPlacement::Proportional);
 
   // Build groups using current residual. `gs` is reused across rebuilds so its
@@ -312,7 +310,7 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
         }
       }
       // Rebuild groups for next tier using updated residual
-      build_groups_residual(*g_, dag, dst, residual_, /*members_by_capacity=*/false, gs);
+      build_groups_residual(*g_, dag, dst, residual_, /*fixed_members=*/false, gs);
       build_reversed_residual(ws, N, groups);
     }
   } else if (placement == FlowPlacement::EqualBalancedLossy) {
@@ -395,7 +393,7 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
   } else {
     // EqualBalanced placement: split flow equally across parallel edges, with
     // topological accumulation to correctly handle reconvergent DAGs. Every
-    // group with capacity stays in the split, so a full member drives the
+    // route edge stays in the split, so a zero or full member drives the
     // global scale to 0.
 
     // Build forward adjacency from parent u to child v for each group and
@@ -472,10 +470,8 @@ Flow FlowState::place_on_dag(NodeId src, NodeId dst, const PredDAG& dag,
       }
     }
 
-    // Early exit if destination is not reachable with capacity.
-    // With require_capacity=false, SPF includes zero-capacity edges in the DAG,
-    // but those edges are filtered out during group building. If no path with
-    // capacity reaches the destination, return 0.
+    // No assignment reaches the destination if it is disconnected in this DAG.
+    // Zero-capacity route edges remain in the assignment and constrain its scale.
     if (inflow[static_cast<std::size_t>(dst)] < kEpsilon) {
       return static_cast<Flow>(0.0);
     }

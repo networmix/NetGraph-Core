@@ -57,9 +57,9 @@ struct FlowIndexHash {
 //
 // - Proportional may be used iteratively (e.g., for max-flow).
 //
-// - EqualBalanced takes its split set from the DAG edges that have *capacity*
-//   (the topology's next-hop set) and admits with one global scale computed
-//   from residual headroom. A member filled since the DAG was built therefore
+// - EqualBalanced takes its split set from every route edge in the DAG,
+//   including 0 capacity, and admits with one global scale computed
+//   from residual headroom. A zero-capacity or full member therefore
 //   blocks admission (scale 0): a forwarding table does not react to load.
 //   Callers that want to progress past a full member recompute the DAG with a
 //   residual-aware SPF, as place_max_flow and FlowPolicy do.
@@ -69,6 +69,8 @@ struct FlowIndexHash {
 //   deficits propagate downstream, and the placed amount is the volume that
 //   reaches dst. This is best-effort hash-ECMP forwarding; the dropped share
 //   per edge is available through the drop trace of place_on_dag.
+//   Below the 2^-12 capacity resolution (kMinCap), lossless admission may be 0;
+//   lossy placement still carries what fits on each member.
 enum class FlowPlacement {
   Proportional = 1,        // Distribute flow proportionally to residual capacity (like ECMP with weights)
   EqualBalanced = 2,       // Equal split over the topology next-hop set, one lossless admission scale

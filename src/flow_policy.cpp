@@ -4,7 +4,7 @@
   Responsibilities:
     - Select shortest-path predecessors (SPF) per policy via `shortest_paths`.
     - Create and track flows with their current DAG and path cost.
-    - Place volumes using `FlowPlacement` (Proportional or EqualBalanced).
+    - Place volumes using the configured `FlowPlacement`.
     - Optionally re-optimize flows and enforce path-cost constraints.
 
   Notes:
@@ -27,9 +27,9 @@
 namespace netgraph::core {
 
 namespace {
-// The equal-balanced placements share FlowPolicy's per-flow target and DAG
-// refresh logic (and, except for the lossy mode, the equalizing rebalance in
-// place_demand); they differ only inside FlowState::place_on_dag.
+// Both equal-balanced placements refresh SPF bundles. Lossless placement uses
+// delivered targets and equalizing rebalance; ordinary lossy calls offer fresh
+// shares to the existing records without equalizing their carried volumes.
 constexpr bool is_equal_balanced(FlowPlacement p) noexcept {
   return p == FlowPlacement::EqualBalanced || p == FlowPlacement::EqualBalancedLossy;
 }
@@ -372,7 +372,7 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
 
   // Compute target flow per flow-record.
   // target: the volume to place per flow (or globally if target_per_flow is unset).
-  // per_target: refined target for EqualBalanced mode (considers source capacity).
+  // per_target: lossless EqualBalanced target (considers source capacity).
   double target = target_per_flow.value_or(volume);
   double per_target = target;
 
@@ -380,7 +380,7 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
   // pinned policy that is the number of USABLE bundles (a head-end hashes over up
   // LSPs only); dynamically it is the configured max_flow_count.
   int eb_divisor = 0;
-  if (is_equal_balanced(flow_placement_)) {
+  if (flow_placement_ == FlowPlacement::EqualBalanced) {
     if (is_static) eb_divisor = static_cast<int>(static_bundles_.size());
     else if (max_flow_count_.has_value()) eb_divisor = *max_flow_count_;
   }
@@ -445,6 +445,14 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
       }
     }
   }
+  // Ordinary lossy calls are fresh offers, shared over the records actually
+  // offered this call, not a cumulative delivered target or a configured maximum.
+  // An explicit target_per_flow retains its cumulative delivered-target meaning.
+  const bool fresh_lossy_offer = flow_placement_ == FlowPlacement::EqualBalancedLossy &&
+                                 !target_per_flow.has_value();
+  const double lossy_share = fresh_lossy_offer && !flows_.empty()
+                              ? target / static_cast<double>(flows_.size()) : 0.0;
+
   // Round-robin placement: iterate over flows and try to place volume on each.
   std::deque<FlowIndex> q;
   for (auto const& kv : flows_) q.push_back(kv.first);
@@ -463,7 +471,8 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
   std::deque<double> recent;
   const double initial_request = volume;
 
-  while (volume >= kMinFlow && !q.empty()) {
+  // Lossy shares remain offers below the lossless admission threshold too.
+  while ((fresh_lossy_offer ? volume > 0.0 : volume >= kMinFlow) && !q.empty()) {
     FlowIndex cur_idx = q.front(); q.pop_front();
     auto it_cur = flows_.find(cur_idx);
     if (it_cur == flows_.end()) continue;  // flow removed during iteration
@@ -490,6 +499,8 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
     if (target_per_flow.has_value()) {
       // When a per-flow target is specified (e.g., during rebalancing), cap by remaining per-flow target.
       need = std::max(0.0, target - f->placed_flow);
+    } else if (fresh_lossy_offer) {
+      need = lossy_share;
     } else if (eb_divisor > 0) {
       // For EqualBalanced, request only the remaining deficit toward per-target for this flow.
       need = std::max(0.0, per_target - f->placed_flow);
@@ -504,9 +515,12 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
     total_placed += placed;
     ++iters;
     // IP-like mode: perform a single augmentation over the current SPF DAG
-    if (shortest_path_) {
+    if (shortest_path_ && !fresh_lossy_offer) {
       break;
     }
+    // Each existing record gets its share once, even if an earlier share was
+    // wholly dropped. Do not grow the record set or stop at a delivery heuristic.
+    if (fresh_lossy_offer) continue;
     // Track recent placements. For a pinned policy, arm the window only once every
     // flow has been visited: with more bundles than the window, the early rounds of
     // small per-flow placements must not starve the bundles not yet visited.
@@ -563,8 +577,9 @@ std::pair<double,double> FlowPolicy::place_demand_body(FlowGraph& fg,
   return { total_placed, volume };
 }
 
-/* Rebalance existing placed demand such that each flow carries approximately
-   `target_per_flow`. Internally removes and re-places the same total volume. */
+/* Remove the placed demand and re-place its volume toward `target_per_flow` per
+   record. With shortest_path=true only the first record receives that target, so
+   volume can be shed. */
 std::pair<double,double> FlowPolicy::rebalance_demand(FlowGraph& fg,
                                                       NodeId src, NodeId dst,
                                                       FlowClass flowClass,

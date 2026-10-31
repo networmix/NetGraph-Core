@@ -55,15 +55,17 @@ class FlowPlacement:
         May be used iteratively (e.g., for max-flow).
 
     EQUAL_BALANCED (ECMP): Single-pass admission on a fixed shortest-path DAG (Dijkstra).
-        The split set is the DAG's edges with capacity (the topology's next-hop
-        set). Computes one global scale so no edge is oversubscribed under
-        equal per-edge splits, places once, and stops; a member filled since
-        the DAG was computed drives the scale to 0, because a forwarding table
+        The split set is every route edge in the DAG, including capacity 0.
+        Computes one global scale so no edge is oversubscribed under
+        equal per-edge splits, places once, and stops; a zero-capacity or full
+        member drives the scale to 0, because a forwarding table
         does not react to load. Progress past a full member by recomputing the
         DAG with a residual-aware SPF (place_max_flow and FlowPolicy do).
         ECMP = Equal-Cost Multi-Path; WCMP = Weighted-Cost Multi-Path.
 
-    EQUAL_BALANCED_LOSSY: Equal split over the same capacity-based set with no
+        Capacities below the 2^-12 capacity resolution (kMinCap) can also yield scale 0.
+
+    EQUAL_BALANCED_LOSSY: Equal split over the same fixed set with no
         scaling: each edge carries min(share, residual) and drops the excess,
         deficits propagate downstream, and the placed amount is what reaches
         the destination. Models best-effort hash-ECMP forwarding; per-edge
@@ -277,7 +279,7 @@ class FlowState:
         EqualBalanced is **single-pass ECMP admission** on the provided DAG:
         we compute one global scale so no edge is oversubscribed under equal per-edge
         splits, apply it once, and return. The split set is the topology's
-        next-hop set, so a member already full yields scale 0; progress past it
+        next-hop set, including zero-capacity edges, so a zero or full member yields scale 0; progress past it
         by recomputing the DAG with residuals. EQUAL_BALANCED_LOSSY forwards
         best-effort over the same set (see FlowPlacement).
 
@@ -556,6 +558,19 @@ class FlowPolicy:
         placed_demand() deltas for strict per-call accounting. EB placement is
         also not incremental: each call's volume defines the per-flow target,
         so a second, smaller call may place nothing.
+
+        EQUAL_BALANCED_LOSSY offers each ordinary call's volume afresh, divided
+        equally over usable pinned bundles or existing seeded dynamic records.
+        Every record is offered its share once, even with shortest_path=True;
+        neither source residual capacity nor prior delivery caps this offer.
+        +inf fills source edges and records no drops. An explicit
+        target_per_flow instead retains a cumulative delivered target per record:
+        only its deficit is offered, without dividing again. With shortest_path=True
+        an explicit target reaches the first record only, so rebalance_demand
+        re-places one record's target. Optional lossy reoptimization re-places each
+        record's delivered volume, so the ledger can end below the delivery returned
+        before reoptimization. This method exposes aggregate placement and remaining
+        volume; per-edge drops are exposed by FlowGraph.place_with_drops.
         """
         ...
 
@@ -566,7 +581,13 @@ class FlowPolicy:
         dst: int,
         flowClass: int,
         target: float,
-    ) -> tuple[float, float]: ...
+    ) -> tuple[float, float]:
+        """Re-place the current volume toward a delivered target per record.
+
+        With shortest_path=True only the first record receives its explicit
+        target, so a demand with multiple records can shed volume.
+        """
+        ...
 
     def remove_demand(self, flow_graph: "FlowGraph") -> None:
         """Remove all of this policy's flows, releasing its (src, dst) binding."""

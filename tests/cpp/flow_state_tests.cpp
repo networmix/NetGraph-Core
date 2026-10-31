@@ -587,3 +587,73 @@ TEST(FlowGraph, LossyPlacementIsReversibleAndDropsStayOutOfLedger) {
   EXPECT_NEAR(fg.place(idx, 0, 1, dag, 20.0, FlowPlacement::EqualBalanced, &drops), 20.0, 1e-9);
   EXPECT_TRUE(drops.empty());
 }
+
+TEST(FlowState, ZeroCapacityRouteMemberKeepsItsShare) {
+  // Two cost-3 routes; the second has a zero last hop. Each gets half.
+  std::int32_t src[] = {0, 0, 1, 2}, dst[] = {1, 2, 3, 3};
+  double cap[] = {10, 10, 10, 0};
+  std::int64_t cost[] = {1, 2, 2, 1}, ext[] = {0, 1, 2, 3};
+  auto g = StrictMultiDiGraph::from_arrays(4, src, dst, cap, cost, ext);
+  auto dag = cost_only_dag(g, 0, 3);
+  for (auto mode : {FlowPlacement::EqualBalanced, FlowPlacement::EqualBalancedLossy}) {
+    FlowState fs(g);
+    std::vector<std::pair<EdgeId, Flow>> drops;
+    const bool lossy = mode == FlowPlacement::EqualBalancedLossy;
+    EXPECT_DOUBLE_EQ(fs.place_on_dag(0, 3, dag, 20, mode, nullptr, &drops), lossy ? 10 : 0);
+    std::vector<double> drop_by_input(4, 0);
+    for (auto [e, amount] : drops) drop_by_input[g.ext_edge_ids_view()[e]] += amount;
+    EXPECT_EQ(drop_by_input, (lossy ? std::vector<double>{0, 0, 0, 10} : std::vector<double>(4, 0)));
+    for (EdgeId e = 0; e < g.num_edges(); ++e) {
+      const auto input = g.ext_edge_ids_view()[e];
+      const double carried = lossy && input != 3 ? 10 : 0;
+      EXPECT_DOUBLE_EQ(fs.edge_flow_view()[e], carried);
+      EXPECT_DOUBLE_EQ(fs.residual_view()[e], cap[input] - carried);
+    }
+  }
+}
+
+TEST(FlowState, ParallelZeroAndBelowResolutionMembers) {
+  std::int32_t src[] = {0, 0}, dst[] = {1, 1};
+  std::int64_t cost[] = {3, 3}, ext[] = {0, 1};
+  for (double small : {0.0, 1.0 / 16384.0}) {
+    double cap[] = {small, 10};
+    auto g = StrictMultiDiGraph::from_arrays(2, src, dst, cap, cost, ext);
+    auto dag = cost_only_dag(g, 0, 1);
+    FlowState lossless(g);
+    EXPECT_DOUBLE_EQ(lossless.place_on_dag(0, 1, dag, 20, FlowPlacement::EqualBalanced), 0);
+    FlowState lossy(g);
+    std::vector<std::pair<EdgeId, Flow>> drops;
+    EXPECT_DOUBLE_EQ(lossy.place_on_dag(0, 1, dag, 20, FlowPlacement::EqualBalancedLossy, nullptr, &drops), 10 + small);
+    ASSERT_EQ(drops.size(), 1u);
+    EXPECT_EQ(g.ext_edge_ids_view()[drops[0].first], 0);
+    EXPECT_DOUBLE_EQ(drops[0].second, 10 - small);
+    for (EdgeId e = 0; e < g.num_edges(); ++e) {
+      EXPECT_DOUBLE_EQ(lossy.edge_flow_view()[e], cap[g.ext_edge_ids_view()[e]]);
+      EXPECT_DOUBLE_EQ(lossy.residual_view()[e], 0);
+    }
+  }
+}
+
+TEST(FlowGraph, ZeroDeliveryLossyFlowRestoresUpstreamOnRemoveAndReset) {
+  std::int32_t src[] = {0, 1}, dst[] = {1, 2};
+  double cap[] = {10, 0};
+  std::int64_t cost[] = {2, 5};
+  auto g = StrictMultiDiGraph::from_arrays(3, src, dst, cap, cost);
+  auto dag = cost_only_dag(g, 0, 2);
+  for (bool reset : {false, true}) {
+    FlowGraph fg(g);
+    FlowIndex idx{0, 2, 0, 0};
+    std::vector<std::pair<EdgeId, Flow>> drops;
+    EXPECT_DOUBLE_EQ(fg.place(idx, 0, 2, dag, 10, FlowPlacement::EqualBalancedLossy, &drops), 0);
+    ASSERT_EQ(fg.get_flow_edges(idx).size(), 1u);
+    EXPECT_DOUBLE_EQ(fg.get_flow_edges(idx)[0].second, 10);
+    ASSERT_EQ(drops.size(), 1u);
+    EXPECT_DOUBLE_EQ(drops[0].second, 10);
+    if (reset) fg.reset(); else fg.remove(idx);
+    EXPECT_TRUE(fg.get_flow_edges(idx).empty());
+    for (EdgeId e = 0; e < g.num_edges(); ++e) {
+      EXPECT_DOUBLE_EQ(fg.edge_flow_view()[e], 0);
+      EXPECT_DOUBLE_EQ(fg.residual_view()[e], g.capacity_view()[e]);
+    }
+  }
+}
