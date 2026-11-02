@@ -814,6 +814,49 @@ TEST(LedgerFaults, RemovalAndReleaseNeverAllocate) {
   }
 }
 
+TEST(LedgerFaults, ScalarNodeStagingFailuresPreserveStateAndRetryPublishes) {
+  const auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  for (int mode : {0, 1, 2}) for (Amount hold : {0, 2}) {
+    bool completed = false;
+    for (long at = 0; at < 64 && !completed; ++at) {
+      FlowLedger ledger(g);
+      const auto owner = LedgerAccess::bind(ledger);
+      auto pending = [&](Amount amount) {
+        FlowRecord r;
+        r.sources = {0}; r.destinations = {1}; r.route = all_edges(*g);
+        r.min_route_cost = 3; r.delivered = amount; r.edge_flows = {{0, amount}};
+        r.edge_reservations = {{0, hold}};
+        return detail::stored_entry(*g, owner, std::span<FlowRecord>(&r, 1));
+      };
+      if (mode != 0) {
+        auto first = pending(2); LedgerAccess::commit(ledger, owner, first);
+      }
+      const auto before = ledger_state(ledger);
+      auto next = pending(4);
+      auto publish = [&](detail::LedgerEntry& value) {
+        if (mode == 2) LedgerAccess::exchange(ledger, owner, value);
+        else LedgerAccess::commit(ledger, owner, value);
+      };
+      const bool failed = fails_at(at, [&] { publish(next); });
+      if (failed) {
+        expect_same(ledger_state(ledger), before, "scalar allocation failure");
+        auto retry = pending(4); publish(retry);
+      } else completed = true;
+      FlowRecord expected;
+      expected.flow_id = {ledger.uid(), mode == 2 ? 1 : 0}; expected.policy_id = owner;
+      expected.sources = {0}; expected.destinations = {1}; expected.route = all_edges(*g);
+      expected.min_route_cost = 3; expected.delivered = 4; expected.edge_flows = {{0, 4}};
+      if (hold != 0) expected.edge_reservations = {{0, hold}};
+      EXPECT_TRUE(same_record(ledger.record(expected.flow_id), expected));
+      EXPECT_EQ(ledger.carried(), (std::vector<Amount> {4}));
+      EXPECT_EQ(ledger.reserved(), (std::vector<Amount> {hold}));
+      EXPECT_EQ(LedgerAccess::next_record_counter(ledger), mode == 2 ? 2 : 1);
+      LedgerAccess::detach(ledger, owner); LedgerAccess::release(ledger, owner);
+    }
+    EXPECT_TRUE(completed) << mode << " holds " << hold;
+  }
+}
+
 TEST(LedgerFaults, WarmEntryContinuationAndReplacementDoNotAllocate) {
   const auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
   FlowLedger ledger(g);

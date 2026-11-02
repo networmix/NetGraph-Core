@@ -161,6 +161,7 @@ if(NETGRAPH_CORE_BUILD_TESTS)
     tests/cpp/route_kernels_tests.cpp
     tests/cpp/shortest_paths_creation_tests.cpp
     tests/cpp/flow_ledger_tests.cpp
+    tests/cpp/flow_ledger_header_tests.cpp
     tests/cpp/flow_policy_fixture_tests.cpp
     tests/cpp/flow_policy_tests.cpp
     tests/cpp/epoch_static_tests.cpp

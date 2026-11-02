@@ -338,7 +338,7 @@ private:
   Storage& storage_;
 };
 
-// Entry swaps and staged map-node transfers are the only publication operations.
+// Entries publish by swap, validated scalar insertion or staged batch-node transfer.
 static_assert(std::is_nothrow_move_assignable_v<LedgerEntry>);
 static_assert(std::is_nothrow_swappable_v<LedgerEntry>);
 
@@ -544,7 +544,7 @@ LedgerEntry stored_entry(const Graph& graph, std::int64_t owner, std::span<FlowR
   auto compact = [](auto& pairs, const char* label, auto add) {
     EdgeId previous = -1;
     std::size_t n = 0;
-    for (const auto [e, x] : pairs) {
+    for (const auto& [e, x] : pairs) {
       bool nonzero;
       if constexpr (std::is_same_v<std::remove_cv_t<decltype(x)>, Amount>) {
         if (x < 0) throw std::logic_error(std::string("ledger: a negative ") + label + " in a commit");
@@ -672,8 +672,10 @@ void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners
     std::int64_t key {-1};
   };
   Prepared single;
-  std::vector<Prepared> multiple(owners.size() > 1 ? owners.size() : 0);
-  const std::span<Prepared> prepared = owners.size() == 1 ? std::span(&single, 1) : std::span(multiple);
+  std::optional<std::vector<Prepared>> multiple;
+  if (owners.size() > 1) multiple.emplace(owners.size());
+  const std::span<Prepared> prepared = owners.size() == 1 ? std::span(&single, 1) :
+      multiple ? std::span(*multiple) : std::span<Prepared> {};
   std::uint64_t count = 0;
   for (std::size_t i = 0; i < owners.size(); ++i) {
     const auto& o = owners[i];
@@ -754,9 +756,9 @@ void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners
       }
     }
   }
-  // Everything that can allocate is staged before aggregate or identity publication.
+  // All fallible preparation precedes publication; scalar insertion allocates before linking its node.
   if (held && ledger.reserved_.empty()) ledger.reserved_.assign(ledger.carried_.size(), 0);
-  std::map<std::int64_t, std::unique_ptr<LedgerEntry>> fresh;
+  std::optional<decltype(ledger.entries_)> fresh;
   std::int64_t next = ledger.next_record_counter_;
   for (auto& s : prepared) {
     auto& o = *s.update;
@@ -766,7 +768,12 @@ void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners
     if (created || o.retire) next += static_cast<std::int64_t>(o.entry->record_inventory().size());
     o.entry->owner = o.owner;
     o.entry->first_counter = s.key;
-    if (created) s.value = fresh.emplace(s.key, std::make_unique<LedgerEntry>(std::move(*o.entry))).first->second.get();
+    if (created) {
+      if (prepared.size() > 1 && !fresh) fresh.emplace();
+      // A scalar inserts last: allocation failure changes nothing; success has no throwing work left.
+      auto& destination = fresh ? *fresh : ledger.entries_;
+      s.value = destination.emplace(s.key, std::make_unique<LedgerEntry>(std::move(*o.entry))).first->second.get();
+    }
   }
   // No allocation or validation remains. Existing entry nodes and values are reused;
   // a full replacement rekeys its node to the newly reserved identity range.
@@ -786,7 +793,7 @@ void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners
     }
     s.owner->second.first_counter = s.key;
   }
-  ledger.entries_.merge(fresh);
+  if (fresh) ledger.entries_.merge(*fresh);
   ledger.next_record_counter_ = next;
 }
 

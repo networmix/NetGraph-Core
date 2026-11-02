@@ -100,7 +100,7 @@ private:
   std::vector<Amount> carried_ {};
   std::vector<Amount> reservation_baseline_ {};
   std::vector<Amount> reserved_ {};
-  std::map<std::int64_t, std::unique_ptr<detail::LedgerEntry>> entries_ {};
+  std::map<std::int64_t, std::unique_ptr<detail::LedgerEntry>> entries_;
   std::int64_t next_record_counter_ {0};
   std::int64_t next_policy_id_ {0};
   // The bound owners (true) and the orphaned owners of live records (false), since the last
