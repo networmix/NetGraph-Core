@@ -53,8 +53,6 @@ struct PolicyEpoch {
   // (shared, never changed: a policy without tunnels carries a null pointer, not a TunnelPlan).
   std::shared_ptr<const ForwardingProgram> program {};
   std::shared_ptr<const TunnelPlan> plan {};
-  // ShortestPaths Optimized: the union of the roster's routes, the controller's support (ascending).
-  std::vector<EdgeId> support {};
   // Unrestricted CentralizedTE with the optimized source allocation: the cumulative marginal curve of the last solve
   // (absent before one, and after a forward).
   std::optional<std::vector<std::pair<Cost, Amount>>> marginal_cost_curve {};

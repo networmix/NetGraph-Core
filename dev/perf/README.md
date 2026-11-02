@@ -365,6 +365,28 @@ named by their input position) on 16 sampled nodes. A search row also checks its
 read from the input (max cost / cost GCD + 1) must both equal the frozen expectation, and its
 roots must be the rule's `(i * 997 + 1) mod N`. A sampled digest is not correctness evidence.
 
+### Pooled preparation and shared-basis rows
+
+The additional pooled rows keep graph construction and fixed inputs outside timing. Each trial
+includes its policy, ledger, complete default result and teardown; no result field is disabled.
+`pooled_fixture` fixes the inputs for both the timed driver and a separate semantic preflight.
+The adapter's optional compile-time observer reads complete results/records only in that
+preflight; its default empty observer does no work in the timed binary.
+
+| Rows | Work and boundary |
+| --- | --- |
+| `pooled.anycast.many`, `.one`, `pooled.single_path.one` | Clos128x32, sources0..95 versus source0, destinations96..111 (single path:96), replace4000; whole-roster and one-root/single-path preparation |
+| `pooled.choice.collapse_available`, `.tree`, `.bottleneck_available` |32 disjoint two-source collapse/tree groups, or one prefix-sensitive bottleneck demand; independent expected deliveries160/192/3. Available-capacity collapse sees2/5 free on capacity10/5; the tree picks the lowest-id qualifying hop; the bottleneck sees1/3 free on capacity5/3 |
+| `pooled.weight.explicit`, `.snapshot` | Clos32x16, eight sources to20/21, replace400. Explicit weights0 or1..7; snapshot reads a half-capacity service view with zero members. U retains the zero-weight route edges |
+| `pooled.from_dag.weighted`, `pooled.from_dag_build.one` |32 non-tight seven-node DAGs with nested roots, dead ends, terminal out-edges and zero alternatives: build and Pinned replace384; or eight one-source builders on the existing Clos64x32 search/trim/plan workload |
+| `pooled.controller.equal`, `global.support.equal` | ShortestPaths Optimized on Clos32x16 with equal sources, or supported CentralizedTE on the non-tight DAG family; preparation, solve, decomposition and default result lifetime |
+| `program.forward.pooled`, `program.repair.pooled`, `program.stale.pooled` | Installed Equal anycast program on Clos32x16;32 full-offer forwards100..3200 or32 fixed three-link states as repair masks/black holes, fresh Lossy Pinned policy per state, replace2400 |
+
+Capacity/headroom collapse and bottleneck scores share their preparation branch with available
+capacity. Static weight variants and memberless roots, and controller source-allocation variants,
+remain semantic controls rather than more timing rows for the same changed branch. Existing
+pooled, program, batch, global and tunnel rows remain controls of the connected readers.
+
 ### Frozen inputs
 
 The destination rows' targets, the endpoint set and the storage inputs are frozen, so every

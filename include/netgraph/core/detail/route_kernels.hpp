@@ -156,12 +156,21 @@ private:
 // ascending.
 [[nodiscard]] std::vector<EdgeId> prune(const Graph& graph, const PredecessorDAG& dag, NodeId source,
                                         std::span<const NodeId> destinations, const Eligibility* eligibility = nullptr);
+// The same prune from all roots at once, without a per-root union. Roots and destinations are
+// sorted and disjoint; an excluded root contributes no walk.
+[[nodiscard]] std::vector<EdgeId> prune(const Graph& graph, const PredecessorDAG& dag, std::span<const NodeId> roots,
+                                        std::span<const NodeId> destinations, const Eligibility* eligibility = nullptr);
 
 // The minimum walk cost from `source` to the destination set over `route` (a record's route:
 // its min_route_cost); kUnreachable when the route has no such walk. The split-graph builder's
 // cost pass alone: no plan is built.
 [[nodiscard]] Cost min_route_cost(const Graph& graph, const PredecessorDAG& route, NodeId source,
                               std::span<const NodeId> destinations);
+// One reverse cost pass over the route, returning each root's cheapest walk cost
+// in root order (kUnreachable where none exists). The DAG need not be shortest-path tight and may
+// contain dead ends or edges leaving destinations; a walk stops at its first destination.
+[[nodiscard]] std::vector<Cost> min_route_costs(const Graph& graph, const PredecessorDAG& route,
+                              std::span<const NodeId> roots, std::span<const NodeId> destinations);
 
 // The plan of a new flow on `route` (acyclic; the flow's DAG or path, its record's route), its
 // Weighted weights from `weights` (a WeightSource; its creation view aligned with the route's edges
@@ -206,31 +215,21 @@ private:
 // position holding a value >= x, a.size() when none); only the probes differ.
 [[nodiscard]] std::size_t lower_bound_from(std::span<const EdgeId> a, std::size_t hint, EdgeId x) noexcept;
 
-// The creation products of a ShortestPaths flow: its record route, its plan and its route cost.
-struct PreparedRouteResult {
-  std::shared_ptr<const PredecessorDAG> route {};
-  PreparedRoute prepared_route {};
-  Cost min_route_cost {kUnreachable};
-};
+// The union U of the roots' ShortestPaths routes, before weight pruning, in ascending EdgeId.
+// `support` is the static reverse shortest-path DAG to destinations; roots are sorted, distinct
+// and disjoint from destinations. Multipath keeps all edges or collapses each parallel pair on
+// view; FEWER_HOPS single paths follow the canonical next edge shared by all roots. HIGHER_*
+// single paths require exactly one root and keep that root's prefix-sensitive bottleneck rule.
+// Each reached support node is visited once; only reached nodes are sorted, never a source union.
+[[nodiscard]] std::vector<EdgeId> shortest_path_routes(const Graph& graph, const PredecessorDAG& support,
+                              std::span<const NodeId> roots, std::span<const NodeId> destinations,
+                              const RouteChoice& choice, PriorityReader view);
 
-// Build a ShortestPaths flow's route, record route DAG, plan and cost in one pass. `support` contains
-// all static shortest paths to the sorted `destinations`; start at `source` and apply the route
-// choice on `view`. The result matches support_route, the route's construction and prepare_route:
-// reuse `support` if it is the whole route, otherwise build the route with
-// PredecessorDAGBuilder::of_edges.
-// Requires multipath and static membership (all kernels except Weighted with ResidualSnapshot
-// weights; a Weighted route edge of weight 0 also returns nullopt).
-// While building, check: every route edge can be a member; none leaves a destination; every
-// route node reaches a destination; the source is first in topological order; no cycle exists;
-// and each tail's members are consecutive. These checks ensure members == route.
-// Return nullopt on a failed condition or if `source` reaches no destination; the caller then uses
-// the separate routines. No per-call allocation is proportional to the whole graph's size.
-[[nodiscard]] std::optional<PreparedRouteResult> prepare_shortest_paths(const Graph& graph,
-                                                                 const std::shared_ptr<const PredecessorDAG>& support,
-                                                                 NodeId source, std::span<const NodeId> destinations,
-                                                                 const RouteChoice& choice, PriorityReader view,
-                                                                 RouteAllocation allocation, Admission admission,
-                                                                 const WeightSource& weights);
+// The edges reached from one source in a destination-pruned DAG, in ascending EdgeId.
+// The common basis has no dead ends and no edge leaves a destination. This is the unweighted
+// record route, independent of the plan's pruned members; it builds no plan or cost table.
+[[nodiscard]] std::vector<EdgeId> reachable_route(const Graph& graph, std::span<const EdgeId> basis,
+                              NodeId source, std::span<const NodeId> destinations);
 
 // ---------------------------------------------------------------- allocation
 

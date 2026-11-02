@@ -130,6 +130,8 @@ inline ProgramSnapshot program_snapshot(const ForwardingProgram* p) {
   };
   scalar(data.pools_source_inflows);
   scalar(data.uses_topology_basis);
+  scalar(data.common_replay_support != nullptr);
+  if (data.common_replay_support) array(*data.common_replay_support);
   array(data.block());
   array(data.source_weight_values);
   scalar(data.entries.size());
@@ -230,8 +232,14 @@ struct Epoch {
 inline Epoch epoch(const FlowPolicy& p) {
   const auto& pe = detail::PolicyAccess::engine(p);
   const auto& ep = pe.epoch;
+  std::vector<EdgeId> support;
+  if (ep.program && std::holds_alternative<ShortestPaths>(pe.config.routing)
+      && std::get<ShortestPaths>(pe.config.routing).allocation == RouteAllocation::Optimized) {
+    const auto& common = detail::ProgramAccess::data(*ep.program).common_replay_support;
+    if (common) support = *common;
+  }
   Epoch e {ep.requested, ep.offered, ep.infinite, ep.prepared, p.delivered(), ep.marginal_cost_curve, ep.program.get(),
-           program_snapshot(ep.program.get()), ep.plan ? std::optional<TunnelPlan>(*ep.plan) : std::nullopt, ep.support,
+           program_snapshot(ep.program.get()), ep.plan ? std::optional<TunnelPlan>(*ep.plan) : std::nullopt, support,
            ep.source_drops_by_source, ep.by_tunnel, {}, program_snapshot(pe.kept_program.get()), pe.kept_program.get()};
   for (const auto& c : ep.record_groups) {
     auto& out = e.record_groups.emplace_back();

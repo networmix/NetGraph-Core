@@ -9,10 +9,12 @@
   policy had installed with the call's.
 
   * ShortestPaths Equal and Weighted (place_pooled): the epoch's first positive call (or a
-    replace) prepares every roster source's route on the working residual at its entry and joins
-    them into the program's one pooled split context, a plan rooted at the whole roster (a router
-    reached by several sources splits their added traffic once). Weighted weights come from the
-    configured basis (capacity, explicit edge weights, or the free capacity read then and frozen).
+    replace) builds the demand's route graph once from the whole roster on the working residual
+    at its entry (the route rule read on that view) and its program's one pooled split context
+    over it, a plan rooted at the whole roster (a router reached by several sources splits their
+    added traffic once); each roster source's record route is the part of that graph it reaches.
+    Weighted weights come from the configured basis (capacity, explicit edge weights, or the
+    free capacity read then and frozen).
     Lossless admits the largest total of the equal source allocation whose no-drop forwarding fits V = W +
     own; Lossy forwards the round-robin increments of the offer on W. The amounts are attributed
     back to the sources (kernels' forward()).
@@ -214,11 +216,6 @@ struct PolicyCallContext {
 
 // ================================================================ routes and plans
 
-struct RouteSupport {
-  std::vector<EdgeId> edges {};  // ascending
-  Cost cost {kUnreachable};
-};
-
 // The edge scores of the creation view W, as the route choice reads them (ShortestPaths). The
 // PriorityReader of `as_priority_reader` points at this view: it must outlive every call through it.
 struct WorkingPriority {
@@ -240,38 +237,12 @@ std::shared_ptr<const PredecessorDAG> record_route_of(const Graph& graph, std::s
   return std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::of_edges(graph, route));
 }
 
-// ShortestPaths: keep static shortest-path support reachable from source, then apply the route choice on W.
-// For parallel_edges = false (Collapse), choose one edge per (u, v) by (cost, higher tie value under
-// a HIGHER_* tie_break, lowest EdgeId). For multipath = false, choose the canonical single
-// path in stages. Both use W's tie values without excluding edges for low residual.
-RouteSupport shortest_path_support(const PolicyCallContext& c, NodeId source) {
-  const auto& g = c.graph;
-  const auto& pe = c.engine;
-  const auto& choice = pe.route_choice;
-  const WorkingPriority view {&c.service_capacity, g.edge_capacity_units(), choice.tie_break};
-  auto r = support_route(g, PredecessorDAGBuilder::ascending(*pe.support), source, pe.allowed_destinations, choice, view.as_priority_reader());
-  RouteSupport out;
-  out.edges = std::move(r.edges);
-  if (choice.single_path() && !out.edges.empty()) out.cost = r.cost;
-  return out;
-}
-
 // ShortestPaths Weighted's static weight source (Capacity or Explicit; ResidualSnapshot reads the view
 // at preparation and is made there).
 WeightSource shortest_path_weight_source(const PolicyEngine& pe) noexcept {
   const auto& sp = std::get<ShortestPaths>(pe.config.routing);
   if (sp.weight_basis == WeightBasis::Explicit) return {WeightBasis::Explicit, *sp.edge_weights};
   return {sp.weight_basis.value_or(WeightBasis::Capacity), {}};
-}
-
-// ShortestPaths's creation products in one pass (prepare_shortest_paths, identical to
-// shortest_path_support, record_route_of and the plan where it applies); nullopt elsewhere.
-std::optional<PreparedRouteResult> creation_products(const PolicyCallContext& c, NodeId source) {
-  const auto& pe = c.engine;
-  const auto& choice = pe.route_choice;
-  const WorkingPriority view {&c.service_capacity, c.graph.edge_capacity_units(), choice.tie_break};
-  return prepare_shortest_paths(c.graph, pe.support, source, pe.allowed_destinations, choice, view.as_priority_reader(), std::get<ShortestPaths>(pe.config.routing).allocation,
-                            pe.config.admission, shortest_path_weight_source(pe));
 }
 
 // ---------------------------------------------------------------- outputs
@@ -497,14 +468,13 @@ Counter128 requested_after(const PolicyEpoch& cur, std::optional<Amount> v) noex
 }
 
 // The epoch a full-offer call starts: one empty record_group per roster source (or program entry);
-// forward keeps the installed program and ShortestPaths Optimized's support.
+// forward keeps the installed program, which also owns ShortestPaths Optimized's support.
 PolicyEpoch fresh_epoch(const PolicyEngine& pe, bool keep_program) {
   PolicyEpoch e;
   e.record_groups.resize(pe.epoch.record_groups.size());
   if (keep_program) {
     e.program = pe.epoch.program;
     e.plan = pe.epoch.plan;
-    e.support = pe.epoch.support;
   }
   return e;
 }
@@ -667,14 +637,12 @@ namespace {
 
 // ---------------------------------------------------------------- ShortestPaths preparation
 
-// A ShortestPaths demand's routes for the epoch, prepared at its first positive call (or a replace)
-// on the working residual at that call's entry: per roster source its route (the record's route
-// and route cost), and its program (Equal, Weighted: one split route per source in one
-// plan rooted at the roster) or the routes' union (Optimized, the controller's support).
+// One common route graph and plan per epoch; only the eager record descriptors remain
+// per source. Optimized uses the same U as its controller support and program replay basis.
 struct PreparedShortestPaths {
-  std::vector<LiveFlow> flows {};  // per roster source, new (id -1)
+  std::vector<LiveFlow> flows {};
   std::shared_ptr<const ForwardingProgram> program {};
-  std::vector<EdgeId> edges {};    // ascending: the union of the routes
+  std::shared_ptr<const std::vector<EdgeId>> support {};
 };
 
 PreparedShortestPaths prepare_shortest_path_program(PolicyCallContext& c) {
@@ -683,94 +651,45 @@ PreparedShortestPaths prepare_shortest_path_program(PolicyCallContext& c) {
   const std::size_t k = pe.reachable_sources.size();
   const RouteAllocation allocation = std::get<ShortestPaths>(pe.config.routing).allocation;
   PreparedShortestPaths out;
-  out.flows.resize(k);
-  if (pe.kept_program) {
-    // Static split programs own each source's unpruned route and cost as well as
-    // the plan. Only fresh descriptors are needed; no retired record id is kept.
-    const auto& entries = ProgramAccess::data(*pe.kept_program).entries;
-    for (std::size_t i = 0; i < k; ++i) {
-      out.flows[i].source = pe.reachable_sources[i];
-      out.flows[i].route = entries[i].route;
-      out.flows[i].min_route_cost = entries[i].min_route_cost;
-    }
-    out.program = pe.kept_program;
-    return out;
-  }
-  std::vector<std::vector<EdgeId>> routes(k);
-  std::shared_ptr<const PreparedRoute> single;  // one source's plan from its one-pass creation
-  for (std::size_t i = 0; i < k; ++i) {
-    const NodeId s = pe.reachable_sources[i];
-    auto& f = out.flows[i];
-    f.source = s;
-    if (auto made = creation_products(c, s)) {
-      f.route = std::move(made->route);
-      f.min_route_cost = made->min_route_cost;
-      if (k == 1 && allocation != RouteAllocation::Optimized) {
-        single = std::make_shared<const PreparedRoute>(std::move(made->prepared_route));
-      } else {
-        routes[i] = std::move(made->prepared_route.support_edges);
-      }
+  out.program = pe.kept_program;
+  std::vector<Cost> costs;
+  if (out.program) {
+    const auto& data = ProgramAccess::data(*out.program);
+    out.support = data.common_replay_support;
+    costs.reserve(k);
+    for (const auto& entry : data.entries) costs.push_back(entry.min_route_cost);
+  } else {
+    const WorkingPriority view {&c.service_capacity, g.edge_capacity_units(), pe.route_choice.tie_break};
+    auto edges = shortest_path_routes(g, *pe.support, pe.reachable_sources, pe.allowed_destinations,
+                                     pe.route_choice, view.as_priority_reader());
+    const auto dag = PredecessorDAGBuilder::of_edges(g, edges);
+    costs = min_route_costs(g, dag, pe.reachable_sources, pe.allowed_destinations);
+    if (allocation == RouteAllocation::Optimized) {
+      out.support = std::make_shared<const std::vector<EdgeId>>(std::move(edges));
     } else {
-      RouteSupport r = shortest_path_support(c, s);
-      f.route = record_route_of(g, r.edges, pe.support);
-      f.min_route_cost = r.cost != kUnreachable ? r.cost : min_route_cost(g, *f.route, s, pe.allowed_destinations);
-      routes[i] = std::move(r.edges);
-    }
-  }
-  // One split-routing source: its one-pass creation plan (the pooled builder's plan of its route,
-  // rooted at it) is the program; its route is the union.
-  if (single) {
-    std::vector<ProgramEntry> entries(1);
-    entries[0].route = out.flows[0].route;
-    entries[0].min_route_cost = out.flows[0].min_route_cost;
-    out.program = shortest_path_program(g, pe.sources, pe.destinations, pe.reachable_sources, std::move(single), std::move(entries));
-    return out;
-  }
-  for (const auto& r : routes) out.edges.insert(out.edges.end(), r.begin(), r.end());
-  std::sort(out.edges.begin(), out.edges.end());
-  out.edges.erase(std::unique(out.edges.begin(), out.edges.end()), out.edges.end());
-  // One continuation per router: every source's route leaves each of its routers by all the
-  // union's edges there. The routes are read on one view under one mask, so a router's
-  // continuation depends on the router alone (a single path's suffix is the canonical path of
-  // its first node; the rejected multipath = false with a HIGHER_* tie_break is the exception).
-  // One route is its own union: nothing to check.
-  const auto row = g.outgoing_offsets();
-  const auto edge_sources = g.edge_sources();
-  for (std::size_t i = 0; k > 1 && i < k; ++i) {
-    const auto& r = routes[i];
-    for (std::size_t a = 0; a < r.size();) {
-      const auto u = static_cast<std::size_t>(edge_sources[static_cast<std::size_t>(r[a])]);
-      std::size_t b = a;
-      while (b < r.size() && static_cast<std::size_t>(edge_sources[static_cast<std::size_t>(r[b])]) == u) ++b;
-      const auto lo = std::lower_bound(out.edges.begin(), out.edges.end(), row[u]);
-      const auto hi = std::lower_bound(lo, out.edges.end(), row[u + 1]);
-      if (static_cast<std::size_t>(hi - lo) != b - a) {
-        throw std::logic_error("ShortestPaths: two roster sources continue differently at node " + std::to_string(u));
+      std::vector<Amount> creation;
+      WeightSource weights = shortest_path_weight_source(pe);
+      if (allocation == RouteAllocation::Weighted && weights.basis == WeightBasis::ResidualSnapshot) {
+        c.service_capacity.gather(edges, creation);
+        weights.values = creation;
       }
-      a = b;
+      std::vector<ProgramEntry> entries(k);
+      for (std::size_t i = 0; i < k; ++i) entries[i].min_route_cost = costs[i];
+      out.program = pooled_dag_program(g, pe.sources, pe.destinations, pe.reachable_sources, dag,
+                                      allocation, weights, std::move(entries));
+      out.support = ProgramAccess::data(*out.program).common_replay_support;
     }
   }
-  if (allocation == RouteAllocation::Optimized) return out;
-  const auto support = PredecessorDAGBuilder::ascending(*pe.support);
-  const auto dag = std::equal(out.edges.begin(), out.edges.end(), support.begin(), support.end())
-                       ? pe.support
-                       : std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::of_edges(g, out.edges));
-  // Weighted weights: the static source, or the free capacity read now (ResidualSnapshot, frozen
-  // for the epoch).
-  std::vector<Amount> creation;
-  WeightSource weights = shortest_path_weight_source(pe);
-  if (allocation == RouteAllocation::Weighted && weights.basis == WeightBasis::ResidualSnapshot) {
-    creation.resize(out.edges.size());
-    for (std::size_t i = 0; i < out.edges.size(); ++i) creation[i] = c.service_capacity.at(out.edges[i]);
-    weights.values = creation;
-  }
-  std::vector<ProgramEntry> entries(k);
+  // Each roster source's record route: the part of U it reaches, made here for its record.
+  // The program itself keeps only U and costs; static reuse reconstructs descriptors from it.
+  out.flows.resize(k);
   for (std::size_t i = 0; i < k; ++i) {
-    entries[i].route = out.flows[i].route;
-    entries[i].min_route_cost = out.flows[i].min_route_cost;
+    auto& flow = out.flows[i];
+    flow.source = pe.reachable_sources[i];
+    const auto route = reachable_route(g, *out.support, flow.source, pe.allowed_destinations);
+    flow.route = record_route_of(g, route, pe.support);
+    flow.min_route_cost = costs[i];
   }
-  out.program = pooled_dag_program(g, pe.sources, pe.destinations, pe.reachable_sources, *dag, allocation, weights,
-                                   std::move(entries));
   return out;
 }
 
@@ -1111,8 +1030,8 @@ Amount source_outgoing_capacity_bound(const PolicyEngine& pe, std::span<const Ed
 }
 
 // The program basis of a controller: unrestricted CentralizedTE the topology under its mask; CentralizedTE with
-// a support that support; ShortestPaths Optimized each source's route.
-ReplayBasis optimized_flow_replay_basis(const PolicyEngine& pe, const std::vector<LiveFlow>& flows) {
+// a support that support; ShortestPaths Optimized its common U.
+ReplayBasis optimized_flow_replay_basis(const PolicyEngine& pe, std::shared_ptr<const std::vector<EdgeId>> support) {
   ReplayBasis b;
   if (is_unrestricted_centralized_te(pe)) {
     b.uses_topology_basis = true;
@@ -1121,8 +1040,7 @@ ReplayBasis optimized_flow_replay_basis(const PolicyEngine& pe, const std::vecto
   } else if (is<CentralizedTE>(pe)) {
     b.common_support = pe.centralized_te_support;
   } else {
-    b.source_supports.reserve(flows.size());
-    for (const auto& f : flows) b.source_supports.push_back(f.route);
+    b.common_support = std::move(support);
   }
   return b;
 }
@@ -1151,10 +1069,11 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
     PolicyCallContext c {pe, g, W};
     prep = prepare_shortest_path_program(c);
   }
+  const auto common = global ? pe.centralized_te_support
+                             : created ? prep.support : ProgramAccess::data(*cur.program).common_replay_support;
   const std::span<const EdgeId> support = dense      ? std::span<const EdgeId> {}
                                           : global   ? std::span<const EdgeId>(*pe.centralized_te_support)
-                                          : created  ? std::span<const EdgeId>(prep.edges)
-                                                     : std::span<const EdgeId>(cur.support);
+                                                     : std::span<const EdgeId>(*common);
   std::vector<LiveFlow> flows(k);
   for (std::size_t i = 0; i < k; ++i) {
     if (!created) {
@@ -1244,7 +1163,7 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
   const auto& supplies = dec.supplies;
   auto program = optimized_flow_program(g, pe.sources, pe.destinations, pe.reachable_sources, std::move(dec.paths),
                                     weighted ? std::span<const Amount>(source_weights) : prescribed ? std::span<const Amount> {} : std::span<const Amount>(supplies),
-                                    optimized_flow_replay_basis(pe, flows));
+                                    optimized_flow_replay_basis(pe, common));
   const Counter128 requested = requested_after(cur, v);
   PlacementResult& out = s.result;
   out.call_delivered = sol.flow_value - P;
@@ -1300,7 +1219,6 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
     trace->set("shares", std::move(shares_tr));
   }
   if (curve) s.next_epoch.marginal_cost_curve = *out.marginal_cost_curve;  // the cumulative curve a later zero call reports
-  if (!global) s.next_epoch.support = created ? prep.edges : cur.support;
   s.next_epoch.program = program;
   s.next_epoch.by_tunnel = out.by_tunnel;
   s.next_epoch.requested = requested;
@@ -2025,16 +1943,14 @@ std::unique_ptr<PolicyEngine> finish_engine(std::unique_ptr<PolicyEngine> pe, Sh
   } else if (global != nullptr && global->support && !global->tunnel_count.has_value()) {
     // The support trimmed to the walks from the sources to the allowed destinations under the mask;
     // the roster is the sources that reach one inside it.
-    std::vector<EdgeId> trimmed;
-    for (NodeId s : pe->sources) {
-      if (!node_allowed(s)) continue;
-      auto part = detail::prune(g, *global->support, s, pe->allowed_destinations, eligibility);
-      if (part.empty()) continue;
-      pe->reachable_sources.push_back(s);
-      trimmed.insert(trimmed.end(), part.begin(), part.end());
+    std::vector<NodeId> allowed;
+    for (NodeId source : pe->sources) if (node_allowed(source)) allowed.push_back(source);
+    auto trimmed = detail::prune(g, *global->support, allowed, pe->allowed_destinations, eligibility);
+    const auto dag = detail::PredecessorDAGBuilder::of_edges(g, trimmed);
+    const auto costs = detail::min_route_costs(g, dag, allowed, pe->allowed_destinations);
+    for (std::size_t i = 0; i < allowed.size(); ++i) {
+      if (costs[i] != kUnreachable) pe->reachable_sources.push_back(allowed[i]);
     }
-    std::sort(trimmed.begin(), trimmed.end());
-    trimmed.erase(std::unique(trimmed.begin(), trimmed.end()), trimmed.end());
     pe->centralized_te_support = std::make_shared<const std::vector<EdgeId>>(std::move(trimmed));
   } else {
     // The static costs fix the roster (unrestricted CentralizedTE, T1 and T2); T1's CostStretch baseline c0
@@ -2652,7 +2568,6 @@ void FlowPolicy::remove() {
   for (auto& c : pe.epoch.record_groups) c.clear();
   pe.epoch.program.reset();
   pe.epoch.plan.reset();
-  pe.epoch.support.clear();
   pe.epoch.marginal_cost_curve.reset();
   pe.epoch.source_drops_by_source.clear();
   pe.epoch.by_tunnel.clear();

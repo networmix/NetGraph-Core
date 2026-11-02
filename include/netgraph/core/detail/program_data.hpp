@@ -26,8 +26,8 @@ namespace netgraph::core::detail {
 
 // One entry: a tunnel (tunnels()[tunnel_position]) or a split route (a root of
 // split_contexts[split_context_position]). `roster_index` is the head's position in the roster;
-// `route` the entry's route as a DAG (a split route's edges before weight pruning; null for a
-// tunnel, whose path the record's route is made from when a Pinned policy needs it) and
+// `route` a private from_routes split route before weight pruning; null for a pooled entry
+// (its route is reached from the common basis) or a tunnel (its path supplies the route), and
 // `min_route_cost` its minimum walk cost.
 struct ProgramEntry {
   std::int32_t entry_id {0};
@@ -84,10 +84,11 @@ struct ProgramData {
   bool uses_topology_basis {false};
   std::span<const NodeId> excluded_nodes {};  // ascending
   std::span<const EdgeId> excluded_edges {};  // ascending (an edge whose endpoint is excluded included)
-  std::shared_ptr<const std::vector<EdgeId>> common_replay_support {};  // every slot's (a supported CentralizedTE)
-  std::vector<std::shared_ptr<const PredecessorDAG>> source_supports {};    // per slot its route (ShortestPaths Optimized)
+  // Every slot's basis: pooled split programs alias their plan's support_edges; controllers on
+  // a support own/share its U. No source route DAG is kept for either kind.
+  std::shared_ptr<const std::vector<EdgeId>> common_replay_support {};
   // A slot's replay basis as edge sets, appended to `out` (each ascending, except a tunnel's path,
-  // in walk order: `second` false): the shared route or edge set above, else (supplied and ShortestPaths
+  // in walk order: `second` false): the common edge set above, else (from_routes
   // split programs) the slot's own entries' routes: a tunnel's edges, a split route's route DAG (its
   // edges before weight pruning). Nothing is copied.
   void basis_parts(std::size_t slot, std::vector<std::pair<std::span<const EdgeId>, bool>>& out) const;
@@ -175,13 +176,11 @@ struct Decomposition {
                                       std::span<const NodeId> roster, std::span<const NodeId> dests);
 
 // A controller program's replay basis: the topology under the producer's exclusions (its excluded
-// nodes and edges, ascending), per roster source its route, or one edge set for every source
-// (both shared, not copied).
+// nodes and edges, ascending), or one shared edge set for every source.
 struct ReplayBasis {
   bool uses_topology_basis {false};
   std::span<const NodeId> excluded_nodes {};
   std::span<const EdgeId> excluded_edges {};
-  std::vector<std::shared_ptr<const PredecessorDAG>> source_supports {};
   std::shared_ptr<const std::vector<EdgeId>> common_support {};
 };
 
@@ -195,8 +194,8 @@ struct ReplayBasis {
 
 // The program of a pooled split demand: one split route per roster source in the one pooled
 // context `plan` (rooted at the roster); `entries` one per roster source in roster order (its
-// record route, the source's route before weight pruning and its replay basis, and its route cost
-// set; index, slot, weight 1 and context are set here).
+// route cost set; no private route). The plan owns U once, before weight pruning; every entry
+// uses it as its replay basis. Index, slot, weight 1 and context are set here.
 [[nodiscard]] std::shared_ptr<const ForwardingProgram> shortest_path_program(
     const Graph& graph, std::span<const NodeId> sources, std::span<const NodeId> destinations,
     std::span<const NodeId> reachable_sources, std::shared_ptr<const PreparedRoute> plan, std::vector<ProgramEntry> entries);
@@ -204,10 +203,8 @@ struct ReplayBasis {
 // The one pooled DAG builder, shared by ShortestPaths Equal/Weighted and from_dag: the plan of
 // `dag` rooted at the roster (the allocation, Equal or Weighted, and the weight source: explicit
 // weights edge-aligned, a snapshot aligned with the DAG's ascending edges), then the program of
-// shortest_path_program. A plan does not depend on the admission. ShortestPaths with one roster
-// source, multipath and a static weight basis builds its plan in one pass instead
-// (prepare_shortest_paths, the same plan as this builder's of that source's route) and passes it to
-// shortest_path_program directly.
+// shortest_path_program. A plan does not depend on the admission. One root is the same builder's
+// degenerate case.
 [[nodiscard]] std::shared_ptr<const ForwardingProgram> pooled_dag_program(
     const Graph& graph, std::span<const NodeId> sources, std::span<const NodeId> destinations,
     std::span<const NodeId> roster, const PredecessorDAG& dag, RouteAllocation allocation,

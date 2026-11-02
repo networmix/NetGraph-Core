@@ -3121,7 +3121,43 @@ int test_captured_sources() {
   return 0;
 }
 
+int test_pooled_preparation() {
+  const std::vector<std::pair<std::string, double>> hand = {
+      {"pooled.choice.collapse_available", 160}, {"pooled.choice.tree", 192},
+      {"pooled.choice.bottleneck_available", 3}};
+  const auto listed = rows();
+  for (const auto& [name, expected] : hand) {
+    const auto spec = pooled_fixture(name);
+    bool observed = false;
+    const auto digest = abaapi::pooled_trial(spec, [&](const auto& result, const auto& policy, const auto& ledger) {
+      observed = true;
+      if (result.delivered != netgraph::core::to_units(expected, abaapi::kResolution))
+        throw std::runtime_error(name + ": wrong hand-derived delivery");
+      if (policy.records().size() != spec.sources.size() || ledger.records().size() != spec.sources.size())
+        throw std::runtime_error(name + ": missing default eager records");
+    });
+    if (!observed) throw std::runtime_error(name + ": observer not reached");
+    const auto row = std::find_if(listed.begin(), listed.end(), [&](const auto& r) { return r.name == name; });
+    if (row == listed.end() || row->setup()() != digest) throw std::runtime_error(name + ": timed row differs from preflight");
+  }
+  const auto supplied = pooled_fixture("pooled.from_dag.weighted");
+  abaapi::pooled_trial(supplied, [&](const auto&, const auto& policy, const auto&) {
+    const auto records = policy.records();
+    if (records.size() != 96) throw std::runtime_error("supplied DAG lost a nested root");
+    for (const auto& record : records) {
+      const auto root = record.sources.front() % 7;
+      const auto cost = root == 0 ? 2 : root == 1 ? 4 : 1;
+      const std::size_t edges = root == 2 ? 3 : 4;
+      if (record.min_route_cost != cost || record.route->via_edges().size() != edges)
+        throw std::runtime_error("supplied DAG route/cost lost a zero-weight edge or retained a terminal/dead-end edge");
+    }
+  });
+  std::puts("pooled preparation: collapse160, tree192, bottleneck3; nested-root costs and zero-weight routes checked");
+  return 0;
+}
+
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string(argv[1]) == "test-pooled-preparation") return test_pooled_preparation();
   if (argc == 2 && std::string(argv[1]) == "test-captured-sources") return test_captured_sources();
   if (argc == 2 && std::string(argv[1]) == "test-times") return test_times();
   if (argc == 2 && std::string(argv[1]) == "test-msd-epochs") return test_msd_epochs();
@@ -3221,6 +3257,11 @@ class Harness(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("all 32-step", result.stdout)
 
+    def test_pooled_preparation_rows_have_independent_hand_answers(self):
+        proc = self.harness("test-pooled-preparation")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("nested-root costs and zero-weight routes checked", proc.stdout)
+
     def test_compiles_without_a_diagnostic(self):
         self.assertEqual(self.compiled.returncode, 0, self.compiled.stderr[-2000:])
         self.assertEqual(self.compiled.stderr, "")
@@ -3230,7 +3271,7 @@ class Harness(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = aba.row_list(proc.stdout.encode(), "aba-list")
         real = {k: v for k, v in rows.items() if not k.startswith("test.")}
-        self.assertEqual(len(real), 101)
+        self.assertEqual(len(real), 116)
         sums = sha256sums(HERE / "queries")
         lists = {}
         for name in sums:
@@ -3264,7 +3305,7 @@ class Harness(unittest.TestCase):
         real = [row for row in listed if not row.startswith("test.")]
         with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 1) as pool:
             procs = list(pool.map(lambda row: self.harness("aba-run", row, "1"), real))
-        self.assertEqual(len(procs), 101)
+        self.assertEqual(len(procs), 116)
         for row, proc in zip(real, procs, strict=True):
             self.assertEqual(proc.returncode, 0, (row, proc.stderr))
             self.assertEqual(

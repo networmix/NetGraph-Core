@@ -441,6 +441,71 @@ void build_split(const Graph& graph, const PredecessorDAG& dag, std::span<const 
   }
 }
 
+// Distances to the first destination, shared by all roots. Outgoing DFS finishes each child
+// before its parent: d(u) = min(cost(u,v) + d(v)). With unit costs it gives the fewest hops.
+// The same stamped slots serve arbitrary DAG costs and canonical ShortestPaths hop selection;
+// no graph-sized buffer is cleared on each call. A failed call's slots expire at begin().
+DagScratch& route_distances(const Graph& graph, std::span<const EdgeId> edges, std::span<const NodeId> roots,
+                            std::span<const NodeId> destinations, bool unit_cost) {
+  DagScratch& s = dag_scratch();
+  s.begin(static_cast<std::size_t>(graph.num_nodes()));
+  s.stack.clear();
+  auto touch = [&](NodeId v) -> DagScratch::Node& {
+    if (!s.seen(v)) {
+      s.touch(v);
+      s.at(v).dist = kUnreachable;
+    }
+    return s.at(v);
+  };
+  const auto tails = graph.edge_sources();
+  const auto heads = graph.edge_destinations();
+  const auto costs = graph.edge_costs();
+  for (std::size_t lo = 0; lo < edges.size();) {
+    const NodeId u = tails[static_cast<std::size_t>(edges[lo])];
+    std::size_t hi = lo + 1;
+    while (hi < edges.size() && tails[static_cast<std::size_t>(edges[hi])] == u) ++hi;
+    auto& nu = touch(u);
+    nu.first = static_cast<std::int32_t>(lo);
+    nu.count = static_cast<std::int32_t>(hi - lo);
+    lo = hi;
+  }
+  for (NodeId d : destinations) {
+    auto& nd = touch(d);
+    nd.target = 1;
+    nd.state = 2;
+    nd.dist = 0;
+  }
+  for (NodeId root : roots) {
+    auto& nr = touch(root);
+    if (nr.state == 2) continue;
+    nr.state = 1;
+    s.stack.emplace_back(root, nr.first);
+    while (!s.stack.empty()) {
+      const auto [u, at] = s.stack.back();
+      auto& nu = s.at(u);
+      if (at == nu.first + nu.count) {
+        nu.state = 2;
+        s.stack.pop_back();
+        continue;
+      }
+      const EdgeId e = edges[static_cast<std::size_t>(at)];
+      const NodeId v = heads[static_cast<std::size_t>(e)];
+      auto& nv = touch(v);
+      if (nv.state == 0) {
+        nv.state = 1;
+        s.stack.emplace_back(v, nv.first);
+        continue;  // read this edge after the child's distance is complete
+      }
+      if (nv.state == 1) throw std::logic_error("kernel plan: the route is cyclic");
+      if (nv.dist != kUnreachable) {
+        nu.dist = std::min(nu.dist, nv.dist + (unit_cost ? Cost {1} : costs[static_cast<std::size_t>(e)]));
+      }
+      ++s.stack.back().second;
+    }
+  }
+  return s;
+}
+
 } // namespace
 
 std::vector<EdgeId> prune(const Graph& graph, const PredecessorDAG& dag, NodeId source, std::span<const NodeId> destinations,
@@ -450,10 +515,27 @@ std::vector<EdgeId> prune(const Graph& graph, const PredecessorDAG& dag, NodeId 
   return std::move(plan.forwarding_edges);
 }
 
+std::vector<EdgeId> prune(const Graph& graph, const PredecessorDAG& dag, std::span<const NodeId> roots,
+                          std::span<const NodeId> destinations, const Eligibility* eligibility) {
+  PreparedRoute plan;
+  build_split(graph, dag, roots, destinations, [&](EdgeId e) { return eligibility == nullptr || eligibility->allows_edge(e); }, &plan, nullptr);
+  return std::move(plan.forwarding_edges);
+}
+
 Cost min_route_cost(const Graph& graph, const PredecessorDAG& route, NodeId source, std::span<const NodeId> destinations) {
   Cost cost = kUnreachable;
   build_split(graph, route, {&source, 1}, destinations, [](EdgeId) { return true; }, nullptr, &cost);
   return cost;
+}
+
+std::vector<Cost> min_route_costs(const Graph& graph, const PredecessorDAG& route, std::span<const NodeId> roots,
+                                std::span<const NodeId> destinations) {
+  if (roots.empty()) return {};
+  const auto& s = route_distances(graph, PredecessorDAGBuilder::ascending(route), roots, destinations, false);
+  std::vector<Cost> out;
+  out.reserve(roots.size());
+  for (NodeId root : roots) out.push_back(s.node[static_cast<std::size_t>(root)].dist);
+  return out;
 }
 
 namespace {
@@ -569,38 +651,22 @@ PreparedRoute restrict_prepared_route(const Graph& graph, const PreparedRoute& p
 
 namespace {
 
-// Per-thread state of prepare_shortest_paths. Per node (by NodeId) a slot valid only under the
+// Per-thread state of the roster route walk. Per node (by NodeId) a slot valid only under the
 // current epoch (DagScratch's pattern: nothing is cleared between calls except on stamp
 // wraparound, a call that throws leaves stale slots behind an old epoch, and the one array of
-// slots grows whole or not at all); every other buffer is indexed by the reached nodes' local
-// indices (their rank in ascending NodeId) or by route position, and is rewritten before it is
-// read.
+// slots grows whole or not at all). The reached list is the queue, then sorted tails; each
+// touched node's outgoing range is rewritten before use.
 struct CreationScratch {
   struct Node {
     std::uint32_t stamp {0};
     std::uint8_t reached {0};
     std::uint8_t target {0};
-    std::int32_t local {0};  // rank among the reached nodes (ascending NodeId)
     std::int32_t lo {0};     // the node's support out-edges: support[lo, hi)
     std::int32_t hi {0};
   };
   std::uint32_t generation {0};
   std::vector<Node> node;
   std::vector<NodeId> reached;  // the walk's nodes (its queue), then ascending
-  std::vector<EdgeId> route;                               // ascending
-  std::vector<std::int32_t> tail;                          // per route edge: its tail's local index
-  std::vector<std::int32_t> head;                          // per route edge: its head's local index
-  std::vector<std::int32_t> parent;                        // per entry: its parent's local index
-  std::vector<std::int32_t> entry;                         // per local node + 1: its entries (by child)
-  std::vector<std::int32_t> fill;
-  std::vector<EdgeId> via;                                 // the entries: by child, ascending via
-  std::vector<std::uint8_t> state;                         // per local node: DFS 1 open, 2 done
-  std::vector<std::pair<std::int32_t, std::int32_t>> dfs;  // (local node, next entry)
-  std::vector<std::int32_t> order;                         // local nodes, every one after its parents
-  std::vector<std::int32_t> position;                      // per local node
-  std::vector<std::int32_t> first;                         // per local node: its first member
-  std::vector<std::int32_t> count;                         // per local node: its number of members
-  std::vector<Cost> dist;                                  // per local node
 
   void begin(std::size_t n) {
     if (node.size() < n) node.resize(n);  // strong guarantee; new slots carry stamp 0
@@ -663,214 +729,110 @@ std::size_t lower_bound_from(std::span<const EdgeId> a, std::size_t hint, EdgeId
                                   a.begin());
 }
 
-std::optional<PreparedRouteResult> prepare_shortest_paths(const Graph& graph, const std::shared_ptr<const PredecessorDAG>& support,
-                                                   NodeId source, std::span<const NodeId> destinations,
-                                                   const RouteChoice& choice, PriorityReader view,
-                                                   RouteAllocation allocation, Admission admission,
-                                                   const WeightSource& weights) {
-  const bool weighted = allocation == RouteAllocation::Weighted;
-  if (choice.single_path() || (weighted && weights.basis == WeightBasis::ResidualSnapshot)) return std::nullopt;
-  check_kernel(allocation, admission);
-  // A Weighted route edge's weight (static membership: Capacity or Explicit).
-  auto weight = [&](EdgeId e) -> Amount {
-    const auto ei = static_cast<std::size_t>(e);
-    const Amount cap = graph.edge_capacity_units()[ei];
-    if (weights.basis == WeightBasis::Explicit) return cap >= 1 ? weights.values[ei] : 0;
-    return cap;
-  };
-  const auto sup = PredecessorDAGBuilder::ascending(*support);
-  const auto row = graph.outgoing_offsets();
-  const auto edst = graph.edge_destinations();
-  const auto edge_cost = graph.edge_costs();
+namespace {
+
+std::vector<EdgeId> select_routes(const Graph& graph, std::span<const EdgeId> sup,
+                                       std::span<const NodeId> roots, std::span<const NodeId> destinations,
+                                       const RouteChoice& choice, PriorityReader view) {
+  if (roots.empty() || destinations.empty()) return {};
+  if (choice.single_path() && choice.prefers_score()) {
+    if (roots.size() != 1) throw std::logic_error("ShortestPaths bottleneck route requires one root");
+    return support_route(graph, sup, roots.front(), destinations, choice, view).edges;
+  }
+  const auto rows = graph.outgoing_offsets();
+  const auto heads = graph.edge_destinations();
   CreationScratch& s = creation_scratch();
   s.begin(static_cast<std::size_t>(graph.num_nodes()));
-  for (NodeId d : destinations) s.touch(d).target = 1;
-  // support_route's walk over the support from source: every reached node keeps its support
-  // out-edges as one range (EdgeIds rank edges by source first: one tail's edges are consecutive).
   s.reached.clear();
-  s.touch(source).reached = 1;
-  s.reached.push_back(source);
-  bool any_target = false;
-  std::size_t m = 0;
+  for (NodeId d : destinations) s.touch(d).target = 1;
+  for (NodeId root : roots) {
+    s.touch(root).reached = 1;
+    s.reached.push_back(root);
+  }
   std::size_t hint = 0;
-  for (std::size_t q = 0; q < s.reached.size(); ++q) {  // the reached list is the walk's queue
+  for (std::size_t q = 0; q < s.reached.size(); ++q) {
     const NodeId u = s.reached[q];
+    auto& nu = s.at(u);
+    if (nu.target != 0) continue;
     const auto ui = static_cast<std::size_t>(u);
-    const std::size_t lo = lower_bound_from(sup, hint, row[ui]);
+    const std::size_t lo = lower_bound_from(sup, hint, rows[ui]);
     std::size_t hi = lo;
-    for (; hi < sup.size() && sup[hi] < row[ui + 1]; ++hi) {
-      const NodeId v = edst[static_cast<std::size_t>(sup[hi])];
+    for (; hi < sup.size() && sup[hi] < rows[ui + 1]; ++hi) {
+      const NodeId v = heads[static_cast<std::size_t>(sup[hi])];
       auto& nv = s.touch(v);
       if (nv.reached != 0) continue;
       nv.reached = 1;
       s.reached.push_back(v);
     }
-    auto& nu = s.at(u);
-    any_target = any_target || nu.target != 0;
     nu.lo = static_cast<std::int32_t>(lo);
     nu.hi = static_cast<std::int32_t>(hi);
-    m += hi - lo;
     hint = lo;
   }
-  if (!any_target || m == 0) return std::nullopt;
-  // The route in ascending EdgeId: the reached nodes' ranges in ascending NodeId (ascending in the
-  // support, checked), each with Collapse when parallel_edges is false (support_route's: one member per
-  // (u, v) by replaces() on the view), every route edge with its tail's local index. A
-  // destination with route edges, or a route edge that is no member candidate, means build_split
-  // would not keep the whole route: the caller's path then runs.
   std::sort(s.reached.begin(), s.reached.end());
-  const std::size_t r = s.reached.size();
-  for (std::size_t i = 0; i < r; ++i) s.at(s.reached[i]).local = static_cast<std::int32_t>(i);
-  s.route.resize(m);
-  s.tail.resize(m);
-  s.first.resize(r);
-  s.count.resize(r);
-  const bool collapse = !choice.parallel_edges;
-  const bool prefer = choice.prefers_score();
-  std::size_t w = 0;
-  std::int32_t prev_hi = 0;
-  for (std::size_t i = 0; i < r; ++i) {
-    const auto& nu = s.at(s.reached[i]);
-    s.first[i] = static_cast<std::int32_t>(w);
-    if (nu.hi > nu.lo) {
-      if (nu.lo < prev_hi || nu.target != 0) return std::nullopt;
-      prev_hi = nu.hi;
-    }
-    for (auto k = nu.lo; k < nu.hi;) {
-      EdgeId best = sup[static_cast<std::size_t>(k)];
-      auto j = k + 1;
-      if (collapse) {
-        const NodeId v = edst[static_cast<std::size_t>(best)];
-        for (; j < nu.hi && edst[static_cast<std::size_t>(sup[static_cast<std::size_t>(j)])] == v; ++j) {
-          if (replaces(graph, sup[static_cast<std::size_t>(j)], best, prefer, view)) best = sup[static_cast<std::size_t>(j)];
+  std::vector<EdgeId> out;
+  for (NodeId u : s.reached) {
+    const auto& nu = s.at(u);
+    for (auto at = nu.lo; at < nu.hi;) {
+      EdgeId best = sup[static_cast<std::size_t>(at)];
+      auto next = at + 1;
+      if (!choice.parallel_edges) {
+        const NodeId v = heads[static_cast<std::size_t>(best)];
+        for (; next < nu.hi && heads[static_cast<std::size_t>(sup[static_cast<std::size_t>(next)])] == v; ++next) {
+          if (replaces(graph, sup[static_cast<std::size_t>(next)], best, choice.prefers_score(), view)) {
+            best = sup[static_cast<std::size_t>(next)];
+          }
         }
       }
-      if (weighted && weight(best) < 1) return std::nullopt;
-      s.route[w] = best;
-      s.tail[w] = static_cast<std::int32_t>(i);
-      ++w;
-      k = j;
-    }
-    s.count[i] = static_cast<std::int32_t>(w) - s.first[i];
-  }
-  const std::span<const EdgeId> route(s.route.data(), w);
-  // The entries grouped by child (ascending NodeId), ascending via within a child: a counting pass
-  // over the heads' local indices, the route scattered in ascending order with each entry's parent.
-  s.head.resize(w);
-  s.entry.assign(r + 1, 0);
-  for (std::size_t k = 0; k < w; ++k) {
-    const auto h = s.at(edst[static_cast<std::size_t>(route[k])]).local;
-    s.head[k] = h;
-    ++s.entry[static_cast<std::size_t>(h) + 1];
-  }
-  std::size_t children = 0;
-  for (std::size_t i = 0; i < r; ++i) {
-    if (s.entry[i + 1] != 0) ++children;
-    s.entry[i + 1] += s.entry[i];
-  }
-  s.fill.assign(s.entry.begin(), s.entry.end() - 1);
-  s.via.resize(w);
-  s.parent.resize(w);
-  for (std::size_t k = 0; k < w; ++k) {
-    const auto at = static_cast<std::size_t>(s.fill[static_cast<std::size_t>(s.head[k])]++);
-    s.via[at] = route[k];
-    s.parent[at] = s.tail[k];
-  }
-  // build_split's order: a backward DFS from the destinations, in their order, over the entries,
-  // listing every node after its parents (postorder). A destination the walk did not reach has no
-  // entry and no position there, so it is skipped.
-  s.state.assign(r, 0);
-  s.order.clear();
-  for (NodeId d : destinations) {
-    const auto& nd = s.at(d);
-    if (nd.reached == 0) continue;
-    const auto di = nd.local;
-    if (s.state[static_cast<std::size_t>(di)] != 0) continue;
-    s.state[static_cast<std::size_t>(di)] = 1;
-    s.dfs.clear();
-    s.dfs.emplace_back(di, s.entry[static_cast<std::size_t>(di)]);
-    while (!s.dfs.empty()) {
-      const auto [v, k] = s.dfs.back();
-      if (k < s.entry[static_cast<std::size_t>(v) + 1]) {
-        s.dfs.back().second = k + 1;
-        const auto u = s.parent[static_cast<std::size_t>(k)];
-        const auto su = s.state[static_cast<std::size_t>(u)];
-        if (su == 0) {
-          s.state[static_cast<std::size_t>(u)] = 1;
-          s.dfs.emplace_back(u, s.entry[static_cast<std::size_t>(u)]);
-        } else if (su == 1) {
-          return std::nullopt;  // a cycle (build_split throws)
-        }
-      } else {
-        s.state[static_cast<std::size_t>(v)] = 2;
-        s.order.push_back(v);
-        s.dfs.pop_back();
-      }
+      out.push_back(best);
+      at = next;
     }
   }
-  const auto src_local = s.at(source).local;
-  if (s.order.size() != r || s.order.front() != src_local) return std::nullopt;
-  s.position.resize(r);
-  for (std::size_t p = 0; p < r; ++p) s.position[static_cast<std::size_t>(s.order[p])] = static_cast<std::int32_t>(p);
-  // prepare_route's cost: the minimum walk cost from source to a destination over the members, by the
-  // order (every member is a route edge, so min_route_cost is not called).
-  s.dist.resize(r);
-  Cost best = kUnreachable;
-  for (const auto v : s.order) {
-    const auto vi = static_cast<std::size_t>(v);
-    Cost dv = 0;
-    if (v != src_local) {
-      dv = kUnreachable;
-      for (auto k = s.entry[vi]; k < s.entry[vi + 1]; ++k) {
-        const auto ki = static_cast<std::size_t>(k);
-        dv = std::min(dv, s.dist[static_cast<std::size_t>(s.parent[ki])] + edge_cost[static_cast<std::size_t>(s.via[ki])]);
-      }
-    }
-    s.dist[vi] = dv;
-    if (s.at(s.reached[vi]).target != 0) best = std::min(best, dv);
+  if (!choice.single_path()) return out;
+  auto& distances = route_distances(graph, out, roots, destinations, true);
+  for (NodeId u : s.reached) distances.at(u).position = -1;
+  const auto tails = graph.edge_sources();
+  for (EdgeId e : out) {
+    const NodeId u = tails[static_cast<std::size_t>(e)];
+    const NodeId v = heads[static_cast<std::size_t>(e)];
+    auto& nu = distances.at(u);
+    const auto& nv = distances.at(v);
+    if (nu.position < 0 && nv.dist != kUnreachable && nu.dist == nv.dist + 1) nu.position = e;
   }
-  PreparedRouteResult out;
-  out.min_route_cost = best;
-  PreparedRoute& plan = out.prepared_route;
-  plan.allocation = allocation;
-  plan.support_edges.assign(route.begin(), route.end());
-  plan.forwarding_edges.assign(route.begin(), route.end());
-  if (weighted) {
-    plan.weights.resize(route.size());
-    for (std::size_t k = 0; k < route.size(); ++k) plan.weights[k] = weight(route[k]);
+  // The tree may leave a reached support branch unused: walk next() from the roots again.
+  for (NodeId u : s.reached) s.at(u).reached = 0;
+  s.reached.clear();
+  for (NodeId root : roots) {
+    s.at(root).reached = 1;
+    s.reached.push_back(root);
   }
-  const PreparedRoute::Layout lay = plan.layout({&source, 1}, destinations, r, route.size());
-  lay.source_positions[0] = 0;  // source comes first in the order
-  for (std::size_t p = 0; p < r; ++p) {
-    const auto v = static_cast<std::size_t>(s.order[p]);
-    const NodeId x = s.reached[v];
-    lay.topological_order[p] = x;
-    lay.is_destination[p] = s.at(x).target;
-    const std::int32_t b = s.count[v] == 0 ? 0 : s.first[v];
-    lay.outgoing_begin[p] = b;
-    lay.outgoing_end[p] = b + s.count[v];
+  for (std::size_t q = 0; q < s.reached.size(); ++q) {
+    const auto next = distances.at(s.reached[q]).position;
+    if (next < 0) continue;
+    const NodeId v = heads[static_cast<std::size_t>(next)];
+    if (s.at(v).reached != 0) continue;
+    s.at(v).reached = 1;
+    s.reached.push_back(v);
   }
-  for (std::size_t k = 0; k < route.size(); ++k) lay.edge_destination_positions[k] = s.position[static_cast<std::size_t>(s.head[k])];
-  // The record route: the support itself when the route is all of it (record_route_of's share).
-  if (route.size() == sup.size()) {
-    out.route = support;
-  } else {
-    std::vector<NodeId> nodes(children);
-    std::vector<std::int32_t> offsets(children + 1);
-    offsets[0] = 0;
-    for (std::size_t i = 0, c = 0; i < r; ++i) {
-      if (s.entry[i + 1] == s.entry[i]) continue;
-      nodes[c] = s.reached[i];
-      offsets[++c] = s.entry[i + 1];
-    }
-    std::vector<EdgeId> via(s.via.begin(), s.via.begin() + static_cast<std::ptrdiff_t>(w));
-    std::vector<NodeId> parents(w);
-    for (std::size_t k = 0; k < w; ++k) parents[k] = s.reached[static_cast<std::size_t>(s.parent[k])];
-    std::vector<EdgeId> asc(route.begin(), route.end());
-    out.route = std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::of_parts(
-        graph, std::move(nodes), std::move(offsets), std::move(parents), std::move(via), std::move(asc)));
+  std::sort(s.reached.begin(), s.reached.end());
+  out.clear();
+  for (NodeId u : s.reached) {
+    const auto next = distances.at(u).position;
+    if (next >= 0) out.push_back(next);
   }
   return out;
+}
+
+} // namespace
+
+std::vector<EdgeId> shortest_path_routes(const Graph& graph, const PredecessorDAG& support,
+                                       std::span<const NodeId> roots, std::span<const NodeId> destinations,
+                                       const RouteChoice& choice, PriorityReader view) {
+  return select_routes(graph, PredecessorDAGBuilder::ascending(support), roots, destinations, choice, view);
+}
+
+std::vector<EdgeId> reachable_route(const Graph& graph, std::span<const EdgeId> basis,
+                                 NodeId source, std::span<const NodeId> destinations) {
+  return select_routes(graph, basis, {&source, 1}, destinations, RouteChoice {}, PriorityReader {});
 }
 
 // ---------------------------------------------------------------- allocation

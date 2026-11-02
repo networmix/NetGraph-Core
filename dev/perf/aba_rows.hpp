@@ -721,6 +721,75 @@ inline void add_storage_rows(std::vector<Row>& r) {
   }
 }
 
+// Fixed pooled preparation inputs. Score/allocation variants sharing the same preparation
+// branch are semantic controls rather than additional permanent timing rows.
+inline abaapi::PooledSpec pooled_fixture(const std::string& name) {
+  using K = abaapi::PooledKind;
+  if (name == "pooled.anycast.many" || name == "pooled.anycast.one" || name == "pooled.single_path.one") {
+    std::vector<int> sources, destinations;
+    for (int i = 0; i < (name == "pooled.anycast.many" ? 96 : 1); ++i) sources.push_back(i);
+    for (int i = 96; i < (name == "pooled.single_path.one" ? 97 : 112); ++i) destinations.push_back(i);
+    return abaapi::pooled_prepare(gen_clos(128, 32, 22), sources, destinations,
+                                  name == "pooled.single_path.one" ? K::Tree : K::Equal, 4000);
+  }
+  if (name == "pooled.weight.explicit" || name == "pooled.weight.snapshot" || name == "pooled.controller.equal" ||
+      name == "program.forward.pooled" || name == "program.repair.pooled" || name == "program.stale.pooled") {
+    auto a = gen_clos(32, 16, 25);
+    std::vector<double> free = a.cap;
+    std::vector<std::int64_t> weights(a.src.size());
+    for (std::size_t i = 0; i < weights.size(); ++i) {
+      weights[i] = i % 5 == 0 ? 0 : 1 + static_cast<std::int64_t>(i % 7);
+      if (name == "pooled.weight.snapshot") free[i] = i % 13 == 0 ? 0 : a.cap[i] / 2;
+    }
+    K kind = name == "pooled.weight.explicit" ? K::Explicit : name == "pooled.weight.snapshot" ? K::Snapshot :
+             name == "pooled.controller.equal" ? K::Controller : K::Equal;
+    return abaapi::pooled_prepare(a, {0,1,2,3,4,5,6,7}, {20,21}, kind,
+                                  name.starts_with("program.") ? 2400 : 400, free, weights);
+  }
+  Arrays a;
+  std::vector<int> sources, destinations;
+  std::vector<double> free;
+  std::vector<std::int64_t> weights;
+  auto add = [&](int u, int v, double capacity, std::int64_t cost, double available, std::int64_t weight = 1) {
+    a.src.push_back(u); a.dst.push_back(v); a.cap.push_back(capacity); a.cost.push_back(cost);
+    free.push_back(available); weights.push_back(weight);
+  };
+  if (name == "pooled.choice.bottleneck_available") {
+    a.n = 6;
+    add(0,2,2,1,2); add(1,2,100,1,100); add(2,4,5,1,1); add(2,3,3,1,3);
+    add(4,5,5,1,1); add(3,5,3,1,3);
+    return abaapi::pooled_prepare(a, {1}, {5}, K::Bottleneck, 10, free);
+  }
+  const bool collapse = name == "pooled.choice.collapse_available";
+  const bool tree = name == "pooled.choice.tree";
+  const bool supplied = name == "pooled.from_dag.weighted";
+  if (!collapse && !tree && !supplied && name != "global.support.equal") throw std::runtime_error("unknown pooled fixture " + name);
+  const int width = collapse ? 4 : tree ? 5 : 7;
+  a.n = 32 * width;
+  for (int j = 0; j < 32; ++j) {
+    const int u = j * width;
+    sources.push_back(u); sources.push_back(u + 1);
+    if (collapse) {
+      destinations.push_back(u + 3);
+      add(u,u+2,100,1,100); add(u+1,u+2,100,1,100);
+      add(u+2,u+3,10,1,2); add(u+2,u+3,5,1,5);
+    } else if (tree) {
+      destinations.push_back(u + 2);
+      add(u,u+3,100,1,100); add(u,u+4,100,1,100); add(u+3,u+2,3,1,3);
+      add(u+4,u+2,100,1,100); add(u+1,u+4,100,1,100);
+    } else {
+      sources.push_back(u + 2);
+      destinations.push_back(u + 5); destinations.push_back(u + 6);
+      add(u,u+2,10,1,10); add(u+1,u+2,10,3,10); add(u+2,u+5,10,1,10,2);
+      add(u+2,u+3,10,1,10,j % 2 == 0 ? 0 : 3); add(u+3,u+5,10,5,10);
+      add(u+2,u+4,10,1,10); add(u+5,u+6,10,1,10);
+    }
+  }
+  return abaapi::pooled_prepare(a, sources, destinations,
+                                collapse ? K::Collapse : tree ? K::Tree : supplied ? K::Supplied : K::Supported,
+                                32 * (collapse ? 20 : tree ? 10 : 12), free, weights);
+}
+
 inline std::vector<Row> rows() {
   std::vector<Row> r;
   // ---- SPF classes
@@ -1129,6 +1198,46 @@ inline std::vector<Row> rows() {
                    return abaapi::replace_under_load(*g, srcs, 20, {9, 10, 11, 12}, 21, loads, 800.0);
                  });
                }});
+  // ---- whole-roster preparation, choices, weights and common-basis readers
+  for (const auto& [name, desc] : std::vector<std::pair<std::string, std::string>> {
+      {"pooled.anycast.many", "ShortestPaths Equal, Clos128x32 seed22, sources0..95 to leaves96..111, replace4000; full policy/result lifetime"},
+      {"pooled.anycast.one", "same anycast graph/offer with source0; one-root preparation"},
+      {"pooled.single_path.one", "same graph, source0 to96, canonical single path, replace4000"},
+      {"pooled.choice.collapse_available", "32 disjoint two-source parallel-edge groups, capacities10/5 and creation view2/5, replace640; one selected edge per pair"},
+      {"pooled.choice.tree", "32 disjoint canonical-tree groups, source0 chooses cap3 next hop while source1 has cap100, replace320"},
+      {"pooled.choice.bottleneck_available", "one source on a six-node prefix-sensitive graph; available1/3 versus capacity5/3, replace10"},
+      {"pooled.weight.explicit", "Weighted Explicit, Clos32x16 seed25, eight sources to20/21, weights0 or1..7, replace400; route basis includes zero-weight edges"},
+      {"pooled.weight.snapshot", "Weighted ResidualSnapshot on the same Clos; creation view half-capacity with zero members, replace400; snapshot gathered once over U"},
+      {"pooled.from_dag.weighted", "32 non-tight supplied DAGs, nested roots, dead ends and terminal out-edges, Weighted Explicit with zero alternatives, build and Pinned replace384"},
+      {"pooled.controller.equal", "ShortestPaths Optimized with equal sources, Clos32x16 seed25, eight sources to20/21, replace400; shared U, solve, decomposition, default results"},
+      {"global.support.equal", "CentralizedTE Equal with32 non-tight supplied DAGs and nested roots; constructor trim/reverse roster plus solve and replace384"}}) {
+    r.push_back({name, name.starts_with("global.") ? "global" : "pooled", desc, [name] {
+      auto spec = std::make_shared<const abaapi::PooledSpec>(pooled_fixture(name));
+      return Iter([spec] { return abaapi::pooled_trial(*spec); });
+    }});
+  }
+  r.push_back({"pooled.from_dag_build.one", "pooled", "same Clos64x32 seed22 and eight from_dag builders, one source per demand; search, trim and plan lifetime", [] {
+    auto g = std::make_shared<Graph>(abaapi::build(gen_clos(64, 32, 22)));
+    std::vector<std::pair<std::vector<int>, int>> demands;
+    for (int j = 0; j < 8; ++j) demands.push_back({{8*j}, (8*j+36)%64});
+    return Iter([g, demands] { return abaapi::pooled_dag_build(*g, demands); });
+  }});
+  r.push_back({"program.forward.pooled", "program", "installed ShortestPaths Equal anycast program, Clos32x16;32 full-offer forwards100..3200, default results and eager records", [] {
+    auto installed = std::make_shared<abaapi::PooledInstalled>(pooled_fixture("program.forward.pooled"));
+    std::vector<double> offers;
+    for (int i = 1; i <= 32; ++i) offers.push_back(100.0*i);
+    return Iter([installed, offers] { return installed->forward_all(offers); });
+  }});
+  for (bool stale : {false, true}) {
+    const std::string name = stale ? "program.stale.pooled" : "program.repair.pooled";
+    r.push_back({name, "program", "Pinned Lossy over a pooled anycast program on Clos32x16;32 fixed three-link states as repair masks or black holes; fresh ledger/policy, replace2400", [name, stale] {
+      auto spec = std::make_shared<const abaapi::PooledSpec>(pooled_fixture(name));
+      auto installed = std::make_shared<abaapi::PooledInstalled>(*spec);
+      auto program = installed->policy.program();
+      auto states = std::make_shared<const abaapi::Masks>(abaapi::masks(spec->graph, failure_states(spec->graph.ref().num_edges()/2, 32, 3, 26)));
+      return Iter([spec, program, states, stale] { return abaapi::pooled_failure_series(*spec, program, *states, stale); });
+    }});
+  }
   // ---- T1 tunnels (the fabric of 4 pods, 12 demands of 120: one policy per demand, one ledger)
   auto t1_pairs = [](const Fabric3& f) {
     std::vector<std::pair<int, int>> pairs;

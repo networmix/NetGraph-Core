@@ -592,15 +592,9 @@ TEST(Plans, KernelEntriesReportTheFirstDefectInOrder) {
   const auto g = make_graph(3, {{0, 1, 2, 1}, {1, 2, 2, 1}});
   const auto support = all_edges(g);
   const std::vector<NodeId> dsts = {2};
-  const PriorityValues values {&g, RouteTieBreak::FewerHops, {}};
   for (const auto& c : cases) {
     EXPECT_EQ(error_of([&] { check_kernel(c.k, c.a); }), c.error);
     EXPECT_EQ(error_of([&] { (void)prepare_route(g, c.k, c.a, WeightSource {}, 0, dsts, *support); }), c.error);
-    const RouteChoice choice {};
-    EXPECT_EQ(error_of([&] {
-                (void)prepare_shortest_paths(g, support, 0, dsts, choice, PriorityReader::of(values), c.k, c.a, WeightSource {});
-              }),
-              c.error);
   }
 }
 

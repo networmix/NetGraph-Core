@@ -748,6 +748,128 @@ inline std::uint64_t replace_under_load(const Graph& g, const std::vector<int>& 
   return d.h;
 }
 
+// Pooled preparation workloads. Inputs and supplied DAGs are fixed outside timing; one trial
+// owns the policy, ledger, complete default result and their teardown. Observers are for a
+// separate semantic preflight: the default empty observer is inlined away in the timed driver.
+enum class PooledKind { Equal, Collapse, Tree, Bottleneck, Explicit, Snapshot, Controller, Supplied, Supported };
+struct PooledSpec {
+  Graph graph;
+  std::vector<nc::NodeId> sources, destinations;
+  std::vector<nc::Amount> baseline;
+  nc::FlowPolicyConfig config;
+  std::shared_ptr<const nc::PredecessorDAG> dag;
+  nc::RouteOptions options;
+  nc::Amount offer {0};
+  bool supplied {false};
+};
+inline std::shared_ptr<const nc::PredecessorDAG> all_edges_dag(const Graph& graph) {
+  const auto& g = graph.ref();
+  std::vector<std::int32_t> offsets(static_cast<std::size_t>(g.num_nodes()) + 1, 0);
+  for (auto v : g.edge_destinations()) ++offsets[static_cast<std::size_t>(v) + 1];
+  for (std::size_t i = 1; i < offsets.size(); ++i) offsets[i] += offsets[i - 1];
+  auto at = offsets;
+  std::vector<nc::NodeId> parents(static_cast<std::size_t>(g.num_edges()));
+  std::vector<nc::EdgeId> via(parents.size());
+  for (nc::EdgeId e = 0; e < g.num_edges(); ++e) {
+    const auto pos = static_cast<std::size_t>(at[static_cast<std::size_t>(g.edge_destinations()[static_cast<std::size_t>(e)])]++);
+    parents[pos] = g.edge_sources()[static_cast<std::size_t>(e)];
+    via[pos] = e;
+  }
+  return std::make_shared<const nc::PredecessorDAG>(nc::PredecessorDAG::from_csr(g, offsets, parents, via));
+}
+inline PooledSpec pooled_prepare(const Arrays& arrays, std::vector<int> sources, std::vector<int> destinations,
+                                 PooledKind kind, double offer, const std::vector<double>& free = {},
+                                 const std::vector<std::int64_t>& weights = {}) {
+  PooledSpec out;
+  out.graph = build(arrays);
+  out.sources.assign(sources.begin(), sources.end());
+  out.destinations.assign(destinations.begin(), destinations.end());
+  out.offer = nc::to_units(offer, kResolution);
+  out.baseline.assign(out.graph.ref().edge_capacity_units().begin(), out.graph.ref().edge_capacity_units().end());
+  for (std::size_t i = 0; i < free.size(); ++i)
+    out.baseline[static_cast<std::size_t>(out.graph.edge_of_input[i])] = nc::to_units(free[i], kResolution);
+  nc::ShortestPaths sp;
+  if (kind == PooledKind::Collapse) sp.parallel_edges = false, sp.tie_break = nc::RouteTieBreak::HigherAvailableCapacity;
+  if (kind == PooledKind::Tree || kind == PooledKind::Bottleneck) sp.multipath = false;
+  if (kind == PooledKind::Bottleneck) sp.tie_break = nc::RouteTieBreak::HigherAvailableCapacity;
+  if (kind == PooledKind::Explicit || kind == PooledKind::Snapshot) {
+    sp.allocation = nc::RouteAllocation::Weighted;
+    sp.weight_basis = kind == PooledKind::Explicit ? nc::WeightBasis::Explicit : nc::WeightBasis::ResidualSnapshot;
+    if (kind == PooledKind::Explicit) {
+      std::vector<nc::Amount> aligned(weights.size());
+      for (std::size_t i = 0; i < weights.size(); ++i) aligned[static_cast<std::size_t>(out.graph.edge_of_input[i])] = weights[i];
+      sp.edge_weights = std::make_shared<const std::vector<nc::Amount>>(std::move(aligned));
+    }
+  }
+  if (kind == PooledKind::Controller) sp.allocation = nc::RouteAllocation::Optimized, sp.source_allocation = nc::SourceAllocation::Equal;
+  out.config.routing = std::move(sp);
+  if (kind == PooledKind::Supplied || kind == PooledKind::Supported) {
+    out.dag = all_edges_dag(out.graph);
+    if (kind == PooledKind::Supplied) {
+      out.supplied = true;
+      out.options.allocation = nc::RouteAllocation::Weighted;
+      out.options.weight_basis = nc::WeightBasis::Explicit;
+      out.options.edge_weights = std::vector<nc::Amount>(weights.size());
+      for (std::size_t i = 0; i < weights.size(); ++i)
+        (*out.options.edge_weights)[static_cast<std::size_t>(out.graph.edge_of_input[i])] = weights[i];
+    } else out.config.routing = centralized(nc::SourceAllocation::Equal, out.dag);
+  }
+  return out;
+}
+struct NoPooledObservation {
+  void operator()(const nc::PlacementResult&, const nc::FlowPolicy&, const nc::FlowLedger&) const noexcept {}
+};
+inline void pooled_digest(Digest& d, const nc::PlacementResult& r) {
+  add_rows(d, r);
+  d.add_i(r.routes_changed); d.add_i(r.weights_changed);
+  for (const auto& row : r.by_source) {
+    d.add_i(row.source); d.add(row.admitted.hi); d.add(row.admitted.lo); d.add_i(row.delivered);
+    d.add(row.source_drops.hi); d.add(row.source_drops.lo);
+    d.add(row.total_edge_drops.hi); d.add(row.total_edge_drops.lo);
+  }
+}
+template<class Observe = NoPooledObservation>
+inline std::uint64_t pooled_trial(const PooledSpec& spec, Observe observe = {}) {
+  nc::FlowLedger ledger(spec.graph.g, spec.baseline);
+  auto cfg = spec.config;
+  if (spec.supplied) cfg.routing = nc::Pinned {nc::ForwardingProgram::from_dag(spec.graph.ref(), spec.sources, spec.destinations, spec.dag, spec.options), nullptr};
+  nc::FlowPolicy policy(ledger, spec.sources, spec.destinations, std::move(cfg));
+  const auto result = policy.replace(spec.offer);
+  observe(result, policy, ledger);
+  Digest d; pooled_digest(d, result); return d.h;
+}
+struct PooledInstalled {
+  PooledSpec spec;
+  nc::FlowLedger ledger;
+  nc::FlowPolicy policy;
+  explicit PooledInstalled(PooledSpec input) : spec(std::move(input)), ledger(spec.graph.g, spec.baseline),
+      policy(ledger, spec.sources, spec.destinations, spec.config) { (void)policy.replace(spec.offer); }
+  template<class Observe = NoPooledObservation>
+  std::uint64_t forward_all(const std::vector<double>& offers, Observe observe = {}) {
+    Digest d;
+    for (double offer : offers) {
+      const auto result = policy.forward(nc::to_units(offer, kResolution));
+      observe(result, policy, ledger);
+      pooled_digest(d, result);
+    }
+    return d.h;
+  }
+};
+template<class Observe = NoPooledObservation>
+inline std::uint64_t pooled_failure_series(const PooledSpec& spec, std::shared_ptr<const nc::ForwardingProgram> program,
+                                            const Masks& states, bool stale, Observe observe = {}) {
+  Digest d;
+  for (const auto& state : states) {
+    nc::FlowLedger ledger(spec.graph.g, spec.baseline);
+    nc::FlowPolicyConfig cfg {nc::Pinned {program, stale ? state : nullptr}, nc::Admission::Lossy};
+    nc::FlowPolicy policy(ledger, spec.sources, spec.destinations, std::move(cfg), stale ? nullptr : state.get());
+    const auto result = policy.replace(spec.offer);
+    observe(result, policy, ledger);
+    pooled_digest(d, result);
+  }
+  return d.h;
+}
+
 // The equal-source-allocation CentralizedTE configuration (every roster source sends its round-robin share).
 inline nc::FlowPolicyConfig global_equal_config() {
   return nc::FlowPolicyConfig {.routing = centralized(nc::SourceAllocation::Equal)};

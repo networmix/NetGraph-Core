@@ -197,7 +197,6 @@ std::shared_ptr<const ForwardingProgram> optimized_flow_program(
     p->entries.push_back(std::move(entry));
   }
   p->uses_topology_basis = basis.uses_topology_basis;
-  p->source_supports = std::move(basis.source_supports);
   p->common_replay_support = std::move(basis.common_support);
   p->initialize_storage(sources, destinations, reachable_sources, basis.excluded_nodes, basis.excluded_edges);
   return ProgramAccess::make(std::move(data));
@@ -211,6 +210,7 @@ std::shared_ptr<const ForwardingProgram> shortest_path_program(
   p->graph_uid = graph.uid();
   SplitContext ctx;
   ctx.prepared_route = std::move(plan);
+  p->common_replay_support = std::shared_ptr<const std::vector<EdgeId>>(ctx.prepared_route, &ctx.prepared_route->support_edges);
   p->entries = std::move(entries);
   for (std::size_t i = 0; i < reachable_sources.size(); ++i) {
     auto& entry = p->entries[i];
@@ -301,10 +301,6 @@ bool same_plan_structure(const PreparedRoute& a, const PreparedRoute& b) noexcep
 void ProgramData::basis_parts(std::size_t slot, std::vector<std::pair<std::span<const EdgeId>, bool>>& out) const {
   if (common_replay_support) {
     out.emplace_back(*common_replay_support, true);
-    return;
-  }
-  if (!source_supports.empty()) {
-    out.emplace_back(PredecessorDAGBuilder::ascending(*source_supports[slot]), true);
     return;
   }
   for (std::int32_t e : entries_for_source(slot)) {
@@ -541,28 +537,24 @@ std::shared_ptr<const ForwardingProgram> ForwardingProgram::from_dag(const Graph
   detail::check_route_options("from_dag", true, options.allocation, options.weight_basis, options.edge_weights.has_value(),
                               options.residual.has_value());
   check_route_vectors(graph, options);
-  // The roster: the sources with a walk to a destination in the DAG (trimmed at the first
-  // destinations), each with its own walks as its record route and replay basis.
-  std::vector<NodeId> roster;
-  std::vector<detail::ProgramEntry> entries;
-  std::vector<EdgeId> all;
-  for (NodeId s : src) {
-    auto part = detail::prune(graph, *dag, s, dst, nullptr);
-    if (part.empty()) continue;
-    roster.push_back(s);
-    detail::ProgramEntry entry;
-    entry.route = std::make_shared<const PredecessorDAG>(detail::PredecessorDAGBuilder::of_edges(graph, part));
-    entry.min_route_cost = detail::min_route_cost(graph, *entry.route, s, dst);
-    entries.push_back(std::move(entry));
-    all.insert(all.end(), part.begin(), part.end());
-  }
-  if (roster.empty()) return detail::empty_program(graph.uid(), src, dst, false);
-  std::sort(all.begin(), all.end());
-  all.erase(std::unique(all.begin(), all.end()), all.end());
+  // Trim once from the whole source set, then compute each source's cheapest walk in
+  // one reverse pass. Dead ends and edges leaving destinations never enter U.
+  auto all = detail::prune(graph, *dag, src, dst);
   const auto supplied = detail::PredecessorDAGBuilder::ascending(*dag);
   const auto pooled = std::equal(all.begin(), all.end(), supplied.begin(), supplied.end())
                           ? dag
                           : std::make_shared<const PredecessorDAG>(detail::PredecessorDAGBuilder::of_edges(graph, all));
+  const auto costs = detail::min_route_costs(graph, *pooled, src, dst);
+  std::vector<NodeId> roster;
+  std::vector<detail::ProgramEntry> entries;
+  for (std::size_t i = 0; i < src.size(); ++i) {
+    if (costs[i] == kUnreachable) continue;
+    roster.push_back(src[i]);
+    detail::ProgramEntry entry;
+    entry.min_route_cost = costs[i];
+    entries.push_back(std::move(entry));
+  }
+  if (roster.empty()) return detail::empty_program(graph.uid(), src, dst, false);
   // Weighted's weights: Explicit edge-aligned; the snapshot aligned with the pooled DAG's edges.
   const RouteAllocation allocation = options.allocation.value_or(RouteAllocation::Equal);
   detail::WeightSource weights {options.weight_basis.value_or(WeightBasis::Capacity), {}};

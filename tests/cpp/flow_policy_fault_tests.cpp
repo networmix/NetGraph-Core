@@ -371,6 +371,60 @@ TEST(PolicyFaults, EveryFullOfferCallFailsAtomically) {
   }
 }
 
+TEST(PolicyFaults, RosterPrimitivesRetryAfterEveryAllocationFailure) {
+  // The two roots of a chain have distinct distances257/256. A fresh thread starts with
+  // no scratch (or with only a three-node warmup). Each failed growth must expire at the
+  // next call; retrying on that same thread returns every edge and the two exact costs.
+  const auto small = chain_graph(3, 1);
+  const auto large = chain_graph(258, 1);
+  const auto small_dag = all_edges(*small), large_dag = all_edges(*large);
+  const std::vector<NodeId> roots {0, 1};
+  for (int mode = 0; mode < 5; ++mode) {
+    const auto call = [&](const Graph& g, const PredecessorDAG& dag) -> std::vector<Cost> {
+      const std::vector<NodeId> dst {g.num_nodes() - 1};
+      if (mode == 3) return detail::min_route_costs(g, dag, roots, dst);
+      std::vector<EdgeId> edges;
+      if (mode == 4) {
+        edges = detail::prune(g, dag, roots, dst);
+      } else {
+        const detail::RouteChoice choice {RouteTieBreak::FewerHops, mode != 1, mode != 2};
+        edges = detail::shortest_path_routes(g, dag, roots, dst, choice, {});
+      }
+      return {edges.begin(), edges.end()};
+    };
+    const auto want = call(*large, *large_dag);
+    if (mode == 3) {
+      ASSERT_EQ(want, (std::vector<Cost> {257, 256}));
+    } else {
+      const auto every = all_ids(*large);
+      ASSERT_EQ(want, (std::vector<Cost>(every.begin(), every.end())));
+    }
+    for (bool warmed : {false, true}) {
+      int injected = 0;
+      for (long at = 0;; ++at) {
+        bool failed = false;
+        const long live = g_live.load();
+        std::thread([&] {
+          if (warmed) (void)call(*small, *small_dag);
+          std::vector<Cost> got;
+          failed = fails_at(at, [&] { got = call(*large, *large_dag); });
+          if (failed) {
+            EXPECT_TRUE(got.empty());
+            got = call(*large, *large_dag);
+          }
+          EXPECT_EQ(got, want) << "mode " << mode << " warm " << warmed << " allocation " << at;
+        }).join();
+        EXPECT_EQ(g_live.load(), live) << "mode " << mode << " allocation " << at;
+        if (!failed) break;
+        ++injected;
+        ASSERT_LT(at, 200);
+        if (::testing::Test::HasFailure()) return;
+      }
+      EXPECT_GT(injected, 0) << mode;
+    }
+  }
+}
+
 // Lossy forwarding with links that wait on each other in a cycle: the rounds'
 // scratch, the independent check and the error path. CYC(x, y): tunnel 0 meets X (input edge 0)
 // before Y (input edge 3), tunnel 1 Y before X. With x = y = 1 the rounds settle: every

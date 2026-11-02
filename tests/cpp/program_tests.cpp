@@ -2349,6 +2349,212 @@ std::shared_ptr<const ForwardingProgram> from_dag(const Graph& g, const std::vec
 
 // DAG-pooled against DAG-separate: one context splits node 2's two units once; two contexts each
 // put their unit on the first link.
+TEST(SharedPreparation, PooledProgramsOwnOneBasisAndNoSourceDag) {
+  const auto g = std::make_shared<const Graph>(make_graph(6, {
+      {0, 2, 100, 1}, {1, 2, 100, 3}, {2, 3, 5, 2}, {2, 4, 6, 1}, {4, 3, 6, 1}, {5, 3, 7, 1}}));
+  // Both shared continuations cost2; source costs are1+2=3 and3+2=5. Source5's edge is outside U.
+  // The two continuation capacities sum11; their 6/5 split admits11, with source shares6/5.
+  for (const auto allocation : {EB, W, MF}) {
+    std::shared_ptr<const ForwardingProgram> retained;
+    std::weak_ptr<const PredecessorDAG> record_route;
+    {
+      FlowLedger ledger(g);
+      FlowPolicy policy(ledger, v({0, 1}), v({3}), shortest_paths_policy(allocation));
+      const auto first = policy.replace(21);
+      EXPECT_EQ(first.delivered, 11);
+      retained = first.program;
+      const auto& data = detail::ProgramAccess::data(*retained);
+      ASSERT_TRUE(data.common_replay_support);
+      EXPECT_EQ(ids_to_input(*g, *data.common_replay_support), (std::vector<std::int32_t> {0, 1, 2, 3, 4}));
+      for (const auto& entry : data.entries) EXPECT_FALSE(entry.route);
+      if (allocation != MF) {
+        ASSERT_EQ(data.split_contexts.size(), 1U);
+        EXPECT_EQ(data.common_replay_support.get(), &data.split_contexts[0].prepared_route->support_edges);
+        ASSERT_EQ(data.entries.size(), 2U);
+        EXPECT_EQ(data.entries[0].min_route_cost, 3);
+        EXPECT_EQ(data.entries[1].min_route_cost, 5);
+      }
+      auto records = policy.records();
+      ASSERT_EQ(records.size(), 2U);
+      EXPECT_EQ(ids_to_input(*g, ascending_edges(*records[0].route)), (std::vector<std::int32_t> {0, 2, 3, 4}));
+      EXPECT_EQ(ids_to_input(*g, ascending_edges(*records[1].route)), (std::vector<std::int32_t> {1, 2, 3, 4}));
+      record_route = records[0].route;
+      const auto repeated = policy.replace(21);
+      EXPECT_EQ(repeated.delivered, first.delivered);
+      EXPECT_FALSE(repeated.routes_changed);
+      EXPECT_FALSE(repeated.weights_changed);
+    }
+    // Keeping the program must not keep any source's record DAG alive.
+    EXPECT_TRUE(record_route.expired());
+    FlowLedger replay_ledger(g);
+    FlowPolicy replay(replay_ledger, v({0, 1}), v({3}), {.routing = Pinned {retained, nullptr}});
+    EXPECT_EQ(replay.replace(21).delivered, 11);
+  }
+}
+
+TEST(SharedPreparation, FromDagCostsAndZeroWeightRoutesSurviveMaskAndViewCopies) {
+  const auto g = std::make_shared<const Graph>(make_graph(7, {
+      {0, 2, 10, 1}, {1, 2, 10, 3}, {2, 5, 10, 1}, {2, 3, 10, 1},
+      {3, 5, 10, 5}, {2, 4, 10, 1}, {5, 6, 10, 1}}));
+  const auto inv = id_of_input(*g);
+  const auto mask = g->eligibility({}, std::vector<EdgeId> {inv[2]});
+  const std::vector<NodeId> sources {0, 1, 2}, dests {5, 6};
+  // Source2 is also downstream of the other two. Their cheapest costs are2/4/1; after
+  // removing2->5, the non-tight alternative raises them to7/9/6. The dead end2->4 and
+  // the edge leaving destination5 never belong to U. Explicit zero weight on2->3
+  // removes forwarding members but must not erase that surviving record route.
+  for (auto basis : {WeightBasis::Capacity, WeightBasis::Explicit, WeightBasis::ResidualSnapshot}) {
+    RouteOptions options;
+    options.allocation = W;
+    options.weight_basis = basis;
+    if (basis == WeightBasis::Explicit) {
+      options.edge_weights = Amounts(static_cast<std::size_t>(g->num_edges()), 1);
+      (*options.edge_weights)[static_cast<std::size_t>(inv[3])] = 0;
+    }
+    if (basis == WeightBasis::ResidualSnapshot) options.residual = Amounts(static_cast<std::size_t>(g->num_edges()), 10);
+    auto program = ForwardingProgram::from_dag(*g, sources, dests, all_edges(*g), options);
+    const auto& data = detail::ProgramAccess::data(*program);
+    ASSERT_TRUE(data.common_replay_support);
+    EXPECT_EQ(ids_to_input(*g, *data.common_replay_support), (std::vector<std::int32_t> {0, 1, 2, 3, 4}));
+    ASSERT_EQ(data.entries.size(), 3U);
+    EXPECT_EQ(data.entries[0].min_route_cost, 2);
+    EXPECT_EQ(data.entries[1].min_route_cost, 4);
+    EXPECT_EQ(data.entries[2].min_route_cost, 1);
+    for (const auto& entry : data.entries) EXPECT_FALSE(entry.route);
+    auto view = detail::make_forwarding_view(*g, program, &mask, dests, nullptr, true);
+    const auto copy = view;
+    program.reset();
+    options = {};
+    view = {};
+    EXPECT_EQ(copy.min_route_cost(0), 7);
+    EXPECT_EQ(copy.min_route_cost(1), 9);
+    EXPECT_EQ(copy.min_route_cost(2), 6);
+    EXPECT_EQ(ids_to_input(*g, ascending_edges(*copy.route(0))), (std::vector<std::int32_t> {0, 3, 4}));
+    EXPECT_EQ(ids_to_input(*g, ascending_edges(*copy.route(1))), (std::vector<std::int32_t> {1, 3, 4}));
+    if (basis == WeightBasis::Explicit) EXPECT_TRUE(copy.prepared_route(0)->forwarding_edges.empty());
+    else EXPECT_FALSE(copy.prepared_route(0)->forwarding_edges.empty());
+  }
+}
+
+TEST(SharedPreparation, MaskedRecordsUseEachHeadsSmallReachOfTheCommonBasis) {
+  constexpr int heads = 64, links = 5;
+  const NodeId hub = heads * links, destination = hub + 1, alternate = hub + 2;
+  std::vector<InEdge> edges;
+  std::vector<NodeId> sources;
+  for (int i = 0; i < heads; ++i) {
+    const NodeId source = i * links;
+    sources.push_back(source);
+    for (int j = 0; j + 1 < links; ++j) edges.push_back({source + j, source + j + 1, 100, 1});
+    edges.push_back({source + links - 1, hub, 100, 1});
+  }
+  const auto shared_input = static_cast<std::size_t>(edges.size());
+  edges.push_back({hub, destination, 100, 1});
+  const auto alternate_input = static_cast<std::size_t>(edges.size());
+  edges.push_back({0, alternate, 100, 9});
+  edges.push_back({alternate, hub, 100, 1});
+  const auto g = shared(make_graph(alternate + 1, edges));
+  const auto inv = id_of_input(*g);
+  const std::vector<NodeId> destinations {destination};
+  const auto mask = g->eligibility({}, std::vector<EdgeId> {inv[0], inv[(heads - 1) * links]});
+  // U has 323 edges; a normal head reaches only its five private links and hub->destination.
+  // Head0's masked chain leaves its non-tight alternate: cost9+1+1=11, not its stored6.
+  // The last head loses its first link and keeps an empty failed entry. A zero-weight
+  // alternate still belongs to the record route: weights do not decide reachability here.
+  for (const auto allocation : {EB, W}) {
+    RouteOptions options;
+    options.allocation = allocation;
+    if (allocation == W) {
+      options.weight_basis = WeightBasis::Explicit;
+      options.edge_weights = Amounts(static_cast<std::size_t>(g->num_edges()), 1);
+      (*options.edge_weights)[static_cast<std::size_t>(inv[alternate_input])] = 0;
+    }
+    const auto pooled = ForwardingProgram::from_dag(*g, sources, destinations, all_edges(*g), options);
+    std::vector<RouteDefinition> private_routes;
+    for (int i = 0; i < heads; ++i) {
+      std::vector<EdgeId> route;
+      for (int j = 0; j < links; ++j) route.push_back(inv[static_cast<std::size_t>(i * links + j)]);
+      route.push_back(inv[shared_input]);
+      if (i == 0) {
+        route.push_back(inv[alternate_input]);
+        route.push_back(inv[alternate_input + 1]);
+      }
+      private_routes.push_back({sources[static_cast<std::size_t>(i)], dag_of(*g, route), 1});
+    }
+    // Independently supplied per-head DAGs are the source-local basis used by the earlier
+    // pooled representation. Their public masked route values must equal the common basis's.
+    const auto separate = ForwardingProgram::from_routes(*g, sources, destinations, private_routes, options);
+    const auto view = detail::make_forwarding_view(*g, pooled, &mask, destinations, nullptr, true);
+    const auto reference = detail::make_forwarding_view(*g, separate, &mask, destinations, nullptr, true);
+    for (int i = 0; i < heads; ++i) {
+      const auto entry = static_cast<std::size_t>(i);
+      ASSERT_TRUE(view.route(entry));
+      EXPECT_EQ(ascending_edges(*view.route(entry)), ascending_edges(*reference.route(entry)));
+      EXPECT_EQ(view.min_route_cost(entry), reference.min_route_cost(entry));
+      EXPECT_EQ(view.status(entry), reference.status(entry));
+      EXPECT_EQ(view.min_route_cost(entry), i == 0 ? 11 : i == heads - 1 ? kUnreachable : 6);
+      EXPECT_EQ(view.route(entry)->via_edges().size(), i == 0 ? 3U : i == heads - 1 ? 0U : 6U);
+    }
+    EXPECT_EQ(ids_to_input(*g, ascending_edges(*view.route(0))),
+              (std::vector<std::int32_t> {static_cast<std::int32_t>(shared_input),
+                                          static_cast<std::int32_t>(alternate_input), static_cast<std::int32_t>(alternate_input + 1)}));
+    EXPECT_EQ(view.status(0), UP);
+    EXPECT_EQ(view.status(heads - 1), FAILED);
+  }
+}
+
+TEST(SharedPreparation, OptimizedSecondPlaceKeepsTheSelectedSupport) {
+  const auto g = par2(10, 5);
+  FlowLedger ledger(g);
+  ShortestPaths routing;
+  routing.allocation = MF;
+  routing.parallel_edges = false;
+  routing.tie_break = RouteTieBreak::HigherCapacity;
+  FlowPolicy policy(ledger, v({0}), v({1}), FlowPolicyConfig {routing});
+  // Collapse keeps only the capacity10 link: after8, only2 more fit. Solving the second
+  // call on both static-support links would incorrectly deliver7 more, for a total15.
+  const auto first = policy.place(8);
+  EXPECT_EQ(first.call_delivered, 8);
+  EXPECT_EQ(first.delivered, 8);
+  const auto second = policy.place(10);
+  EXPECT_EQ(second.call_delivered, 2);
+  EXPECT_EQ(second.delivered, 10);
+  EXPECT_EQ(ledger.carried(), (Amounts {10, 0}));
+  const auto records = policy.records();
+  ASSERT_EQ(records.size(), 1U);
+  EXPECT_EQ(records[0].delivered, 10);
+  EXPECT_EQ(ascending_edges(*records[0].route), (std::vector<EdgeId> {0}));
+  EXPECT_EQ(records[0].edge_flows, (Drops {{0, 10}}));
+}
+
+TEST(SharedPreparation, FromRoutesKeepsItsPrivateBasis) {
+  const auto g = graph(4, {{0, 1, 10, 1}, {0, 2, 10, 1}, {1, 3, 10, 1}, {2, 3, 10, 1}});
+  const auto supplied = dag_of(*g, {0, 1, 2, 3});
+  const auto p = ForwardingProgram::from_routes(*g, v({0}), v({3}), std::vector<RouteDefinition> {{0, supplied, 1}});
+  const auto& data = detail::ProgramAccess::data(*p);
+  ASSERT_EQ(data.entries.size(), 1U);
+  EXPECT_TRUE(data.pools_source_inflows);
+  EXPECT_FALSE(data.common_replay_support);
+  EXPECT_EQ(data.entries[0].route, supplied);
+}
+
+TEST(SharedPreparation, PooledBasisKeepsItsPlanAfterProgramDestruction) {
+  const auto g = graph(4, kDP);
+  std::shared_ptr<const std::vector<EdgeId>> basis;
+  std::weak_ptr<const detail::PreparedRoute> plan;
+  {
+    const auto program = from_dag(*g, {0, 1, 2, 3});
+    const auto& data = detail::ProgramAccess::data(*program);
+    basis = data.common_replay_support;
+    plan = data.split_contexts[0].prepared_route;
+    EXPECT_EQ(basis.get(), &data.split_contexts[0].prepared_route->support_edges);
+  }
+  // The alias must own its containing plan, not merely borrow the vector's address.
+  ASSERT_FALSE(plan.expired());
+  EXPECT_EQ(*basis, v({0, 1, 2, 3}));
+  basis.reset();
+  EXPECT_TRUE(plan.expired());
+}
+
 TEST(FromDag, Pools) {
   const auto g = graph(4, kDP);
   const auto pooled = from_dag(*g, {0, 1, 2, 3});

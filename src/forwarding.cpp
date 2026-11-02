@@ -260,14 +260,21 @@ ForwardingView make_forwarding_view(const Graph& graph, std::shared_ptr<const Fo
   const std::size_t n = p.entries.size();
   v.pooled = p.pools_source_inflows;
   if (mask == nullptr || mask->uid() == 0) {
-    // The program's own state: its roster, its routes and plans, borrowed from the program (a
-    // tunnel's record route is made here; black holes change the statuses).
+    // The program's own roster and plans can be borrowed. Pooled and tunnel record routes
+    // are made here; private supplied DAG routes can be borrowed too. Black holes change statuses.
     v.borrowed = true;
-    if (v.black_holes == nullptr && !(records && !p.tunnels.empty())) {
+    const bool pooled_records = records && p.pools_source_inflows && p.common_replay_support;
+    if (v.black_holes == nullptr && !(records && !p.tunnels.empty()) && !pooled_records) {
       source_weight_width(v);
       return v;
     }
     materialize(v);
+    if (pooled_records) {
+      for (std::size_t e = 0; e < n; ++e) {
+        auto route = reachable_route(graph, *p.common_replay_support, p.entries[e].head, destinations);
+        v.routes_[e] = std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::of_edges(graph, route));
+      }
+    }
     for (std::size_t e = 0; records && e < n; ++e) {
       if (p.entries[e].tunnel_position < 0) continue;
       const auto path = path_of(p.tunnels[static_cast<std::size_t>(p.entries[e].tunnel_position)]);
@@ -332,7 +339,13 @@ ForwardingView make_forwarding_view(const Graph& graph, std::shared_ptr<const Fo
       }
     } else if (!failed) {
       // A split route's route under the mask (its edges before weight pruning).
-      const auto edges = PredecessorDAGBuilder::ascending(*entry.route);
+      std::vector<EdgeId> reached;
+      if (p.pools_source_inflows && p.common_replay_support) {
+        reached = reachable_route(graph, *p.common_replay_support, entry.head, destinations);
+      }
+      const auto edges = p.pools_source_inflows && p.common_replay_support
+                             ? std::span<const EdgeId>(reached)
+                             : PredecessorDAGBuilder::ascending(*entry.route);
       auto [route, cost] = masked_route(graph, edges, entry.head, live_dests, replay);
       failed = cost == kUnreachable;
       v.routes_[e] = std::move(route);

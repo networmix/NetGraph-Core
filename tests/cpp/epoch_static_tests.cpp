@@ -230,7 +230,6 @@ TEST(EpochStatic, ProgramComparatorDetectsWrongRetainedRouteCostWeightAndStructu
   writable.split_contexts = original.split_contexts;
   writable.uses_topology_basis = original.uses_topology_basis;
   writable.common_replay_support = original.common_replay_support;
-  writable.source_supports = original.source_supports;
   writable.pools_source_inflows = original.pools_source_inflows;
   writable.initialize_storage(original.sources, original.destinations, original.reachable_sources,
                               original.excluded_nodes, original.excluded_edges);
