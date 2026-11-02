@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Records**: `ShortestPaths` with Equal or Weighted allocation and programs built by `ForwardingProgram.from_dag` derive source records when read. Repeated record reads of a fixed state produce equal route values in distinct immutable `PredecessorDAG` objects; carried traffic and delivery values are unchanged.
+
 ## [0.12.0] - 2026-10-27
 
 **BREAKING.** The Core is rebuilt and its whole API changes: the graph works on integer units, one

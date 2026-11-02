@@ -59,9 +59,9 @@ public:
   void remove() { policy_->remove(); }
   // The FlowId of the policy's one record (its first), if it has one.
   [[nodiscard]] std::optional<FlowId> flow_id() const {
-    const auto& pe = engine();
-    if (pe.epoch.record_groups.empty() || pe.epoch.record_groups.front().empty()) return std::nullopt;
-    return FlowId {pe.ledger.uid(), pe.epoch.record_groups.front().front().record_counter};
+    const auto records = policy_->records();
+    if (records.empty()) return std::nullopt;
+    return records.front().flow_id;
   }
   // The split route's plan as forwarded (Pinned), or null (CentralizedTE's support has none).
   [[nodiscard]] const detail::PreparedRoute* plan() const {

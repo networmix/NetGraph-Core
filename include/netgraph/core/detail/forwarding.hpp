@@ -71,10 +71,13 @@ struct ForwardingView {
   // Per program entry: Failed (excluded by the mask, or a head outside the replay roster),
   // Blackholed (a tunnel whose path reaches a black hole), a down tunnel's setup status
   // (InsufficientBandwidth, CostCeilingExceeded) or Up; its route under the mask (the record's route; an empty DAG
-  // when it failed or is down) and that route's cost.
+  // when it failed or is down) and that route's cost. Common pooled routes/costs stay absent:
+  // their status follows the common-U roster and their records are derived by the ledger.
   std::vector<TunnelStatus> status_ {};
   std::vector<std::shared_ptr<const PredecessorDAG>> routes_ {};
   std::vector<Cost> min_route_costs_ {};
+  // Allowed unweighted common-basis edges, packed in U order; empty without a repair mask.
+  std::vector<std::uint64_t> basis_ {};
   // Per view head: its surviving entries (positions in data->entries, ascending index).
   std::vector<std::int32_t> source_entry_offsets_ {};
   std::vector<std::int32_t> source_entry_positions_ {};
@@ -90,6 +93,7 @@ struct ForwardingView {
   // The immutable view's effective captured weights may be declared proportions,
   // whose sum need not satisfy the solved-supply bound below 2^62.
   bool wide_source_weights {false};
+  [[nodiscard]] bool derived_records() const noexcept { return data->pools_source_inflows && data->common_replay_support; }
 
   [[nodiscard]] std::size_t num_sources() const noexcept { return borrowed ? data->reachable_sources.size() : source_indices_.size(); }
   [[nodiscard]] std::int32_t source_index(std::size_t h) const noexcept {
@@ -168,6 +172,8 @@ struct ProgramFlow {
   std::vector<Amount> offered_by_source {};
   std::vector<Amount> source_drops_by_source {};
   std::vector<EntryFlow> entries {};
+  // Pooled common-basis programs keep aggregate member-aligned vectors; entries carry only rows.
+  std::vector<Amount> carried {}, drops {};
 };
 
 // A forwarding's network numbers its positions in 32 bits. Its counts, in the order they are

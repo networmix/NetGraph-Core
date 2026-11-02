@@ -16,8 +16,9 @@
     Weighted weights come from the configured basis (capacity, explicit edge weights, or the
     free capacity read then and frozen).
     Lossless admits the largest total of the equal source allocation whose no-drop forwarding fits V = W +
-    own; Lossy forwards the round-robin increments of the offer on W. The amounts are attributed
-    back to the sources (kernels' forward()).
+    own; Lossy forwards the round-robin increments of the offer on W. Lossless keeps the admitted
+    aggregate; Lossy also keeps source-row totals and the forwarding history needed for record
+    reads. Per-source edge data is derived when records are read.
   * The controllers (place_optimized_flow): unrestricted CentralizedTE over every eligible edge, CentralizedTE with a
     support over that support trimmed, ShortestPaths Optimized over the union of the roster's routes
     (prepared as above). A minimum-cost flow of the cumulative value on V = W + own, from one
@@ -42,7 +43,7 @@
   apply_actions (several policies of one ledger): the list is validated whole, then computed (ORDERED:
   each action's call on a working copy of the ledger's totals; SIMULTANEOUS: every participant
   prepared on one view, forwarded by one joint evaluation, finished as its call), then published
-  as one exchange of every owner's records followed by their epochs.
+  as one exchange of every owner's ledger entry followed by their epochs.
 
   Work on copies and publish all changes together; an exception leaves ledger and policy intact.
   Store only changes to ledger residual in per-thread slots. Unrestricted CentralizedTE reads a dense
@@ -153,10 +154,8 @@ public:
   }
   // The policy's own carried load released (the view of a full-offer call): its live records'
   // edges added back.
-  void release_records(std::span<const FlowRecord* const> records) noexcept {
-    for (const FlowRecord* r : records) {
-      for (const auto& [e, x] : r->edge_flows) add(e, x);
-    }
+  void release(std::span<const std::pair<EdgeId, Amount>> carried) noexcept {
+    for (const auto& [e, x] : carried) add(e, x);
   }
 
 private:
@@ -254,30 +253,23 @@ WeightSource shortest_path_weight_source(const PolicyEngine& pe) noexcept {
 // after the call.
 // `totals`: the totals the call read (nullptr: the ledger's, read only for these two outputs).
 void prepare_outputs(const PolicyEngine& pe, const LedgerTotals* totals, const OutputOptions& outputs,
-                     std::span<const FlowRecord* const> after, PlacementResult& out) {
+                     const LedgerEntry& after, PlacementResult& out) {
   const auto m = static_cast<std::size_t>(pe.graph->num_edges());
   if (outputs.edge_reservations) {
     std::vector<Amount> held(m, 0);
-    for (const FlowRecord* r : after) {
-      for (const auto& [e, x] : r->edge_reservations) held[static_cast<std::size_t>(e)] += x;
-    }
+    for (const auto& [e, x] : after.holds) held[static_cast<std::size_t>(e)] = x;
     out.edge_reservations = std::move(held);
   }
   if (!outputs.edge_flows && !outputs.residual && !outputs.saturated_boundary_edges) return;
   std::vector<Amount> own(m, 0);
-  for (const FlowRecord* r : after) {
-    for (const auto& [e, x] : r->edge_flows) own[static_cast<std::size_t>(e)] += x;
-  }
+  for (const auto& [e, x] : after.carried) own[static_cast<std::size_t>(e)] = x;
   if (outputs.residual || outputs.saturated_boundary_edges) {
     const LedgerTotals t = totals != nullptr ? *totals : totals_of(pe.ledger);
     std::vector<Amount> res(m);
-    for (std::size_t e = 0; e < m; ++e) res[e] = t.service_baseline[e] - t.carried[e];
-    for (const auto& record_group : pe.epoch.record_groups) {
-      for (const auto& s : record_group) {
-        for (const auto& [e, x] : LedgerAccess::live(pe.ledger, s.record_counter).edge_flows) res[static_cast<std::size_t>(e)] += x;
-      }
+    for (std::size_t e = 0; e < m; ++e) res[e] = t.service_baseline[e] - t.carried[e] - own[e];
+    if (const auto* old = LedgerAccess::entry(pe.ledger, pe.policy_id)) {
+      for (const auto& [e, x] : old->carried) res[static_cast<std::size_t>(e)] += x;
     }
-    for (std::size_t e = 0; e < m; ++e) res[e] -= own[e];
     if (outputs.saturated_boundary_edges) out.saturated_boundary_edges = saturated_boundary_edges_of(*pe.graph, res, pe.sources, pe.eligibility);
     if (outputs.residual) out.residual = std::move(res);
   }
@@ -293,26 +285,18 @@ bool any_output(const OutputOptions& outputs) noexcept {
 // The result's 128-bit amounts (Counter128 values stay below 2^127).
 Counter128 c128(Amount x) noexcept { return Counter128 {0, static_cast<std::uint64_t>(x)}; }
 
-// a += b, or std::invalid_argument("<what> limit exceeded") when the sum reaches 2^127.
-void accumulate(Counter128& a, const Counter128& b, const char* what) {
-  const std::uint64_t lo = a.lo + b.lo;
-  const std::uint64_t hi = a.hi + b.hi + (lo < a.lo ? 1U : 0U);
-  if (hi >= (std::uint64_t {1} << 63)) throw std::invalid_argument(std::string(what) + " limit exceeded");
-  a = Counter128 {hi, lo};
-}
-
 // a - b, for a >= b.
 Counter128 minus(const Counter128& a, const Counter128& b) noexcept {
   return Counter128 {a.hi - b.hi - (a.lo < b.lo ? 1U : 0U), a.lo - b.lo};
 }
 
-// The demand's state after a call: its records after the call (`after`: one per flow, per roster
-// source or per program entry; the record's source names its row), the shares a Pinned head lost
-// itself (`lost`: per source, outside every record) and the epoch's counters after it. Lossy: a
+// The demand's state after a call: its complete entry (`after`, whose inventory names each
+// source row), the shares a Pinned head lost itself (`lost`: per source, outside every record)
+// and the epoch's counters after it. Lossy: a
 // row's source loss is what its source was offered and neither delivered nor dropped; the
 // demand's is its offered total minus delivery and drops, which with an empty roster is the
 // whole offer while every row stays zero.
-void fill_state(const PolicyEngine& pe, std::span<const FlowRecord* const> after, const Counter128& requested,
+void fill_state(const PolicyEngine& pe, const LedgerEntry& after, const Counter128& requested,
                 bool infinite, const Counter128& offered, PlacementResult& out,
                 std::span<const std::pair<NodeId, Counter128>> lost = {}) {
   const bool lossy = pe.config.admission == Admission::Lossy;
@@ -322,32 +306,35 @@ void fill_state(const PolicyEngine& pe, std::span<const FlowRecord* const> after
     out.by_source[i].source = pe.sources[i];
     if (lossy) out.by_source[i].offered = Counter128 {};
   }
-  // The records' drops, gathered for one merge (one record's are already ascending and unique).
-  std::vector<std::pair<EdgeId, Counter128>> drops;
-  std::size_t dropping = 0;
-  if (lossy) {
-    std::size_t n = 0;
-    for (const FlowRecord* r : after) {
-      n += r->edge_drops.size();
-      dropping += r->edge_drops.empty() ? 0 : 1;
+  out.delivered = after.delivered;
+  if (after.derived) {
+    const auto& d = *after.derived;
+    const auto roots = d.inputs->plan->sources;
+    for (std::size_t i = 0; i < after.record_inventory().size(); ++i) {
+      const auto source = after.record_inventory()[i].source;
+      auto& row = out.by_source[static_cast<std::size_t>(std::lower_bound(pe.sources.begin(), pe.sources.end(), source) - pe.sources.begin())];
+      if (lossy) {
+        row.offered = d.rows[i].offered;
+        row.delivered = d.rows[i].delivered;
+        row.total_edge_drops = minus(minus(*row.offered, c128(row.delivered)), d.rows[i].source_drops);
+      } else {
+        const auto it = std::lower_bound(roots.begin(), roots.end(), source);
+        if (it != roots.end() && *it == source) row.delivered = round_robin_share(after.delivered, static_cast<Amount>(roots.size()), static_cast<Amount>(it - roots.begin()));
+      }
     }
-    drops.reserve(n);
   }
-  for (const FlowRecord* r : after) {
-    const auto it = std::lower_bound(pe.sources.begin(), pe.sources.end(), r->sources.front());
+  for (std::size_t i = 0; i < after.stored.size(); ++i) {
+    const auto& r = after.stored[i];
+    const auto it = std::lower_bound(pe.sources.begin(), pe.sources.end(), after.record_inventory()[i].source);
     auto& row = out.by_source[static_cast<std::size_t>(it - pe.sources.begin())];
-    row.delivered += r->delivered;
-    out.delivered += r->delivered;
+    row.delivered += r.delivered;
     if (!lossy) continue;
-    accumulate(*row.offered, r->offered.value_or(Counter128 {}), "offered");
-    for (const auto& [e, x] : r->edge_drops) {
-      accumulate(row.total_edge_drops, x, "drops");
-      drops.emplace_back(e, x);
-    }
+    accumulate_counter(*row.offered, r.offered.value_or(Counter128 {}), "offered");
+    for (const auto& [e, x] : r.edge_drops) accumulate_counter(row.total_edge_drops, x, "drops");
   }
   for (const auto& [s, x] : lost) {
     const auto it = std::lower_bound(pe.sources.begin(), pe.sources.end(), s);
-    accumulate(*out.by_source[static_cast<std::size_t>(it - pe.sources.begin())].offered, x, "offered");
+    accumulate_counter(*out.by_source[static_cast<std::size_t>(it - pe.sources.begin())].offered, x, "offered");
   }
   if (!lossy) {
     for (auto& row : out.by_source) row.admitted = c128(row.delivered);
@@ -359,14 +346,9 @@ void fill_state(const PolicyEngine& pe, std::span<const FlowRecord* const> after
     row.admitted = *row.offered;
     row.source_drops = minus(minus(*row.offered, c128(row.delivered)), row.total_edge_drops);
   }
-  if (dropping > 1) std::sort(drops.begin(), drops.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-  out.edge_drops.reserve(drops.size());
+  out.edge_drops = after.drops;
   Counter128 dropped {};
-  for (const auto& [e, x] : drops) {
-    if (out.edge_drops.empty() || out.edge_drops.back().first != e) out.edge_drops.emplace_back(e, Counter128 {});
-    accumulate(out.edge_drops.back().second, x, "drops");
-    accumulate(dropped, x, "drops");
-  }
+  for (const auto& [e, x] : after.drops) accumulate_counter(dropped, x, "drops");
   out.offered = offered;
   out.admitted = offered;
   out.unadmitted = Counter128 {};
@@ -375,35 +357,21 @@ void fill_state(const PolicyEngine& pe, std::span<const FlowRecord* const> after
 
 // The exact sum of cost * flow over the records' edges (a controller's total cost; below 2^124:
 // the costs and the capacities each sum below 2^62).
-Counter128 total_cost_of(const Graph& graph, std::span<const FlowRecord* const> after) {
+Counter128 total_cost_of(const Graph& graph, const LedgerEntry& after) {
   const auto cost = graph.edge_costs();
   U128 sum {};
-  for (const FlowRecord* r : after) {
-    for (const auto& [e, x] : r->edge_flows) {
-      const U128 p = mul_u64(static_cast<std::uint64_t>(cost[static_cast<std::size_t>(e)]), static_cast<std::uint64_t>(x));
-      const std::uint64_t lo = sum.lo + p.lo;
-      sum = U128 {sum.hi + p.hi + (lo < sum.lo ? 1U : 0U), lo};
-    }
+  for (const auto& [e, x] : after.carried) {
+    const U128 p = mul_u64(static_cast<std::uint64_t>(cost[static_cast<std::size_t>(e)]), static_cast<std::uint64_t>(x));
+    const std::uint64_t lo = sum.lo + p.lo;
+    sum = U128 {sum.hi + p.hi + (lo < sum.lo ? 1U : 0U), lo};
   }
   return Counter128 {sum.hi, sum.lo};
 }
 
-// The records of the policy's live flows (a call that commits nothing).
-std::vector<const FlowRecord*> current_records(const PolicyEngine& pe) {
-  std::vector<const FlowRecord*> out;
-  for (const auto& record_group : pe.epoch.record_groups) {
-    for (const auto& s : record_group) out.push_back(&LedgerAccess::live(pe.ledger, s.record_counter));
-  }
-  return out;
-}
-
-// The drafts' records as a list, in per-thread storage reused by every call (valid until this
-// thread's next draft_records; it grows before any commit).
-std::span<const FlowRecord* const> draft_records(const std::vector<RecordDraft>& drafts) {
-  thread_local std::vector<const FlowRecord*> out;
-  out.clear();
-  for (const auto& d : drafts) out.push_back(&d.record);
-  return out;
+const LedgerEntry& own_entry(const PolicyEngine& pe) {
+  static const LedgerEntry empty;
+  const auto* own = LedgerAccess::entry(pe.ledger, pe.policy_id);
+  return own != nullptr ? *own : empty;
 }
 
 // T2: CentralizedTE with a tunnel count.
@@ -449,15 +417,22 @@ struct PolicyCall {
 
 LedgerTotals totals_of(const PolicyEngine& pe, const PolicyCall& rq) { return rq.totals != nullptr ? *rq.totals : totals_of(pe.ledger); }
 
-// A computed call, published or discarded whole: its result, the drafts of its commit (a place:
-// every live record plus the new ones; a full-offer call: only new ones, the live ones retired),
-// the epoch after it, and per new draft (in draft order) its flow in that epoch.
+// A computed call, published or discarded whole: its result, transient record data consumed
+// into the pending entry, and the policy epoch after it. A place keeps the entry's identity
+// range; a full-offer call retires that range and publishes a new one.
 struct PendingPolicyUpdate {
   PlacementResult result {};
-  std::vector<RecordDraft> drafts {};
+  std::vector<FlowRecord> drafts {};
+  LedgerEntry entry {};
   PolicyEpoch next_epoch {};
-  std::vector<std::pair<std::size_t, std::size_t>> fresh {};
 };
+
+void finish_state(const PolicyEngine& pe, PendingPolicyUpdate& update, const Counter128& requested,
+                  bool infinite, const Counter128& offered,
+                  std::span<const std::pair<NodeId, Counter128>> lost = {}) {
+  if (!update.entry.derived) update.entry = stored_entry(*pe.graph, pe.policy_id, update.drafts);
+  fill_state(pe, update.entry, requested, infinite, offered, update.result, lost);
+}
 
 // The requested total after the call (a full-offer call: its offer alone) and whether it is
 // infinite.
@@ -467,11 +442,10 @@ Counter128 requested_after(const PolicyEpoch& cur, std::optional<Amount> v) noex
   return r;
 }
 
-// The epoch a full-offer call starts: one empty record_group per roster source (or program entry);
+// The empty epoch a full-offer call starts;
 // forward keeps the installed program, which also owns ShortestPaths Optimized's support.
 PolicyEpoch fresh_epoch(const PolicyEngine& pe, bool keep_program) {
   PolicyEpoch e;
-  e.record_groups.resize(pe.epoch.record_groups.size());
   if (keep_program) {
     e.program = pe.epoch.program;
     e.plan = pe.epoch.plan;
@@ -637,10 +611,10 @@ namespace {
 
 // ---------------------------------------------------------------- ShortestPaths preparation
 
-// One common route graph and plan per epoch; only the eager record descriptors remain
-// per source. Optimized uses the same U as its controller support and program replay basis.
+// One common route graph and plan per epoch. Only Optimized builds stored source descriptors;
+// its controller uses the same U as support and program replay basis.
 struct PreparedShortestPaths {
-  std::vector<LiveFlow> flows {};
+  std::vector<FlowRecord> flows {};
   std::shared_ptr<const ForwardingProgram> program {};
   std::shared_ptr<const std::vector<EdgeId>> support {};
 };
@@ -680,29 +654,32 @@ PreparedShortestPaths prepare_shortest_path_program(PolicyCallContext& c) {
       out.support = ProgramAccess::data(*out.program).common_replay_support;
     }
   }
-  // Each roster source's record route: the part of U it reaches, made here for its record.
-  // The program itself keeps only U and costs; static reuse reconstructs descriptors from it.
-  out.flows.resize(k);
-  for (std::size_t i = 0; i < k; ++i) {
+  // Optimized keeps stored records. Pooled source routes are built only by explicit record reads.
+  if (allocation == RouteAllocation::Optimized) out.flows.resize(k);
+  for (std::size_t i = 0; i < out.flows.size(); ++i) {
     auto& flow = out.flows[i];
-    flow.source = pe.reachable_sources[i];
-    const auto route = reachable_route(g, *out.support, flow.source, pe.allowed_destinations);
+    flow.sources = {pe.reachable_sources[i]};
+    const auto route = reachable_route(g, *out.support, flow.sources.front(), pe.allowed_destinations);
     flow.route = record_route_of(g, route, pe.support);
     flow.min_route_cost = costs[i];
   }
   return out;
 }
 
-Trace routes_trace(const PreparedShortestPaths& p) {
+Trace routes_trace(const PolicyEngine& pe, const PreparedShortestPaths& p) {
   Trace t = Trace::map();
-  for (const auto& f : p.flows) t.set(key(f.source), route_trace(PredecessorDAGBuilder::ascending(*f.route)));
+  for (const auto& f : p.flows) t.set(key(f.sources.front()), route_trace(PredecessorDAGBuilder::ascending(*f.route)));
+  if (p.flows.empty() && p.program) {
+    const auto& data = ProgramAccess::data(*p.program);
+    for (const auto& e : data.entries) t.set(key(e.head), route_trace(reachable_route(*pe.graph, *p.support, e.head, pe.allowed_destinations)));
+  }
   return t;
 }
 
 // A record of one roster source of ShortestPaths or CentralizedTE (its route, its route cost).
-FlowRecord source_record(const PolicyEngine& pe, const LiveFlow& f) {
+FlowRecord source_record(const PolicyEngine& pe, const FlowRecord& f) {
   FlowRecord r;
-  r.sources = {f.source};
+  r.sources = f.sources;
   r.destinations = pe.allowed_destinations;
   r.admission = pe.config.admission;
   r.route = f.route;
@@ -737,7 +714,7 @@ std::vector<std::pair<EdgeId, Counter128>> plus(const std::vector<std::pair<Edge
   for (const auto& [e, x] : add) {
     while (i < base.size() && base[i].first < e) out.push_back(base[i++]);
     Counter128 sum = i < base.size() && base[i].first == e ? base[i++].second : Counter128 {};
-    accumulate(sum, c128(x), "drops");
+    accumulate_counter(sum, c128(x), "drops");
     out.emplace_back(e, sum);
   }
   out.insert(out.end(), base.begin() + static_cast<std::ptrdiff_t>(i), base.end());
@@ -759,21 +736,23 @@ std::vector<std::pair<EdgeId, Amount>> merged(std::vector<std::pair<EdgeId, Amou
   return out;
 }
 
-// One record per roster source (ShortestPaths, CentralizedTE): the drafts in roster order, kept ids when
-// the epoch already has them, else new (with their place in the next epoch).
-void source_drafts(const PolicyEngine& pe, const std::vector<LiveFlow>& flows, PendingPolicyUpdate& s) {
-  const std::size_t k = flows.size();
-  s.drafts.resize(k);
-  s.next_epoch.record_groups.assign(k, {});
-  for (std::size_t i = 0; i < k; ++i) {
-    if (flows[i].record_counter >= 0) {
-      s.drafts[i].record_counter = flows[i].record_counter;
-    } else {
-      s.fresh.emplace_back(i, 0);
+// Source routes and costs come from the single owner entry between calls. They are
+// temporary inputs to the next complete entry, never policy-local flow handles.
+std::vector<FlowRecord> source_specs(const PolicyEngine& pe, const LedgerEntry* own = nullptr) {
+  std::vector<FlowRecord> out(pe.reachable_sources.size());
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    out[i].sources = {pe.reachable_sources[i]};
+    if (own != nullptr) {
+      out[i].route = own->stored[i].route;
+      out[i].min_route_cost = own->stored[i].min_route_cost;
     }
-    s.drafts[i].record = source_record(pe, flows[i]);
-    s.next_epoch.record_groups[i].push_back(flows[i]);
   }
+  return out;
+}
+
+void source_drafts(const PolicyEngine& pe, const std::vector<FlowRecord>& flows, PendingPolicyUpdate& s) {
+  s.drafts.reserve(flows.size());
+  for (const auto& flow : flows) s.drafts.push_back(source_record(pe, flow));
 }
 
 // The programs of a call and the flags they give. Only T1's own setup books holds, so only it
@@ -798,150 +777,75 @@ std::vector<TunnelFlow> optimized_flow_tunnel_rows(const ForwardingProgram& prog
 
 PendingPolicyUpdate place_pooled(const PolicyEngine& pe, const PolicyEpoch& cur, ServiceCapacityWorkspace& W, const PolicyCall& rq,
                     const ForwardingProgram* before_program) {
-  const auto& g = *pe.graph;
-  const auto v = rq.offer;
-  Trace* trace = rq.trace;
-  PolicyCallContext c {pe, g, W};
-  const std::size_t k = pe.reachable_sources.size();
   const bool lossy = pe.config.admission == Admission::Lossy;
-  const bool created = cur.record_groups.front().empty();
-  PreparedShortestPaths prep;
-  std::vector<LiveFlow> flows(k);
-  if (created) {
-    prep = prepare_shortest_path_program(c);
-    flows = prep.flows;
-  } else {
-    for (std::size_t i = 0; i < k; ++i) flows[i] = cur.record_groups[i].front();
-  }
+  const bool created = !cur.prepared;
+  PolicyCallContext context {pe, *pe.graph, W};
+  const auto prep = created ? prepare_shortest_path_program(context) : PreparedShortestPaths {};
   const auto program = created ? prep.program : cur.program;
-  const PreparedRoute& plan = *ProgramAccess::data(*program).split_contexts.front().prepared_route;
-  const auto members = std::span<const EdgeId>(plan.forwarding_edges);
-  std::vector<const FlowRecord*> before(k, nullptr);
-  if (!created) {
-    for (std::size_t i = 0; i < k; ++i) before[i] = &LedgerAccess::live(pe.ledger, flows[i].record_counter);
+  const auto view = make_forwarding_view(*pe.graph, program, nullptr, pe.allowed_destinations, nullptr);
+  const auto& plan = *view.prepared_route(0);
+  const auto* old = created ? nullptr : LedgerAccess::entry(pe.ledger, pe.policy_id);
+  const auto v = rq.offer;
+  ProgramFlow flow;
+  Forwarding fw;
+  std::vector<Amount> inject(view.num_sources(), 0), capacity;
+  W.gather(plan.forwarding_edges, capacity);
+  Counter128 offered = cur.offered;
+  Trace step_trace = Trace::map();
+  Amount before = old ? old->delivered : 0;
+  if (!lossy) {
+    std::vector<Amount> own(plan.forwarding_edges.size(), 0);
+    if (old) align(plan.forwarding_edges, old->carried, own);
+    for (std::size_t m = 0; m < own.size(); ++m) capacity[m] += own[m];
+    auto step = lossless_step(plan, before, capacity, own, v);
+    flow.admitted = flow.delivered = step.admitted;
+    flow.carried = std::move(step.edge_flows);
+    if (kTraced && rq.trace) step_trace = Trace::ints(std::vector<Amount> {before, flow.admitted});
+  } else {
+    if (v) round_robin_increments(cur.offered, *v, inject);
+    Attribution attr;
+    fw = forward(plan, Injection {inject, !v.has_value()}, capacity, view.num_sources() > 1 ? &attr : nullptr);
+    flow.offered = fw.offered;
+    flow.delivered = fw.delivered;
+    flow.source_drops = fw.source_drops;
+    flow.carried = fw.edge_flows;
+    flow.drops = fw.edge_drops;
+    flow.entries.resize(view.num_sources());
+    flow.offered_by_source.resize(view.num_sources());
+    for (std::size_t h = 0; h < view.num_sources(); ++h) {
+      auto& f = flow.entries[h];
+      f.assigned = flow.offered_by_source[h] = view.num_sources() == 1 ? fw.offered : attr.offered[h];
+      f.delivered = view.num_sources() == 1 ? fw.delivered : attr.delivered[h];
+      f.source_drops = view.num_sources() == 1 ? fw.source_drops : attr.source_drops_by_source[h];
+      if (kTraced && rq.trace) step_trace.set(key(view.source(h)), v ? Trace::integer(inject[h]) : Trace::str("inf"));
+    }
   }
   PendingPolicyUpdate s;
-  source_drafts(pe, flows, s);
-  auto& drafts = s.drafts;
-  // A one-source program is its own attribution.
-  Attribution attr;
-  Attribution* per_source = k > 1 ? &attr : nullptr;
-  std::vector<Amount> inject(k, 0);
-  Forwarding fw;
-  Amount call_delivered = 0;
-  Counter128 offered = cur.offered;
-  Trace step_tr = Trace::map();
-  if (!lossy) {
-    // The largest total in [admitted, admitted + v] whose no-drop forwarding fits V = W + own.
-    std::vector<Amount> own(members.size(), 0);
-    std::vector<Amount> part;
-    Amount admitted = 0;
-    for (const FlowRecord* r : before) {
-      if (r == nullptr) continue;
-      admitted += r->delivered;
-      align(members, r->edge_flows, part);
-      for (std::size_t m = 0; m < members.size(); ++m) own[m] += part[m];
-    }
-    std::vector<Amount> view;
-    W.gather(members, view);
-    for (std::size_t m = 0; m < members.size(); ++m) view[m] += own[m];
-    auto step = lossless_step(plan, admitted, view, own, v);
-    call_delivered = step.admitted - admitted;
-    if (per_source == nullptr) {
-      // One source holds the whole admitted allocation (the attribution's degenerate form): it
-      // delivers all of it, with no second forwarding.
-      auto& r = drafts.front().record;
-      r.edge_flows = nonzero_pairs(members, step.edge_flows);
-      r.delivered = step.admitted;
-    } else {
-      // Several sources: forward the admitted total again to attribute it.
-      round_robin(step.admitted, inject);
-      fw = forward(plan, Injection {inject, false}, {}, per_source);
-      if (fw.edge_flows != step.edge_flows) {
-        throw std::logic_error("ShortestPaths: the attributed forwarding differs from the admitted allocation");
-      }
-      for (std::size_t i = 0; i < k; ++i) {
-        auto& r = drafts[i].record;
-        for (const auto& x : attr.entries[i]) {
-          if (x.carried != 0) r.edge_flows.emplace_back(members[static_cast<std::size_t>(x.edge_position)], x.carried);
-        }
-        r.delivered = attr.delivered[i];
-      }
-    }
-    if (kTraced && trace) step_tr = Trace::ints(std::vector<Amount> {admitted, step.admitted});
-  } else {
-    // The new round-robin injections of the offer (or the first-hop experiment) on W.
-    Injection in;
-    if (v.has_value()) {
-      round_robin_increments(cur.offered, *v, inject);
-      in.per_root = inject;
-    } else {
-      in.first_hop = true;
-    }
-    std::vector<Amount> w;
-    W.gather(members, w);
-    fw = forward(plan, in, w, per_source);
-    call_delivered = fw.delivered;
-    for (std::size_t i = 0; i < k; ++i) {
-      auto& r = drafts[i].record;
-      std::vector<std::pair<EdgeId, Amount>> carried;
-      std::vector<std::pair<EdgeId, Amount>> dropped;
-      Amount offer = fw.offered;
-      Amount delivered = fw.delivered;
-      if (per_source == nullptr) {
-        carried = nonzero_pairs(members, fw.edge_flows);
-        dropped = nonzero_pairs(members, fw.edge_drops);
-      } else {
-        for (const auto& x : attr.entries[i]) {
-          const EdgeId e = members[static_cast<std::size_t>(x.edge_position)];
-          if (x.carried != 0) carried.emplace_back(e, x.carried);
-          if (x.drops != 0) dropped.emplace_back(e, x.drops);
-        }
-        offer = attr.offered[i];
-        delivered = attr.delivered[i];
-      }
-      // The counters' 2^127 checks: a drop counter first, then the offered ones.
-      const FlowRecord* b = before[i];
-      r.edge_drops = plus(b != nullptr ? b->edge_drops : std::vector<std::pair<EdgeId, Counter128>> {}, dropped);
-      r.offered = b != nullptr ? b->offered.value_or(Counter128 {}) : Counter128 {};
-      accumulate(*r.offered, c128(offer), "offered");
-      r.delivered = (b != nullptr ? b->delivered : 0) + delivered;
-      r.edge_flows = b != nullptr ? plus(b->edge_flows, carried) : std::move(carried);
-    }
-    accumulate(offered, c128(fw.offered), "offered");
-    if (kTraced && trace) {
-      step_tr = Trace::map();
-      for (std::size_t i = 0; i < k; ++i) {
-        step_tr.set(key(pe.reachable_sources[i]), v.has_value() ? Trace::integer(inject[i]) : Trace::str("inf"));
-      }
-    }
-  }
-  const Counter128 requested = requested_after(cur, v);
+  s.entry = derived_entry(*pe.graph, pe.policy_id, pe.config.admission, pe.allowed_destinations, view, false,
+                          old, v, lossy ? cur.offered : Counter128 {}, flow);
+  if (lossy) accumulate_counter(offered, c128(fw.offered), "offered");
   PlacementResult& out = s.result;
-  out.call_delivered = call_delivered;
-  if (v.has_value()) out.call_undelivered = *v - call_delivered;
-  out.delivery_delta = call_delivered;
-  if (lossy) out.call_edge_drops = nonzero_pairs(members, fw.edge_drops);
-  out.call_source_drops = fw.source_drops;
-  if (members.empty()) {
-    out.termination = Termination::NoActiveWeight;
-  } else if (lossy) {
-    out.termination = v.has_value() ? Termination::Complete : Termination::Exhausted;
-  } else {
-    out.termination = v.has_value() && call_delivered == *v ? Termination::Complete : Termination::Exhausted;
-  }
+  out.call_delivered = lossy ? flow.delivered : flow.delivered - before;
+  out.call_undelivered = v ? std::optional(*v - out.call_delivered) : std::nullopt;
+  out.delivery_delta = out.call_delivered;
+  if (lossy) out.call_edge_drops = nonzero_pairs(plan.forwarding_edges, fw.edge_drops);
+  out.call_source_drops = flow.source_drops;
+  out.termination = plan.forwarding_edges.empty() ? Termination::NoActiveWeight :
+      lossy ? (v ? Termination::Complete : Termination::Exhausted) :
+      (v && out.call_delivered == *v ? Termination::Complete : Termination::Exhausted);
   if (created) set_flags(out, before_program, program.get(), false);
   out.program = program;
-  fill_state(pe, draft_records(drafts), requested, cur.infinite || !v.has_value(), offered, out);
-  if (kTraced && trace) {
-    trace->set("prepare", created ? routes_trace(prep) : Trace::null());
-    trace->set(lossy ? "offers" : "T", std::move(step_tr));
+  const auto requested = requested_after(cur, v);
+  fill_state(pe, s.entry, requested, cur.infinite || !v, offered, out);
+  if (kTraced && rq.trace) {
+    rq.trace->set("prepare", created ? routes_trace(pe, prep) : Trace::null());
+    rq.trace->set(lossy ? "offers" : "T", std::move(step_trace));
   }
   s.next_epoch.program = program;
   s.next_epoch.requested = requested;
   s.next_epoch.offered = offered;
   s.next_epoch.prepared = true;
-  s.next_epoch.infinite = cur.infinite || !v.has_value();
+  s.next_epoch.infinite = cur.infinite || !v;
   return s;
 }
 
@@ -1062,7 +966,7 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
     for (NodeId src : pe.reachable_sources) source_weights.push_back(declared[static_cast<std::size_t>(src)]);
   }
   const bool no_active_source_weight = weighted && std::none_of(source_weights.begin(), source_weights.end(), [](Amount w) { return w != 0; });
-  const bool created = cur.record_groups.front().empty();
+  const bool created = !cur.prepared;
   // ShortestPaths Optimized: the support of the epoch (its routes, prepared at its first call).
   PreparedShortestPaths prep;
   if (!global && created) {
@@ -1074,36 +978,16 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
   const std::span<const EdgeId> support = dense      ? std::span<const EdgeId> {}
                                           : global   ? std::span<const EdgeId>(*pe.centralized_te_support)
                                                      : std::span<const EdgeId>(*common);
-  std::vector<LiveFlow> flows(k);
-  for (std::size_t i = 0; i < k; ++i) {
-    if (!created) {
-      flows[i] = cur.record_groups[i].front();
-    } else if (!global) {
-      flows[i] = prep.flows[i];
-    } else {
-      flows[i].source = pe.reachable_sources[i];
-    }
-  }
-  // V = W + own: the working residual plus the policy's own allocation (its live records, or none
-  // in a full-offer call, whose view already holds them released), per EdgeId (unrestricted
-  // CentralizedTE) or aligned with the support (a record's edges lie in it, both ascending).
+  const auto* own = created ? nullptr : LedgerAccess::entry(pe.ledger, pe.policy_id);
+  auto flows = !global && created ? prep.flows : source_specs(pe, own);
   std::vector<Amount> V;
-  if (dense) {
-    W.dense(V);
-  } else {
-    W.gather(support, V);
-  }
-  Amount P = 0;
-  for (const auto& f : flows) {
-    if (f.record_counter < 0) continue;
-    const FlowRecord& rec = LedgerAccess::live(pe.ledger, f.record_counter);
-    P += rec.delivered;
+  if (dense) W.dense(V);
+  else W.gather(support, V);
+  const Amount P = own != nullptr ? own->delivered : 0;
+  if (own != nullptr) {
     std::size_t p = 0;
-    for (const auto& [e, x] : rec.edge_flows) {
-      if (dense) {
-        V[static_cast<std::size_t>(e)] += x;
-        continue;
-      }
+    for (const auto& [e, x] : own->carried) {
+      if (dense) { V[static_cast<std::size_t>(e)] += x; continue; }
       while (p < support.size() && support[p] < e) ++p;
       if (p == support.size() || support[p] != e) throw std::logic_error("controller: a record edge outside the support");
       V[p] += x;
@@ -1157,8 +1041,8 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
   }
   source_drafts(pe, flows, s);
   for (std::size_t i = 0; i < k; ++i) {
-    s.drafts[i].record.delivered = dec.supplies[i];
-    s.drafts[i].record.edge_flows = std::move(dec.shares[i]);
+    s.drafts[i].delivered = dec.supplies[i];
+    s.drafts[i].edge_flows = std::move(dec.shares[i]);
   }
   const auto& supplies = dec.supplies;
   auto program = optimized_flow_program(g, pe.sources, pe.destinations, pe.reachable_sources, std::move(dec.paths),
@@ -1176,14 +1060,13 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
   set_flags(out, before_program, program.get(), false);
   out.program = program;
   out.by_tunnel = optimized_flow_tunnel_rows(*program);
-  const auto after = draft_records(s.drafts);
-  fill_state(pe, after, requested, cur.infinite || !v.has_value(), Counter128 {}, out);
-  out.total_cost = total_cost_of(g, after);
+  finish_state(pe, s, requested, cur.infinite || !v.has_value(), Counter128 {});
+  out.total_cost = total_cost_of(g, s.entry);
   const bool curve = dense && !prescribed;
   if (curve) out.marginal_cost_curve = sol.payload.marginal_cost_curve;
   if (curve && rq.outputs != nullptr && rq.outputs->min_cut) out.min_cut = sol.payload.min_cut;
   if (kTraced && trace) {
-    if (!global) trace->set("prepare", created ? routes_trace(prep) : Trace::null());
+    if (!global) trace->set("prepare", created ? routes_trace(pe, prep) : Trace::null());
     if (prescribed) trace->set("probes", std::move(probes));
     if (dense) trace->set("V", Trace::ints(V));
     trace->set("cap", cap.has_value() ? Trace::integer(*cap) : Trace::null());
@@ -1212,7 +1095,7 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
     Trace shares_tr = Trace::map();
     for (std::size_t i = 0; i < k; ++i) {
       supply.set(key(pe.reachable_sources[i]), Trace::integer(supplies[i]));
-      shares_tr.set(key(pe.reachable_sources[i]), Trace::pairs(s.drafts[i].record.edge_flows));
+      shares_tr.set(key(pe.reachable_sources[i]), Trace::pairs(s.entry.stored[i].edge_flows));
     }
     fc.set("supply", std::move(supply));
     trace->set("flow_core", std::move(fc));
@@ -1284,22 +1167,14 @@ PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& c
   const bool lossy = pe.config.admission == Admission::Lossy;
   const bool created = !cur.prepared;
   // The entries' live records (none before the first call).
-  std::vector<const FlowRecord*> before;
-  if (!created) {
-    before.resize(n);
-    for (std::size_t e = 0; e < n; ++e) before[e] = &LedgerAccess::live(pe.ledger, cur.record_groups[e].front().record_counter);
-  }
+  const auto* own = created ? nullptr : LedgerAccess::entry(pe.ledger, pe.policy_id);
   ProgramFlow flow;
   Amount call_delivered = 0;
   Counter128 offered = cur.offered;
   if (!lossy) {
     // The largest total in [admitted, admitted + v] on the residual plus the policy's own load.
-    Amount admitted = 0;
-    for (const FlowRecord* r : before) {
-      if (r == nullptr) continue;
-      admitted += r->delivered;
-    }
-    if (!created) W.release_records(before);
+    const Amount admitted = own != nullptr ? own->delivered : 0;
+    if (own != nullptr) W.release(own->carried);
     const std::optional<Amount> hi = v.has_value() ? std::optional<Amount>(admitted + *v) : std::nullopt;
     flow = detail::lossless(view, available_capacity_reader(W), admitted, hi);
     call_delivered = flow.admitted - admitted;
@@ -1307,7 +1182,7 @@ PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& c
     flow = std::move(*given);
     call_delivered = flow.delivered;
     flow.source_drops += *v - flow.offered;
-    accumulate(offered, c128(*v), "offered");
+    accumulate_counter(offered, c128(*v), "offered");
   } else {
     std::vector<Amount> inject(k, 0);
     if (rq.is_full_offer()) {
@@ -1320,38 +1195,31 @@ PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& c
     // The whole offer is sent: what no head receives (every remaining captured weight 0) is lost at
     // the sources, outside every row.
     flow.source_drops += *v - flow.offered;
-    accumulate(offered, c128(*v), "offered");
+    accumulate_counter(offered, c128(*v), "offered");
   }
   PendingPolicyUpdate s;
-  s.drafts.resize(n);
-  s.next_epoch.record_groups.assign(n, {});
   // The by_tunnel amounts per entry, kept only when the program has tunnels (only they have rows).
   const bool rows = !p.tunnels.empty();
   std::vector<Counter128> assigned(rows ? n : 0);
   std::vector<Amount> delivered(rows ? n : 0, 0);
   std::vector<Counter128> dropped(rows ? n : 0);
   std::vector<std::pair<EdgeId, Amount>> call_edge_drops;
-  for (std::size_t e = 0; e < n; ++e) {
+  if (view.derived_records()) {
+    if (lossy && !flow.drops.empty()) call_edge_drops = nonzero_pairs(view.prepared_route(0)->forwarding_edges, flow.drops);
+    else if (lossy) for (const auto& e : flow.entries) call_edge_drops.insert(call_edge_drops.end(), e.edge_drops.begin(), e.edge_drops.end());
+    s.entry = derived_entry(*pe.graph, pe.policy_id, pe.config.admission, pe.allowed_destinations, view, true,
+                            own, v, lossy ? cur.offered : Counter128 {}, flow);
+  }
+  s.drafts.resize(view.derived_records() ? 0 : n);
+  for (std::size_t e = 0; e < s.drafts.size(); ++e) {
     const auto& entry = p.entries[e];
     auto& f = flow.entries[e];
-    LiveFlow live;
-    live.source = entry.head;
-    live.route = view.route(e);
-    live.min_route_cost = view.min_route_cost(e);
-    live.entry_id = entry.entry_id;
-    if (!created) {
-      live.record_counter = cur.record_groups[e].front().record_counter;
-      s.drafts[e].record_counter = live.record_counter;
-    } else {
-      s.fresh.emplace_back(e, 0);
-    }
-    s.next_epoch.record_groups[e].push_back(live);
-    FlowRecord& r = s.drafts[e].record;
+    FlowRecord& r = s.drafts[e];
     r.sources = {entry.head};
     r.destinations = pe.allowed_destinations;
     r.admission = pe.config.admission;
-    r.route = live.route;
-    r.min_route_cost = live.min_route_cost;
+    r.route = view.route(e);
+    r.min_route_cost = view.min_route_cost(e);
     r.entry_id = entry.entry_id;
     if (holds && entry.tunnel_position >= 0) {
       const auto& t = p.tunnels[static_cast<std::size_t>(entry.tunnel_position)];
@@ -1362,7 +1230,7 @@ PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& c
         std::sort(r.edge_reservations.begin(), r.edge_reservations.end());
       }
     }
-    const FlowRecord* b = created ? nullptr : before[e];
+    const StoredRecord* b = own != nullptr ? &own->stored[e] : nullptr;
     if (!lossy) {
       r.edge_flows = std::move(f.edge_flows);
       r.delivered = f.delivered;
@@ -1374,12 +1242,12 @@ PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& c
     }
     r.edge_drops = plus(b != nullptr ? b->edge_drops : std::vector<std::pair<EdgeId, Counter128>> {}, f.edge_drops);
     r.offered = b != nullptr ? b->offered.value_or(Counter128 {}) : Counter128 {};
-    accumulate(*r.offered, c128(f.assigned), "offered");
+    accumulate_counter(*r.offered, c128(f.assigned), "offered");
     r.delivered = (b != nullptr ? b->delivered : 0) + f.delivered;
     r.edge_flows = b != nullptr ? plus(b->edge_flows, f.edge_flows) : std::move(f.edge_flows);
     call_edge_drops.insert(call_edge_drops.end(), f.edge_drops.begin(), f.edge_drops.end());
     Counter128 drops;
-    for (const auto& [x, d] : r.edge_drops) accumulate(drops, d, "drops");
+    for (const auto& [x, d] : r.edge_drops) accumulate_counter(drops, d, "drops");
     if (rows) {
       assigned[e] = *r.offered;
       delivered[e] = r.delivered;
@@ -1391,7 +1259,7 @@ PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& c
   if (lossy) {
     s.next_epoch.source_drops_by_source = cur.source_drops_by_source.empty() ? std::vector<Counter128>(k) : cur.source_drops_by_source;
     for (std::size_t h = 0; h < k; ++h) {
-      accumulate(s.next_epoch.source_drops_by_source[h], c128(flow.source_drops_by_source[h]), "offered");
+      accumulate_counter(s.next_epoch.source_drops_by_source[h], c128(flow.source_drops_by_source[h]), "offered");
       if (!s.next_epoch.source_drops_by_source[h].is_zero()) lost.emplace_back(view.source(h), s.next_epoch.source_drops_by_source[h]);
     }
   }
@@ -1408,7 +1276,7 @@ PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& c
   out.program = view.program;
   if (plan) out.plan = *plan;
   out.by_tunnel = tunnel_rows(view, assigned, delivered, dropped);
-  fill_state(pe, draft_records(s.drafts), requested, cur.infinite || !v.has_value(), offered, out, lost);
+  finish_state(pe, s, requested, cur.infinite || !v.has_value(), offered, lost);
   s.next_epoch.program = view.program;
   s.next_epoch.plan = std::move(plan);
   s.next_epoch.by_tunnel = out.by_tunnel;
@@ -1434,9 +1302,7 @@ std::vector<Amount> reservation_view(const PolicyEngine& pe, const LedgerTotals&
   if (!held.empty()) {
     for (std::size_t e = 0; e < U.size(); ++e) U[e] -= held[e];
   }
-  for (const FlowRecord* r : current_records(pe)) {
-    for (const auto& [e, x] : r->edge_reservations) U[static_cast<std::size_t>(e)] += x;
-  }
+  for (const auto& [e, x] : own_entry(pe).holds) U[static_cast<std::size_t>(e)] += x;
   return U;
 }
 
@@ -1524,11 +1390,10 @@ ForwardingView installed_view(const PolicyEngine& pe, const PolicyCall& rq) {
   return make_forwarding_view(*pe.graph, pe.epoch.program, nullptr, pe.allowed_destinations, rq.black_holes);
 }
 
-// A SIMULTANEOUS ShortestPaths replace (EQUAL or WEIGHTED): its program prepared on the list's view,
-// its per-source flows (routes and costs, new ids) and the program installed before, for the flags.
+// A SIMULTANEOUS ShortestPaths replace: the pooled program prepared on the list's view
+// and the program installed before, for the flags.
 struct PreparedReplace {
   std::shared_ptr<const ForwardingProgram> program {};
-  std::vector<LiveFlow> flows {};
   const ForwardingProgram* before {nullptr};
 };
 
@@ -1541,28 +1406,32 @@ PendingPolicyUpdate finish_by_source(const PolicyEngine& pe, const PolicyCall& r
   const auto v = rq.offer;
   const auto& program = replaced != nullptr ? replaced->program : pe.epoch.program;
   const ProgramData& p = *view.data;
-  const std::size_t k = pe.reachable_sources.size();
   const std::size_t n = p.entries.size();
   const bool lossy = pe.config.admission == Admission::Lossy;
   PendingPolicyUpdate s;
   s.next_epoch = fresh_epoch(pe, replaced == nullptr);
   s.next_epoch.program = program;
-  std::vector<LiveFlow> flows(k);
+  std::vector<std::pair<EdgeId, Amount>> call_edge_drops;
+  if (view.derived_records()) {
+    if (!flow.drops.empty()) call_edge_drops = nonzero_pairs(view.prepared_route(0)->forwarding_edges, flow.drops);
+    else for (const auto& e : flow.entries) call_edge_drops.insert(call_edge_drops.end(), e.edge_drops.begin(), e.edge_drops.end());
+    s.entry = derived_entry(g, pe.policy_id, pe.config.admission, pe.allowed_destinations, view, false,
+                            nullptr, v, {}, flow);
+  }
+  auto flows = view.derived_records() ? std::vector<FlowRecord> {} : source_specs(pe, LedgerAccess::entry(pe.ledger, pe.policy_id));
   // Per roster source: its entries' carried, drops and deliveries summed (the view's heads are the
   // roster: nothing is replayed).
-  std::vector<std::vector<std::pair<EdgeId, Amount>>> carried(k);
-  std::vector<std::vector<std::pair<EdgeId, Amount>>> drops(k);
-  std::vector<Amount> got(k, 0);
-  for (std::size_t e = 0; e < n; ++e) {
+  std::vector<std::vector<std::pair<EdgeId, Amount>>> carried(flows.size());
+  std::vector<std::vector<std::pair<EdgeId, Amount>>> drops(flows.size());
+  std::vector<Amount> got(flows.size(), 0);
+  for (std::size_t e = 0; e < n && !view.derived_records(); ++e) {
     const auto slot = static_cast<std::size_t>(p.entries[e].roster_index);
     const auto& f = flow.entries[e];
     carried[slot].insert(carried[slot].end(), f.edge_flows.begin(), f.edge_flows.end());
     drops[slot].insert(drops[slot].end(), f.edge_drops.begin(), f.edge_drops.end());
     got[slot] += f.delivered;
   }
-  for (std::size_t i = 0; i < k; ++i) {
-    flows[i] = replaced != nullptr ? replaced->flows[i] : pe.epoch.record_groups[i].front();
-    flows[i].record_counter = -1;
+  for (std::size_t i = 0; i < flows.size(); ++i) {
     carried[i] = merged(std::move(carried[i]));
     drops[i] = merged(std::move(drops[i]));
     if (is<CentralizedTE>(pe)) {
@@ -1575,9 +1444,8 @@ PendingPolicyUpdate finish_by_source(const PolicyEngine& pe, const PolicyCall& r
     }
   }
   source_drafts(pe, flows, s);
-  std::vector<std::pair<EdgeId, Amount>> call_edge_drops;
-  for (std::size_t i = 0; i < k; ++i) {
-    FlowRecord& r = s.drafts[i].record;
+  for (std::size_t i = 0; i < flows.size(); ++i) {
+    FlowRecord& r = s.drafts[i];
     r.edge_flows = carried[i];
     r.delivered = got[i];
     if (!lossy) continue;
@@ -1592,7 +1460,7 @@ PendingPolicyUpdate finish_by_source(const PolicyEngine& pe, const PolicyCall& r
     const auto& f = flow.entries[e];
     assigned[e] = c128(lossy ? f.assigned : f.delivered);
     delivered[e] = f.delivered;
-    for (const auto& [x, d] : f.edge_drops) accumulate(dropped[e], c128(d), "drops");
+    for (const auto& [x, d] : f.edge_drops) accumulate_counter(dropped[e], c128(d), "drops");
   }
   const Counter128 requested = v.has_value() ? c128(*v) : Counter128 {};
   const Counter128 offered = lossy ? c128(flow.offered) : Counter128 {};
@@ -1615,9 +1483,8 @@ PendingPolicyUpdate finish_by_source(const PolicyEngine& pe, const PolicyCall& r
   }
   out.program = program;
   out.by_tunnel = tunnel_rows(view, assigned, delivered, dropped);
-  const auto after = draft_records(s.drafts);
-  fill_state(pe, after, requested, !v.has_value(), offered, out);
-  if (uses_optimized_flow(pe)) out.total_cost = total_cost_of(g, after);
+  finish_state(pe, s, requested, !v.has_value(), offered);
+  if (uses_optimized_flow(pe)) out.total_cost = total_cost_of(g, s.entry);
   s.next_epoch.by_tunnel = out.by_tunnel;
   s.next_epoch.requested = requested;
   s.next_epoch.offered = offered;
@@ -1925,7 +1792,6 @@ std::unique_ptr<PolicyEngine> finish_engine(std::unique_ptr<PolicyEngine> pe, Sh
     pe->view = detail::make_forwarding_view(g, pinned->program, eligibility, pe->allowed_destinations, pinned->black_holes.get(), true);
     for (std::size_t h = 0; h < pe->view.num_sources(); ++h) pe->reachable_sources.push_back(pe->view.source(h));
     pe->can_forward = detail::view_active(pe->view);
-    pe->epoch.record_groups.resize(detail::ProgramAccess::data(*pinned->program).entries.size());
     pe->policy_id = LedgerAccess::bind(ledger);
     return pe;
   }
@@ -1946,10 +1812,12 @@ std::unique_ptr<PolicyEngine> finish_engine(std::unique_ptr<PolicyEngine> pe, Sh
     std::vector<NodeId> allowed;
     for (NodeId source : pe->sources) if (node_allowed(source)) allowed.push_back(source);
     auto trimmed = detail::prune(g, *global->support, allowed, pe->allowed_destinations, eligibility);
-    const auto dag = detail::PredecessorDAGBuilder::of_edges(g, trimmed);
-    const auto costs = detail::min_route_costs(g, dag, allowed, pe->allowed_destinations);
-    for (std::size_t i = 0; i < allowed.size(); ++i) {
-      if (costs[i] != kUnreachable) pe->reachable_sources.push_back(allowed[i]);
+    // Every retained edge lies on a source-to-destination walk. Sources and destinations
+    // are disjoint, so a source reaches one exactly when it has a retained outgoing edge.
+    const auto row = g.outgoing_offsets();
+    for (NodeId source : allowed) {
+      const auto it = std::lower_bound(trimmed.begin(), trimmed.end(), row[static_cast<std::size_t>(source)]);
+      if (it != trimmed.end() && *it < row[static_cast<std::size_t>(source) + 1]) pe->reachable_sources.push_back(source);
     }
     pe->centralized_te_support = std::make_shared<const std::vector<EdgeId>>(std::move(trimmed));
   } else {
@@ -1976,8 +1844,6 @@ std::unique_ptr<PolicyEngine> finish_engine(std::unique_ptr<PolicyEngine> pe, Sh
       }
     }
   }
-  // The tunnel models' record_groups are per program entry, sized by their first call.
-  if (!detail::tunnel_model(*pe)) pe->epoch.record_groups.resize(pe->reachable_sources.size());
   pe->policy_id = LedgerAccess::bind(ledger);  // last: nothing is bound when construction fails
   return pe;
 }
@@ -2056,7 +1922,7 @@ PlacementResult zero_state(const PolicyEngine& pe, const LedgerTotals* totals, c
   PlacementResult out;
   out.call_undelivered = 0;
   const auto& ep = pe.epoch;
-  const auto records = current_records(pe);
+  const auto& records = own_entry(pe);
   std::vector<std::pair<NodeId, Counter128>> lost;
   for (std::size_t h = 0; h < ep.source_drops_by_source.size(); ++h) {
     if (!ep.source_drops_by_source[h].is_zero()) lost.emplace_back(pe.view.source(h), ep.source_drops_by_source[h]);
@@ -2080,7 +1946,6 @@ PendingPolicyUpdate empty_roster(const PolicyEngine& pe, const PolicyEpoch& cur,
   const bool optimized_global = is_unrestricted_centralized_te(pe) && pe.source_allocation == SourceAllocation::Optimized;
   const auto v = rq.offer;
   PendingPolicyUpdate s;
-  s.next_epoch.record_groups.resize(cur.record_groups.size());
   s.next_epoch.requested = requested_after(cur, v);
   s.next_epoch.offered = cur.offered;
   if (lossy && v.has_value()) (void)s.next_epoch.offered.add(*v);  // offered <= requested
@@ -2105,7 +1970,7 @@ PendingPolicyUpdate empty_roster(const PolicyEngine& pe, const PolicyEpoch& cur,
   set_flags(out, before, s.next_epoch.program.get(), is<DistributedTE>(pe));
   out.program = s.next_epoch.program;
   if (s.next_epoch.plan) out.plan = *s.next_epoch.plan;
-  fill_state(pe, {}, s.next_epoch.requested, s.next_epoch.infinite, s.next_epoch.offered, out);
+  finish_state(pe, s, s.next_epoch.requested, s.next_epoch.infinite, s.next_epoch.offered);
   if (uses_optimized_flow(pe)) out.total_cost = Counter128 {};
   if (optimized_global) {
     out.marginal_cost_curve.emplace();
@@ -2179,7 +2044,7 @@ void check_call_state(const PolicyEngine& pe, const PolicyCall& rq) {
 PendingPolicyUpdate compute(const PolicyEngine& pe, const PolicyCall& rq) {
   const LedgerTotals totals = totals_of(pe, rq);
   ServiceCapacityWorkspace W(totals);
-  if (rq.is_full_offer()) W.release_records(current_records(pe));
+  if (rq.is_full_offer()) W.release(own_entry(pe).carried);
   const PolicyEpoch fresh = rq.is_full_offer() ? fresh_epoch(pe, rq.operation == PolicyOperation::Forward) : PolicyEpoch {};
   const PolicyEpoch& cur = rq.is_full_offer() ? fresh : pe.epoch;
   // The flags compare the program the policy has installed now.
@@ -2206,8 +2071,7 @@ PendingPolicyUpdate compute(const PolicyEngine& pe, const PolicyCall& rq) {
   }
   // A full-offer call: its call_delivered is the whole new delivery, compared with the old one.
   if (rq.is_full_offer()) {
-    Amount old = 0;
-    for (const FlowRecord* r : current_records(pe)) old += r->delivered;
+    const Amount old = own_entry(pe).delivered;
     s.result.call_delivered = s.result.delivered;
     s.result.delivery_delta = s.result.delivered - old;
     if (rq.offer.has_value()) s.result.call_undelivered = *rq.offer - s.result.call_delivered;
@@ -2215,7 +2079,7 @@ PendingPolicyUpdate compute(const PolicyEngine& pe, const PolicyCall& rq) {
   // The first termination row: a request of 0 is COMPLETE, also for a full-offer call, which
   // still prepared and publishes what it computed.
   if (rq.offer == Amount {0}) s.result.termination = Termination::Complete;
-  if (rq.outputs != nullptr && any_output(*rq.outputs)) prepare_outputs(pe, rq.totals, *rq.outputs, draft_records(s.drafts), s.result);
+  if (rq.outputs != nullptr && any_output(*rq.outputs)) prepare_outputs(pe, rq.totals, *rq.outputs, s.entry, s.result);
   return s;
 }
 
@@ -2231,10 +2095,9 @@ void publish_epoch(PolicyEngine& pe, PolicyEpoch&& epoch) noexcept {
 // ones; a full-offer call retires the live ones and creates the new ones), then the epoch.
 void publish(PolicyEngine& pe, PendingPolicyUpdate& s, bool full) {
   concurrent_event(ConcurrentStage::BeforePublication, &pe.ledger);
-  const auto ids = full ? LedgerAccess::exchange(pe.ledger, pe.policy_id, s.drafts) : LedgerAccess::commit(pe.ledger, pe.policy_id, s.drafts);
+  if (full) LedgerAccess::exchange(pe.ledger, pe.policy_id, s.entry);
+  else LedgerAccess::commit(pe.ledger, pe.policy_id, s.entry);
   publication_event(ConcurrentStage::AfterLedgerExchange, &pe.ledger);
-  // Committed: the epoch state follows (nothing below throws).
-  for (std::size_t n = 0; n < s.fresh.size(); ++n) s.next_epoch.record_groups[s.fresh[n].first][s.fresh[n].second].record_counter = ids[n].second;
   publish_epoch(pe, std::move(s.next_epoch));
 }
 
@@ -2317,20 +2180,18 @@ std::vector<ListAction> validate_list(FlowLedger& ledger, std::span<const Action
 // The list's one publication: one atomic exchange of every publishing policy's records (new ids in
 // list order, then draft order), then their epochs (nothing after the exchange throws).
 void publish_list(FlowLedger& ledger, std::span<ListAction> list, std::span<PendingPolicyUpdate> pending, const std::vector<std::uint8_t>& publishes) {
-  std::vector<OwnerDrafts> owners;
+  std::vector<OwnerEntry> owners;
   std::vector<std::size_t> which;
   for (std::size_t i = 0; i < list.size(); ++i) {
     if (publishes[i] == 0) continue;
-    owners.push_back({list[i].engine->policy_id, pending[i].drafts, list[i].call.is_full_offer()});
+    owners.push_back({list[i].engine->policy_id, &pending[i].entry, list[i].call.is_full_offer()});
     which.push_back(i);
   }
-  std::vector<std::vector<FlowId>> created(owners.size());
   concurrent_event(ConcurrentStage::BeforePublication, &ledger);
-  LedgerAccess::commit_batch(ledger, owners, created);
+  LedgerAccess::commit_batch(ledger, owners);
   publication_event(ConcurrentStage::AfterLedgerExchange, &ledger);
   for (std::size_t k = 0; k < which.size(); ++k) {
     PendingPolicyUpdate& s = pending[which[k]];
-    for (std::size_t n = 0; n < s.fresh.size(); ++n) s.next_epoch.record_groups[s.fresh[n].first][s.fresh[n].second].record_counter = created[k][n].second;
     publish_epoch(*list[which[k]].engine, std::move(s.next_epoch));
   }
 }
@@ -2356,18 +2217,15 @@ std::vector<PlacementResult> run_ordered(FlowLedger& ledger, std::span<ListActio
     }
     pending[i] = compute(pe, rq);
     publishes[i] = 1;
-    // The working totals after it: the policy's live records out, its drafts in.
-    auto exchange = [&](const FlowRecord& r, Amount sign) {
-      for (const auto& [e, x] : r.edge_flows) carried[static_cast<std::size_t>(e)] += sign * x;
-      if (r.edge_reservations.empty()) return;
-      if (held.empty()) {
-        held.assign(carried.size(), 0);
-        totals.held = held;
-      }
-      for (const auto& [e, x] : r.edge_reservations) held[static_cast<std::size_t>(e)] += sign * x;
+    // The old and new entry projections are exchanged once per owner.
+    auto exchange = [&](const LedgerEntry& entry, Amount sign) {
+      for (const auto& [e, x] : entry.carried) carried[static_cast<std::size_t>(e)] += sign * x;
+      if (entry.holds.empty()) return;
+      if (held.empty()) { held.assign(carried.size(), 0); totals.held = held; }
+      for (const auto& [e, x] : entry.holds) held[static_cast<std::size_t>(e)] += sign * x;
     };
-    for (const FlowRecord* r : current_records(pe)) exchange(*r, -1);
-    for (const auto& d : pending[i].drafts) exchange(d.record, 1);
+    exchange(own_entry(pe), -1);
+    exchange(pending[i].entry, 1);
     results[i] = std::move(pending[i].result);
   }
   publish_list(ledger, list, pending, publishes);
@@ -2382,9 +2240,7 @@ std::vector<PlacementResult> run_simultaneous(FlowLedger& ledger, std::span<List
   const auto c = LedgerAccess::carried(ledger);
   std::vector<Amount> carried(c.begin(), c.end());
   for (const auto& x : list) {
-    for (const FlowRecord* r : current_records(*x.engine)) {
-      for (const auto& [e, a] : r->edge_flows) carried[static_cast<std::size_t>(e)] -= a;
-    }
+    for (const auto& [e, a] : own_entry(*x.engine).carried) carried[static_cast<std::size_t>(e)] -= a;
   }
   const LedgerTotals totals {LedgerAccess::baseline(ledger), carried, LedgerAccess::reservation_baseline(ledger), LedgerAccess::reserved(ledger)};
   // One workspace for the whole computation: a second one on this thread would void its deltas.
@@ -2454,14 +2310,13 @@ std::vector<PlacementResult> run_simultaneous(FlowLedger& ledger, std::span<List
         break;
       case Kind::BySource: s = finish_by_source(pe, rq, *part.view, part.flow, nullptr); break;
       case Kind::ShortestPathsReplace: {
-        const PreparedReplace replaced {part.prep.program, part.prep.flows, before};
+        const PreparedReplace replaced {part.prep.program, before};
         s = finish_by_source(pe, rq, *part.view, part.flow, &replaced);
         break;
       }
     }
     // A full-offer call: its call_delivered is the whole new delivery, compared with the old one.
-    Amount old = 0;
-    for (const FlowRecord* r : current_records(pe)) old += r->delivered;
+    const Amount old = own_entry(pe).delivered;
     s.result.call_delivered = s.result.delivered;
     s.result.delivery_delta = s.result.delivered - old;
     s.result.call_undelivered = *rq.offer - s.result.call_delivered;
@@ -2472,9 +2327,7 @@ std::vector<PlacementResult> run_simultaneous(FlowLedger& ledger, std::span<List
   if (any_output(outputs)) {
     std::vector<Amount> after(carried);
     for (const auto& s : pending) {
-      for (const auto& d : s.drafts) {
-        for (const auto& [e, x] : d.record.edge_flows) after[static_cast<std::size_t>(e)] += x;
-      }
+      for (const auto& [e, x] : s.entry.carried) after[static_cast<std::size_t>(e)] += x;
     }
     const auto baseline = LedgerAccess::baseline(ledger);
     std::vector<Amount> residual(after.size());
@@ -2485,16 +2338,12 @@ std::vector<PlacementResult> run_simultaneous(FlowLedger& ledger, std::span<List
       const auto m = residual.size();
       if (outputs.edge_reservations) {
         std::vector<Amount> held(m, 0);
-        for (const auto& d : pending[i].drafts) {
-          for (const auto& [e, x] : d.record.edge_reservations) held[static_cast<std::size_t>(e)] += x;
-        }
+        for (const auto& [e, x] : pending[i].entry.holds) held[static_cast<std::size_t>(e)] = x;
         out.edge_reservations = std::move(held);
       }
       if (outputs.edge_flows) {
         std::vector<Amount> own(m, 0);
-        for (const auto& d : pending[i].drafts) {
-          for (const auto& [e, x] : d.record.edge_flows) own[static_cast<std::size_t>(e)] += x;
-        }
+        for (const auto& [e, x] : pending[i].entry.carried) own[static_cast<std::size_t>(e)] = x;
         out.edge_flows = std::move(own);
       }
       if (outputs.saturated_boundary_edges) out.saturated_boundary_edges = saturated_boundary_edges_of(*pe.graph, residual, pe.sources, pe.eligibility);
@@ -2564,8 +2413,7 @@ void FlowPolicy::remove() {
   auto& pe = *engine_;
   const auto gate = LedgerAccess::lock(pe.ledger);
   (void)LedgerAccess::detach(pe.ledger, pe.policy_id);
-  // A new epoch (nothing below throws): the same number of record_groups, every one empty.
-  for (auto& c : pe.epoch.record_groups) c.clear();
+  // A new epoch; the ledger entry and its identities have already retired.
   pe.epoch.program.reset();
   pe.epoch.plan.reset();
   pe.epoch.marginal_cost_curve.reset();
@@ -2580,25 +2428,14 @@ void FlowPolicy::remove() {
 Amount FlowPolicy::delivered() const {
   const auto& pe = *engine_;
   const auto gate = LedgerAccess::lock(pe.ledger);
-  Amount total = 0;
-  for (const auto& c : pe.epoch.record_groups) {
-    for (const auto& s : c) total += LedgerAccess::live(pe.ledger, s.record_counter).delivered;
-  }
-  return total;
+  const auto* entry = LedgerAccess::entry(pe.ledger, pe.policy_id);
+  return entry != nullptr ? entry->delivered : 0;
 }
 
 std::vector<FlowRecord> FlowPolicy::records() const {
   const auto& pe = *engine_;
   const auto gate = LedgerAccess::lock(pe.ledger);
-  std::vector<std::int64_t> ids;
-  for (const auto& c : pe.epoch.record_groups) {
-    for (const auto& s : c) ids.push_back(s.record_counter);
-  }
-  std::sort(ids.begin(), ids.end());
-  std::vector<FlowRecord> out;
-  out.reserve(ids.size());
-  for (std::int64_t id : ids) out.push_back(LedgerAccess::live(pe.ledger, id));
-  return out;
+  return LedgerAccess::records(pe.ledger, pe.policy_id);
 }
 
 FlowRecord FlowPolicy::record(const FlowId& flow_id) const {

@@ -22,6 +22,7 @@
 #include "netgraph/core/detail/enum_domain.hpp"
 #include "netgraph/core/detail/concurrency.hpp"
 #include "netgraph/core/detail/int128.hpp"
+#include "netgraph/core/detail/ledger_entry.hpp"
 #include "netgraph/core/detail/route_builders.hpp"
 
 namespace netgraph::core::detail {
@@ -733,7 +734,7 @@ namespace {
 
 std::vector<EdgeId> select_routes(const Graph& graph, std::span<const EdgeId> sup,
                                        std::span<const NodeId> roots, std::span<const NodeId> destinations,
-                                       const RouteChoice& choice, PriorityReader view) {
+                                       const RouteChoice& choice, PriorityReader view, std::span<const std::uint64_t> allowed = {}) {
   if (roots.empty() || destinations.empty()) return {};
   if (choice.single_path() && choice.prefers_score()) {
     if (roots.size() != 1) throw std::logic_error("ShortestPaths bottleneck route requires one root");
@@ -758,6 +759,7 @@ std::vector<EdgeId> select_routes(const Graph& graph, std::span<const EdgeId> su
     const std::size_t lo = lower_bound_from(sup, hint, rows[ui]);
     std::size_t hi = lo;
     for (; hi < sup.size() && sup[hi] < rows[ui + 1]; ++hi) {
+      if (!allowed.empty() && !bit_at(allowed, hi)) continue;
       const NodeId v = heads[static_cast<std::size_t>(sup[hi])];
       auto& nv = s.touch(v);
       if (nv.reached != 0) continue;
@@ -773,12 +775,13 @@ std::vector<EdgeId> select_routes(const Graph& graph, std::span<const EdgeId> su
   for (NodeId u : s.reached) {
     const auto& nu = s.at(u);
     for (auto at = nu.lo; at < nu.hi;) {
+      if (!allowed.empty() && !bit_at(allowed, static_cast<std::size_t>(at))) { ++at; continue; }
       EdgeId best = sup[static_cast<std::size_t>(at)];
       auto next = at + 1;
       if (!choice.parallel_edges) {
         const NodeId v = heads[static_cast<std::size_t>(best)];
         for (; next < nu.hi && heads[static_cast<std::size_t>(sup[static_cast<std::size_t>(next)])] == v; ++next) {
-          if (replaces(graph, sup[static_cast<std::size_t>(next)], best, choice.prefers_score(), view)) {
+          if ((allowed.empty() || bit_at(allowed, static_cast<std::size_t>(next))) && replaces(graph, sup[static_cast<std::size_t>(next)], best, choice.prefers_score(), view)) {
             best = sup[static_cast<std::size_t>(next)];
           }
         }
@@ -831,8 +834,8 @@ std::vector<EdgeId> shortest_path_routes(const Graph& graph, const PredecessorDA
 }
 
 std::vector<EdgeId> reachable_route(const Graph& graph, std::span<const EdgeId> basis,
-                                 NodeId source, std::span<const NodeId> destinations) {
-  return select_routes(graph, basis, {&source, 1}, destinations, RouteChoice {}, PriorityReader {});
+                                 NodeId source, std::span<const NodeId> destinations, std::span<const std::uint64_t> allowed) {
+  return select_routes(graph, basis, {&source, 1}, destinations, RouteChoice {}, PriorityReader {}, allowed);
 }
 
 // ---------------------------------------------------------------- allocation
@@ -1270,6 +1273,10 @@ Forwarding forward_on(const PreparedRoute& plan, const Injection& in, std::span<
 } // namespace
 
 Forwarding forward(const PreparedRoute& plan, const Injection& in, std::span<const Amount> w_m, Attribution* attr) {
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  ++thread_entry_work().forwards;
+  if (attr) ++thread_entry_work().attribution;
+#endif
   return attr != nullptr ? forward_on<true>(plan, in, w_m, attr) : forward_on<false>(plan, in, w_m, attr);
 }
 

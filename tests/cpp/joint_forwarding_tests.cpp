@@ -619,6 +619,37 @@ std::shared_ptr<const ForwardingProgram> pooled_program(const std::shared_ptr<co
   return p.program();
 }
 
+// Explicit test-only attribution of the pooled kernel on the original free view and arbitrary
+// head injections. The joint evaluator is still compared field by field with this kernel oracle;
+// aggregate-only ProgramFlow no longer keeps its per-head edge vectors between production calls.
+ProgramFlow attributed_kernel_flow(const detail::ForwardingView& view, const detail::AvailableCapacityFn& free,
+                                  const Amounts& heads) {
+  auto result = detail::lossy(view, free, heads);
+  if (!view.derived_records()) return result;
+  const auto& plan = *view.prepared_route(0);
+  Amounts inject = heads, limits(plan.forwarding_edges.size());
+  free(plan.forwarding_edges, limits);
+  for (std::size_t h = 0; h < inject.size(); ++h) if (view.is_blackholed_source(h)) inject[h] = 0;
+  for (std::size_t m = 0; m < limits.size(); ++m) {
+    if (view.black_holes && !view.black_holes->allows_edge(plan.forwarding_edges[m])) limits[m] = 0;
+  }
+  detail::Attribution attr;
+  const auto forwarded = detail::forward(plan, {inject, false}, limits, &attr);
+  EXPECT_EQ(result.carried, forwarded.edge_flows);
+  EXPECT_EQ(result.drops, forwarded.edge_drops);
+  for (std::size_t h = 0; h < view.num_sources(); ++h) {
+    auto& entry = result.entries[static_cast<std::size_t>(view.entries_for_source(h).front())];
+    EXPECT_EQ(entry.delivered, attr.delivered[h]);
+    EXPECT_EQ(entry.source_drops, attr.source_drops_by_source[h]);
+    for (const auto& x : attr.entries[h]) {
+      const EdgeId e = plan.forwarding_edges[static_cast<std::size_t>(x.edge_position)];
+      if (x.carried != 0) entry.edge_flows.emplace_back(e, x.carried);
+      if (x.drops != 0) entry.edge_drops.emplace_back(e, x.drops);
+    }
+  }
+  return result;
+}
+
 bool same_flow(const ProgramFlow& a, const ProgramFlow& b, const std::string& where) {
   EXPECT_EQ(a.admitted, b.admitted) << where;
   EXPECT_EQ(a.offered, b.offered) << where;
@@ -688,7 +719,7 @@ TEST(JointForwarding, OnePooledDemandEqualsTheKernel) {
     Amounts inject(view.num_sources());
     for (auto& x : inject) x = static_cast<Amount>(rng() % 9);
     const auto free = capacities(*g);
-    const auto kernel = detail::lossy(view, free, inject);
+    const auto kernel = attributed_kernel_flow(view, free, inject);
     const detail::ForwardingDemand one {&view, inject};
     const auto got = detail::lossy(std::span<const detail::ForwardingDemand>(&one, 1), free);
     ASSERT_EQ(got.size(), 1U);
@@ -1072,7 +1103,7 @@ TEST(JointForwarding, PooledRootsBlockSerialPairs) {
   const auto a = pooled_program(g, {0, 1, 2}, 3);
   const auto va = detail::make_forwarding_view(*g, a, nullptr, std::vector<NodeId> {3}, nullptr);
   const Amounts ia {2, 2, 2};
-  const auto kernel = detail::lossy(va, capacities(*g), ia);
+  const auto kernel = attributed_kernel_flow(va, capacities(*g), ia);
   EXPECT_EQ(kernel.delivered, 2);
   const detail::ForwardingDemand alone {&va, ia};
   const auto one = detail::lossy(std::span<const detail::ForwardingDemand>(&alone, 1), capacities(*g));
@@ -1120,7 +1151,7 @@ TEST(JointForwarding, ZeroShareHeadsOfAPooledDemand) {
     const auto a = pooled_program(g, {0, 1, 2}, 3);
     const auto black = c.black ? std::make_shared<const Eligibility>(g->eligibility({}, std::vector<EdgeId> {0})) : nullptr;
     const auto va = detail::make_forwarding_view(*g, a, nullptr, std::vector<NodeId> {3}, black.get());
-    const auto kernel = detail::lossy(va, capacities(*g), c.shares);
+    const auto kernel = attributed_kernel_flow(va, capacities(*g), c.shares);
 #if NETGRAPH_CORE_PRIVATE_HOOKS
     detail::thread_forwarding_limits()[static_cast<std::size_t>(detail::ForwardingCounter::Event)] = c.events;
 #endif

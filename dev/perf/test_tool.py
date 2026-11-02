@@ -3156,7 +3156,46 @@ int test_pooled_preparation() {
   return 0;
 }
 
+int test_entry_histories() {
+  namespace nc = netgraph::core;
+  const abaapi::Arrays a {2, {0}, {1}, {10 * abaapi::kResolution}, {3}};
+  auto spec = abaapi::pooled_prepare(a, {0}, {1}, abaapi::PooledKind::Equal, 4 * abaapi::kResolution);
+  spec.config.admission = nc::Admission::Lossy;
+  for (bool stale : {false, true}) {
+    std::size_t step = 0;
+    const std::vector<nc::Amount> delivered = stale ? std::vector<nc::Amount>{4,0,2,2} : std::vector<nc::Amount>{5,10,10,10};
+    const std::vector<std::uint64_t> offered = stale ? std::vector<std::uint64_t>{4,4,6,6} : std::vector<std::uint64_t>{5,12,12,12};
+    const auto digest = abaapi::entry_history(spec, stale, [&](const auto& result, const auto& policy, const auto& ledger) {
+      if (step >= 4 || result.delivered != delivered[step] || !result.offered || result.offered->hi || result.offered->lo != offered[step])
+        throw std::runtime_error("entry history differs from one-edge hand derivation");
+      const auto records = policy.records();
+      if (records.size() != 1 || records.front().offered != result.offered || records.front().delivered != result.delivered || ledger.carried().front() != result.delivered)
+        throw std::runtime_error("entry record, row or aggregate disagrees");
+      if (result.by_source.size() != 1 || result.by_source.front().admitted != *result.offered)
+        throw std::runtime_error("entry history row lost earlier calls");
+      ++step;
+    });
+    if (step != 4 || abaapi::entry_history(spec, stale) != digest) throw std::runtime_error("entry observer changes row work");
+  }
+  abaapi::EntrySnapshot state(spec, true);
+  const auto first = state.read();
+  if (state.read() != first || state.copy() != state.copy()) throw std::runtime_error("entry read/copy changes its orphan");
+  const auto listed = rows();
+  const auto row = std::find_if(listed.begin(), listed.end(), [](const auto& r) { return r.name == "ledger.joint.pooled_cycle"; });
+  abaapi::Arrays cycle {10, {0,1,2,3,6,7,4,5,5,7}, {6,6,4,4,7,4,5,6,8,9}, {}, std::vector<std::int64_t>(10,1)};
+  for (int c : {100,100,100,100,5,100,6,100,100,100}) cycle.cap.push_back(c * abaapi::kResolution);
+  int seen = 0;
+  const auto joint = abaapi::entry_joint(abaapi::build(cycle), [&](const auto& result, const auto& policy, const auto&) {
+    if (result.delivered != 1 || result.by_source.size() != 2 || policy.records().size() != 2) throw std::runtime_error("joint fixed point must deliver1 per demand");
+    ++seen;
+  });
+  if (seen != 2 || row == listed.end() || row->setup()() != joint) throw std::runtime_error("joint timing row differs from fixed point");
+  std::puts("entry histories: one-edge cumulative offers/delivery, stale heads, first-hop repeats, orphan read/copy and cyclic fixed point checked");
+  return 0;
+}
+
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string(argv[1]) == "test-entry-histories") return test_entry_histories();
   if (argc == 2 && std::string(argv[1]) == "test-pooled-preparation") return test_pooled_preparation();
   if (argc == 2 && std::string(argv[1]) == "test-captured-sources") return test_captured_sources();
   if (argc == 2 && std::string(argv[1]) == "test-times") return test_times();
@@ -3262,6 +3301,11 @@ class Harness(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("nested-root costs and zero-weight routes checked", proc.stdout)
 
+    def test_entry_histories_have_independent_hand_answers(self):
+        proc = self.harness("test-entry-histories")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("cyclic fixed point checked", proc.stdout)
+
     def test_compiles_without_a_diagnostic(self):
         self.assertEqual(self.compiled.returncode, 0, self.compiled.stderr[-2000:])
         self.assertEqual(self.compiled.stderr, "")
@@ -3271,7 +3315,7 @@ class Harness(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = aba.row_list(proc.stdout.encode(), "aba-list")
         real = {k: v for k, v in rows.items() if not k.startswith("test.")}
-        self.assertEqual(len(real), 116)
+        self.assertEqual(len(real), 133)
         sums = sha256sums(HERE / "queries")
         lists = {}
         for name in sums:
@@ -3305,7 +3349,7 @@ class Harness(unittest.TestCase):
         real = [row for row in listed if not row.startswith("test.")]
         with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 1) as pool:
             procs = list(pool.map(lambda row: self.harness("aba-run", row, "1"), real))
-        self.assertEqual(len(procs), 116)
+        self.assertEqual(len(procs), 133)
         for row, proc in zip(real, procs, strict=True):
             self.assertEqual(proc.returncode, 0, (row, proc.stderr))
             self.assertEqual(
@@ -3350,6 +3394,8 @@ class Harness(unittest.TestCase):
             "concurrency.config": 10000,
             "concurrency.two_ledgers_serial": 2048,
             "concurrency.two_ledgers_parallel": 2048,
+            "concurrency.two_ledgers_serial.scaled": 32768,
+            "concurrency.two_ledgers_parallel.scaled": 32768,
         }
         for row, digest in expected.items():
             proc = self.harness("aba-run", row, "1")

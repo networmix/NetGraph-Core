@@ -518,28 +518,24 @@ J policy_json(const FlowPolicy& policy) {
   j.set("requested", J::integer(wide(pe.epoch.requested)));
   j.set("infinite", J::boolean(pe.epoch.infinite));
   j.set("placed_demand", J::integer(policy.delivered()));
-  J record_groups = J::arr();
-  for (std::size_t i = 0; i < pe.reachable_sources.size(); ++i) {
-    if (pe.epoch.record_groups[i].empty()) continue;
+  J cohorts = J::arr();
+  for (const auto& rec : policy.records()) {
+    const auto e = detail::PredecessorDAGBuilder::ascending(*rec.route);
+    const std::vector<EdgeId> route(e.begin(), e.end());
+    J f = J::obj();
+    f.set("id", J::integer(rec.flow_id.second));
+    f.set("route", ints(route));
+    f.set("T", lossy ? J::null() : J::integer(rec.delivered));
+    f.set("delivered", J::integer(rec.delivered));
+    f.set("alloc", pairs(rec.edge_flows));
     J flows = J::arr();
-    for (const auto& s : pe.epoch.record_groups[i]) {
-      const FlowRecord& rec = LedgerAccess::live(pe.ledger, s.record_counter);
-      const auto e = detail::PredecessorDAGBuilder::ascending(*s.route);
-      const std::vector<EdgeId> route(e.begin(), e.end());
-      J f = J::obj();
-      f.set("id", J::integer(s.record_counter));
-      f.set("route", ints(route));
-      f.set("T", lossy ? J::null() : J::integer(rec.delivered));
-      f.set("delivered", J::integer(rec.delivered));
-      f.set("alloc", pairs(rec.edge_flows));
-      flows.push(std::move(f));
-    }
+    flows.push(std::move(f));
     J entry = J::arr();
-    entry.push(J::integer(pe.reachable_sources[i]));
+    entry.push(J::integer(rec.sources.front()));
     entry.push(std::move(flows));
-    record_groups.push(std::move(entry));
+    cohorts.push(std::move(entry));
   }
-  j.set("cohorts", std::move(record_groups));
+  j.set("cohorts", std::move(cohorts));
   return j;
 }
 

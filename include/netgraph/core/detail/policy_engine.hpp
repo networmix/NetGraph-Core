@@ -31,24 +31,9 @@ struct TunnelRoster {
 };
 enum class PolicyOperation { Place, Evaluate, Replace, Forward };
 
-// A live flow of the policy between calls. Its amounts are its ledger record (delivered; edge flows;
-// Lossy offered and edge drops; T1's holds). The flows of ShortestPaths and CentralizedTE are one per roster
-// source (ShortestPaths's sources share the epoch's program); a T1, T2 or Pinned policy's are one per
-// program entry (`entry_id`).
-struct LiveFlow {
-  std::int64_t record_counter {-1};
-  NodeId source {0};
-  std::shared_ptr<const PredecessorDAG> route {};
-  Cost min_route_cost {kUnreachable};
-  std::int32_t entry_id {-1};
-};
-
 // The state accumulated since construction or the last remove(), replace() or forward() (the
 // policy epoch): a value, so a full-offer call builds its own and publishes it whole.
 struct PolicyEpoch {
-  // The live flows: per roster index (ShortestPaths and CentralizedTE: one per source), or per program entry
-  // (T1, T2, Pinned).
-  std::vector<std::vector<LiveFlow>> record_groups {};
   // The installed program (null before the first preparation) and, for T1 and T2, its setup summary
   // (shared, never changed: a policy without tunnels carries a null pointer, not a TunnelPlan).
   std::shared_ptr<const ForwardingProgram> program {};

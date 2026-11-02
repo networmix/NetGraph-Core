@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -390,34 +391,35 @@ TEST(FlowLedger, HoldsAreCheckedAgainstTheReservationBaseline) {
   FlowLedger fg(g, std::vector<Amount> {10}, std::vector<Amount> {6});
   const auto owner = LedgerAccess::bind(fg);
   auto draft = [&](Amount load, Amount hold) {
-    detail::RecordDraft d;
-    d.record.sources = {0};
-    d.record.destinations = {1};
-    d.record.route = all_edges(*g);
-    if (load != 0) d.record.edge_flows = {{0, load}};
-    if (hold != 0) d.record.edge_reservations = {{0, hold}};
-    return d;
+    FlowRecord d;
+    d.sources = {0};
+    d.destinations = {1};
+    d.route = all_edges(*g);
+    if (load != 0) d.edge_flows = {{0, load}};
+    if (hold != 0) d.edge_reservations = {{0, hold}};
+    std::vector<FlowRecord> records {std::move(d)};
+    return detail::stored_entry(*g, owner, records);
   };
   const LedgerState empty = ledger_state(fg);
   for (const auto& [load, hold, text] :
        {std::tuple {Amount {2}, Amount {7}, std::string("ledger: infeasible reservation on edge 0 (7 of 6)")},
         std::tuple {Amount {2}, Amount {-1}, std::string("ledger: a negative hold in a commit")},
         std::tuple {Amount {11}, Amount {6}, std::string("ledger: infeasible commit on edge 0 (11 of 10)")}}) {
-    std::vector<detail::RecordDraft> ds {draft(load, hold)};
-    EXPECT_EQ(logic_error_of([&] { (void)LedgerAccess::commit(fg, owner, ds); }), text);
+    EXPECT_EQ(logic_error_of([&] { auto ds = draft(load, hold); LedgerAccess::commit(fg, owner, ds); }), text);
     expect_same(ledger_state(fg), empty, text);
   }
-  std::vector<detail::RecordDraft> ds {draft(2, 6)};
-  const auto ids = LedgerAccess::commit(fg, owner, ds);
+  auto ds = draft(2, 6);
+  LedgerAccess::commit(fg, owner, ds);
+  const auto id = fg.records()[0].flow_id;
   EXPECT_EQ(fg.reserved(), (std::vector<Amount> {6}));
   EXPECT_EQ(fg.unreserved(), (std::vector<Amount> {0}));
   EXPECT_EQ(fg.carried(), (std::vector<Amount> {2}));
   // An exchange retires the old record and its hold before checking the new one's: 6 again fits.
-  std::vector<detail::RecordDraft> again {draft(3, 6)};
+  auto again = draft(3, 6);
   (void)LedgerAccess::exchange(fg, owner, again);
   EXPECT_EQ(fg.reserved(), (std::vector<Amount> {6}));
   EXPECT_EQ(fg.carried(), (std::vector<Amount> {3}));
-  EXPECT_EQ(LedgerAccess::live(fg, ids[0].second + 1).edge_reservations, (std::vector<std::pair<EdgeId, Amount>> {{0, 6}}));
+  EXPECT_EQ(LedgerAccess::materialize(fg, id.second + 1).edge_reservations, (std::vector<std::pair<EdgeId, Amount>> {{0, 6}}));
   (void)LedgerAccess::detach(fg, owner);
   EXPECT_EQ(fg.reserved(), (std::vector<Amount> {0}));
   EXPECT_EQ(fg.carried(), (std::vector<Amount> {0}));
@@ -953,299 +955,6 @@ TEST(FlowLedger, LossyOffersArePerCall) {
 // than one record; its delta may pass through zero while it accumulates. Each edge's delta is
 // published once.
 namespace {
-
-detail::RecordDraft draft_on(const std::shared_ptr<const PredecessorDAG>& dag, std::vector<std::pair<EdgeId, Amount>> edges,
-                       std::optional<std::int64_t> id = std::nullopt) {
-  detail::RecordDraft d;
-  d.record_counter = id;
-  FlowRecord& r = d.record;
-  r.sources = {0};
-  r.destinations = {1};
-  r.route = dag;
-  r.min_route_cost = 1;
-  for (const auto& [e, x] : edges) r.delivered += x;
-  r.edge_flows = std::move(edges);
-  return d;
-}
-
-Amount record_sum(const FlowLedger& fg, EdgeId e) {
-  Amount sum = 0;
-  for (const auto& r : fg.records()) {
-    for (const auto& [f, x] : r.edge_flows) {
-      if (f == e) sum += x;
-    }
-  }
-  return sum;
-}
-
-} // namespace
-
-TEST(FlowLedger, MultiRecordCommitsPublishEachEdgeOnce) {
-  auto g = shared(make_graph(2, {{0, 1, 3, 1}}));
-  const auto dag = all_edges(*g);
-  FlowLedger fg(g);
-  const auto owner = LedgerAccess::bind(fg);
-  std::vector<detail::RecordDraft> first {draft_on(dag, {{0, 1}})};
-  const auto ids = LedgerAccess::commit(fg, owner, first);
-  // The record kept unchanged (-1, then +1: the delta passes through 0) plus a new 2-unit record.
-  std::vector<detail::RecordDraft> next {draft_on(dag, {{0, 1}}, ids[0].second), draft_on(dag, {{0, 2}})};
-  EXPECT_EQ(LedgerAccess::commit(fg, owner, next).size(), 1U);
-  EXPECT_EQ(fg.carried(), (std::vector<Amount>{3}));
-  EXPECT_EQ(fg.residual(), (std::vector<Amount>{0}));
-  EXPECT_EQ(record_sum(fg, 0), 3);
-  // Over capacity through the same pattern: rejected, nothing changed.
-  const LedgerState held = ledger_state(fg);
-  std::vector<detail::RecordDraft> over {draft_on(dag, {{0, 1}}, ids[0].second), draft_on(dag, {{0, 2}}, ids[0].second + 1),
-                                   draft_on(dag, {{0, 1}})};
-  EXPECT_EQ(logic_error_of([&] { (void)LedgerAccess::commit(fg, owner, over); }),
-            "ledger: infeasible commit on edge 0 (4 of 3)");
-  expect_same(ledger_state(fg), held, "the refused commit");
-  EXPECT_EQ(fg.carried(), (std::vector<Amount>{3}));
-  EXPECT_EQ(LedgerAccess::next_record_counter(fg), 2);
-  // A kept record gives its unit up while a new record takes the edge: published once.
-  std::vector<detail::RecordDraft> moved {draft_on(dag, {}, ids[0].second), draft_on(dag, {{0, 2}}, ids[0].second + 1),
-                                    draft_on(dag, {{0, 1}})};
-  EXPECT_EQ(LedgerAccess::commit(fg, owner, moved).size(), 1U);
-  EXPECT_EQ(fg.carried(), (std::vector<Amount>{3}));
-  EXPECT_EQ(record_sum(fg, 0), 3);
-  EXPECT_EQ(LedgerAccess::detach(fg, owner).size(), 3U);
-  EXPECT_EQ(fg.carried(), (std::vector<Amount>{0}));
-  LedgerAccess::release(fg, owner);
-}
-
-TEST(FlowLedger, RandomMultiOwnerCommitsMatchAModel) {
-  // Three owners on four edges; every commit carries all of its owner's records (each kept,
-  // changed, emptied or moved) plus up to two new ones, so deltas cancel and reappear on shared
-  // edges; detaches between commits. After every call the ledger must equal an independent model
-  // (the aggregate, every live record's owner and edge amounts, the next id), and a rejected
-  // commit must name an edge over its capacity and change nothing.
-  std::mt19937 rng(11);
-  auto g = shared(make_graph(4, {{0, 1, 6, 1}, {1, 2, 4, 1}, {2, 3, 5, 1}, {0, 3, 3, 1}}));
-  const auto dag = all_edges(*g);
-  const auto m = static_cast<std::size_t>(g->num_edges());
-  FlowLedger fg(g);
-  std::vector<std::int64_t> owners;
-  for (int i = 0; i < 3; ++i) owners.push_back(LedgerAccess::bind(fg));
-  // The model: per owner, its live records (id -> per-edge amounts).
-  std::vector<std::map<std::int64_t, std::vector<Amount>>> model(owners.size());
-  std::int64_t next_id = 0;
-  int moved = 0;     // accepted commits that changed the aggregate
-  int rejected = 0;  // commits the ledger rejected
-  auto random_edges = [&] {
-    std::vector<Amount> a(m, 0);
-    for (std::size_t e = 0; e < m; ++e) a[e] = (rng() % 3) == 0 ? static_cast<Amount>(rng() % 3) : 0;
-    return a;
-  };
-  auto as_pairs = [](const std::vector<Amount>& a) {
-    std::vector<std::pair<EdgeId, Amount>> out;
-    for (std::size_t e = 0; e < a.size(); ++e) {
-      if (a[e] != 0) out.emplace_back(static_cast<EdgeId>(e), a[e]);
-    }
-    return out;
-  };
-  for (int step = 0; step < 3000; ++step) {
-    const std::size_t o = rng() % owners.size();
-    if ((rng() % 10) == 0) {
-      (void)LedgerAccess::detach(fg, owners[o]);
-      model[o].clear();
-    } else {
-      std::vector<detail::RecordDraft> drafts;
-      std::map<std::int64_t, std::vector<Amount>> after;
-      for (const auto& [id, a] : model[o]) {
-        const auto kind = rng() % 4;  // kept, changed, emptied, moved to random edges
-        std::vector<Amount> b = a;
-        if (kind == 1) {
-          b[rng() % m] += 1;
-        } else if (kind == 2) {
-          b.assign(m, 0);
-        } else if (kind == 3) {
-          b = random_edges();
-        }
-        drafts.push_back(draft_on(dag, as_pairs(b), id));
-        after[id] = b;
-      }
-      const int fresh = static_cast<int>(rng() % 3);
-      for (int k = 0; k < fresh; ++k) {
-        const auto b = random_edges();
-        drafts.push_back(draft_on(dag, as_pairs(b)));
-        after[next_id + k] = b;
-      }
-      // Feasible exactly when every edge's new total stays within its capacity.
-      std::vector<Amount> total(m, 0);
-      for (std::size_t q = 0; q < owners.size(); ++q) {
-        for (const auto& [id, a] : q == o ? after : model[q]) {
-          for (std::size_t e = 0; e < m; ++e) total[e] += a[e];
-        }
-      }
-      bool feasible = true;
-      for (std::size_t e = 0; e < m; ++e) feasible = feasible && total[e] <= g->edge_capacity_units()[e];
-      const auto before = fg.carried();
-      const LedgerState before_state = ledger_state(fg);
-      if (feasible) {
-        // The new records take the next ids in draft order.
-        std::vector<FlowId> want_ids;
-        for (int k = 0; k < fresh; ++k) want_ids.emplace_back(fg.uid(), next_id + k);
-        EXPECT_EQ(LedgerAccess::commit(fg, owners[o], drafts), want_ids) << "step " << step;
-        model[o] = after;
-        next_id += fresh;
-        moved += fg.carried() != before ? 1 : 0;
-      } else {
-        // The refusal names one edge over its capacity, with its new total.
-        std::vector<std::string> refusals;
-        for (std::size_t e = 0; e < m; ++e) {
-          if (total[e] <= g->edge_capacity_units()[e]) continue;
-          refusals.push_back("ledger: infeasible commit on edge " + std::to_string(e) + " (" + std::to_string(total[e]) +
-                             " of " + std::to_string(g->edge_capacity_units()[e]) + ")");
-        }
-        const std::string got = logic_error_of([&] { (void)LedgerAccess::commit(fg, owners[o], drafts); });
-        EXPECT_TRUE(std::find(refusals.begin(), refusals.end(), got) != refusals.end()) << "step " << step << ": " << got;
-        ++rejected;
-        expect_same(ledger_state(fg), before_state, "step " + std::to_string(step));
-      }
-    }
-    std::vector<Amount> want(m, 0);
-    for (const auto& recs : model) {
-      for (const auto& [id, a] : recs) {
-        for (std::size_t e = 0; e < m; ++e) want[e] += a[e];
-      }
-    }
-    ASSERT_EQ(fg.carried(), want) << "step " << step;
-    for (std::size_t e = 0; e < m; ++e) ASSERT_EQ(record_sum(fg, static_cast<EdgeId>(e)), want[e]);
-    ASSERT_EQ(LedgerAccess::next_record_counter(fg), next_id);
-    // Every live record by id: its owner and its edge amounts are the model's.
-    std::map<std::int64_t, std::pair<std::int64_t, std::vector<std::pair<EdgeId, Amount>>>> want_records;
-    for (std::size_t q = 0; q < owners.size(); ++q) {
-      for (const auto& [id, a] : model[q]) want_records[id] = {owners[q], as_pairs(a)};
-    }
-    const auto records = fg.records();
-    ASSERT_EQ(records.size(), want_records.size()) << "step " << step;
-    for (const auto& r : records) {
-      const auto it = want_records.find(r.flow_id.second);
-      ASSERT_NE(it, want_records.end()) << "step " << step << ": record " << r.flow_id.second;
-      EXPECT_EQ(r.policy_id, it->second.first) << "step " << step << ": record " << r.flow_id.second;
-      EXPECT_EQ(r.edge_flows, it->second.second) << "step " << step << ": record " << r.flow_id.second;
-    }
-  }
-  EXPECT_GT(moved, 500);
-  EXPECT_GT(rejected, 500);
-  for (auto owner : owners) LedgerAccess::release(fg, owner);
-}
-
-TEST(FlowLedger, FreshSingleRecordCommitsMatchTheGeneralRule) {
-  // A commit of one new record by an owner without live records takes a shortcut
-  // when its edges strictly ascend (no aggregation). Against an independent model of the general
-  // rule, for drafts that ascend, repeat an edge, run backwards, hold zeros or negatives, and
-  // overflow at any position (another owner holding part of the capacity): the same outcome, the
-  // same message (negative amounts first, then the first infeasible edge in first-touch order with
-  // its aggregated total), and nothing changed by a rejected commit.
-  std::mt19937 rng(1007);
-  auto g = shared(make_graph(6, {{0, 1, 4, 1}, {1, 2, 3, 1}, {2, 3, 5, 1}, {0, 3, 2, 1}, {3, 4, 4, 1}, {4, 5, 3, 1}}));
-  const auto dag = all_edges(*g);
-  const auto m = static_cast<std::size_t>(g->num_edges());
-  FlowLedger fg(g);
-  const auto other = LedgerAccess::bind(fg);
-  std::vector<detail::RecordDraft> held {draft_on(dag, {{0, 1}, {2, 2}, {5, 1}})};
-  (void)LedgerAccess::commit(fg, other, held);
-  int shortcut = 0;    // accepted non-empty drafts whose edges strictly ascend
-  int general = 0;     // accepted drafts that repeat or reorder an edge
-  int negative = 0;    // rejected for a negative amount
-  int infeasible = 0;  // rejected for an infeasible edge
-  for (int step = 0; step < 4000; ++step) {
-    const auto owner = LedgerAccess::bind(fg);
-    std::vector<std::pair<EdgeId, Amount>> edges;
-    const auto k = rng() % 5;
-    for (std::size_t i = 0; i < k; ++i) {
-      edges.emplace_back(static_cast<EdgeId>(rng() % m), rng() % 9 == 0 ? Amount {-1} : static_cast<Amount>(rng() % 4));
-    }
-    const int shape = static_cast<int>(rng() % 3);  // ascending, sorted with repeats kept, as drawn
-    if (shape < 2) std::sort(edges.begin(), edges.end());
-    if (shape == 0) {
-      edges.erase(std::unique(edges.begin(), edges.end(), [](const auto& a, const auto& b) { return a.first == b.first; }),
-                  edges.end());
-    }
-    const bool strictly = std::adjacent_find(edges.begin(), edges.end(), [](const auto& a, const auto& b) {
-                            return a.first >= b.first;
-                          }) == edges.end();
-    // The general rule: negatives first; then each touched edge in first-touch order with its sum.
-    std::string want;
-    for (const auto& [e, x] : edges) {
-      if (x < 0) want = "ledger: a negative allocation in a commit";
-    }
-    std::vector<Amount> delta(m, 0);
-    std::vector<EdgeId> touched;
-    for (const auto& [e, x] : edges) {
-      if (std::find(touched.begin(), touched.end(), e) == touched.end()) touched.push_back(e);
-      delta[static_cast<std::size_t>(e)] += x;
-    }
-    const auto before = fg.carried();
-    const LedgerState before_state = ledger_state(fg);
-    const auto next_id = LedgerAccess::next_record_counter(fg);
-    if (want.empty()) {
-      for (EdgeId e : touched) {
-        const auto ei = static_cast<std::size_t>(e);
-        const Amount next = before[ei] + delta[ei];
-        if (next < 0 || next > g->edge_capacity_units()[ei]) {
-          want = "ledger: infeasible commit on edge " + std::to_string(e) + " (" + std::to_string(next) + " of " +
-                 std::to_string(g->edge_capacity_units()[ei]) + ")";
-          break;
-        }
-      }
-    }
-    std::vector<detail::RecordDraft> drafts {draft_on(dag, edges)};
-    if (!want.empty()) {
-      try {
-        (void)LedgerAccess::commit(fg, owner, drafts);
-        ADD_FAILURE() << "step " << step << ": accepted, want " << want;
-      } catch (const std::logic_error& e) {
-        EXPECT_EQ(std::string(e.what()), want) << "step " << step;
-        ++(std::string(e.what()).find("negative") != std::string::npos ? negative : infeasible);
-      }
-      expect_same(ledger_state(fg), before_state, "step " + std::to_string(step));
-    } else {
-      const auto ids = LedgerAccess::commit(fg, owner, drafts);
-      ASSERT_EQ(ids.size(), 1U);
-      EXPECT_EQ(ids[0], (FlowId {fg.uid(), next_id}));
-      const auto rec = fg.record(ids[0]);
-      std::vector<std::pair<EdgeId, Amount>> kept;
-      for (const auto& p : edges) {
-        if (p.second != 0) kept.push_back(p);
-      }
-      EXPECT_EQ(rec.edge_flows, kept) << "step " << step;
-      EXPECT_EQ(rec.policy_id, owner);
-      for (std::size_t e = 0; e < m; ++e) EXPECT_EQ(fg.carried()[e], before[e] + delta[e]) << "step " << step;
-      if (strictly && !edges.empty()) ++shortcut;
-      if (!strictly) ++general;
-      if (rng() % 2 == 0) (void)LedgerAccess::detach(fg, owner);
-    }
-    LedgerAccess::release(fg, owner);
-    if (::testing::Test::HasFailure()) return;
-  }
-  EXPECT_GT(shortcut, 140);
-  EXPECT_GT(general, 10);
-  EXPECT_GT(negative, 300);
-  EXPECT_GT(infeasible, 300);
-  LedgerAccess::release(fg, other);
-  // An owner with a live record, and a draft naming an id the owner does not hold, keep the
-  // general path and its rule (a fresh ledger).
-  FlowLedger fg2(g);
-  const auto owner = LedgerAccess::bind(fg2);
-  std::vector<detail::RecordDraft> one {draft_on(dag, {{3, 1}})};
-  const auto ids = LedgerAccess::commit(fg2, owner, one);
-  std::vector<detail::RecordDraft> without_it {draft_on(dag, {{4, 1}})};
-  const std::string must_carry = "ledger: a commit must carry every live record of its policy";
-  EXPECT_EQ(logic_error_of([&] { (void)LedgerAccess::commit(fg2, owner, without_it); }), must_carry);
-  const auto fresh = LedgerAccess::bind(fg2);
-  std::vector<detail::RecordDraft> claims {draft_on(dag, {{4, 1}}, ids[0].second)};
-  EXPECT_EQ(logic_error_of([&] { (void)LedgerAccess::commit(fg2, fresh, claims); }), must_carry);
-  EXPECT_EQ(fg2.records().size(), 1U);
-  LedgerAccess::release(fg2, owner);
-  LedgerAccess::release(fg2, fresh);
-}
-
-namespace {
-
-// What fn raises: the message when the exception's dynamic type is exactly std::runtime_error (an
-// internal limit), or a description of anything else.
 std::string runtime_error_of(const std::function<void()>& fn) {
   try {
     fn();
@@ -1258,70 +967,458 @@ std::string runtime_error_of(const std::function<void()>& fn) {
 
 constexpr std::int64_t kLastId = std::numeric_limits<std::int64_t>::max() - 1;
 
-} // namespace
+// Two stored tunnel records of one head on one edge. Loads and holds are independent;
+// this fixture checks bookkeeping, not route choice or a forwarding algorithm.
+detail::LedgerEntry entry_on(FlowLedger& ledger, std::int64_t owner,
+                             std::array<Amount, 2> loads, std::array<Amount, 2> holds = {}) {
+  std::vector<FlowRecord> records(2);
+  for (std::size_t i = 0; i < records.size(); ++i) {
+    auto& r = records[i];
+    r.sources = {0};
+    r.destinations = {1};
+    r.entry_id = static_cast<std::int32_t>(i);
+    r.route = all_edges(*ledger.graph());
+    r.min_route_cost = 3;
+    r.delivered = loads[i];
+    if (loads[i]) r.edge_flows = {{0, loads[i]}};
+    if (holds[i]) r.edge_reservations = {{0, holds[i]}};
+  }
+  return detail::stored_entry(*ledger.graph(), owner, records);
+}
+}
 
-// Owner ids run up to the largest int64 less one (2^63 - 1 identities); the next bind is refused
-// before anything changes, and an existing owner keeps working.
+TEST(FlowLedger, EntryRangesKeepIdentitiesAndExchangeBothProjections) {
+  const auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  FlowLedger ledger(g, std::vector<Amount> {17}, std::vector<Amount> {11});
+  const auto owner = LedgerAccess::bind(ledger);
+  auto first = entry_on(ledger, owner, {1, 2}, {3, 3});
+  LedgerAccess::commit(ledger, owner, first);
+  EXPECT_EQ(ledger.carried(), (std::vector<Amount> {3}));
+  EXPECT_EQ(ledger.reserved(), (std::vector<Amount> {6}));
+  const auto ids = ledger.records();
+  ASSERT_EQ(ids.size(), 2U);
+  EXPECT_EQ(ids[0].flow_id.second, 0);
+  EXPECT_EQ(ids[1].flow_id.second, 1);
+  const auto* entry = LedgerAccess::entry(ledger, owner);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(entry->record_inventory().size(), 2U);
+  EXPECT_EQ(entry->carried, (std::vector<std::pair<EdgeId, Amount>> {{0, 3}}));
+  EXPECT_EQ(entry->delivered, 3);
+  auto next = entry_on(ledger, owner, {2, 2}, {3, 3});
+  LedgerAccess::commit(ledger, owner, next);
+  EXPECT_EQ(ledger.record(ids[0].flow_id).delivered, 2);
+  EXPECT_EQ(ledger.record(ids[1].flow_id).delivered, 2);
+  EXPECT_EQ(LedgerAccess::next_record_counter(ledger), 2);
+  auto replacement = entry_on(ledger, owner, {4, 1}, {2, 2});
+  LedgerAccess::exchange(ledger, owner, replacement);
+  EXPECT_THROW((void)ledger.record(ids[0].flow_id), std::invalid_argument);
+  EXPECT_EQ(ledger.records()[0].flow_id.second, 2);
+  EXPECT_EQ(ledger.records()[1].flow_id.second, 3);
+  EXPECT_EQ(ledger.carried(), (std::vector<Amount> {5}));
+  EXPECT_EQ(ledger.reserved(), (std::vector<Amount> {4}));
+  LedgerAccess::detach(ledger, owner);
+  EXPECT_TRUE(ledger.records().empty());
+  EXPECT_EQ(ledger.carried(), (std::vector<Amount> {0}));
+  EXPECT_EQ(ledger.reserved(), (std::vector<Amount> {0}));
+  EXPECT_EQ(LedgerAccess::next_record_counter(ledger), 4);
+  LedgerAccess::release(ledger, owner);
+}
+
+TEST(FlowLedger, StoredEntryCopiesOwnDataAndMaterializeCommonIdentities) {
+  const auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  FlowLedger ledger(g);
+  const auto owner = LedgerAccess::bind(ledger);
+  auto value = entry_on(ledger, owner, {2, 3}, {1, 2});
+  LedgerAccess::commit(ledger, owner, value);
+  std::weak_ptr<const PredecessorDAG> route = ledger.records()[0].route;
+  LedgerAccess::release(ledger, owner);
+  FlowLedger copy(ledger);
+  EXPECT_NE(copy.uid(), ledger.uid());
+  const auto before = ledger_state(copy);
+  ledger.reset();
+  ASSERT_FALSE(route.expired());
+  EXPECT_EQ(copy.carried(), (std::vector<Amount> {5}));
+  const auto records = copy.records();
+  ASSERT_EQ(records.size(), 2U);
+  for (std::size_t i = 0; i < records.size(); ++i) {
+    const auto& r = records[i];
+    EXPECT_EQ(r.flow_id, (FlowId {copy.uid(), static_cast<std::int64_t>(i)}));
+    EXPECT_EQ(r.policy_id, owner);
+    EXPECT_EQ(r.sources, (std::vector<NodeId> {0}));
+    EXPECT_EQ(r.destinations, (std::vector<NodeId> {1}));
+    EXPECT_EQ(r.admission, Admission::Lossless);
+    EXPECT_EQ(r.entry_id, static_cast<std::int32_t>(i));
+    EXPECT_EQ(r.min_route_cost, 3);
+    EXPECT_EQ(r.edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{0, static_cast<Amount>(i + 2)}}));
+    EXPECT_EQ(r.edge_reservations, (std::vector<std::pair<EdgeId, Amount>> {{0, static_cast<Amount>(i + 1)}}));
+    EXPECT_FALSE(r.offered);
+    EXPECT_TRUE(r.edge_drops.empty());
+  }
+  expect_same(ledger_state(copy), before, "original reset cannot change copied entry");
+  FlowLedger moved(std::move(copy));
+  expect_same(ledger_state(moved), before, "moved entry");
+  EXPECT_THROW((void)copy.records(), std::logic_error);
+  EXPECT_THROW((void)copy.record(records[0].flow_id), std::logic_error);
+}
+
+TEST(FlowLedger, RandomFixedInventoryEntriesMatchAModel) {
+  const auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  FlowLedger ledger(g, std::vector<Amount> {17}, std::vector<Amount> {11});
+  std::array<std::int64_t, 4> owners;
+  for (auto& owner : owners) owner = LedgerAccess::bind(ledger);
+  std::array<std::array<Amount, 2>, 4> loads {}, holds {};
+  std::array<std::optional<std::int64_t>, 4> first {};
+  std::int64_t next = 0;
+  std::mt19937 rng(7013);
+  int accepted = 0, refused = 0;
+  for (int step = 0; step < 500; ++step) {
+    const auto index = static_cast<std::size_t>(rng() % owners.size());
+    const bool retire = (rng() % 3) == 0;
+    const std::array<Amount, 2> l {static_cast<Amount>(rng() % 6), static_cast<Amount>(rng() % 6)};
+    const std::array<Amount, 2> h {static_cast<Amount>(rng() % 4), static_cast<Amount>(rng() % 4)};
+    auto proposed = entry_on(ledger, owners[index], l, h);
+    auto new_loads = loads, new_holds = holds;
+    new_loads[index] = l; new_holds[index] = h;
+    Amount total = 0, held = 0;
+    for (std::size_t i = 0; i < owners.size(); ++i) {
+      total += new_loads[i][0] + new_loads[i][1];
+      held += new_holds[i][0] + new_holds[i][1];
+    }
+    const auto before = ledger_state(ledger);
+    auto commit = [&] {
+      if (retire) LedgerAccess::exchange(ledger, owners[index], proposed);
+      else LedgerAccess::commit(ledger, owners[index], proposed);
+    };
+    if (total > 17 || held > 11) {
+      const auto want = total > 17 ? "ledger: infeasible commit on edge 0 (" + std::to_string(total) + " of 17)"
+                                   : "ledger: infeasible reservation on edge 0 (" + std::to_string(held) + " of 11)";
+      EXPECT_EQ(logic_error_of(commit), want) << step;
+      expect_same(ledger_state(ledger), before, "refused entry");
+      ++refused;
+    } else {
+      commit();
+      if (retire || !first[index]) { first[index] = next; next += 2; }
+      loads = new_loads; holds = new_holds;
+      EXPECT_EQ(ledger.carried(), (std::vector<Amount> {total}));
+      EXPECT_EQ(ledger.reserved(), (std::vector<Amount> {held}));
+      for (std::size_t i = 0; i < owners.size(); ++i) if (first[i]) {
+        const auto* entry = LedgerAccess::entry(ledger, owners[i]);
+        ASSERT_NE(entry, nullptr);
+        EXPECT_EQ(entry->first_counter, *first[i]);
+        EXPECT_EQ(entry->delivered, loads[i][0] + loads[i][1]);
+        for (std::size_t j = 0; j < 2; ++j) {
+          const auto record = ledger.record({ledger.uid(), *first[i] + static_cast<std::int64_t>(j)});
+          EXPECT_EQ(record.delivered, loads[i][j]);
+          EXPECT_EQ(record.policy_id, owners[i]);
+          EXPECT_EQ(record.entry_id, static_cast<std::int32_t>(j));
+        }
+      }
+      EXPECT_EQ(LedgerAccess::next_record_counter(ledger), next);
+      expect_balanced(ledger, "accepted entry");
+      ++accepted;
+    }
+  }
+  EXPECT_GT(accepted, 50); EXPECT_GT(refused, 50);
+  for (auto owner : owners) { LedgerAccess::detach(ledger, owner); LedgerAccess::release(ledger, owner); }
+  EXPECT_EQ(ledger.carried(), (std::vector<Amount> {0}));
+}
+
+TEST(FlowLedger, RandomEntryBatchesMatchAModel) {
+  const auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  FlowLedger ledger(g, std::vector<Amount> {17}, std::vector<Amount> {11});
+  std::array<std::int64_t, 3> owners;
+  for (auto& owner : owners) owner = LedgerAccess::bind(ledger);
+  std::array<std::array<Amount, 2>, 3> loads {}, holds {};
+  std::array<std::optional<std::int64_t>, 3> first {};
+  std::int64_t next = 0;
+  std::mt19937 rng(992);
+  int accepted = 0, refused = 0;
+  for (int step = 0; step < 300; ++step) {
+    std::array<std::size_t, 3> order {0, 1, 2};
+    std::shuffle(order.begin(), order.end(), rng);
+    auto new_loads = loads, new_holds = holds;
+    std::array<bool, 3> retire;
+    std::vector<detail::LedgerEntry> values;
+    for (const auto i : order) {
+      new_loads[i] = {static_cast<Amount>(rng() % 5), static_cast<Amount>(rng() % 5)};
+      new_holds[i] = {static_cast<Amount>(rng() % 3), static_cast<Amount>(rng() % 3)};
+      retire[i] = rng() % 2 != 0;
+      values.push_back(entry_on(ledger, owners[i], new_loads[i], new_holds[i]));
+    }
+    std::vector<detail::OwnerEntry> batch;
+    for (std::size_t j = 0; j < order.size(); ++j) batch.push_back({owners[order[j]], &values[j], retire[order[j]]});
+    Amount total = 0, held = 0;
+    for (std::size_t i = 0; i < owners.size(); ++i) {
+      total += new_loads[i][0] + new_loads[i][1]; held += new_holds[i][0] + new_holds[i][1];
+    }
+    const auto before = ledger_state(ledger);
+    if (total > 17 || held > 11) {
+      const auto want = total > 17 ? "ledger: infeasible commit on edge 0 (" + std::to_string(total) + " of 17)"
+                                   : "ledger: infeasible reservation on edge 0 (" + std::to_string(held) + " of 11)";
+      EXPECT_EQ(logic_error_of([&] { LedgerAccess::commit_batch(ledger, batch); }), want);
+      expect_same(ledger_state(ledger), before, "refused batch"); ++refused;
+    } else {
+      LedgerAccess::commit_batch(ledger, batch);
+      for (const auto i : order) if (retire[i] || !first[i]) { first[i] = next; next += 2; }
+      loads = new_loads; holds = new_holds;
+      EXPECT_EQ(ledger.carried(), (std::vector<Amount> {total}));
+      EXPECT_EQ(ledger.reserved(), (std::vector<Amount> {held}));
+      EXPECT_EQ(LedgerAccess::next_record_counter(ledger), next);
+      for (std::size_t i = 0; i < owners.size(); ++i) {
+        const auto* entry = LedgerAccess::entry(ledger, owners[i]);
+        ASSERT_NE(entry, nullptr); EXPECT_EQ(entry->first_counter, *first[i]);
+        EXPECT_EQ(entry->delivered, loads[i][0] + loads[i][1]);
+      }
+      expect_balanced(ledger, "accepted batch"); ++accepted;
+    }
+  }
+  EXPECT_GT(accepted, 50); EXPECT_GT(refused, 10);
+  for (auto owner : owners) LedgerAccess::release(ledger, owner);
+}
+
+TEST(FlowLedger, EntryConstructionRejectsInconsistentIdentityBeforePublication) {
+  const auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  FlowLedger ledger(g);
+  const auto owner = LedgerAccess::bind(ledger);
+  const auto before = ledger_state(ledger);
+  for (int kind = 0; kind < 3; ++kind) {
+    std::vector<FlowRecord> records(2);
+    for (auto& r : records) { r.sources = {0}; r.destinations = {1}; r.route = all_edges(*g); }
+    if (kind == 0) records[1].sources.clear();
+    if (kind == 1) records[1].destinations = {0};
+    if (kind == 2) records[1].admission = Admission::Lossy;
+    EXPECT_EQ(logic_error_of([&] { (void)detail::stored_entry(*g, owner, records); }), "ledger: inconsistent record inventory");
+    expect_same(ledger_state(ledger), before, "bad construction never publishes");
+  }
+  auto valid = entry_on(ledger, owner, {1, 2});
+  LedgerAccess::commit(ledger, owner, valid);
+  EXPECT_EQ(ledger.records().size(), 2U);
+  LedgerAccess::detach(ledger, owner); LedgerAccess::release(ledger, owner);
+}
+
+TEST(FlowLedger, SingleAndMultipleStoredRecordsKeepCanonicalIndependentAggregates) {
+  const auto g = shared(make_graph(3, {{0, 1, 20, 1}, {1, 2, 20, 2}}));
+  for (int count : {1, 2}) {
+    FlowLedger ledger(g);
+    const auto owner = LedgerAccess::bind(ledger);
+    std::vector<FlowRecord> rows(static_cast<std::size_t>(count));
+    for (auto& r : rows) {
+      r.sources = {0};
+      r.destinations = {2};
+      r.admission = Admission::Lossy;
+      r.route = all_edges(*g);
+      r.min_route_cost = 3;
+      r.offered = Counter128 {1, 3};
+      r.delivered = 2;
+      r.edge_flows = {{0, 2}, {1, 0}};
+      r.edge_reservations = {{0, 0}, {1, 3}};
+      r.edge_drops = {{0, {}}, {1, {1, 3}}};
+    }
+    auto entry = detail::stored_entry(*g, owner, rows);
+    EXPECT_EQ(entry.carried, (std::vector<std::pair<EdgeId, Amount>> {{0, 2 * count}}));
+    EXPECT_EQ(entry.holds, (std::vector<std::pair<EdgeId, Amount>> {{1, 3 * count}}));
+    EXPECT_EQ(entry.drops, (std::vector<std::pair<EdgeId, Counter128>> {{1, {static_cast<std::uint64_t>(count), static_cast<std::uint64_t>(3 * count)}}}));
+    ASSERT_EQ(entry.stored.size(), static_cast<std::size_t>(count));
+    EXPECT_NE(entry.carried.data(), entry.stored.front().edge_flows.data());
+    EXPECT_NE(entry.holds.data(), entry.stored.front().edge_reservations.data());
+    LedgerAccess::commit(ledger, owner, entry);
+    const auto records = ledger.records();
+    for (const auto& r : records) {
+      EXPECT_EQ(r.sources, (std::vector<NodeId> {0}));
+      EXPECT_EQ(r.destinations, (std::vector<NodeId> {2}));
+      EXPECT_EQ(r.min_route_cost, 3);
+      EXPECT_EQ(r.offered, (Counter128 {1, 3}));
+      EXPECT_EQ(r.delivered, 2);
+      EXPECT_EQ(r.edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{0, 2}}));
+      EXPECT_EQ(r.edge_reservations, (std::vector<std::pair<EdgeId, Amount>> {{1, 3}}));
+      EXPECT_EQ(r.edge_drops, (std::vector<std::pair<EdgeId, Counter128>> {{1, {1, 3}}}));
+    }
+    LedgerAccess::release(ledger, owner);
+  }
+}
+
+TEST(FlowLedger, StoredEntryRejectsNoncanonicalSparseFieldsBeforePublication) {
+  const auto g = shared(make_graph(2, {{0, 1, 20, 1}, {0, 1, 20, 2}, {0, 1, 20, 3}}));
+  FlowLedger ledger(g);
+  const auto owner = LedgerAccess::bind(ledger);
+  const auto before = ledger_state(ledger);
+  for (int field : {0, 1, 2}) for (bool duplicate : {false, true}) {
+    FlowRecord r;
+    r.sources = {0}; r.destinations = {1}; r.route = all_edges(*g);
+    const std::vector<std::pair<EdgeId, Amount>> bad = duplicate ?
+        std::vector<std::pair<EdgeId, Amount>> {{0, 2}, {0, 1}} :
+        std::vector<std::pair<EdgeId, Amount>> {{2, 2}, {0, 3}, {2, 1}};
+    if (field == 0) r.edge_flows = bad;
+    if (field == 1) r.edge_reservations = bad;
+    if (field == 2) for (auto [e, x] : bad) r.edge_drops.emplace_back(e, Counter128 {0, static_cast<std::uint64_t>(x)});
+    const std::string label = field == 0 ? "allocation" : field == 1 ? "hold" : "drops";
+    EXPECT_EQ(logic_error_of([&] {
+      auto value = detail::stored_entry(*g, owner, std::span<FlowRecord>(&r, 1));
+      LedgerAccess::commit(ledger, owner, value);
+    }), "ledger: noncanonical " + label + " in a commit");
+    expect_same(ledger_state(ledger), before, "malformed sparse field");
+  }
+  FlowRecord valid;
+  valid.sources = {0}; valid.destinations = {1}; valid.route = all_edges(*g);
+  valid.edge_flows = {{0, 3}, {1, 0}, {2, 2}};
+  valid.edge_reservations = {{0, 0}, {1, 1}};
+  valid.edge_drops = {{0, {}}, {2, {1, 3}}};
+  auto value = detail::stored_entry(*g, owner, std::span<FlowRecord>(&valid, 1));
+  LedgerAccess::commit(ledger, owner, value);
+  EXPECT_EQ(ledger.carried(), (std::vector<Amount> {3, 0, 2}));
+  EXPECT_EQ(ledger.reserved(), (std::vector<Amount> {0, 1, 0}));
+  EXPECT_EQ(ledger.records().front().edge_drops, (std::vector<std::pair<EdgeId, Counter128>> {{2, {1, 3}}}));
+  LedgerAccess::detach(ledger, owner); LedgerAccess::release(ledger, owner);
+}
+
+TEST(FlowLedger, SupportedControllerRosterUsesReachableWalksIncludingZeroCapacity) {
+  const auto g = shared(make_graph(7, {{1, 2, 9, 4}, {1, 4, 0, 1}, {2, 5, 7, 2}, {3, 0, 9, 1}, {4, 5, 0, 1}}));
+  const auto support = all_edges(*g);
+  for (const auto& excluded : {std::vector<NodeId> {}, std::vector<NodeId> {2}, std::vector<NodeId> {2, 4}}) {
+    FlowLedger ledger(g);
+    const auto mask = g->eligibility(excluded, {});
+    FlowPolicy p(ledger, v({1, 2, 3, 6}), v({5}), on_support(support), &mask);
+    const auto result = p.place(3);
+    const auto records = p.records();
+    const std::vector<NodeId> expected = excluded.empty() ? v({1, 2}) : excluded.size() == 1 ? v({1}) : v({});
+    ASSERT_EQ(records.size(), expected.size());
+    ASSERT_EQ(result.by_source.size(), 4U);  // public rows retain all declared sources
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+      EXPECT_EQ(records[i].sources, std::vector<NodeId> {expected[i]});
+    }
+    for (std::size_t i = 0; i < result.by_source.size(); ++i) {
+      EXPECT_EQ(result.by_source[i].source, (std::vector<NodeId> {1, 2, 3, 6})[i]);
+      EXPECT_EQ(result.by_source[i].delivered, excluded.empty() && i == 1 ? 3 : 0);
+    }
+    EXPECT_EQ(result.call_delivered, excluded.empty() ? 3 : 0);
+    EXPECT_EQ(ledger.carried(), excluded.empty() ? (std::vector<Amount> {0, 0, 3, 0, 0}) : std::vector<Amount>(5, 0));
+  }
+}
+
+TEST(FlowLedger, EmptyEntriesAndInventoryRefusalsDoNotConsumeIds) {
+  const auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  FlowLedger ledger(g);
+  const auto owner = LedgerAccess::bind(ledger);
+  detail::LedgerEntry empty;
+  LedgerAccess::commit(ledger, owner, empty);
+  EXPECT_EQ(LedgerAccess::next_record_counter(ledger), 0);
+  EXPECT_EQ(LedgerAccess::entry(ledger, owner), nullptr);
+  auto value = entry_on(ledger, owner, {1, 2});
+  LedgerAccess::commit(ledger, owner, value);
+  auto changed = entry_on(ledger, owner, {1, 2});
+  changed.inventory.pop_back(); changed.stored.pop_back();
+  const auto before = ledger_state(ledger);
+  EXPECT_EQ(logic_error_of([&] { LedgerAccess::commit(ledger, owner, changed); }), "ledger: a commit must keep its entry inventory");
+  expect_same(ledger_state(ledger), before, "inventory refusal");
+  LedgerAccess::exchange(ledger, owner, empty);
+  EXPECT_EQ(LedgerAccess::next_record_counter(ledger), 2);
+  EXPECT_TRUE(ledger.records().empty());
+  LedgerAccess::release(ledger, owner);
+  EXPECT_TRUE(LedgerAccess::orphan_policy_ids(ledger).empty());
+}
+
+TEST(FlowLedger, ScalarMergePreservesFirstTouchErrorsAndReleasesOldOnlyEdges) {
+  const auto g = shared(make_graph(2, {{0, 1, 10, 1}, {0, 1, 10, 2}, {0, 1, 10, 3}}));
+  FlowLedger ledger(g);
+  const auto a = LedgerAccess::bind(ledger), b = LedgerAccess::bind(ledger);
+  auto pending = [&](std::int64_t owner, std::vector<std::pair<EdgeId, Amount>> carried) {
+    FlowRecord r;
+    r.sources = {0}; r.destinations = {1}; r.route = all_edges(*g);
+    r.edge_flows = std::move(carried);
+    return detail::stored_entry(*g, owner, std::span<FlowRecord>(&r, 1));
+  };
+  auto first = pending(a, {{2, 5}}), other = pending(b, {{0, 10}});
+  LedgerAccess::commit(ledger, a, first); LedgerAccess::commit(ledger, b, other);
+  const auto before = ledger_state(ledger);
+  auto bad = pending(a, {{0, 1}, {2, 11}});
+  // Edge 2 was touched before edge 0 in the old-out/new-in transaction, even
+  // though a sorted merge visits the new-only edge 0 first.
+  EXPECT_EQ(logic_error_of([&] { LedgerAccess::commit(ledger, a, bad); }), "ledger: infeasible commit on edge 2 (11 of 10)");
+  expect_same(ledger_state(ledger), before, "old edge failure first");
+  bad.carried = {{0, -1}, {2, 11}};
+  EXPECT_EQ(logic_error_of([&] { LedgerAccess::commit(ledger, a, bad); }), "ledger: a negative allocation in a commit");
+  expect_same(ledger_state(ledger), before, "negative before feasibility");
+  bad = pending(a, {{0, 1}});
+  EXPECT_EQ(logic_error_of([&] { LedgerAccess::commit(ledger, a, bad); }), "ledger: infeasible commit on edge 0 (11 of 10)");
+  expect_same(ledger_state(ledger), before, "deferred new edge failure");
+  auto good = pending(a, {{1, 4}, {2, 2}});
+  LedgerAccess::commit(ledger, a, good);
+  EXPECT_EQ(ledger.carried(), (std::vector<Amount> {10, 4, 2}));
+  auto zero = pending(a, {});
+  LedgerAccess::commit(ledger, a, zero);
+  EXPECT_EQ(ledger.carried(), (std::vector<Amount> {10, 0, 0}));
+  EXPECT_EQ(ledger.records().size(), 2U);  // zero C keeps the inventory/identity
+  LedgerAccess::detach(ledger, a); LedgerAccess::detach(ledger, b);
+  LedgerAccess::release(ledger, a); LedgerAccess::release(ledger, b);
+}
+
+TEST(FlowLedger, BatchHoldsTransferAtomicallyAndRefusalsChangeNothing) {
+  const auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  FlowLedger ledger(g, std::vector<Amount> {17}, std::vector<Amount> {6});
+  const auto a = LedgerAccess::bind(ledger), b = LedgerAccess::bind(ledger);
+  auto first = entry_on(ledger, a, {1, 0}, {6, 0});
+  LedgerAccess::commit(ledger, a, first);
+  auto proposed = entry_on(ledger, b, {2, 0}, {6, 0});
+  const auto before = ledger_state(ledger);
+  EXPECT_EQ(logic_error_of([&] { LedgerAccess::commit(ledger, b, proposed); }), "ledger: infeasible reservation on edge 0 (12 of 6)");
+  expect_same(ledger_state(ledger), before, "a single owner cannot take another's hold");
+  auto duplicate = entry_on(ledger, a, {2, 0}, {6, 0});
+  std::vector<detail::OwnerEntry> bad {{a, &duplicate, true}, {a, &duplicate, true}};
+  EXPECT_EQ(logic_error_of([&] { LedgerAccess::commit_batch(ledger, bad); }), "ledger: an owner twice in a batch");
+  expect_same(ledger_state(ledger), before, "duplicate owner");
+  detail::LedgerEntry empty;
+  std::vector<detail::OwnerEntry> batch {{a, &empty, true}, {b, &proposed, true}};
+  LedgerAccess::commit_batch(ledger, batch);
+  EXPECT_EQ(LedgerAccess::entry(ledger, a), nullptr);
+  EXPECT_EQ(ledger.reserved(), (std::vector<Amount> {6}));
+  EXPECT_EQ(ledger.carried(), (std::vector<Amount> {2}));
+  LedgerAccess::detach(ledger, b);
+  EXPECT_EQ(ledger.unreserved(), (std::vector<Amount> {6}));
+  LedgerAccess::release(ledger, a); LedgerAccess::release(ledger, b);
+}
+
 TEST(FlowLedger, PolicyIdentitiesStopBeforeTheLargestInt64) {
-  auto g = shared(make_graph(2, {{0, 1, 5, 1}}));
-  const auto dag = all_edges(*g);
-  FlowLedger fg(g);
-  LedgerAccess::set_next_ids(fg, 0, kLastId);
-  const auto last = LedgerAccess::bind(fg);
+  auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  FlowLedger ledger(g);
+  LedgerAccess::set_next_ids(ledger, 0, kLastId);
+  const auto last = LedgerAccess::bind(ledger);
   EXPECT_EQ(last, kLastId);
-  const LedgerState before = ledger_state(fg);
-  EXPECT_EQ(runtime_error_of([&] { (void)LedgerAccess::bind(fg); }), "policy identity limit exceeded");
-  EXPECT_EQ(runtime_error_of([&] { RoutePolicy p(fg, 0, 1, on_support(dag)); }), "policy identity limit exceeded");
-  expect_same(ledger_state(fg), before, "the refused binds");
-  std::vector<detail::RecordDraft> one {draft_on(dag, {{0, 2}})};
-  EXPECT_EQ(LedgerAccess::commit(fg, last, one).size(), 1U);
-  EXPECT_EQ(fg.records()[0].policy_id, kLastId);
-  (void)LedgerAccess::detach(fg, last);
-  LedgerAccess::release(fg, last);
+  const auto before = ledger_state(ledger);
+  EXPECT_EQ(runtime_error_of([&] { (void)LedgerAccess::bind(ledger); }), "policy identity limit exceeded");
+  expect_same(ledger_state(ledger), before, "refused owner");
+  auto entry = entry_on(ledger, last, {1, 2});
+  LedgerAccess::commit(ledger, last, entry);
+  EXPECT_EQ(ledger.records()[0].policy_id, last);
+  LedgerAccess::detach(ledger, last); LedgerAccess::release(ledger, last);
 }
 
-// Record ids run up to the largest int64 less one (2^63 - 1 identities), checked for all of a
-// commit's new records at once, on the fresh-record path and on the general one: the refused
-// commit changes nothing, a commit with no new record still passes.
 TEST(FlowLedger, RecordIdentitiesStopBeforeTheLargestInt64) {
-  auto g = shared(make_graph(2, {{0, 1, 9, 1}}));
-  const auto dag = all_edges(*g);
-  FlowLedger fg(g);
-  const auto a = LedgerAccess::bind(fg);
-  const auto b = LedgerAccess::bind(fg);
-  LedgerAccess::set_next_ids(fg, kLastId - 1, 2);
-  // The general path (an owner with a live record): two new records with two ids left.
-  std::vector<detail::RecordDraft> first {draft_on(dag, {{0, 1}})};
-  const auto ids = LedgerAccess::commit(fg, a, first);
-  EXPECT_EQ(ids[0].second, kLastId - 1);
-  std::vector<detail::RecordDraft> two {draft_on(dag, {{0, 1}}, ids[0].second), draft_on(dag, {{0, 1}}),
-                                        draft_on(dag, {{0, 1}})};
-  const LedgerState one_left = ledger_state(fg);
-  EXPECT_EQ(runtime_error_of([&] { (void)LedgerAccess::commit(fg, a, two); }), "record identity limit exceeded");
-  expect_same(ledger_state(fg), one_left, "two new records, one id left");
-  std::vector<detail::RecordDraft> exchange {draft_on(dag, {{0, 1}}), draft_on(dag, {{0, 1}})};
-  EXPECT_EQ(runtime_error_of([&] { (void)LedgerAccess::exchange(fg, a, exchange); }), "record identity limit exceeded");
-  expect_same(ledger_state(fg), one_left, "an exchange of two new records, one id left");
-  // One new record takes the last id.
-  std::vector<detail::RecordDraft> second {draft_on(dag, {{0, 1}}, ids[0].second), draft_on(dag, {{0, 1}})};
-  EXPECT_EQ(LedgerAccess::commit(fg, a, second)[0].second, kLastId);
-  EXPECT_EQ(LedgerAccess::next_record_counter(fg), std::numeric_limits<std::int64_t>::max());
-  // The fresh-record path (an owner without records): no id left.
-  const LedgerState none_left = ledger_state(fg);
-  std::vector<detail::RecordDraft> fresh {draft_on(dag, {{0, 1}})};
-  EXPECT_EQ(runtime_error_of([&] { (void)LedgerAccess::commit(fg, b, fresh); }), "record identity limit exceeded");
-  expect_same(ledger_state(fg), none_left, "a fresh record, no id left");
-  // A commit that keeps its records and creates none passes.
-  std::vector<detail::RecordDraft> kept {draft_on(dag, {{0, 2}}, kLastId - 1), draft_on(dag, {{0, 1}}, kLastId)};
-  EXPECT_TRUE(LedgerAccess::commit(fg, a, kept).empty());
-  EXPECT_EQ(fg.carried(), (std::vector<Amount> {3}));
-  (void)LedgerAccess::detach(fg, a);
-  LedgerAccess::release(fg, a);
-  LedgerAccess::release(fg, b);
+  auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  FlowLedger ledger(g);
+  const auto a = LedgerAccess::bind(ledger), b = LedgerAccess::bind(ledger);
+  LedgerAccess::set_next_ids(ledger, kLastId - 2, 2);
+  auto value = entry_on(ledger, a, {1, 1});
+  LedgerAccess::commit(ledger, a, value);
+  EXPECT_EQ(ledger.records()[0].flow_id.second, kLastId - 2);
+  const auto before = ledger_state(ledger);
+  auto too_many = entry_on(ledger, a, {2, 1});
+  EXPECT_EQ(runtime_error_of([&] { LedgerAccess::exchange(ledger, a, too_many); }), "record identity limit exceeded");
+  expect_same(ledger_state(ledger), before, "two ids requested, one left");
+  auto continuation = entry_on(ledger, a, {2, 1});
+  LedgerAccess::commit(ledger, a, continuation);
+  EXPECT_EQ(LedgerAccess::next_record_counter(ledger), kLastId);
+  auto last = entry_on(ledger, b, {1, 0});
+  last.inventory.pop_back(); last.stored.pop_back();
+  LedgerAccess::commit(ledger, b, last);
+  EXPECT_EQ(ledger.records().back().flow_id.second, kLastId);
+  auto refused = entry_on(ledger, b, {1, 0});
+  const auto final = ledger_state(ledger);
+  EXPECT_EQ(runtime_error_of([&] { LedgerAccess::exchange(ledger, b, refused); }), "record identity limit exceeded");
+  expect_same(ledger_state(ledger), final, "identity limit unchanged");
+  LedgerAccess::detach(ledger, a); LedgerAccess::detach(ledger, b);
+  LedgerAccess::release(ledger, a); LedgerAccess::release(ledger, b);
 }
 
-// A uid comes from one counter holding the last uid taken: never 0, at most the largest int64
-// (2^63 - 1 identities); after it the counter is spent and unchanged.
 TEST(FlowLedger, ObjectIdentitiesStopAtTheLargestInt64) {
   constexpr auto kMax = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
   std::atomic<std::uint64_t> counter {0};
@@ -1337,8 +1434,6 @@ TEST(FlowLedger, ObjectIdentitiesStopAtTheLargestInt64) {
   EXPECT_GT(u2, u1);
 }
 
-// An owner released without records leaves no entry (bound and orphaned owners only); an owner
-// released with records stays as their orphaned owner; ids are never reissued.
 TEST(FlowLedger, OwnersWithoutRecordsAreForgotten) {
   auto g = shared(make_graph(2, {{0, 1, 5, 1}}));
   const auto dag = all_edges(*g);
@@ -1364,235 +1459,10 @@ TEST(FlowLedger, OwnersWithoutRecordsAreForgotten) {
   EXPECT_EQ(LedgerAccess::bound_policy_ids(fg), (std::vector<std::int64_t> {0, 1002}));
   // The direct entry points: release of an owner that removed its records forgets it.
   const auto owner = LedgerAccess::bind(fg);
-  std::vector<detail::RecordDraft> one {draft_on(dag, {{0, 1}})};
-  (void)LedgerAccess::commit(fg, owner, one);
+  auto one = entry_on(fg, owner, {1, 0});
+  LedgerAccess::commit(fg, owner, one);
   (void)LedgerAccess::detach(fg, owner);
   LedgerAccess::release(fg, owner);
   EXPECT_EQ(LedgerAccess::bound_policy_ids(fg), (std::vector<std::int64_t> {0, 1002}));
   EXPECT_EQ(LedgerAccess::orphan_policy_ids(fg), (std::vector<std::int64_t> {1001}));
-}
-
-namespace {
-
-// The batch exchange of several owners (apply_actions' publication), each with its own rule.
-std::vector<std::vector<FlowId>> commit_batch(FlowLedger& fg, std::vector<std::int64_t> owners,
-                                              std::vector<std::vector<detail::RecordDraft>>& drafts,
-                                              std::vector<bool> retire) {
-  std::vector<detail::OwnerDrafts> parts;
-  for (std::size_t i = 0; i < owners.size(); ++i) parts.push_back({owners[i], drafts[i], retire[i]});
-  std::vector<std::vector<FlowId>> created(owners.size());
-  LedgerAccess::commit_batch(fg, parts, created);
-  return created;
-}
-
-} // namespace
-
-TEST(FlowLedger, RandomBatchesMatchAModel) {
-  // Four owners on four edges; each step one batch of one to four distinct owners in random
-  // order, each owner committing (every live record kept, changed, emptied or moved, plus up to
-  // two new) or exchanging (every live record retired, up to two new). A batch is feasible exactly
-  // when the aggregate over every owner fits, even where an owner alone would not (one gives up
-  // what another takes); new ids follow owner order, then draft order. A refused batch names an
-  // edge over its capacity and changes nothing.
-  std::mt19937 rng(23);
-  auto g = shared(make_graph(4, {{0, 1, 6, 1}, {1, 2, 4, 1}, {2, 3, 5, 1}, {0, 3, 3, 1}}));
-  const auto dag = all_edges(*g);
-  const auto m = static_cast<std::size_t>(g->num_edges());
-  FlowLedger fg(g);
-  std::vector<std::int64_t> owners;
-  for (int i = 0; i < 4; ++i) owners.push_back(LedgerAccess::bind(fg));
-  std::vector<std::map<std::int64_t, std::vector<Amount>>> model(owners.size());
-  std::int64_t next_id = 0;
-  int accepted = 0;
-  int rejected = 0;
-  int needs_batch = 0;  // accepted batches some of whose owners would be refused alone, in batch order
-  auto random_edges = [&] {
-    std::vector<Amount> a(m, 0);
-    for (std::size_t e = 0; e < m; ++e) a[e] = (rng() % 3) == 0 ? static_cast<Amount>(rng() % 3) : 0;
-    return a;
-  };
-  auto as_pairs = [](const std::vector<Amount>& a) {
-    std::vector<std::pair<EdgeId, Amount>> out;
-    for (std::size_t e = 0; e < a.size(); ++e) {
-      if (a[e] != 0) out.emplace_back(static_cast<EdgeId>(e), a[e]);
-    }
-    return out;
-  };
-  for (int step = 0; step < 3000; ++step) {
-    std::vector<std::size_t> order(owners.size());
-    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
-    std::shuffle(order.begin(), order.end(), rng);
-    order.resize(1 + rng() % owners.size());
-    std::vector<std::int64_t> ids;
-    std::vector<std::vector<detail::RecordDraft>> drafts;
-    std::vector<bool> retire;
-    std::vector<std::map<std::int64_t, std::vector<Amount>>> after = model;
-    std::vector<std::vector<FlowId>> want_ids;
-    std::int64_t id = next_id;
-    for (std::size_t o : order) {
-      ids.push_back(owners[o]);
-      retire.push_back(rng() % 3 == 0);
-      drafts.emplace_back();
-      after[o].clear();
-      if (!retire.back()) {
-        for (const auto& [rid, a] : model[o]) {
-          const auto kind = rng() % 4;
-          std::vector<Amount> b = a;
-          if (kind == 1) {
-            b[rng() % m] += 1;
-          } else if (kind == 2) {
-            b.assign(m, 0);
-          } else if (kind == 3) {
-            b = random_edges();
-          }
-          drafts.back().push_back(draft_on(dag, as_pairs(b), rid));
-          after[o][rid] = b;
-        }
-      }
-      want_ids.emplace_back();
-      const int fresh = static_cast<int>(rng() % 3);
-      for (int k = 0; k < fresh; ++k) {
-        const auto b = random_edges();
-        drafts.back().push_back(draft_on(dag, as_pairs(b)));
-        after[o][id] = b;
-        want_ids.back().emplace_back(fg.uid(), id++);
-      }
-    }
-    std::vector<Amount> total(m, 0);
-    for (const auto& recs : after) {
-      for (const auto& [rid, a] : recs) {
-        for (std::size_t e = 0; e < m; ++e) total[e] += a[e];
-      }
-    }
-    bool feasible = true;
-    for (std::size_t e = 0; e < m; ++e) feasible = feasible && total[e] <= g->edge_capacity_units()[e];
-    const LedgerState before_state = ledger_state(fg);
-    if (feasible) {
-      // Would the owners, one at a time in batch order, all pass alone?
-      std::vector<Amount> running = fg.carried();
-      bool alone = true;
-      for (std::size_t j = 0; j < order.size(); ++j) {
-        const auto o = order[j];
-        for (const auto& [rid, a] : model[o]) {
-          for (std::size_t e = 0; e < m; ++e) running[e] -= a[e];
-        }
-        for (const auto& [rid, a] : after[o]) {
-          for (std::size_t e = 0; e < m; ++e) running[e] += a[e];
-        }
-        for (std::size_t e = 0; e < m; ++e) alone = alone && running[e] <= g->edge_capacity_units()[e];
-      }
-      needs_batch += alone ? 0 : 1;
-      EXPECT_EQ(commit_batch(fg, ids, drafts, retire), want_ids) << "step " << step;
-      model = after;
-      next_id = id;
-      ++accepted;
-    } else {
-      std::vector<std::string> refusals;
-      for (std::size_t e = 0; e < m; ++e) {
-        if (total[e] <= g->edge_capacity_units()[e]) continue;
-        refusals.push_back("ledger: infeasible commit on edge " + std::to_string(e) + " (" + std::to_string(total[e]) +
-                           " of " + std::to_string(g->edge_capacity_units()[e]) + ")");
-      }
-      const std::string got = logic_error_of([&] { (void)commit_batch(fg, ids, drafts, retire); });
-      EXPECT_TRUE(std::find(refusals.begin(), refusals.end(), got) != refusals.end()) << "step " << step << ": " << got;
-      expect_same(ledger_state(fg), before_state, "step " + std::to_string(step));
-      ++rejected;
-    }
-    std::vector<Amount> want(m, 0);
-    std::map<std::int64_t, std::pair<std::int64_t, std::vector<std::pair<EdgeId, Amount>>>> want_records;
-    for (std::size_t q = 0; q < owners.size(); ++q) {
-      for (const auto& [rid, a] : model[q]) {
-        for (std::size_t e = 0; e < m; ++e) want[e] += a[e];
-        want_records[rid] = {owners[q], as_pairs(a)};
-      }
-    }
-    ASSERT_EQ(fg.carried(), want) << "step " << step;
-    ASSERT_EQ(LedgerAccess::next_record_counter(fg), next_id);
-    const auto records = fg.records();
-    ASSERT_EQ(records.size(), want_records.size()) << "step " << step;
-    for (const auto& r : records) {
-      const auto it = want_records.find(r.flow_id.second);
-      ASSERT_NE(it, want_records.end()) << "step " << step << ": record " << r.flow_id.second;
-      EXPECT_EQ(r.policy_id, it->second.first) << "step " << step;
-      EXPECT_EQ(r.edge_flows, it->second.second) << "step " << step;
-    }
-  }
-  EXPECT_GT(accepted, 500);
-  EXPECT_GT(rejected, 500);
-  EXPECT_GT(needs_batch, 50);
-  for (auto owner : owners) LedgerAccess::release(fg, owner);
-}
-
-TEST(FlowLedger, BatchHoldsMoveBetweenOwnersAtomically) {
-  // A holds 6 of a reservation baseline of 6; one batch moves the hold to B (A retires its
-  // record). B alone first would be refused; the batch passes. A batch that ends over the
-  // baseline is refused with the hold message and changes nothing.
-  auto g = shared(make_graph(2, {{0, 1, 10, 1}}));
-  const auto dag = all_edges(*g);
-  const std::vector<Amount> service {10};
-  const std::vector<Amount> reservation {6};
-  FlowLedger fg(g, service, reservation);
-  const auto a = LedgerAccess::bind(fg);
-  const auto b = LedgerAccess::bind(fg);
-  auto held_draft = [&](Amount flow, Amount hold) {
-    detail::RecordDraft d = draft_on(dag, {{0, flow}});
-    d.record.edge_reservations = {{0, hold}};
-    return d;
-  };
-  std::vector<detail::RecordDraft> first {held_draft(1, 6)};
-  (void)LedgerAccess::commit(fg, a, first);
-  std::vector<detail::RecordDraft> b_alone {held_draft(1, 6)};
-  EXPECT_EQ(logic_error_of([&] { (void)LedgerAccess::commit(fg, b, b_alone); }),
-            "ledger: infeasible reservation on edge 0 (12 of 6)");
-  std::vector<std::vector<detail::RecordDraft>> over {{}, {held_draft(1, 6)}};
-  over[0].push_back(held_draft(1, 1));
-  const LedgerState before = ledger_state(fg);
-  EXPECT_EQ(logic_error_of([&] { (void)commit_batch(fg, {a, b}, over, {true, false}); }),
-            "ledger: infeasible reservation on edge 0 (7 of 6)");
-  expect_same(ledger_state(fg), before, "the refused batch");
-  std::vector<std::vector<detail::RecordDraft>> move {{held_draft(2, 6)}, {}};
-  const auto created = commit_batch(fg, {b, a}, move, {false, true});
-  EXPECT_EQ(created, (std::vector<std::vector<FlowId>> {{{fg.uid(), 1}}, {}}));
-  EXPECT_EQ(fg.carried(), (std::vector<Amount> {2}));
-  EXPECT_EQ(fg.reserved(), (std::vector<Amount> {6}));
-  ASSERT_EQ(fg.records().size(), 1U);
-  EXPECT_EQ(fg.records()[0].policy_id, b);
-  (void)LedgerAccess::detach(fg, b);
-  LedgerAccess::release(fg, a);
-  LedgerAccess::release(fg, b);
-}
-
-TEST(FlowLedger, BatchRefusalsChangeNothing) {
-  // The batch's own refusals, each before anything changes: an unbound owner, an owner twice, a
-  // created list per owner, a commit that drops a live record, and the record ids of the whole
-  // batch counted first (each owner alone would fit the ids left).
-  auto g = shared(make_graph(2, {{0, 1, 9, 1}}));
-  const auto dag = all_edges(*g);
-  FlowLedger fg(g);
-  const auto a = LedgerAccess::bind(fg);
-  const auto b = LedgerAccess::bind(fg);
-  std::vector<detail::RecordDraft> first {draft_on(dag, {{0, 1}})};
-  const auto ids = LedgerAccess::commit(fg, a, first);
-  const LedgerState before = ledger_state(fg);
-  std::vector<std::vector<detail::RecordDraft>> two {{draft_on(dag, {{0, 1}})}, {draft_on(dag, {{0, 1}})}};
-  EXPECT_EQ(logic_error_of([&] { (void)commit_batch(fg, {b, 77}, two, {true, true}); }), "ledger: commit by an unbound owner");
-  EXPECT_EQ(logic_error_of([&] { (void)commit_batch(fg, {b, b}, two, {true, true}); }), "ledger: an owner twice in a batch");
-  std::vector<detail::OwnerDrafts> parts {{a, two[0], true}};
-  std::vector<std::vector<FlowId>> none;
-  EXPECT_EQ(logic_error_of([&] { LedgerAccess::commit_batch(fg, parts, none); }),
-            "ledger: a batch needs one id list per owner");
-  EXPECT_EQ(logic_error_of([&] { (void)commit_batch(fg, {b, a}, two, {true, false}); }),
-            "ledger: a commit must carry every live record of its policy");
-  expect_same(ledger_state(fg), before, "the malformed batches");
-  LedgerAccess::set_next_ids(fg, kLastId, 2);
-  const LedgerState one_left = ledger_state(fg);
-  EXPECT_EQ(runtime_error_of([&] { (void)commit_batch(fg, {a, b}, two, {true, true}); }), "record identity limit exceeded");
-  expect_same(ledger_state(fg), one_left, "two owners' new records, one id left");
-  std::vector<std::vector<detail::RecordDraft>> one {{draft_on(dag, {{0, 2}}, ids[0].second)}, {draft_on(dag, {{0, 1}})}};
-  EXPECT_EQ(commit_batch(fg, {a, b}, one, {false, false}), (std::vector<std::vector<FlowId>> {{}, {{fg.uid(), kLastId}}}));
-  EXPECT_EQ(fg.carried(), (std::vector<Amount> {3}));
-  (void)LedgerAccess::detach(fg, a);
-  (void)LedgerAccess::detach(fg, b);
-  LedgerAccess::release(fg, a);
-  LedgerAccess::release(fg, b);
 }

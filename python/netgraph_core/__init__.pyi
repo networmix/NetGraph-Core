@@ -721,7 +721,9 @@ class FlowRecord:
     @property
     def route(self) -> PredecessorDAG:
         """
-        the flow's route (an immutable PredecessorDAG shared with the ledger)
+        the flow's immutable PredecessorDAG; pooled ShortestPaths and from_dag records build it
+        when the record is read. Repeated record reads of one state have equal route values
+        in distinct objects
         """
 
     @property

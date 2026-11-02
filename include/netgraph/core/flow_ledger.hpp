@@ -18,6 +18,7 @@ namespace netgraph::core {
 
 namespace detail {
 struct LedgerAccess;
+struct LedgerEntry;
 } // namespace detail
 
 // A ledger tracks the flows placed on one graph in two projections that are never added: the
@@ -49,7 +50,7 @@ public:
   FlowLedger(FlowLedger&& other);
   FlowLedger& operator=(const FlowLedger&) = delete;
   FlowLedger& operator=(FlowLedger&&) = delete;
-  ~FlowLedger() = default;
+  ~FlowLedger();
 
   [[nodiscard]] std::uint64_t uid() const;
   [[nodiscard]] const std::shared_ptr<const Graph>& graph() const;
@@ -99,13 +100,16 @@ private:
   std::vector<Amount> carried_ {};
   std::vector<Amount> reservation_baseline_ {};
   std::vector<Amount> reserved_ {};
-  std::map<std::int64_t, FlowRecord> records_ {};
-  std::map<std::int64_t, std::vector<std::int64_t>> policy_record_counters_ {};  // owner -> live ids, ascending
+  std::map<std::int64_t, std::unique_ptr<detail::LedgerEntry>> entries_ {};
   std::int64_t next_record_counter_ {0};
   std::int64_t next_policy_id_ {0};
   // The bound owners (true) and the orphaned owners of live records (false), since the last
   // reset: release() flips the flag, or erases an owner without records, so it never allocates.
-  std::map<std::int64_t, bool> policy_bindings_ {};
+  struct OwnerState {
+    bool bound {true};
+    std::int64_t first_counter {-1};  // no live entry
+  };
+  std::map<std::int64_t, OwnerState> policy_bindings_ {};
   std::size_t num_bound_policies_ {0};
 };
 

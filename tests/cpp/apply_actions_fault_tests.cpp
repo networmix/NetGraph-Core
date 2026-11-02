@@ -313,77 +313,85 @@ TEST(PolicyFaults, ListScratchGrowthFailureLeavesNothingHalfGrown) {
 TEST(LedgerFaults, EveryAllocationOfABatchExchangeFailsAtomically) {
   const auto g = shared(make_graph(3, {{0, 1, 10, 1}, {1, 2, 10, 1}}));
   const auto dag = all_edges(*g);
-  auto draft = [&](std::vector<std::pair<EdgeId, Amount>> flows, std::optional<std::int64_t> id = std::nullopt, Amount hold = 0) {
-    detail::RecordDraft d;
-    d.record_counter = id;
-    d.record.sources = {0};
-    d.record.destinations = {2};
-    d.record.route = dag;
-    d.record.min_route_cost = 2;
-    for (const auto& [e, x] : flows) d.record.delivered = std::max(d.record.delivered, x);
-    d.record.edge_flows = std::move(flows);
-    if (hold != 0) d.record.edge_reservations = {{0, hold}};
-    return d;
+  auto record = [&](std::vector<std::pair<EdgeId, Amount>> flows, Amount hold = 0) {
+    FlowRecord r;
+    r.sources = {0}; r.destinations = {2}; r.route = dag; r.min_route_cost = 2;
+    for (const auto& [e, x] : flows) r.delivered = std::max(r.delivered, x);
+    r.edge_flows = std::move(flows);
+    if (hold != 0) r.edge_reservations = {{0, hold}};
+    return r;
   };
   for (int owners : {2, 3}) {
-    const std::string where = std::to_string(owners) + " owners";
-    struct Staged {
-      std::vector<std::int64_t> ids;
-      std::vector<std::vector<detail::RecordDraft>> drafts;
-      std::vector<bool> retire;
-    };
-    auto stage = [&](FlowLedger& fg) {
-      Staged s;
-      for (int i = 0; i < owners; ++i) s.ids.push_back(LedgerAccess::bind(fg));
-      std::vector<detail::RecordDraft> first {draft({{0, 2}, {1, 2}}, std::nullopt, 3)};
-      const auto kept = LedgerAccess::commit(fg, s.ids[0], first);
-      std::vector<detail::RecordDraft> second {draft({{0, 1}})};
-      (void)LedgerAccess::commit(fg, s.ids[1], second);
-      s.drafts.push_back({draft({{0, 3}, {1, 3}}, kept[0].second, 2), draft({{1, 1}})});  // keeps and adds
-      s.drafts.push_back({draft({{0, 2}}, std::nullopt, 4)});                                // retires and adds a hold
-      s.retire = {false, true};
-      if (owners == 3) {
-        s.drafts.push_back({draft({{0, 1}, {1, 1}}), draft({{1, 2}})});
-        s.retire.push_back(true);
-      }
-      return s;
-    };
-    auto commit = [&](FlowLedger& fg, Staged& s) {
-      std::vector<detail::OwnerDrafts> parts;
-      for (std::size_t i = 0; i < s.ids.size(); ++i) parts.push_back({s.ids[i], s.drafts[i], s.retire[i]});
-      std::vector<std::vector<FlowId>> created(s.ids.size());
-      LedgerAccess::commit_batch(fg, parts, created);
-      return created;
-    };
-    FlowLedger ref(g);
-    Staged sref = stage(ref);
-    const LedgerState initial = ledger_state(ref);
-    const auto want_ids = commit(ref, sref);
-    const LedgerState after = ledger_state(ref);
-    long injected = 0;
-    for (long at = 0;; ++at) {
-      const std::string w = where + " allocation " + std::to_string(at);
-      const long live = g_live.load();
-      bool completed = false;
-      {
-        FlowLedger fg(g);
-        Staged s = stage(fg);
-        expect_same(ledger_state(fg), initial, w + " (setup)");
-        std::vector<std::vector<FlowId>> got;
-        if (!fails_at(at, [&] { got = commit(fg, s); })) {
-          EXPECT_EQ(got.size(), want_ids.size()) << w;
-          expect_same(ledger_state(fg), after, w + " (no failure)");
-          completed = true;
-        } else {
-          ++injected;
-          expect_same(ledger_state(fg), initial, w + " (failed)");
-          expect_balanced(fg, w + " (failed)");
+    long reused_allocations = 0;
+    for (bool create_last : {false, true}) {
+      const std::string where = std::to_string(owners) + (create_last ? " owners, last new" : " owners, all existing");
+      struct Staged {
+        std::vector<std::int64_t> ids;
+        std::vector<detail::LedgerEntry> entries;
+        std::vector<bool> retire;
+      };
+      auto stage = [&](FlowLedger& fg) {
+        Staged s;
+        for (int i = 0; i < owners; ++i) s.ids.push_back(LedgerAccess::bind(fg));
+        auto make = [&](std::size_t i, std::vector<FlowRecord> records) {
+          return detail::stored_entry(*g, s.ids[i], records);
+        };
+        auto first = make(0, {record({{0, 2}, {1, 2}}, 3), record({})});
+        LedgerAccess::commit(fg, s.ids[0], first);
+        auto second = make(1, {record({{0, 1}})});
+        if (owners != 2 || !create_last) LedgerAccess::commit(fg, s.ids[1], second);
+        s.entries.push_back(make(0, {record({{0, 3}, {1, 3}}, 2), record({{1, 1}})}));
+        s.entries.push_back(make(1, {record({{0, 2}}, 4)}));
+        s.retire = {false, true};
+        if (owners == 3) {
+          if (!create_last) {
+            auto third = make(2, {record({{1, 1}})});
+            LedgerAccess::commit(fg, s.ids[2], third);
+          }
+          s.entries.push_back(make(2, {record({{0, 1}, {1, 1}}), record({{1, 2}})}));
+          s.retire.push_back(true);
         }
+        return s;
+      };
+      auto commit = [&](FlowLedger& fg, Staged& s) {
+        std::vector<detail::OwnerEntry> parts;
+        for (std::size_t i = 0; i < s.ids.size(); ++i) parts.push_back({s.ids[i], &s.entries[i], s.retire[i]});
+        LedgerAccess::commit_batch(fg, parts);
+      };
+      FlowLedger ref(g);
+      Staged sref = stage(ref);
+      const LedgerState initial = ledger_state(ref);
+      commit(ref, sref);
+      const LedgerState after = ledger_state(ref);
+      long injected = 0;
+      for (long at = 0;; ++at) {
+        const std::string w = where + " allocation " + std::to_string(at);
+        const long live = g_live.load();
+        bool completed = false;
+        {
+          FlowLedger fg(g);
+          Staged s = stage(fg);
+          const auto pending = s.entries;
+          expect_same(ledger_state(fg), initial, w + " (setup)");
+          if (!fails_at(at, [&] { commit(fg, s); })) {
+            expect_same(ledger_state(fg), after, w + " (no failure)");
+            completed = true;
+          } else {
+            ++injected;
+            expect_same(ledger_state(fg), initial, w + " (failed)");
+            expect_balanced(fg, w + " (failed)");
+            s.entries = pending;
+            commit(fg, s);
+            expect_same(ledger_state(fg), after, w + " (retry)");
+          }
+        }
+        EXPECT_EQ(g_live.load(), live) << w << ": a leak";
+        if (completed || ::testing::Test::HasFailure()) break;
       }
-      EXPECT_EQ(g_live.load(), live) << w << ": a leak";
-      if (completed || ::testing::Test::HasFailure()) break;
+      EXPECT_GT(injected, 0) << where;
+      if (!create_last) reused_allocations = injected;
+      else EXPECT_GE(injected, reused_allocations + 2) << where << ": first entry stages its object and map node";
     }
-    EXPECT_GT(injected, 5) << where;
   }
 }
 

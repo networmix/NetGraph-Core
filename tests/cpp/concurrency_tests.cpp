@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <barrier>
 #include <chrono>
 #include <condition_variable>
 #include <exception>
@@ -719,6 +720,137 @@ TEST(Concurrency, TunnelPreflightJoinsAfterPartialLaunchFailure) {
 #else
   GTEST_SKIP() << "requires native rendezvous hooks";
 #endif
+}
+
+TEST(Concurrency, DerivedCopiesOwnEveryRecordFieldDuringDestructionAndReplacement) {
+  constexpr int heads = 70, middles = 4, target = heads + middles;
+  std::vector<NodeId> from, to, sources;
+  std::vector<Amount> capacity;
+  std::vector<Cost> costs;
+  for (int h = 0; h < heads; ++h) {
+    sources.push_back(h);
+    for (int j = 0; j < middles; ++j) if ((h + j) % 3 == 0 || j == h % middles) {
+      from.push_back(h); to.push_back(heads + j);
+      capacity.push_back((h * 7 + j) % 5 ? 4 : 0); costs.push_back(1 + (h + j) % 2);
+    }
+  }
+  for (int j = 0; j < middles; ++j) {
+    from.push_back(heads + j); to.push_back(target); capacity.push_back(30 + 7 * j); costs.push_back(1);
+  }
+  const auto graph = std::make_shared<const Graph>(target + 1, from, to, capacity, costs, 1.0);
+  const std::vector<NodeId> destinations {target};
+  auto original = std::make_unique<FlowLedger>(graph);
+  {
+    FlowPolicy lossy(*original, sources, destinations, {ShortestPaths {}, Admission::Lossy});
+    for (int i = 0; i < 6; ++i) (void)lossy.place(37 + i);
+    (void)lossy.place(std::nullopt);
+    std::vector<EdgeId> cut;
+    for (std::size_t e = 0; e < from.size(); e += 11) cut.push_back(static_cast<EdgeId>(e));
+    const auto mask = graph->eligibility(std::vector<NodeId> {1, 64, 65}, cut);
+    FlowPolicy replay(*original, sources, destinations, {Pinned {lossy.program(), nullptr}, Admission::Lossy}, &mask);
+    (void)replay.place(50); (void)replay.place(9);
+    FlowPolicy lossless(*original, sources, destinations, {ShortestPaths {RouteAllocation::Weighted}, Admission::Lossless});
+    (void)lossless.place(40);
+    const auto holes = graph->eligibility(std::vector<NodeId> {3, 64, 69}, {});
+    (void)lossless.forward(60, &holes);
+  }  // all policies, masks and their external program references are gone
+  const auto expected = original->records();
+  ASSERT_EQ(expected.size(), 3U * heads);
+  // Every field is compared by value. A copied ledger has its own uid; replacement
+  // gets a fresh consecutive id range, with all other fields unchanged.
+  auto same = [](const auto& actual, const auto& want, std::uint64_t uid, bool new_ids = false) {
+    if (actual.size() != want.size()) return false;
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+      const auto& a = actual[i]; const auto& b = want[i];
+      if (a.flow_id.first != uid || (!new_ids && a.flow_id.second != b.flow_id.second) ||
+          (new_ids && i && a.flow_id.second != actual[i - 1].flow_id.second + 1) ||
+          a.policy_id != b.policy_id || a.sources != b.sources || a.destinations != b.destinations ||
+          a.admission != b.admission || a.entry_id != b.entry_id || a.min_route_cost != b.min_route_cost ||
+          a.offered != b.offered || a.delivered != b.delivered || a.edge_flows != b.edge_flows ||
+          a.edge_drops != b.edge_drops || a.edge_reservations != b.edge_reservations ||
+          static_cast<bool>(a.route) != static_cast<bool>(b.route) || (a.route && *a.route != *b.route)) return false;
+    }
+    return true;
+  };
+  auto first = std::make_unique<FlowLedger>(*original), second = std::make_unique<FlowLedger>(*original);
+  std::atomic<int> wrong {0}, reads {0};
+  std::barrier begin(7);
+  std::vector<std::thread> workers;
+  for (FlowLedger* copy : {first.get(), second.get()}) for (int reader = 0; reader < 2; ++reader) {
+    workers.emplace_back([&, copy] {
+      begin.arrive_and_wait();
+      for (int i = 0; i < 16; ++i) {
+        try { if (!same(copy->records(), expected, copy->uid())) ++wrong; }
+        catch (...) { ++wrong; }
+        ++reads;
+      }
+    });
+  }
+  workers.emplace_back([&] {
+    begin.arrive_and_wait();
+    try {
+      for (int i = 0; i < 4; ++i) if (!same(original->records(), expected, original->uid())) ++wrong;
+      original.reset();
+    } catch (...) { ++wrong; }
+  });
+  workers.emplace_back([&] {
+    begin.arrive_and_wait();
+    try {
+      for (int i = 0; i < 10; ++i) {
+        auto third = std::make_unique<FlowLedger>(*first);
+        if (!same(third->records(), expected, third->uid())) ++wrong;
+        third.reset();
+      }
+    } catch (...) { ++wrong; }
+  });
+  begin.arrive_and_wait();
+  for (auto& worker : workers) worker.join();
+  EXPECT_EQ(reads.load(), 64);
+  EXPECT_FALSE(original);
+  second.reset();
+  EXPECT_TRUE(same(first->records(), expected, first->uid()));
+
+  FlowLedger live(graph);
+  FlowPolicy policy(live, sources, destinations, {ShortestPaths {}, Admission::Lossy});
+  (void)policy.replace(41);
+  const auto whole = policy.records();
+  ASSERT_EQ(whole.size(), static_cast<std::size_t>(heads));
+  const auto uid = live.uid();
+  constexpr int rounds = 40;
+  std::barrier phase(4);
+  std::atomic<int> full {0}, empty {0};
+  workers.clear();
+  for (int reader = 0; reader < 3; ++reader) workers.emplace_back([&, reader] {
+    auto inspect = [&](int required) {
+      try {
+        const auto now = reader % 2 ? live.records() : policy.records();
+        if (now.empty()) { ++empty; if (required == 1) ++wrong; }
+        else if (same(now, whole, uid, true)) { ++full; if (required == 0) ++wrong; }
+        else ++wrong;
+      } catch (...) { ++wrong; }
+    };
+    for (int i = 0; i < rounds; ++i) {
+      phase.arrive_and_wait(); inspect(0); phase.arrive_and_wait();
+      phase.arrive_and_wait(); inspect(1); phase.arrive_and_wait();
+      for (int j = 0; j < 4; ++j) inspect(-1);
+      phase.arrive_and_wait();
+    }
+  });
+  for (int i = 0; i < rounds; ++i) {
+    try { policy.remove(); } catch (...) { ++wrong; }
+    phase.arrive_and_wait(); phase.arrive_and_wait();
+    try { (void)policy.replace(41); } catch (...) { ++wrong; }
+    phase.arrive_and_wait(); phase.arrive_and_wait();
+    // The bounded stress interval has reads overlapping four remove/replace cycles.
+    for (int j = 0; j < 4; ++j) {
+      try { policy.remove(); (void)policy.replace(41); } catch (...) { ++wrong; }
+    }
+    phase.arrive_and_wait();
+  }
+  for (auto& worker : workers) worker.join();
+  EXPECT_EQ(wrong.load(), 0);
+  EXPECT_GE(full.load(), 3 * rounds);
+  EXPECT_GE(empty.load(), 3 * rounds);
 }
 
 static_assert(std::is_nothrow_destructible_v<FlowPolicy>);

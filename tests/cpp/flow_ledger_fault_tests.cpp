@@ -174,6 +174,16 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { ++x.next_id; },
       [](auto& x) { x.bound.push_back(7); },
       [](auto& x) { x.orphans.push_back(7); },
+      [](auto& x) { x.entries.clear(); },
+      [](auto& x) { ++x.entries[0].owner; },
+      [](auto& x) { ++x.entries[0].first; },
+      [](auto& x) { ++x.entries[0].count; },
+      [](auto& x) { ++x.entries[0].carried[0].second; },
+      [](auto& x) { x.entries[0].holds.emplace_back(0, 1); },
+      [](auto& x) { ++x.entries[0].delivered; },
+      [](auto& x) { x.entries[0].drops.emplace_back(0, Counter128 {0, 1}); },
+      [](auto& x) { ++x.entries[0].derived_values[0]; },
+      [](auto& x) { x.entries[0].derived_values.push_back(77); },
   };
   for (std::size_t k = 0; k < states.size(); ++k) {
     LedgerState x = st;
@@ -273,7 +283,6 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
 
   // The epoch: every field of the call state and of a flow.
   const Epoch ep = epoch(*p);
-  ASSERT_FALSE(ep.record_groups.empty() || ep.record_groups.front().empty());
   EXPECT_EQ(failures_of([&] { expect_same(ep, ep, "same"); }), 0);
   const std::vector<std::function<void(Epoch&)>> epochs = {
       [](auto& x) { ++x.requested.hi; },
@@ -293,11 +302,6 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { x.support.push_back(0); },
       [](auto& x) { x.source_drops_by_source.emplace_back(); },
       [](auto& x) { x.by_tunnel.emplace_back(); },
-      [](auto& x) { x.record_groups.emplace_back(); },
-      [](auto& x) { ++x.record_groups[0][0].id; },
-      [](auto& x) { ++x.record_groups[0][0].cost; },
-      [](auto& x) { x.record_groups[0][0].route.push_back(0); },
-      [](auto& x) { ++x.record_groups[0][0].entry; },
   };
   for (std::size_t k = 0; k < epochs.size(); ++k) {
     Epoch x = ep;
@@ -307,6 +311,11 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   // expect_balanced: one clause broken at a time on a copy of the ledger (its record an orphan:
   // a ledger with a bound policy cannot be copied), through the copy's stored aggregate and
   // record (the copy is not const, so writing through the borrowed views is defined).
+  EXPECT_EQ(failures_of([&] { expect_balanced(fg, "derived balanced"); }), 0);
+  // Corrupt the stored payload for the record-vector clauses; derived state was compared above.
+  auto materialized = p->records();
+  auto stored = detail::stored_entry(*g, rec.policy_id, materialized);
+  detail::LedgerAccess::commit(fg, rec.policy_id, stored);
   p.reset();
   EXPECT_EQ(failures_of([&] { expect_balanced(fg, "balanced"); }), 0);
   const EdgeId e = rec.edge_flows.front().first;
@@ -318,14 +327,14 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
        [&](FlowLedger& x) {
          const Amount over = detail::LedgerAccess::baseline(x)[ei] + 1 - detail::LedgerAccess::carried(x)[ei];
          const_cast<Amount&>(detail::LedgerAccess::carried(x)[ei]) += over;
-         auto& live = const_cast<FlowRecord&>(detail::LedgerAccess::live(x, rec.flow_id.second));
+         auto& live = const_cast<detail::LedgerEntry*>(detail::LedgerAccess::entry(x, rec.policy_id))->stored[static_cast<std::size_t>(rec.flow_id.second - detail::LedgerAccess::entry(x, rec.policy_id)->first_counter)];
          for (auto& [edge, amount] : live.edge_flows) amount += edge == e ? over : 0;
        }},
       {"record and aggregate below zero",
        [&](FlowLedger& x) {
          const Amount under = detail::LedgerAccess::carried(x)[ei] + 1;
          const_cast<Amount&>(detail::LedgerAccess::carried(x)[ei]) -= under;
-         auto& live = const_cast<FlowRecord&>(detail::LedgerAccess::live(x, rec.flow_id.second));
+         auto& live = const_cast<detail::LedgerEntry*>(detail::LedgerAccess::entry(x, rec.policy_id))->stored[static_cast<std::size_t>(rec.flow_id.second - detail::LedgerAccess::entry(x, rec.policy_id)->first_counter)];
          for (auto& [edge, amount] : live.edge_flows) amount -= edge == e ? under : 0;
        }},
       {"holds above the sum of the records", [&](FlowLedger& x) { ++detail::LedgerAccess::reserved_storage(x)[ei]; }},
@@ -333,13 +342,13 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
        [&](FlowLedger& x) {
          const Amount over = detail::LedgerAccess::reservation_baseline(x)[ei] + 1;
          detail::LedgerAccess::reserved_storage(x)[ei] += over;
-         auto& live = const_cast<FlowRecord&>(detail::LedgerAccess::live(x, rec.flow_id.second));
+         auto& live = const_cast<detail::LedgerEntry*>(detail::LedgerAccess::entry(x, rec.policy_id))->stored[static_cast<std::size_t>(rec.flow_id.second - detail::LedgerAccess::entry(x, rec.policy_id)->first_counter)];
          live.edge_reservations.emplace_back(e, over);
        }},
       {"record and holds below zero",
        [&](FlowLedger& x) {
          detail::LedgerAccess::reserved_storage(x)[ei] -= 1;
-         auto& live = const_cast<FlowRecord&>(detail::LedgerAccess::live(x, rec.flow_id.second));
+         auto& live = const_cast<detail::LedgerEntry*>(detail::LedgerAccess::entry(x, rec.policy_id))->stored[static_cast<std::size_t>(rec.flow_id.second - detail::LedgerAccess::entry(x, rec.policy_id)->first_counter)];
          live.edge_reservations.emplace_back(e, -1);
        }},
   };
@@ -802,6 +811,79 @@ TEST(LedgerFaults, RemovalAndReleaseNeverAllocate) {
       auto p = std::make_unique<RoutePolicy>(fg, c.src, c.dst, k.config(fg, c.src, c.dst, dag));
       expect_removal_and_release_allocate_nothing(fg, p, c.name + " " + k.name);
     }
+  }
+}
+
+TEST(LedgerFaults, WarmEntryContinuationAndReplacementDoNotAllocate) {
+  const auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  FlowLedger ledger(g);
+  const auto owner = LedgerAccess::bind(ledger);
+  const auto route = all_edges(*g);
+  auto pending = [&](Amount amount, Amount hold) {
+    FlowRecord r;
+    r.sources = {0};
+    r.destinations = {1};
+    r.route = route;
+    r.min_route_cost = 3;
+    r.delivered = amount;
+    r.edge_flows = {{0, amount}};
+    r.edge_reservations = {{0, hold}};
+    return detail::stored_entry(*g, owner, std::span<FlowRecord>(&r, 1));
+  };
+  auto first = pending(3, 2);
+  LedgerAccess::commit(ledger, owner, first);
+  const FlowId id {ledger.uid(), 0};
+  EXPECT_EQ(ledger.record(id).delivered, 3);
+  auto next = pending(4, 1);
+  EXPECT_FALSE(fails_at(0, [&] { LedgerAccess::commit(ledger, owner, next); }));
+  EXPECT_EQ(ledger.record(id).delivered, 4);
+  EXPECT_EQ(ledger.carried(), (std::vector<Amount> {4}));
+  EXPECT_EQ(ledger.reserved(), (std::vector<Amount> {1}));
+  EXPECT_EQ(LedgerAccess::next_record_counter(ledger), 1);
+  auto replacement = pending(2, 3);
+  EXPECT_FALSE(fails_at(0, [&] { LedgerAccess::exchange(ledger, owner, replacement); }));
+  EXPECT_THROW((void)ledger.record(id), std::invalid_argument);
+  EXPECT_EQ(ledger.record({ledger.uid(), 1}).delivered, 2);
+  EXPECT_EQ(ledger.carried(), (std::vector<Amount> {2}));
+  EXPECT_EQ(ledger.reserved(), (std::vector<Amount> {3}));
+  EXPECT_EQ(LedgerAccess::next_record_counter(ledger), 2);
+  LedgerAccess::detach(ledger, owner);
+  EXPECT_TRUE(ledger.records().empty());
+  LedgerAccess::release(ledger, owner);
+}
+
+TEST(LedgerFaults, ColdThreadScalarPublicationNeedsOnlyItsNewEntryNode) {
+  const auto g = shared(make_graph(3, {{0, 1, 20, 1}, {1, 2, 20, 1}, {0, 2, 20, 2}}));
+  for (int mode : {0, 1, 2}) {  // new, continuation, replacement
+    FlowLedger ledger(g);
+    const auto owner = LedgerAccess::bind(ledger);
+    auto pending = [&](std::vector<std::pair<EdgeId, Amount>> carried) {
+      FlowRecord r;
+      r.sources = {0}; r.destinations = {2}; r.route = all_edges(*g);
+      r.edge_flows = std::move(carried);
+      return detail::stored_entry(*g, owner, std::span<FlowRecord>(&r, 1));
+    };
+    if (mode != 0) {
+      auto first = pending({{0, 1}, {1, 2}});
+      LedgerAccess::commit(ledger, owner, first);
+    }
+    auto next = pending({{0, 3}, {2, 2}});
+    bool failed = true;
+    // An unused thread has no ledger delta scratch. Everything except publication is
+    // prepared outside the injection, including thread creation and its callable.
+    std::thread worker([&] {
+      failed = fails_at(mode == 0 ? 2 : 0, [&] {
+        if (mode == 2) LedgerAccess::exchange(ledger, owner, next);
+        else LedgerAccess::commit(ledger, owner, next);
+      });
+    });
+    worker.join();
+    EXPECT_FALSE(failed) << mode;
+    EXPECT_EQ(ledger.carried(), (std::vector<Amount> {3, 0, 2}));
+    EXPECT_EQ(LedgerAccess::next_record_counter(ledger), mode == 2 ? 2 : 1);
+    LedgerAccess::detach(ledger, owner);
+    EXPECT_EQ(ledger.carried(), (std::vector<Amount> {0, 0, 0}));
+    LedgerAccess::release(ledger, owner);
   }
 }
 

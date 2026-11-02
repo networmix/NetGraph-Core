@@ -25,6 +25,18 @@ namespace netgraph::core::test {
 // The ledger as the tests compare it: both projections (the aggregate and the residual, the
 // holds and the unreserved capacity), every record field (FlowIds keep their local ids: a
 // reference sequence runs on another ledger), the next FlowId and the bound and orphaned owners.
+struct EntryProjection {
+  std::int64_t owner;
+  std::int64_t first;
+  std::size_t count;
+  std::vector<std::pair<EdgeId, Amount>> carried;
+  std::vector<std::pair<EdgeId, Amount>> holds;
+  Amount delivered;
+  std::vector<std::pair<EdgeId, Counter128>> drops;
+  std::vector<std::uint64_t> derived_values {};
+  bool operator==(const EntryProjection&) const = default;
+};
+
 struct LedgerState {
   std::vector<Amount> carried;
   std::vector<Amount> residual;
@@ -34,6 +46,7 @@ struct LedgerState {
   std::int64_t next_id {0};
   std::vector<std::int64_t> bound;
   std::vector<std::int64_t> orphans;
+  std::vector<EntryProjection> entries {};
 };
 
 // Every record's FlowId carries the ledger's uid; then the uid is cleared, so records of two
@@ -50,6 +63,46 @@ inline LedgerState ledger_state(const FlowLedger& fg) {
   LedgerState s {fg.carried(), fg.residual(), fg.reserved(), fg.unreserved(), fg.records(),
                  LedgerAccess::next_record_counter(fg), LedgerAccess::bound_policy_ids(fg), LedgerAccess::orphan_policy_ids(fg)};
   expect_uid_then_clear(s.records, fg.uid());
+  auto owners = s.bound;
+  owners.insert(owners.end(), s.orphans.begin(), s.orphans.end());
+  std::sort(owners.begin(), owners.end());
+  const auto gate = LedgerAccess::lock(fg);
+  for (const auto owner : owners) {
+    if (const auto* entry = LedgerAccess::entry(fg, owner)) {
+      s.entries.push_back({owner, entry->first_counter, entry->record_inventory().size(), entry->carried,
+                           entry->holds, entry->delivered, entry->drops});
+      auto& values = s.entries.back().derived_values;
+      values.push_back(entry->derived.has_value());
+      if (entry->derived) {
+        const auto& derived = *entry->derived;
+        auto scalar = [&](auto x) { values.push_back(static_cast<std::uint64_t>(x)); };
+        auto array = [&](const auto& a) { scalar(a.size()); for (auto x : a) scalar(x); };
+        const auto& inputs = *derived.inputs;
+        const auto& program = detail::ProgramAccess::data(*inputs.program);
+        array(inputs.destinations);
+        scalar(inputs.inventory.size());
+        for (const auto& identity : inputs.inventory) { scalar(identity.source); scalar(identity.entry_id.has_value()); scalar(identity.entry_id.value_or(0)); }
+        array(inputs.roster); array(inputs.basis); array(*program.common_replay_support);
+        for (const auto& e : program.entries) { scalar(e.head); scalar(e.entry_id); scalar(e.min_route_cost); }
+        const auto& plan = *inputs.plan;
+        scalar(plan.allocation); array(plan.sources); array(plan.source_positions); array(plan.destinations);
+        array(plan.support_edges); array(plan.forwarding_edges); array(plan.weights); array(plan.topological_order);
+        array(plan.outgoing_begin); array(plan.outgoing_end); array(plan.edge_destination_positions); array(plan.is_destination);
+        scalar(derived.rows.size());
+        for (const auto& row : derived.rows) {
+          scalar(row.offered.hi); scalar(row.offered.lo); scalar(row.delivered);
+          scalar(row.source_drops.hi); scalar(row.source_drops.lo);
+        }
+        for (auto history = derived.history; history; history = history->previous) {
+          scalar(1); scalar(history->offer.has_value()); scalar(history->offer.value_or(0));
+          scalar(history->offset.hi); scalar(history->offset.lo); scalar(history->raw_head_offers);
+          array(history->dark_heads); array(history->carried); array(history->drops);
+        }
+        scalar(0);
+      }
+
+    }
+  }
   return s;
 }
 
@@ -68,6 +121,7 @@ inline void expect_same(const LedgerState& a, const LedgerState& b, const std::s
   EXPECT_EQ(a.next_id, b.next_id) << where;
   EXPECT_EQ(a.bound, b.bound) << where;
   EXPECT_EQ(a.orphans, b.orphans) << where;
+  EXPECT_TRUE(a.entries == b.entries) << where;
   ASSERT_EQ(a.records.size(), b.records.size()) << where;
   for (std::size_t i = 0; i < a.records.size(); ++i) {
     EXPECT_TRUE(same_record(a.records[i], b.records[i])) << where << " record " << i;
@@ -86,6 +140,22 @@ inline void expect_balanced(const FlowLedger& fg, const std::string& where) {
   for (const auto& r : fg.records()) {
     for (const auto& [e, x] : r.edge_flows) sum[static_cast<std::size_t>(e)] += x;
     for (const auto& [e, x] : r.edge_reservations) held[static_cast<std::size_t>(e)] += x;
+  }
+  const auto state = ledger_state(fg);
+  for (const auto& entry : state.entries) {
+    std::vector<Amount> own(carried.size(), 0), own_holds(carried.size(), 0);
+    Amount delivered = 0;
+    for (const auto& r : state.records) if (r.policy_id == entry.owner) {
+      delivered += r.delivered;
+      for (const auto& [e, x] : r.edge_flows) own[static_cast<std::size_t>(e)] += x;
+      for (const auto& [e, x] : r.edge_reservations) own_holds[static_cast<std::size_t>(e)] += x;
+    }
+    std::vector<Amount> cached(carried.size(), 0), cached_holds(carried.size(), 0);
+    for (const auto& [e, x] : entry.carried) cached[static_cast<std::size_t>(e)] = x;
+    for (const auto& [e, x] : entry.holds) cached_holds[static_cast<std::size_t>(e)] = x;
+    EXPECT_EQ(cached, own) << where << " owner " << entry.owner;
+    EXPECT_EQ(cached_holds, own_holds) << where << " owner " << entry.owner;
+    EXPECT_EQ(entry.delivered, delivered) << where << " owner " << entry.owner;
   }
   EXPECT_EQ(sum, carried) << where;
   EXPECT_EQ(held, reserved) << where;
@@ -197,20 +267,6 @@ inline void expect_same(const PlacementResult& a, const PlacementResult& b, cons
   EXPECT_EQ(a.min_cut, b.min_cut) << where;
 }
 
-// One live flow as the tests compare it: its local id, its route cost, its route's edges and its
-// program entry.
-struct FlowSnapshot {
-  std::int64_t id {0};
-  Cost cost {0};
-  std::vector<EdgeId> route;
-  std::int32_t entry {-1};
-  bool operator==(const FlowSnapshot&) const = default;
-};
-
-// A policy's epoch state: the call state (requested, offered, +inf, prepared, the delivered
-// demand), CentralizedTE's cumulative curve, the installed program (its identity and its value) and T1's
-// plan, ShortestPaths Optimized's support, a Pinned head's own losses, the by_tunnel rows and per record_group
-// its flows.
 struct Epoch {
   Counter128 requested;
   Counter128 offered;
@@ -224,7 +280,6 @@ struct Epoch {
   std::vector<EdgeId> support;
   std::vector<Counter128> source_drops_by_source;
   std::vector<TunnelFlow> by_tunnel;
-  std::vector<std::vector<FlowSnapshot>> record_groups;
   ProgramSnapshot kept_program;
   const ForwardingProgram* kept_id {nullptr};
 };
@@ -240,11 +295,7 @@ inline Epoch epoch(const FlowPolicy& p) {
   }
   Epoch e {ep.requested, ep.offered, ep.infinite, ep.prepared, p.delivered(), ep.marginal_cost_curve, ep.program.get(),
            program_snapshot(ep.program.get()), ep.plan ? std::optional<TunnelPlan>(*ep.plan) : std::nullopt, support,
-           ep.source_drops_by_source, ep.by_tunnel, {}, program_snapshot(pe.kept_program.get()), pe.kept_program.get()};
-  for (const auto& c : ep.record_groups) {
-    auto& out = e.record_groups.emplace_back();
-    for (const auto& f : c) out.push_back({f.record_counter, f.min_route_cost, f.route ? ascending_edges(*f.route) : std::vector<EdgeId> {}, f.entry_id});
-  }
+           ep.source_drops_by_source, ep.by_tunnel, program_snapshot(pe.kept_program.get()), pe.kept_program.get()};
   return e;
 }
 
@@ -260,7 +311,6 @@ inline void expect_same(const Epoch& a, const Epoch& b, const std::string& where
   EXPECT_EQ(a.support, b.support) << where;
   EXPECT_EQ(a.source_drops_by_source, b.source_drops_by_source) << where;
   EXPECT_TRUE(a.by_tunnel == b.by_tunnel) << where;
-  EXPECT_TRUE(a.record_groups == b.record_groups) << where;
   EXPECT_TRUE(a.kept_program == b.kept_program) << where;
 }
 

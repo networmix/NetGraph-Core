@@ -228,8 +228,9 @@ private:
 // The edges reached from one source in a destination-pruned DAG, in ascending EdgeId.
 // The common basis has no dead ends and no edge leaves a destination. This is the unweighted
 // record route, independent of the plan's pruned members; it builds no plan or cost table.
+// Optional allowed bits are in basis order; a masked reach can contain dead ends, pruned by its caller.
 [[nodiscard]] std::vector<EdgeId> reachable_route(const Graph& graph, std::span<const EdgeId> basis,
-                              NodeId source, std::span<const NodeId> destinations);
+                              NodeId source, std::span<const NodeId> destinations, std::span<const std::uint64_t> allowed = {});
 
 // ---------------------------------------------------------------- allocation
 

@@ -1007,7 +1007,7 @@ records.
   the policy, kept after it becomes an orphan); `sources` and `destinations` (node sets);
   `admission`; `entry_id` (a T1, T2 or `Pinned` record: the identifier of the program entry it
   carries; `None` for the records kept per roster source); `route` (the record's route as a
-  `PredecessorDAG`); `min_route_cost` (the cheapest walk of the route, cached; `None` for an empty
+  `PredecessorDAG`); `min_route_cost` (the cheapest walk of the route; `None` for an empty
   route); `offered` (Lossy records only, else `None`); `delivered`; `edge_flows`
   (`[(EdgeId, units)]`, ascending, the carried traffic), `edge_drops` (`[(EdgeId, units)]`,
   cumulative, ascending) and `edge_reservations` (`[(EdgeId, units)]`, ascending: an up T1

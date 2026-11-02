@@ -16,21 +16,15 @@
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/flow_record.hpp"
 #include "netgraph/core/detail/concurrency.hpp"
+#include "netgraph/core/detail/ledger_entry.hpp"
 
 namespace netgraph::core::detail {
 
-// A record proposed by a policy for the commit: `id` nullopt is a new flow (its id is assigned
-// at the commit, in draft order); the commit sets the record's flow_id and policy_id. The record's
-// `edge_flows`, `edge_drops` and `edge_reservations` ascend by EdgeId; zero entries are dropped.
-struct RecordDraft {
-  std::optional<std::int64_t> record_counter {};
-  FlowRecord record {};
-};
-
-// One owner's part of a batch exchange (LedgerAccess::commit_batch).
-struct OwnerDrafts {
+// One owner's complete entry in an atomic batch. A continuing epoch keeps its inventory
+// and first counter; a full-offer call retires that range and receives new identities.
+struct OwnerEntry {
   std::int64_t owner {0};
-  std::span<RecordDraft> drafts {};
+  LedgerEntry* entry {nullptr};
   bool retire {false};
 };
 
@@ -59,29 +53,17 @@ struct LedgerAccess {
   static void release(FlowLedger& ledger, std::int64_t owner) noexcept;
   // remove(): the owner's records are deleted (allocations and holds reverted), their ids retired.
   // Throws only before any change (a moved-from ledger, an unbound owner).
-  static std::vector<std::int64_t> detach(FlowLedger& ledger, std::int64_t owner);
-  // One atomic exchange: `drafts` must carry every live record of the owner (by id) plus the
-  // new ones; the new aggregates must stay within [0, baseline] on every edge (carried loads
-  // within the service baseline, holds within the reservation baseline). Throws (and
-  // changes nothing) otherwise, an allocation failure included: every allocation happens
-  // before a publication step that cannot throw, and the new ids running past the largest int64
-  // (std::runtime_error `record identity limit exceeded`). Returns the FlowIds of the new records in
-  // draft order. The drafts' vectors are moved from.
-  static std::vector<FlowId> commit(FlowLedger& ledger, std::int64_t owner, std::span<RecordDraft> drafts);
-  // The exchange of replace() and forward(): every live record of the owner is retired (its
-  // allocation reverted, its id never live again) and `drafts` (new records only) are created, in
-  // one atomic step with commit's checks and guarantee. Returns the new FlowIds in draft order.
-  static std::vector<FlowId> exchange(FlowLedger& ledger, std::int64_t owner, std::span<RecordDraft> drafts);
-  // commit (retire false) and exchange (retire true).
-  static std::vector<FlowId> commit_drafts(FlowLedger& ledger, std::int64_t owner, std::span<RecordDraft> drafts, bool retire);
-  // One atomic exchange for several distinct owners (apply_actions): each owner's drafts with
-  // commit's (retire false) or exchange's (retire true) rule, the aggregates checked once over
-  // every owner, the new ids counted for the whole batch first and assigned in owner order, then
-  // draft order. Throws (and changes nothing) as commit does. `created` (one per owner) receives
-  // each owner's new FlowIds; the drafts' vectors are moved from.
-  static void commit_batch(FlowLedger& ledger, std::span<OwnerDrafts> owners, std::span<std::vector<FlowId>> created);
-  // A live record by id (throws std::invalid_argument for an unknown or retired id).
-  [[nodiscard]] static const FlowRecord& live(const FlowLedger& ledger, std::int64_t id);
+  static void detach(FlowLedger& ledger, std::int64_t owner);
+  // The owner's live entry, or null before its first records (requires the gate).
+  [[nodiscard]] static const LedgerEntry* entry(const FlowLedger& ledger, std::int64_t owner);
+  // An internal record snapshot by counter; public lookup also checks the ledger uid first.
+  [[nodiscard]] static FlowRecord materialize(const FlowLedger& ledger, std::int64_t counter);
+  [[nodiscard]] static std::vector<FlowRecord> records(const FlowLedger& ledger, std::int64_t owner);
+  // Every buffer and map node is staged before the nonthrowing publication. No identity or
+  // aggregate changes on failure. Existing nodes and values are reused only after staging.
+  static void commit(FlowLedger& ledger, std::int64_t owner, LedgerEntry& entry);
+  static void exchange(FlowLedger& ledger, std::int64_t owner, LedgerEntry& entry);
+  static void commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners);
   // The working residual service baseline - carried() into `out` (resized to E).
   static void residual_into(const FlowLedger& ledger, std::vector<Amount>& out);
   [[nodiscard]] static std::span<const Amount> baseline(const FlowLedger& ledger);

@@ -293,7 +293,8 @@ TEST(PolicyFaults, ZeroCapacityLinksTakePartInTheSweeps) {
       // Three split routes, three records; the all-zero route keeps its Equal member and
       // has none under the Weighted kernel.
       ASSERT_EQ(pe.view.data->split_contexts.size(), 3U) << m.name;
-      ASSERT_EQ(pe.epoch.record_groups.size(), 3U) << m.name;
+      ASSERT_NE(detail::LedgerAccess::entry(fg, pe.policy_id), nullptr) << m.name;
+      ASSERT_EQ(detail::LedgerAccess::entry(fg, pe.policy_id)->record_inventory().size(), 3U) << m.name;
       EXPECT_EQ(pe.view.prepared_route(2)->forwarding_edges.empty(), m.name == "pinned lossy") << m.name;
     }
   }
@@ -2161,5 +2162,84 @@ TEST(PolicyFaults, StaticPreparationBatchRollbackIncludesEveryPrivateOwner) {
       if (::testing::Test::HasFailure()) break;
     }
     EXPECT_TRUE(completed); EXPECT_GT(failures, 0);
+  }
+}
+
+// Every lazy-read allocation fails once, then retries on the same entry and thread. The full
+// owned history and row state are part of ledger_state; failed reads publish or cache nothing.
+TEST(PolicyFaults, LazyRecordReadsFailWithoutChangingOrCachingEntryState) {
+  const auto g = shared(make_graph(5, {{0, 2, 9, 1}, {1, 2, 8, 1}, {2, 3, 3, 1}, {2, 4, 5, 1}}));
+  FlowLedger ledger(g);
+  FlowPolicy policy(ledger, v({0, 1}), v({3, 4}), {.routing = ShortestPaths {}, .admission = Admission::Lossy});
+  (void)policy.place(5); (void)policy.place(7);
+  const auto id = policy.records().front().flow_id;
+  const auto before = ledger_state(ledger);
+  const auto expected = ledger.record(id);
+  for (bool one : {false, true}) {
+    long failures = 0;
+    for (long at = 0;; ++at) {
+      std::vector<FlowRecord> records;
+      const long live = g_live.load();
+      const bool failed = fails_at(at, [&] {
+        if (one) records.push_back(ledger.record(id));
+        else records = ledger.records();
+      });
+      if (!failed) {
+        ASSERT_FALSE(records.empty());
+        EXPECT_TRUE(same_record(records.front(), expected));
+        break;
+      }
+      ++failures;
+      EXPECT_TRUE(records.empty());
+      EXPECT_EQ(g_live.load(), live);
+      expect_same(ledger_state(ledger), before, "failed lazy read");
+      EXPECT_TRUE(same_record(ledger.record(id), expected));
+      if (::testing::Test::HasFailure()) return;
+    }
+    EXPECT_GT(failures, 10);
+  }
+}
+
+TEST(PolicyFaults, ColdMaskedLazyReadsRetryOnTheFailingThread) {
+  const auto g = shared(make_graph(5, {{0, 2, 10, 1}, {1, 2, 10, 1}, {2, 3, 10, 1}, {2, 4, 10, 3}}));
+  RouteOptions options;
+  options.allocation = RouteAllocation::Weighted;
+  options.weight_basis = WeightBasis::Explicit;
+  options.edge_weights = std::vector<Amount> {0, 1, 1, 1};
+  const auto program = ForwardingProgram::from_dag(*g, v({0, 1}), v({3, 4}), all_edges(*g), options);
+  const auto mask = g->eligibility({}, v({2}));
+  FlowLedger ledger(g);
+  FlowPolicy policy(ledger, v({0, 1}), v({3, 4}), {.routing = Pinned {program, nullptr}, .admission = Admission::Lossy}, &mask);
+  (void)policy.place(5); (void)policy.place(7);
+  const auto expected = ledger.records();
+  const auto before = ledger_state(ledger);
+  for (bool one : {false, true}) {
+    long failures = 0;
+    for (long at = 0;; ++at) {
+      bool failed = false;
+      std::exception_ptr error;
+      const long live = g_live.load();
+      std::thread worker([&] {
+        try {
+          std::vector<FlowRecord> records;
+          auto read = [&] {
+            if (one) records.push_back(ledger.record(expected[0].flow_id));
+            else records = ledger.records();
+          };
+          failed = fails_at(at, read);
+          if (failed) read();
+          ASSERT_EQ(records.size(), one ? 1U : expected.size());
+          for (std::size_t i = 0; i < records.size(); ++i) EXPECT_TRUE(same_record(records[i], expected[i]));
+        } catch (...) { error = std::current_exception(); }
+      });
+      worker.join();
+      if (error) std::rethrow_exception(error);
+      EXPECT_EQ(g_live.load(), live);  // the worker's cold traversal scratch was destroyed too
+      expect_same(ledger_state(ledger), before, "cold lazy read and retry");
+      if (::testing::Test::HasFailure()) return;
+      if (!failed) break;
+      ++failures;
+    }
+    EXPECT_GT(failures, 10);
   }
 }

@@ -1238,6 +1238,47 @@ inline std::vector<Row> rows() {
       return Iter([spec, program, states, stale] { return abaapi::pooled_failure_series(*spec, program, *states, stale); });
     }});
   }
+  // ---- aggregate entries, explicit record reads and forwarding histories
+  for (const std::string suffix : {"many", "one", "edges"}) {
+    r.push_back({"ledger.aggregate_default." + suffix, "ledger", "complete default Equal Lossless anycast replacement; optional edge-output control", [suffix] {
+      auto spec = std::make_shared<const abaapi::PooledSpec>(pooled_fixture(suffix == "one" ? "pooled.anycast.one" : "pooled.anycast.many"));
+      return Iter([spec, suffix] { return abaapi::aggregate_trial(*spec, suffix == "edges"); });
+    }});
+  }
+  for (const std::string suffix : {"many", "one", "orphan", "repair"}) {
+    r.push_back({"ledger.record_read." + suffix, "ledger", "prepared state outside timing; records() plus record(last), all13 fields folded; descriptive", [suffix] {
+      auto spec = pooled_fixture(suffix == "repair" ? "pooled.from_dag.weighted" : suffix == "one" ? "pooled.anycast.one" : "pooled.anycast.many");
+      auto state = std::make_shared<const abaapi::EntrySnapshot>(std::move(spec), suffix == "orphan", suffix == "repair");
+      return Iter([state] { return state->read(); });
+    }});
+  }
+  for (bool stale : {false, true}) for (bool one : {false, true}) {
+    const std::string name = std::string(stale ? "program.stale_then_place.pooled" : "pooled.lossy.repeat") + (one ? ".one" : "");
+    r.push_back({name, stale ? "program" : "pooled", stale ? "Lossy replace4, head-blackholed forward4, place2, zero, remove" : "Lossy place5, place7, first-hop infinity twice, remove; complete results, no history read", [stale, one] {
+      auto spec = pooled_fixture("program.forward.pooled");
+      if (one) spec.sources.resize(1);
+      spec.config.admission = netgraph::core::Admission::Lossy;
+      auto input = std::make_shared<const abaapi::PooledSpec>(std::move(spec));
+      return Iter([input, stale] { return abaapi::entry_history(*input, stale); });
+    }});
+  }
+  for (const std::string suffix : {"many", "one"}) {
+    r.push_back({"ledger.copy." + suffix, "ledger", "copy/destruct an orphan ledger, fold C/H/residual/unreserved; no record read", [suffix] {
+      auto state = std::make_shared<const abaapi::EntrySnapshot>(pooled_fixture("pooled.anycast." + suffix), true);
+      return Iter([state] { return state->copy(); });
+    }});
+  }
+  r.push_back({"ledger.lifecycle.one", "ledger", "one source/edge; replace4, zero, evaluate6, forward3, remove, reset", [] {
+    const Arrays a {2, {0}, {1}, {10 * abaapi::kResolution}, {3}};
+    auto graph = std::make_shared<const Graph>(abaapi::build(a));
+    return Iter([graph] { return abaapi::entry_lifecycle(*graph); });
+  }});
+  r.push_back({"ledger.joint.pooled_cycle", "ledger", "two two-source pooled demands cross capacities5/6 in opposite order; one SIMULTANEOUS replace21/15", [] {
+    Arrays a {10, {0,1,2,3,6,7,4,5,5,7}, {6,6,4,4,7,4,5,6,8,9}, {}, std::vector<std::int64_t>(10,1)};
+    for (int capacity : {100,100,100,100,5,100,6,100,100,100}) a.cap.push_back(capacity * abaapi::kResolution);
+    auto graph = std::make_shared<const Graph>(abaapi::build(a));
+    return Iter([graph] { return abaapi::entry_joint(*graph); });
+  }});
   // ---- T1 tunnels (the fabric of 4 pods, 12 demands of 120: one policy per demand, one ledger)
   auto t1_pairs = [](const Fabric3& f) {
     std::vector<std::pair<int, int>> pairs;
@@ -1468,12 +1509,13 @@ inline std::vector<Row> rows() {
       g->warm_cache->freeze();
       return Iter([g, roots] { return abaapi::dag_cache_series(*g, roots, true); });
     }});
-  for (bool parallel : {false, true}) {
-    r.push_back({parallel ? "concurrency.two_ledgers_parallel" : "concurrency.two_ledgers_serial", "concurrency",
-      "Two independent ledgers, 32 evaluate(32) calls each using static preparation installed in setup; two thread launches/joins in both modes; layered graph 384 nodes/2816 edges",
-      [parallel] {
+  for (int evaluates : {32, 512}) for (bool parallel : {false, true}) {
+    const std::string suffix = evaluates == 32 ? "" : ".scaled";
+    r.push_back({(parallel ? "concurrency.two_ledgers_parallel" : "concurrency.two_ledgers_serial") + suffix, "concurrency",
+      "Two independent ledgers, " + std::to_string(evaluates) + " evaluate(32) calls each using static preparation installed in setup; two thread launches/joins in both modes; layered graph 384 nodes/2816 edges",
+      [parallel, evaluates] {
         auto fixture = std::make_shared<abaapi::ParallelLedgers>();
-        return Iter([fixture, parallel] { return fixture->run(parallel); });
+        return Iter([fixture, parallel, evaluates] { return fixture->run(parallel, evaluates); });
       }});
   }
   add_storage_rows(r);  // the storage rows come last in the list

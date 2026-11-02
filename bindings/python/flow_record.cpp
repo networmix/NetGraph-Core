@@ -49,7 +49,9 @@ void register_flow_record(py::module_& m) {
                     "records kept per roster source (ShortestPaths, CentralizedTE)")
       .def_property_readonly(
           "route", [](const FlowRecord& r) { return typed_shared(r.route); },
-          "the flow's route (an immutable PredecessorDAG shared with the ledger)")
+          "the flow's immutable PredecessorDAG; pooled ShortestPaths and from_dag records build it\n"
+          "when the record is read. Repeated record reads of one state have equal route values\n"
+          "in distinct objects")
       .def_property_readonly(
           "min_route_cost", [](const FlowRecord& r) { return cost_or_none(r.min_route_cost); },
           "the cost of the cheapest walk of the route from the sources to the destinations; None when\n"

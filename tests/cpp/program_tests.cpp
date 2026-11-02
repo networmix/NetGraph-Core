@@ -2190,7 +2190,7 @@ TEST(ProgramLayouts, BorrowedViewReadsItsProgram) {
   EXPECT_FALSE(copy.is_blackholed_source(0));
 }
 
-// An epoch is a value: its copy keeps the record_groups, the program, the rows and the counters after
+// An epoch is a value: its copy keeps the program, the rows and the counters after
 // the policy that held the original has moved on and been destroyed.
 TEST(ProgramLayouts, EpochCopyOwnsItsStorage) {
   const auto g = graph(4, kPinloss);
@@ -2199,11 +2199,8 @@ TEST(ProgramLayouts, EpochCopyOwnsItsStorage) {
   (void)(*p)->replace(12);
   const detail::PolicyEpoch copy = detail::PolicyAccess::engine(*p->p).epoch;
   const auto& live = detail::PolicyAccess::engine(*p->p).epoch;
-  ASSERT_EQ(copy.record_groups.size(), 2U);
-  EXPECT_NE(copy.record_groups.data(), live.record_groups.data());
   EXPECT_NE(copy.by_tunnel.data(), live.by_tunnel.data());
   const auto rows_before = copy.by_tunnel;
-  const auto ids_before = std::vector<std::int64_t> {copy.record_groups[0][0].record_counter, copy.record_groups[1][0].record_counter};
   (void)(*p)->replace(4);
   p.reset();
   for (int i = 0; i < 4; ++i) (void)pinned(g, prog, LOSSY)->replace(2);
@@ -2212,7 +2209,6 @@ TEST(ProgramLayouts, EpochCopyOwnsItsStorage) {
   EXPECT_EQ(rows_before.size(), 2U);
   EXPECT_EQ(lo(rows_before[0].assigned), 6);
   EXPECT_EQ(rows_before[0].delivered, 2);
-  EXPECT_EQ((std::vector<std::int64_t> {copy.record_groups[0][0].record_counter, copy.record_groups[1][0].record_counter}), ids_before);
   EXPECT_EQ(lo(copy.offered), 12);
   EXPECT_EQ(lo(copy.requested), 12);
 }
@@ -2392,6 +2388,14 @@ TEST(SharedPreparation, PooledProgramsOwnOneBasisAndNoSourceDag) {
   }
 }
 
+namespace {
+// An explicit lazy read of a view's record values, with no forwarding needed for route checks.
+detail::LedgerEntry entry_from_view(const Graph& graph, const detail::ForwardingView& view, std::span<const NodeId> destinations) {
+  detail::ProgramFlow empty;
+  return detail::derived_entry(graph, 0, LOSSLESS, destinations, view, true, nullptr, 0, {}, empty);
+}
+}
+
 TEST(SharedPreparation, FromDagCostsAndZeroWeightRoutesSurviveMaskAndViewCopies) {
   const auto g = std::make_shared<const Graph>(make_graph(7, {
       {0, 2, 10, 1}, {1, 2, 10, 3}, {2, 5, 10, 1}, {2, 3, 10, 1},
@@ -2422,17 +2426,20 @@ TEST(SharedPreparation, FromDagCostsAndZeroWeightRoutesSurviveMaskAndViewCopies)
     EXPECT_EQ(data.entries[2].min_route_cost, 1);
     for (const auto& entry : data.entries) EXPECT_FALSE(entry.route);
     auto view = detail::make_forwarding_view(*g, program, &mask, dests, nullptr, true);
-    const auto copy = view;
+    auto value = entry_from_view(*g, view, dests);
+    const auto copy = value;
+    value = {};
     program.reset();
     options = {};
     view = {};
-    EXPECT_EQ(copy.min_route_cost(0), 7);
-    EXPECT_EQ(copy.min_route_cost(1), 9);
-    EXPECT_EQ(copy.min_route_cost(2), 6);
-    EXPECT_EQ(ids_to_input(*g, ascending_edges(*copy.route(0))), (std::vector<std::int32_t> {0, 3, 4}));
-    EXPECT_EQ(ids_to_input(*g, ascending_edges(*copy.route(1))), (std::vector<std::int32_t> {1, 3, 4}));
-    if (basis == WeightBasis::Explicit) EXPECT_TRUE(copy.prepared_route(0)->forwarding_edges.empty());
-    else EXPECT_FALSE(copy.prepared_route(0)->forwarding_edges.empty());
+    const auto snapshots = copy.records(*g, 0, 0, copy.record_inventory().size());
+    EXPECT_EQ(snapshots[0].min_route_cost, 7);
+    EXPECT_EQ(snapshots[1].min_route_cost, 9);
+    EXPECT_EQ(snapshots[2].min_route_cost, 6);
+    EXPECT_EQ(ids_to_input(*g, ascending_edges(*snapshots[0].route)), (std::vector<std::int32_t> {0, 3, 4}));
+    EXPECT_EQ(ids_to_input(*g, ascending_edges(*snapshots[1].route)), (std::vector<std::int32_t> {1, 3, 4}));
+    if (basis == WeightBasis::Explicit) EXPECT_TRUE(copy.derived->inputs->plan->forwarding_edges.empty());
+    else EXPECT_FALSE(copy.derived->inputs->plan->forwarding_edges.empty());
   }
 }
 
@@ -2483,18 +2490,27 @@ TEST(SharedPreparation, MaskedRecordsUseEachHeadsSmallReachOfTheCommonBasis) {
     // Independently supplied per-head DAGs are the source-local basis used by the earlier
     // pooled representation. Their public masked route values must equal the common basis's.
     const auto separate = ForwardingProgram::from_routes(*g, sources, destinations, private_routes, options);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    detail::thread_entry_work() = {};
+#endif
     const auto view = detail::make_forwarding_view(*g, pooled, &mask, destinations, nullptr, true);
     const auto reference = detail::make_forwarding_view(*g, separate, &mask, destinations, nullptr, true);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    EXPECT_EQ(detail::thread_entry_work().common_rosters, 1U);
+#endif
+    for (const auto& route : view.routes_) EXPECT_FALSE(route);
+    const auto values = entry_from_view(*g, view, destinations);
+    const auto snapshots = values.records(*g, 0, 0, values.record_inventory().size());
     for (int i = 0; i < heads; ++i) {
       const auto entry = static_cast<std::size_t>(i);
-      ASSERT_TRUE(view.route(entry));
-      EXPECT_EQ(ascending_edges(*view.route(entry)), ascending_edges(*reference.route(entry)));
-      EXPECT_EQ(view.min_route_cost(entry), reference.min_route_cost(entry));
+      ASSERT_TRUE(snapshots[entry].route);
+      EXPECT_EQ(ascending_edges(*snapshots[entry].route), ascending_edges(*reference.route(entry)));
+      EXPECT_EQ(snapshots[entry].min_route_cost, reference.min_route_cost(entry));
       EXPECT_EQ(view.status(entry), reference.status(entry));
-      EXPECT_EQ(view.min_route_cost(entry), i == 0 ? 11 : i == heads - 1 ? kUnreachable : 6);
-      EXPECT_EQ(view.route(entry)->via_edges().size(), i == 0 ? 3U : i == heads - 1 ? 0U : 6U);
+      EXPECT_EQ(snapshots[entry].min_route_cost, i == 0 ? 11 : i == heads - 1 ? kUnreachable : 6);
+      EXPECT_EQ(snapshots[entry].route->via_edges().size(), i == 0 ? 3U : i == heads - 1 ? 0U : 6U);
     }
-    EXPECT_EQ(ids_to_input(*g, ascending_edges(*view.route(0))),
+    EXPECT_EQ(ids_to_input(*g, ascending_edges(*snapshots[0].route)),
               (std::vector<std::int32_t> {static_cast<std::int32_t>(shared_input),
                                           static_cast<std::int32_t>(alternate_input), static_cast<std::int32_t>(alternate_input + 1)}));
     EXPECT_EQ(view.status(0), UP);
@@ -2765,4 +2781,233 @@ TEST(Program, SparseMemberAmountsPreserveOrderAndOwnTheirStorage) {
   EXPECT_TRUE(detail::nonzero_pairs(members, std::vector<Amount>(4, 0)).empty());
   EXPECT_EQ(detail::nonzero_pairs(std::vector<EdgeId> {4}, std::vector<Amount> {1}),
             (std::vector<std::pair<EdgeId, Amount>> {{4, 1}}));
+}
+
+TEST(DerivedEntries, LosslessCallsKeepNoSourceDataAndOnlyReadsAttribute) {
+  const auto g = shared(make_graph(4, {{0, 2, 20, 1}, {1, 2, 20, 1}, {2, 3, 9, 1}}));
+  FlowLedger ledger(g);
+  FlowPolicy p(ledger, v({0, 1}), v({3}), {.routing = ShortestPaths {}});
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  detail::thread_entry_work() = {};
+#endif
+  (void)p.replace(7);
+  const auto final = p.place(2);
+  EXPECT_EQ(final.by_source[0].delivered, 5);
+  EXPECT_EQ(final.by_source[1].delivered, 4);
+  (void)p.place(0);
+  const auto* own = detail::LedgerAccess::entry(ledger, detail::PolicyAccess::engine(p).policy_id);
+  ASSERT_TRUE(own && own->derived);
+  EXPECT_TRUE(own->stored.empty());
+  EXPECT_TRUE(own->derived->rows.empty());
+  ASSERT_TRUE(own->derived->history);
+  EXPECT_FALSE(own->derived->history->previous);
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(detail::thread_entry_work().forwards, 0U);
+  EXPECT_EQ(detail::thread_entry_work().routes, 0U);
+#endif
+  const auto records = p.records();
+  ASSERT_EQ(records.size(), 2U);
+  EXPECT_EQ(records[0].edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{0, 5}, {2, 5}}));
+  EXPECT_EQ(records[1].edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{1, 4}, {2, 4}}));
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(detail::thread_entry_work().derivations, 1U);
+  EXPECT_EQ(detail::thread_entry_work().routes, 2U);
+#endif
+  EXPECT_TRUE(same_record(p.record(records[0].flow_id), records[0]));
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(detail::thread_entry_work().derivations, 2U);
+  EXPECT_EQ(detail::thread_entry_work().routes, 3U);
+#endif
+}
+
+TEST(DerivedEntries, LossyRowsUseEachCallsOnePassAndShareEarlierHistory) {
+  const auto g = shared(make_graph(4, {{0, 2, 20, 1}, {1, 2, 20, 1}, {2, 3, 9, 1}}));
+  FlowLedger ledger(g);
+  FlowPolicy p(ledger, v({0, 1}), v({3}), {.routing = ShortestPaths {}, .admission = LOSSY});
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  detail::thread_entry_work() = {};
+#endif
+  (void)p.place(5);
+  const auto* initial = detail::LedgerAccess::entry(ledger, detail::PolicyAccess::engine(p).policy_id);
+  const auto first = initial->derived->history;
+  const auto inputs = initial->derived->inputs;
+  const auto result = p.place(7);
+  const auto* own = detail::LedgerAccess::entry(ledger, detail::PolicyAccess::engine(p).policy_id);
+  ASSERT_TRUE(own->derived && own->stored.empty());
+  EXPECT_EQ(own->derived->inputs.get(), inputs.get());
+  EXPECT_EQ(own->destination_nodes().data(), inputs->destinations.data());
+  EXPECT_EQ(own->record_inventory().data(), inputs->inventory.data());
+  EXPECT_EQ(own->destination_nodes(), v({3}));
+  ASSERT_EQ(own->record_inventory().size(), 2U);
+  EXPECT_EQ(own->record_inventory()[0].source, 0);
+  EXPECT_EQ(own->record_inventory()[1].source, 1);
+  EXPECT_EQ(own->carried, (std::vector<std::pair<EdgeId, Amount>> {{0, 6}, {1, 6}, {2, 9}}));
+  EXPECT_EQ(own->drops, (std::vector<std::pair<EdgeId, Counter128>> {{2, {0, 3}}}));
+  ASSERT_EQ(own->derived->history->previous.get(), first.get());
+  EXPECT_EQ(own->derived->history->previous->carried.data(), first->carried.data());
+  ASSERT_EQ(result.by_source.size(), 2U);
+  EXPECT_EQ(result.by_source[0].offered, (Counter128 {0, 6}));
+  EXPECT_EQ(result.by_source[1].offered, (Counter128 {0, 6}));
+  EXPECT_EQ(result.by_source[0].delivered, 5);
+  EXPECT_EQ(result.by_source[1].delivered, 4);
+  EXPECT_EQ(result.by_source[0].total_edge_drops, (Counter128 {0, 1}));
+  EXPECT_EQ(result.by_source[1].total_edge_drops, (Counter128 {0, 2}));
+  expect_same(p.place(0), [&] { auto r = result; r.call_delivered = 0; r.call_undelivered = 0; r.delivery_delta = 0;
+      r.call_edge_drops.clear(); r.call_source_drops = {}; r.routes_changed = false; r.weights_changed = false; return r; }(), "zero rows");
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(detail::thread_entry_work().forwards, 2U);
+  EXPECT_EQ(detail::thread_entry_work().attribution, 2U);
+  EXPECT_EQ(detail::thread_entry_work().derivations, 0U);
+  EXPECT_EQ(detail::thread_entry_work().routes, 0U);
+#endif
+  const auto records = p.records();
+  EXPECT_EQ(records[0].edge_drops, (std::vector<std::pair<EdgeId, Counter128>> {{2, {0, 1}}}));
+  EXPECT_EQ(records[1].edge_drops, (std::vector<std::pair<EdgeId, Counter128>> {{2, {0, 2}}}));
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  EXPECT_EQ(detail::thread_entry_work().derivations, 2U);
+#endif
+}
+
+TEST(DerivedEntries, SingleHistoryAttributionKeepsOrderedSparseRecordsForBothAdmissions) {
+  const auto g = shared(make_graph(5, {{1, 3, 20, 1}, {2, 3, 20, 1}, {3, 4, 9, 1}}));
+  for (Admission admission : {Admission::Lossless, Admission::Lossy}) {
+    FlowLedger ledger(g);
+    FlowPolicy p(ledger, v({1, 2}), v({4}), {.routing = ShortestPaths {}, .admission = admission});
+    (void)p.place(12);
+    const auto records = p.records();
+    ASSERT_EQ(records.size(), 2U);
+    const auto* own = detail::LedgerAccess::entry(ledger, detail::PolicyAccess::engine(p).policy_id);
+    ASSERT_TRUE(own && own->derived && own->derived->history);
+    EXPECT_FALSE(own->derived->history->previous);
+    for (std::size_t i = 0; i < records.size(); ++i) {
+      const Amount delivered = i == 0 ? 5 : 4;
+      const Amount entering = admission == Admission::Lossless ? delivered : 6;
+      const auto& r = records[i];
+      EXPECT_EQ(r.sources, std::vector<NodeId> {static_cast<NodeId>(i + 1)});
+      EXPECT_EQ(r.delivered, delivered);
+      EXPECT_EQ(r.edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{static_cast<EdgeId>(i), entering}, {2, delivered}}));
+      const std::vector<std::pair<EdgeId, Counter128>> expected_drops = admission == Admission::Lossless ?
+          std::vector<std::pair<EdgeId, Counter128>> {} : std::vector<std::pair<EdgeId, Counter128>> {{2, {0, static_cast<std::uint64_t>(6 - delivered)}}};
+      EXPECT_EQ(r.edge_drops, expected_drops);
+      EXPECT_TRUE(same_record(p.record(r.flow_id), r));
+    }
+  }
+}
+
+TEST(DerivedEntries, BlackholedComputingHeadHasNoDerivedEdgeDrops) {
+  const auto g = shared(make_graph(4, {{0, 2, 10, 1}, {1, 2, 10, 1}, {2, 3, 10, 1}}));
+  FlowLedger ledger(g);
+  FlowPolicy p(ledger, v({0, 1}), v({3}), {.routing = ShortestPaths {}, .admission = LOSSY});
+  (void)p.place(4);
+  const auto holes = g->eligibility(v({0}), {});
+  (void)p.forward(4, &holes);
+  const auto records = p.records();
+  ASSERT_EQ(records.size(), 2U);
+  EXPECT_EQ(records[0].sources, v({0}));
+  EXPECT_EQ(records[0].offered, (Counter128 {0, 2}));
+  EXPECT_EQ(records[0].delivered, 0);
+  EXPECT_TRUE(records[0].edge_flows.empty());
+  EXPECT_TRUE(records[0].edge_drops.empty());  // its share was lost at the source
+  EXPECT_EQ(records[1].offered, (Counter128 {0, 2}));
+  EXPECT_EQ(records[1].delivered, 2);
+  EXPECT_EQ(records[1].edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{1, 2}, {2, 2}}));
+  EXPECT_TRUE(records[1].edge_drops.empty());
+}
+
+TEST(DerivedEntries, MaskedReplayRecordPrunesTheDeadEndAndBuildsItsRouteOnRead) {
+  const auto g = shared(make_graph(4, {{0, 1, 10, 1}, {0, 2, 10, 1}, {1, 3, 10, 1}, {2, 3, 10, 1}}));
+  FlowLedger ledger(g);
+  FlowPolicy sp(ledger, v({0}), v({3}), {.routing = ShortestPaths {}});
+  (void)sp.place(2);
+  const auto mask = g->eligibility({}, v({3}));
+  FlowPolicy replay(ledger, v({0}), v({3}), {.routing = Pinned {sp.program(), nullptr}}, &mask);
+  (void)replay.place(1);
+  const auto r = replay.records().front();
+  const auto again = replay.records().front();
+  EXPECT_EQ(ids_to_input(*g, ascending_edges(*r.route)), (std::vector<std::int32_t> {0, 2}));
+  EXPECT_EQ(r.min_route_cost, 2);
+  EXPECT_EQ(r.edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{0, 1}, {2, 1}}));
+  EXPECT_NE(r.route.get(), again.route.get());
+  EXPECT_EQ(*r.route, *again.route);
+}
+
+TEST(DerivedEntries, SingleHeadFoldsStaleForwardThenPlaceWithoutHistory) {
+  const auto g = shared(make_graph(2, {{0, 1, 9, 1}}));
+  FlowLedger ledger(g);
+  FlowPolicy p(ledger, v({0}), v({1}), {.routing = ShortestPaths {}, .admission = LOSSY});
+  (void)p.replace(3);
+  const auto dark = g->eligibility(v({0}));
+  (void)p.forward(2, &dark);
+  const auto last = p.place(1);
+  const auto* entry = detail::LedgerAccess::entry(ledger, detail::PolicyAccess::engine(p).policy_id);
+  ASSERT_TRUE(entry->derived);
+  EXPECT_FALSE(entry->derived->history);
+  EXPECT_TRUE(entry->stored.empty());
+  EXPECT_EQ(last.by_source[0].offered, (Counter128 {0, 3}));
+  EXPECT_EQ(last.by_source[0].source_drops, (Counter128 {0, 2}));
+  EXPECT_EQ(p.records()[0].offered, (Counter128 {0, 3}));
+  EXPECT_EQ(p.records()[0].edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{0, 1}}));
+}
+
+TEST(DerivedEntries, OrphanCopyOwnsProgramPlanMaskBitsAndUnusedDestinations) {
+  const auto g = shared(make_graph(5, {{0, 2, 9, 1}, {1, 2, 9, 1}, {2, 3, 9, 1}}));
+  FlowLedger original(g);
+  std::weak_ptr<const ForwardingProgram> program_owner;
+  std::weak_ptr<const detail::DerivedInputs> identity_owner;
+  {
+    auto program = ForwardingProgram::from_dag(*g, v({0, 1}), v({3, 4}), all_edges(*g));
+    program_owner = program;
+    const auto mask = g->eligibility(v({4}), v({0}));
+    FlowPolicy p(original, v({0, 1}), v({3, 4}), {.routing = Pinned {program, nullptr}, .admission = LOSSY}, &mask);
+    (void)p.replace(4);
+    identity_owner = detail::LedgerAccess::entry(original, detail::PolicyAccess::engine(p).policy_id)->derived->inputs;
+  }
+  FlowLedger copy(original);
+  original.reset();
+  ASSERT_FALSE(program_owner.expired());
+  ASSERT_FALSE(identity_owner.expired());
+  const auto records = copy.records();
+  ASSERT_EQ(records.size(), 2U);
+  EXPECT_EQ(records[0].destinations, v({3}));
+  EXPECT_EQ(records[1].destinations, v({3}));
+  EXPECT_TRUE(records[0].route->via_edges().empty());
+  EXPECT_EQ(records[0].min_route_cost, kUnreachable);
+  EXPECT_EQ(records[0].offered, (Counter128 {}));
+  EXPECT_EQ(records[1].edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{1, 4}, {2, 4}}));
+  EXPECT_EQ(records[1].min_route_cost, 2);
+  for (const auto& r : records) EXPECT_EQ(r.flow_id.first, copy.uid());
+}
+
+TEST(DerivedEntries, StaleHeadBitsBelongToEachForwarding) {
+  const auto g = shared(make_graph(4, {{0, 2, 10, 1}, {1, 2, 10, 1}, {2, 3, 10, 1}}));
+  const auto dark = g->eligibility(v({0}));
+  for (auto allocation : {EB, W}) for (auto admission : {LOSSLESS, LOSSY}) {
+    ShortestPaths routing;
+    routing.allocation = allocation;
+    FlowLedger ledger(g);
+    FlowPolicy p(ledger, v({0, 1}), v({3}), {routing, admission});
+    (void)p.replace(1);
+    (void)p.forward(4, &dark);
+    const auto last = p.place(2);
+    const auto records = p.records();
+    ASSERT_EQ(records.size(), 2U);
+    EXPECT_EQ(records[0].edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{0, 1}, {2, 1}}));
+    EXPECT_EQ(records[1].delivered, admission == LOSSY ? 3 : 1);
+    EXPECT_EQ(last.by_source[0].delivered, 1);
+    if (admission == LOSSY) {
+      EXPECT_EQ(records[0].offered, (Counter128 {0, 3}));
+      EXPECT_EQ(last.by_source[0].source_drops, (Counter128 {0, 2}));
+    }
+    expect_balanced(ledger, "forward then ordinary place");
+  }
+}
+
+TEST(DerivedEntries, LongInfiniteEpochRetiresWithoutRecursiveHistoryDestruction) {
+  const auto g = shared(make_graph(4, {{0, 2, 0, 1}, {1, 2, 0, 1}, {2, 3, 0, 1}}));
+  FlowLedger ledger(g);
+  FlowPolicy p(ledger, v({0, 1}), v({3}), {.routing = ShortestPaths {}, .admission = LOSSY});
+  for (int call = 0; call < 100000; ++call) EXPECT_EQ(p.place(INF).delivered, 0);
+  p.remove();
+  EXPECT_TRUE(ledger.records().empty());
+  EXPECT_EQ(ledger.carried(), (std::vector<Amount> {0, 0, 0}));
 }

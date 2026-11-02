@@ -870,6 +870,130 @@ inline std::uint64_t pooled_failure_series(const PooledSpec& spec, std::shared_p
   return d.h;
 }
 
+// Entry workloads retain the ordinary complete result contract. Only the explicit read row
+// materializes records; its snapshots are destroyed on every iteration.
+inline void record_digest(Digest& d, const nc::FlowRecord& r) {
+  d.add_i(r.flow_id.second); d.add_i(r.policy_id);
+  for (auto v : r.sources) d.add_i(v);
+  for (auto v : r.destinations) d.add_i(v);
+  d.add_i(static_cast<int>(r.admission)); d.add_i(r.entry_id.value_or(-1));
+  d.add_i(r.min_route_cost); d.add_i(bool(r.route));
+  if (r.route) {
+    for (auto v : r.route->parent_offsets()) d.add_i(v);
+    for (auto v : r.route->parents()) d.add_i(v);
+    for (auto e : r.route->via_edges()) d.add_i(e);
+  }
+  d.add_i(r.offered.has_value());
+  if (r.offered) d.add(r.offered->hi), d.add(r.offered->lo);
+  d.add_i(r.delivered);
+  for (auto [e, x] : r.edge_flows) d.add_i(e), d.add_i(x);
+  for (auto [e, x] : r.edge_drops) d.add_i(e), d.add(x.hi), d.add(x.lo);
+  for (auto [e, x] : r.edge_reservations) d.add_i(e), d.add_i(x);
+}
+inline nc::OutputOptions entry_outputs(bool edges) {
+  nc::OutputOptions out;
+  out.edge_flows = out.residual = out.edge_reservations = out.saturated_boundary_edges = edges;
+  return out;
+}
+template<class Observe = NoPooledObservation>
+inline std::uint64_t aggregate_trial(const PooledSpec& spec, bool edges, Observe observe = {}) {
+  nc::FlowLedger ledger(spec.graph.g, spec.baseline);
+  nc::FlowPolicy policy(ledger, spec.sources, spec.destinations, spec.config);
+  auto result = policy.replace(spec.offer, std::nullopt, entry_outputs(edges));
+  observe(result, policy, ledger);
+  Digest d; pooled_digest(d, result);
+  for (const auto* values : {&result.edge_flows, &result.residual, &result.edge_reservations})
+    if (*values) for (auto x : **values) d.add_i(x);
+  if (result.saturated_boundary_edges) for (auto e : *result.saturated_boundary_edges) d.add_i(e);
+  return d.h;
+}
+template<class Observe = NoPooledObservation>
+inline std::uint64_t entry_history(const PooledSpec& spec, bool stale, Observe observe = {}) {
+  nc::FlowLedger ledger(spec.graph.g, spec.baseline);
+  nc::FlowPolicy policy(ledger, spec.sources, spec.destinations, spec.config);
+  Digest d;
+  auto capture = [&](const nc::PlacementResult& result) {
+    observe(result, policy, ledger); pooled_digest(d, result);
+  };
+  if (stale) {
+    capture(policy.replace(4));
+    const std::vector<nc::NodeId> dark {spec.sources.front()};
+    const auto mask = spec.graph.ref().eligibility(dark, {});
+    capture(policy.forward(4, &mask));
+    capture(policy.place(2)); capture(policy.place(0));
+  } else {
+    capture(policy.place(5)); capture(policy.place(7));
+    capture(policy.place(std::nullopt)); capture(policy.place(std::nullopt));
+  }
+  policy.remove();
+  return d.h;
+}
+struct EntrySnapshot {
+  PooledSpec spec;
+  nc::FlowLedger ledger;
+  std::unique_ptr<nc::FlowPolicy> policy;
+  nc::FlowId last;
+  explicit EntrySnapshot(PooledSpec input, bool orphan, bool repair = false)
+      : spec(std::move(input)), ledger(spec.graph.g, spec.baseline) {
+    auto cfg = spec.config;
+    std::unique_ptr<nc::Eligibility> mask;
+    if (repair) {
+      auto program = nc::ForwardingProgram::from_dag(spec.graph.ref(), spec.sources, spec.destinations, spec.dag, spec.options);
+      cfg.routing = nc::Pinned {std::move(program), nullptr};
+      const std::vector<nc::EdgeId> dark {spec.graph.edge_of_input.front()};
+      mask = std::make_unique<nc::Eligibility>(spec.graph.ref().eligibility({}, dark));
+    }
+    policy = std::make_unique<nc::FlowPolicy>(ledger, spec.sources, spec.destinations, cfg, mask.get());
+    (void)policy->replace(spec.offer);
+    last = policy->records().back().flow_id;
+    if (orphan || repair) policy.reset();
+  }
+  std::uint64_t read() const {
+    Digest d;
+    for (const auto& record : ledger.records()) record_digest(d, record);
+    record_digest(d, ledger.record(last));
+    return d.h;
+  }
+  std::uint64_t copy() const {
+    nc::FlowLedger copied(ledger);
+    Digest d;
+    for (const auto& values : {copied.carried(), copied.residual(), copied.reserved(), copied.unreserved()})
+      for (auto x : values) d.add_i(x);
+    return d.h;
+  }
+};
+template<class Observe = NoPooledObservation>
+inline std::uint64_t entry_lifecycle(const Graph& graph, Observe observe = {}) {
+  nc::FlowLedger ledger(graph.g);
+  Digest d;
+  {
+    const std::vector<nc::NodeId> src {0}, dst {1};
+    nc::FlowPolicy policy(ledger, src, dst, {nc::ShortestPaths()});
+    auto capture = [&](const nc::PlacementResult& result) {
+      observe(result, policy, ledger); pooled_digest(d, result);
+    };
+    capture(policy.replace(4)); capture(policy.place(0));
+    capture(policy.evaluate(6)); capture(policy.forward(3));
+    policy.remove();
+  }
+  ledger.reset();
+  for (auto x : ledger.carried()) d.add_i(x);
+  return d.h;
+}
+template<class Observe = NoPooledObservation>
+inline std::uint64_t entry_joint(const Graph& graph, Observe observe = {}) {
+  nc::FlowLedger ledger(graph.g);
+  const std::vector<nc::NodeId> a {0, 1}, b {2, 3}, ta {8}, tb {9};
+  const nc::FlowPolicyConfig cfg {nc::ShortestPaths(), nc::Admission::Lossy};
+  nc::FlowPolicy pa(ledger, a, ta, cfg), pb(ledger, b, tb, cfg);
+  const nc::Action actions[] = {nc::Replace {pa, 21}, nc::Replace {pb, 15}};
+  const auto results = nc::apply_actions(ledger, actions, nc::BatchMode::Simultaneous);
+  observe(results[0], pa, ledger); observe(results[1], pb, ledger);
+  Digest d;
+  for (const auto& result : results) pooled_digest(d, result);
+  return d.h;
+}
+
 // The equal-source-allocation CentralizedTE configuration (every roster source sends its round-robin share).
 inline nc::FlowPolicyConfig global_equal_config() {
   return nc::FlowPolicyConfig {.routing = centralized(nc::SourceAllocation::Equal)};
@@ -1198,12 +1322,12 @@ struct ParallelLedgers {
       for (const auto& row : r.by_source) if (row.delivered != 1) throw std::runtime_error("parallel fixture source delivery differs");
     }
   }
-  std::uint64_t run(bool parallel) {
+  std::uint64_t run(bool parallel, int evaluates = 32) {
     std::array<std::uint64_t, 2> sums {};
     std::array<std::exception_ptr, 2> errors {};
     auto worker = [&](std::size_t i) noexcept {
       try {
-        for (int call = 0; call < 32; ++call) {
+        for (int call = 0; call < evaluates; ++call) {
           // evaluate reads the static preparation installed during setup, without publishing it.
           const auto r = policies[i]->evaluate(32);
           if (r.delivered != 32 || r.call_delivered != 32 || r.delivery_delta != 0 || r.by_source.size() != 32) {

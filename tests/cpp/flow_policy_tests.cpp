@@ -603,12 +603,16 @@ TEST(FlowPolicyRequests, LossyCountersStopBelow2To127) {
     FlowLedger fg(g);
     FlowPolicy p(fg, v({0}), v({2}), cfg(ShortestPaths {}, RouteAllocation::Equal, Admission::Lossy));
     ASSERT_EQ(p.place(1).call_delivered, 1) << name;
-    std::vector<detail::RecordDraft> drafts(1);
-    drafts[0].record = p.records().at(0);
-    drafts[0].record_counter = drafts[0].record.flow_id.second;
-    drafts[0].record.offered = below(c.offered_below);
-    if (c.drop_below.has_value()) drafts[0].record.edge_drops = {{1, below(*c.drop_below)}};
-    (void)detail::LedgerAccess::commit(fg, detail::PolicyAccess::engine(p).policy_id, drafts);
+    const auto owner = detail::PolicyAccess::engine(p).policy_id;
+    auto entry = *detail::LedgerAccess::entry(fg, owner);
+    entry.derived->rows[0].offered = below(c.offered_below);
+    detail::PolicyAccess::engine(p).epoch.offered = below(c.offered_below);
+    if (c.drop_below.has_value()) entry.drops = {{1, below(*c.drop_below)}};
+    Counter128 accounted {0, static_cast<std::uint64_t>(entry.delivered)};
+    for (const auto& [e, x] : entry.drops) detail::accumulate_counter(accounted, x, "drops");
+    const auto offered = entry.derived->rows[0].offered;
+    entry.derived->rows[0].source_drops = {offered.hi - accounted.hi - (offered.lo < accounted.lo ? 1U : 0U), offered.lo - accounted.lo};
+    detail::LedgerAccess::commit(fg, owner, entry);
     const auto before = state_of(p, fg);
     if (c.error.has_value()) {
       EXPECT_EQ(error_of([&] { (void)p.place(std::nullopt); }), *c.error) << name;
@@ -1118,13 +1122,15 @@ TEST(FlowPolicyRecords, BundlesAreSharedOrPruned) {
   const auto rec = q.records().front();
   EXPECT_NE(rec.route.get(), whole.get());
   EXPECT_EQ(ascending_edges(*rec.route), (std::vector<EdgeId> {1, 3}));
-  // ShortestPaths: a source whose route is the whole cached support shares it.
+  // ShortestPaths materializes the same route value independently of the cache.
   ShortestPathCache cache(*g);
   FlowLedger fg3(g);
   FlowPolicy c(fg3, v({0}), v({3}), shortest_paths_config(), nullptr, &cache);
   (void)c.place(2);
   const auto support = cache.lookup(*g, v({3}), Direction::Reverse, nullptr);
-  EXPECT_EQ(c.records().front().route.get(), support.get());
+  const auto snapshot = c.records().front();
+  EXPECT_NE(snapshot.route.get(), support.get());
+  EXPECT_EQ(*snapshot.route, *support);
 }
 
 // records() lists the live records in FlowId order, also when the sources' entries interleave.

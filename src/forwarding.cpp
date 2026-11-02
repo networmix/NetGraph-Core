@@ -54,6 +54,7 @@
 #include "netgraph/core/detail/sparse.hpp"
 #include "netgraph/core/detail/route_builders.hpp"
 #include "netgraph/core/detail/strong_components.hpp"
+#include "netgraph/core/detail/ledger_entry.hpp"
 
 namespace netgraph::core::detail {
 
@@ -96,7 +97,16 @@ std::vector<std::uint8_t> replay_roster(const Graph& graph, const ProgramData& p
   std::vector<std::uint8_t> keep(k, 0);
   const auto edge_sources = graph.edge_sources();
   const auto edge_destinations = graph.edge_destinations();
-  if (p.uses_topology_basis) {
+  if (p.uses_topology_basis || p.common_replay_support) {
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+    if (p.common_replay_support) ++thread_entry_work().common_rosters;
+#endif
+    std::vector<std::uint8_t> basis;
+    if (p.common_replay_support) {
+      basis.assign(edge_allowed.size(), 0);
+      for (EdgeId e : *p.common_replay_support) basis[static_cast<std::size_t>(e)] = edge_allowed[static_cast<std::size_t>(e)];
+    }
+    const auto& allowed = p.common_replay_support ? basis : edge_allowed;
     const auto in_row = graph.incoming_offsets();
     const auto in_adj = graph.incoming_edges();
     std::vector<std::uint8_t> seen(static_cast<std::size_t>(graph.num_nodes()), 0);
@@ -112,7 +122,7 @@ std::vector<std::uint8_t> replay_roster(const Graph& graph, const ProgramData& p
       stack.pop_back();
       for (auto i = in_row[v]; i < in_row[v + 1]; ++i) {
         const auto e = static_cast<std::size_t>(in_adj[static_cast<std::size_t>(i)]);
-        if (edge_allowed[e] == 0) continue;
+        if (allowed[e] == 0) continue;
         const auto u = static_cast<std::size_t>(edge_sources[e]);
         // A path stops at the first destination: a destination is not passed through.
         if (seen[u] != 0 || is_dst[u] != 0) continue;
@@ -263,18 +273,11 @@ ForwardingView make_forwarding_view(const Graph& graph, std::shared_ptr<const Fo
     // The program's own roster and plans can be borrowed. Pooled and tunnel record routes
     // are made here; private supplied DAG routes can be borrowed too. Black holes change statuses.
     v.borrowed = true;
-    const bool pooled_records = records && p.pools_source_inflows && p.common_replay_support;
-    if (v.black_holes == nullptr && !(records && !p.tunnels.empty()) && !pooled_records) {
+    if (v.black_holes == nullptr && !(records && !p.tunnels.empty())) {
       source_weight_width(v);
       return v;
     }
     materialize(v);
-    if (pooled_records) {
-      for (std::size_t e = 0; e < n; ++e) {
-        auto route = reachable_route(graph, *p.common_replay_support, p.entries[e].head, destinations);
-        v.routes_[e] = std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::of_edges(graph, route));
-      }
-    }
     for (std::size_t e = 0; records && e < n; ++e) {
       if (p.entries[e].tunnel_position < 0) continue;
       const auto path = path_of(p.tunnels[static_cast<std::size_t>(p.entries[e].tunnel_position)]);
@@ -296,6 +299,12 @@ ForwardingView make_forwarding_view(const Graph& graph, std::shared_ptr<const Fo
   for (NodeId x : p.excluded_nodes) node_allowed[static_cast<std::size_t>(x)] = 0;
   for (std::size_t e = 0; e < num_edges; ++e) edge_allowed[e] = mask->allows_edge(static_cast<EdgeId>(e)) ? 1 : 0;
   for (EdgeId e : p.excluded_edges) edge_allowed[static_cast<std::size_t>(e)] = 0;
+  if (v.derived_records()) {
+    v.basis_.assign((p.common_replay_support->size() + 63) / 64, 0);
+    for (std::size_t i = 0; i < p.common_replay_support->size(); ++i) {
+      if (edge_allowed[static_cast<std::size_t>((*p.common_replay_support)[i])] != 0) set_bit(v.basis_, i);
+    }
+  }
   std::vector<NodeId> live_dests;
   std::vector<std::uint8_t> is_dst(num_nodes, 0);
   for (NodeId d : destinations) {
@@ -337,15 +346,9 @@ ForwardingView make_forwarding_view(const Graph& graph, std::shared_ptr<const Fo
         if (records) v.routes_[e] = std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::of_edges(graph, path_of(t)));
         v.min_route_costs_[e] = entry.min_route_cost;
       }
-    } else if (!failed) {
+    } else if (!failed && !v.derived_records()) {
       // A split route's route under the mask (its edges before weight pruning).
-      std::vector<EdgeId> reached;
-      if (p.pools_source_inflows && p.common_replay_support) {
-        reached = reachable_route(graph, *p.common_replay_support, entry.head, destinations);
-      }
-      const auto edges = p.pools_source_inflows && p.common_replay_support
-                             ? std::span<const EdgeId>(reached)
-                             : PredecessorDAGBuilder::ascending(*entry.route);
+      const auto edges = PredecessorDAGBuilder::ascending(*entry.route);
       auto [route, cost] = masked_route(graph, edges, entry.head, live_dests, replay);
       failed = cost == kUnreachable;
       v.routes_[e] = std::move(route);
@@ -353,7 +356,7 @@ ForwardingView make_forwarding_view(const Graph& graph, std::shared_ptr<const Fo
     }
     if (failed) {
       v.status_[e] = TunnelStatus::Failed;
-      v.routes_[e] = records ? std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::empty(graph)) : nullptr;
+      v.routes_[e] = records && !v.derived_records() ? std::make_shared<const PredecessorDAG>(PredecessorDAGBuilder::empty(graph)) : nullptr;
       v.min_route_costs_[e] = kUnreachable;
     }
   }
@@ -555,12 +558,8 @@ ProgramFlow pooled_lossless(const ForwardingView& view, const AvailableCapacityF
     out.entries[e].assigned = out.offered_by_source[h];
     out.entries[e].delivered = out.offered_by_source[h];
   }
-  if (k > 1 && total > 0) {
-    // Several roots: forward the total again to attribute it.
-    Attribution attr;
-    const auto fw = forward(plan, Injection {out.offered_by_source, false}, {}, &attr);
-    if (fw.edge_flows != own) throw std::logic_error("forwarding: the attributed loads differ from the admitted ones");
-    pooled_entries(view, plan, &attr, {}, {}, out);
+  if (view.derived_records()) {
+    out.carried = std::move(own);
   } else if (k == 1) {
     pooled_entries(view, plan, nullptr, own, {}, out);
   }
@@ -601,7 +600,10 @@ ProgramFlow pooled_lossy(const ForwardingView& view, const AvailableCapacityFn& 
       f.source_drops = fw.source_drops;
     }
   }
-  pooled_entries(view, plan, k > 1 ? &attr : nullptr, fw.edge_flows, fw.edge_drops, out);
+  if (view.derived_records()) {
+    out.carried = fw.edge_flows;
+    out.drops = fw.edge_drops;
+  } else pooled_entries(view, plan, k > 1 ? &attr : nullptr, fw.edge_flows, fw.edge_drops, out);
   return out;
 }
 
@@ -2010,6 +2012,9 @@ void LossyForwardingEvaluator::verify() const {
 }
 
 std::vector<ProgramFlow> LossyForwardingEvaluator::run(std::span<const std::span<const Amount>> injections) {
+#if NETGRAPH_CORE_PRIVATE_HOOKS
+  ++thread_entry_work().joint;
+#endif
   const std::size_t D = net_.views.size();
   std::vector<ProgramFlow> outs(D);
   shares_.resize(D);

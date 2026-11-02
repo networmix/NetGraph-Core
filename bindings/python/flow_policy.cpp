@@ -89,26 +89,19 @@ std::optional<std::optional<Amount>> design_units(const py::object& design) {
 py::dict state_obj(const py::object& self) {
   const auto& policy = policy_value(self);
   const auto& pe = detail::PolicyAccess::engine(policy);
-  struct Flow { detail::LiveFlow flow; FlowRecord record; };
   struct Snapshot {
     std::vector<NodeId> roster;
     Counter128 requested;
     bool infinite;
-    Amount delivered {0};
-    std::vector<std::vector<Flow>> record_groups;
+    Amount delivered;
+    std::vector<FlowRecord> records;
   };
   auto snapshot = native_call([&] {
     const auto gate = detail::LedgerAccess::lock(pe.ledger);
-    Snapshot state {pe.reachable_sources, pe.epoch.requested, pe.epoch.infinite, 0, {}};
-    state.record_groups.resize(pe.epoch.record_groups.size());
-    for (std::size_t i = 0; i < state.record_groups.size(); ++i) {
-      for (const auto& flow : pe.epoch.record_groups[i]) {
-        auto record = detail::LedgerAccess::live(pe.ledger, flow.record_counter);
-        state.delivered += record.delivered;
-        state.record_groups[i].push_back({flow, std::move(record)});
-      }
-    }
-    return state;
+    const auto* entry = detail::LedgerAccess::entry(pe.ledger, pe.policy_id);
+    return Snapshot {pe.reachable_sources, pe.epoch.requested, pe.epoch.infinite,
+                     entry != nullptr ? entry->delivered : 0,
+                     detail::LedgerAccess::records(pe.ledger, pe.policy_id)};
   });
   py::dict out;
   const auto& r = pe.config.routing;
@@ -117,30 +110,31 @@ py::dict state_obj(const py::object& self) {
   out["requested"] = counter_int(snapshot.requested);
   out["infinite"] = snapshot.infinite;
   out["placed_demand"] = snapshot.delivered;
-  py::dict record_groups;
+  py::dict cohorts;
   // Per roster source its flows (T1, T2 and Pinned: per program entry, keyed by its position).
   const auto* gl = std::get_if<CentralizedTE>(&r);
   const bool per_entry = std::holds_alternative<Pinned>(r) || std::holds_alternative<DistributedTE>(r) ||
                          (gl != nullptr && gl->tunnel_count.has_value());
-  for (std::size_t i = 0; i < snapshot.record_groups.size(); ++i) {
+  const auto groups = per_entry ? (std::holds_alternative<Pinned>(r) ? pe.view.data->entries.size() : snapshot.records.size())
+                                : snapshot.roster.size();
+  for (std::size_t i = 0; i < groups; ++i) {
     py::list flows;
-    for (const auto& row : snapshot.record_groups[i]) {
-      const auto& s = row.flow;
-      const FlowRecord& rec = row.record;
+    if (i < snapshot.records.size()) {
+      const auto& rec = snapshot.records[i];
       py::dict f;
       f["flow_id"] = py::make_tuple(rec.flow_id.first, rec.flow_id.second);
-      f["src"] = s.source;
-      const auto edges = detail::PredecessorDAGBuilder::ascending(*s.route);
+      f["src"] = rec.sources.front();
+      const auto edges = detail::PredecessorDAGBuilder::ascending(*rec.route);
       f["route"] = std::vector<EdgeId>(edges.begin(), edges.end());
       f["T"] = rec.delivered;
       f["delivered"] = rec.delivered;
       f["alloc"] = pairs_list(rec.edge_flows);
-      f["entry"] = s.entry_id < 0 ? py::object(py::none()) : py::object(py::int_(s.entry_id));
+      f["entry"] = rec.entry_id ? py::object(py::int_(*rec.entry_id)) : py::object(py::none());
       flows.append(f);
     }
-    record_groups[py::int_(per_entry ? static_cast<std::int64_t>(i) : static_cast<std::int64_t>(snapshot.roster[i]))] = flows;
+    cohorts[py::int_(per_entry ? static_cast<std::int64_t>(i) : static_cast<std::int64_t>(snapshot.roster[i]))] = flows;
   }
-  out["cohorts"] = record_groups;
+  out["cohorts"] = cohorts;
   return out;
 }
 
@@ -377,7 +371,7 @@ void register_flow_policy(py::module_& m) {
           py::arg("offer"), py::arg("outputs") = py::none(),
           "private: place() with the transaction's trace (the call's intermediate values, keyed as\n"
           "the tests' model of the policy keys them)")
-      .def("_state", &state_obj, "private: the epoch state (roster, requested, +inf, record_groups)")
+      .def("_state", &state_obj, "private: the epoch state (roster, requested, +inf, records)")
       .def(
           "_owner", [](const py::object& self) { auto& p = policy_value(self); return detail::PolicyAccess::engine(p).policy_id; },
           "private: the ledger-local owner id (FlowRecord.policy_id)");

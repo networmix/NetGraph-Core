@@ -338,6 +338,7 @@ failed.
 | `cache` | `cache.cold`, `cache.warm`, `cache.frozen.reads` | 64 direct lookups from a cleared, prepopulated building, or prepopulated frozen cache |
 | `concurrency` | `concurrency.place_zero`, `delivered`, `program`, `config` | 10,000 calls of one operation on a prepared one-link policy (capacity 16, cost 3, q=1, replace(4)); config is the immutable control |
 | `concurrency` | `concurrency.two_ledgers_serial`, `concurrency.two_ledgers_parallel` | 32 evaluate(32) calls on each independent ledger, reading the static preparation installed during setup; 384-node/2816-edge layered graph, q=1, capacity 64, two thread launches and joins in both modes |
+| `concurrency` | `concurrency.two_ledgers_serial.scaled`, `concurrency.two_ledgers_parallel.scaled` | Same graph, preparation and two thread launches; 512 evaluate(32) calls per ledger amortize launch cost for scaling comparisons. Both sides do the same work. |
 | `eligibility` | `eligibility.build_intersect` | 64 failure states built and intersected |
 | `construct` | the fourteen storage construction rows (`construct.wgrid256`, `fanout_clos`, `random1m_nat`, `random1m_scat`, `wide65k`, `k65536`, `k65537`, `star1m`, `sparse1m`, `empty1m`, `random65k_bprime`, `random65k_reversed`, `star1m_smallk`, `instar1m_smallk`) | the constructor on prepared input: many short rows, the sort fallback above 65,536 distinct costs and both sides of that limit, very long rows, mostly isolated nodes, an empty graph, input already in or reversed from edge-id order |
 | `spf` | the six storage search rows (`spf.to.{wgrid256,random1m,wide_fallback16k,width65536,width65537}`, `spf.full.random1m`) | 8 full searches each: the bucket queue, a large scattered graph, the heap, and both sides of the bucket-width limit 65,536 |
@@ -386,6 +387,40 @@ Capacity/headroom collapse and bottleneck scores share their preparation branch 
 capacity. Static weight variants and memberless roots, and controller source-allocation variants,
 remain semantic controls rather than more timing rows for the same changed branch. Existing
 pooled, program, batch, global and tunnel rows remain controls of the connected readers.
+
+### Aggregate entries and explicit record reads
+
+These fifteen rows use the same public operations on both revisions. Graphs, fixed masks and
+prepared read/copy states are outside timing. Ordinary placement rows retain complete default
+results and teardown; they do not read records. No output field is disabled.
+
+| Rows | Work per iteration |
+| --- | --- |
+| `ledger.aggregate_default.many`, `.one`, `.edges` | The existing Clos128x32 anycast fixture, 96 sources or one, Lossless replace4000. `.edges` also requests edge flows, residual, holds and boundary on both sides. |
+| `ledger.record_read.many`, `.one`, `.orphan`, `.repair` | `records()` plus `record(last_id)`, folding all thirteen record fields and destroying snapshots. The first three use the anycast fixture; `.orphan` destroys its policy in setup. `.repair` uses the non-tight Weighted supplied-DAG fixture, excludes its first input edge and destroys the policy and mask in setup. Descriptive rows, with no old-speed budget. |
+| `pooled.lossy.repeat`, `.one` | Clos32x16, eight sources or one; place5, place7, place infinity twice, remove. Infinity uses the remaining first-hop view; a repeated call may inject zero. |
+| `program.stale_then_place.pooled`, `.one` | The same Lossy fixture: replace4, forward4 with the first head black-holed, place2, place0, remove. The later place uses its ordinary view. |
+| `ledger.copy.many`, `.one` | Copy/destruct an orphaned anycast ledger; fold carried, residual, reserved and unreserved vectors without reading records. |
+| `ledger.lifecycle.one` | One source and one edge of capacity10/cost3: replace4, zero, evaluate6, forward3, remove and reset. |
+| `ledger.joint.pooled_cycle` | Two demands with two sources each cross links of capacities5 and6 in opposite order. One SIMULTANEOUS replace21/15 list, complete results and ledger lifetime; the independently derived fixed point delivers1 to each demand. |
+
+The history/lifecycle/cycle offers and capacities above are integer Core units. Other fixtures
+keep their existing `kResolution` conversion. A record digest normalizes the opaque ledger uid;
+the separate semantic preflight checks its ownership relation, identities and full values.
+
+Default results and zero calls must not derive earlier history. A multi-head Lossy call uses one
+attributed forwarding pass; one head uses the whole aggregate without attribution. Lossless
+uses its allocation kernel without an attributed forwarding. A bulk many-head record read
+derives a forwarding once, and the separate last-record read derives it again. These are
+untimed mechanism checks; timing binaries contain no observers or work counters.
+
+All ordinary new rows keep the 3% time budget and existing fresh-process RSS rule. The native
+gated call rows retain their 0.1-microsecond added-per-call allowance; config keeps the ordinary
+budget. Two-ledger serial/parallel uses identical work and thread-launch counts with the 1.5
+speedup target. Record-read rows and the existing `pooled.from_dag_build.clos` remain descriptive.
+Compare the full mapped selection with both the released Core base and the preceding accepted
+head. Short plan-only calibrations estimate a requested window; they provide no performance
+verdict and do not replace fresh full warm-ups or A/A controls in the granted window.
 
 ### Frozen inputs
 
