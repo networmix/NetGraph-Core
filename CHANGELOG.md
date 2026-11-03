@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Results**: **BREAKING** Completed `PlacementResult.program` and `PlacementResult.by_source` are absent by default (`None` in Python). Request them with `OutputOptions(program=True)` and `OutputOptions(by_source=True)`. In C++, `PlacementResult::by_source` is now `std::optional<std::vector<SourceFlow>>`, `program` is null unless requested, and `OutputOptions` gains the members `program` and `by_source`. The live policy's program and records remain available independently of result output options.
 - **Records**: `ShortestPaths` with Equal or Weighted allocation, programs built by `ForwardingProgram.from_dag`, and `Pinned` replays of either derive source records when read. Repeated record reads of a fixed state produce equal route values in distinct immutable `PredecessorDAG` objects; carried traffic and delivery values are unchanged.
 
 ## [0.12.0] - 2026-10-27

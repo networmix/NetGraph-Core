@@ -148,7 +148,9 @@ def test_ceiling_products_beyond_64_bits():
         t1 = ngc.FlowPolicyConfig(
             routing=ngc.DistributedTE(ngc.TunnelCount(2), cost_ceiling=ceiling)
         )
-        r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, t1).replace(2, design_demand=2)
+        r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, t1).replace(
+            2, design_demand=2, outputs=ngc.OutputOptions(program=True)
+        )
         status = ngc.TunnelStatus
         assert [t.status for t in r.program.tunnels] == [
             status.UP,

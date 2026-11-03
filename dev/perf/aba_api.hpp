@@ -64,6 +64,26 @@
 namespace abaapi {
 namespace nc = netgraph::core;
 
+// Map explicit detail requests onto either result API for cross-revision comparisons.
+// Earlier APIs retain both fields intrinsically; no product compatibility code is involved.
+template<class Options = nc::OutputOptions>
+inline Options completed_outputs(Options outputs = {}, bool program = true, bool by_source = true) {
+  if constexpr (requires { outputs.program; outputs.by_source; }) {
+    outputs.program = program;
+    outputs.by_source = by_source;
+  }
+  return outputs;
+}
+inline nc::EvaluationOptions completed_outputs(nc::EvaluationOptions options, bool program, bool by_source) {
+  options.outputs = completed_outputs(options.outputs, program, by_source);
+  return options;
+}
+template<class Result>
+inline const auto& source_rows(const Result& result) {
+  if constexpr (requires { result.by_source.value(); }) return result.by_source.value();
+  else return result.by_source;
+}
+
 // Digest: order-sensitive 64-bit mix (splitmix64 finaliser over a running state).
 struct Digest {
   std::uint64_t h = 0x9e3779b97f4a7c15ULL;
@@ -342,7 +362,7 @@ struct Ledger {
       cfg.routing = nc::Pinned {nc::ForwardingProgram::from_routes(*fg.graph(), s, t, routes, options), nullptr};
     }
     nc::FlowPolicy policy(fg, s, t, std::move(cfg));
-    const auto r = policy.place(nc::to_units(amount, kResolution));
+    const auto r = policy.place(nc::to_units(amount, kResolution), completed_outputs());
     return nc::as_float(r.call_delivered, kResolution);
   }
 };
@@ -352,7 +372,7 @@ inline double shortest_paths_capacity(const Graph& g, int src, int dst, Kernel k
   const nc::NodeId s[1] = {src};
   const nc::NodeId t[1] = {dst};
   nc::EvaluationOptions opts {config(nc::ShortestPaths {}, k), el.get(), nullptr, {}};
-  return nc::as_float(nc::evaluate_demand(g.ref(), s, t, opts).call_delivered, kResolution);
+  return nc::as_float(nc::evaluate_demand(g.ref(), s, t, completed_outputs(opts, true, true)).call_delivered, kResolution);
 }
 
 inline nc::FlowPolicyConfig global_config() {
@@ -367,7 +387,7 @@ inline std::uint64_t maxflow_exact(const Graph& g, int src, int dst, const Elig&
   nc::OutputOptions out;
   if (detailed) out = nc::OutputOptions {true, true, true, true};
   nc::EvaluationOptions opts {global_config(), el.get(), nullptr, out};
-  const auto r = nc::evaluate_demand(g.ref(), s, t, opts);
+  const auto r = nc::evaluate_demand(g.ref(), s, t, completed_outputs(opts, true, true));
   Digest d;
   d.add_d(nc::as_float(r.call_delivered, kResolution));
   d.add_i(r.min_cut ? static_cast<std::int64_t>(r.min_cut->size()) : -1);
@@ -396,7 +416,7 @@ inline std::uint64_t edge_failures_exact(const Graph& g, int src, int dst, const
   const nc::NodeId s[1] = {src};
   const nc::NodeId t[1] = {dst};
   nc::EvaluationOptions opts {global_config(), el.get(), nullptr, {}};
-  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), s, t, opts, workers));
+  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), s, t, completed_outputs(opts, true, true), workers));
 }
 
 // Complete evaluator call on a fixed failure-study population. A finite offer is
@@ -407,7 +427,7 @@ inline std::uint64_t edge_failures_unmasked(const Graph& g, int dst, std::option
   const nc::NodeId destinations[1] = {dst};
   nc::EvaluationOptions options {global_config()};
   if (offer) options.offer = std::optional<nc::Amount>(nc::to_units(*offer, kResolution));
-  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), sources, destinations, options, workers));
+  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), sources, destinations, completed_outputs(options, true, true), workers));
 }
 
 // Policy-model failure study over every allowed edge: ShortestPaths Equal.
@@ -416,7 +436,7 @@ inline std::uint64_t edge_failures_policy_all_edges(const Graph& g, int src, int
   const nc::NodeId t[1] = {dst};
   const auto cfg = config(nc::ShortestPaths {}, Kernel::Equal);
   nc::EvaluationOptions opts {cfg, el.get(), nullptr, {}};
-  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), s, t, opts, workers));
+  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), s, t, completed_outputs(opts, true, true), workers));
 }
 
 // Pooled ShortestPaths placement: one Equal policy (Lossless, or Lossy) per demand of several
@@ -434,13 +454,13 @@ inline std::uint64_t pooled_place(const Graph& g, const std::vector<std::pair<st
     const std::vector<nc::NodeId> sv(srcs.begin(), srcs.end());
     const nc::NodeId tv[1] = {dst};
     policies.push_back(std::make_unique<nc::FlowPolicy>(fg, sv, tv, cfg));
-    const auto r = policies.back()->place(units);
+    const auto r = policies.back()->place(units, completed_outputs());
     d.add_i(r.call_delivered);
     nc::Amount drops = 0;
     for (const auto& [e, x] : r.call_edge_drops) drops += x;
     d.add_i(drops);
     d.add_i(static_cast<std::int64_t>(r.call_edge_drops.size()));
-    for (const auto& row : r.by_source) {
+    for (const auto& row : source_rows(r)) {
       d.add_i(row.source);
       d.add(row.admitted.lo);
       d.add_i(row.delivered);
@@ -469,11 +489,11 @@ inline std::uint64_t batch_place(const Graph& g, const std::vector<std::pair<std
   }
   std::vector<nc::PlacementResult> results;
   if (mode == Batch::Scalar) {
-    for (auto& p : policies) results.push_back(p->replace(units));
+    for (auto& p : policies) results.push_back(p->replace(units, std::nullopt, completed_outputs()));
   } else {
     std::vector<nc::Action> actions;
     for (auto& p : policies) actions.push_back(nc::Replace {*p, units});
-    results = nc::apply_actions(fg, actions, mode == Batch::Ordered ? nc::BatchMode::Ordered : nc::BatchMode::Simultaneous);
+    results = nc::apply_actions(fg, actions, mode == Batch::Ordered ? nc::BatchMode::Ordered : nc::BatchMode::Simultaneous, completed_outputs());
   }
   Digest d;
   for (const auto& r : results) {
@@ -482,7 +502,7 @@ inline std::uint64_t batch_place(const Graph& g, const std::vector<std::pair<std
     for (const auto& [e, x] : r.call_edge_drops) drops += x;
     d.add_i(drops);
     d.add_i(static_cast<std::int64_t>(r.call_edge_drops.size()));
-    for (const auto& row : r.by_source) {
+    for (const auto& row : source_rows(r)) {
       d.add_i(row.source);
       d.add(row.admitted.lo);
       d.add_i(row.delivered);
@@ -556,7 +576,7 @@ inline std::uint64_t ring_digest(const std::vector<nc::Amount>& delivered, std::
 // One replace(192) of the ring's one program (a replace releases its own load: every iteration
 // starts from the same state).
 inline std::uint64_t ring_program(Ring& r) {
-  const auto res = r.program->replace(192);
+  const auto res = r.program->replace(192, std::nullopt, completed_outputs());
   std::vector<nc::Amount> delivered;
   for (const auto& t : res.by_tunnel) delivered.push_back(t.delivered);
   return ring_digest(delivered, r.program_ledger->carried());
@@ -565,7 +585,7 @@ inline std::uint64_t ring_program(Ring& r) {
 inline std::uint64_t ring_list(Ring& r) {
   std::vector<nc::Action> actions;
   for (auto& p : r.policies) actions.push_back(nc::Replace {*p, 3});
-  const auto res = nc::apply_actions(*r.list_ledger, actions, nc::BatchMode::Simultaneous);
+  const auto res = nc::apply_actions(*r.list_ledger, actions, nc::BatchMode::Simultaneous, completed_outputs());
   std::vector<nc::Amount> delivered;
   for (const auto& x : res) delivered.push_back(x.call_delivered);
   return ring_digest(delivered, r.list_ledger->carried());
@@ -612,13 +632,13 @@ inline std::uint64_t pooled_pinned_place(const Graph& g, const std::vector<std::
     const nc::FlowPolicyConfig cfg {.routing = nc::Pinned {programs[i], nullptr},
                                     .admission = lossy ? nc::Admission::Lossy : nc::Admission::Lossless};
     policies.push_back(std::make_unique<nc::FlowPolicy>(fg, sv, tv, cfg));
-    const auto r = policies.back()->place(units);
+    const auto r = policies.back()->place(units, completed_outputs());
     d.add_i(r.call_delivered);
     nc::Amount drops = 0;
     for (const auto& [e, x] : r.call_edge_drops) drops += x;
     d.add_i(drops);
     d.add_i(static_cast<std::int64_t>(r.call_edge_drops.size()));
-    for (const auto& row : r.by_source) {
+    for (const auto& row : source_rows(r)) {
       d.add_i(row.source);
       d.add(row.admitted.lo);
       d.add_i(row.delivered);
@@ -645,7 +665,7 @@ inline Program global_program(const Graph& g, const std::vector<int>& srcs, int 
   nc::FlowLedger fg(g.g);
   const nc::NodeId tv[1] = {dst};
   nc::FlowPolicy policy(fg, out.srcs, tv, global_config());
-  out.p = policy.replace(nc::to_units(offer, kResolution)).program;
+  out.p = policy.replace(nc::to_units(offer, kResolution), std::nullopt, completed_outputs()).program;
   return out;
 }
 
@@ -693,11 +713,11 @@ struct Installed {
     const std::vector<nc::NodeId> sv(srcs.begin(), srcs.end());
     const nc::NodeId tv[1] = {dst};
     policy = std::make_unique<nc::FlowPolicy>(fg, sv, tv, global_config());
-    (void)policy->replace(nc::to_units(offer, kResolution));
+    (void)policy->replace(nc::to_units(offer, kResolution), std::nullopt, completed_outputs());
   }
   std::uint64_t forward_all(const std::vector<double>& offers) {
     Digest d;
-    for (double o : offers) add_rows(d, policy->forward(nc::to_units(o, kResolution)));
+    for (double o : offers) add_rows(d, policy->forward(nc::to_units(o, kResolution), nullptr, completed_outputs()));
     return d.h;
   }
 };
@@ -716,7 +736,7 @@ inline std::uint64_t pinned_failures(const Graph& g, const Program& prog, const 
     cfg.routing = nc::Pinned {prog.p, stale ? st : nullptr};
     cfg.admission = nc::Admission::Lossy;
     nc::FlowPolicy policy(fg, prog.srcs, tv, std::move(cfg), stale ? nullptr : st.get());
-    add_rows(d, policy.replace(units));
+    add_rows(d, policy.replace(units, std::nullopt, completed_outputs()));
   }
   return d.h;
 }
@@ -738,8 +758,8 @@ inline std::uint64_t replace_under_load(const Graph& g, const std::vector<int>& 
   Digest d;
   const auto units = nc::to_units(offer, kResolution);
   for (double load : loads) {
-    (void)outside.replace(nc::to_units(load, kResolution));
-    const auto r = demand.replace(units);
+    (void)outside.replace(nc::to_units(load, kResolution), std::nullopt, completed_outputs());
+    const auto r = demand.replace(units, std::nullopt, completed_outputs());
     d.add_i(r.call_delivered);
     d.add_i(r.delivery_delta);
     d.add_i(r.routes_changed ? 1 : 0);
@@ -822,7 +842,7 @@ struct NoPooledObservation {
 inline void pooled_digest(Digest& d, const nc::PlacementResult& r) {
   add_rows(d, r);
   d.add_i(r.routes_changed); d.add_i(r.weights_changed);
-  for (const auto& row : r.by_source) {
+  for (const auto& row : source_rows(r)) {
     d.add_i(row.source); d.add(row.admitted.hi); d.add(row.admitted.lo); d.add_i(row.delivered);
     d.add(row.source_drops.hi); d.add(row.source_drops.lo);
     d.add(row.total_edge_drops.hi); d.add(row.total_edge_drops.lo);
@@ -834,7 +854,7 @@ inline std::uint64_t pooled_trial(const PooledSpec& spec, Observe observe = {}) 
   auto cfg = spec.config;
   if (spec.supplied) cfg.routing = nc::Pinned {nc::ForwardingProgram::from_dag(spec.graph.ref(), spec.sources, spec.destinations, spec.dag, spec.options), nullptr};
   nc::FlowPolicy policy(ledger, spec.sources, spec.destinations, std::move(cfg));
-  const auto result = policy.replace(spec.offer);
+  const auto result = policy.replace(spec.offer, std::nullopt, completed_outputs());
   observe(result, policy, ledger);
   Digest d; pooled_digest(d, result); return d.h;
 }
@@ -843,12 +863,12 @@ struct PooledInstalled {
   nc::FlowLedger ledger;
   nc::FlowPolicy policy;
   explicit PooledInstalled(PooledSpec input) : spec(std::move(input)), ledger(spec.graph.g, spec.baseline),
-      policy(ledger, spec.sources, spec.destinations, spec.config) { (void)policy.replace(spec.offer); }
+      policy(ledger, spec.sources, spec.destinations, spec.config) { (void)policy.replace(spec.offer, std::nullopt, completed_outputs()); }
   template<class Observe = NoPooledObservation>
   std::uint64_t forward_all(const std::vector<double>& offers, Observe observe = {}) {
     Digest d;
     for (double offer : offers) {
-      const auto result = policy.forward(nc::to_units(offer, kResolution));
+      const auto result = policy.forward(nc::to_units(offer, kResolution), nullptr, completed_outputs());
       observe(result, policy, ledger);
       pooled_digest(d, result);
     }
@@ -863,7 +883,7 @@ inline std::uint64_t pooled_failure_series(const PooledSpec& spec, std::shared_p
     nc::FlowLedger ledger(spec.graph.g, spec.baseline);
     nc::FlowPolicyConfig cfg {nc::Pinned {program, stale ? state : nullptr}, nc::Admission::Lossy};
     nc::FlowPolicy policy(ledger, spec.sources, spec.destinations, std::move(cfg), stale ? nullptr : state.get());
-    const auto result = policy.replace(spec.offer);
+    const auto result = policy.replace(spec.offer, std::nullopt, completed_outputs());
     observe(result, policy, ledger);
     pooled_digest(d, result);
   }
@@ -895,17 +915,77 @@ inline nc::OutputOptions entry_outputs(bool edges) {
   out.edge_flows = out.residual = out.edge_reservations = out.saturated_boundary_edges = edges;
   return out;
 }
+// Every aggregate/call field of the ShortestPaths fixtures; optional detail retention
+// deliberately differs between the old and new API and is checked outside timing.
+inline void aggregate_digest(Digest& d, const nc::PlacementResult& r) {
+  const auto counter = [&](const nc::Counter128& x) { d.add(x.hi); d.add(x.lo); };
+  const auto optional_counter = [&](const auto& x) { d.add(x.has_value()); if (x) counter(*x); };
+  d.add_i(r.call_delivered); d.add(r.call_undelivered.has_value());
+  if (r.call_undelivered) d.add_i(*r.call_undelivered);
+  d.add_i(r.delivery_delta); d.add_i(r.call_source_drops);
+  d.add(r.call_edge_drops.size());
+  for (auto [e, x] : r.call_edge_drops) { d.add_i(e); d.add_i(x); }
+  d.add_i(static_cast<std::int64_t>(r.termination));
+  d.add(r.routes_changed); d.add(r.weights_changed); d.add(r.reservations_changed);
+  optional_counter(r.requested); optional_counter(r.offered); counter(r.admitted);
+  d.add_i(r.delivered); optional_counter(r.unadmitted); counter(r.source_drops);
+  d.add(r.edge_drops.size());
+  for (auto [e, x] : r.edge_drops) { d.add_i(e); counter(x); }
+  d.add(r.plan.has_value()); d.add(r.by_tunnel.size());
+  for (const auto& row : r.by_tunnel) {
+    d.add_i(row.entry_id); d.add_i(row.head); d.add_i(status_code(row.status));
+    counter(row.assigned); d.add_i(row.delivered); counter(row.total_edge_drops);
+  }
+  optional_counter(r.total_cost); d.add(r.marginal_cost_curve.has_value());
+  if (r.marginal_cost_curve) for (auto [cost, units] : *r.marginal_cost_curve) { d.add_i(cost); d.add_i(units); }
+  for (const auto* values : {&r.edge_flows, &r.residual, &r.edge_reservations}) {
+    d.add(values->has_value()); if (*values) for (auto x : **values) d.add_i(x);
+  }
+  for (const auto* values : {&r.saturated_boundary_edges, &r.min_cut}) {
+    d.add(values->has_value()); if (*values) for (auto x : **values) d.add_i(x);
+  }
+}
 template<class Observe = NoPooledObservation>
 inline std::uint64_t aggregate_trial(const PooledSpec& spec, bool edges, Observe observe = {}) {
   nc::FlowLedger ledger(spec.graph.g, spec.baseline);
   nc::FlowPolicy policy(ledger, spec.sources, spec.destinations, spec.config);
   auto result = policy.replace(spec.offer, std::nullopt, entry_outputs(edges));
   observe(result, policy, ledger);
-  Digest d; pooled_digest(d, result);
-  for (const auto* values : {&result.edge_flows, &result.residual, &result.edge_reservations})
-    if (*values) for (auto x : **values) d.add_i(x);
-  if (result.saturated_boundary_edges) for (auto e : *result.saturated_boundary_edges) d.add_i(e);
+  Digest d; aggregate_digest(d, result);
   return d.h;
+}
+template<class Observe = NoPooledObservation>
+inline std::uint64_t result_options_trial(const PooledSpec& spec, bool program, bool by_source, Observe observe = {}) {
+  nc::FlowLedger ledger(spec.graph.g, spec.baseline);
+  nc::FlowPolicy policy(ledger, spec.sources, spec.destinations, spec.config);
+  const auto result = policy.replace(spec.offer, std::nullopt, completed_outputs(nc::OutputOptions {}, program, by_source));
+  observe(result, policy, ledger);
+  Digest d; aggregate_digest(d, result);
+  if (program) {
+    if (!result.program) throw std::runtime_error("requested program is absent");
+    for (auto source : result.program->sources()) d.add_i(source);
+    for (auto target : result.program->destinations()) d.add_i(target);
+    d.add(result.program->tunnels().size());
+  }
+  if (by_source) for (const auto& row : source_rows(result)) {
+    d.add_i(row.source); d.add(row.offered.has_value());
+    if (row.offered) { d.add(row.offered->hi); d.add(row.offered->lo); }
+    d.add(row.admitted.hi); d.add(row.admitted.lo); d.add_i(row.delivered);
+    d.add(row.source_drops.hi); d.add(row.source_drops.lo);
+    d.add(row.total_edge_drops.hi); d.add(row.total_edge_drops.lo);
+  }
+  return d.h;
+}
+template<class Observe = NoPooledObservation>
+inline std::uint64_t aggregate_history(const PooledSpec& spec, Observe observe = {}) {
+  nc::FlowLedger ledger(spec.graph.g, spec.baseline);
+  nc::FlowPolicy policy(ledger, spec.sources, spec.destinations, spec.config);
+  Digest d;
+  for (auto offer : {std::optional<nc::Amount>(5), std::optional<nc::Amount>(7), std::optional<nc::Amount>(), std::optional<nc::Amount>()}) {
+    const auto result = policy.place(offer);
+    observe(result, policy, ledger); aggregate_digest(d, result);
+  }
+  policy.remove(); return d.h;
 }
 template<class Observe = NoPooledObservation>
 inline std::uint64_t entry_history(const PooledSpec& spec, bool stale, Observe observe = {}) {
@@ -916,14 +996,14 @@ inline std::uint64_t entry_history(const PooledSpec& spec, bool stale, Observe o
     observe(result, policy, ledger); pooled_digest(d, result);
   };
   if (stale) {
-    capture(policy.replace(4));
+    capture(policy.replace(4, std::nullopt, completed_outputs()));
     const std::vector<nc::NodeId> dark {spec.sources.front()};
     const auto mask = spec.graph.ref().eligibility(dark, {});
-    capture(policy.forward(4, &mask));
-    capture(policy.place(2)); capture(policy.place(0));
+    capture(policy.forward(4, &mask, completed_outputs()));
+    capture(policy.place(2, completed_outputs())); capture(policy.place(0, completed_outputs()));
   } else {
-    capture(policy.place(5)); capture(policy.place(7));
-    capture(policy.place(std::nullopt)); capture(policy.place(std::nullopt));
+    capture(policy.place(5, completed_outputs())); capture(policy.place(7, completed_outputs()));
+    capture(policy.place(std::nullopt, completed_outputs())); capture(policy.place(std::nullopt, completed_outputs()));
   }
   policy.remove();
   return d.h;
@@ -944,7 +1024,7 @@ struct EntrySnapshot {
       mask = std::make_unique<nc::Eligibility>(spec.graph.ref().eligibility({}, dark));
     }
     policy = std::make_unique<nc::FlowPolicy>(ledger, spec.sources, spec.destinations, cfg, mask.get());
-    (void)policy->replace(spec.offer);
+    (void)policy->replace(spec.offer, std::nullopt, completed_outputs());
     last = policy->records().back().flow_id;
     if (orphan || repair) policy.reset();
   }
@@ -972,8 +1052,8 @@ inline std::uint64_t entry_lifecycle(const Graph& graph, Observe observe = {}) {
     auto capture = [&](const nc::PlacementResult& result) {
       observe(result, policy, ledger); pooled_digest(d, result);
     };
-    capture(policy.replace(4)); capture(policy.place(0));
-    capture(policy.evaluate(6)); capture(policy.forward(3));
+    capture(policy.replace(4, std::nullopt, completed_outputs())); capture(policy.place(0, completed_outputs()));
+    capture(policy.evaluate(6, std::nullopt, completed_outputs())); capture(policy.forward(3, nullptr, completed_outputs()));
     policy.remove();
   }
   ledger.reset();
@@ -987,7 +1067,7 @@ inline std::uint64_t entry_joint(const Graph& graph, Observe observe = {}) {
   const nc::FlowPolicyConfig cfg {nc::ShortestPaths(), nc::Admission::Lossy};
   nc::FlowPolicy pa(ledger, a, ta, cfg), pb(ledger, b, tb, cfg);
   const nc::Action actions[] = {nc::Replace {pa, 21}, nc::Replace {pb, 15}};
-  const auto results = nc::apply_actions(ledger, actions, nc::BatchMode::Simultaneous);
+  const auto results = nc::apply_actions(ledger, actions, nc::BatchMode::Simultaneous, completed_outputs());
   observe(results[0], pa, ledger); observe(results[1], pb, ledger);
   Digest d;
   for (const auto& result : results) pooled_digest(d, result);
@@ -1004,12 +1084,12 @@ inline nc::FlowPolicyConfig global_equal_config() {
 inline std::uint64_t global_equal_capacity(const Graph& g, const std::vector<int>& srcs, int dst) {
   const std::vector<nc::NodeId> sv(srcs.begin(), srcs.end());
   const nc::NodeId tv[1] = {dst};
-  const auto r = nc::evaluate_demand(g.ref(), sv, tv, nc::EvaluationOptions {global_equal_config(), nullptr, nullptr, {}});
+  const auto r = nc::evaluate_demand(g.ref(), sv, tv, completed_outputs(nc::EvaluationOptions {global_equal_config(), nullptr, nullptr, {}}, true, true));
   Digest d;
   d.add_i(r.call_delivered);
   d.add(r.total_cost->hi);
   d.add(r.total_cost->lo);
-  for (const auto& row : r.by_source) {
+  for (const auto& row : source_rows(r)) {
     d.add_i(row.source);
     d.add(row.admitted.lo);
   }
@@ -1020,7 +1100,7 @@ inline std::uint64_t global_equal_capacity(const Graph& g, const std::vector<int
 inline std::uint64_t edge_failures_equal_global(const Graph& g, const std::vector<int>& srcs, int dst) {
   const std::vector<nc::NodeId> sv(srcs.begin(), srcs.end());
   const nc::NodeId tv[1] = {dst};
-  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), sv, tv, nc::EvaluationOptions {global_equal_config()}, 1));
+  return fold_edge_failures(nc::evaluate_edge_failures(g.ref(), sv, tv, completed_outputs(nc::EvaluationOptions {global_equal_config()}, true, true), 1));
 }
 
 // Keep the historical-build adapter compilable against a Core preceding declared
@@ -1047,8 +1127,8 @@ inline std::uint64_t global_weighted_capacity(const Graph& g, const std::vector<
   std::vector<nc::Amount> weights(static_cast<std::size_t>(g.ref().num_nodes()),0);
   for(std::size_t i=0;i<sv.size();++i)weights[static_cast<std::size_t>(sv[i])]=static_cast<nc::Amount>(i+1);
   const nc::EvaluationOptions options{captured_config(weights,true),nullptr,nullptr,{true,true,true,true,true}};
-  if(failures)return fold_edge_failures(nc::evaluate_edge_failures(g.ref(),sv,tv,options,1));
-  Digest d;add_rows(d,nc::evaluate_demand(g.ref(),sv,tv,options));return d.h;
+  if(failures)return fold_edge_failures(nc::evaluate_edge_failures(g.ref(),sv,tv, completed_outputs(options, true, true),1));
+  Digest d;add_rows(d,nc::evaluate_demand(g.ref(),sv,tv, completed_outputs(options, true, true)));return d.h;
 }
 
 inline std::shared_ptr<const nc::Graph> captured_graph() {
@@ -1064,13 +1144,13 @@ inline std::uint64_t captured_series(const std::shared_ptr<const nc::Graph>& g,i
   const nc::Amount m=nc::kDomainLimit-1;
   const std::vector<nc::Amount> weights=wide ? std::vector<nc::Amount>{m,m,m,m,m,0} : std::vector<nc::Amount>{2,1,3,1,2,0};
   const std::vector<nc::NodeId> sv{0,1,2,3,4},tv{5};
-  const auto program=nc::evaluate_demand(*g,sv,tv,nc::EvaluationOptions{captured_config(weights,weighted)}).program;
+  const auto program=nc::evaluate_demand(*g,sv,tv, completed_outputs(nc::EvaluationOptions{captured_config(weights,weighted)}, true, true)).program;
   nc::FlowLedger ledger(g);
   nc::FlowPolicy p(ledger,sv,tv,nc::FlowPolicyConfig{nc::Pinned{program},nc::Admission::Lossy});
   Digest d;
   for(int i=0;i<32;++i) {
     const nc::Amount offer=wide && i<4 ? m : wide && i==4 ? 5 : 17;
-    const auto r=incremental ? p.place(offer) : p.replace(offer);
+    const auto r=incremental ? p.place(offer, completed_outputs()) : p.replace(offer, std::nullopt, completed_outputs());
     add_rows(d,r);
   }
   return d.h;
@@ -1107,7 +1187,7 @@ inline std::uint64_t t1_setup(const Graph& g, const std::vector<std::pair<int, i
   T1Fabric f(g, pairs, tunnels, nc::Admission::Lossless);
   Digest d;
   const auto units = nc::to_units(offer, kResolution);
-  for (auto& p : f.policies) add_t1(d, p->replace(units, units));
+  for (auto& p : f.policies) add_t1(d, p->replace(units, units, completed_outputs()));
   return d.h;
 }
 
@@ -1117,7 +1197,7 @@ inline std::shared_ptr<T1Fabric> t1_installed(const Graph& g, const std::vector<
                                               int tunnels) {
   auto f = std::make_shared<T1Fabric>(g, pairs, tunnels, nc::Admission::Lossy);
   const auto units = nc::to_units(offer, kResolution);
-  for (auto& p : f->policies) (void)p->replace(units, units);
+  for (auto& p : f->policies) (void)p->replace(units, units, completed_outputs());
   return f;
 }
 
@@ -1127,7 +1207,7 @@ inline std::uint64_t t1_forward(T1Fabric& f, const std::vector<double>& offers) 
   Digest d;
   for (double offer : offers) {
     const auto units = nc::to_units(offer, kResolution);
-    for (auto& p : f.policies) add_t1(d, p->forward(units));
+    for (auto& p : f.policies) add_t1(d, p->forward(units, nullptr, completed_outputs()));
   }
   return d.h;
 }
@@ -1168,7 +1248,7 @@ inline std::uint64_t t2_fabric(const Graph& g, const std::vector<std::pair<int, 
     const nc::NodeId sv[1] = {s};
     const nc::NodeId tv[1] = {t};
     policies.push_back(std::make_unique<nc::FlowPolicy>(fg, sv, tv, cfg));
-    add_t2(d, policies.back()->replace(units, units));
+    add_t2(d, policies.back()->replace(units, units, completed_outputs()));
   }
   return d.h;
 }
@@ -1184,7 +1264,7 @@ inline std::uint64_t t2_mesh(const Graph& g, const std::vector<std::int64_t>& fr
   const nc::NodeId tv[1] = {destination};
   nc::FlowPolicy p(fg, sv, tv, t2_config(count, up_to, headroom));
   Digest d;
-  add_t2(d, p.replace(std::nullopt));
+  add_t2(d, p.replace(std::nullopt, std::nullopt, completed_outputs()));
   return d.h;
 }
 
@@ -1204,7 +1284,7 @@ struct ShortestPathsSeries {
       const nc::NodeId s[1] = {demands[i].first};
       const nc::NodeId t[1] = {demands[i].second};
       nc::FlowPolicy policy(fg, s, t, cfg, el.get(), &cache);
-      delivered[i] = nc::as_float(policy.place(nc::to_units(offers[i], kResolution)).call_delivered, kResolution);
+      delivered[i] = nc::as_float(policy.place(nc::to_units(offers[i], kResolution), completed_outputs()).call_delivered, kResolution);
     }
     return delivered;
   }
@@ -1231,7 +1311,7 @@ struct ShortestPathsEpochSeries {
     for (const auto& policy : policies) policy->remove();
     std::vector<double> delivered(policies.size());
     for (std::size_t i = 0; i < policies.size(); ++i)
-      delivered[i] = nc::as_float(policies[i]->place(nc::to_units(offers[i], kResolution)).call_delivered, kResolution);
+      delivered[i] = nc::as_float(policies[i]->place(nc::to_units(offers[i], kResolution), completed_outputs()).call_delivered, kResolution);
     return delivered;
   }
 };
@@ -1271,10 +1351,10 @@ struct TinyCalls {
       : graph(std::make_shared<const nc::Graph>(2, std::vector<nc::NodeId>{0}, std::vector<nc::NodeId>{1},
             std::vector<nc::Amount>{16}, std::vector<nc::Cost>{3}, 1.0)),
         ledger(graph), policy(ledger, std::vector<nc::NodeId>{0}, std::vector<nc::NodeId>{1}, {}) {
-    const auto r = policy.replace(4);
-    if (r.delivered != 4 || !r.program || r.by_source.size() != 1 || r.by_source[0].delivered != 4 ||
+    const auto r = policy.replace(4, std::nullopt, completed_outputs());
+    if (r.delivered != 4 || !r.program || source_rows(r).size() != 1 || source_rows(r)[0].delivered != 4 ||
         ledger.residual() != std::vector<nc::Amount>{12}) throw std::runtime_error("tiny fixture preparation failed");
-    const auto zero = policy.place(0);
+    const auto zero = policy.place(0, completed_outputs());
     if (zero.call_delivered != 0 || zero.delivered != 4 || zero.requested != nc::Counter128{0, 4} ||
         zero.routes_changed || zero.weights_changed || zero.reservations_changed || zero.program != r.program ||
         zero.edge_flows || zero.residual || zero.plan) throw std::runtime_error("tiny zero-call result differs");
@@ -1283,7 +1363,7 @@ struct TinyCalls {
     std::uint64_t sum = 0;
     for (int i = 0; i < 10000; ++i) {
       switch (operation) {
-        case TinyOperation::PlaceZero: sum += static_cast<std::uint64_t>(policy.place(0).delivered); break;
+        case TinyOperation::PlaceZero: sum += static_cast<std::uint64_t>(policy.place(0, completed_outputs()).delivered); break;
         case TinyOperation::Delivered: sum += static_cast<std::uint64_t>(policy.delivered()); break;
         case TinyOperation::Program: sum += policy.program() != nullptr ? 1U : 0U; break;
         case TinyOperation::Config: sum += policy.config().admission == nc::Admission::Lossless ? 1U : 0U; break;
@@ -1317,9 +1397,9 @@ struct ParallelLedgers {
     for (std::size_t i = 0; i < 2; ++i) {
       ledgers[i] = std::make_unique<nc::FlowLedger>(graph);
       policies[i] = std::make_unique<nc::FlowPolicy>(*ledgers[i], heads, targets, nc::FlowPolicyConfig{});
-      const auto r = policies[i]->replace(32);
-      if (r.delivered != 32 || r.by_source.size() != 32) throw std::runtime_error("parallel fixture preparation failed");
-      for (const auto& row : r.by_source) if (row.delivered != 1) throw std::runtime_error("parallel fixture source delivery differs");
+      const auto r = policies[i]->replace(32, std::nullopt, completed_outputs());
+      if (r.delivered != 32 || source_rows(r).size() != 32) throw std::runtime_error("parallel fixture preparation failed");
+      for (const auto& row : source_rows(r)) if (row.delivered != 1) throw std::runtime_error("parallel fixture source delivery differs");
     }
   }
   std::uint64_t run(bool parallel, int evaluates = 32) {
@@ -1330,10 +1410,9 @@ struct ParallelLedgers {
         for (int call = 0; call < evaluates; ++call) {
           // evaluate reads the static preparation installed during setup, without publishing it.
           const auto r = policies[i]->evaluate(32);
-          if (r.delivered != 32 || r.call_delivered != 32 || r.delivery_delta != 0 || r.by_source.size() != 32) {
+          if (r.delivered != 32 || r.call_delivered != 32 || r.delivery_delta != 0) {
             throw std::runtime_error("parallel evaluation differs");
           }
-          for (const auto& row : r.by_source) if (row.delivered != 1) throw std::runtime_error("parallel source delivery differs");
           sums[i] += static_cast<std::uint64_t>(r.delivered);
         }
       } catch (...) { errors[i] = std::current_exception(); }

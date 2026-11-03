@@ -30,6 +30,7 @@
 #include "netgraph/core/detail/route_builders.hpp"
 #include "netgraph/core/flow_ledger.hpp"
 #include "netgraph/core/flow_policy.hpp"
+#include "netgraph/core/evaluators.hpp"
 #include "netgraph/core/flow_record.hpp"
 #include "netgraph/core/graph.hpp"
 #include "netgraph/core/route_structures.hpp"
@@ -42,6 +43,18 @@ using detail::MinCostFlowResult;
 using detail::kMaxFlowCap;
 using detail::kNeverReached;
 using detail::solve_min_cost_flow;
+
+// Preserve other output selections while requesting the completed fields a test reads.
+inline OutputOptions result_outputs(OutputOptions outputs, bool program, bool by_source) {
+  outputs.program |= program;
+  outputs.by_source |= by_source;
+  return outputs;
+}
+
+inline EvaluationOptions result_outputs(EvaluationOptions options, bool program, bool by_source) {
+  options.outputs = result_outputs(options.outputs, program, by_source);
+  return options;
+}
 
 // An edge in input coordinates.
 struct InEdge {

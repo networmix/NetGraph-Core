@@ -72,26 +72,32 @@ void register_policy_config(py::module_& m) {
                             "strict holds per edge after the call; zeros for a model without holds), and min_cut (unrestricted\n"
                             "CentralizedTE with the optimized source allocation, when the call's solve reached the maximum\n"
                             "flow; [] for an empty roster, place(0) excepted; None for every other model or source allocation,\n"
-                            "for place(0) and for a forward with a nonempty roster).")
+                            "for place(0) and for a forward with a nonempty roster). program requests the installed,\n"
+                            "replayed or evaluated forwarding program; by_source requests one row per normalized input source.")
       .def(py::init([](StrictBool edge_flows, StrictBool residual, StrictBool saturated_boundary_edges, StrictBool edge_reservations,
-                       StrictBool min_cut) {
+                       StrictBool min_cut, StrictBool program, StrictBool by_source) {
              OutputOptions o;
              o.edge_flows = edge_flows;
              o.residual = residual;
              o.saturated_boundary_edges = saturated_boundary_edges;
              o.edge_reservations = edge_reservations;
              o.min_cut = min_cut;
+             o.program = program;
+             o.by_source = by_source;
              return o;
            }),
            py::kw_only(), py::arg("edge_flows") = StrictBool {false}, py::arg("residual") = StrictBool {false},
            py::arg("saturated_boundary_edges") = StrictBool {false}, py::arg("edge_reservations") = StrictBool {false},
-           py::arg("min_cut") = StrictBool {false})
+           py::arg("min_cut") = StrictBool {false}, py::arg("program") = StrictBool {false},
+           py::arg("by_source") = StrictBool {false})
       .def_readonly("edge_flows", &OutputOptions::edge_flows, "request PlacementResult.edge_flows")
       .def_readonly("residual", &OutputOptions::residual, "request PlacementResult.residual")
       .def_readonly("saturated_boundary_edges", &OutputOptions::saturated_boundary_edges, "request PlacementResult.saturated_boundary_edges")
       .def_readonly("edge_reservations", &OutputOptions::edge_reservations,
                     "request PlacementResult.edge_reservations")
-      .def_readonly("min_cut", &OutputOptions::min_cut, "request PlacementResult.min_cut");
+      .def_readonly("min_cut", &OutputOptions::min_cut, "request PlacementResult.min_cut")
+      .def_readonly("program", &OutputOptions::program, "request PlacementResult.program")
+      .def_readonly("by_source", &OutputOptions::by_source, "request PlacementResult.by_source");
 }
 
 } // namespace netgraph::core::bindings

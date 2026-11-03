@@ -534,7 +534,7 @@ TEST(DeletionFaults, GlobalSensitivityFailsAtEveryAllocation) {
     const EvaluationOptions opts {global_config(), nullptr, nullptr, OutputOptions {true, true, true}};
     const std::vector<NodeId> sources {0};
     const std::vector<NodeId> destinations {4};
-    const auto want = evaluate_edge_failures(*g, sources, destinations, opts, 1);
+    const auto want = evaluate_edge_failures(*g, sources, destinations, result_outputs(opts, true, true), 1);
     ASSERT_EQ(want.entries.size(), 3U);  // three baseline-positive candidates, including a cut edge
     const auto same = [&](const SensitivityResult& got, const std::string& where) {
       expect_same(got.baseline, want.baseline, where);
@@ -557,12 +557,12 @@ TEST(DeletionFaults, GlobalSensitivityFailsAtEveryAllocation) {
           bool failed = false;
           {
             SensitivityResult got;
-            const auto call = [&] { got = evaluate_edge_failures(*g, sources, destinations, opts, workers); };
+            const auto call = [&] { got = evaluate_edge_failures(*g, sources, destinations, result_outputs(opts, true, true), workers); };
             failed = workers_only ? fails_in_workers_at(at, call) : fails_at(at, call);
             if (!failed) {
               same(got, where);
             } else {
-              same(evaluate_edge_failures(*g, sources, destinations, opts, workers), "retry after " + where);
+              same(evaluate_edge_failures(*g, sources, destinations, result_outputs(opts, true, true), workers), "retry after " + where);
             }
           }
           EXPECT_EQ(g_live.load(), live) << where << ": a leak";

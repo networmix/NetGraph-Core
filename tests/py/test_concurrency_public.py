@@ -79,7 +79,7 @@ def test_immutable_configuration_and_snapshots():
                 assert config.admission == ngc.Admission.LOSSLESS
         def writer(_):
             for i in range(50):
-                p.replace(i % 10)
+                p.replace(i % 10, outputs=ngc.OutputOptions(program=True))
         with ThreadPoolExecutor(4) as pool:
             jobs = [pool.submit(reader, i) for i in range(3)] + [pool.submit(writer, 0)]
             for job in jobs:
@@ -92,7 +92,7 @@ def test_cache_lifecycle_and_retained_values():
     run_python("""
         network = graph()
         cache = ngc.ShortestPathCache(network)
-        options = ngc.EvaluationOptions(ngc.FlowPolicyConfig(routing=ngc.ShortestPaths()), cache=cache, offer=3)
+        options = ngc.EvaluationOptions(ngc.FlowPolicyConfig(routing=ngc.ShortestPaths()), cache=cache, offer=3, outputs=ngc.OutputOptions(program=True))
         retained = ngc.evaluate_demand(network, 0, 1, options)
         def reader():
             for _ in range(100):
@@ -164,7 +164,7 @@ def test_final_policy_rejects_swallowed_constructor_error():
         with pytest.raises(ngc.ShortestPathCacheMiss):
             ngc.FlowPolicy.__init__(shell, ledger, 0, 1, ngc.FlowPolicyConfig(routing=ngc.ShortestPaths()), cache=cache)
         with pytest.raises(TypeError):
-            shell.place(1)
+            shell.place(1, outputs=ngc.OutputOptions(program=True))
         del shell
         gc.collect()
         ledger.reset()
@@ -185,9 +185,9 @@ def test_final_policy_rejects_swallowed_constructor_error():
             lambda: ngc.FlowPolicy.config.fget(fake),
             lambda: ngc.FlowPolicy.program.fget(fake),
             lambda: ngc.FlowPolicy.place(fake, 1),
-            lambda: ngc.FlowPolicy.evaluate(fake, 1),
-            lambda: ngc.FlowPolicy.replace(fake, 1),
-            lambda: ngc.FlowPolicy.forward(fake, 1),
+            lambda: ngc.FlowPolicy.evaluate(fake, 1, outputs=ngc.OutputOptions(program=True)),
+            lambda: ngc.FlowPolicy.replace(fake, 1, outputs=ngc.OutputOptions(program=True)),
+            lambda: ngc.FlowPolicy.forward(fake, 1, outputs=ngc.OutputOptions(program=True)),
             lambda: ngc.FlowPolicy.remove(fake),
             lambda: ngc.FlowPolicy.delivered(fake),
             lambda: ngc.FlowPolicy.records(fake),

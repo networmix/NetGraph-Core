@@ -188,17 +188,19 @@ void register_placement_result(py::module_& m) {
       "[(EdgeId, units)], call_source_drops, termination, routes_changed, weights_changed and\n"
       "reservations_changed. The\n"
       "demand's state after the call (totals of the epoch): program (the installed ForwardingProgram;\n"
-      "evaluate: the computed one; None before the first preparation), plan (a TunnelPlan for T1 and T2;\n"
+      "evaluate: the computed one; None unless requested, and before the first preparation), plan (a TunnelPlan for T1 and T2;\n"
       "None for every other model), requested (float('inf') after an infinite request), offered (LOSSY: the traffic sent; None when LOSSLESS), admitted, delivered, unadmitted\n"
       "(LOSSLESS: requested - delivered, None after an infinite request; LOSSY: 0), source_drops,\n"
-      "edge_drops [(EdgeId, units)], by_source (one SourceFlow per normalized input source, ascending\n"
+      "edge_drops [(EdgeId, units)], by_source (when requested: one SourceFlow per normalized input source, ascending\n"
       "NodeId), by_tunnel (one TunnelFlow per program tunnel, ascending entry_id; an alternative view, never\n"
       "added to by_source), total_cost (controllers: CentralizedTE and ShortestPaths OPTIMIZED; else None)\n"
       "and marginal_cost_curve (unrestricted CentralizedTE with the optimized source allocation only).\n"
       "LOSSY: offered = source_drops + sum(edge_drops) + delivered. The rows sum to the totals, except, under\n"
       "LOSSY, for an empty roster and for a forwarding whose remaining captured source weights are all 0\n"
       "(a controller program that sent nothing, or a mask that left only zero-weight heads): the whole\n"
-      "offer is then the demand's source drops and every row is zero. Optional outputs, None unless requested: edge_flows, residual and edge_reservations\n"
+      "offer is then the demand's source drops and every row is zero. program and by_source are None unless\n"
+      "their OutputOptions flag is true; live policy programs and records are independent of these flags.\n"
+      "Other optional outputs, None unless requested: edge_flows, residual and edge_reservations\n"
       "(int64[E]), saturated_boundary_edges, min_cut (they describe the same\n"
       "state; evaluate: the evaluated one). Amounts that accumulate are exact ints (they may exceed 64 bits).")
       .def_property_readonly("call_delivered", int_reader(&PlacementResult::call_delivered), "the units placed (delivered) by this call")
@@ -231,7 +233,7 @@ void register_placement_result(py::module_& m) {
 
           "program",
           [](const PlacementResult& r) { return optional_shared(r.program); },
-          "the installed ForwardingProgram after the call (evaluate: the computed one); None before the first\n"
+          "if requested: the installed ForwardingProgram after the call (evaluate: the computed one); None otherwise and before the first\n"
           "preparation")
       .def_property_readonly(
 
@@ -268,8 +270,8 @@ void register_placement_result(py::module_& m) {
           "the epoch's drops on links [(EdgeId, units)], ascending EdgeId (empty unless LOSSY)")
       .def_property_readonly(
 
-          "by_source", [](const PlacementResult& r) { return tuple_of(r.by_source); },
-          "one SourceFlow per normalized input source, ascending NodeId (zero rows included)")
+          "by_source", [](const PlacementResult& r) -> py::object { return r.by_source ? py::object(tuple_of(*r.by_source)) : py::object(py::none()); },
+          "if requested: one SourceFlow per normalized input source, ascending NodeId (zero rows included); else None")
       .def_property_readonly(
 
           "by_tunnel", [](const PlacementResult& r) { return tuple_of(r.by_tunnel); },

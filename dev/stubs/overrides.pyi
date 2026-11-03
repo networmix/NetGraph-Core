@@ -431,10 +431,10 @@ class PlacementResult:
     # generated: def admitted(self) -> typing.Any:
     @property
     def admitted(self) -> int: ...
-    # reason: one SourceFlow per input source
-    # generated: def by_source(self) -> tuple:
+    # reason: an optional tuple, one SourceFlow per input source when requested
+    # generated: def by_source(self) -> typing.Any:
     @property
-    def by_source(self) -> tuple[SourceFlow, ...]: ...
+    def by_source(self) -> tuple[SourceFlow, ...] | None: ...
     # reason: one TunnelFlow per program tunnel
     # generated: def by_tunnel(self) -> tuple:
     @property

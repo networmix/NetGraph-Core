@@ -279,7 +279,7 @@ void register_flow_policy(py::module_& m) {
           "A full, independent computation and forwarding of offer (int units or float('inf')) from the\n"
           "policy's own released view (the residual plus its own carried load; T1 sets up on the unreserved\n"
           "capacity with its own holds released; T2 lays out on the released residual), as replace would do it -> PlacementResult (the computed\n"
-          "program and plan, the flags replace would set, the outputs of the evaluated state); publishes\n"
+          "plan, the flags replace would set, and requested outputs including program and by_source); publishes\n"
           "nothing, creates no record, books no hold and leaves the epoch as it was. design_demand as for\n"
           "replace. LOSSY requires a finite offer.")
       .def(

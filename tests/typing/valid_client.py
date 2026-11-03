@@ -147,7 +147,9 @@ policy = ng.FlowPolicy(
 result = policy.replace(
     10,
     design_demand=8,
-    outputs=ng.OutputOptions(residual=True, edge_reservations=True),
+    outputs=ng.OutputOptions(
+        residual=True, edge_reservations=True, program=True, by_source=True
+    ),
 )
 assert_type(result, ng.PlacementResult)
 plan = result.plan
@@ -209,7 +211,10 @@ assert_type(result.offered, int | None)
 assert_type(result.unadmitted, int | None)
 assert_type(result.total_cost, int | None)
 assert_type(result.call_edge_drops, list[tuple[int, int]])
-for row in result.by_source:
+source_rows = result.by_source
+assert_type(source_rows, tuple[ng.SourceFlow, ...] | None)
+assert source_rows is not None
+for row in source_rows:
     assert_type(row, ng.SourceFlow)
     assert_type(row.admitted, int)
     assert_type(row.offered, int | None)

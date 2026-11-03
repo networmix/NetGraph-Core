@@ -253,7 +253,7 @@ const std::string kRoundLimit = "lossy forwarding iteration did not reach a fixe
 TEST(ProgramExport, GlobalOptimized) {
   const auto g = graph(4, kB1);
   auto p = make(g, {0, 1}, {3}, global());
-  const auto r = p->place(12);
+  const auto r = p->place(12, OutputOptions {.program = true});
   ASSERT_TRUE(r.program);
   const auto& prog = *r.program;
   EXPECT_EQ(listing(prog), (Listing {{0, {0}, 2}, {1, {1, 2}, 10}}));
@@ -274,7 +274,7 @@ TEST(ProgramExport, GlobalOptimized) {
 TEST(ProgramExport, GlobalEqual) {
   const auto g = graph(4, kB1);
   auto p = make(g, {0, 1}, {3}, global(SourceAllocation::Equal));
-  const auto r = p->place(12);
+  const auto r = p->place(12, OutputOptions {.program = true});
   EXPECT_EQ(r.call_delivered, 4);
   EXPECT_EQ(listing(*r.program), (Listing {{0, {0}, 2}, {1, {1, 2}, 2}}));
   EXPECT_FALSE(r.program->source_weights().has_value());
@@ -284,7 +284,7 @@ TEST(ProgramExport, GlobalEqual) {
 TEST(ProgramExport, SingleSourceDecomposed) {
   const auto g = graph(4, kES);
   auto p = make(g, {0}, {3}, global());
-  const auto r = p->place(12);
+  const auto r = p->place(12, OutputOptions {.program = true});
   EXPECT_EQ(listing(*r.program), (Listing {{0, {0, 2}, 2}, {0, {1, 3}, 10}}));
   std::vector<std::pair<std::int32_t, Cost>> fields;
   for (const auto& t : r.program->tunnels()) fields.emplace_back(t.local_index, *t.path_cost);
@@ -297,7 +297,7 @@ TEST(ProgramExport, SingleSourceDecomposed) {
 TEST(ProgramExport, ShortestPathsMaxFlow) {
   const auto g = graph(4, kES);
   auto p = make(g, {0}, {3}, shortest_paths_policy(MF));
-  const auto r = p->place(12);
+  const auto r = p->place(12, OutputOptions {.program = true});
   EXPECT_EQ(r.call_delivered, 2);
   EXPECT_EQ(listing(*r.program), (Listing {{0, {0, 2}, 2}}));
   EXPECT_EQ(*r.program->source_weights(), (std::vector<std::pair<NodeId, Amount>> {{0, 2}}));
@@ -307,7 +307,7 @@ TEST(ProgramExport, ShortestPathsMaxFlow) {
 TEST(ProgramExport, ShortestPathsSplit) {
   const auto g = graph(4, kPool2);
   auto p = make(g, {0, 1}, {3}, shortest_paths_policy());
-  const auto r = p->place(2);
+  const auto r = p->place(2, OutputOptions {.program = true});
   ASSERT_TRUE(r.program);
   EXPECT_TRUE(r.program->tunnels().empty());
   EXPECT_FALSE(r.program->source_weights().has_value());
@@ -320,7 +320,7 @@ TEST(ProgramExport, ShortestPathsSplit) {
 TEST(ProgramExport, ZeroSupplyKept) {
   const auto g = graph(3, {{0, 2, 5, 1}, {1, 2, 5, 1}});
   auto p = make(g, {0, 1}, {2}, global());
-  const auto r = p->place(1);
+  const auto r = p->place(1, OutputOptions {.program = true});
   EXPECT_EQ(listing(*r.program), (Listing {{0, {0}, 1}}));
   EXPECT_EQ(*r.program->source_weights(), (std::vector<std::pair<NodeId, Amount>> {{0, 1}, {1, 0}}));
 }
@@ -331,11 +331,11 @@ TEST(ProgramExport, NoneBeforePreparation) {
   for (const auto& cfg : {global(), shortest_paths_policy()}) {
     auto p = make(g, {0, 1}, {2}, cfg);
     EXPECT_EQ(p->program(), nullptr);
-    const auto z = p->place(0);
+    const auto z = p->place(0, OutputOptions {.program = true});
     EXPECT_EQ(z.program, nullptr);
     EXPECT_TRUE(z.by_tunnel.empty());
     EXPECT_EQ(p->program(), nullptr);
-    (void)p->place(3);
+    (void)p->place(3, OutputOptions {.program = true});
     EXPECT_NE(p->program(), nullptr);
   }
 }
@@ -344,34 +344,34 @@ TEST(ProgramExport, NoneBeforePreparation) {
 TEST(ProgramExport, ReplayReproducesTheSolve) {
   const auto g = graph(4, kB1);
   auto solver = make(g, {0, 1}, {3}, global());
-  const auto prog = solver->place(12).program;
+  const auto prog = solver->place(12, OutputOptions {.program = true}).program;
   auto p = pinned(g, prog);
-  const auto r = p->place(12, kEdges);
+  const auto r = p->place(12, result_outputs(kEdges, true, false));
   EXPECT_EQ(r.call_delivered, 12);
   EXPECT_EQ(r.termination, Termination::Complete);
   EXPECT_EQ(*r.edge_flows, (Amounts {2, 10, 10}));
-  EXPECT_EQ(pinned(g, prog)->place(INF).call_delivered, 12);
+  EXPECT_EQ(pinned(g, prog)->place(INF, OutputOptions {.program = true}).call_delivered, 12);
 }
 
 // The producer's mask is saved: no replay brings source 1 back.
 TEST(ProgramExport, MaskSaved) {
   const auto g = graph(4, kB1);
   auto masked = make(g, {0, 1}, {3}, global(), no_nodes(*g, {1}));
-  const auto r = masked->place(12);
+  const auto r = masked->place(12, OutputOptions {.program = true, .by_source = true});
   EXPECT_EQ(r.call_delivered, 2);
   EXPECT_EQ(listing(*r.program), (Listing {{0, {0}, 2}}));
-  const auto lossy = pinned(g, r.program, LOSSY)->replace(12);
+  const auto lossy = pinned(g, r.program, LOSSY)->replace(12, std::nullopt, OutputOptions {.program = true, .by_source = true});
   EXPECT_EQ(lossy.call_delivered, 2);
-  ASSERT_EQ(lossy.by_source.size(), 2U);
-  EXPECT_EQ(lo(lossy.by_source[0].offered), 12);
-  EXPECT_EQ(lo(lossy.by_source[1].offered), 0);
+  ASSERT_EQ(lossy.by_source.value().size(), 2U);
+  EXPECT_EQ(lo(lossy.by_source.value()[0].offered), 12);
+  EXPECT_EQ(lo(lossy.by_source.value()[1].offered), 0);
 }
 
 // An empty roster installs an empty program.
 TEST(ProgramExport, EmptyRoster) {
   const auto g = graph(2, kOne);
   auto p = make(g, {0}, {1}, shortest_paths_policy(), no_nodes(*g, {0}));
-  const auto r = p->place(1);
+  const auto r = p->place(1, OutputOptions {.program = true});
   EXPECT_EQ(r.termination, Termination::NoRoute);
   ASSERT_TRUE(r.program);
   EXPECT_TRUE(r.program->tunnels().empty());
@@ -384,9 +384,9 @@ TEST(ProgramExport, EmptyRoster) {
 TEST(PinnedProgram, ProgramIsTheConfiguredOne) {
   const auto g = graph(4, kB1);
   auto solver = make(g, {0, 1}, {3}, global());
-  const auto prog = solver->place(12).program;
+  const auto prog = solver->place(12, OutputOptions {.program = true}).program;
   auto p = pinned(g, prog);
-  const auto r = p->place(1);
+  const auto r = p->place(1, OutputOptions {.program = true});
   EXPECT_EQ(r.program, prog);
   EXPECT_EQ(p->program(), prog);
   EXPECT_EQ(listing(*r.program), listing(*prog));
@@ -398,13 +398,13 @@ TEST(PinnedProgram, ProgramIsTheConfiguredOne) {
 TEST(GlobalSupport, OnlyTheSupport) {
   const auto g = graph(4, kES);
   auto p = make(g, {0}, {3}, global(std::nullopt, dag_of(*g, {1, 3})));
-  const auto r = p->place(12, OutputOptions {.min_cut = true});
+  const auto r = p->place(12, result_outputs(OutputOptions {.min_cut = true}, true, false));
   EXPECT_EQ(r.call_delivered, 10);
   EXPECT_EQ(r.total_cost, c(30));
   EXPECT_FALSE(r.min_cut.has_value());
   EXPECT_FALSE(r.marginal_cost_curve.has_value());
   EXPECT_EQ(listing(*r.program), (Listing {{0, {1, 3}, 10}}));
-  const auto full = make(g, {0}, {3}, global())->place(12);
+  const auto full = make(g, {0}, {3}, global())->place(12, OutputOptions {.program = true});
   EXPECT_EQ(full.call_delivered, 12);
   EXPECT_EQ(full.total_cost, c(34));
 }
@@ -420,7 +420,7 @@ TEST(GlobalSupport, Trimmed) {
 // The mask removes the support: an empty roster.
 TEST(GlobalSupport, MaskRemovesSupport) {
   const auto g = graph(4, kES);
-  const auto r = make(g, {0}, {3}, global(std::nullopt, dag_of(*g, {1, 3})), no_edges(*g, {3}))->place(12);
+  const auto r = make(g, {0}, {3}, global(std::nullopt, dag_of(*g, {1, 3})), no_edges(*g, {3}))->place(12, OutputOptions {.program = true});
   EXPECT_EQ(r.termination, Termination::NoRoute);
   EXPECT_EQ(r.call_delivered, 0);
   ASSERT_TRUE(r.program);
@@ -896,26 +896,26 @@ TEST(PinnedProgram, Increments) {
   const auto g = graph(3, kInc);
   const auto prog = tunnels(*g, {0, 1}, {2}, {{0, {0}, 1}, {1, {1}, 1}});
   auto p = pinned(g, prog);
-  EXPECT_EQ(p->place(3).call_delivered, 2);
-  EXPECT_EQ(p->place(1).call_delivered, 0);
+  EXPECT_EQ(p->place(3, OutputOptions {.by_source = true}).call_delivered, 2);
+  EXPECT_EQ(p->place(1, OutputOptions {.by_source = true}).call_delivered, 0);
   auto q = pinned(g, prog, LOSSY);
-  const auto r1 = q->place(3);
+  const auto r1 = q->place(3, OutputOptions {.by_source = true});
   EXPECT_EQ(r1.call_delivered, 2);
   EXPECT_EQ(r1.call_edge_drops, (Drops {{0, 1}}));
-  const auto r2 = q->place(1);  // RR(4) - RR(3) = (0, 1)
+  const auto r2 = q->place(1, OutputOptions {.by_source = true});  // RR(4) - RR(3) = (0, 1)
   EXPECT_EQ(r2.call_delivered, 1);
   EXPECT_TRUE(r2.call_edge_drops.empty());
-  EXPECT_EQ(lo(r2.by_source[0].offered), 2);
-  EXPECT_EQ(lo(r2.by_source[1].offered), 2);
+  EXPECT_EQ(lo(r2.by_source.value()[0].offered), 2);
+  EXPECT_EQ(lo(r2.by_source.value()[1].offered), 2);
   const auto one = graph(2, kOne);
   auto ledger = std::make_shared<FlowLedger>(one);
   auto other = make(one, {0}, {1}, shortest_paths_policy(), nullptr, ledger);
-  (void)other->place(8);
+  (void)other->place(8, OutputOptions {.by_source = true});
   auto t = pinned(one, tunnels(*one, {0}, {1}, {{0, {0}, 1}}), LOSSLESS, nullptr, nullptr, ledger);
-  EXPECT_EQ(t->place(5).call_delivered, 2);
+  EXPECT_EQ(t->place(5, OutputOptions {.by_source = true}).call_delivered, 2);
   other->remove();
-  (void)other->place(5);
-  EXPECT_EQ(t->place(1).call_delivered, 1);
+  (void)other->place(5, OutputOptions {.by_source = true});
+  EXPECT_EQ(t->place(1, OutputOptions {.by_source = true}).call_delivered, 1);
 }
 
 // +inf is the bound, EXHAUSTED; Lossy rejects it.
@@ -1178,7 +1178,7 @@ TEST(ProgramCycles, VerificationCatchesACorruptedResult) {
   detail::thread_lossy_counters().corrupt = true;
   std::string what;
   try {
-    (void)p->replace(2);
+    (void)p->replace(2, std::nullopt, OutputOptions {.program = true});
   } catch (const std::runtime_error& e) {
     what = e.what();
   }
@@ -1187,7 +1187,7 @@ TEST(ProgramCycles, VerificationCatchesACorruptedResult) {
   expect_same(ledger_state(*p.ledger), ledger, "corrupted");
   expect_unchanged(epoch(*p.p), before, "corrupted");
   // Control: the same call without the corruption succeeds.
-  EXPECT_EQ(p->replace(2).call_delivered, 1);
+  EXPECT_EQ(p->replace(2, std::nullopt, OutputOptions {.program = true}).call_delivered, 1);
 }
 #endif
 
@@ -1197,7 +1197,7 @@ namespace {
 // G1U's optimized program: [(0, [e0, e2], 2), (0, [e1, e3], 10)].
 std::shared_ptr<const ForwardingProgram> g1u_program(const std::shared_ptr<const Graph>& g) {
   auto solver = make(g, {0}, {3}, global());
-  const auto prog = solver->replace(12).program;
+  const auto prog = solver->replace(12, std::nullopt, OutputOptions {.program = true}).program;
   EXPECT_EQ(listing(*prog), (Listing {{0, {0, 2}, 2}, {0, {1, 3}, 10}}));
   return prog;
 }
@@ -1218,28 +1218,28 @@ TEST(Replay, GlobalProgram) {
 TEST(Replay, SourceSurvivor) {
   const auto g = graph(4, kSurv);
   auto solver = make(g, {0, 1, 2}, {3}, global());
-  const auto prog = solver->place(9).program;
+  const auto prog = solver->place(9, OutputOptions {.program = true, .by_source = true}).program;
   EXPECT_EQ(*prog->source_weights(), (std::vector<std::pair<NodeId, Amount>> {{0, 3}, {1, 1}, {2, 5}}));
-  const auto r = pinned(g, prog, LOSSY, no_nodes(*g, {2}))->replace(16);
+  const auto r = pinned(g, prog, LOSSY, no_nodes(*g, {2}))->replace(16, std::nullopt, OutputOptions {.program = true, .by_source = true});
   EXPECT_EQ(r.call_delivered, 4);
-  EXPECT_EQ(lo(r.by_source[0].offered), 12);
-  EXPECT_EQ(lo(r.by_source[1].offered), 4);
-  EXPECT_EQ(lo(r.by_source[2].offered), 0);
+  EXPECT_EQ(lo(r.by_source.value()[0].offered), 12);
+  EXPECT_EQ(lo(r.by_source.value()[1].offered), 4);
+  EXPECT_EQ(lo(r.by_source.value()[2].offered), 0);
   EXPECT_EQ(r.call_edge_drops, (Drops {{0, 9}, {1, 3}}));
   EXPECT_EQ(std::get<2>(rows(r)[2]), FAILED);
-  EXPECT_EQ(pinned(g, prog, LOSSLESS, no_nodes(*g, {2}))->place(INF).call_delivered, 4);
+  EXPECT_EQ(pinned(g, prog, LOSSLESS, no_nodes(*g, {2}))->place(INF, OutputOptions {.program = true, .by_source = true}).call_delivered, 4);
 }
 
 // The topology basis keeps head 1 (it still reaches 2 over e2) and it loses its share.
 TEST(Replay, TopologyBasisKeepsTheHead) {
   const auto g = graph(3, kRB);
   auto solver = make(g, {0, 1}, {2}, global());
-  const auto prog = solver->place(10).program;
+  const auto prog = solver->place(10, OutputOptions {.program = true}).program;
   EXPECT_EQ(listing(*prog), (Listing {{0, {0}, 5}, {1, {1}, 5}}));
-  const auto r = pinned(g, prog, LOSSY, no_edges(*g, {1}))->replace(10);
+  const auto r = pinned(g, prog, LOSSY, no_edges(*g, {1}))->replace(10, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(r.call_delivered, 5);
   EXPECT_EQ(r.source_drops, c(5));
-  EXPECT_EQ(pinned(g, prog, LOSSLESS, no_edges(*g, {1}))->place(INF).call_delivered, 1);
+  EXPECT_EQ(pinned(g, prog, LOSSLESS, no_edges(*g, {1}))->place(INF, OutputOptions {.program = true}).call_delivered, 1);
 }
 
 // The supplied basis drops head 1: head 0 gets all 10.
@@ -1268,13 +1268,13 @@ TEST(Replay, ZeroCapacityIsNotFailed) {
 TEST(Replay, AllRemainingWeightsZero) {
   const auto g = graph(3, {{0, 2, 5, 1}, {1, 2, 5, 1}});
   auto solver = make(g, {0, 1}, {2}, global());
-  const auto prog = solver->place(1).program;
-  const auto r = pinned(g, prog, LOSSY, no_nodes(*g, {0}))->replace(4);
+  const auto prog = solver->place(1, OutputOptions {.program = true}).program;
+  const auto r = pinned(g, prog, LOSSY, no_nodes(*g, {0}))->replace(4, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(r.termination, Termination::NoActiveWeight);
   EXPECT_EQ(r.source_drops, c(4));
   EXPECT_EQ(r.call_delivered, 0);
   EXPECT_EQ(rows(r), (Rows {{0, 0, FAILED, 0, 0, 0}}));
-  const auto ll = pinned(g, prog, LOSSLESS, no_nodes(*g, {0}))->replace(4);
+  const auto ll = pinned(g, prog, LOSSLESS, no_nodes(*g, {0}))->replace(4, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(ll.termination, Termination::NoActiveWeight);
   EXPECT_EQ(ll.call_delivered, 0);
 }
@@ -1283,8 +1283,8 @@ TEST(Replay, AllRemainingWeightsZero) {
 TEST(Replay, SplitRoutePruned) {
   const auto g = graph(4, kDiam);
   auto producer = make(g, {0}, {3}, shortest_paths_policy(EB, LOSSY));
-  const auto prog = producer->place(1).program;
-  const auto r = pinned(g, prog, LOSSY, no_edges(*g, {3}))->replace(100, std::nullopt, kEdges);
+  const auto prog = producer->place(1, OutputOptions {.program = true}).program;
+  const auto r = pinned(g, prog, LOSSY, no_edges(*g, {3}))->replace(100, std::nullopt, result_outputs(kEdges, true, false));
   EXPECT_EQ(r.call_delivered, 100);
   EXPECT_EQ(*r.edge_flows, (Amounts {100, 0, 100, 0}));
 }
@@ -1303,8 +1303,8 @@ TEST(Replay, TunnelFailedByNode) {
 TEST(Replay, FrozenWeights) {
   const auto z = par2(0, 10);
   auto producer = make(z, {0}, {1}, shortest_paths_policy(W, LOSSY));
-  const auto wp = producer->place(1).program;
-  const auto r = pinned(z, wp, LOSSY)->replace(5);
+  const auto wp = producer->place(1, OutputOptions {.program = true}).program;
+  const auto r = pinned(z, wp, LOSSY)->replace(5, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(r.call_delivered, 5);
   EXPECT_TRUE(r.call_edge_drops.empty());
   // A snapshot over the baseline (0, 10) prunes e0; the replay on a fresh ledger at full capacity
@@ -1312,8 +1312,8 @@ TEST(Replay, FrozenWeights) {
   const auto g = par2(10, 10);
   auto snap = make(g, {0}, {1}, weighted(LOSSY, WeightBasis::ResidualSnapshot), nullptr,
                    std::make_shared<FlowLedger>(g, Amounts {0, 10}));
-  const auto sp = snap->place(1).program;
-  const auto rr = pinned(g, sp, LOSSY)->replace(15, std::nullopt, kEdges);
+  const auto sp = snap->place(1, OutputOptions {.program = true}).program;
+  const auto rr = pinned(g, sp, LOSSY)->replace(15, std::nullopt, result_outputs(kEdges, true, false));
   EXPECT_EQ(rr.call_delivered, 10);
   EXPECT_EQ(*rr.edge_flows, (Amounts {0, 10}));
   EXPECT_EQ(rr.call_edge_drops, (Drops {{1, 5}}));
@@ -1462,16 +1462,16 @@ TEST(StaleForwarding, EveryOperation) {
 TEST(Operations, EvaluatePublishesNothing) {
   const auto g = par2(10, 10);
   auto p = make(g, {0}, {1}, shortest_paths_policy());
-  (void)p->replace(6);
+  (void)p->replace(6, std::nullopt, OutputOptions {.program = true});
   const auto ledger = ledger_state(*p.ledger);
   const auto before = epoch(*p.p);
-  const auto r = p->evaluate(12);
+  const auto r = p->evaluate(12, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(r.call_delivered, 12);
   EXPECT_EQ(r.delivery_delta, 6);
   EXPECT_NE(r.program, nullptr);
   expect_same(ledger_state(*p.ledger), ledger, "evaluate");
   expect_unchanged(epoch(*p.p), before, "evaluate");
-  EXPECT_EQ(p->place(0).requested, c(6));
+  EXPECT_EQ(p->place(0, OutputOptions {.program = true}).requested, c(6));
 }
 
 // Replace retires the old ids and starts a new epoch.
@@ -1571,7 +1571,7 @@ TEST(Operations, LosslessInfinite) {
 TEST(Operations, ZeroReplacePrograms) {
   const auto g = graph(4, kPool2);
   auto p = make(g, {0, 1}, {3}, shortest_paths_policy());
-  const auto r = p->replace(0);
+  const auto r = p->replace(0, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(r.termination, Termination::Complete);
   EXPECT_TRUE(r.routes_changed);
   EXPECT_TRUE(r.weights_changed);
@@ -1611,13 +1611,13 @@ TEST(Operations, PlaceContinuesTheEpoch) {
 TEST(Operations, ControllerWeights) {
   const auto g = graph(2, {{0, 1, 20, 1}});
   auto p = make(g, {0}, {1}, global());
-  const auto r1 = p->place(5);
+  const auto r1 = p->place(5, OutputOptions {.program = true});
   EXPECT_TRUE(r1.routes_changed && r1.weights_changed);
-  const auto r2 = p->place(5);
+  const auto r2 = p->place(5, OutputOptions {.program = true});
   EXPECT_FALSE(r2.routes_changed);
   EXPECT_TRUE(r2.weights_changed);
   EXPECT_EQ(listing(*r2.program), (Listing {{0, {0}, 10}}));
-  const auto r3 = p->replace(10);
+  const auto r3 = p->replace(10, std::nullopt, OutputOptions {.program = true});
   EXPECT_FALSE(r3.routes_changed || r3.weights_changed);
 }
 
@@ -1625,8 +1625,8 @@ TEST(Operations, ControllerWeights) {
 TEST(Operations, ControllerRoutes) {
   const auto g = graph(4, kB1);
   auto q = make(g, {0, 1}, {3}, global());
-  EXPECT_EQ(listing(*q->place(2).program), (Listing {{0, {0}, 2}}));
-  const auto r = q->place(10);
+  EXPECT_EQ(listing(*q->place(2, OutputOptions {.program = true}).program), (Listing {{0, {0}, 2}}));
+  const auto r = q->place(10, OutputOptions {.program = true});
   EXPECT_EQ(listing(*r.program), (Listing {{0, {0}, 2}, {1, {1, 2}, 10}}));
   EXPECT_TRUE(r.routes_changed);
 }
@@ -1665,11 +1665,11 @@ TEST(Operations, ForwardControllerProgram) {
 TEST(Operations, RemoveClearsTheProgram) {
   for (const auto& cfg : {global(), shortest_paths_policy()}) {
     auto p = make(par2(10, 10), {0}, {1}, cfg);
-    (void)p->place(3);
+    (void)p->place(3, OutputOptions {.program = true});
     EXPECT_NE(p->program(), nullptr);
     p->remove();
     EXPECT_EQ(p->program(), nullptr);
-    const auto z = p->place(0);
+    const auto z = p->place(0, OutputOptions {.program = true});
     EXPECT_EQ(z.program, nullptr);
     EXPECT_EQ(z.call_delivered, 0);
     EXPECT_EQ(z.delivered, 0);
@@ -1795,9 +1795,9 @@ TEST(ProgramRecords, FailedEntry) {
 TEST(ProgramRecords, PooledContext) {
   const auto g = graph(4, kPool2);
   auto producer = make(g, {0, 1}, {3}, shortest_paths_policy(EB, LOSSY));
-  const auto prog = producer->place(2).program;
+  const auto prog = producer->place(2, OutputOptions {.program = true}).program;
   auto p = pinned(g, prog, LOSSY);
-  (void)p->replace(2);
+  (void)p->replace(2, std::nullopt, OutputOptions {.program = true});
   std::vector<std::pair<std::optional<std::int32_t>, Drops>> got;
   for (const auto& r : p->records()) got.emplace_back(r.entry_id, r.edge_flows);
   EXPECT_EQ(got, (std::vector<std::pair<std::optional<std::int32_t>, Drops>> {{0, {{0, 1}, {2, 1}}},
@@ -1824,13 +1824,13 @@ TEST(ProgramResults, ByTunnel) {
 TEST(ProgramResults, ZeroUnprepared) {
   for (const auto& cfg : {global(), shortest_paths_policy()}) {
     auto p = make(par2(4, 6), {0}, {1}, cfg);
-    const auto z = p->place(0);
+    const auto z = p->place(0, OutputOptions {.program = true});
     EXPECT_EQ(z.program, nullptr);
     EXPECT_TRUE(z.by_tunnel.empty());
     EXPECT_EQ(z.termination, Termination::Complete);
-    (void)p->place(3);
+    (void)p->place(3, OutputOptions {.program = true});
     p->remove();
-    const auto after = p->place(0);
+    const auto after = p->place(0, OutputOptions {.program = true});
     EXPECT_EQ(after.program, nullptr);
     EXPECT_TRUE(after.by_tunnel.empty());
   }
@@ -1843,7 +1843,7 @@ TEST(WideCounters, TunnelRowsBeyond64Bits) {
   auto p = pinned(g, tunnels(*g, {0}, {1}, {{0, {0}, 1}}), LOSSY);
   const Amount big = kL62 - 1;
   PlacementResult r;
-  for (int i = 0; i < 5; ++i) r = p->place(big);
+  for (int i = 0; i < 5; ++i) r = p->place(big, OutputOptions {.by_source = true});
   const Counter128 total {1, 4611686018427387899ULL};
   ASSERT_EQ(r.by_tunnel.size(), 1U);
   EXPECT_EQ(r.by_tunnel[0].assigned, total);
@@ -1854,18 +1854,18 @@ TEST(WideCounters, TunnelRowsBeyond64Bits) {
   EXPECT_EQ(r.admitted, total);
   EXPECT_EQ(r.edge_drops, (std::vector<std::pair<EdgeId, Counter128>> {{0, total}}));
   EXPECT_TRUE(r.source_drops.is_zero());
-  ASSERT_EQ(r.by_source.size(), 1U);
-  EXPECT_EQ(r.by_source[0].offered, total);
-  EXPECT_EQ(r.by_source[0].admitted, total);
-  EXPECT_EQ(r.by_source[0].total_edge_drops, total);
-  EXPECT_TRUE(r.by_source[0].source_drops.is_zero());
+  ASSERT_EQ(r.by_source.value().size(), 1U);
+  EXPECT_EQ(r.by_source.value()[0].offered, total);
+  EXPECT_EQ(r.by_source.value()[0].admitted, total);
+  EXPECT_EQ(r.by_source.value()[0].total_edge_drops, total);
+  EXPECT_TRUE(r.by_source.value()[0].source_drops.is_zero());
   const auto rec = p->records().front();
   EXPECT_EQ(rec.offered, total);
   EXPECT_EQ(rec.edge_drops, (std::vector<std::pair<EdgeId, Counter128>> {{0, total}}));
   // The carry: four calls stay below 2^64.
   auto q = pinned(g, tunnels(*g, {0}, {1}, {{0, {0}, 1}}), LOSSY);
   PlacementResult four;
-  for (int i = 0; i < 4; ++i) four = q->place(big);
+  for (int i = 0; i < 4; ++i) four = q->place(big, OutputOptions {.by_source = true});
   EXPECT_EQ(four.by_tunnel[0].assigned, (Counter128 {0, 4 * static_cast<std::uint64_t>(big)}));
 }
 
@@ -2088,7 +2088,7 @@ TEST(ProgramLayouts, ControllerProgramOwnsItsLists) {
   std::shared_ptr<const ForwardingProgram> prog;
   {
     auto p = std::make_unique<FlowPolicy>(fg, v({0, 4}), v({3}), global(std::nullopt), el.get());
-    prog = p->place(5).program;
+    prog = p->place(5, OutputOptions {.program = true}).program;
     p.reset();
   }
   // Churn the allocator so a list read from freed policy storage would differ.
@@ -2196,14 +2196,14 @@ TEST(ProgramLayouts, EpochCopyOwnsItsStorage) {
   const auto g = graph(4, kPinloss);
   const auto prog = tunnels(*g, {0}, {3}, {{0, {0, 2}, 1}, {0, {1, 3}, 1}});
   std::optional<Pol> p(pinned(g, prog, LOSSY));
-  (void)(*p)->replace(12);
+  (void)(*p)->replace(12, std::nullopt, OutputOptions {.program = true});
   const detail::PolicyEpoch copy = detail::PolicyAccess::engine(*p->p).epoch;
   const auto& live = detail::PolicyAccess::engine(*p->p).epoch;
   EXPECT_NE(copy.by_tunnel.data(), live.by_tunnel.data());
   const auto rows_before = copy.by_tunnel;
-  (void)(*p)->replace(4);
+  (void)(*p)->replace(4, std::nullopt, OutputOptions {.program = true});
   p.reset();
-  for (int i = 0; i < 4; ++i) (void)pinned(g, prog, LOSSY)->replace(2);
+  for (int i = 0; i < 4; ++i) (void)pinned(g, prog, LOSSY)->replace(2, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(copy.program, prog);
   EXPECT_TRUE(copy.by_tunnel == rows_before);
   EXPECT_EQ(rows_before.size(), 2U);
@@ -2356,7 +2356,7 @@ TEST(SharedPreparation, PooledProgramsOwnOneBasisAndNoSourceDag) {
     {
       FlowLedger ledger(g);
       FlowPolicy policy(ledger, v({0, 1}), v({3}), shortest_paths_policy(allocation));
-      const auto first = policy.replace(21);
+      const auto first = policy.replace(21, std::nullopt, OutputOptions {.program = true});
       EXPECT_EQ(first.delivered, 11);
       retained = first.program;
       const auto& data = detail::ProgramAccess::data(*retained);
@@ -2375,7 +2375,7 @@ TEST(SharedPreparation, PooledProgramsOwnOneBasisAndNoSourceDag) {
       EXPECT_EQ(ids_to_input(*g, ascending_edges(*records[0].route)), (std::vector<std::int32_t> {0, 2, 3, 4}));
       EXPECT_EQ(ids_to_input(*g, ascending_edges(*records[1].route)), (std::vector<std::int32_t> {1, 2, 3, 4}));
       record_route = records[0].route;
-      const auto repeated = policy.replace(21);
+      const auto repeated = policy.replace(21, std::nullopt, OutputOptions {.program = true});
       EXPECT_EQ(repeated.delivered, first.delivered);
       EXPECT_FALSE(repeated.routes_changed);
       EXPECT_FALSE(repeated.weights_changed);
@@ -2384,7 +2384,7 @@ TEST(SharedPreparation, PooledProgramsOwnOneBasisAndNoSourceDag) {
     EXPECT_TRUE(record_route.expired());
     FlowLedger replay_ledger(g);
     FlowPolicy replay(replay_ledger, v({0, 1}), v({3}), {.routing = Pinned {retained, nullptr}});
-    EXPECT_EQ(replay.replace(21).delivered, 11);
+    EXPECT_EQ(replay.replace(21, std::nullopt, OutputOptions {.program = true}).delivered, 11);
   }
 }
 
@@ -2396,7 +2396,7 @@ TEST(SharedPreparation, MaskedDestinationStaysInPlanAndProgramEndpoints) {
   for (const auto allocation : {EB, W}) for (const auto admission : {LOSSLESS, LOSSY}) {
     FlowLedger ledger(g);
     FlowPolicy policy(ledger, sources, destinations, shortest_paths_policy(allocation, admission), &mask);
-    const auto placed = policy.place(11);
+    const auto placed = policy.place(11, OutputOptions {.program = true});
     const auto& data = detail::ProgramAccess::data(*placed.program);
     const auto& plan = *data.split_contexts.front().prepared_route;
     // The immutable program/plan retain the requested endpoints, including masked6. The entry's
@@ -2409,7 +2409,7 @@ TEST(SharedPreparation, MaskedDestinationStaysInPlanAndProgramEndpoints) {
     EXPECT_EQ(records[1].destinations, v({5}));
     EXPECT_EQ(records[0].min_route_cost, 3);
     EXPECT_EQ(records[1].min_route_cost, 5);
-    const auto replaced = policy.replace(7);
+    const auto replaced = policy.replace(7, std::nullopt, OutputOptions {.program = true});
     EXPECT_EQ(replaced.program.get(), placed.program.get());
     EXPECT_EQ(vec(detail::ProgramAccess::data(*replaced.program).split_contexts.front().prepared_route->destinations), destinations);
   }
@@ -2614,13 +2614,13 @@ TEST(FromDag, Pools) {
 TEST(FromDag, Attribution) {
   const auto g = graph(4, kDP);
   auto p = pinned(g, from_dag(*g, {0, 1, 2, 3}), LOSSY);
-  const auto r = p->place(3);
+  const auto r = p->place(3, OutputOptions {.by_source = true});
   EXPECT_EQ(r.call_delivered, 2);
   EXPECT_EQ(r.call_edge_drops, (Drops {{2, 1}}));
-  ASSERT_EQ(r.by_source.size(), 2U);
-  EXPECT_EQ(std::tuple(lo(r.by_source[0].offered), r.by_source[0].delivered, lo(r.by_source[0].total_edge_drops)),
+  ASSERT_EQ(r.by_source.value().size(), 2U);
+  EXPECT_EQ(std::tuple(lo(r.by_source.value()[0].offered), r.by_source.value()[0].delivered, lo(r.by_source.value()[0].total_edge_drops)),
             std::tuple(Amount {2}, Amount {1}, Amount {1}));
-  EXPECT_EQ(std::tuple(lo(r.by_source[1].offered), r.by_source[1].delivered, lo(r.by_source[1].total_edge_drops)),
+  EXPECT_EQ(std::tuple(lo(r.by_source.value()[1].offered), r.by_source.value()[1].delivered, lo(r.by_source.value()[1].total_edge_drops)),
             std::tuple(Amount {1}, Amount {1}, Amount {0}));
   const auto records = p.ledger->records();
   ASSERT_EQ(records.size(), 2U);
@@ -2652,20 +2652,20 @@ TEST(FromDag, EqualsShortestPaths) {
     for (const Amount offer : {1, 2, 3, 4, 5}) {
       auto a = make(g, v({0, 1}), v({3}), shortest_paths_policy(k, LOSSY), mask);
       auto b = make(g, v({0, 1}), v({3}), FlowPolicyConfig {.routing = Pinned {program, nullptr}, .admission = LOSSY}, mask);
-      const auto x = a->place(offer);
-      const auto y = b->place(offer);
+      const auto x = a->place(offer, OutputOptions {.by_source = true});
+      const auto y = b->place(offer, OutputOptions {.by_source = true});
       EXPECT_EQ(x.call_delivered, y.call_delivered) << offer;
       EXPECT_EQ(x.call_edge_drops, y.call_edge_drops) << offer;
-      EXPECT_EQ(x.by_source.size(), y.by_source.size());
-      for (std::size_t i = 0; i < std::min(x.by_source.size(), y.by_source.size()); ++i) {
-        EXPECT_EQ(x.by_source[i].delivered, y.by_source[i].delivered) << offer;
-        EXPECT_EQ(x.by_source[i].total_edge_drops, y.by_source[i].total_edge_drops) << offer;
+      EXPECT_EQ(x.by_source.value().size(), y.by_source.value().size());
+      for (std::size_t i = 0; i < std::min(x.by_source.value().size(), y.by_source.value().size()); ++i) {
+        EXPECT_EQ(x.by_source.value()[i].delivered, y.by_source.value()[i].delivered) << offer;
+        EXPECT_EQ(x.by_source.value()[i].total_edge_drops, y.by_source.value()[i].total_edge_drops) << offer;
       }
     }
     auto a = make(g, v({0, 1}), v({3}), shortest_paths_policy(k), mask);
     auto b = make(g, v({0, 1}), v({3}), FlowPolicyConfig {.routing = Pinned {program, nullptr}}, mask);
-    const Amount bound = a->place(INF).call_delivered;
-    EXPECT_EQ(bound, b->place(INF).call_delivered);
+    const Amount bound = a->place(INF, OutputOptions {.by_source = true}).call_delivered;
+    EXPECT_EQ(bound, b->place(INF, OutputOptions {.by_source = true}).call_delivered);
     return bound;
   };
   const auto dp = graph(4, kDP);
@@ -2817,11 +2817,11 @@ TEST(DerivedEntries, LosslessCallsKeepNoSourceDataAndOnlyReadsAttribute) {
 #if NETGRAPH_CORE_PRIVATE_HOOKS
   detail::thread_entry_work() = {};
 #endif
-  (void)p.replace(7);
-  const auto final = p.place(2);
-  EXPECT_EQ(final.by_source[0].delivered, 5);
-  EXPECT_EQ(final.by_source[1].delivered, 4);
-  (void)p.place(0);
+  (void)p.replace(7, std::nullopt, OutputOptions {.by_source = true});
+  const auto final = p.place(2, OutputOptions {.by_source = true});
+  EXPECT_EQ(final.by_source.value()[0].delivered, 5);
+  EXPECT_EQ(final.by_source.value()[1].delivered, 4);
+  (void)p.place(0, OutputOptions {.by_source = true});
   const auto* own = detail::LedgerAccess::entry(ledger, detail::PolicyAccess::engine(p).policy_id);
   ASSERT_TRUE(own && own->derived);
   EXPECT_TRUE(own->stored.empty());
@@ -2854,11 +2854,11 @@ TEST(DerivedEntries, LossyRowsUseEachCallsOnePassAndShareEarlierHistory) {
 #if NETGRAPH_CORE_PRIVATE_HOOKS
   detail::thread_entry_work() = {};
 #endif
-  (void)p.place(5);
+  (void)p.place(5, OutputOptions {.program = true, .by_source = true});
   const auto* initial = detail::LedgerAccess::entry(ledger, detail::PolicyAccess::engine(p).policy_id);
   const auto first = initial->derived->history;
   const auto inputs = initial->derived->inputs;
-  const auto result = p.place(7);
+  const auto result = p.place(7, OutputOptions {.program = true, .by_source = true});
   const auto* own = detail::LedgerAccess::entry(ledger, detail::PolicyAccess::engine(p).policy_id);
   ASSERT_TRUE(own->derived && own->stored.empty());
   EXPECT_EQ(own->derived->inputs.get(), inputs.get());
@@ -2872,14 +2872,14 @@ TEST(DerivedEntries, LossyRowsUseEachCallsOnePassAndShareEarlierHistory) {
   EXPECT_EQ(own->drops, (std::vector<std::pair<EdgeId, Counter128>> {{2, {0, 3}}}));
   ASSERT_EQ(own->derived->history->previous.get(), first.get());
   EXPECT_EQ(own->derived->history->previous->carried.data(), first->carried.data());
-  ASSERT_EQ(result.by_source.size(), 2U);
-  EXPECT_EQ(result.by_source[0].offered, (Counter128 {0, 6}));
-  EXPECT_EQ(result.by_source[1].offered, (Counter128 {0, 6}));
-  EXPECT_EQ(result.by_source[0].delivered, 5);
-  EXPECT_EQ(result.by_source[1].delivered, 4);
-  EXPECT_EQ(result.by_source[0].total_edge_drops, (Counter128 {0, 1}));
-  EXPECT_EQ(result.by_source[1].total_edge_drops, (Counter128 {0, 2}));
-  expect_same(p.place(0), [&] { auto r = result; r.call_delivered = 0; r.call_undelivered = 0; r.delivery_delta = 0;
+  ASSERT_EQ(result.by_source.value().size(), 2U);
+  EXPECT_EQ(result.by_source.value()[0].offered, (Counter128 {0, 6}));
+  EXPECT_EQ(result.by_source.value()[1].offered, (Counter128 {0, 6}));
+  EXPECT_EQ(result.by_source.value()[0].delivered, 5);
+  EXPECT_EQ(result.by_source.value()[1].delivered, 4);
+  EXPECT_EQ(result.by_source.value()[0].total_edge_drops, (Counter128 {0, 1}));
+  EXPECT_EQ(result.by_source.value()[1].total_edge_drops, (Counter128 {0, 2}));
+  expect_same(p.place(0, OutputOptions {.program = true, .by_source = true}), [&] { auto r = result; r.call_delivered = 0; r.call_undelivered = 0; r.delivery_delta = 0;
       r.call_edge_drops.clear(); r.call_source_drops = {}; r.routes_changed = false; r.weights_changed = false; return r; }(), "zero rows");
 #if NETGRAPH_CORE_PRIVATE_HOOKS
   EXPECT_EQ(detail::thread_entry_work().forwards, 2U);
@@ -2962,16 +2962,16 @@ TEST(DerivedEntries, SingleHeadFoldsStaleForwardThenPlaceWithoutHistory) {
   const auto g = shared(make_graph(2, {{0, 1, 9, 1}}));
   FlowLedger ledger(g);
   FlowPolicy p(ledger, v({0}), v({1}), {.routing = ShortestPaths {}, .admission = LOSSY});
-  (void)p.replace(3);
+  (void)p.replace(3, std::nullopt, OutputOptions {.by_source = true});
   const auto dark = g->eligibility(v({0}));
-  (void)p.forward(2, &dark);
-  const auto last = p.place(1);
+  (void)p.forward(2, &dark, OutputOptions {.by_source = true});
+  const auto last = p.place(1, OutputOptions {.by_source = true});
   const auto* entry = detail::LedgerAccess::entry(ledger, detail::PolicyAccess::engine(p).policy_id);
   ASSERT_TRUE(entry->derived);
   EXPECT_FALSE(entry->derived->history);
   EXPECT_TRUE(entry->stored.empty());
-  EXPECT_EQ(last.by_source[0].offered, (Counter128 {0, 3}));
-  EXPECT_EQ(last.by_source[0].source_drops, (Counter128 {0, 2}));
+  EXPECT_EQ(last.by_source.value()[0].offered, (Counter128 {0, 3}));
+  EXPECT_EQ(last.by_source.value()[0].source_drops, (Counter128 {0, 2}));
   EXPECT_EQ(p.records()[0].offered, (Counter128 {0, 3}));
   EXPECT_EQ(p.records()[0].edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{0, 1}}));
 }
@@ -3013,17 +3013,17 @@ TEST(DerivedEntries, StaleHeadBitsBelongToEachForwarding) {
     routing.allocation = allocation;
     FlowLedger ledger(g);
     FlowPolicy p(ledger, v({0, 1}), v({3}), {routing, admission});
-    (void)p.replace(1);
-    (void)p.forward(4, &dark);
-    const auto last = p.place(2);
+    (void)p.replace(1, std::nullopt, OutputOptions {.by_source = true});
+    (void)p.forward(4, &dark, OutputOptions {.by_source = true});
+    const auto last = p.place(2, OutputOptions {.by_source = true});
     const auto records = p.records();
     ASSERT_EQ(records.size(), 2U);
     EXPECT_EQ(records[0].edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{0, 1}, {2, 1}}));
     EXPECT_EQ(records[1].delivered, admission == LOSSY ? 3 : 1);
-    EXPECT_EQ(last.by_source[0].delivered, 1);
+    EXPECT_EQ(last.by_source.value()[0].delivered, 1);
     if (admission == LOSSY) {
       EXPECT_EQ(records[0].offered, (Counter128 {0, 3}));
-      EXPECT_EQ(last.by_source[0].source_drops, (Counter128 {0, 2}));
+      EXPECT_EQ(last.by_source.value()[0].source_drops, (Counter128 {0, 2}));
     }
     expect_balanced(ledger, "forward then ordinary place");
   }

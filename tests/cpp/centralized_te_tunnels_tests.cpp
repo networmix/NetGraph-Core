@@ -66,7 +66,7 @@ Int128 wide(const Counter128& c) { return int128_of(static_cast<std::int64_t>(c.
 
 std::vector<SourceRow> source_rows(const PlacementResult& r) {
   std::vector<SourceRow> out;
-  for (const auto& s : r.by_source) out.emplace_back(s.source, lo(s.offered), lo(s.admitted), s.delivered, lo(s.source_drops), lo(s.total_edge_drops));
+  for (const auto& s : r.by_source.value()) out.emplace_back(s.source, lo(s.offered), lo(s.admitted), s.delivered, lo(s.source_drops), lo(s.total_edge_drops));
   return out;
 }
 std::vector<Edges> routes(const ForwardingProgram& p) {
@@ -184,7 +184,7 @@ TEST(T2Objectives, ContractExamples) {
     const auto g = ordered(x.n, x.rows);
     auto ledger = x.free.empty() ? std::make_shared<FlowLedger>(g) : std::make_shared<FlowLedger>(g, x.free);
     auto p = make(g, x.heads, {x.dst}, t2(x.N, LOSSLESS, true), nullptr, ledger);
-    const auto r = p->replace(INF, x.D.has_value() ? std::optional<std::optional<Amount>>(x.D) : UNLIMITED);
+    const auto r = p->replace(INF, x.D.has_value() ? std::optional<std::optional<Amount>>(x.D) : UNLIMITED, OutputOptions {.program = true});
     ASSERT_TRUE(r.plan.has_value());
     const auto& pl = *r.plan;
     EXPECT_EQ(pl.max_bandwidth_per_tunnel, x.U);
@@ -208,7 +208,7 @@ TEST(T2Objectives, ContractExamples) {
     if (!x.offer.has_value()) continue;
     auto lossy_ledger = x.free.empty() ? std::make_shared<FlowLedger>(g) : std::make_shared<FlowLedger>(g, x.free);
     auto q = make(g, x.heads, {x.dst}, t2(x.N, LOSSY, true), nullptr, lossy_ledger);
-    const auto s = q->replace(x.offer, x.D.has_value() ? std::optional<std::optional<Amount>>(x.D) : UNLIMITED);
+    const auto s = q->replace(x.offer, x.D.has_value() ? std::optional<std::optional<Amount>>(x.D) : UNLIMITED, OutputOptions {.program = true});
     EXPECT_EQ(s.call_delivered, x.delivery);
     EXPECT_EQ(s.call_source_drops, x.loss);
     EXPECT_EQ(routes(*s.program), x.routes);
@@ -219,7 +219,7 @@ TEST(T2Objectives, ContractExamples) {
 TEST(T2Objectives, ContractCall) {
   const auto g = g1();
   auto p = make(g, {0}, {3}, t2(16, LOSSY, true));
-  const auto r = p->replace(Amount {49152});
+  const auto r = p->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true});
   ASSERT_TRUE(r.plan.has_value());
   const auto& pl = *r.plan;
   EXPECT_EQ(pl.tunnels_per_head, 16);
@@ -262,26 +262,26 @@ TEST(LedgerProjections, T2BooksNothing) {
 TEST(T2Objectives, HeadroomOff) {
   const auto g = g1();
   auto p = make(g, {0}, {3}, t2(16, LOSSY));
-  const auto r = p->replace(Amount {49152});
+  const auto r = p->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(counts(*r.program, 4), (Amounts {2, 14, 2, 14}));
   EXPECT_EQ(r.plan->max_lossless_offer, 46812);
   EXPECT_EQ(r.call_delivered, 47104);
   EXPECT_FALSE(r.plan->headroom_penalty.has_value());
   auto q = make(g, {0}, {3}, t2(16));
-  const auto s = q->replace(INF, Amount {8192});
+  const auto s = q->replace(INF, Amount {8192}, OutputOptions {.program = true});
   EXPECT_EQ(s.plan->planned_bandwidth_per_tunnel, 512);
   EXPECT_EQ(counts(*s.program, 4), (Amounts {16, 0, 16, 0}));
   EXPECT_EQ(s.plan->max_lossless_offer, 8192);
   const auto par = ordered(2, {{0, 1, 4, 1}, {0, 1, 12, 1}});
   auto h = make(par, {0}, {1}, t2(2, LOSSLESS, true));
-  const auto a = h->replace(INF, Amount {2});
+  const auto a = h->replace(INF, Amount {2}, OutputOptions {.program = true});
   EXPECT_EQ(a.plan->max_bandwidth_per_tunnel, 6);
   EXPECT_EQ(a.plan->planned_bandwidth_per_tunnel, 1);
   EXPECT_EQ(routes(*a.program), (std::vector<Edges> {{1}, {1}}));
   EXPECT_EQ(a.plan->max_lossless_offer, 12);
   EXPECT_EQ(lo(a.plan->headroom_penalty), 1073741823);
   auto c = make(par, {0}, {1}, t2(2));
-  const auto b = c->replace(INF, Amount {2});
+  const auto b = c->replace(INF, Amount {2}, OutputOptions {.program = true});
   EXPECT_EQ(routes(*b.program), (std::vector<Edges> {{0}, {0}}));
   EXPECT_EQ(b.plan->max_lossless_offer, 4);
 }
@@ -295,7 +295,7 @@ TEST(T2Objectives, PreferHeadroomExample) {
   for (const bool on : {false, true}) {
     SCOPED_TRACE(on);
     auto p = make(g, {0}, {1}, t2(2, LOSSY, on));
-    const auto r = p->replace(Amount {12}, Amount {2});
+    const auto r = p->replace(Amount {12}, Amount {2}, OutputOptions {.program = true});
     EXPECT_EQ(r.plan->max_bandwidth_per_tunnel, 10);
     EXPECT_EQ(r.plan->planned_bandwidth_per_tunnel, 1);
     EXPECT_EQ(r.plan->total_planned_bandwidth, 2);
@@ -313,14 +313,14 @@ TEST(T2Objectives, PreferHeadroomExample) {
 TEST(T2Objectives, ReverseArcsAndPreloadedPrices) {
   const auto g = ordered(4, {{0, 1, 1, 1}, {0, 2, 1, 5}, {1, 2, 1, 1}, {1, 3, 1, 5}, {2, 3, 1, 1}});
   auto p = make(g, {0}, {3}, t2(2));
-  const auto r = p->replace(INF);
+  const auto r = p->replace(INF, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(r.plan->max_bandwidth_per_tunnel, 1);
   EXPECT_EQ(routes(*r.program), (std::vector<Edges> {{0, 3}, {1, 4}}));
   EXPECT_EQ(lo(r.plan->total_tunnel_cost), 12);
   const auto one = one10();
   const Amounts six {6};
   auto q = make(one, {0}, {1}, t2(2, LOSSLESS, true), nullptr, std::make_shared<FlowLedger>(one, six));
-  const auto s = q->replace(INF, Amount {4});
+  const auto s = q->replace(INF, Amount {4}, OutputOptions {.program = true});
   EXPECT_EQ(s.plan->max_bandwidth_per_tunnel, 3);
   EXPECT_EQ(s.plan->planned_bandwidth_per_tunnel, 2);
   EXPECT_EQ(lo(s.plan->headroom_penalty), 2576980377 + 3435973836);
@@ -330,7 +330,7 @@ TEST(T2Objectives, ReverseArcsAndPreloadedPrices) {
 TEST(T2Objectives, RoundIndices) {
   const auto g = ordered(3, {{0, 2, 3, 1}, {1, 2, 8, 1}});
   auto p = make(g, {0, 1}, {2}, t2(2));
-  const auto r = p->replace(INF, Amount {6});
+  const auto r = p->replace(INF, Amount {6}, OutputOptions {.program = true});
   std::vector<std::tuple<std::int32_t, NodeId, std::int32_t, Edges>> got;
   for (const auto& t : r.program->tunnels()) got.emplace_back(t.entry_id, t.head, t.local_index, *t.edges);
   EXPECT_EQ(got, (std::vector<std::tuple<std::int32_t, NodeId, std::int32_t, Edges>> {
@@ -355,9 +355,9 @@ TEST(T2Objectives, RootKeyTie) {
   const auto b = ordered(6, {{0, 2, 1, 1}, {0, 5, 1, 1}, {1, 2, 1, 1}, {1, 4, 1, 1}, {2, 3, 1, 1}, {4, 3, 1, 1}, {5, 3, 1, 1}});
   for (const bool headroom : {false, true}) {
     auto p = make(a, {0, 1}, {3}, t2(1, LOSSLESS, headroom));
-    EXPECT_EQ(head_routes(*p->replace(INF).program), (std::vector<std::pair<NodeId, Edges>> {{0, {0, 4}}, {1, {3, 6}}}));
+    EXPECT_EQ(head_routes(*p->replace(INF, std::nullopt, OutputOptions {.program = true}).program), (std::vector<std::pair<NodeId, Edges>> {{0, {0, 4}}, {1, {3, 6}}}));
     auto q = make(b, {0, 1}, {3}, t2(1, LOSSLESS, headroom));
-    EXPECT_EQ(head_routes(*q->replace(INF).program), (std::vector<std::pair<NodeId, Edges>> {{0, {0, 4}}, {1, {3, 5}}}));
+    EXPECT_EQ(head_routes(*q->replace(INF, std::nullopt, OutputOptions {.program = true}).program), (std::vector<std::pair<NodeId, Edges>> {{0, {0, 4}}, {1, {3, 5}}}));
   }
 }
 
@@ -367,9 +367,9 @@ TEST(T2Objectives, RootKeyTie) {
 // (cost 3), e2 1-2, e3 2-3 (cost 1 each): e1, keys alone e0 e2 e3. Capacities 1, N = 1.
 TEST(T2Objectives, FewestArcsBeforeKeys) {
   auto p = make(ordered(3, {{0, 1, 1, 1}, {0, 2, 1, 2}, {1, 2, 1, 1}}), {0}, {2}, t2(1));
-  EXPECT_EQ(routes(*p->replace(INF).program), (std::vector<Edges> {{1}}));
+  EXPECT_EQ(routes(*p->replace(INF, std::nullopt, OutputOptions {.program = true}).program), (std::vector<Edges> {{1}}));
   auto q = make(ordered(4, {{0, 1, 1, 1}, {0, 3, 1, 3}, {1, 2, 1, 1}, {2, 3, 1, 1}}), {0}, {3}, t2(1));
-  EXPECT_EQ(routes(*q->replace(INF).program), (std::vector<Edges> {{1}}));
+  EXPECT_EQ(routes(*q->replace(INF, std::nullopt, OutputOptions {.program = true}).program), (std::vector<Edges> {{1}}));
 }
 
 // The cut into unit walks: live heads ascending, each walk along the smallest positive EdgeId.
@@ -380,11 +380,11 @@ TEST(T2Objectives, FewestArcsBeforeKeys) {
 // x is all ones; head 0 takes e0 e2 e4, head 1 e1 e3 e5 (the largest EdgeId: e0 e3 e5 and e1 e2 e4).
 TEST(T2Objectives, CutIntoUnitWalks) {
   auto p = make(ordered(3, {{0, 1, 2, 2}, {1, 2, 2, 2}, {1, 2, 3, 2}}), {0, 1}, {2}, t2(2));
-  EXPECT_EQ(head_routes(*p->replace(INF).program),
+  EXPECT_EQ(head_routes(*p->replace(INF, std::nullopt, OutputOptions {.program = true}).program),
             (std::vector<std::pair<NodeId, Edges>> {{0, {0, 1}}, {1, {2}}, {0, {0, 1}}, {1, {2}}}));
   auto q = make(ordered(6, {{0, 2, 1, 1}, {1, 2, 1, 1}, {2, 3, 1, 1}, {2, 4, 1, 1}, {3, 5, 1, 1}, {4, 5, 1, 1}}), {0, 1},
                 {5}, t2(1));
-  EXPECT_EQ(head_routes(*q->replace(INF).program),
+  EXPECT_EQ(head_routes(*q->replace(INF, std::nullopt, OutputOptions {.program = true}).program),
             (std::vector<std::pair<NodeId, Edges>> {{0, {0, 2, 4}}, {1, {1, 3, 5}}}));
 }
 
@@ -510,13 +510,13 @@ TEST(T2UpTo, ContractExamples) {
     SCOPED_TRACE(c.id);
     const auto g = ordered(c.n, c.rows);
     auto p = make(g, c.heads, {c.dst}, t2(c.L, LOSSLESS, true, true));
-    const auto r = p->replace(c.D.has_value() ? c.D : INF);
+    const auto r = p->replace(c.D.has_value() ? c.D : INF, std::nullopt, OutputOptions {.program = true});
     EXPECT_EQ(r.plan->tunnels_per_head, c.k);
     EXPECT_EQ(routes(*r.program), c.routes);
     EXPECT_EQ(r.call_delivered, c.delivered);
     for (std::size_t k = 1; k <= c.bounds.size(); ++k) {
       auto q = make(g, c.heads, {c.dst}, t2(static_cast<std::int64_t>(k), LOSSLESS, true));
-      EXPECT_EQ(q->replace(INF).call_delivered, c.bounds[k - 1]) << k;
+      EXPECT_EQ(q->replace(INF, std::nullopt, OutputOptions {.program = true}).call_delivered, c.bounds[k - 1]) << k;
     }
   }
 }
@@ -528,7 +528,7 @@ TEST(T2UpTo, ContractExamples) {
 TEST(T2UpTo, ReachesTheDesignExactly) {
   const auto g = ordered(2, {{0, 1, 6, 1}, {0, 1, 5, 1}, {0, 1, 4, 1}});
   auto p = make(g, {0}, {1}, t2(3, LOSSLESS, false, true));
-  const auto r = p->replace(Amount {11});
+  const auto r = p->replace(Amount {11}, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(r.plan->tunnels_per_head, 2);
   EXPECT_EQ(r.plan->max_bandwidth_per_tunnel, 5);
   EXPECT_EQ(r.plan->planned_bandwidth_per_tunnel, 5);
@@ -566,7 +566,7 @@ TEST(T2Operations, AllDead) {
   for (const bool up : {false, true}) {
     for (const auto a : {LOSSY, LOSSLESS}) {
       auto p = make(g, {0, 1}, {2}, t2(up ? 3 : 2, a, false, up));
-      const auto r = p->replace(Amount {10}, Amount {10});
+      const auto r = p->replace(Amount {10}, Amount {10}, OutputOptions {.program = true, .by_source = true});
       const auto& pl = *r.plan;
       EXPECT_EQ(pl.tunnels_per_head, up ? 1 : 2);
       EXPECT_EQ(pl.design_by_head, (std::vector<std::pair<NodeId, Amount>> {{0, 5}, {1, 5}}));
@@ -599,7 +599,7 @@ TEST(T2Operations, InsufficientResolution) {
   const auto g = twoh(1, 100);
   for (const auto a : {LOSSY, LOSSLESS}) {
     auto p = make(g, {0, 1}, {2}, t2(16, a));
-    const auto r = p->replace(Amount {200}, Amount {200});
+    const auto r = p->replace(Amount {200}, Amount {200}, OutputOptions {.program = true, .by_source = true});
     EXPECT_EQ(r.plan->insufficient_resolution, true);
     EXPECT_EQ(r.plan->max_fractional_bandwidth_per_tunnel, (std::pair<Amount, Amount> {1, 16}));
     EXPECT_EQ(r.plan->max_bandwidth_per_tunnel, 0);
@@ -607,7 +607,7 @@ TEST(T2Operations, InsufficientResolution) {
     EXPECT_TRUE(r.program->tunnels().empty());
     ASSERT_NE(p->program(), nullptr);
     EXPECT_EQ(r.call_delivered, 0);
-    const auto f = p->forward(Amount {10});
+    const auto f = p->forward(Amount {10}, nullptr, OutputOptions {.program = true, .by_source = true});
     if (a == LOSSY) {
       EXPECT_EQ(source_rows(r), (std::vector<SourceRow> {{0, 100, 100, 0, 100, 0}, {1, 100, 100, 0, 100, 0}}));
       EXPECT_EQ(f.call_source_drops, 10);
@@ -625,7 +625,7 @@ TEST(T2Operations, InsufficientResolution) {
 // A dead head: indices 1 and 3; the rows; two records (entries 1, 3).
 TEST(T2Operations, DeadHead) {
   auto p = make(twoh(0, 10), {0, 1}, {2}, t2(2, LOSSY));
-  const auto r = p->replace(Amount {10}, Amount {10});
+  const auto r = p->replace(Amount {10}, Amount {10}, OutputOptions {.program = true, .by_source = true});
   EXPECT_EQ(indices(*r.program), (std::vector<std::int32_t> {1, 3}));
   EXPECT_EQ(source_rows(r), (std::vector<SourceRow> {{0, 5, 5, 0, 5, 0}, {1, 5, 5, 5, 0, 0}}));
   std::vector<std::optional<std::int32_t>> entries;
@@ -639,8 +639,8 @@ TEST(T2Operations, OptimizedOneSource) {
   const auto g = g1();
   auto a = make(g, {0}, {3}, t2(16, LOSSY, true));
   auto b = make(g, {0}, {3}, t2(16, LOSSY, true, false, SourceAllocation::Optimized));
-  const auto ra = a->replace(Amount {49152});
-  const auto rb = b->replace(Amount {49152});
+  const auto ra = a->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true});
+  const auto rb = b->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(ra.plan, rb.plan);
   EXPECT_EQ(routes(*ra.program), routes(*rb.program));
   EXPECT_EQ(ra.by_tunnel, rb.by_tunnel);
@@ -665,7 +665,7 @@ TEST(T2Operations, EmptyRoster) {
   const auto g = ordered(3, {{1, 2, 5, 1}});
   for (const auto a : {LOSSY, LOSSLESS}) {
     auto p = make(g, {0}, {2}, t2(2, a, true));
-    const auto r = p->replace(Amount {5}, Amount {5});
+    const auto r = p->replace(Amount {5}, Amount {5}, OutputOptions {.program = true});
     EXPECT_EQ(r.termination, Termination::NoRoute);
     EXPECT_TRUE(r.program->tunnels().empty());
     EXPECT_EQ(r.plan->tunnels_per_head, 2);
@@ -679,7 +679,7 @@ TEST(T2Operations, EmptyRoster) {
 // A zero design: D = 0 plans at u = 1.
 TEST(T2Operations, ZeroDesign) {
   auto p = make(one10(), {0}, {1}, t2(2));
-  const auto r = p->replace(Amount {0});
+  const auto r = p->replace(Amount {0}, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(r.plan->planned_bandwidth_per_tunnel, 1);
   EXPECT_EQ(r.program->tunnels().size(), 2U);
   for (const auto& t : r.program->tunnels()) EXPECT_EQ(t.planned_bandwidth, 1);
@@ -691,15 +691,15 @@ TEST(T2Operations, ZeroDesign) {
 TEST(T2Operations, Forward) {
   const auto g = g1();
   auto p = make(g, {0}, {3}, t2(16, LOSSY, true));
-  const auto first = p->replace(Amount {49152});
-  const auto f = p->forward(Amount {32768});
+  const auto first = p->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true});
+  const auto f = p->forward(Amount {32768}, nullptr, OutputOptions {.program = true});
   EXPECT_EQ(f.call_delivered, 32768);
   EXPECT_FALSE(f.routes_changed || f.weights_changed || f.reservations_changed);
   EXPECT_EQ(f.program, first.program);
   EXPECT_EQ(f.plan, first.plan);
   auto q = make(g, {0}, {3}, t2(16, LOSSLESS, true));
-  (void)q->replace(Amount {49152});
-  EXPECT_EQ(q->forward(INF).call_delivered, 46812);
+  (void)q->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true});
+  EXPECT_EQ(q->forward(INF, nullptr, OutputOptions {.program = true}).call_delivered, 46812);
 }
 
 // The same routes and weights with another planned size: no flag (a planned size is no
@@ -807,18 +807,18 @@ TEST(TunnelOperations, T2CallValidation) {
 TEST(TunnelOperations, T2NoCertificates) {
   const auto g = g1();
   auto p = make(g, {0}, {3}, t2(16));
-  const auto r = p->replace(INF, std::nullopt, OutputOptions {.min_cut = true});
+  const auto r = p->replace(INF, std::nullopt, result_outputs(OutputOptions {.min_cut = true}, true, false));
   EXPECT_FALSE(r.total_cost.has_value());
   EXPECT_FALSE(r.min_cut.has_value());
   EXPECT_FALSE(r.marginal_cost_curve.has_value());
   auto pin = make(g, {0}, {3}, FlowPolicyConfig {.routing = Pinned {r.program, nullptr}});
-  EXPECT_FALSE(pin->replace(Amount {10}).plan.has_value());
+  EXPECT_FALSE(pin->replace(Amount {10}, std::nullopt, OutputOptions {.program = true}).plan.has_value());
   // An optimized-source-allocation T2 policy whose roster is empty (source 0 reaches nothing) reports no
   // certificate either, never an empty cut or curve: replace(5) is NO_ROUTE, replace(0) COMPLETE.
   auto empty = make(ordered(3, {{1, 2, 10, 1}}), {0}, {2}, t2(2, LOSSLESS, false, false, SourceAllocation::Optimized));
   for (const Amount offer : {Amount {5}, Amount {0}}) {
     SCOPED_TRACE(offer);
-    const auto e = empty->replace(offer, std::nullopt, OutputOptions {.min_cut = true});
+    const auto e = empty->replace(offer, std::nullopt, result_outputs(OutputOptions {.min_cut = true}, true, false));
     EXPECT_EQ(e.termination, offer > 0 ? Termination::NoRoute : Termination::Complete);
     EXPECT_EQ(e.call_delivered, 0);
     EXPECT_FALSE(e.total_cost.has_value());
@@ -834,10 +834,10 @@ TEST(TunnelOperations, T2NoCertificates) {
 TEST(TunnelPrograms, T2Replay) {
   const auto g = g1();
   auto p = make(g, {0}, {3}, t2(16, LOSSY, true));
-  const auto base = p->replace(Amount {49152}).program;
+  const auto base = p->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true}).program;
   const auto fail = g->eligibility({}, std::vector<EdgeId> {2});
   auto replay = make(g, {0}, {3}, FlowPolicyConfig {.routing = Pinned {base, nullptr}, .admission = LOSSY}, &fail);
-  const auto r = replay->replace(Amount {49152});
+  const auto r = replay->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true});
   auto st = row_statuses(r);
   st.resize(3);
   EXPECT_EQ(st, (std::vector<TunnelStatus> {FAILED, FAILED, UP}));
@@ -849,10 +849,10 @@ TEST(TunnelPrograms, T2Replay) {
 TEST(TunnelPrograms, T2Stale) {
   const auto g = g1();
   auto p = make(g, {0}, {3}, t2(16, LOSSY, true));
-  const auto base = p->replace(Amount {49152}).program;
+  const auto base = p->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true}).program;
   const auto dark = std::make_shared<const Eligibility>(g->eligibility({}, std::vector<EdgeId> {2}));
   auto stale = make(g, {0}, {3}, FlowPolicyConfig {.routing = Pinned {base, dark}, .admission = LOSSY});
-  const auto r = stale->replace(Amount {49152});
+  const auto r = stale->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true});
   std::vector<TunnelStatus> want(2, BLACKHOLED);
   want.insert(want.end(), 14, UP);
   EXPECT_EQ(row_statuses(r), want);
@@ -864,7 +864,7 @@ TEST(TunnelPrograms, T2Stale) {
 // The G1 call's tunnels: requested 0, reserved 0, planned 2925, UP, weight 1; equal sources.
 TEST(TunnelPrograms, T2Fields) {
   auto p = make(g1(), {0}, {3}, t2(16, LOSSY, true));
-  const auto r = p->replace(Amount {49152});
+  const auto r = p->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true});
   ASSERT_EQ(r.program->tunnels().size(), 16U);
   for (const auto& t : r.program->tunnels()) {
     EXPECT_EQ(t.requested_bandwidth, 0);
@@ -888,23 +888,23 @@ TEST(TunnelPrograms, PlannedOnlyOnT2) {
     return out;
   };
   auto t1 = make(g, {0, 1}, {2}, FlowPolicyConfig {.routing = DistributedTE {.tunnel_count = TunnelCount {2}}, .admission = LOSSY});
-  EXPECT_EQ(planned(t1->replace(12, 12)), (Amounts {0, 0, 0, 0}));
+  EXPECT_EQ(planned(t1->replace(12, 12, OutputOptions {.program = true})), (Amounts {0, 0, 0, 0}));
   auto global = make(g, {0, 1}, {2}, FlowPolicyConfig {.routing = centralized()});
-  EXPECT_EQ(planned(global->place(12)), (Amounts {0, 0}));
+  EXPECT_EQ(planned(global->place(12, OutputOptions {.program = true})), (Amounts {0, 0}));
   auto max_flow = make(g, {0, 1}, {2}, FlowPolicyConfig {.routing = shortest_paths(RouteAllocation::Optimized)});
-  EXPECT_EQ(planned(max_flow->place(12)), (Amounts {0, 0}));
+  EXPECT_EQ(planned(max_flow->place(12, OutputOptions {.program = true})), (Amounts {0, 0}));
   const std::vector<NodeId> s {0, 1};
   const std::vector<NodeId> d {2};
   const std::vector<RouteDefinition> routes {{0, std::make_shared<const Path>(*g, std::vector<std::vector<EdgeId>> {{0}}), 1},
                                    {1, std::make_shared<const Path>(*g, std::vector<std::vector<EdgeId>> {{1}}), 1}};
   const auto supplied = ForwardingProgram::from_routes(*g, s, d, routes);
   auto pinned = make(g, {0, 1}, {2}, FlowPolicyConfig {.routing = Pinned {.program = supplied}, .admission = LOSSY});
-  EXPECT_EQ(planned(pinned->replace(Amount {4})), (Amounts {0, 0}));
+  EXPECT_EQ(planned(pinned->replace(Amount {4}, std::nullopt, OutputOptions {.program = true})), (Amounts {0, 0}));
   auto tun = make(g, {0, 1}, {2}, t2(2));
-  const auto laid = tun->replace(INF);
+  const auto laid = tun->replace(INF, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(planned(laid), (Amounts {1, 1, 1, 1}));
   auto replay = make(g, {0, 1}, {2}, FlowPolicyConfig {.routing = Pinned {.program = laid.program}, .admission = LOSSY});
-  EXPECT_EQ(planned(replay->replace(Amount {4})), (Amounts {1, 1, 1, 1}));
+  EXPECT_EQ(planned(replay->replace(Amount {4}, std::nullopt, OutputOptions {.program = true})), (Amounts {1, 1, 1, 1}));
 }
 
 // ---------------------------------------------------------------- evaluators (Q)
@@ -1058,8 +1058,8 @@ TEST(T2Support, EqualsMask) {
     for (const Amount offer : {6, 12, 13}) {
       auto on = make(g, {0}, {1}, t2_on(*g, {0, 1}, a));
       auto masked = make(g, {0}, {1}, t2(2, a), &outside);
-      const auto x = on->replace(offer);
-      const auto y = masked->replace(offer);
+      const auto x = on->replace(offer, std::nullopt, OutputOptions {.by_source = true});
+      const auto y = masked->replace(offer, std::nullopt, OutputOptions {.by_source = true});
       const std::string where = std::to_string(static_cast<int>(a)) + "/" + std::to_string(offer);
       EXPECT_EQ(*x.plan, *y.plan) << where;
       const auto tx = on->program()->tunnels();
@@ -1140,10 +1140,10 @@ TEST(TunnelRanges, T2CostMax) {
 TEST(TunnelZero, T2AllDead) {
   for (const auto a : {LOSSY, LOSSLESS}) {
     auto p = make(twoh(0, 0), {0, 1}, {2}, t2(2, a));
-    EXPECT_EQ(p->replace(Amount {0}, Amount {10}).termination, Termination::Complete);
-    EXPECT_EQ(p->evaluate(Amount {0}, Amount {10}).termination, Termination::Complete);
-    EXPECT_EQ(p->forward(Amount {0}).termination, Termination::Complete);
-    const auto r = p->replace(Amount {10}, Amount {10});
+    EXPECT_EQ(p->replace(Amount {0}, Amount {10}, OutputOptions {.program = true}).termination, Termination::Complete);
+    EXPECT_EQ(p->evaluate(Amount {0}, Amount {10}, OutputOptions {.program = true}).termination, Termination::Complete);
+    EXPECT_EQ(p->forward(Amount {0}, nullptr, OutputOptions {.program = true}).termination, Termination::Complete);
+    const auto r = p->replace(Amount {10}, Amount {10}, OutputOptions {.program = true});
     EXPECT_EQ(r.termination, a == LOSSY ? Termination::Complete : Termination::Exhausted);
     EXPECT_TRUE(r.program->tunnels().empty());
     EXPECT_EQ(vec(r.program->sources()), v({0, 1}));
@@ -1154,9 +1154,9 @@ TEST(TunnelZero, T2AllDead) {
 // U = 0: replace(0) and forward(0) COMPLETE, forward(10) loses 5 at each head.
 TEST(TunnelZero, T2NoTunnels) {
   auto p = make(twoh(1, 100), {0, 1}, {2}, t2(16, LOSSY));
-  EXPECT_EQ(p->replace(Amount {0}).termination, Termination::Complete);
-  EXPECT_EQ(p->forward(Amount {0}).termination, Termination::Complete);
-  const auto f = p->forward(Amount {10});
+  EXPECT_EQ(p->replace(Amount {0}, std::nullopt, OutputOptions {.by_source = true}).termination, Termination::Complete);
+  EXPECT_EQ(p->forward(Amount {0}, nullptr, OutputOptions {.by_source = true}).termination, Termination::Complete);
+  const auto f = p->forward(Amount {10}, nullptr, OutputOptions {.by_source = true});
   EXPECT_EQ(source_rows(f), (std::vector<SourceRow> {{0, 5, 5, 0, 5, 0}, {1, 5, 5, 0, 5, 0}}));
 }
 
@@ -1165,7 +1165,7 @@ TEST(TunnelZero, T2NoTunnels) {
 TEST(TunnelZero, T2) {
   for (const auto a : {LOSSY, LOSSLESS}) {
     auto p = make(one10(), {0}, {1}, t2(2, a));
-    const auto r = p->replace(Amount {0});
+    const auto r = p->replace(Amount {0}, std::nullopt, OutputOptions {.program = true});
     EXPECT_EQ(r.termination, Termination::Complete);
     ASSERT_EQ(r.program->tunnels().size(), 2U);
     std::vector<FlowId> before;
@@ -1174,11 +1174,11 @@ TEST(TunnelZero, T2) {
       before.push_back(rec.flow_id);
     }
     ASSERT_EQ(before.size(), 2U);
-    EXPECT_EQ(p->evaluate(Amount {0}).termination, Termination::Complete);
+    EXPECT_EQ(p->evaluate(Amount {0}, std::nullopt, OutputOptions {.program = true}).termination, Termination::Complete);
     std::vector<FlowId> after;
     for (const auto& rec : p->records()) after.push_back(rec.flow_id);
     EXPECT_EQ(after, before);
-    EXPECT_EQ(p->forward(Amount {0}).termination, Termination::Complete);
+    EXPECT_EQ(p->forward(Amount {0}, nullptr, OutputOptions {.program = true}).termination, Termination::Complete);
     EXPECT_EQ(p->records().size(), 2U);
   }
 }
@@ -1188,14 +1188,14 @@ TEST(TunnelZero, T2) {
 TEST(TunnelZero, PinnedT2NoRoster) {
   const auto g = g1();
   auto p = make(g, {0}, {3}, t2(16, LOSSY, true));
-  const auto base = p->replace(Amount {49152}).program;
+  const auto base = p->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true}).program;
   const auto mask = g->eligibility({}, std::vector<EdgeId> {0, 1});
   auto pin = make(g, {0}, {3}, FlowPolicyConfig {.routing = Pinned {base, nullptr}, .admission = LOSSY}, &mask);
-  const auto r = pin->replace(Amount {49152});
+  const auto r = pin->replace(Amount {49152}, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(r.termination, Termination::NoRoute);
   EXPECT_EQ(pin->records().size(), 16U);
   EXPECT_EQ(row_statuses(r), std::vector<TunnelStatus>(16, FAILED));
-  EXPECT_EQ(pin->replace(Amount {0}).termination, Termination::Complete);
+  EXPECT_EQ(pin->replace(Amount {0}, std::nullopt, OutputOptions {.program = true}).termination, Termination::Complete);
 }
 
 // A zero offered; an Eligibility that excludes every edge.
@@ -1255,7 +1255,7 @@ TEST(T2Property, AgainstTheReference) {
     const std::optional<Amount> D = rng() % 3 == 0 ? std::nullopt : std::optional<Amount>(static_cast<Amount>(rng() % 15));
     const auto design = D.has_value() ? std::optional<std::optional<Amount>>(D) : UNLIMITED;
     auto p = make(g, heads, dests, t2(N, LOSSLESS, hr), elig, std::make_shared<FlowLedger>(g, V));
-    const auto r = p->replace(INF, design);
+    const auto r = p->replace(INF, design, OutputOptions {.program = true});
     const auto& pl = *r.plan;
     const auto& roster = detail::PolicyAccess::engine(*p.p).reachable_sources;
     const auto H = static_cast<std::int64_t>(roster.size());
@@ -1327,7 +1327,7 @@ TEST(T2Property, AgainstTheReference) {
     std::vector<Int128> scores;
     for (std::int64_t k = 1; k <= N; ++k) {
       auto e = make(g, heads, dests, t2(k, LOSSLESS, hr), elig, std::make_shared<FlowLedger>(g, V));
-      const auto rk = e->replace(INF);
+      const auto rk = e->replace(INF, std::nullopt, OutputOptions {.program = true});
       if (*rk.plan->max_bandwidth_per_tunnel == 0) {
         scores.push_back(0);
         continue;
@@ -1374,7 +1374,7 @@ TEST(T2Property, AgainstTheReference) {
       }
     }
     auto up = make(g, heads, dests, t2(N, LOSSLESS, hr, true), elig, std::make_shared<FlowLedger>(g, V));
-    EXPECT_EQ(up->replace(INF, design).plan->tunnels_per_head, chosen);
+    EXPECT_EQ(up->replace(INF, design, OutputOptions {.program = true}).plan->tunnels_per_head, chosen);
     ++selections;
   }
   EXPECT_GT(checked, 200);

@@ -28,6 +28,8 @@ import sys
 from fractions import Fraction
 from pathlib import Path
 
+from helpers import evaluation_outputs, result_outputs
+
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -63,8 +65,12 @@ def values():
     policy = ngc.FlowPolicy(ledger, 0, 3, cfg)
     result = policy.place(
         4,
-        ngc.OutputOptions(
-            edge_flows=True, residual=True, saturated_boundary_edges=True
+        result_outputs(
+            ngc.OutputOptions(
+                edge_flows=True, residual=True, saturated_boundary_edges=True
+            ),
+            program=True,
+            by_source=True,
         ),
     )
     t1_result = ngc.FlowPolicy(
@@ -72,15 +78,32 @@ def values():
         0,
         3,
         ngc.FlowPolicyConfig(routing=dte, admission=ngc.Admission.LOSSY),
-    ).replace(6, design_demand=6, outputs=ngc.OutputOptions(edge_reservations=True))
+    ).replace(
+        6,
+        design_demand=6,
+        outputs=result_outputs(
+            ngc.OutputOptions(edge_reservations=True), program=True, by_source=True
+        ),
+    )
     t2_result = ngc.FlowPolicy(
         ngc.FlowLedger(g), 0, 3, ngc.FlowPolicyConfig(routing=t2)
-    ).replace(inf)
+    ).replace(inf, outputs=ngc.OutputOptions(program=True, by_source=True))
     exact = ngc.FlowPolicy(
         ngc.FlowLedger(g), 0, 3, ngc.FlowPolicyConfig(routing=controller)
-    ).place(inf, ngc.OutputOptions(min_cut=True))
+    ).place(
+        inf,
+        result_outputs(ngc.OutputOptions(min_cut=True), program=True, by_source=True),
+    )
     failures = ngc.evaluate_edge_failures(
-        g, 0, 3, ngc.EvaluationOptions(ngc.FlowPolicyConfig(routing=controller)), 1
+        g,
+        0,
+        3,
+        evaluation_outputs(
+            ngc.EvaluationOptions(ngc.FlowPolicyConfig(routing=controller)),
+            program=True,
+            by_source=True,
+        ),
+        1,
     )
     cache = ngc.ShortestPathCache(g)
     return {
@@ -157,23 +180,37 @@ def wide_values():
         299,
         ngc.FlowPolicyConfig(routing=ngc.ShortestPaths(), admission=lossy),
     )
-    sp.replace(2**41)
-    dark = sp.forward(2**41, black_holes=g.eligibility(excluded_nodes=[296]))
+    sp.replace(2**41, outputs=ngc.OutputOptions(program=True, by_source=True))
+    dark = sp.forward(
+        2**41,
+        black_holes=g.eligibility(excluded_nodes=[296]),
+        outputs=ngc.OutputOptions(program=True, by_source=True),
+    )
     out["PlacementResult.dark"] = dark
     out["SourceFlow.dark"] = dark.by_source[0]
     out["SourceFlow.drops"] = dark.by_source[1]
     out["FlowRecord.lossy"] = sp.records()[-1]
-    lossless = ngc.FlowPolicy(ngc.FlowLedger(g), 297, 299, shortest).place(2**42)
+    lossless = ngc.FlowPolicy(ngc.FlowLedger(g), 297, 299, shortest).place(
+        2**42, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     out["PlacementResult.lossless"] = lossless
     out["SourceFlow.lossless"] = lossless.by_source[0]
     controller = ngc.FlowPolicyConfig(
         routing=ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.OPTIMIZED)
     )
-    exact = ngc.FlowPolicy(ngc.FlowLedger(g), 297, 299, controller).place(float("inf"))
+    exact = ngc.FlowPolicy(ngc.FlowLedger(g), 297, 299, controller).place(
+        float("inf"), outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     out["PlacementResult.exact"] = exact
     out["Tunnel.exact"] = exact.program.tunnels[0]
     failures = ngc.evaluate_edge_failures(
-        g, 297, 299, ngc.EvaluationOptions(controller), 1
+        g,
+        297,
+        299,
+        evaluation_outputs(
+            ngc.EvaluationOptions(controller), program=True, by_source=True
+        ),
+        1,
     )
     out["SensitivityEntry"] = failures.entries[-1]
     ledger = ngc.FlowLedger(g)
@@ -187,7 +224,11 @@ def wide_values():
             routing=ngc.DistributedTE(ngc.TunnelCount(300)), admission=lossy
         ),
     )
-    t1_result = t1.replace(2**41, design_demand=300 * cost)
+    t1_result = t1.replace(
+        2**41,
+        design_demand=300 * cost,
+        outputs=ngc.OutputOptions(program=True, by_source=True),
+    )
     out["PlacementResult.T1"] = t1_result
     out["TunnelPlan.T1"] = t1_result.plan
     out["Tunnel.T1"] = t1_result.program.tunnels[-1]
@@ -200,7 +241,7 @@ def wide_values():
     )
     t2_result = ngc.FlowPolicy(
         ngc.FlowLedger(g), 297, 299, ngc.FlowPolicyConfig(routing=t2)
-    ).replace(2**40)
+    ).replace(2**40, outputs=ngc.OutputOptions(program=True, by_source=True))
     out["TunnelPlan.T2"] = t2_result.plan  # fluid optimum 2^37/25
     out["Tunnel.T2"] = t2_result.program.tunnels[-1]
     # One link of capacity c split over 300 tunnels: the fluid optimum c/300.
@@ -208,7 +249,7 @@ def wide_values():
         link = build(2, [(0, 1, c, 1)])
         out[name] = (
             ngc.FlowPolicy(ngc.FlowLedger(link), 0, 1, ngc.FlowPolicyConfig(routing=t2))
-            .replace(1)
+            .replace(1, outputs=ngc.OutputOptions(program=True, by_source=True))
             .plan
         )
     path = ngc.ksp(g, 297, 299, ngc.KspOptions(1))[0][1]

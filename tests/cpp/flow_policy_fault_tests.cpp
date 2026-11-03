@@ -53,6 +53,53 @@
 
 using namespace netgraph::core;
 using namespace netgraph::core::test;
+
+TEST(ResultOutputs, SourceRowsAllocateOnlyWhenRequestedAndRetryAfterFailure) {
+  const auto graph = shared(make_graph(2, {{0, 1, 10, 3}}));
+  FlowLedger ledger(graph);
+  FlowPolicy policy(ledger, v({0}), v({1}), {ShortestPaths {}});
+  (void)policy.replace(4);
+  const auto count = [&](OutputOptions outputs) {
+    constexpr long limit = 1000000;
+    g_countdown.store(limit);
+    auto result = policy.place(0, outputs);
+    const long allocations = limit - g_countdown.exchange(-1);
+    EXPECT_EQ(result.by_source.has_value(), outputs.by_source);
+    return allocations;
+  };
+  // The shared gate may allocate; requesting rows adds owned storage. Debug
+  // standard libraries may allocate proxies too, so its exact count is not fixed.
+  const long defaults = count({});
+  EXPECT_EQ(count({.program = true}), defaults);
+  EXPECT_GT(count({.by_source = true}), defaults);
+  EXPECT_EQ(count({}), defaults);
+  const auto before = ledger_state(ledger);
+  EXPECT_TRUE(fails_at(defaults, [&] { (void)policy.place(0, {.by_source = true}); }));
+  expect_same(ledger_state(ledger), before, "failed requested source output");
+  const auto retry = policy.place(0, {.by_source = true});
+  ASSERT_TRUE(retry.by_source);
+  ASSERT_EQ(retry.by_source->size(), 1U);
+  EXPECT_EQ(retry.by_source->front().delivered, 4);
+
+  const auto pooled_graph = shared(make_graph(4, {{0, 2, 10, 1}, {1, 2, 10, 1}, {2, 3, 6, 1}}));
+  FlowLedger pooled_ledger(pooled_graph);
+  FlowPolicy pooled(pooled_ledger, v({0, 1}), v({3}), {ShortestPaths {}, Admission::Lossy});
+  (void)pooled.replace(13);
+  const auto positive_count = [&](OutputOptions outputs) {
+    constexpr long limit = 1000000;
+    g_countdown.store(limit);
+    const auto result = pooled.replace(13, std::nullopt, outputs);
+    const long allocations = limit - g_countdown.exchange(-1);
+    EXPECT_EQ(result.delivered, 6);
+    EXPECT_EQ(result.offered, std::optional(Counter128 {0, 13}));
+    EXPECT_EQ(result.by_source.has_value(), outputs.by_source);
+    return allocations;
+  };
+  const long positive_defaults = positive_count({});
+  EXPECT_EQ(positive_count({.program = true}), positive_defaults);
+  EXPECT_GT(positive_count({.by_source = true}), positive_defaults);
+  EXPECT_EQ(positive_count({}), positive_defaults);
+}
 using detail::LedgerAccess;
 
 namespace {
@@ -133,7 +180,7 @@ std::vector<Mode> modes(const Graph& g) {
   {
     CentralizedTE model(SourceAllocation::Weighted);
     model.source_weights = std::make_shared<const std::vector<Amount>>(static_cast<std::size_t>(g.num_nodes()),kDomainLimit-1);
-    const auto program = evaluate_demand(g,S,D,EvaluationOptions{FlowPolicyConfig{model}}).program;
+    const auto program = evaluate_demand(g,S,D, result_outputs(EvaluationOptions{FlowPolicyConfig{model}}, true, false)).program;
     out.push_back({"wide weighted captured replay", {.routing=Pinned{program},.admission=Admission::Lossy},S,D,Amount{6}});
   }
   out.push_back({"shortest_paths maxflow equal",
@@ -263,7 +310,7 @@ std::unique_ptr<FlowPolicy> third_party(FlowLedger& fg, const Graph& g) {
   const auto inv = id_of_input(g);
   auto t = std::make_unique<FlowPolicy>(fg, std::vector<NodeId> {0}, std::vector<NodeId> {5},
                                         FlowPolicyConfig {.routing = centralized(SourceAllocation::Optimized, dag_of(g, {inv[0], inv[4]}))});
-  (void)t->place(1);
+  (void)t->place(1, OutputOptions {.program = true});
   return t;
 }
 
@@ -278,7 +325,7 @@ TEST(PolicyFaults, ZeroCapacityLinksTakePartInTheSweeps) {
   for (const auto& m : modes(*g)) {
     FlowLedger fg(g);
     FlowPolicy p(fg, m.sources, m.destinations, m.cfg);
-    (void)p.place(5);
+    (void)p.place(5, OutputOptions {.program = true});
     const auto& pe = detail::PolicyAccess::engine(p);
     if (m.name == "shortest_paths eb") {
       // The pooled program of both sources holds the zero link as a member.
@@ -286,7 +333,7 @@ TEST(PolicyFaults, ZeroCapacityLinksTakePartInTheSweeps) {
       const auto& plan = *detail::ProgramAccess::data(*pe.epoch.program).split_contexts.front().prepared_route;
       EXPECT_EQ(vec(plan.sources), (std::vector<NodeId> {0, 1}));
       EXPECT_TRUE(std::find(plan.forwarding_edges.begin(), plan.forwarding_edges.end(), inv[11]) != plan.forwarding_edges.end());
-      const auto s = evaluate_edge_failures(*g, m.sources, m.destinations, query_of(m), 1);
+      const auto s = evaluate_edge_failures(*g, m.sources, m.destinations, result_outputs(query_of(m), true, false), 1);
       EXPECT_TRUE(std::any_of(s.entries.begin(), s.entries.end(), [&](const auto& e) { return e.edge == inv[11]; }));
     }
     if (m.name == "pinned eb split routes" || m.name == "pinned lossy") {
@@ -690,7 +737,7 @@ TEST(PolicyFaults, ConstructionFailsWithoutBindingAndTheCacheStaysConsistent) {
       ShortestPathCache rc(*g);
       FlowPolicy pr(rf, m.sources, m.destinations, m.cfg, elig, with_cache ? &rc : nullptr);
       const ShortestPathCache::Stats fresh = rc.stats();
-      const PlacementResult want = pr.place(2);
+      const PlacementResult want = pr.place(2, OutputOptions {.program = true, .by_source = true});
       const LedgerState after_place = ledger_state(rf);
       long injected = 0;
       int empty = 0;  // failures that left the supplied cache empty, and that left its whole entry
@@ -731,7 +778,7 @@ TEST(PolicyFaults, ConstructionFailsWithoutBindingAndTheCacheStaysConsistent) {
           p.emplace(fg, m.sources, m.destinations, m.cfg, elig, with_cache ? &cache : nullptr);
           EXPECT_EQ(cache.stats().entries, fresh.entries) << w;
           EXPECT_EQ(cache.stats().bytes, fresh.bytes) << w;
-          expect_same(p->place(2), want, w);
+          expect_same(p->place(2, OutputOptions {.program = true, .by_source = true}), want, w);
           expect_same(ledger_state(fg), after_place, w);
           expect_balanced(fg, w);
         }
@@ -914,7 +961,7 @@ long sweep_batch(const Mode& m, const Graph& g, std::span<const std::int32_t> wo
   std::optional<ShortestPathCache> cache;
   const auto opts = [&] { return query_of(m, o.elig, cache ? &*cache : nullptr); };
   if (o.cache) cache.emplace(g);
-  const auto want = evaluate_pairs(g, pairs, opts(), per_pair, 1);
+  const auto want = evaluate_pairs(g, pairs, result_outputs(opts(), true, true), per_pair, 1);
   const std::int64_t clean = cache ? cache->stats().entries : 0;
   cache.reset();  // each attempt gets a fresh one (setup)
   const std::string name = m.name + " batch" + o.name;
@@ -924,11 +971,11 @@ long sweep_batch(const Mode& m, const Graph& g, std::span<const std::int32_t> wo
     for (const bool in_workers : {false, true}) {
       if (in_workers && workers == 1) continue;  // one worker runs on the calling thread
       const long failures = sweep_evaluator(
-          name, workers, in_workers, step, [&](std::int32_t w) { (void)evaluate_pairs(g, pairs, opts(), per_pair, w); },
+          name, workers, in_workers, step, [&](std::int32_t w) { (void)evaluate_pairs(g, pairs, result_outputs(opts(), true, true), per_pair, w); },
           [&](std::int32_t w) {
             expect_whole_entries(cache, clean, name + " failed call");
             if (cache && cache->stats().entries > 0) ++kept;
-            const auto b = evaluate_pairs(g, pairs, opts(), per_pair, w);
+            const auto b = evaluate_pairs(g, pairs, result_outputs(opts(), true, true), per_pair, w);
             ASSERT_EQ(b.size(), want.size());
             for (std::size_t i = 0; i < b.size(); ++i) expect_same(b[i], want[i], name + " retry");
             if (cache) EXPECT_EQ(cache->stats().entries, clean) << name << " retry";
@@ -950,7 +997,7 @@ long sweep_edge_failures(const Mode& m, const Graph& g, std::span<const std::int
   std::optional<ShortestPathCache> cache;
   const auto opts = [&] { return query_of(m, o.elig, cache ? &*cache : nullptr); };
   if (o.cache) cache.emplace(g);
-  const auto want = evaluate_edge_failures(g, m.sources, m.destinations, opts(), 1);
+  const auto want = evaluate_edge_failures(g, m.sources, m.destinations, result_outputs(opts(), true, true), 1);
   const std::int64_t clean = cache ? cache->stats().entries : 0;
   cache.reset();  // each attempt gets a fresh one (setup)
   const std::string name = m.name + " sensitivity" + o.name;
@@ -961,11 +1008,11 @@ long sweep_edge_failures(const Mode& m, const Graph& g, std::span<const std::int
       if (in_workers && workers == 1) continue;
       const long failures = sweep_evaluator(
           name, workers, in_workers, step,
-          [&](std::int32_t w) { (void)evaluate_edge_failures(g, m.sources, m.destinations, opts(), w); },
+          [&](std::int32_t w) { (void)evaluate_edge_failures(g, m.sources, m.destinations, result_outputs(opts(), true, true), w); },
           [&](std::int32_t w) {
             expect_whole_entries(cache, clean, name + " failed call");
             if (cache && cache->stats().entries > 0) ++kept;
-            const auto s = evaluate_edge_failures(g, m.sources, m.destinations, opts(), w);
+            const auto s = evaluate_edge_failures(g, m.sources, m.destinations, result_outputs(opts(), true, true), w);
             expect_same(s.baseline, want.baseline, name + " retry");
             ASSERT_EQ(s.entries.size(), want.entries.size());
             for (std::size_t i = 0; i < s.entries.size(); ++i) {
@@ -1049,7 +1096,7 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
         return query_of(m, o.elig, cache ? &*cache : nullptr, OutputOptions {true, true, true});
       };
       if (o.cache) cache.emplace(*g);
-      const auto want = evaluate_demand(*g, m.sources, m.destinations, copts());
+      const auto want = evaluate_demand(*g, m.sources, m.destinations, result_outputs(copts(), true, true));
       const std::int64_t clean = cache ? cache->stats().entries : 0;
       if (o.cache) EXPECT_GT(clean, 0) << name;  // the cache is read
       cache.reset();  // each attempt supplies a fresh one
@@ -1066,7 +1113,7 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
         bool failed = false;
         {
           PlacementResult got;
-          failed = fails_at(at, [&] { got = evaluate_demand(*g, m.sources, m.destinations, copts()); });
+          failed = fails_at(at, [&] { got = evaluate_demand(*g, m.sources, m.destinations, result_outputs(copts(), true, true)); });
           if (!failed) {
             expect_same(got, want, name + " (no failure)");
           } else {
@@ -1081,7 +1128,7 @@ TEST(PolicyFaults, EvaluatorsLeaveNoPoisonedScratch) {
                 EXPECT_EQ(s.hits, 0) << w;
               }
             }
-            expect_same(evaluate_demand(*g, m.sources, m.destinations, copts()), want, w + " (retry)");
+            expect_same(evaluate_demand(*g, m.sources, m.destinations, result_outputs(copts(), true, true)), want, w + " (retry)");
             if (cache) EXPECT_EQ(cache->stats().entries, clean) << w;
           }
         }
@@ -1121,7 +1168,7 @@ long sweep_finite_offers(const Graph& g, const std::string& name, std::initializ
     if (base.name != name) continue;
     Mode uncapped = base;
     uncapped.offered.reset();
-    const Amount top = evaluate_demand(g, base.sources, base.destinations, query_of(uncapped)).call_delivered;
+    const Amount top = evaluate_demand(g, base.sources, base.destinations, result_outputs(query_of(uncapped), true, true)).call_delivered;
     EXPECT_GT(top, 2) << base.name;
     for (const int which : offers) {
       const Amount offer = which < 0 ? top / 2 : (which == 0 ? top : top + 3);
@@ -1214,7 +1261,7 @@ void expect_scratch_growth_failure_leaves_nothing_half_grown(
   {
     FlowLedger fg(large);
     FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {n - 1}, config(*large));
-    want = p.place(2, all);
+    want = p.place(2, result_outputs(all, true, true));
     want_state = ledger_state(fg);
     want_epoch = epoch(p);
   }
@@ -1224,7 +1271,7 @@ void expect_scratch_growth_failure_leaves_nothing_half_grown(
       [&] {
         FlowLedger fg(small);
         FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {2}, config(*small));
-        EXPECT_EQ(p.place(2, all).call_delivered, 2);
+        EXPECT_EQ(p.place(2, result_outputs(all, true, true)).call_delivered, 2);
       },
       [&](long at, const std::string& w) {
         FlowLedger fg(large);
@@ -1232,11 +1279,11 @@ void expect_scratch_growth_failure_leaves_nothing_half_grown(
         const LedgerState before = ledger_state(fg);
         const Epoch before_epoch = epoch(p);
         PlacementResult got;
-        const bool failed = fails_at(at, [&] { got = p.place(2, all); });
+        const bool failed = fails_at(at, [&] { got = p.place(2, result_outputs(all, true, true)); });
         if (failed) {
           expect_same(ledger_state(fg), before, w);
           expect_same(epoch(p), before_epoch, w);
-          got = p.place(2, all);
+          got = p.place(2, result_outputs(all, true, true));
         }
         expect_same(got, want, w);
         expect_same(ledger_state(fg), want_state, w);
@@ -1247,11 +1294,11 @@ void expect_scratch_growth_failure_leaves_nothing_half_grown(
       [&] {
         FlowLedger fg(large);
         FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {n - 1}, config(*large));
-        (void)p.place(2, all);  // the scratch grows to the large graph
+        (void)p.place(2, result_outputs(all, true, true));  // the scratch grows to the large graph
         p.remove();
         long warm = 0;
         while (fails_at(warm, [&] {
-          (void)p.place(2, all);
+          (void)p.place(2, result_outputs(all, true, true));
           p.remove();
         })) {
           ++warm;
@@ -1295,32 +1342,32 @@ TEST(PolicyFaults, WeightedSourceHeapAndWideReplayFailAtomically) {
     m.source_weights=std::make_shared<const std::vector<Amount>>(18,kDomainLimit-1);
     return FlowPolicyConfig{m};
   };
-  const auto program=evaluate_demand(*g,heads,std::vector<NodeId>{17},EvaluationOptions{model()}).program;
+  const auto program=evaluate_demand(*g,heads,std::vector<NodeId>{17}, result_outputs(EvaluationOptions{model()}, true, true)).program;
   for(bool replay:{false,true})for(bool support:{false,true})for(int stage:{0,1,2}) {
     const auto setup=[&](FlowLedger& ledger) {
       auto cfg=model();
       if(support)std::get<CentralizedTE>(cfg.routing).support=all_edges(*g);
       if(replay)cfg=FlowPolicyConfig{Pinned{program},Admission::Lossy};
       auto p=std::make_shared<FlowPolicy>(ledger,heads,std::vector<NodeId>{17},cfg);
-      if(stage!=0){(void)p->place(1);if(stage==1)p->remove();}
+      if(stage!=0){(void)p->place(1, OutputOptions {.program = true});if(stage==1)p->remove();}
       auto* raw=p.get();return Staged{p,raw};
     };
-    EXPECT_GT(sweep_placement(g,"weighted heap/wide cold removed live",setup,[&](FlowPolicy& p){return p.place(stage==2 ? 15 : 16,{true,true,true,true,true});}),0);
+    EXPECT_GT(sweep_placement(g,"weighted heap/wide cold removed live",setup,[&](FlowPolicy& p){return p.place(stage==2 ? 15 : 16, result_outputs({true,true,true,true,true}, true, true));}),0);
     if(::testing::Test::HasFailure())return;
   }
   // Finite16 over17 equal weights forces a heap remainder on each evaluator worker.
   EvaluationOptions options{model(),nullptr,nullptr,{true,true,true,true,true},{},Amount{16}};
   for(int workers:{2,4})for(bool warm:{false,true}) {
     const std::vector<std::pair<std::vector<NodeId>,std::vector<NodeId>>> pairs(static_cast<std::size_t>(2*workers),{heads,{17}});
-    const auto expected=evaluate_pairs(*g,pairs,options,{},workers);
+    const auto expected=evaluate_pairs(*g,pairs, result_outputs(options, true, true),{},workers);
     long failures=0;
     for(long at=0;;++at) {
       const auto live=g_live.load();bool failed=false;
       std::thread attempt([&] {
-        if(warm)(void)evaluate_pairs(*g,pairs,options,{},workers);
+        if(warm)(void)evaluate_pairs(*g,pairs, result_outputs(options, true, true),{},workers);
         std::vector<PlacementResult> got;
-        failed=fails_in_workers_at(at,[&]{got=evaluate_pairs(*g,pairs,options,{},workers);});
-        if(failed){EXPECT_TRUE(got.empty());got=evaluate_pairs(*g,pairs,options,{},workers);}
+        failed=fails_in_workers_at(at,[&]{got=evaluate_pairs(*g,pairs, result_outputs(options, true, true),{},workers);});
+        if(failed){EXPECT_TRUE(got.empty());got=evaluate_pairs(*g,pairs, result_outputs(options, true, true),{},workers);}
         ASSERT_EQ(got.size(),expected.size());
         for(std::size_t i=0;i<got.size();++i)expect_same(got[i],expected[i],"weighted heap worker retry");
       });
@@ -1612,16 +1659,16 @@ TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
   for (const auto& [s, t] : pairs) (void)cache.lookup(*g, t, Direction::Reverse, nullptr);
   const auto entries = cache.stats().entries;
   cache.freeze();
-  const auto want = evaluate_pairs(*g, pairs, query_of(m), {}, 1);
+  const auto want = evaluate_pairs(*g, pairs, result_outputs(query_of(m), true, true), {}, 1);
   const EvaluationOptions shared {m.cfg, nullptr, &cache};
   for (const std::int32_t workers : {2, 4}) {
     for (const bool in_workers : {false, true}) {
       const long failures = sweep_evaluator(
           "frozen batch", workers, in_workers, 5,
-          [&](std::int32_t w) { (void)evaluate_pairs(*g, pairs, shared, {}, w); },
+          [&](std::int32_t w) { (void)evaluate_pairs(*g, pairs, result_outputs(shared, true, true), {}, w); },
           [&](std::int32_t w) {
             EXPECT_EQ(cache.stats().entries, entries);
-            const auto b = evaluate_pairs(*g, pairs, shared, {}, w);
+            const auto b = evaluate_pairs(*g, pairs, result_outputs(shared, true, true), {}, w);
             ASSERT_EQ(b.size(), want.size());
             for (std::size_t i = 0; i < b.size(); ++i) expect_same(b[i], want[i], "frozen batch retry");
           });
@@ -1638,7 +1685,7 @@ TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
     return w.substr(0, w.find(", Eligibility uid "));
   };
   const auto shortest_paths_edge_failures = [&](std::int32_t w) {
-    (void)evaluate_edge_failures(*g, m.sources, m.destinations, query_of(m, nullptr, &cache), w);
+    (void)evaluate_edge_failures(*g, m.sources, m.destinations, result_outputs(query_of(m, nullptr, &cache), true, true), w);
   };
   std::string want_miss;
   try {
@@ -1669,7 +1716,7 @@ TEST(PolicyFaults, WorkersSharingAFrozenCacheFailCleanly) {
   // starts, the cache unchanged.
   const auto git = std::find_if(all.begin(), all.end(), [](const Mode& x) { return x.name == "global"; });
   ASSERT_NE(git, all.end());
-  EXPECT_THROW((void)evaluate_edge_failures(*g, git->sources, git->destinations, EvaluationOptions {git->cfg, nullptr, &cache}, 2),
+  EXPECT_THROW((void)evaluate_edge_failures(*g, git->sources, git->destinations, result_outputs(EvaluationOptions {git->cfg, nullptr, &cache}, true, true), 2),
                std::invalid_argument);
   EXPECT_EQ(cache.stats().entries, entries);
 }
@@ -1739,7 +1786,7 @@ TEST(PolicyFaults, T1ConstructionFailsWithoutBinding) {
       const std::string variant = m.name + (elig != nullptr ? " eligibility" : "");
       FlowLedger rf(g);
       FlowPolicy pr(rf, m.sources, m.destinations, m.cfg, elig);
-      const PlacementResult want = pr.replace(2, *m.design);
+      const PlacementResult want = pr.replace(2, *m.design, OutputOptions {.program = true, .by_source = true});
       const LedgerState after_place = ledger_state(rf);
       long injected = 0;
       for (long at = 0;; ++at) {
@@ -1757,7 +1804,7 @@ TEST(PolicyFaults, T1ConstructionFailsWithoutBinding) {
           EXPECT_FALSE(p.has_value()) << w;
           expect_same(ledger_state(fg), before, w);
           p.emplace(fg, m.sources, m.destinations, m.cfg, elig);
-          expect_same(p->replace(2, *m.design), want, w);
+          expect_same(p->replace(2, *m.design, OutputOptions {.program = true, .by_source = true}), want, w);
           expect_same(ledger_state(fg), after_place, w);
           expect_balanced(fg, w);
         }
@@ -1784,17 +1831,17 @@ TEST(PolicyFaults, T1EvaluatorsLeaveNoPoisonedScratch) {
     for (const auto& o : option_sets(no_bypass, no_cross)) {
       if (o.cache) continue;  // T1 rejects a cache
       const std::string name = m.name + " capacity" + o.name;
-      const auto want = evaluate_demand(*g, m.sources, m.destinations, query_of(m, o.elig, nullptr, {true, true, true}));
+      const auto want = evaluate_demand(*g, m.sources, m.destinations, result_outputs(query_of(m, o.elig, nullptr, {true, true, true}), true, true));
       long injected = 0;
       for (long at = 0;; ++at) {
         const long live = g_live.load();
         bool failed = false;
         {
           PlacementResult got;
-          failed = fails_at(at, [&] { got = evaluate_demand(*g, m.sources, m.destinations, query_of(m, o.elig, nullptr, {true, true, true})); });
+          failed = fails_at(at, [&] { got = evaluate_demand(*g, m.sources, m.destinations, result_outputs(query_of(m, o.elig, nullptr, {true, true, true}), true, true)); });
           if (failed) {
             ++injected;
-            expect_same(evaluate_demand(*g, m.sources, m.destinations, query_of(m, o.elig, nullptr, {true, true, true})), want,
+            expect_same(evaluate_demand(*g, m.sources, m.destinations, result_outputs(query_of(m, o.elig, nullptr, {true, true, true}), true, true)), want,
                         name + " retry");
           } else {
             expect_same(got, want, name);
@@ -1819,12 +1866,12 @@ TEST(PolicyFaults, T1RemovalAndReleaseNeverAllocate) {
   for (const auto& m : t1_modes()) {
     FlowLedger fg(g);
     auto p = std::make_unique<FlowPolicy>(fg, m.sources, m.destinations, m.cfg);
-    (void)p->replace(4, *m.design);
+    (void)p->replace(4, *m.design, OutputOptions {.program = true, .by_source = true});
     ASSERT_FALSE(fg.records().empty()) << m.name;
     EXPECT_FALSE(fails_at(0, [&] { p->remove(); })) << m.name;
     EXPECT_TRUE(fg.records().empty()) << m.name;
     EXPECT_EQ(fg.reserved(), std::vector<Amount>(fg.reserved().size(), 0)) << m.name;
-    (void)p->replace(2, *m.design);
+    (void)p->replace(2, *m.design, OutputOptions {.program = true, .by_source = true});
     const LedgerState held = ledger_state(fg);
     ASSERT_GT(std::accumulate(held.reserved.begin(), held.reserved.end(), Amount {0}), 0) << m.name;
     EXPECT_FALSE(fails_at(0, [&] { p.reset(); })) << m.name;
@@ -1853,11 +1900,11 @@ void expect_t1_hold_scratch_growth(const std::string& name, bool from_small, boo
   const FlowPolicyConfig cfg {.routing = DistributedTE {TunnelCount {2}}};
   const auto make = [&](FlowLedger& fg) {
     auto p = std::make_unique<FlowPolicy>(fg, std::vector<NodeId> {0}, std::vector<NodeId> {last}, cfg);
-    if (prior) std::thread([&] { (void)p->replace(2, 2); }).join();
+    if (prior) std::thread([&] { (void)p->replace(2, 2, OutputOptions {.program = true, .by_source = true}); }).join();
     return p;
   };
   const OutputOptions holds {.edge_reservations = true};
-  const auto call = [&](FlowPolicy& p) { return p.replace(4, 4, holds); };
+  const auto call = [&](FlowPolicy& p) { return p.replace(4, 4, result_outputs(holds, true, true)); };
   PlacementResult want;
   LedgerState want_state;
   Epoch want_epoch;
@@ -1877,7 +1924,7 @@ void expect_t1_hold_scratch_growth(const std::string& name, bool from_small, boo
         if (!from_small) return;
         FlowLedger fg(small);
         FlowPolicy p(fg, std::vector<NodeId> {0}, std::vector<NodeId> {2}, cfg);
-        EXPECT_EQ(p.replace(4, 4).call_delivered, 4);
+        EXPECT_EQ(p.replace(4, 4, OutputOptions {.program = true, .by_source = true}).call_delivered, 4);
       },
       [&](long at, const std::string& w) {
         FlowLedger fg(large);
@@ -1983,7 +2030,7 @@ TEST(PolicyFaults, T2ConstructionFailsWithoutBinding) {
       const std::string variant = m.name + (elig != nullptr ? " eligibility" : "");
       FlowLedger rf(g);
       FlowPolicy pr(rf, m.sources, m.destinations, m.cfg, elig);
-      const PlacementResult want = pr.replace(2, *m.design);
+      const PlacementResult want = pr.replace(2, *m.design, OutputOptions {.program = true, .by_source = true});
       const LedgerState after_place = ledger_state(rf);
       long injected = 0;
       for (long at = 0;; ++at) {
@@ -2001,7 +2048,7 @@ TEST(PolicyFaults, T2ConstructionFailsWithoutBinding) {
           EXPECT_FALSE(p.has_value()) << w;
           expect_same(ledger_state(fg), before, w);
           p.emplace(fg, m.sources, m.destinations, m.cfg, elig);
-          expect_same(p->replace(2, *m.design), want, w);
+          expect_same(p->replace(2, *m.design, OutputOptions {.program = true, .by_source = true}), want, w);
           expect_same(ledger_state(fg), after_place, w);
           expect_balanced(fg, w);
         }
@@ -2037,17 +2084,17 @@ void sweep_t2_evaluators(const Mode& m, int part) {
         continue;
       }
       const std::string name = m.name + " capacity" + o.name;
-      const auto want = evaluate_demand(*g, m.sources, m.destinations, query_of(m, o.elig, nullptr, {true, true, true}));
+      const auto want = evaluate_demand(*g, m.sources, m.destinations, result_outputs(query_of(m, o.elig, nullptr, {true, true, true}), true, true));
       long injected = 0;
       for (long at = 0;; ++at) {
         const long live = g_live.load();
         bool failed = false;
         {
           PlacementResult got;
-          failed = fails_at(at, [&] { got = evaluate_demand(*g, m.sources, m.destinations, query_of(m, o.elig, nullptr, {true, true, true})); });
+          failed = fails_at(at, [&] { got = evaluate_demand(*g, m.sources, m.destinations, result_outputs(query_of(m, o.elig, nullptr, {true, true, true}), true, true)); });
           if (failed) {
             ++injected;
-            expect_same(evaluate_demand(*g, m.sources, m.destinations, query_of(m, o.elig, nullptr, {true, true, true})), want,
+            expect_same(evaluate_demand(*g, m.sources, m.destinations, result_outputs(query_of(m, o.elig, nullptr, {true, true, true}), true, true)), want,
                         name + " retry");
           } else {
             expect_same(got, want, name);
@@ -2189,19 +2236,19 @@ TEST(PolicyFaults, StaticPreparationBatchRollbackIncludesEveryPrivateOwner) {
       const FlowPolicyConfig cfg {ShortestPaths {}, Admission::Lossy};
       FlowPolicy a(ledger, std::vector<NodeId>{0}, std::vector<NodeId>{5}, cfg);
       FlowPolicy b(ledger, std::vector<NodeId>{0, 1}, std::vector<NodeId>{5, 6}, cfg);
-      if (warm) { (void)a.place(2); (void)b.place(2); a.remove(); b.remove(); }
+      if (warm) { (void)a.place(2, OutputOptions {.program = true, .by_source = true}); (void)b.place(2, OutputOptions {.program = true, .by_source = true}); a.remove(); b.remove(); }
       const auto before = ledger_state(ledger);
       const auto a_before = epoch(a), b_before = epoch(b);
       const std::vector<Action> actions {Replace {a, 7}, Replace {b, 5}};
       std::vector<PlacementResult> result;
-      if (fails_at(at, [&] { result = apply_actions(ledger, actions, mode, all); })) {
+      if (fails_at(at, [&] { result = apply_actions(ledger, actions, mode, result_outputs(all, true, true)); })) {
         ++failures;
         expect_same(ledger_state(ledger), before, "batch rollback ledger");
         expect_same(epoch(a), a_before, "batch rollback first owner");
         expect_same(epoch(b), b_before, "batch rollback second owner");
         EXPECT_EQ(detail::PolicyAccess::engine(a).kept_program.get(), a_before.kept_id);
         EXPECT_EQ(detail::PolicyAccess::engine(b).kept_program.get(), b_before.kept_id);
-        result = apply_actions(ledger, actions, mode, all);
+        result = apply_actions(ledger, actions, mode, result_outputs(all, true, true));
       } else completed = true;
       ASSERT_EQ(result.size(), 2U);
       EXPECT_TRUE(detail::PolicyAccess::engine(a).kept_program);
@@ -2219,7 +2266,7 @@ TEST(PolicyFaults, LazyRecordReadsFailWithoutChangingOrCachingEntryState) {
   const auto g = shared(make_graph(5, {{0, 2, 9, 1}, {1, 2, 8, 1}, {2, 3, 3, 1}, {2, 4, 5, 1}}));
   FlowLedger ledger(g);
   FlowPolicy policy(ledger, v({0, 1}), v({3, 4}), {.routing = ShortestPaths {}, .admission = Admission::Lossy});
-  (void)policy.place(5); (void)policy.place(7);
+  (void)policy.place(5, OutputOptions {.program = true, .by_source = true}); (void)policy.place(7, OutputOptions {.program = true, .by_source = true});
   const auto id = policy.records().front().flow_id;
   const auto before = ledger_state(ledger);
   const auto expected = ledger.record(id);
@@ -2258,7 +2305,7 @@ TEST(PolicyFaults, ColdMaskedLazyReadsRetryOnTheFailingThread) {
   const auto mask = g->eligibility({}, v({2}));
   FlowLedger ledger(g);
   FlowPolicy policy(ledger, v({0, 1}), v({3, 4}), {.routing = Pinned {program, nullptr}, .admission = Admission::Lossy}, &mask);
-  (void)policy.place(5); (void)policy.place(7);
+  (void)policy.place(5, OutputOptions {.program = true, .by_source = true}); (void)policy.place(7, OutputOptions {.program = true, .by_source = true});
   const auto expected = ledger.records();
   const auto before = ledger_state(ledger);
   for (bool one : {false, true}) {

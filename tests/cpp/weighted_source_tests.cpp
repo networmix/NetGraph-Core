@@ -31,7 +31,7 @@ std::shared_ptr<const Graph> witness(bool coarse = false) {
 }
 std::vector<Amount> sources(const PlacementResult& r) {
   std::vector<Amount> out;
-  for (const auto& row : r.by_source) out.push_back(row.delivered);
+  for (const auto& row : r.by_source.value()) out.push_back(row.delivered);
   return out;
 }
 std::string refused(const std::function<void()>& call) {
@@ -61,10 +61,10 @@ TEST(WeightedSources, WitnessAndDeclaredReplayOnDenseAndSupportPaths) {
     FlowLedger ledger(g);
     FlowPolicy p(ledger, v({0,1}), v({5}), cfg);
     const auto before = ledger_state(ledger);
-    const auto r = p.evaluate(std::nullopt, {}, all);
+    const auto r = p.evaluate(std::nullopt, {}, result_outputs(all, true, true));
     expect_same(ledger_state(ledger), before, "evaluate is read only");
     EXPECT_FALSE(p.program());
-    expect_same(p.replace(std::nullopt, {}, all), r, "evaluate/replace");
+    expect_same(p.replace(std::nullopt, {}, result_outputs(all, true, true)), r, "evaluate/replace");
     EXPECT_EQ(r.delivered, 16);
     EXPECT_FALSE(r.call_undelivered);
     EXPECT_EQ(r.by_tunnel, (std::vector<TunnelFlow>{{0,0,TunnelStatus::Up,{0,3},3,{}},
@@ -95,14 +95,14 @@ TEST(WeightedSources, WitnessAndDeclaredReplayOnDenseAndSupportPaths) {
     for (Admission admission : {Admission::Lossless, Admission::Lossy}) {
       FlowLedger replay(g);
       FlowPolicy q(replay, v({0,1}), v({5}), {.routing=Pinned{r.program}, .admission=admission});
-      const auto at15 = q.replace(15, {}, all);
+      const auto at15 = q.replace(15, {}, result_outputs(all, true, true));
       EXPECT_EQ(sources(at15), (std::vector<Amount>{10,5}));
       EXPECT_EQ(at15.edge_flows, (std::optional<std::vector<Amount>>{{10,0,5,3,7,8,7}}));
       EXPECT_EQ(at15.termination, Termination::Complete);
-      EXPECT_EQ(q.replace(16).delivered, 16);
-      EXPECT_EQ(refused([&] { (void)q.forward(15); }), "Pinned forwards with replace");
+      EXPECT_EQ(q.replace(16, std::nullopt, result_outputs(OutputOptions {.program = true, .by_source = true}, true, true)).delivered, 16);
+      EXPECT_EQ(refused([&] { (void)q.forward(15, nullptr, result_outputs(OutputOptions {.program = true, .by_source = true}, true, true)); }), "Pinned forwards with replace");
     }
-    const auto forwarded=p.forward(15);
+    const auto forwarded=p.forward(15, nullptr, result_outputs(OutputOptions {.program = true, .by_source = true}, true, true));
     EXPECT_EQ(sources(forwarded), (std::vector<Amount>{10,5}));
     EXPECT_FALSE(forwarded.routes_changed);EXPECT_FALSE(forwarded.weights_changed);EXPECT_FALSE(forwarded.reservations_changed);
     expect_balanced(ledger, "controller replay");
@@ -113,7 +113,7 @@ TEST(WeightedSources, CoarsePositiveWeightWithoutAPathKeepsItsShare) {
   const auto g = witness(true);
   FlowLedger ledger(g);
   FlowPolicy p(ledger, v({0,1}), v({5}), weighted({2,1,0,0,0,0}));
-  const auto r = p.replace(std::nullopt, {}, all);
+  const auto r = p.replace(std::nullopt, {}, result_outputs(all, true, true));
   EXPECT_EQ(r.delivered, 2); EXPECT_EQ(r.total_cost, (Counter128{0,6}));
   EXPECT_EQ(sources(r), (std::vector<Amount>{2,0}));
   EXPECT_EQ(r.edge_flows, (std::optional<std::vector<Amount>>{{2,0,0,1,1,1,1}}));
@@ -124,7 +124,7 @@ TEST(WeightedSources, CoarsePositiveWeightWithoutAPathKeepsItsShare) {
   for (Admission admission : {Admission::Lossless, Admission::Lossy}) {
     FlowLedger replay(g);
     FlowPolicy q(replay, v({0,1}), v({5}), {.routing=Pinned{r.program}, .admission=admission});
-    const auto at3 = q.replace(3);
+    const auto at3 = q.replace(3, std::nullopt, result_outputs(OutputOptions {.program = true}, true, true));
     EXPECT_EQ(at3.delivered, 2);
     EXPECT_EQ(at3.source_drops, (Counter128{0,admission==Admission::Lossy ? 1U : 0U}));
     EXPECT_EQ(at3.termination, admission==Admission::Lossy ? Termination::Complete : Termination::Exhausted);
@@ -137,7 +137,7 @@ TEST(WeightedSources, RosterZeroWeightsAndEmptyReplayKeepDifferentOutcomes) {
     const auto mask = g->eligibility(masked ? v({2}) : v({}), {});
     FlowLedger ledger(g);
     FlowPolicy p(ledger, v({2,0,1,2}), v({3}), weighted({1,1,2,0}), &mask);
-    const auto r = p.replace(std::nullopt, {}, all);
+    const auto r = p.replace(std::nullopt, {}, result_outputs(all, true, true));
     EXPECT_EQ(r.delivered,8); EXPECT_EQ(r.total_cost,(Counter128{0,8}));
     EXPECT_EQ(sources(r), (masked ? std::vector<Amount>{4,4,0} : std::vector<Amount>{2,2,4}));
   }
@@ -145,38 +145,38 @@ TEST(WeightedSources, RosterZeroWeightsAndEmptyReplayKeepDifferentOutcomes) {
     const auto mask = g->eligibility(empty ? v({0,1,2}) : v({2}), {});
     FlowLedger ledger(g);
     FlowPolicy p(ledger, v({0,1,2}), v({3}), weighted({0,0,5,0}, support ? dag_of(*g,{0,1,2}) : nullptr), &mask);
-    const auto r = p.replace(6, {}, all);
+    const auto r = p.replace(6, {}, result_outputs(all, true, true));
     EXPECT_EQ(r.termination,empty ? Termination::NoRoute : Termination::NoActiveWeight);
     EXPECT_EQ(r.delivered,0); EXPECT_EQ(r.unadmitted,(Counter128{0,6}));
     EXPECT_EQ(sources(r),(std::vector<Amount>{0,0,0}));
     ASSERT_TRUE(r.program->source_weights());
     EXPECT_EQ(r.program->source_weights()->size(),empty ? 0U : 2U);
     EXPECT_TRUE(r.program->tunnels().empty());
-    const auto unlimited=p.evaluate(std::nullopt);
+    const auto unlimited=p.evaluate(std::nullopt, std::nullopt, result_outputs(OutputOptions {.program = true}, true, true));
     EXPECT_EQ(unlimited.termination,empty ? Termination::NoRoute : Termination::NoActiveWeight);
     EXPECT_FALSE(unlimited.requested);EXPECT_FALSE(unlimited.unadmitted);EXPECT_FALSE(unlimited.call_undelivered);
-    EXPECT_EQ(p.forward(6).termination,empty ? Termination::NoRoute : Termination::Exhausted);
+    EXPECT_EQ(p.forward(6, nullptr, result_outputs(OutputOptions {.program = true}, true, true)).termination,empty ? Termination::NoRoute : Termination::Exhausted);
     for (Admission admission : {Admission::Lossless,Admission::Lossy}) {
       FlowLedger replay(g);
       FlowPolicy q(replay,v({0,1,2}),v({3}),{.routing=Pinned{r.program},.admission=admission},&mask);
-      EXPECT_EQ(q.replace(0).termination,Termination::Complete);
-      EXPECT_EQ(q.evaluate(6).termination,empty ? Termination::NoRoute : admission==Admission::Lossy ? Termination::Complete : Termination::Exhausted);
-      const auto at6=q.place(6);
+      EXPECT_EQ(q.replace(0, std::nullopt, result_outputs(OutputOptions {.program = true}, true, true)).termination,Termination::Complete);
+      EXPECT_EQ(q.evaluate(6, std::nullopt, result_outputs(OutputOptions {.program = true}, true, true)).termination,empty ? Termination::NoRoute : admission==Admission::Lossy ? Termination::Complete : Termination::Exhausted);
+      const auto at6=q.place(6, result_outputs(OutputOptions {.program = true}, true, true));
       EXPECT_EQ(at6.source_drops,(Counter128{0,admission==Admission::Lossy ? 6U : 0U}));
       EXPECT_EQ(at6.termination,empty ? Termination::NoRoute : admission==Admission::Lossy ? Termination::Complete : Termination::Exhausted);
-      EXPECT_EQ(refused([&]{(void)q.forward(6);}),"Pinned forwards with replace");
+      EXPECT_EQ(refused([&]{(void)q.forward(6, nullptr, result_outputs(OutputOptions {.program = true}, true, true));}),"Pinned forwards with replace");
     }
   }
 }
 
 TEST(WeightedSources, EqualPositiveWeightsAndZeroWeightHead) {
   const auto g=std::make_shared<const Graph>(make_graph(4,{{0,3,2,1},{1,2,10,1},{2,3,10,2}}));
-  auto r=evaluate_demand(*g,v({0,1}),v({3}),EvaluationOptions{weighted({7,7,0,0}),nullptr,nullptr,all,{},Amount{12}});
+  auto r=evaluate_demand(*g,v({0,1}),v({3}), result_outputs(EvaluationOptions{weighted({7,7,0,0}),nullptr,nullptr,all,{},Amount{12}}, true, true));
   EXPECT_EQ(r.delivered,4); EXPECT_EQ(r.total_cost,(Counter128{0,8}));
   EXPECT_EQ(r.edge_flows,(std::optional<std::vector<Amount>>{{2,2,2}}));
   EXPECT_EQ(sources(r),(std::vector<Amount>{2,2}));
   const auto h=std::make_shared<const Graph>(make_graph(3,{{0,2,5,1},{1,2,5,1}}));
-  r=evaluate_demand(*h,v({0,1}),v({2}),EvaluationOptions{weighted({0,3,0}),nullptr,nullptr,all});
+  r=evaluate_demand(*h,v({0,1}),v({2}), result_outputs(EvaluationOptions{weighted({0,3,0}),nullptr,nullptr,all}, true, true));
   EXPECT_EQ(r.delivered,5); EXPECT_EQ(r.total_cost,(Counter128{0,5}));
   EXPECT_EQ(sources(r),(std::vector<Amount>{0,5}));
   EXPECT_EQ(r.edge_flows,(std::optional<std::vector<Amount>>{{0,5}}));
@@ -189,16 +189,16 @@ TEST(WeightedSources, RefusalReliefUsesDeliveredRatherThanRequestedInScalarAndOr
   for(bool ordered:{false,true}) {
     FlowLedger ledger(g);
     FlowPolicy other(ledger,v({2}),v({3}),{}),p(ledger,v({0,1}),v({3}),weighted({2,1,0,0}));
-    (void)other.replace(8);
+    (void)other.replace(8, std::nullopt, OutputOptions {.by_source = true});
     const auto call=[&](Amount offer) {
-      if(!ordered)return p.place(offer,all);
+      if(!ordered)return p.place(offer, result_outputs(all, false, true));
       const std::vector<Action> actions{Place{p,offer}};
-      return apply_actions(ledger,actions,BatchMode::Ordered,all).front();
+      return apply_actions(ledger,actions,BatchMode::Ordered, result_outputs(all, false, true)).front();
     };
     const auto initial=call(5);
     EXPECT_EQ(initial.delivered,2); EXPECT_EQ(initial.call_undelivered,3);
     EXPECT_EQ(initial.by_tunnel,(std::vector<TunnelFlow>{{0,0,TunnelStatus::Up,{0,2},2,{}}}));
-    (void)other.replace(5);
+    (void)other.replace(5, std::nullopt, OutputOptions {.by_source = true});
     const auto r=call(1);
     EXPECT_EQ(r.delivered,3); EXPECT_EQ(r.call_delivered,1); EXPECT_EQ(r.total_cost,(Counter128{0,6}));
     EXPECT_EQ(r.requested,(Counter128{0,6})); EXPECT_EQ(r.unadmitted,(Counter128{0,3}));
@@ -206,14 +206,14 @@ TEST(WeightedSources, RefusalReliefUsesDeliveredRatherThanRequestedInScalarAndOr
     EXPECT_EQ(r.call_undelivered,0);
     EXPECT_EQ(r.by_tunnel,(std::vector<TunnelFlow>{{0,0,TunnelStatus::Up,{0,2},2,{}},{1,1,TunnelStatus::Up,{0,1},1,{}}}));
     EXPECT_EQ(r.edge_flows,(std::optional<std::vector<Amount>>{{2,1,3}}));
-    const auto state=epoch(p); (void)p.evaluate(4); expect_same(epoch(p),state,"evaluate after refusal");
+    const auto state=epoch(p); (void)p.evaluate(4, std::nullopt, OutputOptions {.by_source = true}); expect_same(epoch(p),state,"evaluate after refusal");
     p.remove(); EXPECT_FALSE(p.program());
   }
 }
 
 TEST(WeightedSources, SimultaneousAwardsFollowCreationOrderInBothActionOrders) {
   const auto g=std::make_shared<const Graph>(make_graph(2,{{0,1,3,1}}));
-  const auto program=evaluate_demand(*g,v({0}),v({1}),EvaluationOptions{weighted({1,0})}).program;
+  const auto program=evaluate_demand(*g,v({0}),v({1}), result_outputs(EvaluationOptions{weighted({1,0})}, true, false)).program;
   for(bool reverse:{false,true}) for(bool reverse_creation:{false,true}) {
     FlowLedger ledger(g);
     FlowPolicy first(ledger,v({0}),v({1}),{.routing=Pinned{program},.admission=Admission::Lossy});
@@ -222,11 +222,11 @@ TEST(WeightedSources, SimultaneousAwardsFollowCreationOrderInBothActionOrders) {
     FlowPolicy* b=reverse_creation ? &first : &second;
     if(reverse)std::swap(a,b);
     const std::vector<Action> actions{Replace{*a,3},Replace{*b,3}};
-    const auto r=apply_actions(ledger,actions,BatchMode::Simultaneous,all);
+    const auto r=apply_actions(ledger,actions,BatchMode::Simultaneous, result_outputs(all, true, false));
     EXPECT_EQ(r[0].delivered,a==&first ? 2 : 1); EXPECT_EQ(r[1].delivered,b==&first ? 2 : 1);
     EXPECT_EQ(first.delivered(),2); EXPECT_EQ(second.delivered(),1);
     first.remove(); second.remove();
-    const auto ordered=apply_actions(ledger,actions,BatchMode::Ordered,all);
+    const auto ordered=apply_actions(ledger,actions,BatchMode::Ordered, result_outputs(all, true, false));
     EXPECT_EQ(ordered[0].delivered,3); EXPECT_EQ(ordered[1].delivered,0);
   }
 }
@@ -266,12 +266,12 @@ TEST(WeightedSources, FailureStudyRecomputesUnusedEdgesAndEveryWorkerMatches) {
   const auto g=std::make_shared<const Graph>(make_graph(3,{{0,2,0,1},{1,2,10,1}}));
   for(int workers:{1,2,4}) {
     const EvaluationOptions options{weighted({2,1,0}),nullptr,nullptr,all};
-    const auto result=evaluate_edge_failures(*g,v({0,1}),v({2}),options,workers);
+    const auto result=evaluate_edge_failures(*g,v({0,1}),v({2}), result_outputs(options, true, true),workers);
     EXPECT_EQ(result.baseline.delivered,0);ASSERT_EQ(result.entries.size(),2U);
     EXPECT_EQ(result.entries[0].edge,0);EXPECT_EQ(result.entries[0].delivery_reduction,-10);
     EXPECT_EQ(result.entries[1].edge,1);EXPECT_EQ(result.entries[1].delivery_reduction,0);
     const std::vector<std::pair<std::vector<NodeId>,std::vector<NodeId>>> pairs(5,{{1,0,1},{2}});
-    const auto batch=evaluate_pairs(*g,pairs,options,{},workers);
+    const auto batch=evaluate_pairs(*g,pairs, result_outputs(options, true, true),{},workers);
     for(const auto& r:batch)expect_same(r,result.baseline,"pair-local source weights");
   }
 }
@@ -281,10 +281,10 @@ TEST(WeightedSources, SmallFlowEnumerationConfirmsThePrescribedMaximumAndMinimum
   EXPECT_EQ(sequential(50,{100,1,1,1}),(std::vector<Amount>{50,0,0,0}));
   {
     const auto g=make_graph(3,{{0,2,2,9},{1,2,10,1}});
-    const auto r=evaluate_demand(g,v({0,1}),v({2}),EvaluationOptions{weighted({2,1,0})});
+    const auto r=evaluate_demand(g,v({0,1}),v({2}), result_outputs(EvaluationOptions{weighted({2,1,0})}, false, true));
     EXPECT_EQ(r.delivered,3);EXPECT_EQ(r.total_cost,(Counter128{0,19}));EXPECT_EQ(sources(r),(std::vector<Amount>{2,1}));
     const auto h=make_graph(3,{{0,1,2,1},{0,2,2,5},{1,2,2,1}});
-    const auto cheap=evaluate_demand(h,v({0}),v({2}),EvaluationOptions{weighted({1,0,0}),nullptr,nullptr,all,{},Amount{2}});
+    const auto cheap=evaluate_demand(h,v({0}),v({2}), result_outputs(EvaluationOptions{weighted({1,0,0}),nullptr,nullptr,all,{},Amount{2}}, false, true));
     EXPECT_EQ(cheap.delivered,2);EXPECT_EQ(cheap.total_cost,(Counter128{0,4}));
     EXPECT_EQ(cheap.edge_flows,(std::optional<std::vector<Amount>>{{2,0,2}}));
   }
@@ -308,7 +308,7 @@ TEST(WeightedSources, SmallFlowEnumerationConfirmsThePrescribedMaximumAndMinimum
     enumerate(0);
     const Amount maximum=best.rbegin()->first;
     for(Amount offer:{Amount{0},Amount{1},Amount{9}}) {
-      const auto r=evaluate_demand(*g,v({0,1}),v({3}),EvaluationOptions{weighted({w[0],w[1],0,0}),nullptr,nullptr,all,{},offer});
+      const auto r=evaluate_demand(*g,v({0,1}),v({3}), result_outputs(EvaluationOptions{weighted({w[0],w[1],0,0}),nullptr,nullptr,all,{},offer}, false, true));
       const Amount t=std::min(offer,maximum);
       EXPECT_EQ(r.delivered,t);EXPECT_EQ(r.total_cost,(Counter128{0,static_cast<std::uint64_t>(best.at(t))}));
       EXPECT_EQ(sources(r),sequential(t,w));
@@ -352,7 +352,7 @@ TEST(WeightedSources, WideApportionmentHasExactQuotientOrderAndIncrementCarries)
     for(int i=0;i<count;++i){edges.push_back({i,count,5,1});heads.push_back(i);}
     const auto g=std::make_shared<const Graph>(make_graph(count+1,edges));
     auto declared=weights;declared.push_back(0);
-    const auto program=evaluate_demand(*g,heads,v({count}),EvaluationOptions{weighted(declared)}).program;
+    const auto program=evaluate_demand(*g,heads,v({count}), result_outputs(EvaluationOptions{weighted(declared)}, true, true)).program;
     const auto view=detail::make_forwarding_view(*g,program,nullptr,v({count}),nullptr);
     for(Counter128 x:{Counter128{1,1},Counter128{(std::uint64_t{1}<<62)+1,3}}) {
       std::vector<Amount> delta(weights.size());detail::source_offer_increments(view,x,17,delta);
@@ -364,11 +364,11 @@ TEST(WeightedSources, WideApportionmentHasExactQuotientOrderAndIncrementCarries)
     FlowPolicy p(ledger,heads,v({count}),{.routing=Pinned{program},.admission=Admission::Lossy});
     UInt128 total=0;
     for(Amount offer:{kDomainLimit-1,kDomainLimit-1,kDomainLimit-1,Amount{7},kDomainLimit-1,Amount{5},Amount{17}}) {
-      const auto r=p.place(offer);
+      const auto r=p.place(offer, OutputOptions {.program = true, .by_source = true});
       total+=UInt128(offer);
       ASSERT_TRUE(r.requested);
       EXPECT_EQ((UInt128(r.requested->hi)<<64)|UInt128(r.requested->lo),total);
-      UInt128 offered=0;for(const auto& row:r.by_source){ASSERT_TRUE(row.offered);offered+=(UInt128(row.offered->hi)<<64)|UInt128(row.offered->lo);}
+      UInt128 offered=0;for(const auto& row:r.by_source.value()){ASSERT_TRUE(row.offered);offered+=(UInt128(row.offered->hi)<<64)|UInt128(row.offered->lo);}
       EXPECT_EQ(offered,total);
     }
   }
@@ -383,7 +383,7 @@ TEST(WeightedSources, WideCostKeepsBothWordsAndSharedInputOwnership) {
   FlowLedger ledger(g);std::optional<FlowPolicy> p;
   p.emplace(ledger,v({0}),v({1}),FlowPolicyConfig{cfg});
   cfg.source_weights.reset();owner.reset();ASSERT_FALSE(weak.expired());
-  const auto r=p->replace(m,{},all);
+  const auto r=p->replace(m,{}, result_outputs(all, false, true));
   const UInt128 square=UInt128(m)*UInt128(m);
   ASSERT_TRUE(r.total_cost);
   EXPECT_EQ((UInt128(r.total_cost->hi)<<64)|UInt128(r.total_cost->lo),square);
@@ -391,31 +391,31 @@ TEST(WeightedSources, WideCostKeepsBothWordsAndSharedInputOwnership) {
   auto& requested=detail::PolicyAccess::engine(*p).epoch.requested;
   requested=Counter128{(std::uint64_t{1}<<63)-1,std::numeric_limits<std::uint64_t>::max()};
   const auto before=ledger_state(ledger);const auto old=epoch(*p);
-  EXPECT_EQ(refused([&]{(void)p->place(1);}),"requested limit exceeded");
+  EXPECT_EQ(refused([&]{(void)p->place(1, OutputOptions {.by_source = true});}),"requested limit exceeded");
   expect_same(ledger_state(ledger),before,"counter limit");expect_same(epoch(*p),old,"counter limit");
   p.reset();EXPECT_TRUE(weak.expired());
 }
 
 TEST(WeightedSources, MasksChangeTheRosterButBlackHolesKeepDeclaredShares) {
   const auto g=std::make_shared<const Graph>(make_graph(3,{{0,2,10,1},{1,2,10,1}}));
-  const auto program=evaluate_demand(*g,v({0,1}),v({2}),EvaluationOptions{weighted({2,1,0}),nullptr,nullptr,{}, {},Amount{3}}).program;
+  const auto program=evaluate_demand(*g,v({0,1}),v({2}), result_outputs(EvaluationOptions{weighted({2,1,0}),nullptr,nullptr,{}, {},Amount{3}}, true, true)).program;
   const auto mask=g->eligibility(v({0}),{});
   FlowLedger a(g),b(g);
   FlowPolicy repaired(a,v({0,1}),v({2}),{.routing=Pinned{program},.admission=Admission::Lossy},&mask);
   FlowPolicy stale(b,v({0,1}),v({2}),{.routing=Pinned{program,std::make_shared<const Eligibility>(mask)},.admission=Admission::Lossy});
-  EXPECT_EQ(sources(repaired.replace(3)),(std::vector<Amount>{0,3}));
-  const auto r=stale.replace(3);
+  EXPECT_EQ(sources(repaired.replace(3, std::nullopt, result_outputs(OutputOptions {.program = true}, true, true))),(std::vector<Amount>{0,3}));
+  const auto r=stale.replace(3, std::nullopt, result_outputs(OutputOptions {.program = true}, true, true));
   EXPECT_EQ(sources(r),(std::vector<Amount>{0,1}));
   EXPECT_EQ(r.source_drops,(Counter128{0,2}));
-  const auto supported=evaluate_demand(*g,v({0,1}),v({2}),EvaluationOptions{weighted({2,1,0},dag_of(*g,{1})),nullptr,nullptr,all});
+  const auto supported=evaluate_demand(*g,v({0,1}),v({2}), result_outputs(EvaluationOptions{weighted({2,1,0},dag_of(*g,{1})),nullptr,nullptr,all}, true, true));
   EXPECT_EQ(sources(supported),(std::vector<Amount>{0,10}));
   EXPECT_EQ(supported.edge_flows,(std::optional<std::vector<Amount>>{{0,10}}));
 }
 
 TEST(WeightedSources, ZeroInjectionChangesNoOtherLossOrForwardingStructure) {
   const auto g=witness();
-  const auto empty=evaluate_demand(*g,v({0,1}),v({5}),EvaluationOptions{weighted({0,0,0,0,0,0})}).program;
-  const auto positive=evaluate_demand(*g,v({0,1}),v({5}),EvaluationOptions{weighted({2,1,0,0,0,0})}).program;
+  const auto empty=evaluate_demand(*g,v({0,1}),v({5}), result_outputs(EvaluationOptions{weighted({0,0,0,0,0,0})}, true, true)).program;
+  const auto positive=evaluate_demand(*g,v({0,1}),v({5}), result_outputs(EvaluationOptions{weighted({2,1,0,0,0,0})}, true, true)).program;
   const auto dag=dag_of(*g,{0,1,2,3,4,5,6});
   const auto pooled=ForwardingProgram::from_dag(*g,v({0,1}),v({5}),dag);
   const std::vector<RouteDefinition> definitions{{0,dag,1},{1,dag,1}};
@@ -426,13 +426,13 @@ TEST(WeightedSources, ZeroInjectionChangesNoOtherLossOrForwardingStructure) {
     FlowPolicy p(ledger,v({0,1}),v({5}),FlowPolicyConfig{model,Admission::Lossy});
     FlowPolicy zero(ledger,v({0,1}),v({5}),{.routing=Pinned{empty},.admission=Admission::Lossy});
     const std::vector<Action> baseline{Replace{p,19}};
-    const auto want=apply_actions(ledger,baseline,BatchMode::Simultaneous,all).front();
+    const auto want=apply_actions(ledger,baseline,BatchMode::Simultaneous, result_outputs(all, true, true)).front();
 #if NETGRAPH_CORE_PRIVATE_HOOKS
     const auto old=detail::thread_lossy_counters();
 #endif
     p.remove();
     const std::vector<Action> with_zero{Replace{zero,zero_offer},Replace{p,19}};
-    const auto actual=apply_actions(ledger,with_zero,BatchMode::Simultaneous,all);
+    const auto actual=apply_actions(ledger,with_zero,BatchMode::Simultaneous, result_outputs(all, true, true));
     expect_same(actual[1],want,"zero source injection");
 #if NETGRAPH_CORE_PRIVATE_HOOKS
     const auto& now=detail::thread_lossy_counters();
@@ -445,7 +445,7 @@ TEST(WeightedSources, ZeroInjectionChangesNoOtherLossOrForwardingStructure) {
 TEST(WeightedSources, TransitThroughAnotherSourceIsNotItsInjection) {
   const auto g=std::make_shared<const Graph>(make_graph(3,{{0,1,5,1},{1,2,10,1}}));
   FlowLedger ledger(g);FlowPolicy p(ledger,v({0,1}),v({2}),weighted({1,1,0}));
-  const auto r=p.replace(std::nullopt,{},all);
+  const auto r=p.replace(std::nullopt,{}, result_outputs(all, false, true));
   EXPECT_EQ(r.delivered,10);EXPECT_EQ(r.total_cost,(Counter128{0,15}));
   EXPECT_EQ(sources(r),(std::vector<Amount>{5,5}));
   EXPECT_EQ(r.edge_flows,(std::optional<std::vector<Amount>>{{5,10}}));
@@ -468,7 +468,7 @@ TEST(WeightedSources, LiveTunnelRowsAndUndeliveredAreExactAcrossReaders) {
     EXPECT_EQ(r.admitted,amount);EXPECT_EQ(r.delivered,carried);
     EXPECT_EQ(r.unadmitted,(Counter128{0,static_cast<std::uint64_t>(offer-carried)}));
     EXPECT_EQ(r.source_drops,(Counter128{}));EXPECT_TRUE(r.edge_drops.empty());EXPECT_EQ(r.total_cost,amount);
-    EXPECT_EQ(r.by_source,(std::vector<SourceFlow>{{0,{},amount,carried,{},{}}}));
+    EXPECT_EQ(r.by_source.value(),(std::vector<SourceFlow>{{0,{},amount,carried,{},{}}}));
     EXPECT_FALSE(r.min_cut);EXPECT_FALSE(r.marginal_cost_curve);
     EXPECT_EQ(r.edge_flows,(std::optional<std::vector<Amount>>{{carried}}));
     EXPECT_EQ(r.residual,(std::optional<std::vector<Amount>>{{5-carried}}));
@@ -479,38 +479,38 @@ TEST(WeightedSources, LiveTunnelRowsAndUndeliveredAreExactAcrossReaders) {
   for(Amount offer:{Amount{3},Amount{7}}) {
     for(int operation=0;operation<3;++operation)for(bool ordered:{false,true}) {
       FlowLedger ledger(g);FlowPolicy p(ledger,v({0}),v({1}),cfg);
-      if(operation==2)check(p.evaluate(offer,{},all),offer);
-      else if(!ordered)check(operation==0 ? p.place(offer,all) : p.replace(offer,{},all),offer);
+      if(operation==2)check(p.evaluate(offer,{}, result_outputs(all, true, true)),offer);
+      else if(!ordered)check(operation==0 ? p.place(offer, result_outputs(all, true, true)) : p.replace(offer,{}, result_outputs(all, true, true)),offer);
       else {
         const std::vector<Action> actions=operation==0 ? std::vector<Action>{Place{p,offer}} : std::vector<Action>{Replace{p,offer}};
-        check(apply_actions(ledger,actions,BatchMode::Ordered,all).front(),offer);
+        check(apply_actions(ledger,actions,BatchMode::Ordered, result_outputs(all, true, true)).front(),offer);
       }
     }
     const EvaluationOptions options{cfg,nullptr,nullptr,all,{},offer};
-    check(evaluate_demand(*g,v({0}),v({1}),options),offer);
+    check(evaluate_demand(*g,v({0}),v({1}), result_outputs(options, true, true)),offer);
     for(int workers:{1,2,4}) {
       const std::vector<std::pair<std::vector<NodeId>,std::vector<NodeId>>> pairs(5,{{0},{1}});
-      for(const auto& r:evaluate_pairs(*g,pairs,options,{},workers))check(r,offer);
-      check(evaluate_edge_failures(*g,v({0}),v({1}),options,workers).baseline,offer);
+      for(const auto& r:evaluate_pairs(*g,pairs, result_outputs(options, true, true),{},workers))check(r,offer);
+      check(evaluate_edge_failures(*g,v({0}),v({1}), result_outputs(options, true, true),workers).baseline,offer);
     }
   }
 }
 
 TEST(WeightedSources, RemainingZeroCapturedWeightsWithAProgramPathHaveNoActiveWeight) {
   const auto g=std::make_shared<const Graph>(make_graph(3,{{0,2,10,1},{1,2,10,1}}));
-  const auto program=evaluate_demand(*g,v({0,1}),v({2}),EvaluationOptions{weighted({2,0,0}),nullptr,nullptr,all,{},Amount{5}}).program;
+  const auto program=evaluate_demand(*g,v({0,1}),v({2}), result_outputs(EvaluationOptions{weighted({2,0,0}),nullptr,nullptr,all,{},Amount{5}}, true, true)).program;
   ASSERT_EQ(program->tunnels().size(),1U);
   const auto mask=g->eligibility(v({0}),{});
   for(Admission admission:{Admission::Lossy,Admission::Lossless}) {
     FlowLedger ledger(g);FlowPolicy p(ledger,v({0,1}),v({2}),{.routing=Pinned{program},.admission=admission},&mask);
     for(int operation=0;operation<3;++operation) {
       p.remove();
-      const auto r=operation==0 ? p.replace(4,{},all) : operation==1 ? p.evaluate(4,{},all) : p.place(4,all);
+      const auto r=operation==0 ? p.replace(4,{}, result_outputs(all, true, true)) : operation==1 ? p.evaluate(4,{}, result_outputs(all, true, true)) : p.place(4, result_outputs(all, true, true));
       EXPECT_EQ(r.termination,Termination::NoActiveWeight);EXPECT_EQ(r.delivered,0);
       EXPECT_EQ(r.call_undelivered,4);EXPECT_EQ(r.source_drops,(Counter128{0,admission==Admission::Lossy ? 4U : 0U}));
       EXPECT_EQ(r.unadmitted,(std::optional<Counter128>{{0,admission==Admission::Lossy ? 0U : 4U}}));
       EXPECT_EQ(sources(r),(std::vector<Amount>{0,0}));
-      for(const auto& row:r.by_source) EXPECT_EQ(row.source_drops,(Counter128{}));
+      for(const auto& row:r.by_source.value()) EXPECT_EQ(row.source_drops,(Counter128{}));
     }
   }
 }
@@ -522,7 +522,7 @@ TEST(WeightedSources, SmallWeightSumsUseWideCumulativeArithmetic) {
     for(int i=0;i<count;++i){edges.push_back({i,count,5,1});heads.push_back(i);weights.push_back(m-(unequal ? i : 0));}
     weights.push_back(0);
     const auto g=std::make_shared<const Graph>(make_graph(count+1,edges));
-    const auto program=evaluate_demand(*g,heads,v({count}),EvaluationOptions{weighted(weights)}).program;
+    const auto program=evaluate_demand(*g,heads,v({count}), result_outputs(EvaluationOptions{weighted(weights)}, true, false)).program;
     const auto view=detail::make_forwarding_view(*g,program,nullptr,v({count}),nullptr);
     // The sum of four M weights is 2^64-4; X=3M+7 reaches the old product overflow.
     std::vector<Amount> delta(static_cast<std::size_t>(count));

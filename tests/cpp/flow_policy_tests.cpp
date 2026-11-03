@@ -47,6 +47,106 @@
 using namespace netgraph::core;
 using namespace netgraph::core::test;
 
+TEST(ResultOutputs, EveryProducerKeepsOnlyTheRequestedDetails) {
+  // One edge of capacity10 at cost3 carries offer4 without loss. The source row is
+  // (0, offered-or-absent, 4, 4, 0, 0); output flags do not change that answer.
+  const auto g = shared(make_graph(2, {{0, 1, 10, 3}}));
+  const std::vector<NodeId> sources {0}, targets {1};
+  for (bool program : {false, true}) for (bool by_source : {false, true}) {
+    const OutputOptions outputs {.program = program, .by_source = by_source};
+    for (auto admission : {Admission::Lossless, Admission::Lossy}) {
+      const FlowPolicyConfig config {ShortestPaths {}, admission};
+      const auto check = [&](const PlacementResult& r) {
+        EXPECT_EQ(r.delivered, 4);
+        EXPECT_EQ(r.call_delivered, 4);
+        EXPECT_EQ(r.call_undelivered, 0);
+        EXPECT_EQ(r.admitted, (Counter128 {0, 4}));
+        EXPECT_EQ(r.requested, std::optional(Counter128 {0, 4}));
+        EXPECT_EQ(static_cast<bool>(r.program), program);
+        ASSERT_EQ(r.by_source.has_value(), by_source);
+        if (r.by_source) {
+          ASSERT_EQ(r.by_source->size(), 1U);
+          const auto& row = r.by_source->front();
+          EXPECT_EQ(row.source, 0);
+          EXPECT_EQ(row.offered, admission == Admission::Lossy ? std::optional(Counter128 {0, 4}) : std::nullopt);
+          EXPECT_EQ(row.admitted, (Counter128 {0, 4}));
+          EXPECT_EQ(row.delivered, 4);
+          EXPECT_EQ(row.source_drops, Counter128 {});
+          EXPECT_EQ(row.total_edge_drops, Counter128 {});
+        }
+        EXPECT_FALSE(r.edge_flows || r.residual || r.edge_reservations || r.saturated_boundary_edges || r.min_cut);
+      };
+      FlowLedger ledger(g);
+      FlowPolicy policy(ledger, sources, targets, config);
+      check(policy.place(4, outputs));
+      check(policy.evaluate(4, std::nullopt, outputs));
+      check(policy.replace(4, std::nullopt, outputs));
+      check(policy.forward(4, nullptr, outputs));
+      ASSERT_TRUE(policy.program());
+      ASSERT_EQ(policy.records().size(), 1U);
+      EXPECT_EQ(policy.records().front().delivered, 4);
+      const std::vector<Action> actions {Replace {policy, 4}};
+      check(apply_actions(ledger, actions, BatchMode::Ordered, outputs).front());
+      if (admission == Admission::Lossy) check(apply_actions(ledger, actions, BatchMode::Simultaneous, outputs).front());
+      EvaluationOptions options {config};
+      options.offer = std::optional<Amount>(4);
+      options.outputs = outputs;
+      check(evaluate_demand(*g, sources, targets, options));
+      const std::vector<std::pair<std::vector<NodeId>, std::vector<NodeId>>> pairs {{sources, targets}, {sources, targets}};
+      for (const auto& r : evaluate_pairs(*g, pairs, options, {}, 2)) check(r);
+      const auto sensitivity = evaluate_edge_failures(*g, sources, targets, options, 2);
+      check(sensitivity.baseline);
+      ASSERT_EQ(sensitivity.entries.size(), 1U);
+      EXPECT_EQ(sensitivity.entries.front().edge, 0);
+      EXPECT_EQ(sensitivity.entries.front().delivery_reduction, 4);
+    }
+  }
+}
+
+TEST(ResultOutputs, DefaultAndZeroResultsDoNotRetainTheLiveProgramOrSourceRows) {
+  const auto g = shared(make_graph(2, {{0, 1, 10, 3}}));
+  FlowLedger ledger(g);
+  FlowPolicy policy(ledger, v({0}), v({1}), {ShortestPaths {}});
+  auto zero = policy.place(0, {.program = true, .by_source = true});
+  EXPECT_FALSE(zero.program);
+  ASSERT_TRUE(zero.by_source);
+  ASSERT_EQ(zero.by_source->size(), 1U);
+  EXPECT_EQ(zero.by_source->front().delivered, 0);
+  const auto result = policy.replace(4);
+  EXPECT_FALSE(result.program);
+  EXPECT_FALSE(result.by_source);
+  const auto installed = policy.program();
+  const auto refs = installed.use_count();
+  zero = policy.place(0);
+  EXPECT_FALSE(zero.program);
+  EXPECT_FALSE(zero.by_source);
+  EXPECT_EQ(installed.use_count(), refs);
+  auto snapshot = policy.place(0, {.program = true, .by_source = true});
+  EXPECT_EQ(snapshot.program, installed);
+  ASSERT_TRUE(snapshot.by_source);
+  EXPECT_EQ(snapshot.by_source->front().delivered, 4);
+  policy.remove();
+  EXPECT_EQ(snapshot.by_source->front().delivered, 4);
+  EXPECT_EQ(snapshot.program, installed);
+}
+
+TEST(ResultOutputs, RequestedProgramOwnsItsLifetimeAfterEveryLiveOwnerIsGone) {
+  const auto graph = shared(make_graph(2, {{0, 1, 10, 3}}));
+  PlacementResult result;
+  std::weak_ptr<const ForwardingProgram> live_program;
+  {
+    FlowLedger ledger(graph);
+    FlowPolicy policy(ledger, v({0}), v({1}), {ShortestPaths {}});
+    result = policy.replace(4, std::nullopt, {.program = true, .by_source = true});
+    live_program = policy.program();
+  }
+  ASSERT_FALSE(live_program.expired());
+  ASSERT_TRUE(result.program);
+  EXPECT_EQ(std::vector<NodeId>(result.program->sources().begin(), result.program->sources().end()), v({0}));
+  ASSERT_TRUE(result.by_source);
+  EXPECT_EQ(result.by_source->front().delivered, 4);
+}
+
 namespace {
 
 detail::RouteChoice sel(RouteTieBreak t = RouteTieBreak::FewerHops, bool multipath = true, bool parallel_edges = true) {
@@ -602,7 +702,7 @@ TEST(FlowPolicyRequests, LossyCountersStopBelow2To127) {
     const std::string name = "L - " + std::to_string(c.offered_below);
     FlowLedger fg(g);
     FlowPolicy p(fg, v({0}), v({2}), cfg(ShortestPaths {}, RouteAllocation::Equal, Admission::Lossy));
-    ASSERT_EQ(p.place(1).call_delivered, 1) << name;
+    ASSERT_EQ(p.place(1, OutputOptions {.program = true, .by_source = true}).call_delivered, 1) << name;
     const auto owner = detail::PolicyAccess::engine(p).policy_id;
     auto entry = *detail::LedgerAccess::entry(fg, owner);
     entry.derived->rows[0].offered = below(c.offered_below);
@@ -615,11 +715,11 @@ TEST(FlowPolicyRequests, LossyCountersStopBelow2To127) {
     detail::LedgerAccess::commit(fg, owner, entry);
     const auto before = state_of(p, fg);
     if (c.error.has_value()) {
-      EXPECT_EQ(error_of([&] { (void)p.place(std::nullopt); }), *c.error) << name;
+      EXPECT_EQ(error_of([&] { (void)p.place(std::nullopt, OutputOptions {.program = true, .by_source = true}); }), *c.error) << name;
       expect_same(state_of(p, fg), before, name);
       continue;
     }
-    const auto r = p.place(std::nullopt);
+    const auto r = p.place(std::nullopt, OutputOptions {.program = true, .by_source = true});
     EXPECT_EQ(r.call_delivered, 3) << name;
     EXPECT_EQ(r.call_edge_drops, (std::vector<std::pair<EdgeId, Amount>> {{1, 6}})) << name;
     const auto records = p.records();
@@ -1228,15 +1328,15 @@ TEST(Evaluators, CapacityIsPlaceInfOnAFreshLedger) {
   const Pinned pin = pinned_dags(*g, 0, 3, {dag_of(*g, {0, 2}), dag_of(*g, {1, 3})});
   for (const auto& c : {global_config(), shortest_paths_config(), FlowPolicyConfig {.routing = pin},
                         FlowPolicyConfig {.routing = centralized(SourceAllocation::Optimized, dag_of(*g, {0, 2}))}}) {
-    const auto r = evaluate_demand(*g, v({0}), v({3}), EvaluationOptions {c, nullptr, nullptr, OutputOptions {true, true, true}});
+    const auto r = evaluate_demand(*g, v({0}), v({3}), result_outputs(EvaluationOptions {c, nullptr, nullptr, OutputOptions {true, true, true}}, true, true));
     FlowLedger fg(g);
     FlowPolicy p(fg, v({0}), v({3}), c);
-    const auto want = p.place(std::nullopt, OutputOptions {true, true, true});
+    const auto want = p.place(std::nullopt, result_outputs(OutputOptions {true, true, true}, true, true));
     EXPECT_GT(want.call_delivered, 0);  // two empty results would agree too
     expect_same(r, want, "capacity against place(+inf)");
   }
   // The exact maximum flow: CentralizedTE's curve (cheapest walks first).
-  const auto exact = evaluate_demand(*g, v({0}), v({3}), EvaluationOptions {global_config()});
+  const auto exact = evaluate_demand(*g, v({0}), v({3}), result_outputs(EvaluationOptions {global_config()}, true, true));
   EXPECT_EQ(exact.call_delivered, 8);
   EXPECT_EQ(*exact.marginal_cost_curve, curve({{2, 5}, {4, 3}}));
 }
@@ -1566,13 +1666,15 @@ TEST(Evaluators, SensitivityBaselineIsCapacityWithTheRequestedOutputs) {
       if (std::holds_alternative<DistributedTE>(c.routing)) q.design_demand = Amount {6};
       return q;
     };
-    const auto s = evaluate_edge_failures(*g, v({0}), v({3}), with({c, nullptr, nullptr, all}), 1);
-    const auto want = evaluate_demand(*g, v({0}), v({3}), with({c, nullptr, nullptr, all}));
+    const auto s = evaluate_edge_failures(*g, v({0}), v({3}), result_outputs(with({c, nullptr, nullptr, all}), true, true), 1);
+    const auto want = evaluate_demand(*g, v({0}), v({3}), result_outputs(with({c, nullptr, nullptr, all}), true, true));
     EXPECT_GT(want.call_delivered, 0);
     ASSERT_TRUE(want.edge_flows.has_value() && want.residual.has_value() && want.saturated_boundary_edges.has_value() &&
                 want.edge_reservations.has_value());
     expect_same(s.baseline, want, "sensitivity baseline with every output");
     const auto plain = evaluate_edge_failures(*g, v({0}), v({3}), with({c}), 1);
+    EXPECT_FALSE(plain.baseline.program);
+    EXPECT_FALSE(plain.baseline.by_source);
     expect_same(plain.baseline, evaluate_demand(*g, v({0}), v({3}), with({c})), "sensitivity baseline, no output");
   }
 }

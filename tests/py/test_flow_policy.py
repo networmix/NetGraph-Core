@@ -22,10 +22,12 @@ from helpers import (
     build,
     config,
     dag_of,
+    evaluation_outputs,
     exact,
     full_ledger_state,
     ids,
     plain,
+    result_outputs,
     sweep_python_allocation,
     t1_config,
     to_ids,
@@ -496,7 +498,7 @@ def test_placement_result_fields_and_outputs():
     g = diamond()
     fg = ngc.FlowLedger(g)
     pol = ngc.FlowPolicy(fg, [0], [3], SHORTEST_PATHS)
-    r = pol.place(4)
+    r = pol.place(4, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, r.call_undelivered, r.termination) == (4, 0, T.COMPLETE)
     assert not hasattr(r, "local_outcomes")
     # The epoch's first call installs the program: its routes and weights.
@@ -528,7 +530,7 @@ def test_placement_result_fields_and_outputs():
         and r.saturated_boundary_edges is None
         and r.min_cut is None
     )
-    r = pol.place(INF, ALL_OUT)
+    r = pol.place(INF, result_outputs(ALL_OUT, by_source=True))
     assert (r.call_delivered, r.call_undelivered, r.termination) == (
         3,
         INF,
@@ -567,14 +569,22 @@ def test_placement_result_fields_and_outputs():
         pol.place(np.int64(1))
     pol.remove()
     assert pol.records() == [] and list(fg.carried()) == [0, 0, 0, 0]
-    assert pol.place(np.int64(2)).call_delivered == 2
+    assert (
+        pol.place(np.int64(2), outputs=ngc.OutputOptions(by_source=True)).call_delivered
+        == 2
+    )
     # CentralizedTE: the marginal curve; min_cut with bottleneck.
     fg2 = ngc.FlowLedger(diamond(5, 3, 2))
     gl = ngc.FlowPolicy(fg2, 0, 3, GLOBAL)
-    r = gl.place(INF, ngc.OutputOptions(saturated_boundary_edges=True))
+    r = gl.place(
+        INF,
+        result_outputs(
+            ngc.OutputOptions(saturated_boundary_edges=True), by_source=True
+        ),
+    )
     assert r.marginal_cost_curve == [(2, 5), (4, 3)] and r.min_cut is None
     gl.remove()
-    r = gl.place(INF, ngc.OutputOptions(min_cut=True))
+    r = gl.place(INF, result_outputs(ngc.OutputOptions(min_cut=True), by_source=True))
     assert r.min_cut == sorted(ids(diamond(5, 3, 2), [0, 2]))
     assert [rec.delivered for rec in gl.records()] == [8]
 
@@ -643,14 +653,14 @@ def test_pinned_records():
     # The replay fails the second route (its last edge excluded): the head's share goes to the
     # first; one record per program entry, the failed one with an empty route.
     pol = ngc.FlowPolicy(fg, 0, 3, pinned_over(g, r1, r2), el)
-    r = pol.place(9)
+    r = pol.place(9, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, r.termination) == (5, T.EXHAUSTED)
     rec, failed = pol.records()
     assert rec.route == r1 and pol.record(rec.flow_id).delivered == 5
     assert (rec.entry_id, failed.entry_id, failed.min_route_cost) == (0, 1, None)
     # record() reads the policy's own records only, not another policy's on the same ledger.
     other = ngc.FlowPolicy(fg, 0, 3, pinned_over(g, r1))
-    other.place(1)
+    other.place(1, outputs=ngc.OutputOptions(by_source=True))
     theirs = other.records()[0].flow_id
     with pytest.raises(
         ValueError, match=exact(f"FlowId {theirs} is not a record of this policy")
@@ -673,7 +683,7 @@ def test_pinned_records():
     all_down = ngc.FlowPolicy(
         fg, 0, 3, pinned_over(g, r2), g.eligibility(excluded_edges=ids(g, [3]))
     )
-    r = all_down.place(1)
+    r = all_down.place(1, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, r.termination, r.by_source[0].admitted) == (
         0,
         T.NO_ROUTE,
@@ -773,7 +783,12 @@ def test_capacity_batch_and_workers(monkeypatch):
 def test_edge_failures_candidates_and_signed_reductions(monkeypatch):
     # CentralizedTE: an unsaturated critical edge appears.
     g = build(3, [(0, 1, 9, 1), (1, 2, 4, 1), (0, 2, 2, 5)])
-    s = ngc.evaluate_edge_failures(g, 0, 2, ngc.EvaluationOptions(GLOBAL))
+    s = ngc.evaluate_edge_failures(
+        g,
+        0,
+        2,
+        evaluation_outputs(ngc.EvaluationOptions(GLOBAL), program=True, by_source=True),
+    )
     assert s.baseline.call_delivered == 6
     pos = g.input_positions()
     assert {int(pos[e.edge]): e.delivery_reduction for e in s.entries} == {
@@ -785,14 +800,23 @@ def test_edge_failures_candidates_and_signed_reductions(monkeypatch):
     # the default path with the variable set works; its parsing is tested in C++).
     monkeypatch.setenv("NGRAPH_CORE_SENSITIVITY_THREADS", "3")
     assert plain(
-        ngc.evaluate_edge_failures(g, 0, 2, ngc.EvaluationOptions(GLOBAL))
+        ngc.evaluate_edge_failures(
+            g,
+            0,
+            2,
+            evaluation_outputs(
+                ngc.EvaluationOptions(GLOBAL), program=True, by_source=True
+            ),
+        )
     ) == plain(s)
     # A policy model: every allowed edge is a candidate, a zero-capacity one too. Equal splitting
     # over parallel links of 1, 10 and 0 fits 2 units (a third would cross the zero link);
     # without the thin link 1 fits, without the wide link 1, without the zero link 2.
     p = build(2, [(0, 1, 1, 1), (0, 1, 10, 1), (0, 1, 0, 1)])
     opts = ngc.EvaluationOptions(SHORTEST_PATHS)
-    s = ngc.evaluate_edge_failures(p, 0, 1, opts, workers=2)
+    s = ngc.evaluate_edge_failures(
+        p, 0, 1, evaluation_outputs(opts, program=True, by_source=True), workers=2
+    )
     assert s.baseline.call_delivered == 2
     pos = p.input_positions()
     assert {int(pos[e.edge]): e.delivery_reduction for e in s.entries} == {
@@ -803,7 +827,9 @@ def test_edge_failures_candidates_and_signed_reductions(monkeypatch):
     # A negative loss on a zero-capacity link (the search graph S): the only shortest route 0 -> 1 has capacity
     # 0, so equal splitting carries 0; without it the route 0 -> 2 -> 1 carries 5.
     g8 = build(3, [(0, 1, 0, 1), (0, 2, 5, 1), (2, 1, 5, 1)])
-    s8 = ngc.evaluate_edge_failures(g8, 0, 1, opts)
+    s8 = ngc.evaluate_edge_failures(
+        g8, 0, 1, evaluation_outputs(opts, program=True, by_source=True)
+    )
     assert s8.baseline.call_delivered == 0
     pos8 = g8.input_positions()
     assert {int(pos8[e.edge]): e.delivery_reduction for e in s8.entries} == {
@@ -816,9 +842,25 @@ def test_edge_failures_candidates_and_signed_reductions(monkeypatch):
     # The baseline is evaluate_demand() with the requested outputs.
     for cfg in (GLOBAL, SHORTEST_PATHS):
         s = ngc.evaluate_edge_failures(
-            g, 0, 2, ngc.EvaluationOptions(cfg, outputs=ALL_OUT)
+            g,
+            0,
+            2,
+            evaluation_outputs(
+                ngc.EvaluationOptions(cfg, outputs=ALL_OUT),
+                program=True,
+                by_source=True,
+            ),
         )
-        want = ngc.evaluate_demand(g, 0, 2, ngc.EvaluationOptions(cfg, outputs=ALL_OUT))
+        want = ngc.evaluate_demand(
+            g,
+            0,
+            2,
+            evaluation_outputs(
+                ngc.EvaluationOptions(cfg, outputs=ALL_OUT),
+                program=True,
+                by_source=True,
+            ),
+        )
         assert want.edge_flows is not None and want.residual is not None
         assert plain(s.baseline) == plain(want)
 
@@ -874,17 +916,43 @@ def test_explicit_workers_win_over_the_environment(monkeypatch):
     sopts = ngc.EvaluationOptions(SHORTEST_PATHS, cache=building)
     want = [
         r.call_delivered
-        for r in ngc.evaluate_pairs(g, [(0, 3), (1, 3)], bopts, workers=1)
+        for r in ngc.evaluate_pairs(
+            g,
+            [(0, 3), (1, 3)],
+            evaluation_outputs(bopts, program=True, by_source=True),
+            workers=1,
+        )
     ]
     assert want == [7, 5]
     assert [
-        r.call_delivered for r in ngc.evaluate_pairs(g, [(0, 3), (1, 3)], bopts)
+        r.call_delivered
+        for r in ngc.evaluate_pairs(
+            g, [(0, 3), (1, 3)], evaluation_outputs(bopts, program=True, by_source=True)
+        )
     ] == want
-    base = plain(ngc.evaluate_edge_failures(g, 0, 3, sopts, workers=1))
-    assert plain(ngc.evaluate_edge_failures(g, 0, 3, sopts)) == base
+    base = plain(
+        ngc.evaluate_edge_failures(
+            g, 0, 3, evaluation_outputs(sopts, program=True, by_source=True), workers=1
+        )
+    )
+    assert (
+        plain(
+            ngc.evaluate_edge_failures(
+                g, 0, 3, evaluation_outputs(sopts, program=True, by_source=True)
+            )
+        )
+        == base
+    )
     for call in (
-        lambda: ngc.evaluate_pairs(g, [(0, 3)], bopts, workers=2),
-        lambda: ngc.evaluate_edge_failures(g, 0, 3, sopts, workers=2),
+        lambda: ngc.evaluate_pairs(
+            g,
+            [(0, 3)],
+            evaluation_outputs(bopts, program=True, by_source=True),
+            workers=2,
+        ),
+        lambda: ngc.evaluate_edge_failures(
+            g, 0, 3, evaluation_outputs(sopts, program=True, by_source=True), workers=2
+        ),
     ):
         with pytest.raises(ValueError, match="unless workers == 1"):
             call()

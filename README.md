@@ -73,7 +73,7 @@ print(r.call_delivered, r.call_edge_drops)  # 10 [(0, 2)]
 # with 6 unreserved. A reservation does not cap traffic: all 12 go into the tunnel that is up,
 # and its path carries 10.
 t1 = ngc.FlowPolicyConfig(routing=ngc.DistributedTE(ngc.TunnelCount(2)), admission=ngc.Admission.LOSSY)
-r = ngc.FlowPolicy(ngc.FlowLedger(graph), 0, 3, t1).replace(12, design_demand=12)
+r = ngc.FlowPolicy(ngc.FlowLedger(graph), 0, 3, t1).replace(12, design_demand=12, outputs=ngc.OutputOptions(program=True))
 print([t.status.name for t in r.program.tunnels], r.call_delivered)  # ['UP', 'INSUFFICIENT_BANDWIDTH'] 10
 ```
 

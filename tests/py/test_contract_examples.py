@@ -23,6 +23,7 @@ from fractions import Fraction
 import _netgraph_core as ext
 import numpy as np
 import pytest
+from helpers import evaluation_outputs, result_outputs
 from private_hooks import needs_hooks
 
 import netgraph_core as ngc
@@ -543,7 +544,7 @@ def run_zero_state(service, outside):
     ]
     pinned(
         g, ngc.ForwardingProgram.from_routes(g, [0], [1], held), ledger=ledger
-    ).place(sum(outside))
+    ).place(sum(outside), outputs=ngc.OutputOptions(program=True))
     outputs = ngc.OutputOptions(
         edge_flows=True, residual=True, edge_reservations=True, min_cut=True
     )
@@ -568,12 +569,14 @@ def run_zero_state(service, outside):
         )
 
     fresh = state(
-        policy(g, 0, 1, config(ngc.ShortestPaths()), ledger=ledger).place(0, outputs)
+        policy(g, 0, 1, config(ngc.ShortestPaths()), ledger=ledger).place(
+            0, result_outputs(outputs, program=True)
+        )
     )
     used = policy(g, 0, 1, config(ngc.ShortestPaths()), ledger=ledger)
-    used.place(1)
+    used.place(1, outputs=ngc.OutputOptions(program=True))
     used.remove()
-    again = state(used.place(0, outputs))
+    again = state(used.place(0, result_outputs(outputs, program=True)))
     assert again == fresh, (fresh, again)
     return fresh
 
@@ -588,7 +591,7 @@ def run_change_flags(path_cap, calls, recomputed):
         p = pinned(g, ngc.ForwardingProgram.from_routes(g, [0], [1], tunnel))
     flags = []
     for i, (op, v) in enumerate(calls):
-        r = getattr(p, op)(v)
+        r = getattr(p, op)(v, outputs=ngc.OutputOptions(program=True, by_source=True))
         if i:
             flags.append(r)
     return dict(
@@ -774,14 +777,22 @@ def run_termination(offer, model=None, args=None, program=None):
         else:
             routing = ngc.CentralizedTE(source_allocation=S.EQUAL, tunnel_count=count)
         p = policy(g, args["heads"], args["destinations"], config(routing, LY))
-        r = p.replace(offer, design_demand=args.get("design_demand"))
+        r = p.replace(
+            offer,
+            design_demand=args.get("design_demand"),
+            outputs=ngc.OutputOptions(program=True, by_source=True),
+        )
         installed = p.program
         forward_error = None
         try:
-            p.forward(offer)
+            p.forward(offer, outputs=ngc.OutputOptions(program=True, by_source=True))
         except ValueError as e:
             forward_error = str(e)
-        lossless = pinned(g, installed).place(offer).termination.name
+        lossless = (
+            pinned(g, installed)
+            .place(offer, outputs=ngc.OutputOptions(program=True, by_source=True))
+            .termination.name
+        )
     else:
         roster, entries = program
         n = 1 + max(roster)
@@ -793,9 +804,13 @@ def run_termination(offer, model=None, args=None, program=None):
             routes.append(ngc.RouteDefinition(head, path_of(g, [head]), weight=weight))
         installed = ngc.ForwardingProgram.from_routes(g, roster, [n], routes)
         p = pinned(g, installed, LY)
-        r = p.place(offer)
+        r = p.place(offer, outputs=ngc.OutputOptions(program=True, by_source=True))
         forward_error = None
-        lossless = pinned(g, installed).place(offer).termination.name
+        lossless = (
+            pinned(g, installed)
+            .place(offer, outputs=ngc.OutputOptions(program=True, by_source=True))
+            .termination.name
+        )
     return dict(
         tunnels=len(installed.tunnels),
         lossy=r.termination.name,
@@ -833,7 +848,9 @@ def run_t1(
         setup = policy(g, heads, destinations, config(routing), mask, ledger)
     except (TypeError, ValueError) as e:
         return dict(error=error_text(e))
-    r = setup.replace(INF, design_demand=design_demand)
+    r = setup.replace(
+        INF, design_demand=design_demand, outputs=ngc.OutputOptions(program=True)
+    )
     tunnels = r.program.tunnels
     out = dict(
         requested_bandwidth=[t.requested_bandwidth for t in tunnels],
@@ -846,7 +863,7 @@ def run_t1(
     )
     if offer is not None:
         lossy = policy(g, heads, destinations, config(routing, LY), mask).replace(
-            offer, design_demand=design_demand
+            offer, design_demand=design_demand, outputs=ngc.OutputOptions(program=True)
         )
         assigned = [t.assigned for t in lossy.by_tunnel]
         load = [0] * len(edges)
@@ -854,7 +871,7 @@ def run_t1(
             for e in t.edges or ():
                 load[e] += a
         lossless = policy(g, heads, destinations, config(routing), mask).replace(
-            offer, design_demand=design_demand
+            offer, design_demand=design_demand, outputs=ngc.OutputOptions(program=True)
         )
         out.update(
             offered_by_entry=assigned,
@@ -879,7 +896,9 @@ def run_head_requests(heads, per_head, design_demand):
         heads,
         config(ngc.DistributedTE(ngc.TunnelCount(per_head)), LY),
     )
-    r = p.replace(0, design_demand=design_demand)
+    r = p.replace(
+        0, design_demand=design_demand, outputs=ngc.OutputOptions(program=True)
+    )
     return [t.requested_bandwidth for t in r.program.tunnels]
 
 
@@ -920,7 +939,9 @@ def run_t2(
     p = t2_policy(
         edges, heads, destinations, count, prefer_headroom, LL, cap, support, excluded
     )
-    r = p.replace(INF, design_demand=design_demand)
+    r = p.replace(
+        INF, design_demand=design_demand, outputs=ngc.OutputOptions(program=True)
+    )
     plan = r.plan
     tunnels = r.program.tunnels
     counts = [0] * len(edges)
@@ -955,7 +976,11 @@ def run_t2(
             support,
             excluded,
         )
-        lr = q.replace(lossy_offer, design_demand=design_demand)
+        lr = q.replace(
+            lossy_offer,
+            design_demand=design_demand,
+            outputs=ngc.OutputOptions(program=True),
+        )
         out.update(
             lossy_delivery=lr.call_delivered, lossy_source_drops=lr.call_source_drops
         )
@@ -968,7 +993,9 @@ def run_upto(
     count = ngc.TunnelCount(limit, up_to=True)
     p = t2_policy(edges, heads, destinations, count, prefer_headroom, LL)
     offer = INF if design_demand is None else design_demand
-    r = p.replace(offer, design_demand=design_demand)
+    r = p.replace(
+        offer, design_demand=design_demand, outputs=ngc.OutputOptions(program=True)
+    )
     return dict(
         tunnels_per_head=r.plan.tunnels_per_head,
         delivered=r.call_delivered,
@@ -1264,7 +1291,7 @@ def evaluation_case(
         return "TypeError"
     src = [0] if sources == 1 else [0, 1]
     try:
-        r = ngc.evaluate_demand(g, src, 2, options)
+        r = ngc.evaluate_demand(g, src, 2, evaluation_outputs(options, by_source=True))
     except ValueError as e:
         return str(e)
     if r.requested == INF and r.by_source[0].offered is not None:

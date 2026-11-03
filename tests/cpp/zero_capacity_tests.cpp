@@ -95,7 +95,7 @@ Placed place_once(const std::shared_ptr<const Graph>& g, std::vector<NodeId> s, 
   FlowLedger fg(g);
   FlowPolicy p(fg, s, d, c, elig);
   Placed x;
-  x.r = p.place(v, out);
+  x.r = p.place(v, result_outputs(out, true, true));
   x.records = p.records();
   return x;
 }
@@ -109,7 +109,7 @@ Placed replace_once(const std::shared_ptr<const Graph>& g, std::vector<NodeId> s
   FlowLedger fg(g);
   FlowPolicy p(fg, s, d, c);
   Placed x;
-  x.r = p.replace(offer, design);
+  x.r = p.replace(offer, design, OutputOptions {.program = true, .by_source = true});
   x.records = p.records();
   return x;
 }

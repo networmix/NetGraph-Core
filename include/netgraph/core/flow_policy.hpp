@@ -162,13 +162,16 @@ struct FlowPolicyConfig {
 // allocation per edge after the call), residual and saturated_boundary_edges (the ledger's after
 // the call), min_cut (CentralizedTE with the optimized source allocation; see
 // PlacementResult::min_cut) and edge_reservations (this policy's strict holds per edge after the
-// call, zeros for a model without holds).
+// call, zeros for a model without holds), program (the installed, replayed or evaluated
+// forwarding program) and by_source (one row per normalized input source).
 struct OutputOptions {
   bool edge_flows {false};
   bool residual {false};
   bool saturated_boundary_edges {false};
   bool min_cut {false};
   bool edge_reservations {false};
+  bool program {false};
+  bool by_source {false};
 };
 
 // The call's outcome, the first that applies: Complete for a zero request; NoRoute for a
@@ -257,15 +260,16 @@ struct TunnelPlan {
 // reservation). An offer-only change to a program that
 // is not recomputed (forward, Pinned, ShortestPaths increments) sets none of them; a controller's
 // re-solve that changes a path's amount is a weight change; an identical replace sets none.
-// State: program (the installed program after the call; evaluate: the computed one; null before
-// the epoch's first preparation), plan (T1 and T2: the setup of that program; nullopt for every
+// State: program (when requested: the installed program after the call; evaluate: the computed one;
+// null without the output flag or before the epoch's first preparation), plan (T1 and T2: the setup of that program; nullopt for every
 // other model, Pinned over a tunnel program too), requested (the sum of the requests;
 // nullopt after +inf), offered (Lossy only: the traffic actually sent; the first-hop injection of a
 // Lossy +inf), admitted (Lossless: the total carried; Lossy: offered), delivered, unadmitted
 // (Lossless: requested - delivered, nullopt after +inf; Lossy: 0), source_drops and edge_drops
-// (per edge). Lossy: offered = source_drops + sum(edge_drops) + delivered. by_source has one row per
+// (per edge). Lossy: offered = source_drops + sum(edge_drops) + delivered. When requested, by_source has one row per
 // normalized input source in ascending NodeId; the rows sum to the totals except for Lossy with an
 // empty roster, where the whole offer is source loss of the demand and every row is zero.
+// Without OutputOptions::by_source the field is nullopt; an output flag never changes the live records.
 // by_tunnel has one row per program tunnel in ascending index (empty without tunnels); it is an
 // alternative view of the same traffic, never added to by_source. total_cost (controllers: CentralizedTE
 // and ShortestPaths Optimized) is the exact sum of cost * flow over the policy's allocation (below 2^124;
@@ -295,7 +299,7 @@ struct PlacementResult {
   std::optional<Counter128> unadmitted {};
   Counter128 source_drops {};
   std::vector<std::pair<EdgeId, Counter128>> edge_drops {};
-  std::vector<SourceFlow> by_source {};
+  std::optional<std::vector<SourceFlow>> by_source {};
   std::vector<TunnelFlow> by_tunnel {};
   std::optional<Counter128> total_cost {};
   std::optional<std::vector<std::pair<Cost, Amount>>> marginal_cost_curve {};

@@ -1218,7 +1218,7 @@ inline std::vector<Row> rows() {
       {"pooled.weight.explicit.one", "same Explicit graph/weights/offer with source0; zero-weight edges retained in the route basis"},
       {"pooled.weight.snapshot.one", "same ResidualSnapshot graph/creation view/offer with source0; one-root weighted preparation"},
       {"pooled.from_dag.weighted", "32 non-tight supplied DAGs, nested roots, dead ends and terminal out-edges, Weighted Explicit with zero alternatives, build and Pinned replace384"},
-      {"pooled.controller.equal", "ShortestPaths Optimized with equal sources, Clos32x16 seed25, eight sources to20/21, replace400; shared U, solve, decomposition, default results"},
+      {"pooled.controller.equal", "ShortestPaths Optimized with equal sources, Clos32x16 seed25, eight sources to20/21, replace400; shared U, solve, decomposition, explicit program/source outputs"},
       {"global.support.equal", "CentralizedTE Equal with32 non-tight supplied DAGs and nested roots; constructor trim/reverse roster plus solve and replace384"}}) {
     r.push_back({name, name.starts_with("global.") ? "global" : "pooled", desc, [name] {
       auto spec = std::make_shared<const abaapi::PooledSpec>(pooled_fixture(name));
@@ -1231,7 +1231,7 @@ inline std::vector<Row> rows() {
     for (int j = 0; j < 8; ++j) demands.push_back({{8*j}, (8*j+36)%64});
     return Iter([g, demands] { return abaapi::pooled_dag_build(*g, demands); });
   }});
-  r.push_back({"program.forward.pooled", "program", "installed ShortestPaths Equal anycast program, Clos32x16;32 full-offer forwards100..3200, default results and eager records", [] {
+  r.push_back({"program.forward.pooled", "program", "installed ShortestPaths Equal anycast program, Clos32x16;32 full-offer forwards100..3200, explicit program/source outputs; records not read", [] {
     auto installed = std::make_shared<abaapi::PooledInstalled>(pooled_fixture("program.forward.pooled"));
     std::vector<double> offers;
     for (int i = 1; i <= 32; ++i) offers.push_back(100.0*i);
@@ -1249,9 +1249,29 @@ inline std::vector<Row> rows() {
   }
   // ---- aggregate entries, explicit record reads and forwarding histories
   for (const std::string suffix : {"many", "one", "edges"}) {
-    r.push_back({"ledger.aggregate_default." + suffix, "ledger", "complete default Equal Lossless anycast replacement; optional edge-output control", [suffix] {
+    r.push_back({"ledger.aggregate_default." + suffix, "ledger", "aggregate-default Equal Lossless anycast replacement; optional edge-output control", [suffix] {
       auto spec = std::make_shared<const abaapi::PooledSpec>(pooled_fixture(suffix == "one" ? "pooled.anycast.one" : "pooled.anycast.many"));
       return Iter([spec, suffix] { return abaapi::aggregate_trial(*spec, suffix == "edges"); });
+    }});
+  }
+  for (const std::string suffix : {"lossy", "lossy_one", "lossy_repeat"}) {
+    r.push_back({"ledger.aggregate_default." + suffix, "ledger", "Lossy pooled call with aggregate default results; one-source and repeated-call controls", [suffix] {
+      auto spec = pooled_fixture("program.forward.pooled");
+      spec.config.admission = netgraph::core::Admission::Lossy;
+      if (suffix == "lossy_one") spec.sources.resize(1);
+      auto input = std::make_shared<const abaapi::PooledSpec>(std::move(spec));
+      return Iter([input, suffix] {
+        return suffix == "lossy_repeat" ? abaapi::aggregate_history(*input) : abaapi::aggregate_trial(*input, false);
+      });
+    }});
+  }
+  for (bool program : {false, true}) for (bool by_source : {false, true}) {
+    const std::string suffix = program ? (by_source ? "both" : "program") : (by_source ? "by_source" : "none");
+    r.push_back({"result.options." + suffix, "result", "Same many-source Lossy replacement, independently selected program/source outputs; full call/result lifetime", [program, by_source] {
+      auto spec = pooled_fixture("program.forward.pooled");
+      spec.config.admission = netgraph::core::Admission::Lossy;
+      auto input = std::make_shared<const abaapi::PooledSpec>(std::move(spec));
+      return Iter([input, program, by_source] { return abaapi::result_options_trial(*input, program, by_source); });
     }});
   }
   for (const std::string suffix : {"many", "one", "orphan", "repair"}) {

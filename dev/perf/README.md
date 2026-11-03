@@ -336,9 +336,9 @@ failed.
 | `ksp` | `ksp.ties` | 64 equal-cost branches, each of the four tie rules |
 | `ksp` | `ksp.k1` | the long-prefix population with k = 1 |
 | `cache` | `cache.cold`, `cache.warm`, `cache.frozen.reads` | 64 direct lookups from a cleared, prepopulated building, or prepopulated frozen cache |
-| `concurrency` | `concurrency.place_zero`, `delivered`, `program`, `config` | 10,000 calls of one operation on a prepared one-link policy (capacity 16, cost 3, q=1, replace(4)); config is the immutable control |
-| `concurrency` | `concurrency.two_ledgers_serial`, `concurrency.two_ledgers_parallel` | 32 evaluate(32) calls on each independent ledger, reading the static preparation installed during setup; 384-node/2816-edge layered graph, q=1, capacity 64, two thread launches and joins in both modes |
-| `concurrency` | `concurrency.two_ledgers_serial.scaled`, `concurrency.two_ledgers_parallel.scaled` | Same graph, preparation and two thread launches; 512 evaluate(32) calls per ledger amortize launch cost for scaling comparisons. Both sides do the same work. |
+| `concurrency` | `concurrency.place_zero`, `delivered`, `program`, `config` | 10,000 calls of one operation on a prepared one-link policy (capacity 16, cost 3, q=1, replace(4)); place_zero requests program and source rows; config is the immutable control |
+| `concurrency` | `concurrency.two_ledgers_serial`, `concurrency.two_ledgers_parallel` | 32 evaluate(32) calls with aggregate-default outputs on each independent ledger, reading the static preparation installed during setup; 384-node/2816-edge layered graph, q=1, capacity 64, two thread launches and joins in both modes |
+| `concurrency` | `concurrency.two_ledgers_serial.scaled`, `concurrency.two_ledgers_parallel.scaled` | Same graph, preparation and two thread launches; 512 evaluate(32) calls per ledger with aggregate-default outputs amortize launch cost. Both serial/parallel modes request neither program nor source rows; earlier APIs still retain those details. |
 | `eligibility` | `eligibility.build_intersect` | 64 failure states built and intersected |
 | `construct` | the fourteen storage construction rows (`construct.wgrid256`, `fanout_clos`, `random1m_nat`, `random1m_scat`, `wide65k`, `k65536`, `k65537`, `star1m`, `sparse1m`, `empty1m`, `random65k_bprime`, `random65k_reversed`, `star1m_smallk`, `instar1m_smallk`) | the constructor on prepared input: many short rows, the sort fallback above 65,536 distinct costs and both sides of that limit, very long rows, mostly isolated nodes, an empty graph, input already in or reversed from edge-id order |
 | `spf` | the six storage search rows (`spf.to.{wgrid256,random1m,wide_fallback16k,width65536,width65537}`, `spf.full.random1m`) | 8 full searches each: the bucket queue, a large scattered graph, the heap, and both sides of the bucket-width limit 65,536 |
@@ -349,7 +349,8 @@ name them): `proportional` and `prop` in a name mean the OPTIMIZED route allocat
 means the EQUAL route allocation with LOSSY admission.
 
 The tiny native operation rows use added time per call against the same row on the reference:
-at most 0.1 microseconds for a gated call. The two direct-hit cache rows have the same
+at most 0.1 microseconds for a gated call. `concurrency.place_zero` requests both `program`
+and `by_source` to retain the same completed details as the reference. The two direct-hit cache rows have the same
 0.1-microsecond allowance per lookup; `cache.cold` keeps the ordinary 3% tolerance. The immutable
 configuration control keeps the ordinary tolerance. For two ledgers compare candidate serial
 against candidate parallel on identical work, with a speedup target of at least 1.5; both modes
@@ -368,8 +369,9 @@ roots must be the rule's `(i * 997 + 1) mod N`. A sampled digest is not correctn
 
 ### Pooled preparation and shared-basis rows
 
-The additional pooled rows keep graph construction and fixed inputs outside timing. Each trial
-includes its policy, ledger, complete default result and teardown; no result field is disabled.
+The additional pooled rows keep graph construction and fixed inputs outside timing. Each detailed trial
+includes its policy, ledger, explicitly requested program/source result fields and teardown.
+Aggregate-default rows leave those two flags false; earlier APIs retain them intrinsically.
 `pooled_fixture` fixes the inputs for both the timed driver and a separate semantic preflight.
 The adapter's optional compile-time observer reads complete results/records only in that
 preflight; its default empty observer does no work in the timed binary.
@@ -399,8 +401,8 @@ Record reads and these checks do not run in timing binaries.
 ### Aggregate entries and explicit record reads
 
 These fifteen rows use the same public operations on both revisions. Graphs, fixed masks and
-prepared read/copy states are outside timing. Ordinary placement rows retain complete default
-results and teardown; they do not read records. No output field is disabled.
+prepared read/copy states are outside timing. Detailed placement rows retain explicitly requested program/source fields and teardown; they do
+not read records. Aggregate-default rows request neither of those fields.
 
 | Rows | Work per iteration |
 | --- | --- |
@@ -416,7 +418,7 @@ The history/lifecycle/cycle offers and capacities above are integer Core units. 
 keep their existing `kResolution` conversion. A record digest normalizes the opaque ledger uid;
 the separate semantic preflight checks its ownership relation, identities and full values.
 
-Default results and zero calls must not derive earlier history. A multi-head Lossy call uses one
+Default results omit program/source outputs, and zero calls must not derive earlier history. A multi-head Lossy call uses one
 attributed forwarding pass; one head uses the whole aggregate without attribution. Lossless
 uses its allocation kernel without an attributed forwarding. A bulk many-head record read
 derives a forwarding once, and the separate last-record read derives it again. These are
@@ -490,3 +492,30 @@ unequal weights; `.wide` uses five weights `2^62-1` and crosses 64-bit cumulativ
 and `sens.weighted_global` cover weighted-source optimization and fresh deletion solves.
 The new model rows have no pre-feature baseline; run them separately. Tool correctness checks
 all source quotas and complete row digests against independent ordinary/wide histories.
+
+### Completed-result output selection
+
+Detailed rows explicitly request `program` and `by_source` before folding them. The adapter
+maps that request to intrinsically present fields on older APIs; optional source rows are
+checked before reading, never replaced with an empty vector. Both sides use the same driver
+and row definitions. A missing requested field fails the semantic preflight.
+
+`ledger.aggregate_default.{many,one,edges,lossy,lossy_one,lossy_repeat}` folds the common
+aggregate/call values, with the requested edge-output control. It requests neither program nor
+source rows on the new API; the old API still constructs and retains its intrinsic details.
+`result.options.{none,program,by_source,both}` uses the same many-source Lossy replacement
+with each independent output selection. Setup and teardown are included as in the other call
+rows. An untimed observer checks field presence and full semantic values; timing contains no
+record audit. Source attribution and internal Lossy row totals are unchanged by output flags.
+
+`concurrency.place_zero` is a detailed row: its timed zero calls request both `program` and
+`by_source`, just as its reference intrinsically retains them. It keeps the 0.1-microsecond
+like-for-like allowance above and is not an aggregate-default row. The other three tiny rows
+read live policy getters and create no completed result.
+
+The aggregate-default list also includes `concurrency.two_ledgers_serial`,
+`concurrency.two_ledgers_parallel` and their `.scaled` variants. These rows evaluate with aggregate defaults. Their untimed preparation
+checks each source's unit delivery using explicit source outputs; timed calls check and fold
+aggregate answers. The `.scaled` pair uses 512 evaluations per ledger and is descriptive for
+this output-selection change; report both the candidate/base ratios and the serial/parallel
+ratio without assigning it a new performance bar.

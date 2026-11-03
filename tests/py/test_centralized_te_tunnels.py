@@ -19,8 +19,10 @@ from helpers import (
     SHORTEST_PATHS,
     build,
     dag_of,
+    evaluation_outputs,
     exact,
     full_ledger_state,
+    result_outputs,
     sweep_python_allocation,
 )
 from private_hooks import needs_hooks
@@ -206,7 +208,9 @@ def test_contract_examples(eid):
     g = graph(rows_)
     fg = ngc.FlowLedger(g, free) if free is not None else ngc.FlowLedger(g)
     r = policy(g, heads, dst, N, ledger=fg, headroom=hr).replace(
-        INF, design_demand=INF if D is None else D
+        INF,
+        design_demand=INF if D is None else D,
+        outputs=ngc.OutputOptions(program=True),
     )
     p = r.plan
     U, u, fluid, F, total, cost, phi, live, indices = want
@@ -246,7 +250,7 @@ def test_contract_examples(eid):
         ledger=ngc.FlowLedger(g, free) if free else None,
         headroom=hr,
     )
-    s = ly.replace(offer, design_demand=D)
+    s = ly.replace(offer, design_demand=D, outputs=ngc.OutputOptions(program=True))
     assert (s.call_delivered, s.call_source_drops, s.termination) == (
         delivery,
         loss,
@@ -271,7 +275,7 @@ def test_up_to_examples(eid):
     rows_, heads, dst, L, D, k, rts, delivered, bounds = UP_TO[eid]
     g = graph(rows_)
     r = policy(g, heads, dst, L, up_to=True, headroom=True).replace(
-        INF if D is None else D
+        INF if D is None else D, outputs=ngc.OutputOptions(program=True)
     )
     assert (r.plan.tunnels_per_head, routes(r), r.call_delivered) == (k, rts, delivered)
     if bounds is None:
@@ -279,7 +283,10 @@ def test_up_to_examples(eid):
     # With every head live, F'(k) is EXACT(k)'s bound at U(k) (an unlimited design).
     for c, b in enumerate(bounds, 1):
         assert (
-            policy(g, heads, dst, c, headroom=True).replace(INF).call_delivered == b
+            policy(g, heads, dst, c, headroom=True)
+            .replace(INF, outputs=ngc.OutputOptions(program=True))
+            .call_delivered
+            == b
         ), c
 
 
@@ -297,7 +304,7 @@ def test_g1_call():
     te16 = t2_config(16, ngc.Admission.LOSSY, headroom=True)
     fg = ngc.FlowLedger(g)
     p = ngc.FlowPolicy(fg, 0, 3, te16)
-    r = p.replace(49152)
+    r = p.replace(49152, outputs=ngc.OutputOptions(program=True))
     assert (
         r.plan.max_bandwidth_per_tunnel,
         r.plan.planned_bandwidth_per_tunnel,
@@ -349,7 +356,7 @@ def test_masked_replay_call():
     # The replay under the mask, then the same program stale (black holes).
     g = graph(G1)
     p = policy(g, 0, 3, 16, LOSSY, headroom=True)
-    p.replace(49152)
+    p.replace(49152, outputs=ngc.OutputOptions(program=True))
     base = p.program
     fail = g.eligibility(excluded_edges=[2])
     replay = ngc.FlowPolicy(
@@ -359,7 +366,7 @@ def test_masked_replay_call():
         ngc.FlowPolicyConfig(routing=ngc.Pinned(base), admission=LOSSY),
         eligibility=fail,
     )
-    r = replay.replace(49152)
+    r = replay.replace(49152, outputs=ngc.OutputOptions(program=True))
     assert [t.status for t in r.by_tunnel][:3] == [FAILED, FAILED, UP]
     assert r.call_delivered == 40960 and r.plan is None
     stale = ngc.FlowPolicy(
@@ -370,7 +377,7 @@ def test_masked_replay_call():
             routing=ngc.Pinned(base, black_holes=fail), admission=LOSSY
         ),
     )
-    s = stale.replace(49152)
+    s = stale.replace(49152, outputs=ngc.OutputOptions(program=True))
     assert [t.status for t in s.by_tunnel] == [BLACKHOLED] * 2 + [UP] * 14
     assert (s.call_edge_drops, s.call_delivered) == ([(1, 2048), (2, 6144)], 40960)
     assert [t.status for t in base.tunnels] == [
@@ -560,7 +567,9 @@ def test_support_examples(excluded, want):
         routing=cte(support=dag_of(g, [0, 1]), tunnel_count=ngc.TunnelCount(2))
     )
     mask = None if excluded is None else g.eligibility(excluded_edges=excluded)
-    r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg, mask).replace(INF)
+    r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg, mask).replace(
+        INF, outputs=ngc.OutputOptions(program=True)
+    )
     got = (
         r.plan.max_bandwidth_per_tunnel,
         counts(r, 3),
@@ -596,7 +605,9 @@ def test_support_equals_mask():
                 (t2_config(2, admission), outside),
             ):
                 p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg, mask)
-                r = p.replace(offer)
+                r = p.replace(
+                    offer, outputs=ngc.OutputOptions(program=True, by_source=True)
+                )
                 got.append(
                     (
                         plan_tuple(r.plan),
@@ -648,7 +659,7 @@ def test_support_headroom():
     # second slot on e0 costs more); the penalty is 2 floor(2^32 1 / 6).
     g = graph(SUPPORTED, 2)
     r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, on_sup(g, headroom=True)).replace(
-        INF, design_demand=2
+        INF, design_demand=2, outputs=ngc.OutputOptions(program=True)
     )
     assert (r.plan.max_bandwidth_per_tunnel, r.plan.planned_bandwidth_per_tunnel) == (
         6,
@@ -705,8 +716,14 @@ def test_support_is_the_composed_mask(seed):
 
     def call(cfg, eligibility):
         p = ngc.FlowPolicy(ngc.FlowLedger(g), sources, n - 1, cfg, eligibility)
-        r = p.replace(offer, design_demand=design)
-        f = p.forward(offer + 1)
+        r = p.replace(
+            offer,
+            design_demand=design,
+            outputs=ngc.OutputOptions(program=True, by_source=True),
+        )
+        f = p.forward(
+            offer + 1, outputs=ngc.OutputOptions(program=True, by_source=True)
+        )
         return (
             plan_tuple(r.plan),
             routes(r),
@@ -724,20 +741,30 @@ def test_support_is_the_composed_mask(seed):
     a = ngc.EvaluationOptions(on_support, eligibility=mask, **options)
     b = ngc.EvaluationOptions(plain_t2, eligibility=composed, **options)
     ra, rb = (
-        ngc.evaluate_demand(g, sources, n - 1, a),
-        ngc.evaluate_demand(g, sources, n - 1, b),
+        ngc.evaluate_demand(
+            g, sources, n - 1, evaluation_outputs(a, program=True, by_source=True)
+        ),
+        ngc.evaluate_demand(
+            g, sources, n - 1, evaluation_outputs(b, program=True, by_source=True)
+        ),
     )
     assert (plan_tuple(ra.plan), routes(ra), ra.call_delivered) == (
         plan_tuple(rb.plan),
         routes(rb),
         rb.call_delivered,
     ), seed
-    (pa,) = ngc.evaluate_pairs(g, [(sources, n - 1)], a)
+    (pa,) = ngc.evaluate_pairs(
+        g, [(sources, n - 1)], evaluation_outputs(a, program=True, by_source=True)
+    )
     assert pa.call_delivered == ra.call_delivered
     # The deletions of the support's allowed edges match; a deletion outside the support changes
     # nothing.
-    sa = ngc.evaluate_edge_failures(g, sources, n - 1, a, 1)
-    sb = ngc.evaluate_edge_failures(g, sources, n - 1, b, 1)
+    sa = ngc.evaluate_edge_failures(
+        g, sources, n - 1, evaluation_outputs(a, program=True, by_source=True), 1
+    )
+    sb = ngc.evaluate_edge_failures(
+        g, sources, n - 1, evaluation_outputs(b, program=True, by_source=True), 1
+    )
     reduction_b = {x.edge: x.delivery_reduction for x in sb.entries}
     for x in sa.entries:
         assert x.delivery_reduction == reduction_b.get(x.edge, 0), (seed, x.edge)
@@ -751,7 +778,9 @@ def test_prefer_headroom_example(on):
     # floor(2^32 2 / 10) for a second slot on link 0: Phi = 2 floor(2^32 / 10) = 858993458, bound
     # 20, Lossy 12 delivers 12. Both plan 2.
     g = graph([(0, 1, 10, 1), (0, 1, 10, 1)])
-    r = policy(g, 0, 1, 2, LOSSY, headroom=on).replace(12, design_demand=2)
+    r = policy(g, 0, 1, 2, LOSSY, headroom=on).replace(
+        12, design_demand=2, outputs=ngc.OutputOptions(program=True)
+    )
     p = r.plan
     assert (
         p.max_bandwidth_per_tunnel,
@@ -851,14 +880,18 @@ def test_operations_and_design_validation():
 def test_headroom_off_and_finite_cost_tie():
     # G1 without prefer_headroom (the cost tie goes to the smallest keys); PAR412 with and without.
     g = graph(G1)
-    r = policy(g, 0, 3, 16, LOSSY).replace(49152)
+    r = policy(g, 0, 3, 16, LOSSY).replace(
+        49152, outputs=ngc.OutputOptions(program=True)
+    )
     assert (
         counts(r, 4),
         r.plan.max_lossless_offer,
         r.call_delivered,
         r.plan.headroom_penalty,
     ) == ([2, 14, 2, 14], 46812, 47104, None)
-    r = policy(g, 0, 3, 16).replace(INF, design_demand=8192)
+    r = policy(g, 0, 3, 16).replace(
+        INF, design_demand=8192, outputs=ngc.OutputOptions(program=True)
+    )
     assert (
         r.plan.planned_bandwidth_per_tunnel,
         counts(r, 4),
@@ -868,10 +901,14 @@ def test_headroom_off_and_finite_cost_tie():
         [16, 0, 16, 0],
         8192,
     )
-    r = policy(g, 0, 3, 16, headroom=True).replace(INF, design_demand=8192)
+    r = policy(g, 0, 3, 16, headroom=True).replace(
+        INF, design_demand=8192, outputs=ngc.OutputOptions(program=True)
+    )
     assert (counts(r, 4), r.plan.max_lossless_offer) == ([2, 14, 2, 14], 46812)
     p412 = graph([(0, 1, 4, 1), (0, 1, 12, 1)])
-    r = policy(p412, 0, 1, 2, headroom=True).replace(INF, design_demand=2)
+    r = policy(p412, 0, 1, 2, headroom=True).replace(
+        INF, design_demand=2, outputs=ngc.OutputOptions(program=True)
+    )
     assert (
         r.plan.max_bandwidth_per_tunnel,
         r.plan.planned_bandwidth_per_tunnel,
@@ -879,7 +916,9 @@ def test_headroom_off_and_finite_cost_tie():
         r.plan.max_lossless_offer,
     ) == (6, 1, [[1], [1]], 12)
     assert r.plan.headroom_penalty == 1073741823
-    r = policy(p412, 0, 1, 2).replace(INF, design_demand=2)
+    r = policy(p412, 0, 1, 2).replace(
+        INF, design_demand=2, outputs=ngc.OutputOptions(program=True)
+    )
     assert (routes(r), r.plan.max_lossless_offer) == ([[0], [0]], 4)
 
 
@@ -923,23 +962,39 @@ def head_routes(r):
 def test_root_key_tie(headroom):
     # The heads' first walks tie (price 2, four arcs): the smaller head NodeId goes first; the
     # other head then takes its four-arc walk, not the six-arc one through a reverse arc.
-    r = policy(graph(ROOT_TIE_A), [0, 1], 3, 1, headroom=headroom).replace(INF)
+    r = policy(graph(ROOT_TIE_A), [0, 1], 3, 1, headroom=headroom).replace(
+        INF, outputs=ngc.OutputOptions(program=True)
+    )
     assert head_routes(r) == [(0, [0, 4]), (1, [3, 6])]
-    r = policy(graph(ROOT_TIE_B), [0, 1], 3, 1, headroom=headroom).replace(INF)
+    r = policy(graph(ROOT_TIE_B), [0, 1], 3, 1, headroom=headroom).replace(
+        INF, outputs=ngc.OutputOptions(program=True)
+    )
     assert head_routes(r) == [(0, [0, 4]), (1, [3, 5])]
 
 
 def test_fewest_arcs_before_keys():
     # The direct link ties the longer walk on cost; fewer arcs wins before the smallest keys.
-    assert routes(policy(graph(FEWEST_A), 0, 2, 1).replace(INF)) == [[1]]
-    assert routes(policy(graph(FEWEST_B), 0, 3, 1).replace(INF)) == [[1]]
+    assert routes(
+        policy(graph(FEWEST_A), 0, 2, 1).replace(
+            INF, outputs=ngc.OutputOptions(program=True)
+        )
+    ) == [[1]]
+    assert routes(
+        policy(graph(FEWEST_B), 0, 3, 1).replace(
+            INF, outputs=ngc.OutputOptions(program=True)
+        )
+    ) == [[1]]
 
 
 def test_cut_into_unit_walks():
     # Live heads ascending, each walk along the smallest positive EdgeId: head 0 cuts first.
-    r = policy(graph(CUT_A), [0, 1], 2, 2).replace(INF)
+    r = policy(graph(CUT_A), [0, 1], 2, 2).replace(
+        INF, outputs=ngc.OutputOptions(program=True)
+    )
     assert head_routes(r) == [(0, [0, 1]), (1, [2]), (0, [0, 1]), (1, [2])]
-    r = policy(graph(CUT_B), [0, 1], 5, 1).replace(INF)
+    r = policy(graph(CUT_B), [0, 1], 5, 1).replace(
+        INF, outputs=ngc.OutputOptions(program=True)
+    )
     assert head_routes(r) == [(0, [0, 2, 4]), (1, [1, 3, 5])]
 
 
@@ -947,7 +1002,7 @@ def test_reverse_arcs_and_preloaded_prices():
     # A reverse arc: the second unit cancels the first unit's middle link (reverse arcs undo an
     # earlier choice); a preload: the slot prices read the static capacity, not the free one.
     g = graph([(0, 1, 1, 1), (0, 2, 1, 5), (1, 2, 1, 1), (1, 3, 1, 5), (2, 3, 1, 1)])
-    r = policy(g, 0, 3, 2).replace(INF)
+    r = policy(g, 0, 3, 2).replace(INF, outputs=ngc.OutputOptions(program=True))
     assert (r.plan.max_bandwidth_per_tunnel, routes(r), r.plan.total_tunnel_cost) == (
         1,
         [[0, 3], [1, 4]],
@@ -955,7 +1010,7 @@ def test_reverse_arcs_and_preloaded_prices():
     )
     r = policy(
         one10(), 0, 1, 2, ledger=ngc.FlowLedger(one10(), [6]), headroom=True
-    ).replace(INF, design_demand=4)
+    ).replace(INF, design_demand=4, outputs=ngc.OutputOptions(program=True))
     assert (
         r.plan.max_bandwidth_per_tunnel,
         r.plan.planned_bandwidth_per_tunnel,
@@ -987,7 +1042,9 @@ def test_up_to_reaches_the_design_exactly():
     # F'(2) = 11 (z = 11 gives 6 and 5) = D: chosen. k = 3: U = 4, its lower bound min(11, 3 * 4)
     # already reaches D, so a budget F'(2) one unit low would choose 3.
     g = graph([(0, 1, 6, 1), (0, 1, 5, 1), (0, 1, 4, 1)])
-    r = policy(g, 0, 1, 3, up_to=True).replace(11)
+    r = policy(g, 0, 1, 3, up_to=True).replace(
+        11, outputs=ngc.OutputOptions(program=True)
+    )
     assert (
         r.plan.tunnels_per_head,
         r.plan.max_bandwidth_per_tunnel,
@@ -1002,7 +1059,11 @@ def test_all_dead_and_insufficient_resolution():
     for up, count in ((False, 2), (True, 1)):
         for adm in (LOSSY, LOSSLESS):
             p = policy(g, [0, 1], 2, 2 if not up else 3, adm, up_to=up)
-            r = p.replace(10, design_demand=10)
+            r = p.replace(
+                10,
+                design_demand=10,
+                outputs=ngc.OutputOptions(program=True, by_source=True),
+            )
             assert plan_tuple(r.plan) == (
                 count,
                 10,
@@ -1028,7 +1089,11 @@ def test_all_dead_and_insufficient_resolution():
     g = twoh(1, 100)
     for adm in (LOSSY, LOSSLESS):
         p = policy(g, [0, 1], 2, 16, adm)
-        r = p.replace(200, design_demand=200)
+        r = p.replace(
+            200,
+            design_demand=200,
+            outputs=ngc.OutputOptions(program=True, by_source=True),
+        )
         assert (
             r.plan.insufficient_resolution,
             r.plan.max_fractional_bandwidth_per_tunnel,
@@ -1040,7 +1105,7 @@ def test_all_dead_and_insufficient_resolution():
             0,
         )
         assert p.program is not None and p.program.sources == (0, 1)
-        f = p.forward(10)
+        f = p.forward(10, outputs=ngc.OutputOptions(program=True, by_source=True))
         if adm == LOSSY:
             assert source_rows(r) == [
                 (0, 100, 100, 0, 100, 0),
@@ -1061,7 +1126,9 @@ def test_dead_head_rows_and_records():
     # A dead head's indices, rows and records; the round order with heads behind 3 and 8.
     g = twoh(0, 10)
     p = policy(g, [0, 1], 2, 2, LOSSY)
-    r = p.replace(10, design_demand=10)
+    r = p.replace(
+        10, design_demand=10, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     assert [t.entry_id for t in r.program.tunnels] == [1, 3]
     assert source_rows(r) == [(0, 5, 5, 0, 5, 0), (1, 5, 5, 5, 0, 0)]
     assert sorted(rec.entry_id for rec in p.records()) == [1, 3]
@@ -1070,7 +1137,7 @@ def test_dead_head_rows_and_records():
         (3, UP, 2, 2),
     ]
     r = policy(graph([(0, 2, 3, 1), (1, 2, 8, 1)]), [0, 1], 2, 2).replace(
-        INF, design_demand=6
+        INF, design_demand=6, outputs=ngc.OutputOptions(program=True, by_source=True)
     )
     assert [
         (t.entry_id, t.head, t.local_index, list(t.edges)) for t in r.program.tunnels
@@ -1085,7 +1152,9 @@ def test_dead_head_rows_and_records():
 def test_optimized_one_source():
     # OPTIMIZED with one source: every field equal to the EQUAL call's.
     g = graph(G1)
-    a = policy(g, 0, 3, 16, LOSSY, headroom=True).replace(49152)
+    a = policy(g, 0, 3, 16, LOSSY, headroom=True).replace(
+        49152, outputs=ngc.OutputOptions(program=True)
+    )
     p = policy(
         g,
         0,
@@ -1095,7 +1164,7 @@ def test_optimized_one_source():
         headroom=True,
         source_allocation=ngc.SourceAllocation.OPTIMIZED,
     )
-    b = p.replace(49152)
+    b = p.replace(49152, outputs=ngc.OutputOptions(program=True))
     assert plan_tuple(a.plan) == plan_tuple(b.plan)
     assert (routes(a), rows(a), a.call_delivered, a.call_edge_drops) == (
         routes(b),
@@ -1121,12 +1190,25 @@ def test_planned_only_on_t2():
     t1 = ngc.FlowPolicyConfig(
         routing=ngc.DistributedTE(ngc.TunnelCount(2)), admission=LOSSY
     )
-    assert planned(t1, lambda p: p.replace(12, design_demand=12)) == [0, 0, 0, 0]
-    assert planned(GLOBAL, lambda p: p.place(12)) == [0, 0]
+    assert planned(
+        t1,
+        lambda p: p.replace(
+            12,
+            design_demand=12,
+            outputs=ngc.OutputOptions(program=True, by_source=True),
+        ),
+    ) == [0, 0, 0, 0]
+    assert planned(
+        GLOBAL,
+        lambda p: p.place(12, outputs=ngc.OutputOptions(program=True, by_source=True)),
+    ) == [0, 0]
     max_flow = ngc.FlowPolicyConfig(
         routing=ngc.ShortestPaths(allocation=ngc.RouteAllocation.OPTIMIZED)
     )
-    assert planned(max_flow, lambda p: p.place(12)) == [0, 0]
+    assert planned(
+        max_flow,
+        lambda p: p.place(12, outputs=ngc.OutputOptions(program=True, by_source=True)),
+    ) == [0, 0]
     supplied = ngc.ForwardingProgram.from_routes(
         g,
         [0, 1],
@@ -1137,11 +1219,21 @@ def test_planned_only_on_t2():
         ],
     )
     pinned = ngc.FlowPolicyConfig(routing=ngc.Pinned(supplied), admission=LOSSY)
-    assert planned(pinned, lambda p: p.replace(4)) == [0, 0]
-    laid = policy(g, [0, 1], 2, 2).replace(INF).program
+    assert planned(
+        pinned,
+        lambda p: p.replace(4, outputs=ngc.OutputOptions(program=True, by_source=True)),
+    ) == [0, 0]
+    laid = (
+        policy(g, [0, 1], 2, 2)
+        .replace(INF, outputs=ngc.OutputOptions(program=True, by_source=True))
+        .program
+    )
     assert [t.planned_bandwidth for t in laid.tunnels] == [1, 1, 1, 1]
     replay = ngc.FlowPolicyConfig(routing=ngc.Pinned(laid), admission=LOSSY)
-    assert planned(replay, lambda p: p.replace(4)) == [1, 1, 1, 1]
+    assert planned(
+        replay,
+        lambda p: p.replace(4, outputs=ngc.OutputOptions(program=True, by_source=True)),
+    ) == [1, 1, 1, 1]
 
 
 def test_two_heads_equal_against_global():
@@ -1164,7 +1256,9 @@ def test_empty_roster_zero_design_forward_and_flags():
     # An empty roster, a zero design, forward, and the change flags.
     empty = graph([(1, 2, 5, 1)])
     for adm in (LOSSY, LOSSLESS):
-        r = policy(empty, 0, 2, 2, adm, headroom=True).replace(5, design_demand=5)
+        r = policy(empty, 0, 2, 2, adm, headroom=True).replace(
+            5, design_demand=5, outputs=ngc.OutputOptions(program=True)
+        )
         assert (
             r.termination,
             r.program.tunnels,
@@ -1186,7 +1280,7 @@ def test_empty_roster_zero_design_forward_and_flags():
             0,
             0,
         )
-    r = policy(one10(), 0, 1, 2).replace(0)
+    r = policy(one10(), 0, 1, 2).replace(0, outputs=ngc.OutputOptions(program=True))
     assert (
         r.plan.planned_bandwidth_per_tunnel,
         [t.planned_bandwidth for t in r.program.tunnels],
@@ -1200,8 +1294,8 @@ def test_empty_roster_zero_design_forward_and_flags():
     )
     g = graph(G1)
     p = policy(g, 0, 3, 16, LOSSY, headroom=True)
-    first = p.replace(49152)
-    f = p.forward(32768)
+    first = p.replace(49152, outputs=ngc.OutputOptions(program=True))
+    f = p.forward(32768, outputs=ngc.OutputOptions(program=True))
     assert (
         f.call_delivered,
         f.routes_changed,
@@ -1215,9 +1309,13 @@ def test_empty_roster_zero_design_forward_and_flags():
     )
     assert f.program is first.program and plan_tuple(f.plan) == plan_tuple(first.plan)
     q = policy(g, 0, 3, 16, headroom=True)
-    q.replace(49152)
-    assert q.forward(INF).call_delivered == 46812
-    second = p.replace(49152, design_demand=8192)
+    q.replace(49152, outputs=ngc.OutputOptions(program=True))
+    assert (
+        q.forward(INF, outputs=ngc.OutputOptions(program=True)).call_delivered == 46812
+    )
+    second = p.replace(
+        49152, design_demand=8192, outputs=ngc.OutputOptions(program=True)
+    )
     assert (
         second.routes_changed,
         second.weights_changed,
@@ -1235,12 +1333,14 @@ def test_empty_roster_zero_design_forward_and_flags():
 def test_no_certificates_and_plan_only_for_tunnels():
     # No certificates; the plan only for the tunnel models.
     g = graph(G1)
-    r = policy(g, 0, 3, 16).replace(INF, outputs=ngc.OutputOptions(min_cut=True))
+    r = policy(g, 0, 3, 16).replace(
+        INF, outputs=result_outputs(ngc.OutputOptions(min_cut=True), program=True)
+    )
     assert (r.total_cost, r.min_cut, r.marginal_cost_curve) == (None, None, None)
     pin = ngc.FlowPolicy(
         ngc.FlowLedger(g), 0, 3, ngc.FlowPolicyConfig(routing=ngc.Pinned(r.program))
     )
-    assert pin.replace(10).plan is None
+    assert pin.replace(10, outputs=ngc.OutputOptions(program=True)).plan is None
     # An optimized-source-allocation T2 policy whose roster is empty (source 0 reaches nothing): no
     # certificate either, never an empty cut or curve.
     empty = ngc.FlowPolicy(
@@ -1250,7 +1350,9 @@ def test_no_certificates_and_plan_only_for_tunnels():
         t2_config(2, source_allocation=ngc.SourceAllocation.OPTIMIZED),
     )
     for offer, termination in ((5, T.NO_ROUTE), (0, T.COMPLETE)):
-        e = empty.replace(offer, outputs=ngc.OutputOptions(min_cut=True))
+        e = empty.replace(
+            offer, outputs=result_outputs(ngc.OutputOptions(min_cut=True), program=True)
+        )
         assert (e.termination, e.call_delivered, e.plan is not None) == (
             termination,
             0,
@@ -1263,7 +1365,7 @@ def test_t2_replay_with_every_tunnel_failed():
     # The G1 call's program with e0 and e1 masked: no head reaches 3; sixteen zero records.
     g = graph(G1)
     base = policy(g, 0, 3, 16, LOSSY, headroom=True)
-    base.replace(49152)
+    base.replace(49152, outputs=ngc.OutputOptions(program=True))
     pin = ngc.FlowPolicy(
         ngc.FlowLedger(g),
         0,
@@ -1271,14 +1373,17 @@ def test_t2_replay_with_every_tunnel_failed():
         ngc.FlowPolicyConfig(routing=ngc.Pinned(base.program), admission=LOSSY),
         g.eligibility(excluded_edges=[0, 1]),
     )
-    r = pin.replace(49152)
+    r = pin.replace(49152, outputs=ngc.OutputOptions(program=True))
     assert (r.termination, len(pin.records()), [t.status for t in r.by_tunnel]) == (
         T.NO_ROUTE,
         16,
         [FAILED] * 16,
     )
     assert all(rec.delivered == 0 for rec in pin.records())
-    assert pin.replace(0).termination == T.COMPLETE
+    assert (
+        pin.replace(0, outputs=ngc.OutputOptions(program=True)).termination
+        == T.COMPLETE
+    )
 
 
 # ---------------------------------------------------------------- zero offers (E)
@@ -1289,21 +1394,53 @@ def test_zero_and_masked():
     g = twoh(0, 0)
     for adm in (LOSSY, LOSSLESS):
         p = policy(g, [0, 1], 2, 2, adm)
-        assert p.replace(0, design_demand=10).termination == T.COMPLETE
-        assert p.evaluate(0, design_demand=10).termination == T.COMPLETE
-        assert p.forward(0).termination == T.COMPLETE
-        r = p.replace(10, design_demand=10)
+        assert (
+            p.replace(
+                0,
+                design_demand=10,
+                outputs=ngc.OutputOptions(program=True, by_source=True),
+            ).termination
+            == T.COMPLETE
+        )
+        assert (
+            p.evaluate(
+                0,
+                design_demand=10,
+                outputs=ngc.OutputOptions(program=True, by_source=True),
+            ).termination
+            == T.COMPLETE
+        )
+        assert (
+            p.forward(
+                0, outputs=ngc.OutputOptions(program=True, by_source=True)
+            ).termination
+            == T.COMPLETE
+        )
+        r = p.replace(
+            10,
+            design_demand=10,
+            outputs=ngc.OutputOptions(program=True, by_source=True),
+        )
         assert r.termination == (T.COMPLETE if adm == LOSSY else T.EXHAUSTED)
         assert (r.program.tunnels, p.records()) == ((), [])
     p = policy(twoh(1, 100), [0, 1], 2, 16, LOSSY)
-    assert (p.replace(0).termination, p.forward(0).termination) == (
+    assert (
+        p.replace(
+            0, outputs=ngc.OutputOptions(program=True, by_source=True)
+        ).termination,
+        p.forward(
+            0, outputs=ngc.OutputOptions(program=True, by_source=True)
+        ).termination,
+    ) == (
         T.COMPLETE,
         T.COMPLETE,
     )
-    assert source_rows(p.forward(10)) == [(0, 5, 5, 0, 5, 0), (1, 5, 5, 0, 5, 0)]
+    assert source_rows(
+        p.forward(10, outputs=ngc.OutputOptions(program=True, by_source=True))
+    ) == [(0, 5, 5, 0, 5, 0), (1, 5, 5, 0, 5, 0)]
     for adm in (LOSSY, LOSSLESS):
         p = policy(one10(), 0, 1, 2, adm)
-        r = p.replace(0)
+        r = p.replace(0, outputs=ngc.OutputOptions(program=True, by_source=True))
         assert (r.termination, [t.planned_bandwidth for t in r.program.tunnels]) == (
             T.COMPLETE,
             [1, 1],
@@ -1313,11 +1450,11 @@ def test_zero_and_masked():
             (1, 0),
         ]
         ids = [rec.flow_id for rec in p.records()]
-        e = p.evaluate(0)
+        e = p.evaluate(0, outputs=ngc.OutputOptions(program=True, by_source=True))
         assert (
             e.termination == T.COMPLETE and [rec.flow_id for rec in p.records()] == ids
         )
-        f = p.forward(0)
+        f = p.forward(0, outputs=ngc.OutputOptions(program=True, by_source=True))
         assert (f.termination, f.routes_changed, f.weights_changed) == (
             T.COMPLETE,
             False,
@@ -1327,10 +1464,17 @@ def test_zero_and_masked():
     g = twoh(10, 10)
     none = g.eligibility(excluded_edges=[0, 1])
     q = ngc.EvaluationOptions(t2_config(2), eligibility=none)
-    r = ngc.evaluate_demand(g, [0, 1], 2, q)
+    r = ngc.evaluate_demand(
+        g, [0, 1], 2, evaluation_outputs(q, program=True, by_source=True)
+    )
     assert (r.termination, r.call_delivered) == (T.NO_ROUTE, 0)
     assert [
-        x.termination for x in ngc.evaluate_pairs(g, [([0, 1], [2]), ([0], [2])], q)
+        x.termination
+        for x in ngc.evaluate_pairs(
+            g,
+            [([0, 1], [2]), ([0], [2])],
+            evaluation_outputs(q, program=True, by_source=True),
+        )
     ] == [T.NO_ROUTE] * 2
 
 
@@ -1411,18 +1555,39 @@ def test_lossy_offer_rule(design, offered):
             else "CentralizedTE LOSSY evaluation requires a finite offer"
         )
         for call in (
-            lambda: ngc.evaluate_demand(g, 0, 1, q),
-            lambda: ngc.evaluate_pairs(g, [([0], [1]), ([0], [1])], q, workers=2),
-            lambda: ngc.evaluate_edge_failures(g, 0, 1, q, workers=2),
+            lambda: ngc.evaluate_demand(
+                g, 0, 1, evaluation_outputs(q, program=True, by_source=True)
+            ),
+            lambda: ngc.evaluate_pairs(
+                g,
+                [([0], [1]), ([0], [1])],
+                evaluation_outputs(q, program=True, by_source=True),
+                workers=2,
+            ),
+            lambda: ngc.evaluate_edge_failures(
+                g, 0, 1, evaluation_outputs(q, program=True, by_source=True), workers=2
+            ),
         ):
             with pytest.raises(ValueError, match=exact(text)):
                 call()
         return
-    assert ngc.evaluate_demand(g, 0, 1, q).call_delivered == want
-    got = ngc.evaluate_pairs(g, [([0], [1]), ([0], [1])], q, workers=2)
+    assert (
+        ngc.evaluate_demand(
+            g, 0, 1, evaluation_outputs(q, program=True, by_source=True)
+        ).call_delivered
+        == want
+    )
+    got = ngc.evaluate_pairs(
+        g,
+        [([0], [1]), ([0], [1])],
+        evaluation_outputs(q, program=True, by_source=True),
+        workers=2,
+    )
     assert [r.call_delivered for r in got] == [want, want]
     assert (
-        ngc.evaluate_edge_failures(g, 0, 1, q, workers=2).baseline.call_delivered
+        ngc.evaluate_edge_failures(
+            g, 0, 1, evaluation_outputs(q, program=True, by_source=True), workers=2
+        ).baseline.call_delivered
         == want
     )
 
@@ -1550,7 +1715,11 @@ def test_property():
         p = ngc.FlowPolicy(
             fg, sources, dests, t2_config(N, headroom=hr, up_to=up), eligibility
         )
-        r = p.replace(INF, design_demand=INF if D is None else D)
+        r = p.replace(
+            INF,
+            design_demand=INF if D is None else D,
+            outputs=ngc.OutputOptions(program=True),
+        )
         want = orc.t2(
             edges, sources, dests, N, D, up_to=up, V=free, mask=mask, headroom=hr
         )
@@ -1609,7 +1778,11 @@ def test_property():
             t2_config(N, LOSSY, hr, up),
             eligibility,
         )
-        lr = lp.replace(offer, design_demand=INF if D is None else D)
+        lr = lp.replace(
+            offer,
+            design_demand=INF if D is None else D,
+            outputs=ngc.OutputOptions(program=True),
+        )
         assert [(t.entry_id, list(t.edges)) for t in lr.program.tunnels] == [
             (a, c) for a, _, c in got
         ], where
@@ -1678,7 +1851,7 @@ cfg = ngc.FlowPolicyConfig(routing=ngc.CentralizedTE(source_allocation=ngc.Sourc
                                                      tunnel_count=ngc.TunnelCount(4), prefer_headroom=True),
                            admission=ngc.Admission.LOSSY)
 p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, cfg)
-r = p.replace(4096)
+r = p.replace(4096, outputs=ngc.OutputOptions(program=True))
 gl = ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.EQUAL, tunnel_count=ngc.TunnelCount(4))
 fn = lambda: {getter}
 expected = repr(fn())  # the getter reads its value first: a missing name fails here

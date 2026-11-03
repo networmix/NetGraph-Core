@@ -7,7 +7,14 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from helpers import SHORTEST_PATHS, build, exact, ledger_state, t1_config
+from helpers import (
+    SHORTEST_PATHS,
+    build,
+    exact,
+    ledger_state,
+    result_outputs,
+    t1_config,
+)
 
 import netgraph_core as ngc
 
@@ -59,7 +66,7 @@ def test_unreserved_texts():
     g = one10()
     fg = ngc.FlowLedger(g, reservation_baseline=[3])
     p = t1(fg, 0, 1, 1)
-    r = p.replace(4, design_demand=4)
+    r = p.replace(4, design_demand=4, outputs=ngc.OutputOptions(program=True))
     assert r.program.tunnels[0].status == ngc.TunnelStatus.INSUFFICIENT_BANDWIDTH
     assert (fg.residual().tolist(), fg.unreserved().tolist()) == ([10], [3])
     for bad, text in (
@@ -119,7 +126,7 @@ def test_snapshots_are_int64_copies():
 def test_remove_releases_both():
     fg = ngc.FlowLedger(one10())
     p = t1(fg, 0, 1, 1)
-    p.replace(4, design_demand=6)
+    p.replace(4, design_demand=6, outputs=ngc.OutputOptions(program=True))
     p.remove()
     assert (fg.reserved().tolist(), fg.carried().tolist()) == ([0], [0])
     assert p.program is None and p.records() == []
@@ -186,13 +193,15 @@ def test_imported_programs_book_nothing():
     # Pinned over T1's program forwards it without a hold.
     g = twoh(2, 10)
     prog = (
-        t1(ngc.FlowLedger(g), [0, 1], 2, 2, LOSSY).replace(12, design_demand=12).program
+        t1(ngc.FlowLedger(g), [0, 1], 2, 2, LOSSY)
+        .replace(12, design_demand=12, outputs=ngc.OutputOptions(program=True))
+        .program
     )
     fg = ngc.FlowLedger(g)
     pin = ngc.FlowPolicy(
         fg, [0, 1], 2, ngc.FlowPolicyConfig(routing=ngc.Pinned(prog), admission=LOSSY)
     )
-    r = pin.replace(12, outputs=HOLDS)
+    r = pin.replace(12, outputs=result_outputs(HOLDS, program=True))
     assert (r.edge_reservations.tolist(), fg.reserved().tolist()) == (
         [0, 0],
         [0, 0],

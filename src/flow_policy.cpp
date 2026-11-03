@@ -298,22 +298,35 @@ Counter128 minus(const Counter128& a, const Counter128& b) noexcept {
 // demand's is its offered total minus delivery and drops, which with an empty roster is the
 // whole offer while every row stays zero.
 void fill_state(const PolicyEngine& pe, const LedgerEntry& after, const Counter128& requested,
-                bool infinite, const Counter128& offered, PlacementResult& out,
+                bool infinite, const Counter128& offered, PlacementResult& out, const OutputOptions& outputs,
                 std::span<const std::pair<NodeId, Counter128>> lost = {}) {
   const bool lossy = pe.config.admission == Admission::Lossy;
   if (!infinite) out.requested = requested;
-  out.by_source.resize(pe.sources.size());
-  for (std::size_t i = 0; i < pe.sources.size(); ++i) {
-    out.by_source[i].source = pe.sources[i];
-    if (lossy) out.by_source[i].offered = Counter128 {};
-  }
   out.delivered = after.delivered;
+  if (!lossy) {
+    out.admitted = c128(out.delivered);
+    if (!infinite) out.unadmitted = minus(requested, out.admitted);
+  } else {
+    out.edge_drops = after.aggregate_drops();
+    Counter128 dropped {};
+    for (const auto& [e, x] : after.aggregate_drops()) accumulate_counter(dropped, x, "drops");
+    out.offered = offered;
+    out.admitted = offered;
+    out.unadmitted = Counter128 {};
+    out.source_drops = minus(minus(offered, c128(out.delivered)), dropped);
+  }
+  if (!outputs.by_source) return;
+  auto& rows = out.by_source.emplace(pe.sources.size());
+  for (std::size_t i = 0; i < pe.sources.size(); ++i) {
+    rows[i].source = pe.sources[i];
+    if (lossy) rows[i].offered = Counter128 {};
+  }
   if (after.derived) {
     const auto& d = *after.derived;
     const auto roots = d.inputs->plan->sources;
     for (std::size_t i = 0; i < after.record_inventory().size(); ++i) {
       const auto source = after.record_inventory()[i].source;
-      auto& row = out.by_source[static_cast<std::size_t>(std::lower_bound(pe.sources.begin(), pe.sources.end(), source) - pe.sources.begin())];
+      auto& row = rows[static_cast<std::size_t>(std::lower_bound(pe.sources.begin(), pe.sources.end(), source) - pe.sources.begin())];
       if (lossy) {
         row.offered = d.rows[i].offered;
         row.delivered = d.rows[i].delivered;
@@ -327,7 +340,7 @@ void fill_state(const PolicyEngine& pe, const LedgerEntry& after, const Counter1
   for (std::size_t i = 0; i < after.stored.size(); ++i) {
     const auto& r = after.stored[i];
     const auto it = std::lower_bound(pe.sources.begin(), pe.sources.end(), after.record_inventory()[i].source);
-    auto& row = out.by_source[static_cast<std::size_t>(it - pe.sources.begin())];
+    auto& row = rows[static_cast<std::size_t>(it - pe.sources.begin())];
     row.delivered += r.delivered;
     if (!lossy) continue;
     accumulate_counter(*row.offered, r.offered.value_or(Counter128 {}), "offered");
@@ -335,25 +348,12 @@ void fill_state(const PolicyEngine& pe, const LedgerEntry& after, const Counter1
   }
   for (const auto& [s, x] : lost) {
     const auto it = std::lower_bound(pe.sources.begin(), pe.sources.end(), s);
-    accumulate_counter(*out.by_source[static_cast<std::size_t>(it - pe.sources.begin())].offered, x, "offered");
+    accumulate_counter(*rows[static_cast<std::size_t>(it - pe.sources.begin())].offered, x, "offered");
   }
-  if (!lossy) {
-    for (auto& row : out.by_source) row.admitted = c128(row.delivered);
-    out.admitted = c128(out.delivered);
-    if (!infinite) out.unadmitted = minus(requested, out.admitted);
-    return;
+  for (auto& row : rows) {
+    row.admitted = lossy ? *row.offered : c128(row.delivered);
+    if (lossy) row.source_drops = minus(minus(*row.offered, c128(row.delivered)), row.total_edge_drops);
   }
-  for (auto& row : out.by_source) {
-    row.admitted = *row.offered;
-    row.source_drops = minus(minus(*row.offered, c128(row.delivered)), row.total_edge_drops);
-  }
-  out.edge_drops = after.aggregate_drops();
-  Counter128 dropped {};
-  for (const auto& [e, x] : after.aggregate_drops()) accumulate_counter(dropped, x, "drops");
-  out.offered = offered;
-  out.admitted = offered;
-  out.unadmitted = Counter128 {};
-  out.source_drops = minus(minus(offered, c128(out.delivered)), dropped);
 }
 
 // The exact sum of cost * flow over the records' edges (a controller's total cost; below 2^124:
@@ -429,10 +429,10 @@ struct PendingPolicyUpdate {
 };
 
 void finish_state(const PolicyEngine& pe, PendingPolicyUpdate& update, const Counter128& requested,
-                  bool infinite, const Counter128& offered,
+                  bool infinite, const Counter128& offered, const OutputOptions& outputs,
                   std::span<const std::pair<NodeId, Counter128>> lost = {}) {
   if (!update.entry.derived) update.entry = stored_entry(*pe.graph, pe.policy_id, update.drafts);
-  fill_state(pe, update.entry, requested, infinite, offered, update.result, lost);
+  fill_state(pe, update.entry, requested, infinite, offered, update.result, outputs, lost);
 }
 
 // The requested total after the call (a full-offer call: its offer alone) and whether it is
@@ -828,9 +828,9 @@ PendingPolicyUpdate place_pooled(const PolicyEngine& pe, const PolicyEpoch& cur,
       lossy ? (v ? Termination::Complete : Termination::Exhausted) :
       (v && out.call_delivered == *v ? Termination::Complete : Termination::Exhausted);
   if (created) set_flags(out, before_program, program.get(), false);
-  out.program = program;
+  if (rq.outputs->program) out.program = program;
   const auto requested = requested_after(cur, v);
-  fill_state(pe, s.entry, requested, cur.infinite || !v, offered, out);
+  fill_state(pe, s.entry, requested, cur.infinite || !v, offered, out, *rq.outputs);
   if (kTraced && rq.trace) {
     rq.trace->set("prepare", created ? routes_trace(pe, prep) : Trace::null());
     rq.trace->set(lossy ? "offers" : "T", std::move(step_trace));
@@ -1052,9 +1052,9 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
     out.termination = Termination::NoActiveWeight;
   }
   set_flags(out, before_program, program.get(), false);
-  out.program = program;
+  if (rq.outputs->program) out.program = program;
   out.by_tunnel = optimized_flow_tunnel_rows(*program);
-  finish_state(pe, s, requested, cur.infinite || !v.has_value(), Counter128 {});
+  finish_state(pe, s, requested, cur.infinite || !v.has_value(), Counter128 {}, *rq.outputs);
   out.total_cost = total_cost_of(g, s.entry);
   const bool curve = dense && !prescribed;
   if (curve) out.marginal_cost_curve = sol.payload.marginal_cost_curve;
@@ -1267,10 +1267,10 @@ PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& c
   // No head reaches a destination (every entry failed): NO_ROUTE, the records kept per entry.
   out.termination = k == 0 ? Termination::NoRoute : forwarding_termination(active, p.has_path(), lossy, v, call_delivered);
   set_flags(out, before_program, view.program.get(), is<DistributedTE>(pe));
-  out.program = view.program;
+  if (rq.outputs->program) out.program = view.program;
   if (plan) out.plan = *plan;
   out.by_tunnel = tunnel_rows(view, assigned, delivered, dropped);
-  finish_state(pe, s, requested, cur.infinite || !v.has_value(), offered, lost);
+  finish_state(pe, s, requested, cur.infinite || !v.has_value(), offered, *rq.outputs, lost);
   s.next_epoch.program = view.program;
   s.next_epoch.plan = std::move(plan);
   s.next_epoch.by_tunnel = out.by_tunnel;
@@ -1475,9 +1475,9 @@ PendingPolicyUpdate finish_by_source(const PolicyEngine& pe, const PolicyCall& r
     out.termination = view.prepared_route(0)->forwarding_edges.empty() ? Termination::NoActiveWeight : Termination::Complete;
     set_flags(out, replaced->before, program.get(), false);
   }
-  out.program = program;
+  if (rq.outputs->program) out.program = program;
   out.by_tunnel = tunnel_rows(view, assigned, delivered, dropped);
-  finish_state(pe, s, requested, !v.has_value(), offered);
+  finish_state(pe, s, requested, !v.has_value(), offered, *rq.outputs);
   if (uses_optimized_flow(pe)) out.total_cost = total_cost_of(g, s.entry);
   s.next_epoch.by_tunnel = out.by_tunnel;
   s.next_epoch.requested = requested;
@@ -1921,10 +1921,10 @@ PlacementResult zero_state(const PolicyEngine& pe, const LedgerTotals* totals, c
   for (std::size_t h = 0; h < ep.source_drops_by_source.size(); ++h) {
     if (!ep.source_drops_by_source[h].is_zero()) lost.emplace_back(pe.view.source(h), ep.source_drops_by_source[h]);
   }
-  fill_state(pe, records, ep.requested, ep.infinite, ep.offered, out, lost);
+  fill_state(pe, records, ep.requested, ep.infinite, ep.offered, out, outputs, lost);
   if (uses_optimized_flow(pe)) out.total_cost = total_cost_of(*pe.graph, records);
   if (is_unrestricted_centralized_te(pe) && pe.source_allocation == SourceAllocation::Optimized && ep.prepared && ep.marginal_cost_curve.has_value()) out.marginal_cost_curve = *ep.marginal_cost_curve;
-  out.program = ep.program;
+  if (outputs.program) out.program = ep.program;
   out.by_tunnel = ep.by_tunnel;
   prepare_outputs(pe, totals, outputs, records, out);
   return out;
@@ -1962,9 +1962,9 @@ PendingPolicyUpdate empty_roster(const PolicyEngine& pe, const PolicyEpoch& cur,
   out.termination = Termination::NoRoute;
   if (lossy && v.has_value()) out.call_source_drops = *v;
   set_flags(out, before, s.next_epoch.program.get(), is<DistributedTE>(pe));
-  out.program = s.next_epoch.program;
+  if (rq.outputs->program) out.program = s.next_epoch.program;
   if (s.next_epoch.plan) out.plan = *s.next_epoch.plan;
-  finish_state(pe, s, s.next_epoch.requested, s.next_epoch.infinite, s.next_epoch.offered);
+  finish_state(pe, s, s.next_epoch.requested, s.next_epoch.infinite, s.next_epoch.offered, *rq.outputs);
   if (uses_optimized_flow(pe)) out.total_cost = Counter128 {};
   if (optimized_global) {
     out.marginal_cost_curve.emplace();

@@ -95,7 +95,7 @@ def main() -> None:
                 routing=ngc.ShortestPaths(), admission=ngc.Admission.LOSSY
             ),
         )
-        result = policy.place(case["total"])
+        result = policy.place(case["total"], outputs=ngc.OutputOptions(by_source=True))
         exact(
             [row.source for row in result.by_source],
             list(range(k)),
@@ -113,7 +113,7 @@ def main() -> None:
             routing=ngc.ShortestPaths(), admission=ngc.Admission.LOSSY
         ),
     )
-    program = sp.replace(0).program
+    program = sp.replace(0, outputs=ngc.OutputOptions(program=True)).program
     pinned = ngc.FlowPolicy(
         ngc.FlowLedger(graph),
         [2, 0, 1],
@@ -126,7 +126,9 @@ def main() -> None:
     for kind, policy in policies:
         previous = [0, 0, 0]
         for index, case in enumerate(cases["public_sequence"]):
-            result = policy.place(case["offer"])
+            result = policy.place(
+                case["offer"], outputs=ngc.OutputOptions(by_source=True)
+            )
             exact(
                 [row.source for row in result.by_source],
                 [0, 1, 2],

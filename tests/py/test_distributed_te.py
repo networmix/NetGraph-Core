@@ -20,6 +20,7 @@ from helpers import (
     exact,
     full_ledger_state,
     ledger_state,
+    result_outputs,
     sweep_python_allocation,
     t1_config,
 )
@@ -220,7 +221,7 @@ def test_contract_examples(eid):
     g = graph(rows_)
     fg = ngc.FlowLedger(g)
     p = policy(g, heads, dst, N, ledger=fg, **kw)
-    r = p.replace(INF, design_demand=D, outputs=HOLDS)
+    r = p.replace(INF, design_demand=D, outputs=result_outputs(HOLDS, program=True))
     assert (requests(r), routes(r), statuses(r)) == (req, rts, st)
     assert r.plan.total_reserved_bandwidth == reserved
     assert r.edge_reservations.tolist() == per_edge == fg.reserved().tolist()
@@ -228,7 +229,7 @@ def test_contract_examples(eid):
     if offer is None:
         return
     ly = policy(g, heads, dst, N, LOSSY, **kw)
-    s = ly.replace(offer, design_demand=D)
+    s = ly.replace(offer, design_demand=D, outputs=ngc.OutputOptions(program=True))
     assert [t.assigned for t in s.by_tunnel] == shares
     assert (s.call_delivered, s.call_source_drops, s.termination) == (
         delivery,
@@ -252,7 +253,7 @@ def test_twoh_call():
     )
     fg = ngc.FlowLedger(g)
     p = ngc.FlowPolicy(fg, [0, 1], 2, cfg)
-    r = p.replace(12, design_demand=12)
+    r = p.replace(12, design_demand=12, outputs=ngc.OutputOptions(program=True))
     assert [t.status for t in r.program.tunnels] == [NB, UP, NB, UP]
     assert (r.call_delivered, r.call_source_drops) == (6, 6)
     assert r.plan.total_reserved_bandwidth == 6
@@ -261,7 +262,7 @@ def test_twoh_call():
         12,
         ((0, 6), (1, 6)),
     )
-    f = p.forward(8)
+    f = p.forward(8, outputs=ngc.OutputOptions(program=True))
     assert (f.call_delivered, f.call_source_drops, f.delivery_delta) == (4, 4, -2)
     assert [t.assigned for t in f.by_tunnel] == [0, 2, 0, 2]
     assert fg.reserved().tolist() == [0, 6]
@@ -514,7 +515,7 @@ def test_tie_breaks():
     ):
         fg = ngc.FlowLedger(g)
         r = ngc.FlowPolicy(fg, 0, 1, t1_config(2, tie_break=s)).replace(
-            8, design_demand=8
+            8, design_demand=8, outputs=ngc.OutputOptions(program=True)
         )
         assert (routes(r), fg.reserved().tolist()) == (want, held)
 
@@ -530,7 +531,7 @@ def test_tie_break_reads_unreserved():
     ):
         fg = ngc.FlowLedger(g, reservation_baseline=[5, 8])
         r = ngc.FlowPolicy(fg, 0, 1, t1_config(1, tie_break=s)).replace(
-            4, design_demand=4
+            4, design_demand=4, outputs=ngc.OutputOptions(program=True)
         )
         assert routes(r) == [want]
 
@@ -549,7 +550,7 @@ def test_tie_scores_read_unreserved():
     ):
         fg = ngc.FlowLedger(g, reservation_baseline=[3, 8])
         r = ngc.FlowPolicy(fg, 0, 1, t1_config(1, tie_break=tie)).replace(
-            1, design_demand=1
+            1, design_demand=1, outputs=ngc.OutputOptions(program=True)
         )
         assert routes(r) == [want], tie
 
@@ -560,14 +561,14 @@ def test_filter_before_collapse_and_min_unreserved():
     for parallel_edges in (False, True):
         r = ngc.FlowPolicy(
             ngc.FlowLedger(g), 0, 1, t1_config(1, parallel_edges=parallel_edges)
-        ).replace(6, design_demand=6)
+        ).replace(6, design_demand=6, outputs=ngc.OutputOptions(program=True))
         assert (routes(r), statuses(r)) == ([[1]], [UP])
     # PARC, N = 2, D = 2, minimum 5 and 0.
     parc = graph([(0, 1, 4, 1), (0, 1, 10, 2)])
     for minimum, path, held, bound in ((5, [1], [0, 2], 10), (0, [0], [2, 0], 4)):
         fg = ngc.FlowLedger(parc)
         r = policy(parc, 0, 1, 2, ledger=fg, min_unreserved_bandwidth=minimum).replace(
-            INF, design_demand=2
+            INF, design_demand=2, outputs=ngc.OutputOptions(program=True)
         )
         assert (routes(r), fg.reserved().tolist(), r.call_delivered) == (
             [path, path],
@@ -578,7 +579,7 @@ def test_filter_before_collapse_and_min_unreserved():
     zl = graph([(0, 1, 0, 1), (0, 1, 10, 2)])
     fg = ngc.FlowLedger(zl)
     r = policy(zl, 0, 1, 2, LOSSY, ledger=fg, min_unreserved_bandwidth=1).replace(
-        2, design_demand=1
+        2, design_demand=1, outputs=ngc.OutputOptions(program=True)
     )
     assert (requests(r), routes(r), fg.reserved().tolist(), r.call_delivered) == (
         [1, 0],
@@ -593,12 +594,16 @@ def test_other_owners_holds():
     fg = ngc.FlowLedger(g)
     a = policy(g, 0, 1, 1, ledger=fg)
     b = policy(g, 0, 1, 1, LOSSY, ledger=fg)
-    assert statuses(a.replace(6, design_demand=6)) == [UP]
+    assert statuses(
+        a.replace(6, design_demand=6, outputs=ngc.OutputOptions(program=True))
+    ) == [UP]
     assert (fg.reserved().tolist(), fg.unreserved().tolist()) == ([6], [4])
-    down = b.replace(6, design_demand=6)
+    down = b.replace(6, design_demand=6, outputs=ngc.OutputOptions(program=True))
     assert (statuses(down), down.call_source_drops) == ([NB], 6)
     a.remove()
-    assert statuses(b.replace(6, design_demand=6)) == [UP]
+    assert statuses(
+        b.replace(6, design_demand=6, outputs=ngc.OutputOptions(program=True))
+    ) == [UP]
     assert fg.reserved().tolist() == [6]
 
 
@@ -612,8 +617,10 @@ def test_holds_do_not_queue():
         1,
         ngc.FlowPolicyConfig(routing=ngc.ShortestPaths(), admission=LOSSY),
     )
-    assert c.replace(10).call_delivered == 10
-    r = policy(g, 0, 1, 1, LOSSY, ledger=fg).replace(4, design_demand=4)
+    assert c.replace(10, outputs=ngc.OutputOptions(program=True)).call_delivered == 10
+    r = policy(g, 0, 1, 1, LOSSY, ledger=fg).replace(
+        4, design_demand=4, outputs=ngc.OutputOptions(program=True)
+    )
     assert (
         statuses(r),
         fg.reserved().tolist(),
@@ -630,14 +637,14 @@ def test_holds_do_not_queue():
 def test_replace_evaluate_and_zero():
     fg = ngc.FlowLedger(one10())
     p = policy(None, 0, 1, 1, ledger=fg)
-    p.replace(6, design_demand=6)
+    p.replace(6, design_demand=6, outputs=ngc.OutputOptions(program=True))
     first = p.records()[0].flow_id
-    r = p.replace(6, design_demand=6)
+    r = p.replace(6, design_demand=6, outputs=ngc.OutputOptions(program=True))
     assert (statuses(r), fg.reserved().tolist()) == ([UP], [6])
     assert not (r.routes_changed or r.weights_changed or r.reservations_changed)
     assert p.records()[0].flow_id != first
     state = ledger_now(fg)
-    e = p.evaluate(3, design_demand=8, outputs=HOLDS)
+    e = p.evaluate(3, design_demand=8, outputs=result_outputs(HOLDS, program=True))
     assert (
         statuses(e),
         requests(e),
@@ -648,7 +655,7 @@ def test_replace_evaluate_and_zero():
     assert ledger_now(fg) == state
     fg2 = ngc.FlowLedger(one10())
     q = policy(None, 0, 1, 2, ledger=fg2)
-    z = q.replace(0)
+    z = q.replace(0, outputs=ngc.OutputOptions(program=True))
     assert (
         statuses(z),
         requests(z),
@@ -662,7 +669,7 @@ def test_replace_evaluate_and_zero():
         T.COMPLETE,
         0,
     )
-    z12 = q.replace(0, design_demand=12)
+    z12 = q.replace(0, design_demand=12, outputs=ngc.OutputOptions(program=True))
     assert (requests(z12), statuses(z12), fg2.reserved().tolist()) == (
         [6, 6],
         [UP, NB],
@@ -671,7 +678,9 @@ def test_replace_evaluate_and_zero():
 
 
 def test_infinite_offer_masked_source_and_empty_roster():
-    r = policy(par612(), 0, 1, 4).replace(INF, design_demand=12)
+    r = policy(par612(), 0, 1, 4).replace(
+        INF, design_demand=12, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     assert (
         r.call_delivered,
         r.call_undelivered,
@@ -688,13 +697,17 @@ def test_infinite_offer_masked_source_and_empty_roster():
     g = twoh(10, 10)
     r = policy(
         g, [0, 1], 2, 2, LOSSY, eligibility=g.eligibility(excluded_nodes=[0])
-    ).replace(10, design_demand=10)
+    ).replace(
+        10, design_demand=10, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     assert (requests(r), r.plan.design_by_head) == ([5, 5], ((1, 10),))
     assert source_rows(r) == [(0, 0, 0, 0, 0, 0), (1, 10, 10, 10, 0, 0)]
     # EMPTY.
     empty = build(3, [(1, 2, 5, 1)])
     p = policy(empty, 0, 2, 2, LOSSY)
-    r = p.replace(5, design_demand=5)
+    r = p.replace(
+        5, design_demand=5, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     assert (
         r.termination,
         r.program.sources,
@@ -714,9 +727,13 @@ def test_infinite_offer_masked_source_and_empty_roster():
     ) == (2, 5, (), 0)
     assert (r.call_source_drops, source_rows(r)) == (5, [(0, 0, 0, 0, 0, 0)])
     for z in (
-        p.replace(0, design_demand=5),
-        p.evaluate(0, design_demand=5),
-        p.forward(0),
+        p.replace(
+            0, design_demand=5, outputs=ngc.OutputOptions(program=True, by_source=True)
+        ),
+        p.evaluate(
+            0, design_demand=5, outputs=ngc.OutputOptions(program=True, by_source=True)
+        ),
+        p.forward(0, outputs=ngc.OutputOptions(program=True, by_source=True)),
     ):
         assert (z.termination, z.program.tunnels) == (T.COMPLETE, ())
     assert p.records() == []
@@ -725,16 +742,22 @@ def test_infinite_offer_masked_source_and_empty_roster():
 def test_all_down_and_round_order():
     # Every tunnel down (design 14 asks 7 per tunnel, no path has 7); the round order.
     for offer in (5, 14):
-        r = policy(diam5(), 0, 3, 2, LOSSY).replace(offer, design_demand=14)
+        r = policy(diam5(), 0, 3, 2, LOSSY).replace(
+            offer, design_demand=14, outputs=ngc.OutputOptions(program=True)
+        )
         assert (statuses(r), r.call_source_drops, r.call_delivered, r.termination) == (
             [NB, NB],
             offer,
             0,
             T.COMPLETE,
         )
-        s = policy(diam5(), 0, 3, 2).replace(offer, design_demand=14)
+        s = policy(diam5(), 0, 3, 2).replace(
+            offer, design_demand=14, outputs=ngc.OutputOptions(program=True)
+        )
         assert (s.call_delivered, s.termination) == (0, T.EXHAUSTED)
-    r = policy(twoh(10, 10), [0, 1], 2, 2).replace(10, design_demand=10)
+    r = policy(twoh(10, 10), [0, 1], 2, 2).replace(
+        10, design_demand=10, outputs=ngc.OutputOptions(program=True)
+    )
     assert requests(r) == [3, 3, 2, 2]
     assert [(t.entry_id, t.head, t.local_index) for t in r.program.tunnels] == [
         (0, 0, 0),
@@ -746,7 +769,9 @@ def test_all_down_and_round_order():
 
 
 def test_by_tunnel_and_stretch():
-    r = policy(par612(), 0, 1, 4, LOSSY).replace(13, design_demand=12)
+    r = policy(par612(), 0, 1, 4, LOSSY).replace(
+        13, design_demand=12, outputs=ngc.OutputOptions(program=True)
+    )
     assert rows(r) == [
         (0, 0, UP, 4, 4, 0),
         (1, 0, UP, 3, 2, 1),
@@ -757,16 +782,16 @@ def test_by_tunnel_and_stretch():
     # The pool baseline; the largest numerator compares exactly.
     for f, second in ((2, CC), (2**63 - 1, UP)):
         r = policy(x8(), [0, 1], 2, 1, LOSSY, cost_ceiling=ngc.CostStretch(f)).replace(
-            4, design_demand=4
+            4, design_demand=4, outputs=ngc.OutputOptions(program=True)
         )
         assert statuses(r) == [NB, second]
 
 
 def test_flags():
     p = policy(diam5(), 0, 3, 2)
-    a = p.replace(8, design_demand=8)
-    b = p.replace(10, design_demand=10)
-    f = p.forward(10)
+    a = p.replace(8, design_demand=8, outputs=ngc.OutputOptions(program=True))
+    b = p.replace(10, design_demand=10, outputs=ngc.OutputOptions(program=True))
+    f = p.forward(10, outputs=ngc.OutputOptions(program=True))
     assert (a.routes_changed, a.weights_changed, a.reservations_changed) == (
         True,
         True,
@@ -778,7 +803,9 @@ def test_flags():
         True,
     )
     assert (f.routes_changed, f.weights_changed, f.reservations_changed) == (False,) * 3
-    d = policy(diam5(), 0, 3, 2, LOSSY).replace(5, design_demand=14)
+    d = policy(diam5(), 0, 3, 2, LOSSY).replace(
+        5, design_demand=14, outputs=ngc.OutputOptions(program=True)
+    )
     assert (d.routes_changed, d.weights_changed, d.reservations_changed) == (
         True,
         False,
@@ -789,11 +816,11 @@ def test_flags():
     g = graph([(0, 1, 4, 1), (0, 1, 4, 1)])
     fg = ngc.FlowLedger(g)
     other = policy(None, 0, 1, 1, ledger=fg)
-    other.replace(1, design_demand=1)
+    other.replace(1, design_demand=1, outputs=ngc.OutputOptions(program=True))
     mine = policy(None, 0, 1, 2, ledger=fg)
-    held = mine.replace(8, design_demand=8)
+    held = mine.replace(8, design_demand=8, outputs=ngc.OutputOptions(program=True))
     other.remove()
-    freed = mine.replace(8, design_demand=8)
+    freed = mine.replace(8, design_demand=8, outputs=ngc.OutputOptions(program=True))
     assert (statuses(held), statuses(freed)) == ([UP, NB], [UP, UP])
     assert [t.reserved_bandwidth for t in held.program.tunnels] == [4, 0]
     assert requests(held) == requests(freed) == [4, 4]
@@ -806,8 +833,16 @@ def test_pinned_over_a_t1_program_reserves_nothing():
     # as data, and the ledger and the records hold nothing. Also for an all-down program whose
     # requests are positive (a request of 20 on one link of 10).
     g = one10()
-    up = policy(g, 0, 1, 1).replace(0, design_demand=6).program
-    down = policy(g, 0, 1, 1).replace(0, design_demand=20).program
+    up = (
+        policy(g, 0, 1, 1)
+        .replace(0, design_demand=6, outputs=ngc.OutputOptions(program=True))
+        .program
+    )
+    down = (
+        policy(g, 0, 1, 1)
+        .replace(0, design_demand=20, outputs=ngc.OutputOptions(program=True))
+        .program
+    )
     assert [
         (t.status, t.requested_bandwidth, t.reserved_bandwidth) for t in up.tunnels
     ] == [(UP, 6, 6)]
@@ -818,7 +853,7 @@ def test_pinned_over_a_t1_program_reserves_nothing():
         for op in ("evaluate", "replace", "place"):
             fg = ngc.FlowLedger(g)
             p = pinned(g, prog, 0, 1, LOSSLESS, ledger=fg)
-            r = getattr(p, op)(1)
+            r = getattr(p, op)(1, outputs=ngc.OutputOptions(program=True))
             assert not r.reservations_changed, (prog.tunnels[0].status, op)
             assert r.plan is None
             assert [
@@ -834,7 +869,7 @@ def test_pinned_over_a_t1_program_reserves_nothing():
 def test_rows():
     # The TWOH call's policy's rows and records; forward recreates the records with their holds.
     p = policy(twoh(2, 10), [0, 1], 2, 2, LOSSY)
-    r = p.replace(12, design_demand=12)
+    r = p.replace(12, design_demand=12, outputs=ngc.OutputOptions(by_source=True))
     assert rows(r) == [
         (0, 0, NB, 0, 0, 0),
         (1, 1, UP, 3, 3, 0),
@@ -849,7 +884,7 @@ def test_rows():
     assert [rec.min_route_cost for rec in recs] == [None, 1, None, 1]
     assert [len(rec.route.via_edges()) for rec in recs] == [0, 1, 0, 1]
     ids = [rec.flow_id for rec in recs]
-    f = p.forward(8)
+    f = p.forward(8, outputs=ngc.OutputOptions(by_source=True))
     assert not (f.routes_changed or f.weights_changed or f.reservations_changed)
     after = p.records()
     assert [rec.edge_reservations for rec in after] == [
@@ -886,7 +921,9 @@ def test_terminations():
 def test_no_certificates_and_plan_only_for_t1():
     g = twoh(2, 10)
     r = policy(g, [0, 1], 2, 2).replace(
-        INF, design_demand=12, outputs=ngc.OutputOptions(min_cut=True)
+        INF,
+        design_demand=12,
+        outputs=result_outputs(ngc.OutputOptions(min_cut=True), program=True),
     )
     assert (r.total_cost, r.min_cut, r.marginal_cost_curve) == (None, None, None)
     assert isinstance(r.plan, ngc.TunnelPlan)
@@ -896,10 +933,13 @@ def test_no_certificates_and_plan_only_for_t1():
         2,
         ngc.FlowPolicyConfig(routing=ngc.Pinned(r.program)),
     )
-    assert pin.replace(12).plan is None
+    assert pin.replace(12, outputs=ngc.OutputOptions(program=True)).plan is None
     for cfg in (SHORTEST_PATHS, GLOBAL):
         q = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, cfg)
-        assert q.place(5).plan is None and q.replace(5).plan is None
+        assert (
+            q.place(5, outputs=ngc.OutputOptions(program=True)).plan is None
+            and q.replace(5, outputs=ngc.OutputOptions(program=True)).plan is None
+        )
     with pytest.raises(TypeError):
         ngc.TunnelPlan()
 
@@ -918,7 +958,9 @@ def test_the_exact_int_check_rejects_floats_and_bools():
 
 
 def test_program_fields():
-    r = policy(twoh(2, 10), [0, 1], 2, 2, LOSSY).replace(12, design_demand=12)
+    r = policy(twoh(2, 10), [0, 1], 2, 2, LOSSY).replace(
+        12, design_demand=12, outputs=ngc.OutputOptions(program=True)
+    )
     got = [
         (
             t.entry_id,
@@ -947,14 +989,18 @@ def test_program_fields():
     )
     # Two-hop tunnels end at the destination: DIAM5, N = 2, D = 10 (requests 5, 5; e2 of 4 is
     # filtered out): tunnel 0 takes e0 e3, tunnel 1 e1 e4, both cost 4, both to node 3.
-    two = policy(diam5(), 0, 3, 2).replace(10, design_demand=10)
+    two = policy(diam5(), 0, 3, 2).replace(
+        10, design_demand=10, outputs=ngc.OutputOptions(program=True)
+    )
     assert [(t.edges, t.destination, t.path_cost) for t in two.program.tunnels] == [
         ((0, 3), 3, 4),
         ((1, 4), 3, 4),
     ]
     g = twoh(2, 10)
     for t in (
-        ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, GLOBAL).place(12).program.tunnels
+        ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, GLOBAL)
+        .place(12, outputs=ngc.OutputOptions(program=True))
+        .program.tunnels
     ):
         assert (t.status, t.requested_bandwidth, t.reserved_bandwidth) == (UP, 0, 0)
         assert t.destination == 2 and t.edges is not None and t.path_cost is not None
@@ -979,9 +1025,19 @@ def pinned(
 
 def test_t1_replay_stale_and_down_tunnels():
     g = par612()
-    prog = policy(g, 0, 1, 4, LOSSY).replace(13, design_demand=12).program
+    prog = (
+        policy(g, 0, 1, 4, LOSSY)
+        .replace(
+            13,
+            design_demand=12,
+            outputs=ngc.OutputOptions(program=True, by_source=True),
+        )
+        .program
+    )
     mask = g.eligibility(excluded_edges=[0])
-    r = pinned(g, prog, 0, 1, eligibility=mask).replace(13)
+    r = pinned(g, prog, 0, 1, eligibility=mask).replace(
+        13, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     assert rows(r) == [
         (0, 0, FAILED, 0, 0, 0),
         (1, 0, FAILED, 0, 0, 0),
@@ -990,30 +1046,42 @@ def test_t1_replay_stale_and_down_tunnels():
     ]
     assert (r.call_delivered, r.call_edge_drops) == (6, [(1, 7)])
     assert (
-        pinned(g, prog, 0, 1, LOSSLESS, eligibility=mask).replace(13).call_delivered
+        pinned(g, prog, 0, 1, LOSSLESS, eligibility=mask)
+        .replace(13, outputs=ngc.OutputOptions(program=True, by_source=True))
+        .call_delivered
         == 6
     )
     # Node 2 a black hole; the live forward the same, holds kept.
     g = diam5()
     fg = ngc.FlowLedger(g)
     p = policy(g, 0, 3, 2, LOSSY, ledger=fg)
-    prog = p.replace(10, design_demand=10).program
+    prog = p.replace(
+        10, design_demand=10, outputs=ngc.OutputOptions(program=True, by_source=True)
+    ).program
     dark = g.eligibility(excluded_nodes=[2])
-    r = pinned(g, prog, 0, 3, black_holes=dark).replace(10)
+    r = pinned(g, prog, 0, 3, black_holes=dark).replace(
+        10, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     assert rows(r) == [(0, 0, UP, 5, 5, 0), (1, 0, BLACKHOLED, 5, 0, 5)]
     assert (r.call_edge_drops, r.call_delivered) == ([(1, 5)], 5)
     assert (
-        pinned(g, prog, 0, 3, LOSSLESS, black_holes=dark).replace(10).call_delivered
+        pinned(g, prog, 0, 3, LOSSLESS, black_holes=dark)
+        .replace(10, outputs=ngc.OutputOptions(program=True, by_source=True))
+        .call_delivered
         == 1
     )
     held = fg.reserved().tolist()
-    f = p.forward(10, black_holes=dark)
+    f = p.forward(
+        10, black_holes=dark, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     assert (rows(f), f.call_delivered, fg.reserved().tolist()) == (rows(r), 5, held)
     assert [t.status for t in p.program.tunnels] == [UP, UP]
     g = twoh(2, 10)
-    live = policy(g, [0, 1], 2, 2, LOSSY).replace(12, design_demand=12)
+    live = policy(g, [0, 1], 2, 2, LOSSY).replace(
+        12, design_demand=12, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     pin = pinned(g, live.program, [0, 1], 2)
-    r = pin.replace(12)
+    r = pin.replace(12, outputs=ngc.OutputOptions(program=True, by_source=True))
     assert (r.call_delivered, r.call_source_drops, rows(r), r.plan, r.termination) == (
         6,
         6,
@@ -1023,10 +1091,18 @@ def test_t1_replay_stale_and_down_tunnels():
     )
     # The replay roster comes from the topology basis: head 0 keeps its share and loses it.
     rg = graph([(0, 2, 10, 1), (0, 3, 10, 5), (1, 2, 10, 1), (3, 2, 10, 5)])
-    prog = policy(rg, [0, 1], 2, 1, LOSSY).replace(10, design_demand=10).program
+    prog = (
+        policy(rg, [0, 1], 2, 1, LOSSY)
+        .replace(
+            10,
+            design_demand=10,
+            outputs=ngc.OutputOptions(program=True, by_source=True),
+        )
+        .program
+    )
     x = pinned(
         rg, prog, [0, 1], 2, eligibility=rg.eligibility(excluded_edges=[0])
-    ).replace(10)
+    ).replace(10, outputs=ngc.OutputOptions(program=True, by_source=True))
     assert (x.call_delivered, x.call_source_drops, x.termination) == (5, 5, T.COMPLETE)
     assert source_rows(x) == [(0, 5, 5, 0, 5, 0), (1, 5, 5, 5, 0, 0)]
 
@@ -1172,7 +1248,9 @@ def test_ranges():
     m = L62 - 1
     g = graph([(0, 1, m, 1)])
     fg = ngc.FlowLedger(g)
-    r = policy(g, 0, 1, 1, LOSSY, ledger=fg).replace(m, design_demand=m)
+    r = policy(g, 0, 1, 1, LOSSY, ledger=fg).replace(
+        m, design_demand=m, outputs=ngc.OutputOptions(program=True)
+    )
     assert (
         statuses(r),
         r.plan.total_reserved_bandwidth,
@@ -1186,14 +1264,23 @@ def test_ranges():
         [0],
         m,
     )
-    assert policy(g, 0, 1, 1).replace(INF, design_demand=m).call_delivered == m
+    assert (
+        policy(g, 0, 1, 1)
+        .replace(INF, design_demand=m, outputs=ngc.OutputOptions(program=True))
+        .call_delivered
+        == m
+    )
     fg = ngc.FlowLedger(g)
     half = 1 << 61
     assert statuses(
-        policy(g, 0, 1, 1, ledger=fg).replace(half, design_demand=half)
+        policy(g, 0, 1, 1, ledger=fg).replace(
+            half, design_demand=half, outputs=ngc.OutputOptions(program=True)
+        )
     ) == [UP]
     assert statuses(
-        policy(g, 0, 1, 1, ledger=fg).replace(half, design_demand=half)
+        policy(g, 0, 1, 1, ledger=fg).replace(
+            half, design_demand=half, outputs=ngc.OutputOptions(program=True)
+        )
     ) == [NB]
     assert fg.unreserved().tolist() == [half - 1]
     # FAN4MAX with N = 10000: 40000 tunnels, all up, the design carried whole.
@@ -1201,7 +1288,9 @@ def test_ranges():
     g = graph([(i, 4, cap, 1) for i in range(4)])
     fg = ngc.FlowLedger(g)
     D = L62 - 4
-    r = policy(g, [0, 1, 2, 3], 4, 10000, ledger=fg).replace(D, design_demand=D)
+    r = policy(g, [0, 1, 2, 3], 4, 10000, ledger=fg).replace(
+        D, design_demand=D, outputs=ngc.OutputOptions(program=True)
+    )
     reqs = [t.requested_bandwidth for t in r.program.tunnels]
     assert len(reqs) == 40000 and all(t.status == UP for t in r.program.tunnels)
     assert (reqs.count(115292150460685), reqs.count(115292150460684)) == (
@@ -1228,7 +1317,9 @@ def test_zero_and_masked():
     for adm in (LOSSLESS, LOSSY):
         fg = ngc.FlowLedger(twoh(2, 10))
         p = policy(None, [0, 1], 2, 2, adm, ledger=fg)
-        r = p.replace(0, design_demand=12)
+        r = p.replace(
+            0, design_demand=12, outputs=ngc.OutputOptions(program=True, by_source=True)
+        )
         assert (
             r.termination,
             r.call_delivered,
@@ -1248,10 +1339,15 @@ def test_zero_and_masked():
         ]
         state = ledger_now(fg)
         assert (
-            p.evaluate(0, design_demand=12).termination == T.COMPLETE
+            p.evaluate(
+                0,
+                design_demand=12,
+                outputs=ngc.OutputOptions(program=True, by_source=True),
+            ).termination
+            == T.COMPLETE
             and ledger_now(fg) == state
         )
-        f = p.forward(0)
+        f = p.forward(0, outputs=ngc.OutputOptions(program=True, by_source=True))
         assert (
             f.termination,
             f.program is r.program or f.program.tunnels == r.program.tunnels,
@@ -1259,40 +1355,81 @@ def test_zero_and_masked():
         assert not (f.routes_changed or f.weights_changed or f.reservations_changed)
         assert fg.reserved().tolist() == [0, 6]
         d = policy(diam5(), 0, 3, 2, adm)
-        assert d.replace(0, design_demand=14).termination == T.COMPLETE
-        assert d.replace(5, design_demand=14).termination == (
-            T.COMPLETE if adm == LOSSY else T.EXHAUSTED
+        assert (
+            d.replace(
+                0,
+                design_demand=14,
+                outputs=ngc.OutputOptions(program=True, by_source=True),
+            ).termination
+            == T.COMPLETE
         )
+        assert d.replace(
+            5, design_demand=14, outputs=ngc.OutputOptions(program=True, by_source=True)
+        ).termination == (T.COMPLETE if adm == LOSSY else T.EXHAUSTED)
         assert [rec.entry_id for rec in d.records()] == [0, 1]
-        assert d.forward(0).termination == T.COMPLETE
+        assert (
+            d.forward(
+                0, outputs=ngc.OutputOptions(program=True, by_source=True)
+            ).termination
+            == T.COMPLETE
+        )
         g = twoh(10, 10)
         e = policy(
             g, [0, 1], 2, 2, adm, eligibility=g.eligibility(excluded_edges=[0, 1])
         )
-        assert e.replace(5, design_demand=5).termination == T.NO_ROUTE
         assert (
-            e.replace(0, design_demand=5).termination == T.COMPLETE
+            e.replace(
+                5,
+                design_demand=5,
+                outputs=ngc.OutputOptions(program=True, by_source=True),
+            ).termination
+            == T.NO_ROUTE
+        )
+        assert (
+            e.replace(
+                0,
+                design_demand=5,
+                outputs=ngc.OutputOptions(program=True, by_source=True),
+            ).termination
+            == T.COMPLETE
             and e.records() == []
         )
         # Pinned over the TWOH call's program.
         g = twoh(2, 10)
-        prog = policy(g, [0, 1], 2, 2, LOSSY).replace(12, design_demand=12).program
+        prog = (
+            policy(g, [0, 1], 2, 2, LOSSY)
+            .replace(
+                12,
+                design_demand=12,
+                outputs=ngc.OutputOptions(program=True, by_source=True),
+            )
+            .program
+        )
         x = pinned(
             g, prog, [0, 1], 2, adm, eligibility=g.eligibility(excluded_edges=[1])
         )
-        r = x.replace(12)
+        r = x.replace(12, outputs=ngc.OutputOptions(program=True, by_source=True))
         assert r.termination == T.NO_ACTIVE_WEIGHT
         assert [t.status for t in r.by_tunnel] == [NB, FAILED, NB, FAILED]
         if adm == LOSSY:
             assert source_rows(r) == [(0, 12, 12, 0, 12, 0), (1, 0, 0, 0, 0, 0)]
-        assert x.replace(0).termination == T.COMPLETE
+        assert (
+            x.replace(
+                0, outputs=ngc.OutputOptions(program=True, by_source=True)
+            ).termination
+            == T.COMPLETE
+        )
         assert [rec.entry_id for rec in x.records()] == [0, 1, 2, 3]
         y = pinned(
             g, prog, [0, 1], 2, adm, eligibility=g.eligibility(excluded_nodes=[0, 1])
         )
         assert (
-            y.replace(12).termination,
-            y.replace(0).termination,
+            y.replace(
+                12, outputs=ngc.OutputOptions(program=True, by_source=True)
+            ).termination,
+            y.replace(
+                0, outputs=ngc.OutputOptions(program=True, by_source=True)
+            ).termination,
             len(y.records()),
         ) == (T.NO_ROUTE, T.COMPLETE, 4)
 
@@ -1339,7 +1476,11 @@ def test_property():
         held = [0] * len(rows_)
         if rng.random() < 0.3 and sources:
             other = ngc.FlowPolicy(fg, sources[:1], dests, t1_config(1))
-            other.replace(0, design_demand=rng.randint(0, 4))
+            other.replace(
+                0,
+                design_demand=rng.randint(0, 4),
+                outputs=ngc.OutputOptions(program=True, by_source=True),
+            )
             held = fg.reserved().tolist()
         php = rng.random() < 0.5
         prio = rng.choice(["CAPACITY", "AVAILABLE_CAPACITY", "HEADROOM"])
@@ -1382,7 +1523,11 @@ def test_property():
         before_holds = fg.reserved().tolist()
         V = fg.residual().tolist()
         p = ngc.FlowPolicy(fg, sources, dests, t1_config(N, **s, **kw), eligibility)
-        r = p.replace(INF, design_demand=D)
+        r = p.replace(
+            INF,
+            design_demand=D,
+            outputs=ngc.OutputOptions(program=True, by_source=True),
+        )
         where = (trial, rows_, sources, D, N, s, kw)
         got = [
             (t.status.name, list(t.edges or []), t.requested_bandwidth)
@@ -1412,7 +1557,14 @@ def test_property():
             and all(t.up for t in want.tunnels)
             and all(a <= b for a, b in zip(U, V, strict=True))
         ):
-            assert p.replace(D, design_demand=D).call_delivered == D, where
+            assert (
+                p.replace(
+                    D,
+                    design_demand=D,
+                    outputs=ngc.OutputOptions(program=True, by_source=True),
+                ).call_delivered
+                == D
+            ), where
             all_up += 1
         # Lossy: the oracle's loss rule, conservation and the setup independent of the offer.
         offer = rng.randint(0, 14)
@@ -1425,7 +1577,11 @@ def test_property():
             t1_config(N, LOSSY, **s, **kw),
             eligibility,
         )
-        lr = lp.replace(offer, design_demand=D)
+        lr = lp.replace(
+            offer,
+            design_demand=D,
+            outputs=ngc.OutputOptions(program=True, by_source=True),
+        )
         assert [(t.status.name, list(t.edges or [])) for t in lr.program.tunnels] == [
             (a, b) for a, b, _ in got
         ], where
@@ -1490,7 +1646,7 @@ g = ngc.Graph(3, [0, 1], [2, 2], [2, 10], [1, 1], 1.0)
 fg = ngc.FlowLedger(g)
 cfg = ngc.FlowPolicyConfig(routing=ngc.DistributedTE(ngc.TunnelCount(2)), admission=ngc.Admission.LOSSY)
 p = ngc.FlowPolicy(fg, [0, 1], 2, cfg)
-r = p.replace(12, design_demand=12)
+r = p.replace(12, design_demand=12, outputs=ngc.OutputOptions(program=True))
 fid = p.records()[0].flow_id
 ca = cfg.routing
 t0 = r.program.tunnels[0]
@@ -1563,13 +1719,18 @@ def test_stretch_exact():
         g = graph([(0, 1, 0, 5), (0, 1, 1, cost)])
         factor = 1.2 if cost == 6 else Fraction(6, 5)
         lossy = policy(g, 0, 1, 1, LOSSY, cost_ceiling=ngc.CostStretch(factor))
-        r = lossy.replace(1, design_demand=1)
+        r = lossy.replace(1, design_demand=1, outputs=ngc.OutputOptions(program=True))
         assert (statuses(r), routes(r)) == ([status], [route]), cost
         assert (r.call_delivered, r.call_source_drops) == (delivered, 1 - delivered), (
             cost
         )
         lossless = policy(g, 0, 1, 1, cost_ceiling=ngc.CostStretch(factor))
-        assert lossless.replace(INF, design_demand=1).call_delivered == delivered, cost
+        assert (
+            lossless.replace(
+                INF, design_demand=1, outputs=ngc.OutputOptions(program=True)
+            ).call_delivered
+            == delivered
+        ), cost
 
 
 def test_stretch_below_one():
@@ -1595,6 +1756,6 @@ def test_stretch_wide_products():
         (Fraction(2**61 + 1, 2**61), CC),
     ):
         r = policy(g, 0, 1, 2, cost_ceiling=ngc.CostStretch(factor)).replace(
-            INF, design_demand=2
+            INF, design_demand=2, outputs=ngc.OutputOptions(program=True)
         )
         assert statuses(r) == [UP, second], factor

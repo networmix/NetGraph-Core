@@ -678,6 +678,8 @@ def _bool_parameters():
         "saturated_boundary_edges",
         "edge_reservations",
         "min_cut",
+        "program",
+        "by_source",
     ):
         params.append(
             (
@@ -693,7 +695,7 @@ def test_bools_are_strict():
     # class named like NumPy's bool, an object with __bool__, None, an int or a string.
     params = _bool_parameters()
     assert {name for name, _ in params} == _stub_bool_parameters()
-    assert len(params) == 14
+    assert len(params) == 16
     fakes = [fake() for fake in FAKE_NUMPY_BOOLS]
     for name, make in params:
         for bad in (*fakes, _Truthy(), None, 0, 1, "x", np.int64(1), np.array([True])):

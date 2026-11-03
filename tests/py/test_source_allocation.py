@@ -10,7 +10,16 @@ from __future__ import annotations
 import random
 
 import pytest
-from helpers import HIGHER_CAP, assert_read_only, build, dag_of, exact, shortest
+from helpers import (
+    HIGHER_CAP,
+    assert_read_only,
+    build,
+    dag_of,
+    evaluation_outputs,
+    exact,
+    result_outputs,
+    shortest,
+)
 from source_allocation_oracle import (
     INF,
     PooledReference,
@@ -305,11 +314,11 @@ def test_deterministic_single_paths_pool():
     # Canonical paths 0: [e0, e2], 1: [e1, e2] (equal cost and hops, lower EdgeId e2).
     det = ngc.ShortestPaths(multipath=False)
     _, _, p = fresh(POOL, [0, 1], 3, shortest_paths(routing=det))
-    r = p.place(INF)
+    r = p.place(INF, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, [x.admitted for x in r.by_source]) == (1, [1, 0])
     # Lossy 2: e2's arrivals (1, 1), carried H(1, [1, 1]) = [1, 0].
     _, _, p = fresh(POOL, [0, 1], 3, shortest_paths(admission=A.LOSSY, routing=det))
-    r = p.place(2)
+    r = p.place(2, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, r.call_edge_drops) == (1, [(2, 1)])
     assert rows(r) == [(0, 1, 1, 1, 0, 0), (1, 1, 1, 0, 0, 1)]
     assert [list(rec.route.via_edges()) for rec in p.records()] == [[0, 2], [1, 2]]
@@ -362,7 +371,9 @@ def test_global_examples(
 ):
     request = 10 if edges in (B3Z, B3P) else 12
     _, _, p = fresh(edges, sources, dest, glob(source_allocation))
-    r = p.place(request, ngc.OutputOptions(edge_flows=True))
+    r = p.place(
+        request, result_outputs(ngc.OutputOptions(edge_flows=True), by_source=True)
+    )
     term = T.COMPLETE if delivered == request else T.EXHAUSTED
     assert (r.call_delivered, r.call_undelivered, r.termination) == (
         delivered,
@@ -380,9 +391,12 @@ def test_global_examples(
 def test_global_records_and_masks():
     # The rows; the records: source 0's 6 is 2 direct and 4 through node 1.
     _, _, p = fresh(B1, [0, 1], 3, glob(ORIGIN.EQUAL))
-    assert rows(p.place(12)) == [(0, None, 2, 2, 0, 0), (1, None, 2, 2, 0, 0)]
+    assert rows(p.place(12, outputs=ngc.OutputOptions(by_source=True))) == [
+        (0, None, 2, 2, 0, 0),
+        (1, None, 2, 2, 0, 0),
+    ]
     _, _, p = fresh(B2, [0, 1], 2, glob(ORIGIN.EQUAL))
-    p.place(12)
+    p.place(12, outputs=ngc.OutputOptions(by_source=True))
     assert [(rec.edge_flows, rec.delivered) for rec in p.records()] == [
         ([(0, 4), (1, 2), (2, 4)], 6),
         ([(2, 6)], 6),
@@ -391,10 +405,10 @@ def test_global_records_and_masks():
     _, _, p = fresh(
         B3Z, [0, 1], 2, glob(ORIGIN.EQUAL), lambda g: g.eligibility(excluded_nodes=[0])
     )
-    assert p.place(10).call_delivered == 10
+    assert p.place(10, outputs=ngc.OutputOptions(by_source=True)).call_delivered == 10
     # The optimum on the residual.
     _, _, p = fresh(WIT, 0, 2, glob())
-    r = p.place(1, ngc.OutputOptions(edge_flows=True))
+    r = p.place(1, result_outputs(ngc.OutputOptions(edge_flows=True), by_source=True))
     assert (r.edge_flows.tolist(), r.total_cost) == ([0, 1, 0], 1)
 
 
@@ -597,9 +611,9 @@ def test_zero_unprepared(routing):
         assert r.total_cost == (0 if routing == "global" else None)
         assert p.records() == []
 
-    unprepared(p.place(0, ALL))
-    p.place(3)
-    r = p.place(0, ALL)
+    unprepared(p.place(0, result_outputs(ALL, by_source=True)))
+    p.place(3, outputs=ngc.OutputOptions(by_source=True))
+    r = p.place(0, result_outputs(ALL, by_source=True))
     assert (r.call_delivered, r.routes_changed, r.delivered, r.requested) == (
         0,
         False,
@@ -609,13 +623,13 @@ def test_zero_unprepared(routing):
     if routing == "global":
         assert r.marginal_cost_curve == [(1, 3)] and r.min_cut is None
     p.remove()
-    unprepared(p.place(0, ALL))
+    unprepared(p.place(0, result_outputs(ALL, by_source=True)))
 
 
 def test_result_accounting():
     # B1, equal source allocation, Lossless.
     _, _, p = fresh(B1, [0, 1], 3, glob(ORIGIN.EQUAL))
-    r = p.place(12)
+    r = p.place(12, outputs=ngc.OutputOptions(by_source=True))
     assert (r.requested, r.offered, r.admitted, r.delivered, r.unadmitted) == (
         12,
         None,
@@ -644,7 +658,7 @@ def test_result_accounting():
         shortest_paths(),
         lambda g: g.eligibility(excluded_nodes=[4]),
     )
-    assert rows(p.place(3)) == [
+    assert rows(p.place(3, outputs=ngc.OutputOptions(by_source=True))) == [
         (0, None, 3, 3, 0, 0),
         (1, None, 0, 0, 0, 0),
         (4, None, 0, 0, 0, 0),
@@ -653,17 +667,32 @@ def test_result_accounting():
     g = graph(B1)
     for config in (shortest_paths(), shortest_paths(P.WEIGHTED)):
         assert (
-            ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, config).place(1).total_cost
+            ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, config)
+            .place(1, outputs=ngc.OutputOptions(by_source=True))
+            .total_cost
             is None
         )
     t1 = ngc.FlowPolicyConfig(routing=ngc.DistributedTE(ngc.TunnelCount(1)))
     assert (
-        ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, t1).replace(1).total_cost is None
+        ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, t1)
+        .replace(1, outputs=ngc.OutputOptions(by_source=True))
+        .total_cost
+        is None
     )
     pinned = pinned_route(g, 0, 3, [0])
-    assert ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, pinned).place(1).total_cost is None
+    assert (
+        ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, pinned)
+        .place(1, outputs=ngc.OutputOptions(by_source=True))
+        .total_cost
+        is None
+    )
     support = glob(support=dag_of(g, [0]))
-    assert ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, support).place(1).total_cost == 1
+    assert (
+        ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, support)
+        .place(1, outputs=ngc.OutputOptions(by_source=True))
+        .total_cost
+        == 1
+    )
 
 
 def test_pinned_in_the_new_shape():
@@ -674,7 +703,9 @@ def test_pinned_in_the_new_shape():
         (P.EQUAL, (0, T.COMPLETE, 0, [(0, 2)], (0, 2, 2, 0, 0, 2))),
     ):
         config = pinned_route(g, 0, 1, [0], allocation=allocation, admission=A.LOSSY)
-        r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, config).place(2)
+        r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, config).place(
+            2, outputs=ngc.OutputOptions(by_source=True)
+        )
         assert (
             r.call_delivered,
             r.termination,
@@ -693,7 +724,9 @@ def test_equal_source_increments_beyond_64_bits():
     g = ngc.Graph(4, [0, 1, 2], [3, 3, 3], [1, 1, 1], [1, 2, 3], 1.0)
     lossy = ngc.FlowPolicyConfig(routing=ngc.ShortestPaths(), admission=A.LOSSY)
     sp = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1, 2], 3, lossy)
-    program = sp.replace(0).program
+    program = sp.replace(
+        0, outputs=ngc.OutputOptions(program=True, by_source=True)
+    ).program
     pinned = ngc.FlowPolicy(
         ngc.FlowLedger(g),
         [0, 1, 2],
@@ -705,7 +738,9 @@ def test_equal_source_increments_beyond_64_bits():
         total += offer
         expected = [total // 3 + (1 if i < total % 3 else 0) for i in range(3)]
         for policy in (sp, pinned):
-            r = policy.place(offer)
+            r = policy.place(
+                offer, outputs=ngc.OutputOptions(program=True, by_source=True)
+            )
             assert r.offered == total
             assert [row.offered for row in r.by_source] == expected
             assert r.delivered == sum(min(x, 1) for x in expected)  # 1-unit links
@@ -717,8 +752,11 @@ def test_terminations():
     # An empty roster (no edge reaches 1 from 0).
     for config in (glob(), shortest_paths(), shortest_paths(admission=A.LOSSY)):
         _, _, p = fresh([(1, 0, 5, 1)], 0, 1, config)
-        assert p.place(0).termination == T.COMPLETE
-        r = p.place(5)
+        assert (
+            p.place(0, outputs=ngc.OutputOptions(by_source=True)).termination
+            == T.COMPLETE
+        )
+        r = p.place(5, outputs=ngc.OutputOptions(by_source=True))
         assert (r.call_delivered, r.termination) == (0, T.NO_ROUTE)
         if config.admission == A.LOSSY:
             # Nothing enters: the offer is all source loss and the row stays zero.
@@ -728,22 +766,25 @@ def test_terminations():
             assert (r.offered, r.unadmitted) == (None, 5)
     # Weighted splitting over the zero edge: no positive weight.
     _, _, p = fresh(ZERO, 0, 1, shortest_paths(P.WEIGHTED, A.LOSSY))
-    r = p.place(2)
+    r = p.place(2, outputs=ngc.OutputOptions(by_source=True))
     assert (r.termination, r.call_source_drops, r.offered) == (T.NO_ACTIVE_WEIGHT, 2, 2)
     _, _, p = fresh(ZERO, 0, 1, shortest_paths(P.WEIGHTED))
-    r = p.place(2)
+    r = p.place(2, outputs=ngc.OutputOptions(by_source=True))
     assert (r.termination, r.unadmitted) == (T.NO_ACTIVE_WEIGHT, 2)
     # A controller at zero over existing routes.
     for config in (glob(), shortest_paths(P.OPTIMIZED)):
         _, _, p = fresh(
             SPF if config.routing.__class__ is ngc.ShortestPaths else ZERO, 0, 1, config
         )
-        assert p.place(5).termination == T.EXHAUSTED
+        assert (
+            p.place(5, outputs=ngc.OutputOptions(by_source=True)).termination
+            == T.EXHAUSTED
+        )
 
 
 def test_result_objects():
     _, _, p = fresh(B1, [0, 1], 3, glob(ORIGIN.EQUAL))
-    r = p.place(INF)
+    r = p.place(INF, outputs=ngc.OutputOptions(by_source=True))
     assert isinstance(r.by_source, tuple) and all(
         isinstance(x, ngc.SourceFlow) for x in r.by_source
     )
@@ -890,7 +931,10 @@ def test_controllers_random(seed):
                 g,
                 sources,
                 dests,
-                ngc.EvaluationOptions(config, eligibility=eligibility),
+                evaluation_outputs(
+                    ngc.EvaluationOptions(config, eligibility=eligibility),
+                    by_source=True,
+                ),
             )
             where = (seed, routing, source_allocation.name)
             assert (r.call_delivered, r.total_cost) == (best, best_cost), where
@@ -900,8 +944,8 @@ def test_controllers_random(seed):
             # Increments: a then b admit min(max, a) and then min(max, that + b).
             a, b = rng.randint(0, 6), rng.randint(0, 6)
             p = ngc.FlowPolicy(ngc.FlowLedger(g), sources, dests, config, eligibility)
-            first = p.place(a)
-            second = p.place(b)
+            first = p.place(a, outputs=ngc.OutputOptions(by_source=True))
+            second = p.place(b, outputs=ngc.OutputOptions(by_source=True))
             want_a = min(best, a)
             want_b = min(best, want_a + b)
             assert (first.call_delivered, second.call_delivered) == (

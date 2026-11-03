@@ -4,7 +4,7 @@ import itertools
 
 import numpy as np
 import pytest
-from helpers import ALL_OUT, build, dag_of, plain
+from helpers import ALL_OUT, build, dag_of, plain, result_outputs
 from private_hooks import needs_hooks
 
 import netgraph_core as ngc
@@ -65,36 +65,60 @@ def fixture(pooled, allocation, tie, multipath, parallel, lossy):
 @pytest.mark.parametrize("case", list(cases()))
 def test_static_identity_all_preparation_points_and_unchanged_values(case):
     g, ledger, p = fixture(*case)
-    assert p.evaluate(0).program is not None
+    assert (
+        p.evaluate(0, outputs=ngc.OutputOptions(program=True, by_source=True)).program
+        is not None
+    )
     assert p.program is None and not p.records()
-    assert p.place(0).program is None
-    first = p.place(6, ALL_OUT)
+    assert (
+        p.place(0, outputs=ngc.OutputOptions(program=True, by_source=True)).program
+        is None
+    )
+    first = p.place(6, result_outputs(ALL_OUT, program=True, by_source=True))
     before_ids = [r.flow_id for r in p.records()]
-    assert p.evaluate(6, outputs=ALL_OUT).program is first.program
+    assert (
+        p.evaluate(
+            6, outputs=result_outputs(ALL_OUT, program=True, by_source=True)
+        ).program
+        is first.program
+    )
     assert [r.flow_id for r in p.records()] == before_ids
     p.remove()
     assert p.program is None
-    assert p.place(0).program is None
+    assert (
+        p.place(0, outputs=ngc.OutputOptions(program=True, by_source=True)).program
+        is None
+    )
     with pytest.raises(ValueError, match="forward requires an installed program"):
         p.forward(1)
-    second = p.place(6, ALL_OUT)
+    second = p.place(6, result_outputs(ALL_OUT, program=True, by_source=True))
     assert second.program is first.program
     assert plain(second) == plain(first)
     assert all(r.flow_id[1] > before_ids[-1][1] for r in p.records())
-    replaced = p.replace(6, outputs=ALL_OUT)
+    replaced = p.replace(
+        6, outputs=result_outputs(ALL_OUT, program=True, by_source=True)
+    )
     assert replaced.program is first.program
     assert not replaced.routes_changed and not replaced.weights_changed
     p.remove()
-    ordered = ngc.apply_actions(ledger, [ngc.Place(p, 6)], outputs=ALL_OUT)[0]
+    ordered = ngc.apply_actions(
+        ledger,
+        [ngc.Place(p, 6)],
+        outputs=result_outputs(ALL_OUT, program=True, by_source=True),
+    )[0]
     assert ordered.program is first.program and plain(ordered) == plain(first)
-    ordered = ngc.apply_actions(ledger, [ngc.Replace(p, 6)], outputs=ALL_OUT)[0]
+    ordered = ngc.apply_actions(
+        ledger,
+        [ngc.Replace(p, 6)],
+        outputs=result_outputs(ALL_OUT, program=True, by_source=True),
+    )[0]
     assert ordered.program is first.program and plain(ordered) == plain(replaced)
     if case[-1]:
         simultaneous = ngc.apply_actions(
             ledger,
             [ngc.Replace(p, 6)],
             mode=ngc.BatchMode.SIMULTANEOUS,
-            outputs=ALL_OUT,
+            outputs=result_outputs(ALL_OUT, program=True, by_source=True),
         )[0]
         assert simultaneous.program is first.program
         assert plain(simultaneous) == plain(replaced)
@@ -128,22 +152,27 @@ def test_excluded_preparation_is_new_and_reads_changed_residual(mode):
     p = ngc.FlowPolicy(
         ledger, 0, 1, ngc.FlowPolicyConfig(routing=ngc.ShortestPaths(**kw))
     )
-    first = p.place(2)
+    first = p.place(2, outputs=ngc.OutputOptions(program=True))
     program = ngc.ForwardingProgram.from_routes(
         g, [0], [1], [ngc.RouteDefinition(0, dag_of(g, [0]))]
     )
     other = ngc.FlowPolicy(
         ledger, 0, 1, ngc.FlowPolicyConfig(routing=ngc.Pinned(program))
     )
-    other.place(1 if mode == "headroom" else 8)
-    second = p.replace(1 if mode in ("available", "headroom") else 12)
+    other.place(1 if mode == "headroom" else 8, outputs=ngc.OutputOptions(program=True))
+    second = p.replace(
+        1 if mode in ("available", "headroom") else 12,
+        outputs=ngc.OutputOptions(program=True),
+    )
     assert second.program is not first.program
     if mode in ("available", "headroom"):
         assert list(p.records()[0].route.via_edges()) == [1]
     else:
         assert second.delivered == 12
     p.remove()
-    assert p.place(1).program is not first.program
+    assert (
+        p.place(1, outputs=ngc.OutputOptions(program=True)).program is not first.program
+    )
 
 
 @needs_hooks

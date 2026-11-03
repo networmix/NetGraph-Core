@@ -1489,13 +1489,13 @@ TEST(Sensitivity, GlobalBaselineKeepsEveryOutputsCombination) {
 TEST(Sensitivity, BaselineComparisonRejectsEveryFieldAndRedistribution) {
   const Case c = make_case(5, {{0, 2, 3, 1}, {0, 4, 0, 5}, {1, 3, 4, 2}, {2, 4, 3, 2}, {3, 4, 4, 1}}, {0, 1}, {4});
   const EvaluationOptions options {global_config(), nullptr, nullptr, OutputOptions {true, true, true, true, true}};
-  const auto result = evaluate_edge_failures(*c.g, c.sources, c.destinations, options, 1);
+  const auto result = evaluate_edge_failures(*c.g, c.sources, c.destinations, result_outputs(options, true, true), 1);
   const auto& good = result.baseline;
   ASSERT_EQ(good.call_delivered, 7);
-  ASSERT_EQ(good.by_source.size(), 2U);
-  ASSERT_EQ(good.by_source[0].delivered, 3);
-  ASSERT_EQ(good.by_source[1].delivered, 4);
-  expect_same(good, evaluate_demand(*c.g, c.sources, c.destinations, options), "independent baseline call");
+  ASSERT_EQ(good.by_source.value().size(), 2U);
+  ASSERT_EQ(good.by_source.value()[0].delivered, 3);
+  ASSERT_EQ(good.by_source.value()[1].delivered, 4);
+  expect_same(good, evaluate_demand(*c.g, c.sources, c.destinations, result_outputs(options, true, true)), "independent baseline call");
   ASSERT_TRUE(good.program != nullptr);
   ASSERT_TRUE(good.edge_flows && good.residual && good.saturated_boundary_edges && good.edge_reservations && good.min_cut);
   ASSERT_TRUE(good.total_cost && good.marginal_cost_curve && !good.marginal_cost_curve->empty());
@@ -1508,8 +1508,8 @@ TEST(Sensitivity, BaselineComparisonRejectsEveryFieldAndRedistribution) {
       [](auto& x) { x.plan = TunnelPlan {}; }, [](auto& x) { x.requested = Counter128 {}; },
       [](auto& x) { x.offered = Counter128 {}; }, [](auto& x) { ++x.admitted.lo; }, [](auto& x) { ++x.delivered; },
       [](auto& x) { x.unadmitted = Counter128 {}; }, [](auto& x) { ++x.source_drops.lo; },
-      [](auto& x) { x.edge_drops.emplace_back(0, Counter128 {}); }, [](auto& x) { x.by_source.pop_back(); },
-      [](auto& x) { ++x.by_source[0].delivered; --x.by_source[1].delivered; },
+      [](auto& x) { x.edge_drops.emplace_back(0, Counter128 {}); }, [](auto& x) { x.by_source.value().pop_back(); },
+      [](auto& x) { ++x.by_source.value()[0].delivered; --x.by_source.value()[1].delivered; },
       [](auto& x) { x.by_tunnel.emplace_back(); }, [](auto& x) { x.total_cost.reset(); },
       [](auto& x) { ++x.total_cost->lo; }, [](auto& x) { x.marginal_cost_curve.reset(); },
       [](auto& x) { ++x.marginal_cost_curve->back().first; }, [](auto& x) { x.edge_flows.reset(); },
@@ -1599,8 +1599,8 @@ TEST(FlowCoreDeletion, ScalarLossPreservesMaximumGuardAndIndependentResets) {
   for (Amount offer : {0, 1, 5}) for (std::int32_t workers : {1, 2}) {
     EvaluationOptions options {global_config(), nullptr, nullptr, OutputOptions {true, true, true, true, true}};
     options.offer = std::optional<Amount>(offer);
-    const auto got = evaluate_edge_failures(*parallel.g, parallel.sources, parallel.destinations, options, workers);
-    expect_same(got.baseline, evaluate_demand(*parallel.g, parallel.sources, parallel.destinations, options), "finite baseline");
+    const auto got = evaluate_edge_failures(*parallel.g, parallel.sources, parallel.destinations, result_outputs(options, true, true), workers);
+    expect_same(got.baseline, evaluate_demand(*parallel.g, parallel.sources, parallel.destinations, result_outputs(options, true, true)), "finite baseline");
     EXPECT_EQ(got.baseline.call_delivered, std::min<Amount>(offer, 4));
     ASSERT_EQ(got.entries.size(), offer == 0 ? 0U : offer == 1 ? 1U : 2U);
     for (std::size_t i = 0; i < got.entries.size(); ++i) {
@@ -1656,7 +1656,7 @@ TEST(Sensitivity, ShortcutControlsPreserveEveryFieldAndClassifyCuts) {
   full.full_repair = true;
   const auto reference = [&] {
     detail::ScopedSensitivityProbe control(&full);
-    return evaluate_edge_failures(*c.g, c.sources, c.destinations, options, 1);
+    return evaluate_edge_failures(*c.g, c.sources, c.destinations, result_outputs(options, true, true), 1);
   }();
   ASSERT_EQ(reference.entries.size(), 3U);
   ASSERT_EQ(reference.baseline.call_delivered, 3);
@@ -1673,7 +1673,7 @@ TEST(Sensitivity, ShortcutControlsPreserveEveryFieldAndClassifyCuts) {
       (*static_cast<std::vector<int>*>(context))[static_cast<std::size_t>(e)] = static_cast<int>(work);
     };
     detail::ScopedSensitivityProbe control(&probe);
-    const auto got = evaluate_edge_failures(*c.g, c.sources, c.destinations, options, workers);
+    const auto got = evaluate_edge_failures(*c.g, c.sources, c.destinations, result_outputs(options, true, true), workers);
     expect_same(got.baseline, reference.baseline, "edge-failure full baseline");
     ASSERT_EQ(got.entries.size(), expected_edges.size());
     for (std::size_t i = 0; i < got.entries.size(); ++i) {

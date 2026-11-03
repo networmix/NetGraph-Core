@@ -137,13 +137,13 @@ void expect_unchanged(const World& w, const World::State& before, const std::str
 // The message of the std::invalid_argument the list raises ("" for none), and that nothing changed.
 std::string refused(World& w, const Actions& actions, BatchMode mode, const OutputOptions& outputs = {}) {
   const auto before = w.state();
-  const std::string what = error_of([&] { (void)apply_actions(*w.ledger, actions, mode, outputs); });
+  const std::string what = error_of([&] { (void)apply_actions(*w.ledger, actions, mode, result_outputs(outputs, true, true)); });
   expect_unchanged(w, before, "refused: " + what);
   return what;
 }
 
 std::vector<PlacementResult> run(World& w, const Actions& actions, BatchMode mode, const OutputOptions& outputs = {}) {
-  auto out = apply_actions(*w.ledger, actions, mode, outputs);
+  auto out = apply_actions(*w.ledger, actions, mode, result_outputs(outputs, true, true));
   expect_balanced(*w.ledger, "after the list");
   return out;
 }
@@ -637,14 +637,14 @@ TEST(ApplyActions, PooledDemandSharesALink) {
   ASSERT_EQ(ra.edge_drops.size(), 1U);
   EXPECT_EQ(ra.edge_drops[0].first, 2);
   EXPECT_EQ(lo(ra.edge_drops[0].second), 1);
-  ASSERT_EQ(ra.by_source.size(), 2U);
-  EXPECT_EQ(ra.by_source[0].source, 0);
-  EXPECT_EQ(lo(*ra.by_source[0].offered), 1);
-  EXPECT_EQ(ra.by_source[0].delivered, 0);
-  EXPECT_EQ(lo(ra.by_source[0].total_edge_drops), 1);
-  EXPECT_EQ(ra.by_source[1].source, 1);
-  EXPECT_EQ(lo(*ra.by_source[1].offered), 1);
-  EXPECT_EQ(ra.by_source[1].delivered, 1);
+  ASSERT_EQ(ra.by_source.value().size(), 2U);
+  EXPECT_EQ(ra.by_source.value()[0].source, 0);
+  EXPECT_EQ(lo(*ra.by_source.value()[0].offered), 1);
+  EXPECT_EQ(ra.by_source.value()[0].delivered, 0);
+  EXPECT_EQ(lo(ra.by_source.value()[0].total_edge_drops), 1);
+  EXPECT_EQ(ra.by_source.value()[1].source, 1);
+  EXPECT_EQ(lo(*ra.by_source.value()[1].offered), 1);
+  EXPECT_EQ(ra.by_source.value()[1].delivered, 1);
   EXPECT_TRUE(ra.by_tunnel.empty());
   EXPECT_FALSE(ra.total_cost.has_value());
   EXPECT_FALSE(ra.marginal_cost_curve.has_value());
@@ -1041,7 +1041,7 @@ TEST(ApplyActions, ZeroServiceAndZeroWeight) {
 TEST(ApplyActions, PooledRootsBlockSerialPairs) {
   auto make = [] { return graph(6, {{0, 1, 2, 1}, {1, 2, 2, 1}, {2, 3, 2, 1}, {4, 5, 10, 1}}); };
   World scalar(make());
-  const auto want = scalar.add({0, 1, 2}, {3}, ecmp()).replace(6);
+  const auto want = scalar.add({0, 1, 2}, {3}, ecmp()).replace(6, std::nullopt, OutputOptions {.program = true, .by_source = true});
   for (bool beside : {false, true}) {
     World w(make());
     auto& a = w.add({0, 1, 2}, {3}, ecmp());
@@ -1049,9 +1049,9 @@ TEST(ApplyActions, PooledRootsBlockSerialPairs) {
     const auto r = run(w, beside ? Actions {Replace {a, 6}, Replace {z, 1}} : Actions {Replace {a, 6}}, SIMULTANEOUS);
     expect_same(r[0], want, beside ? "beside" : "alone");
     EXPECT_EQ(r[0].call_delivered, 2);
-    EXPECT_EQ(r[0].by_source[0].delivered, 1);
-    EXPECT_EQ(r[0].by_source[1].delivered, 0);
-    EXPECT_EQ(r[0].by_source[2].delivered, 1);
+    EXPECT_EQ(r[0].by_source.value()[0].delivered, 1);
+    EXPECT_EQ(r[0].by_source.value()[1].delivered, 0);
+    EXPECT_EQ(r[0].by_source.value()[2].delivered, 1);
   }
 }
 
@@ -1068,8 +1068,8 @@ TEST(ApplyActions, PooledCycleKeepsSourceState) {
   EXPECT_EQ(detail::thread_lossy_counters().rounds, 3);
 #endif
   EXPECT_EQ(r[0].call_delivered, 1);
-  EXPECT_EQ(r[0].by_source[0].delivered, 1);
-  EXPECT_EQ(r[0].by_source[1].delivered, 0);
+  EXPECT_EQ(r[0].by_source.value()[0].delivered, 1);
+  EXPECT_EQ(r[0].by_source.value()[1].delivered, 0);
   EXPECT_EQ(r[1].call_delivered, 0);
   EXPECT_EQ(r[1].call_edge_drops, (Pairs {{id[1], 1}}));
 }
@@ -1387,7 +1387,7 @@ TEST(ApplyActions, OutputsPerEntry) {
 TEST(ApplyActions, CapturedWeightsInAList) {
   auto g = graph(3, {{0, 2, 3, 1}, {1, 2, 1, 1}});
   World solver(g);
-  const auto prog = solver.add({0, 1}, {2}, global()).replace(4).program;
+  const auto prog = solver.add({0, 1}, {2}, global()).replace(4, std::nullopt, OutputOptions {.program = true}).program;
   World w(g);
   auto& a = w.pin(prog);
   auto& b = w.pin(tunnel(*w.g, 0, 2, {0}));
@@ -1493,7 +1493,7 @@ TEST(ApplyActions, RingSettlesAtRoundSix) {
   for (int i = 0; i < n; ++i) heads.push_back(n + i), all.push_back(tunnel_of(i));
   World one(g);
   auto& program = one.pin(tunnels(*g, heads, {2 * n}, all));
-  const auto r = program.replace(192);
+  const auto r = program.replace(192, std::nullopt, OutputOptions {.program = true});
 #if NETGRAPH_CORE_PRIVATE_HOOKS
   EXPECT_EQ(detail::thread_lossy_counters().groups, 1);
   EXPECT_EQ(detail::thread_lossy_counters().rounds, 6);
@@ -1621,22 +1621,22 @@ Generated generate(std::uint32_t seed, std::shared_ptr<const Graph> graph = null
     out.lossy_replace.push_back(12);
     {
       World solver(w.g);
-      const auto prog = solver.add(S, D, global()).replace(6).program;
+      const auto prog = solver.add(S, D, global()).replace(6, std::nullopt, OutputOptions {.program = true}).program;
       w.pin(prog, LOSSY, no_edges(g, {random_edge()}));
       out.lossy_replace.push_back(13);
     }
     w.pin(tunnel(g, 6, 7, {sep}));
     out.separate = 14;
     // State before the list: scalar calls, an orphan, an outside owner.
-    (void)w.p[0]->place(static_cast<Amount>(rng() % 6));
-    (void)w.p[2]->replace(static_cast<Amount>(rng() % 6));
-    (void)w.p[6]->place(static_cast<Amount>(rng() % 6));
-    (void)w.p[8]->replace(2, std::optional<Amount> {2});
-    (void)w.p[9]->replace(2);
-    (void)w.p[10]->replace(static_cast<Amount>(rng() % 6));
-    w.add(S, D, ecmp()).place(1 + static_cast<Amount>(rng() % 3));  // the outside owner (index 15)
+    (void)w.p[0]->place(static_cast<Amount>(rng() % 6), OutputOptions {.program = true});
+    (void)w.p[2]->replace(static_cast<Amount>(rng() % 6), std::nullopt, OutputOptions {.program = true});
+    (void)w.p[6]->place(static_cast<Amount>(rng() % 6), OutputOptions {.program = true});
+    (void)w.p[8]->replace(2, std::optional<Amount> {2}, OutputOptions {.program = true});
+    (void)w.p[9]->replace(2, std::nullopt, OutputOptions {.program = true});
+    (void)w.p[10]->replace(static_cast<Amount>(rng() % 6), std::nullopt, OutputOptions {.program = true});
+    w.add(S, D, ecmp()).place(1 + static_cast<Amount>(rng() % 3), OutputOptions {.program = true});  // the outside owner (index 15)
     auto& orphan = w.add({0}, D, ecmp());
-    (void)orphan.place(1 + static_cast<Amount>(rng() % 3));
+    (void)orphan.place(1 + static_cast<Amount>(rng() % 3), OutputOptions {.program = true});
     w.p.pop_back();
   } catch (const std::invalid_argument&) {
     return {};
@@ -1672,9 +1672,9 @@ PlacementResult scalar(const Action& a, const OutputOptions& o) {
   return std::visit(
       [&](const auto& x) -> PlacementResult {
         using T = std::decay_t<decltype(x)>;
-        if constexpr (std::is_same_v<T, Place>) return x.policy.get().place(x.offer, o);
-        if constexpr (std::is_same_v<T, Replace>) return x.policy.get().replace(x.offer, x.design_demand, o);
-        if constexpr (std::is_same_v<T, Forward>) return x.policy.get().forward(x.offer, x.black_holes, o);
+        if constexpr (std::is_same_v<T, Place>) return x.policy.get().place(x.offer, result_outputs(o, true, true));
+        if constexpr (std::is_same_v<T, Replace>) return x.policy.get().replace(x.offer, x.design_demand, result_outputs(o, true, true));
+        if constexpr (std::is_same_v<T, Forward>) return x.policy.get().forward(x.offer, x.black_holes, result_outputs(o, true, true));
       },
       a);
 }
@@ -1730,7 +1730,7 @@ TEST(ApplyActions, OrderedEqualsScalarCalls) {
     std::vector<PlacementResult> got;
     std::string error;
     try {
-      got = apply_actions(*a.w->ledger, list, ORDERED, kAll);
+      got = apply_actions(*a.w->ledger, list, ORDERED, result_outputs(kAll, true, true));
     } catch (const std::invalid_argument& e) {
       error = e.what();
     }
@@ -1778,7 +1778,7 @@ TEST(ApplyActions, OneParticipantEqualsTheScalarCall) {
     Actions list;
     FlowPolicy& p = *a.w->p[i];
     if (forward) {
-      if (p.program() == nullptr) (void)p.replace(1), (void)b.w->p[i]->replace(1);
+      if (p.program() == nullptr) (void)p.replace(1, std::nullopt, OutputOptions {.program = true, .by_source = true}), (void)b.w->p[i]->replace(1, std::nullopt, OutputOptions {.program = true, .by_source = true});
       const Eligibility* bh = nullptr;
       if (rng() % 2 == 0) {
         a.w->keep.push_back(no_edges(*a.w->g, {static_cast<EdgeId>(rng() % (a.w->g->num_edges() - 1))}));
@@ -1793,7 +1793,7 @@ TEST(ApplyActions, OneParticipantEqualsTheScalarCall) {
     const bool pair = rng() % 2 == 0;
     if (pair) list.push_back(Replace {*a.w->p[a.separate], static_cast<Amount>(rng() % 13)});
     const std::string where = "seed " + std::to_string(seed) + " policy " + std::to_string(i);
-    const auto got = apply_actions(*a.w->ledger, list, SIMULTANEOUS, kAll);
+    const auto got = apply_actions(*a.w->ledger, list, SIMULTANEOUS, result_outputs(kAll, true, true));
     std::vector<PlacementResult> want;
     for (const auto& x : list) want.push_back(scalar(retarget(x, *a.w, *b.w), kAll));
     // The scalar calls' outputs read the ledger after each; the list's after both: with the pair,

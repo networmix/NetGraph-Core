@@ -23,6 +23,39 @@ HIGHER_HEADROOM = ngc.RouteTieBreak.HIGHER_HEADROOM
 ALL_OUT = ngc.OutputOptions(
     edge_flows=True, residual=True, saturated_boundary_edges=True
 )
+
+
+def result_outputs(outputs=None, *, program=False, by_source=False):
+    """Request the completed fields a test reads, preserving its other output flags."""
+    values = {
+        name: False if outputs is None else getattr(outputs, name)
+        for name in (
+            "edge_flows",
+            "residual",
+            "saturated_boundary_edges",
+            "edge_reservations",
+            "min_cut",
+            "program",
+            "by_source",
+        )
+    }
+    values["program"] |= program
+    values["by_source"] |= by_source
+    return ngc.OutputOptions(**values)
+
+
+def evaluation_outputs(options, *, program=False, by_source=False):
+    """Keep the evaluator question while requesting the completed fields a test reads."""
+    return ngc.EvaluationOptions(
+        options.config,
+        eligibility=options.eligibility,
+        cache=options.cache,
+        outputs=result_outputs(options.outputs, program=program, by_source=by_source),
+        design_demand=options.design_demand,
+        offer=options.offer,
+    )
+
+
 # A chain 0 -> 1 -> 2 -> 3 (cost 1 per edge) with the bypasses 0 -> 2 and 1 -> 3 (cost 3), every
 # capacity 1: (u, v, capacity, cost) in input order.
 CHAIN = [(0, 1, 1, 1), (1, 2, 1, 1), (2, 3, 1, 1), (0, 2, 1, 3), (1, 3, 1, 3)]

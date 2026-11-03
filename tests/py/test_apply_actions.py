@@ -29,6 +29,7 @@ from helpers import (
     full_ledger_state,
     ledger_state,
     plain,
+    result_outputs,
     shortest,
     sweep_python_allocation,
     t1_config,
@@ -594,14 +595,22 @@ def test_normal_outcomes_commit():
     e = w.add(0, 1, ecmp())
     f = w.add(0, 1, ecmp(LL))
     e2 = w.add(0, 1, ecmp())
-    re, rf = run(w, [ngc.Replace(e, 10), ngc.Replace(f, 5)])
+    re, rf = run(
+        w,
+        [ngc.Replace(e, 10), ngc.Replace(f, 5)],
+        outputs=ngc.OutputOptions(program=True),
+    )
     assert re.call_delivered == 10
     assert rf.call_delivered == 0 and rf.call_undelivered == 5
     assert rf.termination == ngc.Termination.EXHAUSTED
     assert [r.delivered for r in f.records()] == [0]
     # A zero place on a new policy: zeros, no program, no record, flags false; nothing published.
     before = w.state()
-    (z,) = run(w, [ngc.Place(e2, 0)], outputs=ngc.OutputOptions(residual=True))
+    (z,) = run(
+        w,
+        [ngc.Place(e2, 0)],
+        outputs=result_outputs(ngc.OutputOptions(residual=True), program=True),
+    )
     assert z.call_delivered == 0 and z.program is None
     assert not (z.routes_changed or z.weights_changed or z.reservations_changed)
     assert z.residual.tolist() == [0]
@@ -703,21 +712,42 @@ def released_world():
 def test_simultaneous_view_releases_together():
     w, o, a, b = released_world()
     outside = policy_state(o)
-    r = run(w, [ngc.Replace(a, 10), ngc.Replace(b, 10)], SIMULTANEOUS)
+    r = run(
+        w,
+        [ngc.Replace(a, 10), ngc.Replace(b, 10)],
+        SIMULTANEOUS,
+        outputs=ngc.OutputOptions(program=True, by_source=True),
+    )
     assert delivered(r) == [3, 3] and r[0].call_edge_drops == [(0, 7)]
     assert [x.delivery_delta for x in r] == [2, -2]
     assert w.ledger.carried().tolist() == [10]
     assert policy_state(o) == outside
     # ORDERED (the contrast): A on 0 + 1, B on 0 + 5.
     w3, _, a3, b3 = released_world()
-    assert delivered(run(w3, [ngc.Replace(a3, 10), ngc.Replace(b3, 10)])) == [1, 5]
+    assert delivered(
+        run(
+            w3,
+            [ngc.Replace(a3, 10), ngc.Replace(b3, 10)],
+            outputs=ngc.OutputOptions(program=True, by_source=True),
+        )
+    ) == [1, 5]
 
 
 def test_permutation_changes_nothing():
     w, _, a, b = released_world()
-    r = run(w, [ngc.Replace(a, 10), ngc.Replace(b, 10)], SIMULTANEOUS)
+    r = run(
+        w,
+        [ngc.Replace(a, 10), ngc.Replace(b, 10)],
+        SIMULTANEOUS,
+        outputs=ngc.OutputOptions(program=True, by_source=True),
+    )
     w2, _, a2, b2 = released_world()
-    r2 = run(w2, [ngc.Replace(b2, 10), ngc.Replace(a2, 10)], SIMULTANEOUS)
+    r2 = run(
+        w2,
+        [ngc.Replace(b2, 10), ngc.Replace(a2, 10)],
+        SIMULTANEOUS,
+        outputs=ngc.OutputOptions(program=True, by_source=True),
+    )
     assert plain(r2) == plain([r[1], r[0]])
     assert w2.ledger.carried().tolist() == w.ledger.carried().tolist()
     assert (a2.delivered(), b2.delivered()) == (a.delivered(), b.delivered())
@@ -825,7 +855,12 @@ def test_pooled_demand_shares_a_link():
     )
     a = w.add([0, 1], 3, ecmp())
     b = w.pin(tunnel(w.g, 4, 3, [4, 2]))
-    ra, rb = run(w, [ngc.Replace(a, 2), ngc.Replace(b, 2)], SIMULTANEOUS, ALL)
+    ra, rb = run(
+        w,
+        [ngc.Replace(a, 2), ngc.Replace(b, 2)],
+        SIMULTANEOUS,
+        result_outputs(ALL, program=True, by_source=True),
+    )
     assert (ra.call_delivered, ra.call_undelivered, ra.delivery_delta) == (1, 1, 1)
     assert ra.call_edge_drops == [(2, 1)] and ra.call_source_drops == 0
     assert ra.termination == ngc.Termination.COMPLETE
@@ -865,7 +900,12 @@ def test_results_in_input_order():
     a = w.pin(tunnel(w.g, 0, 1, [0]))
     b = w.pin(tunnel(w.g, 2, 3, [1]))
     for mode in (ORDERED, SIMULTANEOUS):
-        r = run(w, [ngc.Replace(b, 7), ngc.Replace(a, 3)], mode)
+        r = run(
+            w,
+            [ngc.Replace(b, 7), ngc.Replace(a, 3)],
+            mode,
+            outputs=ngc.OutputOptions(program=True),
+        )
         assert delivered(r) == [7, 3] and r[0].program.tunnels[0].head == 2
 
 
@@ -979,7 +1019,12 @@ def test_zero_offers():
     w = World(g1())
     a = w.add(0, 1, ecmp())
     b = w.add(0, 1, ecmp())
-    for x in run(w, [ngc.Replace(a, 0), ngc.Replace(b, 0)], SIMULTANEOUS):
+    for x in run(
+        w,
+        [ngc.Replace(a, 0), ngc.Replace(b, 0)],
+        SIMULTANEOUS,
+        outputs=ngc.OutputOptions(program=True),
+    ):
         assert x.termination == ngc.Termination.COMPLETE and x.call_delivered == 0
         assert x.program is not None and x.routes_changed and x.weights_changed
     assert len(a.records()) == len(b.records()) == 1
@@ -1321,21 +1366,36 @@ def test_disjoint_maximal_participants():
 def test_imported_tunnels_book_no_holds():
     w = World(g1(), [8], [6])
     t = w.add(0, 1, t1())
-    t.replace(0, design_demand=6)
+    t.replace(0, design_demand=6, outputs=ngc.OutputOptions(program=True))
     p = w.pin(t.program)
     o = ngc.OutputOptions(edge_reservations=True)
-    rt, rp = run(w, [ngc.Forward(t, 8), ngc.Replace(p, 8)], SIMULTANEOUS, o)
+    rt, rp = run(
+        w,
+        [ngc.Forward(t, 8), ngc.Replace(p, 8)],
+        SIMULTANEOUS,
+        result_outputs(o, program=True),
+    )
     assert delivered([rt, rp]) == [4, 4]
     assert w.ledger.carried().tolist() == [8] and w.ledger.reserved().tolist() == [6]
     assert rp.edge_reservations.tolist() == [0] and rp.plan is None
     assert rt.plan is not None
     # The program of an orphaned T1 policy.
     w = World(g1(), [8], [6])
-    w.add(0, 1, t1()).replace(0, design_demand=6)
+    w.add(0, 1, t1()).replace(
+        0, design_demand=6, outputs=ngc.OutputOptions(program=True)
+    )
     prog = w.p.pop().program
     gc.collect()
     p = w.pin(prog)
-    assert run(w, [ngc.Replace(p, 8)], SIMULTANEOUS)[0].call_delivered == 8
+    assert (
+        run(
+            w,
+            [ngc.Replace(p, 8)],
+            SIMULTANEOUS,
+            outputs=ngc.OutputOptions(program=True),
+        )[0].call_delivered
+        == 8
+    )
     assert w.ledger.reserved().tolist() == [6]
 
 
@@ -1343,17 +1403,24 @@ def test_zero_forward():
     w = World(g1())
     t = w.add(0, 1, t1())
     e = w.add(0, 1, ecmp())
-    t.replace(6, design_demand=6)
+    t.replace(
+        6, design_demand=6, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     old = t.records()[0].flow_id
     prog = t.program
-    rt, re = run(w, [ngc.Forward(t, 0), ngc.Replace(e, 10)], SIMULTANEOUS)
+    rt, re = run(
+        w,
+        [ngc.Forward(t, 0), ngc.Replace(e, 10)],
+        SIMULTANEOUS,
+        outputs=ngc.OutputOptions(program=True, by_source=True),
+    )
     assert rt.termination == ngc.Termination.COMPLETE and rt.call_delivered == 0
     assert rt.delivery_delta == -6 and rt.by_tunnel[0].assigned == 0
     assert plain(t.program) == plain(prog)
     assert len(t.records()) == 1 and t.records()[0].flow_id != old
     assert t.records()[0].edge_reservations == [(0, 6)]
     assert re.call_delivered == 10
-    f = t.forward(8)
+    f = t.forward(8, outputs=ngc.OutputOptions(program=True, by_source=True))
     assert f.call_delivered == 0 and f.call_edge_drops == [(0, 8)]
     assert w.ledger.reserved().tolist() == [6]
 
@@ -1361,23 +1428,31 @@ def test_zero_forward():
 def test_black_holed_sources_and_nodes():
     w = World(graph(5, [(0, 2, 10, 1), (1, 2, 10, 1), (3, 4, 10, 1)]))
     a = w.add([0, 1], 2, ecmp())
-    a.replace(2)
+    a.replace(2, outputs=ngc.OutputOptions(program=True))
     z = w.pin(tunnel(w.g, 3, 4, [2]))
     ra, rz = run(
         w,
         [ngc.Forward(a, 4, black_holes=no_nodes(w.g, [0])), ngc.Replace(z, 3)],
         SIMULTANEOUS,
+        outputs=ngc.OutputOptions(program=True),
     )
     assert ra.call_source_drops == 2 and ra.call_edge_drops == []
     assert ra.call_delivered == 2 and rz.call_delivered == 3
     # A repair mask first: source 1 takes the whole offer.
     q = w.pin(a.program, mask=no_nodes(w.g, [0]))
-    rq, _ = run(w, [ngc.Replace(q, 4), ngc.Replace(z, 3)], SIMULTANEOUS)
+    rq, _ = run(
+        w,
+        [ngc.Replace(q, 4), ngc.Replace(z, 3)],
+        SIMULTANEOUS,
+        outputs=ngc.OutputOptions(program=True),
+    )
     assert rq.call_delivered == 4 and rq.call_source_drops == 0
     # An internal black-holed node.
     w2 = World(graph(3, [(0, 1, 10, 1), (1, 2, 10, 1)]))
     n = w2.pin(tunnel(w2.g, 0, 2, [0, 1]), black_holes=no_nodes(w2.g, [1]))
-    (rn,) = run(w2, [ngc.Replace(n, 6)], SIMULTANEOUS)
+    (rn,) = run(
+        w2, [ngc.Replace(n, 6)], SIMULTANEOUS, outputs=ngc.OutputOptions(program=True)
+    )
     assert rn.by_tunnel[0].status == BLACKHOLED and rn.call_edge_drops == [(0, 6)]
 
 
@@ -1402,13 +1477,22 @@ def test_pooled_roots_block_serial_pairs():
         return graph(6, [(0, 1, 2, 1), (1, 2, 2, 1), (2, 3, 2, 1), (4, 5, 10, 1)])
 
     scalar = World(make())
-    want = plain(scalar.add([0, 1, 2], 3, ecmp()).replace(6))
+    want = plain(
+        scalar.add([0, 1, 2], 3, ecmp()).replace(
+            6, outputs=ngc.OutputOptions(program=True, by_source=True)
+        )
+    )
     for beside in (False, True):
         w = World(make())
         a = w.add([0, 1, 2], 3, ecmp())
         z = w.pin(tunnel(w.g, 4, 5, [3]))
         actions = [ngc.Replace(a, 6)] + ([ngc.Replace(z, 1)] if beside else [])
-        r = run(w, actions, SIMULTANEOUS)[0]
+        r = run(
+            w,
+            actions,
+            SIMULTANEOUS,
+            outputs=ngc.OutputOptions(program=True, by_source=True),
+        )[0]
         assert plain(r) == want
         assert r.call_delivered == 2
         assert [s.delivered for s in r.by_source] == [1, 0, 1]
@@ -1432,7 +1516,12 @@ def test_pooled_cycle_keeps_source_state():
     w = World(g)
     a = w.add([4, 5], 6, ecmp())
     b = w.pin(tunnel(g, 7, 8, [i[6], i[1], i[7], i[0], i[8]]))
-    ra, rb = run(w, [ngc.Replace(a, 2), ngc.Replace(b, 1)], SIMULTANEOUS)
+    ra, rb = run(
+        w,
+        [ngc.Replace(a, 2), ngc.Replace(b, 1)],
+        SIMULTANEOUS,
+        outputs=ngc.OutputOptions(by_source=True),
+    )
     assert ra.call_delivered == 1 and [s.delivered for s in ra.by_source] == [1, 0]
     assert rb.call_delivered == 0 and rb.call_edge_drops == [(i[1], 1)]
 
@@ -1449,11 +1538,20 @@ def test_outputs_per_entry():
 
 def test_captured_weights_in_a_list():
     g = graph(3, [(0, 2, 3, 1), (1, 2, 1, 1)])
-    prog = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, controller()).replace(4).program
+    prog = (
+        ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, controller())
+        .replace(4, outputs=ngc.OutputOptions(program=True))
+        .program
+    )
     w = World(g)
     a = w.pin(prog)
     b = w.pin(tunnel(g, 0, 2, [0]))
-    r = run(w, [ngc.Replace(a, 4), ngc.Replace(b, 1)], SIMULTANEOUS)
+    r = run(
+        w,
+        [ngc.Replace(a, 4), ngc.Replace(b, 1)],
+        SIMULTANEOUS,
+        outputs=ngc.OutputOptions(program=True),
+    )
     assert delivered(r) == [4, 0] and r[1].call_edge_drops == [(0, 1)]
 
 
@@ -1490,9 +1588,21 @@ def test_lists_are_all_or_nothing():
     for mode in (ORDERED, SIMULTANEOUS):
         w, actions = list_world(mode)
         twin, twin_actions = list_world(mode)
-        got = plain(ngc.apply_actions(w.ledger, actions, mode=mode, outputs=ALL))
+        got = plain(
+            ngc.apply_actions(
+                w.ledger,
+                actions,
+                mode=mode,
+                outputs=result_outputs(ALL, program=True, by_source=True),
+            )
+        )
         assert got == plain(
-            ngc.apply_actions(twin.ledger, twin_actions, mode=mode, outputs=ALL)
+            ngc.apply_actions(
+                twin.ledger,
+                twin_actions,
+                mode=mode,
+                outputs=result_outputs(ALL, program=True, by_source=True),
+            )
         )
 
 
@@ -1663,18 +1773,26 @@ class Generated:
             ngc.ForwardingProgram.from_dag(g, S, D, everything),
             mask=no_edges(g, [random_edge()]),
         )
-        prog = ngc.FlowPolicy(ngc.FlowLedger(g), S, D, controller()).replace(6).program
+        prog = (
+            ngc.FlowPolicy(ngc.FlowLedger(g), S, D, controller())
+            .replace(6, outputs=ngc.OutputOptions(program=True))
+            .program
+        )
         w.pin(prog, black_holes=no_edges(g, [random_edge()]))
         w.pin(tunnel(g, 6, 7, [sep]))
         # State before the list: scalar calls, an outside owner, an orphan.
-        w.p[0].place(rng.randrange(6))
-        w.p[2].replace(rng.randrange(6))
-        w.p[6].place(rng.randrange(6))
-        w.p[8].replace(2, design_demand=2)
-        w.p[9].replace(2)
-        w.p[10].replace(rng.randrange(6))
-        w.add(S, D, ecmp()).place(1 + rng.randrange(3))
-        w.add([0], D, ecmp()).place(1 + rng.randrange(3))
+        w.p[0].place(rng.randrange(6), outputs=ngc.OutputOptions(program=True))
+        w.p[2].replace(rng.randrange(6), outputs=ngc.OutputOptions(program=True))
+        w.p[6].place(rng.randrange(6), outputs=ngc.OutputOptions(program=True))
+        w.p[8].replace(2, design_demand=2, outputs=ngc.OutputOptions(program=True))
+        w.p[9].replace(2, outputs=ngc.OutputOptions(program=True))
+        w.p[10].replace(rng.randrange(6), outputs=ngc.OutputOptions(program=True))
+        w.add(S, D, ecmp()).place(
+            1 + rng.randrange(3), outputs=ngc.OutputOptions(program=True)
+        )
+        w.add([0], D, ecmp()).place(
+            1 + rng.randrange(3), outputs=ngc.OutputOptions(program=True)
+        )
         w.p.pop()
         w.sources.pop()
         w.masks.pop()
@@ -1732,7 +1850,13 @@ def test_ordered_equals_scalar_calls():
         actions = [ordered_action(rng, a.w, i) for i in order[: 2 + rng.randrange(6)]]
         try:
             got, error = (
-                plain(ngc.apply_actions(a.w.ledger, actions, outputs=ALL)),
+                plain(
+                    ngc.apply_actions(
+                        a.w.ledger,
+                        actions,
+                        outputs=result_outputs(ALL, program=True, by_source=True),
+                    )
+                ),
                 None,
             )
         except ValueError as e:
@@ -1740,7 +1864,15 @@ def test_ordered_equals_scalar_calls():
         want, scalar_error = [], None
         for x in actions:
             try:
-                want.append(plain(scalar(x, b.w.p[index_of(a.w, x.policy)], ALL)))
+                want.append(
+                    plain(
+                        scalar(
+                            x,
+                            b.w.p[index_of(a.w, x.policy)],
+                            result_outputs(ALL, program=True, by_source=True),
+                        )
+                    )
+                )
             except ValueError as e:
                 scalar_error = str(e)
                 break
@@ -1770,8 +1902,10 @@ def test_one_participant_equals_the_scalar_call():
         p = a.w.p[i]
         if forward:
             if p.program is None:
-                p.replace(1)
-                b.w.p[i].replace(1)
+                p.replace(1, outputs=ngc.OutputOptions(program=True, by_source=True))
+                b.w.p[i].replace(
+                    1, outputs=ngc.OutputOptions(program=True, by_source=True)
+                )
             bh = None
             if rng.randrange(2) == 0:
                 bh = no_edges(a.w.g, [rng.randrange(a.w.g.num_edges() - 1)])
@@ -1785,9 +1919,23 @@ def test_one_participant_equals_the_scalar_call():
             separate = a.w.p[Generated.SEPARATE]
             actions.append(ngc.Replace(separate, rng.randrange(13)))
         got = plain(
-            ngc.apply_actions(a.w.ledger, actions, mode=SIMULTANEOUS, outputs=ALL)
+            ngc.apply_actions(
+                a.w.ledger,
+                actions,
+                mode=SIMULTANEOUS,
+                outputs=result_outputs(ALL, program=True, by_source=True),
+            )
         )
-        want = [plain(scalar(x, b.w.p[index_of(a.w, x.policy)], ALL)) for x in actions]
+        want = [
+            plain(
+                scalar(
+                    x,
+                    b.w.p[index_of(a.w, x.policy)],
+                    result_outputs(ALL, program=True, by_source=True),
+                )
+            )
+            for x in actions
+        ]
         # The scalar calls' outputs read the ledger after each; the list's after both: with the
         # pair, each entry's residual is the one after the list (the other one is disjoint).
         if pair:

@@ -141,7 +141,7 @@ void register_program(py::module_& m) {
       "captured weights ((source, weight) for every roster source, ascending): optimized controllers' solved\n"
       "supplies, weighted CentralizedTE's declared weights, or None for equal sources (round robin). Each head splits its share by\n"
       "highest averages over its entries' weights; identical routes are never merged. ShortestPaths and CentralizedTE\n"
-      "produce one (FlowPolicy.program, PlacementResult.program), and so do T1 and T2 (their tunnels);\n"
+      "produce one (FlowPolicy.program; PlacementResult.program when requested), and so do T1 and T2 (their tunnels);\n"
       "from_routes builds one from given routes and from_dag one shared hop-by-hop program on a DAG; Pinned\n"
       "forwards one. No public constructor.")
       .def_property_readonly(

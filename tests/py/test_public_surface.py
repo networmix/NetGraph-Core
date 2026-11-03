@@ -685,7 +685,9 @@ def test_repr_labels_name_current_attributes():
     )
     fg = ngc.FlowLedger(g)
     p = ngc.FlowPolicy(fg, 0, 3, cfg)
-    r = p.replace(4, design_demand=4)
+    r = p.replace(
+        4, design_demand=4, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     search = ngc.spf(g, 0, ngc.SpfOptions(ngc.Direction.FORWARD))
     path = ngc.ksp(g, 0, 3, ngc.KspOptions(1))[0][1]
     objects = [

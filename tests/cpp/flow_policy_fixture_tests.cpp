@@ -454,7 +454,7 @@ J result_json(const PlacementResult& r) {
   j.set("source_loss", J::integer(wide(r.source_drops)));
   j.set("drops", counter_pairs(r.edge_drops));
   J rows = J::arr();
-  for (const auto& x : r.by_source) {
+  for (const auto& x : r.by_source.value()) {
     J row = J::arr();
     row.push(J::integer(x.source));
     row.push(x.offered.has_value() ? J::integer(wide(*x.offered)) : J::null());
@@ -794,6 +794,7 @@ std::vector<std::string> replay(const J& fx, std::size_t* compared = nullptr,
       const auto& o = op.at("outputs").a;
       outputs = OutputOptions {o[0].b, o[1].b, o[2].b, o[3].b};
     }
+    outputs.by_source = true;
     const J policy_before = error ? policy_json(pol) : J::null();
     detail::Trace trace;
     PlacementResult r;

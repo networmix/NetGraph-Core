@@ -75,6 +75,10 @@ REQUIRED = [
     "total = flows.sum()",
     "cost_total: int = best.total_cost",
     "weights = best.program.source_weights",
+    "row = best.by_source[0]",
+    "for _source_row in best.by_source:",
+    "ng.OutputOptions(program=1)",
+    "ng.OutputOptions(by_source=None)",
 ]
 
 

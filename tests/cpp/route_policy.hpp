@@ -55,7 +55,7 @@ public:
     policy_ = std::make_unique<FlowPolicy>(fg, s, d, std::move(cfg), elig_.get());
   }
 
-  PlacementResult place(std::optional<Amount> offer) { return policy_->place(offer); }
+  PlacementResult place(std::optional<Amount> offer, const OutputOptions& outputs = {}) { return policy_->place(offer, outputs); }
   void remove() { policy_->remove(); }
   // The FlowId of the policy's one record (its first), if it has one.
   [[nodiscard]] std::optional<FlowId> flow_id() const {

@@ -80,7 +80,7 @@ long sweep_list(const std::shared_ptr<const Graph>& g, const std::string& where,
   ListScenario sref = setup(ref);
   const LedgerState initial = ledger_state(ref);
   const auto initial_epochs = epochs(sref);
-  const auto want = apply_actions(ref, sref.actions, sref.mode, kAll);
+  const auto want = apply_actions(ref, sref.actions, sref.mode, result_outputs(kAll, true, true));
   const LedgerState after = ledger_state(ref);
   const auto want_epochs = epochs(sref);
   long injected = 0;
@@ -94,7 +94,7 @@ long sweep_list(const std::shared_ptr<const Graph>& g, const std::string& where,
       expect_same(ledger_state(fg), initial, w + " (setup)");
       expect_same_epochs(epochs(s), initial_epochs, w + " (setup)");
       std::vector<PlacementResult> got;
-      if (!fails_at(at, [&] { got = apply_actions(fg, s.actions, s.mode, kAll); })) {
+      if (!fails_at(at, [&] { got = apply_actions(fg, s.actions, s.mode, result_outputs(kAll, true, true)); })) {
         EXPECT_EQ(got.size(), want.size()) << w;
         for (std::size_t k = 0; k < std::min(got.size(), want.size()); ++k) expect_same(got[k], want[k], w + " entry " + std::to_string(k));
         expect_same(ledger_state(fg), after, w + " (no failure)");
@@ -105,7 +105,7 @@ long sweep_list(const std::shared_ptr<const Graph>& g, const std::string& where,
         expect_same(ledger_state(fg), initial, w + " (failed list)");
         expect_same_epochs(epochs(s), initial_epochs, w + " (failed list)");
         expect_balanced(fg, w + " (failed list)");
-        const auto retry = apply_actions(fg, s.actions, s.mode, kAll);
+        const auto retry = apply_actions(fg, s.actions, s.mode, result_outputs(kAll, true, true));
         for (std::size_t k = 0; k < std::min(retry.size(), want.size()); ++k) expect_same(retry[k], want[k], w + " retry " + std::to_string(k));
         expect_same(ledger_state(fg), after, w + " (retry)");
         expect_same_epochs(epochs(s), want_epochs, w + " (retry)");
@@ -215,14 +215,14 @@ TEST(PolicyFaults, WeightedSourceListsPublishAllOwnersOrNone) {
   model.source_weights=std::make_shared<const std::vector<Amount>>(std::vector<Amount>{2,1,0,0,0,0,0,0});
   FlowLedger producer(g);
   FlowPolicy p(producer,kS,kD,FlowPolicyConfig{model});
-  const auto program=p.replace(6).program;
+  const auto program=p.replace(6, std::nullopt, OutputOptions {.program = true}).program;
   for(auto mode:{BatchMode::Ordered,BatchMode::Simultaneous})for(bool warm:{false,true}) {
     const auto injected=sweep_list(g,"weighted list",[&](FlowLedger& ledger) {
       ListScenario s;
       for(int i=0;i<2;++i) {
         FlowPolicyConfig cfg=mode==BatchMode::Ordered ? FlowPolicyConfig{model} : pinned_config(program);
         s.policies.push_back(std::make_unique<FlowPolicy>(ledger,kS,kD,cfg));
-        if(warm)(void)s.policies.back()->replace(2);
+        if(warm)(void)s.policies.back()->replace(2, std::nullopt, OutputOptions {.program = true});
         s.actions.push_back(Replace{*s.policies.back(),6});
       }
       s.mode=mode;return s;
@@ -264,7 +264,7 @@ TEST(PolicyFaults, ListScratchGrowthFailureLeavesNothingHalfGrown) {
       std::unique_ptr<FlowPolicy> a;
       std::unique_ptr<FlowPolicy> b;
       const auto list = list_on(large, fg, a, b);
-      want.results = apply_actions(fg, list, mode, kAll);
+      want.results = apply_actions(fg, list, mode, result_outputs(kAll, true, true));
       want.state = ledger_state(fg);
     }
     ASSERT_EQ(want.results[0].call_delivered, 2);
@@ -275,7 +275,7 @@ TEST(PolicyFaults, ListScratchGrowthFailureLeavesNothingHalfGrown) {
           std::unique_ptr<FlowPolicy> a;
           std::unique_ptr<FlowPolicy> b;
           const auto list = list_on(small, fg, a, b);
-          EXPECT_EQ(apply_actions(fg, list, mode, kAll).size(), 2U);
+          EXPECT_EQ(apply_actions(fg, list, mode, result_outputs(kAll, true, true)).size(), 2U);
         },
         [&](long at, const std::string& w) {
           FlowLedger fg(large);
@@ -284,10 +284,10 @@ TEST(PolicyFaults, ListScratchGrowthFailureLeavesNothingHalfGrown) {
           const auto list = list_on(large, fg, a, b);
           const LedgerState before = ledger_state(fg);
           std::vector<PlacementResult> got;
-          const bool failed = fails_at(at, [&] { got = apply_actions(fg, list, mode, kAll); });
+          const bool failed = fails_at(at, [&] { got = apply_actions(fg, list, mode, result_outputs(kAll, true, true)); });
           if (failed) {
             expect_same(ledger_state(fg), before, w);
-            got = apply_actions(fg, list, mode, kAll);
+            got = apply_actions(fg, list, mode, result_outputs(kAll, true, true));
           }
           for (std::size_t k = 0; k < got.size(); ++k) expect_same(got[k], want.results[k], w);
           expect_same(ledger_state(fg), want.state, w);
@@ -298,9 +298,9 @@ TEST(PolicyFaults, ListScratchGrowthFailureLeavesNothingHalfGrown) {
           std::unique_ptr<FlowPolicy> a;
           std::unique_ptr<FlowPolicy> b;
           const auto list = list_on(large, fg, a, b);
-          (void)apply_actions(fg, list, mode, kAll);  // the scratch grows to the large graph
+          (void)apply_actions(fg, list, mode, result_outputs(kAll, true, true));  // the scratch grows to the large graph
           long warm = 0;
-          while (fails_at(warm, [&] { (void)apply_actions(fg, list, mode, kAll); })) ++warm;
+          while (fails_at(warm, [&] { (void)apply_actions(fg, list, mode, result_outputs(kAll, true, true)); })) ++warm;
           return warm;
         });
     if (::testing::Test::HasFailure()) return;

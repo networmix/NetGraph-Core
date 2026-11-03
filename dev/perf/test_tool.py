@@ -3092,7 +3092,7 @@ int test_captured_sources() {
     const auto m=netgraph::core::kDomainLimit-1;
     std::vector<netgraph::core::Amount> weights=mode==2 ? std::vector<netgraph::core::Amount>{m,m,m,m,m,0} : std::vector<netgraph::core::Amount>{2,1,3,1,2,0};
     const std::vector<netgraph::core::NodeId> heads{0,1,2,3,4},destinations{5};
-    auto saved=netgraph::core::evaluate_demand(*network,heads,destinations,netgraph::core::EvaluationOptions{abaapi::captured_config(weights,mode!=0)}).program;
+    auto saved=netgraph::core::evaluate_demand(*network,heads,destinations, abaapi::completed_outputs(netgraph::core::EvaluationOptions{abaapi::captured_config(weights,mode!=0)}, true, true)).program;
     netgraph::core::FlowLedger ledger(network);
     netgraph::core::FlowPolicy policy(ledger,heads,destinations,netgraph::core::FlowPolicyConfig{netgraph::core::Pinned{saved},netgraph::core::Admission::Lossy});
     Digest expected;
@@ -3100,7 +3100,7 @@ int test_captured_sources() {
     for(int i=0;i<32;++i) {
       const netgraph::core::Amount offer=mode==2&&i<4 ? m : mode==2&&i==4 ? 5 : 17;
       total=incremental ? total+static_cast<unsigned __int128>(offer) : static_cast<unsigned __int128>(offer);
-      const auto result=incremental ? policy.place(offer) : policy.replace(offer);
+      const auto result=incremental ? policy.place(offer, abaapi::completed_outputs()) : policy.replace(offer, std::nullopt, abaapi::completed_outputs());
       std::vector<unsigned __int128> share(5,0);
       if(mode==1) {
         const unsigned w[]={2,1,3,1,2};
@@ -3111,7 +3111,7 @@ int test_captured_sources() {
         }
       } else for(std::size_t j=0;j<5;++j)share[j]=total/5+(j<total%5);
       for(std::size_t j=0;j<5;++j) {
-        const auto actual=*result.by_source[j].offered;
+        const auto actual=*abaapi::source_rows(result)[j].offered;
         if(((static_cast<unsigned __int128>(actual.hi)<<64)|actual.lo)!=share[j])throw std::runtime_error("captured-source series quota mismatch");
       }
       abaapi::add_rows(expected,result);
@@ -3269,7 +3269,7 @@ int test_entry_histories() {
       const auto records = policy.records();
       if (records.size() != 1 || records.front().offered != result.offered || records.front().delivered != result.delivered || ledger.carried().front() != result.delivered)
         throw std::runtime_error("entry record, row or aggregate disagrees");
-      if (result.by_source.size() != 1 || result.by_source.front().admitted != *result.offered)
+      if (abaapi::source_rows(result).size() != 1 || abaapi::source_rows(result).front().admitted != *result.offered)
         throw std::runtime_error("entry history row lost earlier calls");
       ++step;
     });
@@ -3284,7 +3284,7 @@ int test_entry_histories() {
   for (int c : {100,100,100,100,5,100,6,100,100,100}) cycle.cap.push_back(c * abaapi::kResolution);
   int seen = 0;
   const auto joint = abaapi::entry_joint(abaapi::build(cycle), [&](const auto& result, const auto& policy, const auto&) {
-    if (result.delivered != 1 || result.by_source.size() != 2 || policy.records().size() != 2) throw std::runtime_error("joint fixed point must deliver1 per demand");
+    if (result.delivered != 1 || abaapi::source_rows(result).size() != 2 || policy.records().size() != 2) throw std::runtime_error("joint fixed point must deliver1 per demand");
     ++seen;
   });
   if (seen != 2 || row == listed.end() || row->setup()() != joint) throw std::runtime_error("joint timing row differs from fixed point");
@@ -3292,7 +3292,58 @@ int test_entry_histories() {
   return 0;
 }
 
+int test_result_options() {
+  namespace nc = netgraph::core;
+  const abaapi::Arrays a {2, {0}, {1}, {10 * abaapi::kResolution}, {3}};
+  auto spec = abaapi::pooled_prepare(a, {0}, {1}, abaapi::PooledKind::Equal, 13 * abaapi::kResolution);
+  // This control uses integer Core units, independently of the physical-unit row fixtures.
+  spec.offer = 13;
+  spec.config.admission = nc::Admission::Lossy;
+  for (bool program : {false, true}) for (bool by_source : {false, true}) {
+    int seen = 0;
+    const auto expected = abaapi::result_options_trial(spec, program, by_source,
+        [&](const auto& result, const auto& policy, const auto&) {
+      if (result.delivered != 10 || result.offered != nc::Counter128{0,13} || result.source_drops != nc::Counter128{} ||
+          result.edge_drops != std::vector<std::pair<nc::EdgeId,nc::Counter128>>{{0,{0,3}}} ||
+          static_cast<bool>(result.program) != program || result.by_source.has_value() != by_source || !policy.program())
+        throw std::runtime_error("result output flags or one-edge aggregate answer differs");
+      if (by_source) {
+        const auto& rows = *result.by_source;
+        if (rows.size() != 1 || rows[0].source != 0 || rows[0].offered != nc::Counter128{0,13} ||
+            rows[0].admitted != nc::Counter128{0,13} || rows[0].delivered != 10 ||
+            rows[0].source_drops != nc::Counter128{} || rows[0].total_edge_drops != nc::Counter128{0,3})
+          throw std::runtime_error("requested source output differs from hand values");
+      }
+      ++seen;
+    });
+    if (seen != 1 || abaapi::result_options_trial(spec,program,by_source) != expected)
+      throw std::runtime_error("result-output observer changes row work");
+  }
+  for (bool edges : {false,true}) {
+    const auto digest = abaapi::aggregate_trial(spec,edges,[&](const auto& result,const auto&,const auto&) {
+      if (result.program || result.by_source || result.delivered != 10 || result.requested != nc::Counter128{0,13} ||
+          result.edge_flows.has_value() != edges || result.residual.has_value() != edges)
+        throw std::runtime_error("aggregate-default row kept details or lost aggregate/edge outputs");
+      if (edges && (*result.edge_flows != std::vector<nc::Amount>{10} || *result.residual != std::vector<nc::Amount>{0}))
+        throw std::runtime_error("aggregate-default edge vectors differ");
+    });
+    if (digest != abaapi::aggregate_trial(spec,edges)) throw std::runtime_error("aggregate observer changes row work");
+  }
+  int step=0;
+  const std::vector<nc::Amount> delivered{5,10,10,10};
+  const std::vector<std::uint64_t> offered{5,12,12,12};
+  const auto history = abaapi::aggregate_history(spec,[&](const auto& result,const auto& policy,const auto&) {
+    if(step>=4 || result.program || result.by_source || result.delivered!=delivered[step] || result.offered!=nc::Counter128{0,offered[step]} ||
+       policy.records().front().delivered!=delivered[step]) throw std::runtime_error("aggregate history changed an answer or retained details");
+    ++step;
+  });
+  if(step!=4 || abaapi::aggregate_history(spec)!=history) throw std::runtime_error("aggregate history observer changes work");
+  std::puts("result outputs: four combinations, full hand rows, aggregate defaults, edges and history checked");
+  return 0;
+}
+
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string(argv[1]) == "test-result-options") return test_result_options();
   if (argc == 2 && std::string(argv[1]) == "test-entry-histories") return test_entry_histories();
   if (argc == 2 && std::string(argv[1]) == "test-pooled-preparation") return test_pooled_preparation();
   if (argc == 2 && std::string(argv[1]) == "test-few-root-preparation") return test_few_root_preparation();
@@ -3405,6 +3456,11 @@ class Harness(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("cyclic fixed point checked", proc.stdout)
 
+    def test_result_output_rows_have_independent_hand_answers(self):
+        proc = self.harness("test-result-options")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("four combinations, full hand rows", proc.stdout)
+
     def test_few_root_rows_keep_support_membership_and_creation_weights(self):
         proc = self.harness("test-few-root-preparation")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -3420,7 +3476,7 @@ class Harness(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = aba.row_list(proc.stdout.encode(), "aba-list")
         real = {k: v for k, v in rows.items() if not k.startswith("test.")}
-        self.assertEqual(len(real), 137)
+        self.assertEqual(len(real), 144)
         sums = sha256sums(HERE / "queries")
         lists = {}
         for name in sums:
@@ -3454,7 +3510,7 @@ class Harness(unittest.TestCase):
         real = [row for row in listed if not row.startswith("test.")]
         with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 1) as pool:
             procs = list(pool.map(lambda row: self.harness("aba-run", row, "1"), real))
-        self.assertEqual(len(procs), 137)
+        self.assertEqual(len(procs), 144)
         for row, proc in zip(real, procs, strict=True):
             self.assertEqual(proc.returncode, 0, (row, proc.stderr))
             self.assertEqual(

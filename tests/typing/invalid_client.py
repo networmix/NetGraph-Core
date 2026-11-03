@@ -85,6 +85,11 @@ total = flows.sum()  # expect: reportOptionalMemberAccess
 best = ng.evaluate_demand(g, 0, 1, ng.EvaluationOptions(cfg))
 cost_total: int = best.total_cost  # expect: reportAssignmentType
 weights = best.program.source_weights  # expect: reportOptionalMemberAccess
+row = best.by_source[0]  # expect: reportOptionalSubscript
+for _source_row in best.by_source:  # expect: reportOptionalIterable
+    pass
+ng.OutputOptions(program=1)  # expect: reportArgumentType
+ng.OutputOptions(by_source=None)  # expect: reportArgumentType
 
 # A list takes actions, its mode by keyword only, and an action takes a number.
 lister = ng.FlowLedger(g)

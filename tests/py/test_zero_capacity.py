@@ -45,9 +45,12 @@ def walks(result):
     return [(c, [hop[0] for hop in p.hops()]) for c, p in result]
 
 
-def place(g, s, d, cfg, offer, eligibility=None):
+def place(g, s, d, cfg, offer, eligibility=None, *, outputs=None):
     policy = ngc.FlowPolicy(ngc.FlowLedger(g), s, d, cfg, eligibility)
-    return policy.place(offer), policy
+    result = (
+        policy.place(offer) if outputs is None else policy.place(offer, outputs=outputs)
+    )
+    return result, policy
 
 
 def test_spf_and_ksp_search_the_zero_edge():
@@ -117,7 +120,7 @@ def test_g8_for_every_model():
     assert place(g, 0, 1, GLOBAL, 5)[0].call_delivered == 5
     # T1: the request of 5 filters the zero link out; the tunnel comes up over 0 -> 2 -> 1.
     t1 = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, t1_config(1)).replace(
-        5, design_demand=5
+        5, design_demand=5, outputs=ngc.OutputOptions(program=True)
     )
     assert (t1.call_delivered, t1.program.tunnels[0].edges) == (5, (1, 2))
 
@@ -158,7 +161,9 @@ def test_two_sources_one_behind_a_zero_link(caps, lossless, drops):
     # (RR(1) gives source 0 the unit), 1 when source 1 is (RR(2) gives source 1 a unit). LOSSY
     # offers RR(10) = 5 and 5 and drops the share behind the zero link.
     g = graph(3, [(0, 2, caps[0], 1), (1, 2, caps[1], 1)])
-    r, p = place(g, [0, 1], 2, SHORTEST_PATHS, 10)
+    r, p = place(
+        g, [0, 1], 2, SHORTEST_PATHS, 10, outputs=ngc.OutputOptions(by_source=True)
+    )
     assert (r.call_delivered, r.termination) == (lossless, ngc.Termination.EXHAUSTED)
     assert [row.source for row in r.by_source] == [0, 1]
     assert len(p.records()) == 2

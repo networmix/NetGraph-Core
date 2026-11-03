@@ -273,7 +273,7 @@ FlowOut exact_flow(const std::vector<InEdge>& edges, const std::vector<NodeId>& 
                    std::optional<Amount> limit, SourceAllocation s) {
   const Net n(edges);
   auto p = policy(n, heads, dests, {.routing = centralized(s)});
-  const auto r = p->place(limit, OutputOptions {.edge_flows = true, .min_cut = true});
+  const auto r = p->place(limit, result_outputs(OutputOptions {.edge_flows = true, .min_cut = true}, true, true));
   FlowOut out {r.call_delivered, lo(r.total_cost), n.in_order(*r.edge_flows), std::nullopt};
   if (r.min_cut.has_value()) {
     out.min_cut = n.positions(*r.min_cut);
@@ -322,7 +322,7 @@ T1Out t1(const T1In& in) {
   out.error = error_of([&] { (void)policy(n, in.heads, in.destinations, {.routing = dte, .admission = LL}, mask); });
   if (!out.error.empty()) return out;
   auto bound = policy(n, in.heads, in.destinations, {.routing = dte, .admission = LL}, mask);
-  const auto b = bound->replace(std::nullopt, design_of(in.design_demand), OutputOptions {.edge_reservations = true});
+  const auto b = bound->replace(std::nullopt, design_of(in.design_demand), result_outputs(OutputOptions {.edge_reservations = true}, true, true));
   out.bound = b.call_delivered;
   out.reserved = b.plan->total_reserved_bandwidth;
   out.edge_reservations = n.in_order(*b.edge_reservations);
@@ -336,7 +336,7 @@ T1Out t1(const T1In& in) {
   out.routes = paths;
   if (!in.offer.has_value()) return out;
   auto lossy = policy(n, in.heads, in.destinations, {.routing = dte, .admission = LY}, mask);
-  const auto r = lossy->replace(*in.offer, design_of(in.design_demand));
+  const auto r = lossy->replace(*in.offer, design_of(in.design_demand), OutputOptions {.program = true, .by_source = true});
   out.no_drop_load.assign(n.m(), 0);
   for (std::size_t i = 0; i < r.by_tunnel.size(); ++i) {
     const Amount a = lo(r.by_tunnel[i].assigned);
@@ -347,7 +347,7 @@ T1Out t1(const T1In& in) {
   out.lossy_delivery = r.call_delivered;
   out.lossy_edge_drops = n.per_edge(r.call_edge_drops);
   auto lossless = policy(n, in.heads, in.destinations, {.routing = dte, .admission = LL}, mask);
-  out.lossless_admitted = lossless->replace(*in.offer, design_of(in.design_demand)).call_delivered;
+  out.lossless_admitted = lossless->replace(*in.offer, design_of(in.design_demand), OutputOptions {.program = true, .by_source = true}).call_delivered;
   out.lossless_unadmitted = *in.offer - out.lossless_admitted;
   return out;
 }
@@ -388,7 +388,7 @@ T2Out t2(const T2In& in) {
   const auto mask = n.mask({}, in.excluded);
   const DesignArg design = in.design_demand.has_value() ? design_of(*in.design_demand) : kUnlimited;
   auto p = policy(n, in.heads, in.destinations, {.routing = cte, .admission = LL}, mask, ledger_of(n, in.cap));
-  const auto r = p->replace(in.design_demand, design);
+  const auto r = p->replace(in.design_demand, design, OutputOptions {.program = true, .by_source = true});
   T2Out out;
   out.plan = *r.plan;
   out.delivered = r.call_delivered;
@@ -401,7 +401,7 @@ T2Out t2(const T2In& in) {
   }
   if (in.lossy_offer.has_value()) {
     auto ly = policy(n, in.heads, in.destinations, {.routing = cte, .admission = LY}, mask, ledger_of(n, in.cap));
-    const auto l = ly->replace(*in.lossy_offer, design);
+    const auto l = ly->replace(*in.lossy_offer, design, OutputOptions {.program = true, .by_source = true});
     out.lossy_delivery = l.call_delivered;
     out.lossy_source_drops = l.call_source_drops;
   }
@@ -501,7 +501,7 @@ LossyOut lossy(const Amounts& offers, const Routes& routes, const Amounts& cap, 
   }
   LossyOut out;
   PlacementResult res;
-  out.error = error_of([&] { res = p->place(*total, kFlows); });
+  out.error = error_of([&] { res = p->place(*total, result_outputs(kFlows, true, true)); });
 #if NETGRAPH_CORE_PRIVATE_HOOKS
   const auto& counters = detail::thread_lossy_counters();
   out.rounds = counters.rounds;
@@ -543,7 +543,7 @@ Amount bound(const Amounts& cap, const Routes& routes, const Amounts& weights) {
   const std::vector<NodeId> head_of(routes.size(), 0);
   const Routed r = routed(cap, routes, head_of);
   auto p = policy(r.net, r.heads, {r.destination}, {.routing = Pinned {routed_program(r, head_of, weights), nullptr}});
-  return p->place(std::nullopt).call_delivered;
+  return p->place(std::nullopt, OutputOptions {.program = true, .by_source = true}).call_delivered;
 }
 
 // ---------------------------------------------------------------- stale forwarding
@@ -586,7 +586,7 @@ StaleOut stale_dag(const StaleIn& in) {
   const auto prog = ForwardingProgram::from_dag(*n.g, in.sources, t, n.dag(members), o);
   auto p = policy(n, in.sources, {in.destination}, {.routing = Pinned {prog, n.mask(in.black_nodes, in.black_links)}, .admission = LY},
                   n.mask(in.mask_nodes, in.mask_links));
-  const auto r = p->place(in.offer, kFlows);
+  const auto r = p->place(in.offer, result_outputs(kFlows, true, true));
   return {r.call_delivered, n.in_order(*r.edge_flows), n.per_edge(r.call_edge_drops), r.call_source_drops};
 }
 
@@ -627,7 +627,7 @@ StalePathsOut stale_paths(const StalePathsIn& in) {
   const auto prog = ForwardingProgram::from_routes(*n.g, heads, t, defs);
   const FlowPolicyConfig ly {.routing = Pinned {prog, n.mask(in.black_nodes, in.black_links)}, .admission = LY};
   auto p = policy(n, heads, {dest}, ly, n.mask(in.mask_nodes, in.mask_links));
-  const auto r = p->place(total);
+  const auto r = p->place(total, OutputOptions {.program = true, .by_source = true});
   StalePathsOut out;
   for (const auto& row : r.by_tunnel) {
     out.status.push_back(name_of(row.status));
@@ -640,7 +640,7 @@ StalePathsOut stale_paths(const StalePathsIn& in) {
     FlowPolicyConfig ll = ly;
     ll.admission = LL;
     auto q = policy(n, heads, {dest}, ll, n.mask(in.mask_nodes, in.mask_links));
-    out.lossless_admitted = q->place(total).call_delivered;
+    out.lossless_admitted = q->place(total, OutputOptions {.program = true, .by_source = true}).call_delivered;
   }
   return out;
 }
@@ -699,9 +699,9 @@ std::string config_case(Routing routing, int sources = 1, Admission admission = 
                          (std::holds_alternative<CentralizedTE>(p.config().routing) &&
                           std::get<CentralizedTE>(p.config().routing).tunnel_count.has_value());
     if (tunnels) {
-      (void)p.replace(0, design_of(0));
+      (void)p.replace(0, design_of(0), OutputOptions {.program = true, .by_source = true});
     } else {
-      (void)p.place(0);
+      (void)p.place(0, OutputOptions {.program = true, .by_source = true});
     }
     got = resolved(p.config().routing);
   });
@@ -734,8 +734,8 @@ std::string evaluation_case(Routing routing, Admission admission, DesignArg offe
   o.design_demand = design;
   std::string got;
   const auto e = error_of([&] {
-    const auto r = evaluate_demand(*n.g, v({0}), v({2}), o);
-    const std::string offered = !r.requested.has_value() ? (r.by_source[0].offered.has_value() ? "first-hop experiment" : "inf")
+    const auto r = evaluate_demand(*n.g, v({0}), v({2}), result_outputs(o, true, true));
+    const std::string offered = !r.requested.has_value() ? (r.by_source.value()[0].offered.has_value() ? "first-hop experiment" : "inf")
                                                          : std::to_string(lo(r.requested));
     const std::string d = !r.plan.has_value() ? "None"
                           : r.plan->design_demand.has_value() ? std::to_string(*r.plan->design_demand)
@@ -770,11 +770,11 @@ EpochOut epoch(const Amounts& cap, const Amounts& calls, bool full, Admission ad
   if (full) {
     Amount total = 0;
     for (Amount x : calls) total += x;
-    r = p->place(total, kFlows);
+    r = p->place(total, result_outputs(kFlows, true, true));
     out.per_call.push_back(r.call_delivered);
   } else {
     for (Amount x : calls) {
-      r = p->place(x, kFlows);
+      r = p->place(x, result_outputs(kFlows, true, true));
       out.per_call.push_back(r.call_delivered);
     }
   }
@@ -816,8 +816,8 @@ IncrementsOut increments(const Amounts& caps, const Amounts& calls, Admission ad
   IncrementsOut out {};
   PlacementResult r;
   for (std::size_t c = 0; c < calls.size(); ++c) {
-    for (std::size_t i = 0; i < others.size(); ++i) (void)others[i]->replace(outside[c][i]);
-    r = p->place(calls[c]);
+    for (std::size_t i = 0; i < others.size(); ++i) (void)others[i]->replace(outside[c][i], std::nullopt, OutputOptions {.program = true, .by_source = true});
+    r = p->place(calls[c], OutputOptions {.program = true, .by_source = true});
     out.call_delivered.push_back(r.call_delivered);
   }
   out.requested = lo(r.requested);
@@ -843,11 +843,11 @@ TerminationOut termination(const Net& n, const std::vector<NodeId>& s, const std
   auto ly = policy(n, s, d, {.routing = routing, .admission = LY});
   auto ll = policy(n, s, d, {.routing = routing, .admission = LL});
   const bool tunnel_model = !std::holds_alternative<Pinned>(routing);
-  const auto a = tunnel_model ? ly->replace(offer, design) : ly->place(offer);
-  const auto b = tunnel_model ? ll->replace(offer, design) : ll->place(offer);
+  const auto a = tunnel_model ? ly->replace(offer, design, OutputOptions {.program = true, .by_source = true}) : ly->place(offer, OutputOptions {.program = true, .by_source = true});
+  const auto b = tunnel_model ? ll->replace(offer, design, OutputOptions {.program = true, .by_source = true}) : ll->place(offer, OutputOptions {.program = true, .by_source = true});
   TerminationOut out {a.program ? a.program->tunnels().size() : 0, name_of(a.termination), name_of(b.termination), {}, ""};
-  for (const auto& row : a.by_source) out.source_drops.push_back(lo(row.source_drops));
-  if (tunnel_model) out.forward_error = error_of([&] { (void)ly->forward(offer); });
+  for (const auto& row : a.by_source.value()) out.source_drops.push_back(lo(row.source_drops));
+  if (tunnel_model) out.forward_error = error_of([&] { (void)ly->forward(offer, nullptr, OutputOptions {.program = true, .by_source = true}); });
   return out;
 }
 
@@ -1952,10 +1952,10 @@ TEST(ContractExamples, RC02_zero_unprepared) {
   const std::vector<RouteDefinition> defs = {RouteDefinition {0, n.path({0}), 1}, RouteDefinition {0, n.path({1}), 2}};
   auto other = policy(n, v({0}), v({1}), {.routing = Pinned {ForwardingProgram::from_routes(*n.g, s, t, defs), nullptr}, .admission = LY},
                       nullptr, ledger);
-  (void)other->place(3);
+  (void)other->place(3, OutputOptions {.program = true});
   ASSERT_EQ(n.in_order(ledger->carried()), (Amounts {1, 2}));
   auto p = policy(n, v({0}), v({1}), {.routing = ShortestPaths {}}, nullptr, ledger);
-  const auto r = p->place(0, OutputOptions {.edge_flows = true, .residual = true, .min_cut = true, .edge_reservations = true});
+  const auto r = p->place(0, result_outputs(OutputOptions {.edge_flows = true, .residual = true, .min_cut = true, .edge_reservations = true}, true, false));
   EXPECT_EQ(r.call_delivered, 0);
   EXPECT_EQ(r.call_undelivered, std::optional<Amount>(0));
   EXPECT_EQ(r.delivery_delta, 0);

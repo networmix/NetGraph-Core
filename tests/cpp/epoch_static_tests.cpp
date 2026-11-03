@@ -59,12 +59,12 @@ TEST(EpochStatic, EveryStaticCombinationReusesAcrossScalarAndListEpochsWithFresh
     auto& engine = detail::PolicyAccess::engine(p);
     ASSERT_TRUE(engine.static_preparation);
     EXPECT_FALSE(engine.kept_program);
-    (void)p.evaluate(0, {}, all);
+    (void)p.evaluate(0, {}, result_outputs(all, true, true));
     EXPECT_FALSE(engine.kept_program);
     EXPECT_FALSE(p.program());
-    (void)p.place(0);
+    (void)p.place(0, OutputOptions {.program = true, .by_source = true});
     EXPECT_FALSE(engine.kept_program);
-    auto got = p.place(6, all), want = ref.place(6, all);
+    auto got = p.place(6, result_outputs(all, true, true)), want = ref.place(6, result_outputs(all, true, true));
     compare(p, ref, ledger, fresh, got, want);
     const auto kept = got.program;
     ASSERT_TRUE(kept);
@@ -72,22 +72,22 @@ TEST(EpochStatic, EveryStaticCombinationReusesAcrossScalarAndListEpochsWithFresh
     const auto before = epoch(p);
     const auto before_ledger = ledger_state(ledger);
     discard_kept(ref);
-    expect_same(p.evaluate(8, {}, all), ref.evaluate(8, {}, all), "warm evaluate");
-    EXPECT_EQ(p.evaluate(8).program.get(), kept.get());
+    expect_same(p.evaluate(8, {}, result_outputs(all, true, true)), ref.evaluate(8, {}, result_outputs(all, true, true)), "warm evaluate");
+    EXPECT_EQ(p.evaluate(8, std::nullopt, OutputOptions {.program = true, .by_source = true}).program.get(), kept.get());
     expect_same(epoch(p), before, "evaluate read only");
     expect_same(ledger_state(ledger), before_ledger, "evaluate read only");
     p.remove(); ref.remove();
     EXPECT_FALSE(p.program());
     EXPECT_EQ(engine.kept_program.get(), kept.get());
-    EXPECT_FALSE(p.place(0).program);
-    EXPECT_THROW((void)p.forward(1), std::invalid_argument);
+    EXPECT_FALSE(p.place(0, OutputOptions {.program = true, .by_source = true}).program);
+    EXPECT_THROW((void)p.forward(1, nullptr, OutputOptions {.program = true, .by_source = true}), std::invalid_argument);
     discard_kept(ref);
-    got = p.place(7, all); want = ref.place(7, all);
+    got = p.place(7, result_outputs(all, true, true)); want = ref.place(7, result_outputs(all, true, true));
     EXPECT_EQ(got.program.get(), kept.get());
     compare(p, ref, ledger, fresh, got, want);
     const auto old_id = p.records().front().flow_id.second;
     discard_kept(ref);
-    got = p.replace(3, {}, all); want = ref.replace(3, {}, all);
+    got = p.replace(3, {}, result_outputs(all, true, true)); want = ref.replace(3, {}, result_outputs(all, true, true));
     EXPECT_EQ(got.program.get(), kept.get());
     EXPECT_GT(p.records().front().flow_id.second, old_id);
     compare(p, ref, ledger, fresh, got, want);
@@ -96,24 +96,24 @@ TEST(EpochStatic, EveryStaticCombinationReusesAcrossScalarAndListEpochsWithFresh
       discard_kept(ref);
       const Action a = replace ? Action(Replace {p, 9}) : Action(Place {p, 9});
       const Action b = replace ? Action(Replace {ref, 9}) : Action(Place {ref, 9});
-      got = apply_actions(ledger, std::span(&a, 1), BatchMode::Ordered, all).front();
-      want = apply_actions(fresh, std::span(&b, 1), BatchMode::Ordered, all).front();
+      got = apply_actions(ledger, std::span(&a, 1), BatchMode::Ordered, result_outputs(all, true, true)).front();
+      want = apply_actions(fresh, std::span(&b, 1), BatchMode::Ordered, result_outputs(all, true, true)).front();
       EXPECT_EQ(got.program.get(), kept.get());
       compare(p, ref, ledger, fresh, got, want);
     }
     if (cfg.admission == Admission::Lossy) {
       discard_kept(ref);
       const Action a = Replace {p, 4}, b = Replace {ref, 4};
-      got = apply_actions(ledger, std::span(&a, 1), BatchMode::Simultaneous, all).front();
-      want = apply_actions(fresh, std::span(&b, 1), BatchMode::Simultaneous, all).front();
+      got = apply_actions(ledger, std::span(&a, 1), BatchMode::Simultaneous, result_outputs(all, true, true)).front();
+      want = apply_actions(fresh, std::span(&b, 1), BatchMode::Simultaneous, result_outputs(all, true, true)).front();
       EXPECT_EQ(got.program.get(), kept.get());
       compare(p, ref, ledger, fresh, got, want);
     }
     const auto holes = g->eligibility({}, std::vector<EdgeId>{2});
-    got = p.forward(8, &holes, all); want = ref.forward(8, &holes, all);
+    got = p.forward(8, &holes, result_outputs(all, true, true)); want = ref.forward(8, &holes, result_outputs(all, true, true));
     compare(p, ref, ledger, fresh, got, want);
     discard_kept(ref);
-    got = p.replace(5, {}, all); want = ref.replace(5, {}, all);
+    got = p.replace(5, {}, result_outputs(all, true, true)); want = ref.replace(5, {}, result_outputs(all, true, true));
     EXPECT_EQ(got.program.get(), kept.get());
     compare(p, ref, ledger, fresh, got, want);
   }
@@ -134,27 +134,27 @@ TEST(EpochStatic, DynamicChoicesNeverRetainAndChangeOnTheNewResidual) {
     FlowLedger ledger(g);
     FlowPolicy p(ledger, src, dst, {sp, mode < 3 ? Admission::Lossy : Admission::Lossless});
     ASSERT_FALSE(detail::PolicyAccess::engine(p).static_preparation);
-    const auto first = p.place(2);
+    const auto first = p.place(2, OutputOptions {.program = true});
     const auto original = program_snapshot(first.program.get());
     // Outside traffic is pinned to e0 so its own route choice cannot hide the change.
     const auto route = std::make_shared<const PredecessorDAG>(*dag_of(*g, {0}));
     RouteDefinition def {0, route};
     const auto outside_program = ForwardingProgram::from_routes(*g, src, dst, std::span(&def, 1));
     FlowPolicy outside(ledger, src, dst, {Pinned {outside_program}, Admission::Lossless});
-    ASSERT_EQ(outside.place(mode == 1 ? 1 : 8).delivered, mode == 1 ? 1 : 8);
-    const auto next = p.replace(mode < 2 ? 1 : 12);
+    ASSERT_EQ(outside.place(mode == 1 ? 1 : 8, OutputOptions {.program = true}).delivered, mode == 1 ? 1 : 8);
+    const auto next = p.replace(mode < 2 ? 1 : 12, std::nullopt, OutputOptions {.program = true});
     EXPECT_NE(next.program.get(), first.program.get());
     EXPECT_FALSE(detail::PolicyAccess::engine(p).kept_program);
     EXPECT_FALSE(program_snapshot(next.program.get()) == original);
     if (mode < 2) EXPECT_EQ(ascending_edges(*p.records().front().route), std::vector<EdgeId> {1});
     else EXPECT_EQ(next.delivered, 12);
     p.remove();
-    EXPECT_NE(p.place(1).program.get(), first.program.get());
+    EXPECT_NE(p.place(1, OutputOptions {.program = true}).program.get(), first.program.get());
     for (bool replace : {false, true}) {
       if (!replace) p.remove();
       const auto before_program = p.program();
       const Action action = replace ? Action(Replace {p, 1}) : Action(Place {p, 1});
-      const auto result = apply_actions(ledger, std::span(&action, 1)).front();
+      const auto result = apply_actions(ledger, std::span(&action, 1), BatchMode::Ordered, OutputOptions {.program = true}).front();
       EXPECT_NE(result.program.get(), first.program.get());
       if (before_program) EXPECT_NE(result.program.get(), before_program.get());
       EXPECT_FALSE(detail::PolicyAccess::engine(p).kept_program);
@@ -162,7 +162,7 @@ TEST(EpochStatic, DynamicChoicesNeverRetainAndChangeOnTheNewResidual) {
     if (mode < 3) {
       const auto previous = p.program();
       const Action action = Replace {p, 1};
-      const auto result = apply_actions(ledger, std::span(&action, 1), BatchMode::Simultaneous).front();
+      const auto result = apply_actions(ledger, std::span(&action, 1), BatchMode::Simultaneous, OutputOptions {.program = true}).front();
       EXPECT_NE(result.program.get(), previous.get());
       EXPECT_FALSE(detail::PolicyAccess::engine(p).kept_program);
     }
@@ -178,7 +178,7 @@ TEST(EpochStatic, KeptProgramOwnsUnprunedRoutesAndLifetimeWithoutOldRecordIds) {
   auto p = std::make_unique<FlowPolicy>(ledger, s, t, FlowPolicyConfig {sp, Admission::Lossy});
   std::weak_ptr<const ForwardingProgram> weak;
   {
-    const auto result = p->place(2);
+    const auto result = p->place(2, OutputOptions {.program = true});
     ASSERT_EQ(result.delivered, 2);
     weak = result.program;
     const auto& owner = detail::PolicyAccess::engine(*p).kept_program;
@@ -192,7 +192,7 @@ TEST(EpochStatic, KeptProgramOwnsUnprunedRoutesAndLifetimeWithoutOldRecordIds) {
   const auto id = p->records().front().flow_id;
   p->remove();
   EXPECT_FALSE(p->program()); EXPECT_FALSE(weak.expired());
-  auto next = p->place(1);
+  auto next = p->place(1, OutputOptions {.program = true});
   EXPECT_EQ(next.program.get(), weak.lock().get());
   EXPECT_GT(p->records().front().flow_id.second, id.second);
   EXPECT_THROW((void)ledger.record(id), std::invalid_argument);
@@ -208,7 +208,7 @@ TEST(EpochStatic, ProgramComparatorDetectsWrongRetainedRouteCostWeightAndStructu
   const std::vector<NodeId> sources {0, 1}, dst {5};
   ShortestPaths sp; sp.allocation = RouteAllocation::Weighted;
   FlowPolicy p(ledger, sources, dst, {sp, Admission::Lossy});
-  const auto r = p.place(3);
+  const auto r = p.place(3, OutputOptions {.program = true});
   const auto good = program_snapshot(r.program.get());
   auto wrong = good;
   ASSERT_FALSE(wrong.weights.empty()); ASSERT_FALSE(wrong.weights.front().empty());
@@ -329,14 +329,14 @@ TEST(EpochStatic, WideCountersAndLargestLegalRouteCostAreFreshAfterRemove) {
   const std::vector<NodeId> source {0}, destination {2};
   FlowPolicy p(ledger, source, destination, {ShortestPaths {}, Admission::Lossy});
   PlacementResult r;
-  for (int call = 0; call < 5; ++call) r = p.place(m);
+  for (int call = 0; call < 5; ++call) r = p.place(m, OutputOptions {.program = true});
   ASSERT_TRUE(r.offered); ASSERT_TRUE(r.requested);
   EXPECT_EQ(r.offered->hi, 1U); EXPECT_EQ(r.offered->lo, static_cast<std::uint64_t>(kL62 - 5));
   EXPECT_EQ(*r.requested, *r.offered);
   EXPECT_EQ(p.records().front().min_route_cost, m);
   const auto kept = r.program;
   p.remove();
-  r = p.place(1);
+  r = p.place(1, OutputOptions {.program = true});
   EXPECT_EQ(r.program.get(), kept.get());
   EXPECT_EQ(r.offered->hi, 0U); EXPECT_EQ(r.offered->lo, 1U);
   EXPECT_EQ(p.records().front().min_route_cost, m);
@@ -351,14 +351,14 @@ TEST(EpochStatic, ColdListPreparationSeedsTheOwnerBeforeLaterEpochs) {
       const std::vector<NodeId> sources = pooled ? std::vector<NodeId>{0, 1} : std::vector<NodeId>{0};
       FlowPolicy p(ledger, sources, std::vector<NodeId>{5}, cfg);
       const Action action = Replace {p, 3};
-      const auto first = apply_actions(ledger, std::span(&action, 1), mode, all).front();
+      const auto first = apply_actions(ledger, std::span(&action, 1), mode, result_outputs(all, true, false)).front();
       EXPECT_EQ(detail::PolicyAccess::engine(p).kept_program.get(), first.program.get());
       p.remove();
-      const auto repeated = apply_actions(ledger, std::span(&action, 1), mode, all).front();
+      const auto repeated = apply_actions(ledger, std::span(&action, 1), mode, result_outputs(all, true, false)).front();
       EXPECT_EQ(repeated.program.get(), first.program.get());
       expect_same(repeated, first, "cold-list then retained list");
       p.remove();
-      EXPECT_EQ(p.place(3).program.get(), first.program.get());
+      EXPECT_EQ(p.place(3, OutputOptions {.program = true}).program.get(), first.program.get());
     }
 }
 
@@ -372,11 +372,11 @@ TEST(EpochStatic, SuppliedCacheStatisticsFreezeAndClearKeepTheirOriginalBehavior
     const auto before = cache.stats();
     ASSERT_EQ(before.entries, 1); ASSERT_EQ(before.misses, 1); ASSERT_EQ(before.live_values, 1);
     cache.freeze();
-    const auto original = p.place(3).program;
+    const auto original = p.place(3, OutputOptions {.program = true}).program;
     for (int epoch = 0; epoch < 3; ++epoch) {
       p.remove();
-      EXPECT_EQ(p.place(3).program.get(), original.get());
-      EXPECT_EQ(p.evaluate(3).program.get(), original.get());
+      EXPECT_EQ(p.place(3, OutputOptions {.program = true}).program.get(), original.get());
+      EXPECT_EQ(p.evaluate(3, std::nullopt, OutputOptions {.program = true}).program.get(), original.get());
       const auto now = cache.stats();
       EXPECT_EQ(now.hits, before.hits); EXPECT_EQ(now.misses, before.misses);
       EXPECT_EQ(now.entries, before.entries); EXPECT_EQ(now.bytes, before.bytes); EXPECT_EQ(now.live_values, before.live_values);
@@ -385,7 +385,7 @@ TEST(EpochStatic, SuppliedCacheStatisticsFreezeAndClearKeepTheirOriginalBehavior
     cache.thaw(); cache.clear();
     EXPECT_EQ(cache.stats().entries, 0); EXPECT_EQ(cache.stats().bytes, 0); EXPECT_EQ(cache.stats().live_values, 1);
     p.remove();
-    EXPECT_EQ(p.place(1).program.get(), original.get());
+    EXPECT_EQ(p.place(1, OutputOptions {.program = true}).program.get(), original.get());
     EXPECT_EQ(cache.stats().misses, before.misses);
   }
   EXPECT_EQ(cache.stats().live_values, 0);
@@ -416,7 +416,7 @@ void check_separate_programs(bool explicit_weights) {
                    const std::shared_ptr<const ForwardingProgram>& other, Amount offer,
                    const std::vector<Amount>& carried, const std::vector<EdgeId>& edges) {
     discard_kept(ref);
-    const auto got = policy.place(offer, all), want = ref.place(offer, all);
+    const auto got = policy.place(offer, result_outputs(all, true, false)), want = ref.place(offer, result_outputs(all, true, false));
     compare(policy, ref, ledger, fresh, got, want);
     ASSERT_TRUE(got.program);
     if (!kept) kept = got.program;

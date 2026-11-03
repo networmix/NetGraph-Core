@@ -9,7 +9,7 @@ from __future__ import annotations
 import random
 
 import pytest
-from helpers import build, dag_of, exact, shortest
+from helpers import build, dag_of, exact, result_outputs, shortest
 from source_allocation_oracle import INF, PooledReference
 
 import netgraph_core as ngc
@@ -73,7 +73,7 @@ def test_b_pooled():
     # goes to source 0 by H(1, [1, 1]) = [1, 0], e3's to source 1. Split separately, both units
     # would take e2 (capacity 1) and only 1 would fit.
     _, _, p = policy(POOL, [0, 1], 3, cfg())
-    r = p.place(2, EDGES)
+    r = p.place(2, result_outputs(EDGES, by_source=True))
     assert (r.call_delivered, r.termination, r.edge_flows.tolist()) == (
         2,
         T.COMPLETE,
@@ -83,7 +83,7 @@ def test_b_pooled():
     assert records(p) == [([0], [(0, 1), (2, 1)], 1), ([1], [(1, 1), (3, 1)], 1)]
     # 3 would give e2 two units: the unlimited request admits 2.
     _, _, p = policy(POOL, [0, 1], 3, cfg())
-    r = p.place(INF)
+    r = p.place(INF, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, r.call_undelivered, r.termination) == (
         2,
         INF,
@@ -92,7 +92,7 @@ def test_b_pooled():
     assert (r.requested, r.unadmitted, r.offered) == (INF, None, None)
     # Capacity weights (1, 1) are equal: highest averages is the round robin.
     _, _, p = policy(POOL, [0, 1], 3, cfg(W))
-    assert p.place(2).call_delivered == 2
+    assert p.place(2, outputs=ngc.OutputOptions(by_source=True)).call_delivered == 2
 
 
 def test_lossy_attribution_by_arrivals():
@@ -100,7 +100,7 @@ def test_lossy_attribution_by_arrivals():
     # H(2, [2, 2]) = [1, 1] (then [1, 1] remain for e3); each edge carries 1 of its 2 arrivals,
     # H(1, [1, 1]) = [1, 0]: source 0 delivers 2, source 1 drops one unit on each.
     _, _, p = policy(POOL, [0, 1], 3, cfg(admission=LOSSY))
-    r = p.place(4)
+    r = p.place(4, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, r.termination, r.call_edge_drops) == (
         2,
         T.COMPLETE,
@@ -135,7 +135,7 @@ def test_pooled_source_behind_a_zero_link(edges, lossless):
 def test_lossy_entry_that_cannot_pass():
     # EB keeps the zero edge and drops source 0's 5 there.
     _, _, p = policy(B3Z, [0, 1], 2, cfg(admission=LOSSY))
-    r = p.place(10)
+    r = p.place(10, outputs=ngc.OutputOptions(by_source=True))
     assert (
         r.call_delivered,
         r.termination,
@@ -149,7 +149,7 @@ def test_lossy_entry_that_cannot_pass():
     )
     # W gives the zero edge weight 0: source 0 has no member, its 5 is lost at the source.
     _, _, p = policy(B3Z, [0, 1], 2, cfg(W, LOSSY))
-    r = p.place(10)
+    r = p.place(10, outputs=ngc.OutputOptions(by_source=True))
     assert (
         r.call_delivered,
         r.termination,
@@ -168,12 +168,12 @@ def test_lossy_entry_that_cannot_pass():
 def test_equal_source_allocation_limits_the_total():
     # RR(5, 2) = (3, 2) would put 3 on e0 (capacity 2): 4, rows (2, 2).
     _, _, p = policy(B1, [0, 1], 3, cfg())
-    r = p.place(12)
+    r = p.place(12, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, r.termination) == (4, T.EXHAUSTED)
     assert [x.delivered for x in r.by_source] == [2, 2]
     # Lossy offers (6, 6): source 0 drops 4 on e0.
     _, _, p = policy(B1, [0, 1], 3, cfg(admission=LOSSY))
-    r = p.place(12)
+    r = p.place(12, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, r.call_edge_drops) == (8, [(0, 4)])
 
 
@@ -181,18 +181,18 @@ def test_transit_through_a_source():
     # Injections (5, 5); e1 carries source 1's 5 to node 0, which holds 10 for e0 (3):
     # carried H(3, [5, 5]) = [2, 1].
     _, _, p = policy(CHAIN, [0, 1], 2, cfg(admission=LOSSY))
-    r = p.place(10)
+    r = p.place(10, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, r.call_edge_drops) == (3, [(0, 7)])
     assert rows(r) == [(0, 5, 5, 2, 0, 3), (1, 5, 5, 1, 0, 4)]
     assert records(p) == [([0], [(0, 2)], 2), ([1], [(0, 1), (1, 5)], 1)]
     # Lossless: e0 carries the whole total, so 3, as RR(3) = (2, 1).
     _, _, p = policy(CHAIN, [0, 1], 2, cfg())
-    r = p.place(INF)
+    r = p.place(INF, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, [x.delivered for x in r.by_source]) == (3, [2, 1])
     # The first-hop experiment: source 0 injects e0's 3, source 1 e1's 10; node 0 adds
     # source 1's 10 of transit on e0: arrivals (3, 10), carried H(3, [3, 10]) = [0, 3].
     _, _, p = policy(CHAIN, [0, 1], 2, cfg(admission=LOSSY))
-    r = p.place(INF)
+    r = p.place(INF, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, r.termination, r.requested, r.offered) == (
         3,
         T.EXHAUSTED,
@@ -210,7 +210,7 @@ def test_residual_weights_on_the_common_view():
     _, _, p = policy(
         SNAP, [0, 1], 3, cfg(W, weight_basis=SNAPSHOT), residual=[10, 10, 2, 10]
     )
-    r = p.place(INF)
+    r = p.place(INF, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, [x.delivered for x in r.by_source]) == (12, [6, 6])
     assert records(p) == [
         ([0], [(0, 6), (2, 1), (3, 5)], 6),
@@ -260,7 +260,10 @@ def test_first_hop_experiment():
 def test_inc():
     # RR(3) = (2, 1) does not fit e0 (1): call 1 admits 2; call 2 targets 3 again: 0.
     _, _, p = policy(INC, [0, 1], 2, cfg())
-    a, b = p.place(3), p.place(1)
+    a, b = (
+        p.place(3, outputs=ngc.OutputOptions(by_source=True)),
+        p.place(1, outputs=ngc.OutputOptions(by_source=True)),
+    )
     assert (a.call_delivered, a.termination, b.call_delivered, b.termination) == (
         2,
         T.EXHAUSTED,
@@ -270,7 +273,10 @@ def test_inc():
     assert (b.requested, b.admitted, b.unadmitted, b.offered) == (4, 2, 2, None)
     # Lossy: call 1 injects (2, 1) and drops 1 on e0; call 2 injects RR(4) - RR(3) = (0, 1).
     _, _, p = policy(INC, [0, 1], 2, cfg(admission=LOSSY))
-    a, b = p.place(3), p.place(1)
+    a, b = (
+        p.place(3, outputs=ngc.OutputOptions(by_source=True)),
+        p.place(1, outputs=ngc.OutputOptions(by_source=True)),
+    )
     assert (
         a.call_delivered,
         a.call_edge_drops,
@@ -290,21 +296,27 @@ def test_inc():
     g = build(2, ONE)
     ledger = ngc.FlowLedger(g)
     other = ngc.FlowPolicy(ledger, 0, 1, cfg())
-    other.place(8)
+    other.place(8, outputs=ngc.OutputOptions(by_source=True))
     p = ngc.FlowPolicy(ledger, 0, 1, cfg())
-    assert p.place(5).call_delivered == 2
+    assert p.place(5, outputs=ngc.OutputOptions(by_source=True)).call_delivered == 2
     other.remove()
-    other.place(5)
-    r = p.place(1)
+    other.place(5, outputs=ngc.OutputOptions(by_source=True))
+    r = p.place(1, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, r.requested, r.admitted, r.unadmitted) == (1, 6, 3, 3)
     # Two parallel unit edges: Lossy 1 then 1 drops the second unit on e0 (RR(1) again);
     # one call of 2 carries both; Lossless 1 then 1 fills both.
     _, _, p = policy(RC, 0, 1, cfg(admission=LOSSY))
-    assert [p.place(1).call_delivered, p.place(1).call_delivered] == [1, 0]
+    assert [
+        p.place(1, outputs=ngc.OutputOptions(by_source=True)).call_delivered,
+        p.place(1, outputs=ngc.OutputOptions(by_source=True)).call_delivered,
+    ] == [1, 0]
     _, _, p = policy(RC, 0, 1, cfg(admission=LOSSY))
-    assert p.place(2).call_delivered == 2
+    assert p.place(2, outputs=ngc.OutputOptions(by_source=True)).call_delivered == 2
     _, _, p = policy(RC, 0, 1, cfg())
-    assert [p.place(1).call_delivered, p.place(1, EDGES).edge_flows.tolist()] == [
+    assert [
+        p.place(1, outputs=ngc.OutputOptions(by_source=True)).call_delivered,
+        p.place(1, result_outputs(EDGES, by_source=True)).edge_flows.tolist(),
+    ] == [
         1,
         [1, 1],
     ]
@@ -394,7 +406,7 @@ def test_random_against_reference(seed):
     if rng.random() < 0.3:
         calls.append(INF)
     for i, offer in enumerate(calls):
-        r = p.place(offer)
+        r = p.place(offer, outputs=ngc.OutputOptions(by_source=True))
         want = ref.place(offer)
         compare((seed, i, offer), r, want, p)
         if lossy:

@@ -555,12 +555,12 @@ TEST(FlowLedger, RequestDomainAndFailedCallsLeaveState) {
   auto g = shared(make_graph(2, {{0, 1, 5, 1}}));
   FlowLedger fg(g);
   RoutePolicy p(fg, 0, 1, split_route(fg, 0, 1, all_edges(*g), RouteAllocation::Weighted, Admission::Lossless));
-  (void)p.place(2);
+  (void)p.place(2, OutputOptions {.program = true, .by_source = true});
   const LedgerState before = ledger_state(fg);
   const auto id = p.flow_id();
-  EXPECT_EQ(error_of([&] { (void)p.place(kDomainLimit); }),
+  EXPECT_EQ(error_of([&] { (void)p.place(kDomainLimit, OutputOptions {.program = true, .by_source = true}); }),
             "offer must be an integer in [0, 2^62) or permitted +inf");
-  EXPECT_EQ(error_of([&] { (void)p.place(-1); }),
+  EXPECT_EQ(error_of([&] { (void)p.place(-1, OutputOptions {.program = true, .by_source = true}); }),
             "offer must be an integer in [0, 2^62) or permitted +inf");
   // The failed calls changed nothing: the requested total, the +inf flag, the flow and the
   // ledger (every record field, the aggregate, the residual, the next FlowId and the owners).
@@ -1321,17 +1321,17 @@ TEST(FlowLedger, SupportedControllerRosterUsesReachableWalksIncludingZeroCapacit
     FlowLedger ledger(g);
     const auto mask = g->eligibility(excluded, {});
     FlowPolicy p(ledger, v({1, 2, 3, 6}), v({5}), on_support(support), &mask);
-    const auto result = p.place(3);
+    const auto result = p.place(3, OutputOptions {.by_source = true});
     const auto records = p.records();
     const std::vector<NodeId> expected = excluded.empty() ? v({1, 2}) : excluded.size() == 1 ? v({1}) : v({});
     ASSERT_EQ(records.size(), expected.size());
-    ASSERT_EQ(result.by_source.size(), 4U);  // public rows retain all declared sources
+    ASSERT_EQ(result.by_source.value().size(), 4U);  // public rows retain all declared sources
     for (std::size_t i = 0; i < expected.size(); ++i) {
       EXPECT_EQ(records[i].sources, std::vector<NodeId> {expected[i]});
     }
-    for (std::size_t i = 0; i < result.by_source.size(); ++i) {
-      EXPECT_EQ(result.by_source[i].source, (std::vector<NodeId> {1, 2, 3, 6})[i]);
-      EXPECT_EQ(result.by_source[i].delivered, excluded.empty() && i == 1 ? 3 : 0);
+    for (std::size_t i = 0; i < result.by_source.value().size(); ++i) {
+      EXPECT_EQ(result.by_source.value()[i].source, (std::vector<NodeId> {1, 2, 3, 6})[i]);
+      EXPECT_EQ(result.by_source.value()[i].delivered, excluded.empty() && i == 1 ? 3 : 0);
     }
     EXPECT_EQ(result.call_delivered, excluded.empty() ? 3 : 0);
     EXPECT_EQ(ledger.carried(), excluded.empty() ? (std::vector<Amount> {0, 0, 3, 0, 0}) : std::vector<Amount>(5, 0));

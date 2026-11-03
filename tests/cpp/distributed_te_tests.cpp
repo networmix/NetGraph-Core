@@ -80,7 +80,7 @@ Rows rows(const PlacementResult& r) {
 }
 std::vector<SourceRow> source_rows(const PlacementResult& r) {
   std::vector<SourceRow> out;
-  for (const auto& s : r.by_source) {
+  for (const auto& s : r.by_source.value()) {
     out.emplace_back(s.source, lo(s.offered), lo(s.admitted), s.delivered, lo(s.source_drops), lo(s.total_edge_drops));
   }
   return out;
@@ -257,7 +257,7 @@ TEST(T1Setup, ContractExamples) {
     const auto g = ordered(x.n, x.edges);
     // The setup and the lossless bound.
     auto ll = make(g, x.heads, {x.dst}, t1(x.N, LOSSLESS, x.ceiling));
-    const auto r = ll->replace(INF, x.D, kHolds);
+    const auto r = ll->replace(INF, x.D, result_outputs(kHolds, true, false));
     ASSERT_TRUE(r.program) << where;
     EXPECT_EQ(requests(*r.program), x.requests) << where;
     EXPECT_EQ(routes(*r.program), x.routes) << where;
@@ -270,7 +270,7 @@ TEST(T1Setup, ContractExamples) {
     EXPECT_EQ(r.termination, Termination::Exhausted) << where;  // an unlimited query
     if (!x.offer.has_value()) continue;
     auto ly = make(g, x.heads, {x.dst}, t1(x.N, LOSSY, x.ceiling));
-    const auto s = ly->replace(*x.offer, x.D);
+    const auto s = ly->replace(*x.offer, x.D, OutputOptions {.program = true});
     Amounts shares;
     for (const auto& t : s.by_tunnel) shares.push_back(lo(t.assigned));
     EXPECT_EQ(shares, x.shares) << where;
@@ -287,7 +287,7 @@ TEST(T1Setup, ContractExamples) {
 // order 2, 1, 1, 1. And TWOH(10, 10), D = 10: shares (5, 5), requests 3, 3, 2, 2.
 TEST(T1Setup, RoundOrder) {
   auto p = make(twoh(10, 10), {0, 1}, {2}, t1(2));
-  const auto split = p->replace(5, 5);
+  const auto split = p->replace(5, 5, OutputOptions {.program = true});
   EXPECT_EQ(requests(*split.program), (Amounts {2, 1, 1, 1}));
   std::vector<NodeId> heads;
   std::vector<std::int32_t> indices, locals;
@@ -300,7 +300,7 @@ TEST(T1Setup, RoundOrder) {
   EXPECT_EQ(indices, (std::vector<std::int32_t> {0, 1, 2, 3}));
   EXPECT_EQ(locals, (std::vector<std::int32_t> {0, 0, 1, 1}));
   EXPECT_EQ(split.plan->design_by_head, (std::vector<std::pair<NodeId, Amount>> {{0, 3}, {1, 2}}));
-  EXPECT_EQ(requests(*p->replace(10, 10).program), (Amounts {3, 3, 2, 2}));
+  EXPECT_EQ(requests(*p->replace(10, 10, OutputOptions {.program = true}).program), (Amounts {3, 3, 2, 2}));
 }
 
 // ---------------------------------------------------------------- setup
@@ -321,7 +321,7 @@ TEST(T1Setup, TieBreaks) {
                         Case {RouteTieBreak::HigherAvailableCapacity, {{1}, {1}}, {0, 8}},
                         Case {RouteTieBreak::HigherHeadroom, {{0}, {1}}, {4, 4}}}) {
     auto p = make(g, {0}, {1}, t1(2, LOSSLESS, std::nullopt, 0, c.s));
-    const auto r = p->replace(8, 8);
+    const auto r = p->replace(8, 8, OutputOptions {.program = true});
     EXPECT_EQ(routes(*r.program), c.routes);
     EXPECT_EQ(p.ledger->reserved(), c.holds);
   }
@@ -340,7 +340,7 @@ TEST(T1Setup, TieBreakReadsUnreserved) {
                                 std::pair {RouteTieBreak::HigherHeadroom, Edges {1}}}) {
     auto ledger = std::make_shared<FlowLedger>(g, g->edge_capacity_units(), unreserved);
     auto p = make(g, {0}, {1}, t1(1, LOSSLESS, std::nullopt, 0, s), nullptr, ledger);
-    EXPECT_EQ(routes(*p->replace(4, 4).program), (std::vector<Edges> {want}));
+    EXPECT_EQ(routes(*p->replace(4, 4, OutputOptions {.program = true}).program), (std::vector<Edges> {want}));
   }
 }
 
@@ -357,7 +357,7 @@ TEST(T1Setup, TieScores) {
                                 std::pair {RouteTieBreak::HigherHeadroom, Edges {1}}}) {
     auto ledger = std::make_shared<FlowLedger>(g, g->edge_capacity_units(), unreserved);
     auto p = make(g, {0}, {1}, t1(1, LOSSLESS, std::nullopt, 0, s), nullptr, ledger);
-    EXPECT_EQ(routes(*p->replace(1, 1).program), (std::vector<Edges> {want})) << static_cast<int>(s);
+    EXPECT_EQ(routes(*p->replace(1, 1, OutputOptions {.program = true}).program), (std::vector<Edges> {want})) << static_cast<int>(s);
   }
 }
 
@@ -367,7 +367,7 @@ TEST(T1Setup, FilterBeforeCollapse) {
   const auto g = ordered(2, {{0, 1, 2, 1}, {0, 1, 10, 1}});
   for (const bool parallel_edges : {false, true}) {
     auto p = make(g, {0}, {1}, t1(1, LOSSLESS, std::nullopt, 0, RouteTieBreak::FewerHops, parallel_edges));
-    const auto r = p->replace(6, 6);
+    const auto r = p->replace(6, 6, OutputOptions {.program = true});
     EXPECT_EQ(routes(*r.program), (std::vector<Edges> {{1}})) << parallel_edges;
     EXPECT_EQ(statuses(*r.program), (std::vector<TunnelStatus> {UP})) << parallel_edges;
   }
@@ -375,7 +375,7 @@ TEST(T1Setup, FilterBeforeCollapse) {
   // the collapse): UP, UP, UP, NB as with true.
   const auto ax3 = ordered(2, {{0, 1, 2, 1}, {0, 1, 10, 2}});
   auto p = make(ax3, {0}, {1}, t1(4, LOSSLESS, std::nullopt, 0, RouteTieBreak::FewerHops, false));
-  EXPECT_EQ(statuses(*p->replace(12, 12).program), (std::vector<TunnelStatus> {UP, UP, UP, NB}));
+  EXPECT_EQ(statuses(*p->replace(12, 12, OutputOptions {.program = true}).program), (std::vector<TunnelStatus> {UP, UP, UP, NB}));
 }
 
 // min_unreserved_bandwidth filters every attempt at max(b, minimum) and is never a
@@ -388,14 +388,14 @@ TEST(T1Setup, MinUnreserved) {
   for (const auto& [minimum, path, holding, bound] :
        {std::tuple {Amount {5}, Edges {1}, Amounts {0, 2}, Amount {10}}, std::tuple {Amount {0}, Edges {0}, Amounts {2, 0}, Amount {4}}}) {
     auto p = make(parc, {0}, {1}, t1(2, LOSSLESS, std::nullopt, minimum));
-    const auto r = p->replace(INF, 2);
+    const auto r = p->replace(INF, 2, OutputOptions {.program = true});
     EXPECT_EQ(routes(*r.program), (std::vector<Edges> {path, path})) << minimum;
     EXPECT_EQ(p.ledger->reserved(), holding) << minimum;
     EXPECT_EQ(r.call_delivered, bound) << minimum;
     EXPECT_EQ(r.plan->total_reserved_bandwidth, 2) << minimum;  // the requests, not the minimum
   }
   auto z = make(zl(), {0}, {1}, t1(2, LOSSY, std::nullopt, 1));
-  const auto r = z->replace(2, 1);
+  const auto r = z->replace(2, 1, OutputOptions {.program = true});
   EXPECT_EQ(requests(*r.program), (Amounts {1, 0}));
   EXPECT_EQ(routes(*r.program), (std::vector<Edges> {{1}, {1}}));
   EXPECT_EQ(z.ledger->reserved(), (Amounts {0, 1}));
@@ -410,14 +410,14 @@ TEST(T1Setup, OtherOwnersHolds) {
   auto ledger = std::make_shared<FlowLedger>(g);
   auto a = make(g, {0}, {1}, t1(1), nullptr, ledger);
   auto b = make(g, {0}, {1}, t1(1, LOSSY), nullptr, ledger);
-  EXPECT_EQ(statuses(*a->replace(6, 6).program), (std::vector<TunnelStatus> {UP}));
+  EXPECT_EQ(statuses(*a->replace(6, 6, OutputOptions {.program = true}).program), (std::vector<TunnelStatus> {UP}));
   EXPECT_EQ(ledger->reserved(), (Amounts {6}));
   EXPECT_EQ(ledger->unreserved(), (Amounts {4}));
-  const auto down = b->replace(6, 6);
+  const auto down = b->replace(6, 6, OutputOptions {.program = true});
   EXPECT_EQ(statuses(*down.program), (std::vector<TunnelStatus> {NB}));
   EXPECT_EQ(down.call_source_drops, 6);
   a->remove();
-  const auto up = b->replace(6, 6);
+  const auto up = b->replace(6, 6, OutputOptions {.program = true});
   EXPECT_EQ(statuses(*up.program), (std::vector<TunnelStatus> {UP}));
   EXPECT_EQ(ledger->reserved(), (Amounts {6}));
   expect_balanced(*ledger, "after B's setup");
@@ -429,7 +429,7 @@ TEST(T1Setup, MaskedSource) {
   const auto g = twoh(10, 10);
   const auto mask = g->eligibility(std::vector<NodeId> {0}, {});
   auto p = make(g, {0, 1}, {2}, t1(2, LOSSY), &mask);
-  const auto r = p->replace(10, 10);
+  const auto r = p->replace(10, 10, OutputOptions {.program = true, .by_source = true});
   EXPECT_EQ(requests(*r.program), (Amounts {5, 5}));
   EXPECT_EQ(r.plan->design_by_head, (std::vector<std::pair<NodeId, Amount>> {{1, 10}}));
   EXPECT_EQ(source_rows(r), (std::vector<SourceRow> {{0, 0, 0, 0, 0, 0}, {1, 10, 10, 10, 0, 0}}));
@@ -443,13 +443,13 @@ TEST(T1Setup, StretchPoolBaseline) {
   constexpr std::int64_t kMax = std::numeric_limits<std::int64_t>::max();
   for (const auto& [f, second] : {std::pair {CostStretch(2), CC}, std::pair {CostStretch(kMax), UP}}) {
     auto p = make(x8(), {0, 1}, {2}, t1(1, LOSSY, f));
-    EXPECT_EQ(statuses(*p->replace(4, 4).program), (std::vector<TunnelStatus> {NB, second})) << f.numerator();
+    EXPECT_EQ(statuses(*p->replace(4, 4, OutputOptions {.program = true}).program), (std::vector<TunnelStatus> {NB, second})) << f.numerator();
   }
   // AbsoluteCost is inclusive: AbsoluteCost(3) admits the cost-3 path, AbsoluteCost(2) not.
   auto in = make(x8(), {0, 1}, {2}, t1(1, LOSSY, AbsoluteCost {3}));
-  EXPECT_EQ(statuses(*in->replace(4, 4).program), (std::vector<TunnelStatus> {NB, UP}));
+  EXPECT_EQ(statuses(*in->replace(4, 4, OutputOptions {.program = true}).program), (std::vector<TunnelStatus> {NB, UP}));
   auto out = make(x8(), {0, 1}, {2}, t1(1, LOSSY, AbsoluteCost {2}));
-  EXPECT_EQ(statuses(*out->replace(4, 4).program), (std::vector<TunnelStatus> {NB, CC}));
+  EXPECT_EQ(statuses(*out->replace(4, 4, OutputOptions {.program = true}).program), (std::vector<TunnelStatus> {NB, CC}));
   // Large costs compare exactly: two parallel paths of 2^60 and 2^60 + 1 (two units each), D = 4,
   // N = 2: CostStretch(1) admits only the cheaper one for the first tunnel, the second tunnel's only
   // remaining path costs 2^60 + 1: CostCeiling; (2^60 + 1) / 2^60 admits it at equality, (2^61 + 1)
@@ -462,22 +462,22 @@ TEST(T1Setup, StretchPoolBaseline) {
                                 std::pair {CostStretch(2 * p60 + 1, 2 * p60), std::vector<TunnelStatus> {UP, CC}},
                                 std::pair {CostStretch(kMax), std::vector<TunnelStatus> {UP, UP}}}) {
     auto p = make(big, {0}, {4}, t1(2, LOSSLESS, f));
-    EXPECT_EQ(statuses(*p->replace(4, 4).program), want) << f.numerator() << "/" << f.denominator();
+    EXPECT_EQ(statuses(*p->replace(4, 4, OutputOptions {.program = true}).program), want) << f.numerator() << "/" << f.denominator();
   }
   // The baseline ignores the setup view: a third party's holds on the cheap path leave c0 = 2^60.
   auto ledger = std::make_shared<FlowLedger>(big);
   auto third = make(big, {0}, {4}, t1(1), nullptr, ledger);
-  EXPECT_EQ(statuses(*third->replace(2, 2).program), (std::vector<TunnelStatus> {UP}));
+  EXPECT_EQ(statuses(*third->replace(2, 2, OutputOptions {.program = true}).program), (std::vector<TunnelStatus> {UP}));
   auto p = make(big, {0}, {4}, t1(1, LOSSLESS, CostStretch(1)), nullptr, ledger);
-  EXPECT_EQ(statuses(*p->replace(2, 2).program), (std::vector<TunnelStatus> {CC}));
+  EXPECT_EQ(statuses(*p->replace(2, 2, OutputOptions {.program = true}).program), (std::vector<TunnelStatus> {CC}));
   // A fractional factor is inclusive at equality: CostStretch(3/2) on c0 = 2 admits a path of cost 3
   // exactly and rejects one of cost 4 (the cheaper links are too small for the request of 5).
   auto at = make(ordered(2, {{0, 1, 1, 2}, {0, 1, 10, 3}}), {0}, {1}, t1(1, LOSSLESS, CostStretch(3, 2)));
-  const auto ra = at->replace(5, 5);
+  const auto ra = at->replace(5, 5, OutputOptions {.program = true});
   EXPECT_EQ(statuses(*ra.program), (std::vector<TunnelStatus> {UP}));
   EXPECT_EQ(ra.program->tunnels()[0].path_cost, std::optional<Cost> {3});
   auto above = make(ordered(2, {{0, 1, 1, 2}, {0, 1, 1, 3}, {0, 1, 10, 4}}), {0}, {1}, t1(1, LOSSLESS, CostStretch(3, 2)));
-  EXPECT_EQ(statuses(*above->replace(5, 5).program), (std::vector<TunnelStatus> {CC}));
+  EXPECT_EQ(statuses(*above->replace(5, 5, OutputOptions {.program = true}).program), (std::vector<TunnelStatus> {CC}));
 }
 
 // ---------------------------------------------------------------- forwarding
@@ -500,9 +500,9 @@ TEST(T1Forwarding, HoldsDoNotQueue) {
   const auto g = one10();
   auto ledger = std::make_shared<FlowLedger>(g);
   auto c = make(g, {0}, {1}, FlowPolicyConfig {ShortestPaths {}, LOSSY}, nullptr, ledger);
-  EXPECT_EQ(c->replace(10).call_delivered, 10);
+  EXPECT_EQ(c->replace(10, std::nullopt, OutputOptions {.program = true}).call_delivered, 10);
   auto p = make(g, {0}, {1}, t1(1, LOSSY), nullptr, ledger);
-  const auto r = p->replace(4, 4);
+  const auto r = p->replace(4, 4, OutputOptions {.program = true});
   EXPECT_EQ(statuses(*r.program), (std::vector<TunnelStatus> {UP}));
   EXPECT_EQ(ledger->reserved(), (Amounts {4}));
   EXPECT_EQ(r.call_edge_drops, (Pairs {{0, 4}}));
@@ -510,7 +510,7 @@ TEST(T1Forwarding, HoldsDoNotQueue) {
   EXPECT_EQ(ledger->residual(), (Amounts {0}));
   // Carried above the holds: each tunnel holds 4 and carries 5.
   auto o = make(ordered(2, {{0, 1, 5, 1}, {0, 1, 5, 1}}), {0}, {1}, t1(2, LOSSY));
-  const auto over = o->replace(10, 8);
+  const auto over = o->replace(10, 8, OutputOptions {.program = true});
   EXPECT_EQ(over.call_delivered, 10);
   for (const auto& rec : o->records()) {
     EXPECT_EQ(rec.delivered, 5);
@@ -525,13 +525,13 @@ TEST(T1Forwarding, HoldsDoNotQueue) {
 TEST(T1Forwarding, AllDown) {
   for (const Amount offer : {5, 14}) {
     auto ly = make(diam5(), {0}, {3}, t1(2, LOSSY));
-    const auto r = ly->replace(offer, 14);
+    const auto r = ly->replace(offer, 14, OutputOptions {.program = true});
     EXPECT_EQ(statuses(*r.program), (std::vector<TunnelStatus> {NB, NB}));
     EXPECT_EQ(r.call_source_drops, offer);
     EXPECT_EQ(r.call_delivered, 0);
     EXPECT_EQ(r.termination, Termination::Complete);
     auto ll = make(diam5(), {0}, {3}, t1(2));
-    const auto s = ll->replace(offer, 14);
+    const auto s = ll->replace(offer, 14, OutputOptions {.program = true});
     EXPECT_EQ(s.call_delivered, 0);
     EXPECT_EQ(s.termination, Termination::Exhausted);
   }
@@ -553,7 +553,7 @@ TEST(T1Forwarding, ByTunnel) {
 // then forward(8).
 TEST(T1Operations, ContractCall) {
   auto p = make(twoh(2, 10), {0, 1}, {2}, t1(2, LOSSY));
-  const auto r = p->replace(12, 12, kHolds);
+  const auto r = p->replace(12, 12, result_outputs(kHolds, true, true));
   EXPECT_EQ(statuses(*r.program), (std::vector<TunnelStatus> {NB, UP, NB, UP}));
   EXPECT_EQ(r.call_delivered, 6);
   EXPECT_EQ(r.call_source_drops, 6);
@@ -576,7 +576,7 @@ TEST(T1Operations, ContractCall) {
   std::vector<std::int64_t> before;
   for (const auto& rec : recs) before.push_back(rec.flow_id.second);
   // forward(8): the same tunnels and holds; head 0 still loses its share (4).
-  const auto f = p->forward(8);
+  const auto f = p->forward(8, nullptr, OutputOptions {.program = true, .by_source = true});
   EXPECT_EQ(f.call_delivered, 4);
   EXPECT_EQ(f.call_source_drops, 4);
   EXPECT_EQ(f.delivery_delta, -2);
@@ -597,9 +597,9 @@ TEST(T1Operations, ContractCall) {
 // released): up again, reserved [6] (not 12); all three flags false; the record id is new.
 TEST(T1Operations, ReplaceReleasesOwnHolds) {
   auto p = make(one10(), {0}, {1}, t1(1));
-  (void)p->replace(6, 6);
+  (void)p->replace(6, 6, OutputOptions {.program = true});
   const auto id = p->records().front().flow_id;
-  const auto r = p->replace(6, 6);
+  const auto r = p->replace(6, 6, OutputOptions {.program = true});
   EXPECT_EQ(statuses(*r.program), (std::vector<TunnelStatus> {UP}));
   EXPECT_EQ(p.ledger->reserved(), (Amounts {6}));
   EXPECT_FALSE(r.routes_changed || r.weights_changed || r.reservations_changed);
@@ -612,10 +612,10 @@ TEST(T1Operations, ReplaceReleasesOwnHolds) {
 //.
 TEST(T1Operations, EvaluateAndZero) {
   auto p = make(one10(), {0}, {1}, t1(1));
-  (void)p->replace(6, 6);
+  (void)p->replace(6, 6, OutputOptions {.program = true});
   const auto ledger = ledger_state(*p.ledger);
   const auto ep = epoch(*p.p);
-  const auto e = p->evaluate(3, 8, kHolds);
+  const auto e = p->evaluate(3, 8, result_outputs(kHolds, true, false));
   EXPECT_EQ(statuses(*e.program), (std::vector<TunnelStatus> {UP}));
   EXPECT_EQ(requests(*e.program), (Amounts {8}));
   EXPECT_EQ(e.program->tunnels()[0].reserved_bandwidth, 8);
@@ -625,13 +625,13 @@ TEST(T1Operations, EvaluateAndZero) {
   expect_same(ledger_state(*p.ledger), ledger, "evaluate");
   expect_unchanged(epoch(*p.p), ep, "evaluate");
   auto q = make(one10(), {0}, {1}, t1(2));
-  const auto z = q->replace(0);
+  const auto z = q->replace(0, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(statuses(*z.program), (std::vector<TunnelStatus> {UP, UP}));
   EXPECT_EQ(requests(*z.program), (Amounts {0, 0}));
   EXPECT_EQ(q.ledger->reserved(), (Amounts {0}));
   EXPECT_EQ(z.termination, Termination::Complete);
   EXPECT_EQ(z.call_delivered, 0);
-  const auto z12 = q->replace(0, 12);
+  const auto z12 = q->replace(0, 12, OutputOptions {.program = true});
   EXPECT_EQ(requests(*z12.program), (Amounts {6, 6}));
   EXPECT_EQ(statuses(*z12.program), (std::vector<TunnelStatus> {UP, NB}));
   EXPECT_EQ(q.ledger->reserved(), (Amounts {6}));
@@ -656,7 +656,7 @@ TEST(T1Operations, InfiniteOffer) {
 TEST(T1Operations, EmptyRoster) {
   const auto g = ordered(3, {{1, 2, 5, 1}});
   auto p = make(g, {0}, {2}, t1(2, LOSSY));
-  const auto r = p->replace(5, 5);
+  const auto r = p->replace(5, 5, OutputOptions {.program = true, .by_source = true});
   EXPECT_EQ(r.termination, Termination::NoRoute);
   ASSERT_TRUE(r.program);
   EXPECT_EQ(vec(r.program->sources()), v({0}));
@@ -666,7 +666,7 @@ TEST(T1Operations, EmptyRoster) {
   EXPECT_EQ(r.call_source_drops, 5);
   EXPECT_EQ(source_rows(r), (std::vector<SourceRow> {{0, 0, 0, 0, 0, 0}}));
   EXPECT_TRUE(p->records().empty());
-  for (const auto& z : {p->replace(0, 5), p->evaluate(0, 5), p->forward(0)}) {
+  for (const auto& z : {p->replace(0, 5, OutputOptions {.program = true, .by_source = true}), p->evaluate(0, 5, OutputOptions {.program = true, .by_source = true}), p->forward(0, nullptr, OutputOptions {.program = true, .by_source = true})}) {
     EXPECT_EQ(z.termination, Termination::Complete);
     EXPECT_TRUE(z.program && z.program->tunnels().empty());
     EXPECT_TRUE(z.plan.has_value());
@@ -679,32 +679,32 @@ TEST(T1Operations, EmptyRoster) {
 // the diamond with design 14 (all down) changes routes and reservations (requests 7, 7) but no weight.
 TEST(T1Operations, Flags) {
   auto p = make(diam5(), {0}, {3}, t1(2));
-  const auto first = p->replace(8, 8);
+  const auto first = p->replace(8, 8, OutputOptions {.program = true});
   EXPECT_TRUE(first.routes_changed && first.weights_changed && first.reservations_changed);
-  const auto second = p->replace(10, 10);
+  const auto second = p->replace(10, 10, OutputOptions {.program = true});
   EXPECT_TRUE(second.routes_changed && second.weights_changed && second.reservations_changed);
-  const auto f = p->forward(10);
+  const auto f = p->forward(10, nullptr, OutputOptions {.program = true});
   EXPECT_FALSE(f.routes_changed || f.weights_changed || f.reservations_changed);
   auto down = make(diam5(), {0}, {3}, t1(2, LOSSY));
-  const auto d = down->replace(5, 14);
+  const auto d = down->replace(5, 14, OutputOptions {.program = true});
   EXPECT_TRUE(d.routes_changed);
   EXPECT_FALSE(d.weights_changed);
   EXPECT_TRUE(d.reservations_changed);
   // Only the requests change (D = 15: requests 8 and 7, still all down): reservations alone.
-  const auto d2 = down->replace(5, 15);
+  const auto d2 = down->replace(5, 15, OutputOptions {.program = true});
   EXPECT_FALSE(d2.routes_changed || d2.weights_changed);
   EXPECT_TRUE(d2.reservations_changed);
   // A controller's tunnels hold nothing: a change in their number is a route change, never a
   // reservation change (a tunnel absent from one program counts as (0, 0) there).
   auto gl = make(diam5(), {0}, {3}, global_config());
-  const auto many = gl->replace(INF);
+  const auto many = gl->replace(INF, std::nullopt, OutputOptions {.program = true});
   ASSERT_GT(many.program->tunnels().size(), 1u);
   EXPECT_FALSE(many.reservations_changed);
-  const auto one = gl->replace(1);
+  const auto one = gl->replace(1, std::nullopt, OutputOptions {.program = true});
   ASSERT_EQ(one.program->tunnels().size(), 1u);
   EXPECT_TRUE(one.routes_changed);
   EXPECT_FALSE(one.reservations_changed);
-  const auto again = gl->replace(INF);
+  const auto again = gl->replace(INF, std::nullopt, OutputOptions {.program = true});
   EXPECT_TRUE(again.routes_changed);
   EXPECT_FALSE(again.reservations_changed);
   // Equal requests, changed holds: two links of 4, N = 2, D = 8 (requests 4, 4). Another owner's
@@ -713,12 +713,12 @@ TEST(T1Operations, Flags) {
   const auto two = ordered(2, {{0, 1, 4, 1}, {0, 1, 4, 1}});
   auto ledger = std::make_shared<FlowLedger>(two);
   auto other = make(two, {0}, {1}, t1(1), nullptr, ledger);
-  (void)other->replace(1, 1);
+  (void)other->replace(1, 1, OutputOptions {.program = true});
   auto mine = make(two, {0}, {1}, t1(2), nullptr, ledger);
-  const auto held = mine->replace(8, 8);
+  const auto held = mine->replace(8, 8, OutputOptions {.program = true});
   EXPECT_EQ(statuses(*held.program), (std::vector<TunnelStatus> {UP, NB}));
   other->remove();
-  const auto freed = mine->replace(8, 8);
+  const auto freed = mine->replace(8, 8, OutputOptions {.program = true});
   EXPECT_EQ(statuses(*freed.program), (std::vector<TunnelStatus> {UP, UP}));
   EXPECT_EQ(requests(*held.program), requests(*freed.program));
   EXPECT_TRUE(freed.reservations_changed);
@@ -730,10 +730,10 @@ TEST(T1Operations, Flags) {
 // count, so only this direct check reaches the absent-tunnel branches.
 TEST(T1Operations, AbsentTunnelsCountAsZero) {
   auto two = make(one10(), {0}, {1}, t1(2));
-  const auto zero2 = two->replace(0, 0).program;  // two tunnels, requests 0
+  const auto zero2 = two->replace(0, 0, OutputOptions {.program = true}).program;  // two tunnels, requests 0
   auto one = make(one10(), {0}, {1}, t1(1));
-  const auto zero1 = one->replace(0, 0).program;  // one tunnel, request 0
-  const auto held1 = one->replace(0, 6).program;  // one tunnel holding 6
+  const auto zero1 = one->replace(0, 0, OutputOptions {.program = true}).program;  // one tunnel, request 0
+  const auto held1 = one->replace(0, 6, OutputOptions {.program = true}).program;  // one tunnel holding 6
   ASSERT_EQ(zero2->tunnels().size(), 2U);
   ASSERT_EQ(held1->tunnels()[0].reserved_bandwidth, 6);
   EXPECT_FALSE(detail::compare_programs(zero2.get(), zero1.get()).reservations);  // absent after
@@ -802,15 +802,15 @@ TEST(T1Operations, DesignValidationAndTerminations) {
 TEST(T1Operations, NoCertificatesAndPlanOnlyForT1) {
   const auto g = twoh(2, 10);
   auto p = make(g, {0, 1}, {2}, t1(2));
-  const auto r = p->replace(INF, 12, OutputOptions {.min_cut = true});
+  const auto r = p->replace(INF, 12, result_outputs(OutputOptions {.min_cut = true}, true, false));
   EXPECT_FALSE(r.total_cost.has_value() || r.min_cut.has_value() || r.marginal_cost_curve.has_value());
   ASSERT_TRUE(r.plan.has_value());
   auto pin = make(g, {0, 1}, {2}, FlowPolicyConfig {.routing = Pinned {r.program, nullptr}});
-  EXPECT_FALSE(pin->replace(12).plan.has_value());
+  EXPECT_FALSE(pin->replace(12, std::nullopt, OutputOptions {.program = true}).plan.has_value());
   for (const auto& c : {shortest_paths_config(), global_config()}) {
     auto q = make(g, {0, 1}, {2}, c);
-    EXPECT_FALSE(q->place(5).plan.has_value());
-    EXPECT_FALSE(q->replace(5).plan.has_value());
+    EXPECT_FALSE(q->place(5, OutputOptions {.program = true}).plan.has_value());
+    EXPECT_FALSE(q->replace(5, std::nullopt, OutputOptions {.program = true}).plan.has_value());
   }
 }
 
@@ -845,7 +845,7 @@ TEST(LedgerProjections, Baselines) {
   const auto g = one10();
   auto ledger = std::make_shared<FlowLedger>(g, g->edge_capacity_units(), Amounts {3});
   auto p = make(g, {0}, {1}, t1(1), nullptr, ledger);
-  EXPECT_EQ(statuses(*p->replace(4, 4).program), (std::vector<TunnelStatus> {NB}));
+  EXPECT_EQ(statuses(*p->replace(4, 4, OutputOptions {.program = true}).program), (std::vector<TunnelStatus> {NB}));
   EXPECT_EQ(ledger->residual(), (Amounts {10}));
   EXPECT_EQ(ledger->unreserved(), (Amounts {3}));
   EXPECT_EQ(error_of([&] { FlowLedger x(g, g->edge_capacity_units(), Amounts {3, 1}); }),
@@ -962,7 +962,7 @@ TEST(LedgerProjections, AbsentReservationBaselineIsTheCapacities) {
     FlowLedger fg = after_reset ? FlowLedger(g, Amounts {1, 4}, Amounts {1, 3}) : FlowLedger(g, Amounts {1, 4});
     if (after_reset) fg.reset(Amounts {1, 4});
     FlowPolicy p(fg, v({1}), v({2}), t1(1, LOSSY));
-    const auto r = p.replace(6, 6);
+    const auto r = p.replace(6, 6, OutputOptions {.program = true});
     ASSERT_EQ(r.program->tunnels().size(), 1U);
     EXPECT_EQ(r.program->tunnels()[0].status, UP) << after_reset;
     EXPECT_EQ(fg.reserved(), (Amounts {0, 6})) << after_reset;
@@ -977,20 +977,20 @@ TEST(LedgerProjections, AbsentReservationBaselineIsTheCapacities) {
 TEST(LedgerProjections, OutputsImportsAndBottleneck) {
   const auto g = twoh(2, 10);
   auto c = make(g, {0, 1}, {2}, shortest_paths_config());
-  EXPECT_EQ(*c->place(4, kHolds).edge_reservations, (Amounts {0, 0}));
+  EXPECT_EQ(*c->place(4, result_outputs(kHolds, true, false)).edge_reservations, (Amounts {0, 0}));
   auto p = make(g, {0, 1}, {2}, t1(2, LOSSY));
-  const auto r = p->replace(12, 12);
+  const auto r = p->replace(12, 12, OutputOptions {.program = true});
   auto pin = make(g, {0, 1}, {2}, FlowPolicyConfig {.routing = Pinned {r.program, nullptr}, .admission = LOSSY});
-  const auto q = pin->replace(12, std::nullopt, kHolds);
+  const auto q = pin->replace(12, std::nullopt, result_outputs(kHolds, true, false));
   EXPECT_EQ(*q.edge_reservations, (Amounts {0, 0}));
   EXPECT_EQ(pin.ledger->reserved(), (Amounts {0, 0}));
   for (const auto& rec : pin->records()) EXPECT_TRUE(rec.edge_reservations.empty());
   // ONE10 held whole (replace(0, 10): unreserved 0) is not a bottleneck: the residual is 10.
   auto h = make(one10(), {0}, {1}, t1(1));
-  (void)h->replace(0, 10);
+  (void)h->replace(0, 10, OutputOptions {.program = true});
   EXPECT_EQ(h.ledger->unreserved(), (Amounts {0}));
   EXPECT_TRUE(h.ledger->saturated_boundary_edges(v({0})).empty());
-  EXPECT_EQ(*h->replace(0, 10, OutputOptions {.saturated_boundary_edges = true}).saturated_boundary_edges, Edges {});
+  EXPECT_EQ(*h->replace(0, 10, result_outputs(OutputOptions {.saturated_boundary_edges = true}, true, false)).saturated_boundary_edges, Edges {});
 }
 
 // ---------------------------------------------------------------- programs
@@ -1000,7 +1000,7 @@ TEST(LedgerProjections, OutputsImportsAndBottleneck) {
 // policy's (every head), its sources and destinations the policy's, equal sources.
 TEST(TunnelPrograms, T1Fields) {
   auto p = make(twoh(2, 10), {0, 1}, {2}, t1(2, LOSSY));
-  const auto prog = p->replace(12, 12).program;
+  const auto prog = p->replace(12, 12, OutputOptions {.program = true}).program;
   ASSERT_EQ(prog->tunnels().size(), 4U);
   for (std::size_t i = 0; i < 4; ++i) {
     const auto& t = prog->tunnels()[i];
@@ -1023,7 +1023,7 @@ TEST(TunnelPrograms, T1Fields) {
   // Two-hop tunnels end at the destination, not at the first link's end: DIAM5, N = 2, D = 10
   // (requests 5, 5; e2 of 4 is filtered out): tunnel 0 takes e0 e3, tunnel 1 e1 e4, both cost 4.
   auto d = make(diam5(), {0}, {3}, t1(2));
-  const auto two = d->replace(10, 10).program;
+  const auto two = d->replace(10, 10, OutputOptions {.program = true}).program;
   EXPECT_EQ(routes(*two), (std::vector<Edges> {{0, 3}, {1, 4}}));
   for (const auto& t : two->tunnels()) {
     EXPECT_EQ(t.destination, std::optional<NodeId> {3});
@@ -1038,9 +1038,9 @@ TEST(TunnelPrograms, T1Fields) {
 TEST(TunnelPrograms, PinnedOverT1ReservesNothing) {
   const auto g = one10();
   auto u = make(g, {0}, {1}, t1(1));
-  const auto up = u->replace(0, 6).program;
+  const auto up = u->replace(0, 6, OutputOptions {.program = true}).program;
   auto d = make(g, {0}, {1}, t1(1));
-  const auto down = d->replace(0, 20).program;
+  const auto down = d->replace(0, 20, OutputOptions {.program = true}).program;
   ASSERT_EQ(statuses(*up), (std::vector<TunnelStatus> {UP}));
   ASSERT_EQ(statuses(*down), (std::vector<TunnelStatus> {NB}));
   EXPECT_EQ(up->tunnels()[0].reserved_bandwidth, 6);
@@ -1048,7 +1048,7 @@ TEST(TunnelPrograms, PinnedOverT1ReservesNothing) {
   for (const auto& prog : {up, down}) {
     for (int op = 0; op < 3; ++op) {
       auto p = make(g, {0}, {1}, FlowPolicyConfig {.routing = Pinned {prog, nullptr}});
-      const auto r = op == 0 ? p->evaluate(1) : op == 1 ? p->replace(1) : p->place(1);
+      const auto r = op == 0 ? p->evaluate(1, std::nullopt, OutputOptions {.program = true}) : op == 1 ? p->replace(1, std::nullopt, OutputOptions {.program = true}) : p->place(1, OutputOptions {.program = true});
       EXPECT_FALSE(r.reservations_changed) << op;
       EXPECT_FALSE(r.plan.has_value()) << op;
       EXPECT_EQ(r.program->tunnels()[0].requested_bandwidth, prog->tunnels()[0].requested_bandwidth) << op;
@@ -1081,26 +1081,26 @@ TEST(TunnelPrograms, BuilderWeighsOnlyUpTunnels) {
 TEST(TunnelPrograms, T1Replay) {
   const auto g = par612();
   auto p = make(g, {0}, {1}, t1(4, LOSSY));
-  const auto prog = p->replace(13, 12).program;
+  const auto prog = p->replace(13, 12, OutputOptions {.program = true, .by_source = true}).program;
   const auto mask = g->eligibility({}, std::vector<EdgeId> {0});
   auto ly = make(g, {0}, {1}, FlowPolicyConfig {.routing = Pinned {prog, nullptr}, .admission = LOSSY}, &mask);
-  const auto r = ly->replace(13);
+  const auto r = ly->replace(13, std::nullopt, OutputOptions {.program = true, .by_source = true});
   EXPECT_EQ(rows(r), (Rows {{0, 0, FAILED, 0, 0, 0}, {1, 0, FAILED, 0, 0, 0}, {2, 0, UP, 7, 3, 4}, {3, 0, UP, 6, 3, 3}}));
   EXPECT_EQ(r.call_delivered, 6);
   EXPECT_EQ(r.call_edge_drops, (Pairs {{1, 7}}));
   auto ll = make(g, {0}, {1}, FlowPolicyConfig {.routing = Pinned {prog, nullptr}}, &mask);
-  EXPECT_EQ(ll->replace(13).call_delivered, 6);
+  EXPECT_EQ(ll->replace(13, std::nullopt, OutputOptions {.program = true, .by_source = true}).call_delivered, 6);
   // The replay roster comes from the topology basis, not from the surviving tunnels: REPLAY, N = 1,
   // D = 10: head 0's tunnel e0 fails, but head 0
   // still reaches node 2 over the topology (e1, e3): it keeps its share 5 and loses it; head 1
   // delivers its 5.
   const auto rg = ordered(4, {{0, 2, 10, 1}, {0, 3, 10, 5}, {1, 2, 10, 1}, {3, 2, 10, 5}});
   auto t = make(rg, {0, 1}, {2}, t1(1, LOSSY));
-  const auto rp = t->replace(10, 10).program;
+  const auto rp = t->replace(10, 10, OutputOptions {.program = true, .by_source = true}).program;
   EXPECT_EQ(routes(*rp), (std::vector<Edges> {{0}, {2}}));
   const auto m0 = rg->eligibility({}, std::vector<EdgeId> {0});
   auto replay = make(rg, {0, 1}, {2}, FlowPolicyConfig {.routing = Pinned {rp, nullptr}, .admission = LOSSY}, &m0);
-  const auto x = replay->replace(10);
+  const auto x = replay->replace(10, std::nullopt, OutputOptions {.program = true, .by_source = true});
   EXPECT_EQ(x.call_delivered, 5);
   EXPECT_EQ(x.call_source_drops, 5);
   EXPECT_EQ(source_rows(x), (std::vector<SourceRow> {{0, 5, 5, 0, 5, 0}, {1, 5, 5, 5, 0, 0}}));
@@ -1114,17 +1114,17 @@ TEST(TunnelPrograms, T1Replay) {
 TEST(TunnelPrograms, T1Stale) {
   const auto g = diam5();
   auto p = make(g, {0}, {3}, t1(2, LOSSY));
-  const auto prog = p->replace(10, 10).program;
+  const auto prog = p->replace(10, 10, OutputOptions {.program = true}).program;
   const auto dark = std::make_shared<const Eligibility>(g->eligibility(std::vector<NodeId> {2}, {}));
   auto ly = make(g, {0}, {3}, FlowPolicyConfig {.routing = Pinned {prog, dark}, .admission = LOSSY});
-  const auto r = ly->replace(10);
+  const auto r = ly->replace(10, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(rows(r), (Rows {{0, 0, UP, 5, 5, 0}, {1, 0, BLACKHOLED, 5, 0, 5}}));
   EXPECT_EQ(r.call_edge_drops, (Pairs {{1, 5}}));
   EXPECT_EQ(r.call_delivered, 5);
   auto ll = make(g, {0}, {3}, FlowPolicyConfig {.routing = Pinned {prog, dark}});
-  EXPECT_EQ(ll->replace(10).call_delivered, 1);
+  EXPECT_EQ(ll->replace(10, std::nullopt, OutputOptions {.program = true}).call_delivered, 1);
   const auto holds_before = p.ledger->reserved();
-  const auto f = p->forward(10, dark.get());
+  const auto f = p->forward(10, dark.get(), OutputOptions {.program = true});
   EXPECT_EQ(rows(f), rows(r));
   EXPECT_EQ(f.call_delivered, 5);
   EXPECT_EQ(p.ledger->reserved(), holds_before);
@@ -1137,9 +1137,9 @@ TEST(TunnelPrograms, T1Stale) {
 TEST(TunnelPrograms, T1DownTunnels) {
   const auto g = twoh(2, 10);
   auto p = make(g, {0, 1}, {2}, t1(2, LOSSY));
-  const auto live = p->replace(12, 12);
+  const auto live = p->replace(12, 12, OutputOptions {.program = true});
   auto pin = make(g, {0, 1}, {2}, FlowPolicyConfig {.routing = Pinned {live.program, nullptr}, .admission = LOSSY});
-  const auto r = pin->replace(12);
+  const auto r = pin->replace(12, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(r.call_delivered, 6);
   EXPECT_EQ(r.call_source_drops, 6);
   EXPECT_EQ(rows(r), rows(live));
@@ -1150,10 +1150,10 @@ TEST(TunnelPrograms, T1DownTunnels) {
   // that leaves every path: still NB, NB; Lossy loses the offer at the head (not rule (3)).
   const auto dg = diam5();
   auto d = make(dg, {0}, {3}, t1(2, LOSSY));
-  const auto down = d->replace(5, 14).program;
+  const auto down = d->replace(5, 14, OutputOptions {.program = true}).program;
   const auto mask = dg->eligibility({}, std::vector<EdgeId> {2});
   auto replay = make(dg, {0}, {3}, FlowPolicyConfig {.routing = Pinned {down, nullptr}, .admission = LOSSY}, &mask);
-  const auto x = replay->replace(5);
+  const auto x = replay->replace(5, std::nullopt, OutputOptions {.program = true});
   EXPECT_EQ(rows(x), (Rows {{0, 0, NB, 0, 0, 0}, {1, 0, NB, 0, 0, 0}}));
   EXPECT_EQ(x.termination, Termination::Complete);
   EXPECT_EQ(x.call_source_drops, 5);
@@ -1164,7 +1164,7 @@ TEST(TunnelPrograms, T1DownTunnels) {
 TEST(TunnelPrograms, OtherProducersFields) {
   const auto g = ordered(3, {{0, 2, 2, 1}, {1, 2, 10, 1}});
   auto gl = make(g, {0, 1}, {2}, global_config());
-  for (const auto& t : gl->place(12).program->tunnels()) {
+  for (const auto& t : gl->place(12, OutputOptions {.program = true}).program->tunnels()) {
     EXPECT_EQ(t.status, UP);
     EXPECT_EQ(t.requested_bandwidth, 0);
     EXPECT_EQ(t.reserved_bandwidth, 0);
@@ -1187,7 +1187,7 @@ TEST(TunnelPrograms, OtherProducersFields) {
 TEST(TunnelZero, T1) {
   for (const auto a : {LOSSLESS, LOSSY}) {
     auto p = make(twoh(2, 10), {0, 1}, {2}, t1(2, a));
-    const auto r = p->replace(0, 12);
+    const auto r = p->replace(0, 12, OutputOptions {.program = true});
     EXPECT_EQ(r.termination, Termination::Complete);
     EXPECT_EQ(r.call_delivered, 0);
     EXPECT_EQ(statuses(*r.program), (std::vector<TunnelStatus> {NB, UP, NB, UP}));
@@ -1195,12 +1195,12 @@ TEST(TunnelZero, T1) {
     EXPECT_EQ(entries(p->records()), (std::vector<std::optional<std::int32_t>> {0, 1, 2, 3}));
     for (const auto& rec : p->records()) EXPECT_EQ(rec.delivered, 0);
     const auto state = ledger_state(*p.ledger);
-    const auto e = p->evaluate(0, 12);
+    const auto e = p->evaluate(0, 12, OutputOptions {.program = true});
     EXPECT_EQ(e.termination, Termination::Complete);
     EXPECT_EQ(statuses(*e.program), (std::vector<TunnelStatus> {NB, UP, NB, UP}));
     expect_same(ledger_state(*p.ledger), state, "evaluate(0, 12)");
     const auto before = p->records();
-    const auto f = p->forward(0);
+    const auto f = p->forward(0, nullptr, OutputOptions {.program = true});
     EXPECT_EQ(f.termination, Termination::Complete);
     EXPECT_FALSE(f.routes_changed || f.weights_changed || f.reservations_changed);
     EXPECT_EQ(f.program, r.program);
@@ -1236,10 +1236,10 @@ TEST(TunnelZero, T1AllMasked) {
   const auto g = twoh(10, 10);
   const auto mask = g->eligibility({}, std::vector<EdgeId> {0, 1});
   auto p = make(g, {0, 1}, {2}, t1(2), &mask);
-  const auto r = p->replace(5, 5);
+  const auto r = p->replace(5, 5, OutputOptions {.program = true});
   EXPECT_EQ(r.termination, Termination::NoRoute);
   EXPECT_TRUE(r.program->tunnels().empty());
-  EXPECT_EQ(p->replace(0, 5).termination, Termination::Complete);
+  EXPECT_EQ(p->replace(0, 5, OutputOptions {.program = true}).termination, Termination::Complete);
   EXPECT_TRUE(p->records().empty());
 }
 
@@ -1251,23 +1251,23 @@ TEST(TunnelZero, T1AllMasked) {
 TEST(TunnelZero, PinnedT1AllFailedOrNoRoster) {
   const auto g = twoh(2, 10);
   auto p = make(g, {0, 1}, {2}, t1(2, LOSSY));
-  const auto prog = p->replace(12, 12).program;
+  const auto prog = p->replace(12, 12, OutputOptions {.program = true, .by_source = true}).program;
   const auto no_e1 = g->eligibility({}, std::vector<EdgeId> {1});
   const auto no_heads = g->eligibility(std::vector<NodeId> {0, 1}, {});
   for (const auto a : {LOSSLESS, LOSSY}) {
     auto pin = make(g, {0, 1}, {2}, FlowPolicyConfig {.routing = Pinned {prog, nullptr}, .admission = a}, &no_e1);
-    const auto r = pin->replace(12);
+    const auto r = pin->replace(12, std::nullopt, OutputOptions {.program = true, .by_source = true});
     EXPECT_EQ(r.termination, Termination::NoActiveWeight);
     if (a == LOSSY) {
       EXPECT_EQ(r.call_source_drops, 12);
       EXPECT_EQ(source_rows(r), (std::vector<SourceRow> {{0, 12, 12, 0, 12, 0}, {1, 0, 0, 0, 0, 0}}));
     }
     EXPECT_EQ(rows(r), (Rows {{0, 0, NB, 0, 0, 0}, {1, 1, FAILED, 0, 0, 0}, {2, 0, NB, 0, 0, 0}, {3, 1, FAILED, 0, 0, 0}}));
-    EXPECT_EQ(pin->replace(0).termination, Termination::Complete);
+    EXPECT_EQ(pin->replace(0, std::nullopt, OutputOptions {.program = true, .by_source = true}).termination, Termination::Complete);
     EXPECT_EQ(entries(pin->records()), (std::vector<std::optional<std::int32_t>> {0, 1, 2, 3}));
     auto none = make(g, {0, 1}, {2}, FlowPolicyConfig {.routing = Pinned {prog, nullptr}, .admission = a}, &no_heads);
-    EXPECT_EQ(none->replace(12).termination, Termination::NoRoute);
-    EXPECT_EQ(none->replace(0).termination, Termination::Complete);
+    EXPECT_EQ(none->replace(12, std::nullopt, OutputOptions {.program = true, .by_source = true}).termination, Termination::NoRoute);
+    EXPECT_EQ(none->replace(0, std::nullopt, OutputOptions {.program = true, .by_source = true}).termination, Termination::Complete);
     EXPECT_EQ(none->records().size(), 4U);
   }
 }
@@ -1451,20 +1451,20 @@ TEST(TunnelRanges, OneMaxAndHoldsNearTheBaseline) {
   const Amount max = kL62 - 1;
   const auto g = ordered(2, {{0, 1, max, 1}});
   auto p = make(g, {0}, {1}, t1(1, LOSSY));
-  const auto r = p->replace(max, max, kHolds);
+  const auto r = p->replace(max, max, result_outputs(kHolds, true, false));
   EXPECT_EQ(statuses(*r.program), (std::vector<TunnelStatus> {UP}));
   EXPECT_EQ(r.plan->total_reserved_bandwidth, max);
   EXPECT_EQ(p.ledger->reserved(), (Amounts {max}));
   EXPECT_EQ(p.ledger->unreserved(), (Amounts {0}));
   EXPECT_EQ(r.call_delivered, max);
   auto ll = make(g, {0}, {1}, t1(1));
-  EXPECT_EQ(ll->replace(INF, max).call_delivered, max);
+  EXPECT_EQ(ll->replace(INF, max, OutputOptions {.program = true}).call_delivered, max);
   auto ledger = std::make_shared<FlowLedger>(g);
   auto a = make(g, {0}, {1}, t1(1), nullptr, ledger);
   auto b = make(g, {0}, {1}, t1(1), nullptr, ledger);
   const Amount half = Amount {1} << 61;
-  EXPECT_EQ(statuses(*a->replace(half, half).program), (std::vector<TunnelStatus> {UP}));
-  EXPECT_EQ(statuses(*b->replace(half, half).program), (std::vector<TunnelStatus> {NB}));
+  EXPECT_EQ(statuses(*a->replace(half, half, OutputOptions {.program = true}).program), (std::vector<TunnelStatus> {UP}));
+  EXPECT_EQ(statuses(*b->replace(half, half, OutputOptions {.program = true}).program), (std::vector<TunnelStatus> {NB}));
   EXPECT_EQ(ledger->unreserved(), (Amounts {half - 1}));
   expect_balanced(*ledger, "near the baseline");
 }
@@ -1478,7 +1478,7 @@ TEST(TunnelRanges, ManyTunnels) {
   const auto g = ordered(5, {{0, 4, cap, 1}, {1, 4, cap, 1}, {2, 4, cap, 1}, {3, 4, cap, 1}});
   auto p = make(g, {0, 1, 2, 3}, {4}, t1(10000));
   const Amount D = kL62 - 4;
-  const auto r = p->replace(D, D);
+  const auto r = p->replace(D, D, OutputOptions {.program = true});
   ASSERT_EQ(r.program->tunnels().size(), 40000U);
   std::map<Amount, std::int64_t> counts;
   for (const auto& t : r.program->tunnels()) {
@@ -1560,7 +1560,7 @@ TEST(CostStretch, CeilingProductsBeyond64Bits) {
     for (const auto& [cost, path] : ksp(*g, 0, 1, o)) costs.push_back(cost);
     EXPECT_EQ(costs, x.admitted ? (std::vector<Cost> {b, x.c}) : (std::vector<Cost> {b})) << x.c;
     auto p = make(g, {0}, {1}, t1(2, LOSSLESS, CostCeiling {x.f}));
-    const auto r = p->replace(2, 2);
+    const auto r = p->replace(2, 2, OutputOptions {.program = true});
     ASSERT_TRUE(r.program);
     std::vector<TunnelStatus> statuses;
     for (const auto& t : r.program->tunnels()) statuses.push_back(t.status);
@@ -1658,11 +1658,11 @@ TEST(T1Property, SetupAndBoundAgainstTheReference) {
       s.ledger = std::make_shared<FlowLedger>(g, service, reservation);
       if (other_holds) {
         s.holds = std::make_unique<FlowPolicy>(*s.ledger, src, dst, t1(1));
-        (void)s.holds->replace(0, other_d);
+        (void)s.holds->replace(0, other_d, OutputOptions {.program = true});
       }
       if (other_load) {
         s.load = std::make_unique<FlowPolicy>(*s.ledger, src, dst, shortest_paths_config());
-        (void)s.load->place(other_d);
+        (void)s.load->place(other_d, OutputOptions {.program = true});
       }
       s.p = std::make_unique<FlowPolicy>(*s.ledger, src, dst, t1(N, a, ceiling, minimum, rs.tie_break, rs.parallel_edges), elig);
       return s;
@@ -1680,7 +1680,7 @@ TEST(T1Property, SetupAndBoundAgainstTheReference) {
     const auto heads = t1_reference::roster(*g, elig, src, dests_ok);
     if (heads.empty()) continue;
     const auto want = t1_reference::setup(*g, elig, heads, dests_ok, rs, ceiling, minimum, D, N, U);
-    const auto r = s.p->replace(INF, D);
+    const auto r = s.p->replace(INF, D, OutputOptions {.program = true});
     ASSERT_EQ(vec(detail::ProgramAccess::data(*r.program).reachable_sources), heads) << where;
     ASSERT_EQ(r.program->tunnels().size(), want.size()) << where;
     std::vector<Amount> sum(U.size(), 0);
@@ -1713,14 +1713,14 @@ TEST(T1Property, SetupAndBoundAgainstTheReference) {
     EXPECT_EQ(r.call_delivered, bound) << where;
     bounded += bound > 0 ? 1 : 0;
     // The setup does not depend on the offer (evaluate releases the policy's own holds).
-    const auto e = s.p->evaluate(below(9), D);
+    const auto e = s.p->evaluate(below(9), D, OutputOptions {.program = true});
     EXPECT_EQ(routes(*e.program), routes(*r.program)) << where;
     EXPECT_EQ(statuses(*e.program), statuses(*r.program)) << where;
     // Every tunnel up and U <= V on every link: D is carried without loss.
     bool covered = all_up;
     for (std::size_t x = 0; covered && x < U.size(); ++x) covered = U[x] <= V[x];
     if (covered) {
-      EXPECT_EQ(s.p->evaluate(D, D).call_delivered, D) << where;
+      EXPECT_EQ(s.p->evaluate(D, D, OutputOptions {.program = true}).call_delivered, D) << where;
       ++design_carried;
     }
     preferred += rs.prefer() ? 1 : 0;
@@ -1728,7 +1728,7 @@ TEST(T1Property, SetupAndBoundAgainstTheReference) {
     // Lossy: the same setup; the accounting and every record's conservation.
     auto ly = build(LOSSY);
     const Amount offer = below(15);
-    const auto lr = ly.p->replace(offer, D);
+    const auto lr = ly.p->replace(offer, D, OutputOptions {.program = true});
     EXPECT_EQ(routes(*lr.program), routes(*r.program)) << where;
     Amount drops = 0;
     for (const auto& [x, d] : lr.edge_drops) drops += lo(d);

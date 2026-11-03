@@ -988,7 +988,7 @@ class ForwardingProgram:
     captured weights ((source, weight) for every roster source, ascending): optimized controllers' solved
     supplies, weighted CentralizedTE's declared weights, or None for equal sources (round robin). Each head splits its share by
     highest averages over its entries' weights; identical routes are never merged. ShortestPaths and CentralizedTE
-    produce one (FlowPolicy.program, PlacementResult.program), and so do T1 and T2 (their tunnels);
+    produce one (FlowPolicy.program; PlacementResult.program when requested), and so do T1 and T2 (their tunnels);
     from_routes builds one from given routes and from_dag one shared hop-by-hop program on a DAG; Pinned
     forwards one. No public constructor.
     """
@@ -1469,7 +1469,8 @@ class OutputOptions:
     strict holds per edge after the call; zeros for a model without holds), and min_cut (unrestricted
     CentralizedTE with the optimized source allocation, when the call's solve reached the maximum
     flow; [] for an empty roster, place(0) excepted; None for every other model or source allocation,
-    for place(0) and for a forward with a nonempty roster).
+    for place(0) and for a forward with a nonempty roster). program requests the installed,
+    replayed or evaluated forwarding program; by_source requests one row per normalized input source.
     """
 
     def __init__(
@@ -1480,7 +1481,15 @@ class OutputOptions:
         saturated_boundary_edges: bool = False,
         edge_reservations: bool = False,
         min_cut: bool = False,
+        program: bool = False,
+        by_source: bool = False,
     ) -> None: ...
+    @property
+    def by_source(self) -> bool:
+        """
+        request PlacementResult.by_source
+        """
+
     @property
     def edge_flows(self) -> bool:
         """
@@ -1497,6 +1506,12 @@ class OutputOptions:
     def min_cut(self) -> bool:
         """
         request PlacementResult.min_cut
+        """
+
+    @property
+    def program(self) -> bool:
+        """
+        request PlacementResult.program
         """
 
     @property
@@ -1768,17 +1783,19 @@ class PlacementResult:
     [(EdgeId, units)], call_source_drops, termination, routes_changed, weights_changed and
     reservations_changed. The
     demand's state after the call (totals of the epoch): program (the installed ForwardingProgram;
-    evaluate: the computed one; None before the first preparation), plan (a TunnelPlan for T1 and T2;
+    evaluate: the computed one; None unless requested, and before the first preparation), plan (a TunnelPlan for T1 and T2;
     None for every other model), requested (float('inf') after an infinite request), offered (LOSSY: the traffic sent; None when LOSSLESS), admitted, delivered, unadmitted
     (LOSSLESS: requested - delivered, None after an infinite request; LOSSY: 0), source_drops,
-    edge_drops [(EdgeId, units)], by_source (one SourceFlow per normalized input source, ascending
+    edge_drops [(EdgeId, units)], by_source (when requested: one SourceFlow per normalized input source, ascending
     NodeId), by_tunnel (one TunnelFlow per program tunnel, ascending entry_id; an alternative view, never
     added to by_source), total_cost (controllers: CentralizedTE and ShortestPaths OPTIMIZED; else None)
     and marginal_cost_curve (unrestricted CentralizedTE with the optimized source allocation only).
     LOSSY: offered = source_drops + sum(edge_drops) + delivered. The rows sum to the totals, except, under
     LOSSY, for an empty roster and for a forwarding whose remaining captured source weights are all 0
     (a controller program that sent nothing, or a mask that left only zero-weight heads): the whole
-    offer is then the demand's source drops and every row is zero. Optional outputs, None unless requested: edge_flows, residual and edge_reservations
+    offer is then the demand's source drops and every row is zero. program and by_source are None unless
+    their OutputOptions flag is true; live policy programs and records are independent of these flags.
+    Other optional outputs, None unless requested: edge_flows, residual and edge_reservations
     (int64[E]), saturated_boundary_edges, min_cut (they describe the same
     state; evaluate: the evaluated one). Amounts that accumulate are exact ints (they may exceed 64 bits).
     """
@@ -1792,9 +1809,9 @@ class PlacementResult:
         """
 
     @property
-    def by_source(self) -> tuple[SourceFlow, ...]:
+    def by_source(self) -> tuple[SourceFlow, ...] | None:
         """
-        one SourceFlow per normalized input source, ascending NodeId (zero rows included)
+        if requested: one SourceFlow per normalized input source, ascending NodeId (zero rows included); else None
         """
 
     @property
@@ -1903,7 +1920,7 @@ class PlacementResult:
     @property
     def program(self) -> ForwardingProgram | None:
         """
-        the installed ForwardingProgram after the call (evaluate: the computed one); None before the first
+        if requested: the installed ForwardingProgram after the call (evaluate: the computed one); None otherwise and before the first
         preparation
         """
 
@@ -2128,7 +2145,7 @@ class FlowPolicy:
         A full, independent computation and forwarding of offer (int units or float('inf')) from the
         policy's own released view (the residual plus its own carried load; T1 sets up on the unreserved
         capacity with its own holds released; T2 lays out on the released residual), as replace would do it -> PlacementResult (the computed
-        program and plan, the flags replace would set, the outputs of the evaluated state); publishes
+        plan, the flags replace would set, and requested outputs including program and by_source); publishes
         nothing, creates no record, books no hold and leaves the epoch as it was. design_demand as for
         replace. LOSSY requires a finite offer.
         """

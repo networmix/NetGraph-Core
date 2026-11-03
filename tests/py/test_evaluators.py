@@ -10,7 +10,7 @@ import math
 
 import numpy as np
 import pytest
-from helpers import build, exact, plain
+from helpers import build, evaluation_outputs, exact, plain
 
 import netgraph_core as ngc
 
@@ -76,8 +76,19 @@ def test_optimized_deletion_shortcuts_keep_complete_results(workers, bits):
     for n, edges, sources, destinations, value, cost, reductions in fixtures:
         g = build(n, edges)
         options = opts(model, outputs=outputs)
-        got = ngc.evaluate_edge_failures(g, sources, destinations, options, workers)
-        baseline = ngc.evaluate_demand(g, sources, destinations, options)
+        got = ngc.evaluate_edge_failures(
+            g,
+            sources,
+            destinations,
+            evaluation_outputs(options, program=True, by_source=True),
+            workers,
+        )
+        baseline = ngc.evaluate_demand(
+            g,
+            sources,
+            destinations,
+            evaluation_outputs(options, program=True, by_source=True),
+        )
         assert plain(got.baseline) == plain(baseline)
         assert (got.baseline.call_delivered, got.baseline.total_cost) == (value, cost)
         by_input = dict(reductions)
@@ -95,7 +106,12 @@ def test_optimized_deletion_shortcuts_keep_complete_results(workers, bits):
                 eligibility=g.eligibility(excluded_edges=[entry.edge]),
                 outputs=outputs,
             )
-            fresh = ngc.evaluate_demand(g, sources, destinations, without)
+            fresh = ngc.evaluate_demand(
+                g,
+                sources,
+                destinations,
+                evaluation_outputs(without, program=True, by_source=True),
+            )
             assert entry.delivery_reduction == value - fresh.call_delivered
             if fresh.edge_flows is not None:
                 caps = list(g.edge_capacity_units())
@@ -123,16 +139,34 @@ def test_optimized_deletion_shortcuts_masks_finite_zero_and_wide_cost():
         for offer in [None, 0, 1, 3, 4]:
             options = opts(model, eligibility=eligibility, outputs=outputs, offer=offer)
             for workers in [1, 2]:
-                got = ngc.evaluate_edge_failures(g, [0], [2], options, workers)
+                got = ngc.evaluate_edge_failures(
+                    g,
+                    [0],
+                    [2],
+                    evaluation_outputs(options, program=True, by_source=True),
+                    workers,
+                )
                 assert plain(got.baseline) == plain(
-                    ngc.evaluate_demand(g, [0], [2], options)
+                    ngc.evaluate_demand(
+                        g,
+                        [0],
+                        [2],
+                        evaluation_outputs(options, program=True, by_source=True),
+                    )
                 )
                 for entry in got.entries:
                     deleted = g.eligibility(excluded_edges=[entry.edge])
                     if eligibility is not None:
                         deleted = ngc.Eligibility.intersect(eligibility, deleted)
                     fresh = ngc.evaluate_demand(
-                        g, [0], [2], opts(model, eligibility=deleted, offer=offer)
+                        g,
+                        [0],
+                        [2],
+                        evaluation_outputs(
+                            opts(model, eligibility=deleted, offer=offer),
+                            program=True,
+                            by_source=True,
+                        ),
                     )
                     assert (
                         entry.delivery_reduction
@@ -140,7 +174,13 @@ def test_optimized_deletion_shortcuts_masks_finite_zero_and_wide_cost():
                     )
     amount = (1 << 32) + 1
     wide = build(2, [(0, 1, amount, amount)])
-    got = ngc.evaluate_edge_failures(wide, 0, 1, opts(model, outputs=outputs), 2)
+    got = ngc.evaluate_edge_failures(
+        wide,
+        0,
+        1,
+        evaluation_outputs(opts(model, outputs=outputs), program=True, by_source=True),
+        2,
+    )
     assert got.baseline.total_cost == (1 << 64) + (1 << 33) + 1
     assert [(e.edge, e.delivery_reduction) for e in got.entries] == [(0, amount)]
 
@@ -158,8 +198,15 @@ def opts(routing, admission=LL, **kw):
     )
 
 
-def demand(g, routing, admission=LL, **kw):
-    return ngc.evaluate_demand(g, 0, 1, opts(routing, admission, **kw))
+def demand(g, routing, admission=LL, *, program=False, by_source=False, **kw):
+    return ngc.evaluate_demand(
+        g,
+        0,
+        1,
+        evaluation_outputs(
+            opts(routing, admission, **kw), program=program, by_source=by_source
+        ),
+    )
 
 
 def failures(g, routing, admission=LL, workers=1, **kw):
@@ -232,17 +279,17 @@ def test_offer_shortest_paths_lossy():
     # the first-hop experiment: each first-hop link injects its own free capacity (4 and 10),
     # offered 14 against requested +inf, nothing dropped.
     g = par(4, 10)
-    r = demand(g, ngc.ShortestPaths(), LY, offer=12)
+    r = demand(g, ngc.ShortestPaths(), LY, offer=12, by_source=True)
     assert (r.call_delivered, r.call_edge_drops, r.by_source[0].offered) == (
         10,
         [(0, 2)],
         12,
     )
     assert r.termination == T.COMPLETE
-    r = demand(g, ngc.ShortestPaths(), LY)
+    r = demand(g, ngc.ShortestPaths(), LY, by_source=True)
     assert (r.call_delivered, r.requested, r.by_source[0].offered) == (14, INF, 14)
     assert r.call_edge_drops == []
-    r = demand(g, ngc.ShortestPaths(), LY, offer=0)
+    r = demand(g, ngc.ShortestPaths(), LY, offer=0, by_source=True)
     assert (r.call_delivered, r.by_source[0].offered) == (0, 0)
 
 
@@ -277,20 +324,20 @@ def test_offer_distributed():
     # T1, two tunnels sized for the design 8 (requests 4 and 4: one on each link): Lossless
     # bound 8, an offer 5 delivered in full; Lossy 12 splits 6 and 6, link 0 drops 2.
     g = par(4, 10)
-    assert demand(g, dte(), design_demand=8).call_delivered == 8
-    assert demand(g, dte(), design_demand=8, offer=5).call_delivered == 5
-    r = demand(g, dte(), LY, design_demand=8, offer=12)
+    assert demand(g, dte(), design_demand=8, program=True).call_delivered == 8
+    assert demand(g, dte(), design_demand=8, offer=5, program=True).call_delivered == 5
+    r = demand(g, dte(), LY, design_demand=8, offer=12, program=True)
     assert [list(t.edges) for t in r.program.tunnels] == [[0], [1]]
     assert (r.call_delivered, r.call_edge_drops) == (10, [(0, 2)])
     with pytest.raises(
         ValueError,
         match=exact("DistributedTE LOSSY evaluation requires a finite offer"),
     ):
-        demand(g, dte(), LY, design_demand=8)
+        demand(g, dte(), LY, design_demand=8, program=True)
     with pytest.raises(
         ValueError, match=exact("DistributedTE evaluation requires design_demand")
     ):
-        demand(g, dte())
+        demand(g, dte(), program=True)
 
 
 def test_offer_centralized_tunnels():
@@ -298,22 +345,22 @@ def test_offer_centralized_tunnels():
     # offer 5 is also the design; Lossy 12 (the design 12, u 5) drops 2 on link 1; Lossy with
     # the design 4 and no offer forwards 4 (u 2, both tunnels on link 0).
     g = par(4, 10)
-    r = demand(g, t2())
+    r = demand(g, t2(), program=True)
     assert (r.call_delivered, r.plan.max_bandwidth_per_tunnel) == (10, 5)
     assert [list(t.edges) for t in r.program.tunnels] == [[1], [1]]
-    r = demand(g, t2(), offer=5)
+    r = demand(g, t2(), offer=5, program=True)
     assert (r.call_delivered, r.plan.design_demand) == (5, 5)
-    r = demand(g, t2(), LY, offer=12)
+    r = demand(g, t2(), LY, offer=12, program=True)
     assert (r.call_delivered, r.call_edge_drops) == (10, [(1, 2)])
     assert (r.plan.design_demand, r.plan.planned_bandwidth_per_tunnel) == (12, 5)
-    r = demand(g, t2(), LY, design_demand=4)
+    r = demand(g, t2(), LY, design_demand=4, program=True)
     assert (r.call_delivered, r.plan.planned_bandwidth_per_tunnel) == (4, 2)
     assert [list(t.edges) for t in r.program.tunnels] == [[0], [0]]
     with pytest.raises(
         ValueError,
         match=exact("CentralizedTE LOSSY evaluation requires a finite offer"),
     ):
-        demand(g, t2(), LY)
+        demand(g, t2(), LY, program=True)
 
 
 def test_offer_pinned():
@@ -369,10 +416,20 @@ def test_offer_zero_and_masked():
     # still set up (both tunnels up, 8 reserved).
     g = par(4, 10)
     mask = g.eligibility(excluded_edges=[0, 1])
-    r = demand(g, ngc.ShortestPaths(), LY, eligibility=mask, offer=4)
+    r = demand(
+        g,
+        ngc.ShortestPaths(),
+        LY,
+        eligibility=mask,
+        offer=4,
+        program=True,
+        by_source=True,
+    )
     assert (r.termination, r.call_delivered, r.call_source_drops) == (T.NO_ROUTE, 0, 4)
     assert [(s.offered, s.source_drops) for s in r.by_source] == [(0, 0)]
-    r = demand(g, ngc.ShortestPaths(), eligibility=mask, offer=4)
+    r = demand(
+        g, ngc.ShortestPaths(), eligibility=mask, offer=4, program=True, by_source=True
+    )
     assert (r.termination, r.call_delivered, r.call_undelivered) == (T.NO_ROUTE, 0, 4)
     pin = two_paths(g)
     for model, admission, kw in (
@@ -387,9 +444,9 @@ def test_offer_zero_and_masked():
         (pin, LL, {}),
         (pin, LY, {}),
     ):
-        r = demand(g, model, admission, offer=0, **kw)
+        r = demand(g, model, admission, offer=0, **kw, program=True, by_source=True)
         assert (r.termination, r.call_delivered) == (T.COMPLETE, 0), model
-    r = demand(g, dte(), LY, design_demand=8, offer=0)
+    r = demand(g, dte(), LY, design_demand=8, offer=0, program=True, by_source=True)
     assert r.plan.total_reserved_bandwidth == 8
     assert [t.status for t in r.program.tunnels] == [ngc.TunnelStatus.UP] * 2
 
@@ -449,7 +506,7 @@ def outcome(model, kwargs, admission="LOSSLESS", offer=None, design_demand=None)
     except TypeError:
         return "TypeError"
     try:
-        r = ngc.evaluate_demand(g, 0, 2, options)
+        r = ngc.evaluate_demand(g, 0, 2, evaluation_outputs(options, by_source=True))
     except ValueError as e:
         return str(e)
     if r.requested == INF and r.by_source[0].offered is not None:
@@ -776,7 +833,13 @@ def test_pair_rosters_use_the_composed_mask(model):
     ]
     common = g.eligibility(excluded_nodes=[2])
     o = opts(routing(g), eligibility=common, design_demand=6, offer=4, outputs=ALL_OUT)
-    result = ngc.evaluate_pairs(g, [([0, 1], 3)] * 3, o, masks, 2)
+    result = ngc.evaluate_pairs(
+        g,
+        [([0, 1], 3)] * 3,
+        evaluation_outputs(o, program=True, by_source=True),
+        masks,
+        2,
+    )
     assert [r.delivered for r in result] == [4, 4, 0]
     assert [r.edge_flows.tolist() for r in result] == [[0, 4], [0, 4], [0, 0]]
     zero = opts(
@@ -784,7 +847,13 @@ def test_pair_rosters_use_the_composed_mask(model):
     )
     assert all(
         r.delivered == 0
-        for r in ngc.evaluate_pairs(g, [([0, 1], 3)] * 3, zero, masks, 2)
+        for r in ngc.evaluate_pairs(
+            g,
+            [([0, 1], 3)] * 3,
+            evaluation_outputs(zero, program=True, by_source=True),
+            masks,
+            2,
+        )
     )
 
     rng = random.Random(7)
@@ -823,7 +892,9 @@ def test_pair_rosters_use_the_composed_mask(model):
         options = ngc.EvaluationOptions(
             config, eligibility=common, design_demand=6, offer=4, outputs=ALL_OUT
         )
-        batch = ngc.evaluate_pairs(g, pairs, options, per, 2)
+        batch = ngc.evaluate_pairs(
+            g, pairs, evaluation_outputs(options, program=True, by_source=True), per, 2
+        )
         assert len(batch) == 3
         for i, (heads, destinations) in enumerate(pairs):
             mask = (
@@ -833,7 +904,12 @@ def test_pair_rosters_use_the_composed_mask(model):
                 config, eligibility=mask, design_demand=6, offer=4, outputs=ALL_OUT
             )
             assert plain(batch[i]) == plain(
-                ngc.evaluate_demand(g, heads, destinations, single)
+                ngc.evaluate_demand(
+                    g,
+                    heads,
+                    destinations,
+                    evaluation_outputs(single, program=True, by_source=True),
+                )
             )
             compared += 1
     assert compared >= 400

@@ -48,8 +48,8 @@ through six things:
 5. **Forwarding**: the call's offer is split over the program's routes in whole units. `LOSSLESS`
    admits only what goes through without loss; `LOSSY` sends everything and records where it is
    lost.
-6. A **result** (`PlacementResult`): what the call delivered, what was lost and where, the program,
-   and the demand's totals.
+6. A **result** (`PlacementResult`): what the call delivered, what was lost and where, and the demand's totals.
+   The program and per-source rows are optional outputs.
 
 One demand, routed like IGP routers with equal-cost multipath (ECMP), on a network of two branches:
 
@@ -1139,7 +1139,7 @@ when the policy is built.
 - The roster decides which sources receive shares. For the computing models it also decides which
   records exist (T1 and T2: its heads' entries); `Pinned` keeps one record per configured program
   entry even when no head survives the replay (such a record stays at zero).
-- `by_source` reports every input source, a source outside the roster with a zero row.
+- When requested, `by_source` reports every input source, a source outside the roster with a zero row.
 - A positive offer with an empty roster ends `NO_ROUTE`: a computing model creates no record, and
   `Pinned` creates or keeps its per-entry records at zero.
 
@@ -1178,11 +1178,11 @@ of 2 + 30 = 32. Weights 1, 1 and 2 over three private links of 4 give `H(8, [1, 
 S = ngc.SourceAllocation
 g = graph(4, [(0, 3, 2, 1), (1, 2, 10, 1), (2, 3, 10, 2)])
 for sa in (S.EQUAL, S.OPTIMIZED):
-    r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, config(ngc.CentralizedTE(source_allocation=sa))).place(12)
+    r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, config(ngc.CentralizedTE(source_allocation=sa))).place(12, outputs=ngc.OutputOptions(by_source=True))
     print(sa.name, r.call_delivered, r.total_cost, [(row.source, row.delivered) for row in r.by_source])
 g = graph(4, [(0, 3, 4, 1), (1, 3, 4, 1), (2, 3, 4, 1)])
 weighted = ngc.CentralizedTE(source_allocation=S.WEIGHTED, source_weights=[1, 1, 2, 0])
-r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1, 2], 3, config(weighted)).place(float("inf"))
+r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1, 2], 3, config(weighted)).place(float("inf"), outputs=ngc.OutputOptions(by_source=True))
 print("WEIGHTED", r.call_delivered, [(row.source, row.delivered) for row in r.by_source])
 ```
 
@@ -1372,7 +1372,7 @@ ledger = ngc.FlowLedger(g)
 lossy_t1 = ngc.FlowPolicyConfig(routing=ngc.DistributedTE(ngc.TunnelCount(2)),
                                 admission=ngc.Admission.LOSSY)
 pol = ngc.FlowPolicy(ledger, [0, 1], 2, lossy_t1)
-r = pol.replace(12, design_demand=12)
+r = pol.replace(12, design_demand=12, outputs=ngc.OutputOptions(program=True))
 print([t.status.name for t in r.program.tunnels])
 print([(t.entry_id, t.head, t.requested_bandwidth, t.reserved_bandwidth, t.edges) for t in r.program.tunnels])
 print(r.call_delivered, r.call_source_drops, r.plan.total_reserved_bandwidth, r.plan.design_by_head)
@@ -1406,7 +1406,7 @@ g = graph(3, [(0, 2, 0, 1), (1, 2, 8, 3)])
 for ceiling in (ngc.CostStretch(2), ngc.AbsoluteCost(3)):
     t1 = ngc.FlowPolicyConfig(routing=ngc.DistributedTE(ngc.TunnelCount(1), cost_ceiling=ceiling),
                               admission=ngc.Admission.LOSSY)
-    r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, t1).replace(4, design_demand=4)
+    r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, t1).replace(4, design_demand=4, outputs=ngc.OutputOptions(program=True))
     print(repr(ceiling), [t.status.name for t in r.program.tunnels], r.call_delivered)
 ```
 
@@ -1445,7 +1445,7 @@ g = graph(4, [(0, 1, 4, 1), (0, 2, 10, 1), (1, 3, 4, 1), (2, 3, 10, 1)])
 four = ngc.FlowPolicyConfig(routing=ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.EQUAL,
                                                       tunnel_count=ngc.TunnelCount(4)),
                             admission=ngc.Admission.LOSSY)
-r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, four).replace(16)
+r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, four).replace(16, outputs=ngc.OutputOptions(program=True))
 p = r.plan
 print(p.max_fractional_bandwidth_per_tunnel, p.max_bandwidth_per_tunnel, p.total_planned_bandwidth,
       p.max_lossless_offer)
@@ -1565,7 +1565,7 @@ Two heads behind private links of 3 and 8 to node 2, two tunnels each, design 6:
 g = graph(3, [(0, 2, 3, 1), (1, 2, 8, 1)])
 two = ngc.FlowPolicyConfig(routing=ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.EQUAL,
                                                      tunnel_count=ngc.TunnelCount(2)))
-r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, two).replace(6)
+r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, two).replace(6, outputs=ngc.OutputOptions(program=True))
 p = r.plan
 print(p.max_fractional_bandwidth_per_tunnel, p.max_bandwidth_per_tunnel, p.planned_bandwidth_per_tunnel,
       p.max_lossless_offer)
@@ -1594,7 +1594,7 @@ te16 = ngc.FlowPolicyConfig(routing=ngc.CentralizedTE(source_allocation=ngc.Sour
                                                      tunnel_count=ngc.TunnelCount(16), prefer_headroom=True),
                             admission=ngc.Admission.LOSSY)
 pol = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, te16)
-r = pol.replace(49152)
+r = pol.replace(49152, outputs=ngc.OutputOptions(program=True))
 p = r.plan
 print(p.max_bandwidth_per_tunnel, p.planned_bandwidth_per_tunnel, p.max_fractional_bandwidth_per_tunnel, p.max_lossless_offer, r.call_delivered)
 print(p.total_planned_bandwidth, p.total_tunnel_cost, p.headroom_penalty, p.heads_with_capacity, p.insufficient_resolution)
@@ -1629,12 +1629,12 @@ lossy_t2 = lambda tunnel_count: ngc.FlowPolicyConfig(
     routing=ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.EQUAL, tunnel_count=tunnel_count),
     admission=ngc.Admission.LOSSY)
 dead = graph(3, [(0, 2, 0, 1), (1, 2, 10, 1)])
-r = ngc.FlowPolicy(ngc.FlowLedger(dead), [0, 1], 2, lossy_t2(ngc.TunnelCount(2))).replace(10)
+r = ngc.FlowPolicy(ngc.FlowLedger(dead), [0, 1], 2, lossy_t2(ngc.TunnelCount(2))).replace(10, outputs=ngc.OutputOptions(program=True))
 print(r.plan.heads_with_capacity, [t.entry_id for t in r.program.tunnels], r.plan.planned_bandwidth_per_tunnel, r.call_delivered, r.call_source_drops)
 tiny = graph(3, [(0, 2, 1, 1), (1, 2, 100, 1)])
-r = ngc.FlowPolicy(ngc.FlowLedger(tiny), [0, 1], 2, lossy_t2(ngc.TunnelCount(16))).replace(200)
+r = ngc.FlowPolicy(ngc.FlowLedger(tiny), [0, 1], 2, lossy_t2(ngc.TunnelCount(16))).replace(200, outputs=ngc.OutputOptions(program=True))
 print(r.plan.insufficient_resolution, r.plan.max_fractional_bandwidth_per_tunnel, r.program.tunnels, r.call_source_drops)
-r = ngc.FlowPolicy(ngc.FlowLedger(tiny), [0, 1], 2, lossy_t2(ngc.TunnelCount(3, up_to=True))).replace(200)
+r = ngc.FlowPolicy(ngc.FlowLedger(tiny), [0, 1], 2, lossy_t2(ngc.TunnelCount(3, up_to=True))).replace(200, outputs=ngc.OutputOptions(program=True))
 print(r.plan.tunnels_per_head, [t.edges for t in r.program.tunnels], r.call_delivered)
 ```
 
@@ -1677,7 +1677,7 @@ for on in (False, True):
     cfg = ngc.FlowPolicyConfig(routing=ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.EQUAL,
                                                          tunnel_count=ngc.TunnelCount(2), prefer_headroom=on),
                                admission=ngc.Admission.LOSSY)
-    r = ngc.FlowPolicy(ngc.FlowLedger(par), 0, 1, cfg).replace(12, design_demand=2)
+    r = ngc.FlowPolicy(ngc.FlowLedger(par), 0, 1, cfg).replace(12, design_demand=2, outputs=ngc.OutputOptions(program=True))
     print(on, [t.edges for t in r.program.tunnels], r.plan.headroom_penalty, r.plan.max_lossless_offer, r.call_delivered)
 ```
 
@@ -1702,7 +1702,7 @@ on_support = ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.EQUAL, sup
                                tunnel_count=ngc.TunnelCount(2))
 for mask in (None, sup.eligibility(excluded_edges=[1])):
     pol = ngc.FlowPolicy(ngc.FlowLedger(sup), 0, 1, ngc.FlowPolicyConfig(routing=on_support), mask)
-    r = pol.replace(float("inf"))
+    r = pol.replace(float("inf"), outputs=ngc.OutputOptions(program=True))
     print(r.plan.max_bandwidth_per_tunnel, [t.edges for t in r.program.tunnels], r.plan.max_lossless_offer)
 ```
 
@@ -1763,7 +1763,7 @@ separately, each source would send its unit to the first member:
 # Edges 0: 0 -> 2, 1: 1 -> 2, then the two members 2: 2 -> 3 and 3: 2 -> 3.
 g = graph(4, [(0, 2, 5, 1), (1, 2, 5, 1), (2, 3, 1, 1), (2, 3, 1, 1)])
 pol = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, config(ngc.ShortestPaths()))
-r = pol.place(2)
+r = pol.place(2, outputs=ngc.OutputOptions(by_source=True))
 print(r.call_delivered, r.termination.name, [(row.source, row.delivered) for row in r.by_source])
 print([(rec.sources, rec.edge_flows) for rec in pol.records()])
 ```
@@ -1795,7 +1795,7 @@ for name, cfg in (("ShortestPaths", config(ngc.ShortestPaths())),
     r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, cfg).place(10)
     print(name, r.call_delivered, r.termination.name)
 lossy = config(ngc.ShortestPaths(), admission=ngc.Admission.LOSSY)
-r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, lossy).place(10)
+r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, lossy).place(10, outputs=ngc.OutputOptions(by_source=True))
 print("LOSSY", r.call_delivered, r.call_edge_drops, [(row.source, row.total_edge_drops) for row in r.by_source])
 r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, config(ngc.ShortestPaths()),
                    g.eligibility(excluded_nodes=[0])).place(10)
@@ -1816,8 +1816,8 @@ source 1 blocked 1
 ### Forwarding programs
 
 **In plain words.** A program is what a routing decided, written down: which routes each source
-uses and in which integer proportions. Every computing model produces one (`policy.program`,
-`result.program`). `Pinned(program)` forwards a program without computing anything: to replay a
+uses and in which integer proportions. Every computing model produces one (`policy.program`);
+a completed result retains it only with `OutputOptions(program=True)` (`result.program`). `Pinned(program)` forwards a program without computing anything: to replay a
 solution on another ledger, to study a failure (the routers drop the failed routes and split over
 the survivors) or to study the moment before anyone reacts (the failed elements swallow what
 reaches them). `ForwardingProgram.from_routes` builds a program from routes you give, each its own
@@ -2030,7 +2030,7 @@ head's surviving tunnel:
 ```python
 g = graph(4, [(0, 1, 2, 1), (0, 2, 10, 1), (1, 3, 2, 1), (2, 3, 10, 1)])
 solved = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, ngc.FlowPolicyConfig(routing=ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.OPTIMIZED)))
-prog = solved.replace(12).program
+prog = solved.replace(12, outputs=ngc.OutputOptions(program=True)).program
 print([(t.entry_id, list(t.edges), t.weight) for t in prog.tunnels], prog.source_weights)
 r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, pinned(prog, ngc.Admission.LOSSY),
                    g.eligibility(excluded_edges=[2])).replace(12)
@@ -2204,9 +2204,10 @@ Round 3 repeats round 1, so the call raises the period-2 error and publishes not
    infinite one is rejected (`finite placement after infinite placement requires a new epoch`, the
    cumulative request would be undefined), `place(0)` included.
 2. **An offer of 0** is `COMPLETE` and does nothing: it creates no flow and prepares nothing.
-   Before any program exists (a new policy, or after `remove()`) its result is all zeros, every
-   flag false; with a program installed it reports the demand's current state with every flag
-   false. It is not a removal: `remove()` is.
+   Before any program exists (a new policy, or after `remove()`) its numeric state is zero and
+   every change flag is false; with a program installed it reports the demand's current state
+   with every change flag false. Optional fields follow `outputs` in both cases. It is not a
+   removal: `remove()` is.
 3. **`ShortestPaths` split routing and `Pinned`.** `ShortestPaths` prepares the program at the
    epoch's first positive call (one record per roster source, also at zero delivery); `Pinned`
    creates its records, one per entry, there. The two admissions count the new offer differently:
@@ -2374,7 +2375,7 @@ def show(r):
 g = graph(4, [(0, 1, 6, 1), (0, 2, 6, 3), (1, 2, 4, 1), (1, 3, 6, 3), (2, 3, 6, 1)])
 for admission in (ngc.Admission.LOSSY, ngc.Admission.LOSSLESS):
     all_down = ngc.FlowPolicyConfig(routing=ngc.DistributedTE(ngc.TunnelCount(2)), admission=admission)
-    r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, all_down).replace(14, design_demand=14)
+    r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, all_down).replace(14, design_demand=14, outputs=ngc.OutputOptions(by_source=True))
     print(admission.name, [t.status.name for t in r.by_tunnel], r.call_source_drops, end=" ")
     show(r)
 
@@ -2386,7 +2387,7 @@ ledger = ngc.FlowLedger(g)
 ngc.FlowPolicy(ledger, 1, 4, config(ngc.ShortestPaths())).place(1)
 weighted = ngc.FlowPolicyConfig(routing=ngc.ShortestPaths(allocation=ngc.RouteAllocation.WEIGHTED,
                                                           weight_basis=ngc.WeightBasis.RESIDUAL_SNAPSHOT))
-show(ngc.FlowPolicy(ledger, 1, 4, weighted).place(1))
+show(ngc.FlowPolicy(ledger, 1, 4, weighted).place(1, outputs=ngc.OutputOptions(by_source=True)))
 ```
 
 ```text
@@ -2453,14 +2454,21 @@ confused.
   `weights_changed` and `reservations_changed` as above; `delivery_delta`, the change of the
   delivery (for `place` it equals `call_delivered`); `call_edge_drops`, this call's drops per edge
   as `[(EdgeId, units)]`; `call_source_drops`, the units this call lost at sources.
-- **The demand's state**: `program` (the installed `ForwardingProgram`, `evaluate`'s computed one;
-  `None` before the epoch's first preparation and after `remove()`), `plan` (T1 and T2: the
+- **The demand's state**: `program` (when requested: the installed `ForwardingProgram`, `evaluate`'s computed one;
+  `None` without `OutputOptions(program=True)` or before the epoch's first preparation), `plan` (T1 and T2: the
   `TunnelPlan` of that program, [T1](#t1-tunnels-set-up-by-their-heads),
   [T2](#t2-the-controllers-equal-tunnels); `None` for every other routing, `Pinned` included),
   `requested` (the sum of the offers, `float('inf')` after an infinite one), `offered`,
   `admitted`, `delivered`, `unadmitted`, `source_drops`, `edge_drops` (per edge, as
   `[(EdgeId, units)]`), `by_source`, `by_tunnel` and `total_cost`. Every amount is an exact Python
   integer and may exceed 64 bits.
+- **Output selection.** The two flags are independent: with neither, `program` and `by_source`
+  are both `None`; requesting either retains only that field; requesting both retains both.
+  All aggregate values, call fields, change flags, `plan` and `by_tunnel` keep their usual
+  semantics. This applies to `place`, `evaluate`, `replace`, `forward`, every `apply_actions`
+  result and every evaluator result (sensitivity: its baseline through `EvaluationOptions.outputs`).
+  The live `policy.program`, `records()` and `record()` are independent of the output options.
+  A requested result is a snapshot: later calls or removal do not change its values.
 - **Accounting.** Lossless: `offered` is `None`, `source_drops` 0, no edge drops, `admitted =
   delivered`, and `requested = unadmitted + delivered` for a finite offer (`unadmitted` is `None`
   after an infinite one). Lossy: `offered` is the traffic actually sent, `admitted = offered`,
@@ -2468,7 +2476,7 @@ confused.
   requested` except in the first-hop experiment, where `requested` is infinite and `offered` the
   finite injection. `delivered + sum(edge_drops)` is what entered the network. `edge_flows` are
   carried loads per edge: summing them counts every hop, not the delivery.
-- **`by_source`** is a tuple of `SourceFlow` rows, one per input source in ascending node id, a
+- **`by_source`** is `None` unless `OutputOptions(by_source=True)` is requested; then it is a tuple of `SourceFlow` rows, one per input source in ascending node id, a
   source outside the roster included (a zero row): `source`, `offered` (`None` when Lossless),
   `admitted`, `delivered`, `source_drops` and `total_edge_drops` (its share of `edge_drops`). The
   rows sum to the totals, with two exceptions, both Lossy with a positive offer: an empty roster,
@@ -2502,7 +2510,8 @@ confused.
   `ShortestPaths` split routing, T1 and T2, whose routes have one cost, but not for a split route
   whose walks differ in cost.
 - **Optional outputs**, `None` unless requested through `OutputOptions(edge_flows=False,
-  residual=False, saturated_boundary_edges=False, edge_reservations=False, min_cut=False)`:
+  residual=False, saturated_boundary_edges=False, edge_reservations=False, min_cut=False,
+  program=False, by_source=False)`:
   `edge_flows` is the policy's own allocation per edge after the call (the ledger's total is
   `carried()`); `residual` and `saturated_boundary_edges` are the ledger's after the call;
   `edge_reservations` is the policy's own holds per edge after the call (zeros for a routing

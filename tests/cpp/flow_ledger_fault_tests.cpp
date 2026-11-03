@@ -115,7 +115,7 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   const auto g = shared(make_graph(3, {{0, 1, 9, 1}, {1, 2, 9, 1}, {0, 2, 4, 3}}));
   FlowLedger fg(g);
   auto p = std::make_unique<FlowPolicy>(fg, v({0}), v({2}), shortest_paths_config());
-  const PlacementResult r = p->place(5, OutputOptions {true, true, true});
+  const PlacementResult r = p->place(5, result_outputs(OutputOptions {true, true, true}, true, true));
   const LedgerState st = ledger_state(fg);
   ASSERT_EQ(st.records.size(), 1U);
   const FlowRecord& rec = st.records.front();
@@ -210,8 +210,8 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
       [](auto& x) { x.unadmitted.reset(); },
       [](auto& x) { ++x.source_drops.lo; },
       [](auto& x) { x.edge_drops.emplace_back(2, Counter128 {0, 1}); },
-      [](auto& x) { x.by_source.emplace_back(); },
-      [](auto& x) { ++x.by_source[0].delivered; },
+      [](auto& x) { x.by_source.value().emplace_back(); },
+      [](auto& x) { ++x.by_source.value()[0].delivered; },
       [](auto& x) { x.total_cost = Counter128 {0, 1}; },
       [](auto& x) { x.marginal_cost_curve = std::vector<std::pair<Cost, Amount>> {{9, 1}}; },
       [](auto& x) { x.edge_flows->push_back(0); },
@@ -225,7 +225,7 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   ASSERT_FALSE(r.marginal_cost_curve.has_value());  // ShortestPaths: CentralizedTE's curve only
   ASSERT_FALSE(r.min_cut.has_value());
   ASSERT_FALSE(r.offered.has_value() || r.total_cost.has_value());  // Lossless ShortestPaths Equal
-  ASSERT_TRUE(r.requested.has_value() && r.unadmitted.has_value() && !r.by_source.empty());
+  ASSERT_TRUE(r.requested.has_value() && r.unadmitted.has_value() && !r.by_source.value().empty());
   for (std::size_t k = 0; k < results.size(); ++k) {
     PlacementResult x = r;
     results[k](x);
@@ -240,7 +240,7 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   EXPECT_GT(failures_of([&] { expect_same(r, absent, "present program"); }), 0);
   FlowLedger equal_ledger(g);
   FlowPolicy equal_policy(equal_ledger, v({0}), v({2}), shortest_paths_config());
-  const auto equal_result = equal_policy.place(5);
+  const auto equal_result = equal_policy.place(5, OutputOptions {.program = true, .by_source = true});
   ASSERT_NE(r.program.get(), equal_result.program.get());
   PlacementResult same_program = r;
   same_program.program = equal_result.program;
@@ -248,7 +248,7 @@ TEST(LedgerFaults, TheSweepComparatorsCompareEveryField) {
   FlowLedger different_ledger(g);
   FlowPolicy different_policy(different_ledger, v({1}), v({2}), shortest_paths_config());
   PlacementResult different_program = r;
-  different_program.program = different_policy.place(5).program;
+  different_program.program = different_policy.place(5, OutputOptions {.program = true, .by_source = true}).program;
   EXPECT_GT(failures_of([&] { expect_same(different_program, r, "different program"); }), 0);
   EXPECT_GT(failures_of([&] { expect_same(r, different_program, "different program reversed"); }), 0);
 
@@ -453,7 +453,7 @@ TEST(LedgerFaults, PolicyConstructionFailsWithoutBinding) {
     for (const auto& k : kernels()) {
       {
         FlowLedger warm(c.g);
-        (void)RoutePolicy(warm, c.src, c.dst, k.config(warm, c.src, c.dst, dag)).place(1);
+        (void)RoutePolicy(warm, c.src, c.dst, k.config(warm, c.src, c.dst, dag)).place(1, OutputOptions {.program = true, .by_source = true});
       }
       long injected = 0;
       for (long at = 0;; ++at) {
@@ -461,7 +461,7 @@ TEST(LedgerFaults, PolicyConstructionFailsWithoutBinding) {
         FlowLedger fg(c.g);
         {
           RoutePolicy other(fg, c.src, c.dst, split_route(fg, c.src, c.dst, dag, RouteAllocation::Equal, Admission::Lossless));
-          (void)other.place(1);
+          (void)other.place(1, OutputOptions {.program = true, .by_source = true});
         }  // an orphan
         const LedgerState before = ledger_state(fg);
         std::optional<RoutePolicy> p;
@@ -492,8 +492,8 @@ TEST(LedgerFaults, EveryAllocationOfAResetFailsAtomically) {
       // The policies are destroyed without remove(): their records are orphans, a T1 tunnel's
       // with its holds.
       (void)RoutePolicy(*fg, c.src, c.dst, split_route(*fg, c.src, c.dst, dag, RouteAllocation::Equal, Admission::Lossless))
-          .place(2);
-      (void)FlowPolicy(*fg, v({c.src}), v({c.dst}), FlowPolicyConfig {.routing = DistributedTE {TunnelCount {1}}}).replace(0, 1);
+          .place(2, OutputOptions {.program = true, .by_source = true});
+      (void)FlowPolicy(*fg, v({c.src}), v({c.dst}), FlowPolicyConfig {.routing = DistributedTE {TunnelCount {1}}}).replace(0, 1, OutputOptions {.program = true, .by_source = true});
       return fg;
     };
     const std::vector<Amount> half = [&] {
@@ -709,7 +709,7 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
     RoutePolicy p = policy(fg);
     built = ledger_state(fg);
     built_epoch = epoch(p.policy());
-    want = p.place(2);
+    want = p.place(2, OutputOptions {.program = true, .by_source = true});
     want_state = ledger_state(fg);
     want_epoch = epoch(p.policy());
   }
@@ -720,7 +720,7 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
   const auto warm_up = [&] {
     FlowLedger fg(small);
     RoutePolicy p(fg, 0, 2, split_route(fg, 0, 2, small_dag, RouteAllocation::Equal, Admission::Lossless));
-    EXPECT_EQ(p.place(2).call_delivered, 2);
+    EXPECT_EQ(p.place(2, OutputOptions {.program = true, .by_source = true}).call_delivered, 2);
   };
   sweep_scratch_growth(
       "construction", warm_up,
@@ -735,7 +735,7 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
         }
         expect_same(ledger_state(fg), built, w);
         expect_same(epoch(p->policy()), built_epoch, w);
-        expect_same(p->place(2), want, w);
+        expect_same(p->place(2, OutputOptions {.program = true, .by_source = true}), want, w);
         expect_same(ledger_state(fg), want_state, w);
         expect_same(epoch(p->policy()), want_epoch, w);
         expect_balanced(fg, w);
@@ -744,7 +744,7 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
       [&] {
         FlowLedger fg(large);
         std::optional<RoutePolicy> p(policy(fg));
-        (void)p->place(2);  // the scratch grows to the large graph
+        (void)p->place(2, OutputOptions {.program = true, .by_source = true});  // the scratch grows to the large graph
         p->remove();
         p.reset();
         long warm = 0;
@@ -759,11 +759,11 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
         const LedgerState before = ledger_state(fg);
         const Epoch before_epoch = epoch(p.policy());
         PlacementResult got;
-        const bool failed = fails_at(at, [&] { got = p.place(2); });
+        const bool failed = fails_at(at, [&] { got = p.place(2, OutputOptions {.program = true, .by_source = true}); });
         if (failed) {
           expect_same(ledger_state(fg), before, w);
           expect_same(epoch(p.policy()), before_epoch, w);
-          got = p.place(2);
+          got = p.place(2, OutputOptions {.program = true, .by_source = true});
         }
         expect_same(got, want, w);
         expect_same(ledger_state(fg), want_state, w);
@@ -774,10 +774,10 @@ TEST(LedgerFaults, ScratchGrowthFailureLeavesNothingHalfGrown) {
       [&] {
         FlowLedger fg(large);
         RoutePolicy p = policy(fg);
-        (void)p.place(2);  // the scratch grows to the large graph
+        (void)p.place(2, OutputOptions {.program = true, .by_source = true});  // the scratch grows to the large graph
         p.remove();
         long warm = 0;
-        while (fails_at(warm, [&] { (void)p.place(2); })) ++warm;
+        while (fails_at(warm, [&] { (void)p.place(2, OutputOptions {.program = true, .by_source = true}); })) ++warm;
         return warm;
       });
 }

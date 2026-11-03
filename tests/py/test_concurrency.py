@@ -38,9 +38,9 @@ with pytest.raises(ValueError, match='offer must be'):
 assert probe.counts() == before
 q = policy(ledger)
 cache = ngc.ShortestPathCache(network)
-options = ngc.EvaluationOptions(ngc.FlowPolicyConfig(routing=ngc.ShortestPaths()), cache=cache)
+options = ngc.EvaluationOptions(ngc.FlowPolicyConfig(routing=ngc.ShortestPaths()), cache=cache, outputs=ngc.OutputOptions(program=True))
 invalid = {
-    'scalar': lambda: p.replace(-1),
+    'scalar': lambda: p.replace(-1, outputs=ngc.OutputOptions(program=True)),
     'list': lambda: ngc.apply_actions(ledger, [ngc.Forward(p, 1), ngc.Replace(q, -1)]),
     'reset': lambda: ledger.reset([-1]),
     'demand': lambda: ngc.evaluate_demand(network, [], 1, options),
@@ -114,13 +114,13 @@ holder = Probe(pause='ledger_acquired')
 task = start(lambda: candidate.__init__(ledger, 0, 1, config), holder)
 assert holder.wait('ledger_acquired')
 for read in (lambda: candidate.program, lambda: candidate.config,
-             candidate.delivered, candidate.records, lambda: candidate.place(1),
+             candidate.delivered, candidate.records, lambda: candidate.place(1, outputs=ngc.OutputOptions(program=True)),
              lambda: ngc.Place(candidate, 1)):
     with pytest.raises(TypeError, match='FlowPolicy is not constructed'):
         read()
 holder.release()
 finish(task)
-assert candidate.place(3).delivered == 3
+assert candidate.place(3, outputs=ngc.OutputOptions(program=True)).delivered == 3
 """)
 
 
@@ -161,12 +161,12 @@ sys.setswitchinterval(0.000001)
 network = ngc.Graph(2, [0]*3000, [1]*3000, [1000]*3000, [1]*3000, 1.0)
 ledger = ngc.FlowLedger(network)
 p = policy(ledger)
-p.replace(1)
+p.replace(1, outputs=ngc.OutputOptions(program=True))
 probe = Probe()
 wcfg = ngc.FlowPolicyConfig(routing=ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.WEIGHTED, source_weights=[2,0]))
 weighted_policy = ngc.FlowPolicy(ngc.FlowLedger(network),0,1,wcfg)
-operations = [lambda: p.place(1), lambda: p.evaluate(3), lambda: p.replace(3),
-              lambda: p.forward(3), lambda: ngc.apply_actions(ledger, [ngc.Replace(p, 3)]), lambda: weighted_policy.place(1)]
+operations = [lambda: p.place(1, outputs=ngc.OutputOptions(program=True)), lambda: p.evaluate(3, outputs=ngc.OutputOptions(program=True)), lambda: p.replace(3, outputs=ngc.OutputOptions(program=True)),
+              lambda: p.forward(3, outputs=ngc.OutputOptions(program=True)), lambda: ngc.apply_actions(ledger, [ngc.Replace(p, 3)]), lambda: weighted_policy.place(1, outputs=ngc.OutputOptions(program=True))]
 observations = {}
 for name, operation in zip(('place', 'evaluate', 'replace', 'forward', 'ordered_list', 'weighted_place'), operations, strict=True):
     overlaps = 0
@@ -199,10 +199,10 @@ network = graph()
 bare = ngc.FlowLedger(network)
 active_ledger = ngc.FlowLedger(network)
 owner = policy(active_ledger)
-owner.replace(3)
+owner.replace(3, outputs=ngc.OutputOptions(program=True))
 record_id = owner.records()[0].flow_id
 cache = ngc.ShortestPathCache(network)
-options = ngc.EvaluationOptions(ngc.FlowPolicyConfig(routing=ngc.ShortestPaths()), cache=cache, offer=3)
+options = ngc.EvaluationOptions(ngc.FlowPolicyConfig(routing=ngc.ShortestPaths()), cache=cache, offer=3, outputs=ngc.OutputOptions(program=True))
 held = [policy(ngc.FlowLedger(network))]
 def destroy():
     held.clear()
@@ -252,7 +252,7 @@ for u in range(side*side):
 grid = ngc.Graph(side*side, us, vs, [10]*len(us), [1]*len(us), 1.0)
 pairs = [(i, side*side-1) for i in range(64)]
 for routing in (ngc.DistributedTE(ngc.TunnelCount(1)), ngc.CentralizedTE(source_allocation=ngc.SourceAllocation.EQUAL, tunnel_count=ngc.TunnelCount(1))):
-    options = ngc.EvaluationOptions(ngc.FlowPolicyConfig(routing=routing), design_demand=1, offer=1)
+    options = ngc.EvaluationOptions(ngc.FlowPolicyConfig(routing=routing), design_demand=1, offer=1, outputs=ngc.OutputOptions(program=True))
     probe = Probe(pause='tunnel_roster_search', auto_release_ms=200)
     task = start(lambda: ngc.evaluate_pairs(grid, pairs, options, workers=4), probe)
     overlap = 0
@@ -279,7 +279,7 @@ for routing in (ngc.DistributedTE(ngc.TunnelCount(1)), ngc.CentralizedTE(source_
     constructed = finish(task)
     assert overlap > 0, 'constructor tunnel preflight held the GIL'
     assert constructor.counts()['tunnel_roster_search'] == 1
-    assert constructed.replace(1, design_demand=1).delivered == 1
+    assert constructed.replace(1, design_demand=1, outputs=ngc.OutputOptions(program=True)).delivered == 1
     small = ngc.Graph(4, [0,1,2], [1,2,3], [10]*3, [1]*3, 1.0)
     for name, call, searches in (
         ('demand', lambda: ngc.evaluate_demand(small, 0, 3, options), 1),
@@ -387,7 +387,7 @@ assert ledger.carried().tolist() == [5]
 
 def test_every_ledger_reader_waits_without_gil():
     run("""
-p.place(1)
+p.place(1, outputs=ngc.OutputOptions(program=True))
 flow_id = p.records()[0].flow_id
 readers = [ledger.uid, ledger.graph, ledger.edge_capacity_units, ledger.residual,
            ledger.carried, ledger.reserved, ledger.unreserved, ledger.records,
@@ -397,7 +397,7 @@ readers = [ledger.uid, ledger.graph, ledger.edge_capacity_units, ledger.residual
 early = []
 for index, read in enumerate(readers):
     holder, waiter = Probe(pause='ledger_acquired'), Probe()
-    a = start(lambda: p.place(0), holder)
+    a = start(lambda: p.place(0, outputs=ngc.OutputOptions(program=True)), holder)
     assert holder.wait('ledger_acquired')
     b = start(read, waiter)
     assert waiter.wait('ledger_wait')
@@ -420,9 +420,9 @@ def test_immutable_readers_do_not_wait():
     run("""
 cache = ngc.ShortestPathCache(network)
 q = policy(ledger, cache=cache)
-result = q.place(2)
+result = q.place(2, outputs=ngc.OutputOptions(program=True))
 holder = Probe(pause='ledger_acquired')
-a = start(lambda: q.place(0), holder)
+a = start(lambda: q.place(0, outputs=ngc.OutputOptions(program=True)), holder)
 assert holder.wait('ledger_acquired')
 assert q.config.admission == ngc.Admission.LOSSLESS
 assert cache.graph_uid() == network.uid()
@@ -489,7 +489,7 @@ def test_reservations_and_program_are_atomic():
     run("""
 q = ngc.FlowPolicy(ledger, 0, 1, ngc.FlowPolicyConfig(routing=ngc.DistributedTE(ngc.TunnelCount(1))))
 holder, waiter = Probe(pause='after_exchange'), Probe()
-a = start(lambda: q.replace(4, design_demand=6), holder)
+a = start(lambda: q.replace(4, design_demand=6, outputs=ngc.OutputOptions(program=True)), holder)
 assert holder.wait('after_exchange')
 b = start(lambda: (q.program, q.records(), ledger.reserved()), waiter)
 assert waiter.wait('ledger_wait')
@@ -818,11 +818,11 @@ for operation in (lambda: p.place(3), lambda: p.replace(3), lambda: p.forward(3)
 
 def test_zero_empty_and_masked_calls():
     run("""
-assert p.place(0).program is None
+assert p.place(0, outputs=ngc.OutputOptions(program=True)).program is None
 assert ngc.apply_actions(ledger, []) == []
 masked = ngc.FlowPolicy(ledger, 0, 1, ngc.FlowPolicyConfig(routing=ngc.ShortestPaths()), eligibility=network.eligibility(excluded_nodes=[0]))
-assert masked.place(5).delivered == 0
-before = p.place(3)
+assert masked.place(5, outputs=ngc.OutputOptions(program=True)).delivered == 0
+before = p.place(3, outputs=ngc.OutputOptions(program=True))
 for mode in (ngc.BatchMode.ORDERED, ngc.BatchMode.SIMULTANEOUS):
     # A zero LOSSY participant changes no other participant's quantities.
     l = ngc.FlowLedger(network)
@@ -830,7 +830,7 @@ for mode in (ngc.BatchMode.ORDERED, ngc.BatchMode.SIMULTANEOUS):
     r = ngc.apply_actions(l, [ngc.Replace(a, 3), ngc.Replace(z, 0)], mode=mode)
     assert [x.delivered for x in r] == [3, 0]
     assert l.carried().tolist() == [3]
-assert p.place(0).program is before.program
+assert p.place(0, outputs=ngc.OutputOptions(program=True)).program is before.program
 """)
 
 
@@ -894,7 +894,7 @@ poisoned['T'] = [0, 4]
 assert plain(trace) != poisoned
 assert before == (ledger.carried().tolist(), p.program, p._state())
 probe = Probe(pause='ledger_acquired')
-task = start(lambda: p.place(0), probe)
+task = start(lambda: p.place(0, outputs=ngc.OutputOptions(program=True)), probe)
 assert probe.wait('ledger_acquired')
 assert trace.as_dict() == first
 probe.release()

@@ -43,7 +43,7 @@ import traceback
 from pathlib import Path
 
 import pytest
-from helpers import build, dag_of
+from helpers import build, dag_of, result_outputs
 from private_hooks import needs_hooks
 
 import netgraph_core as ngc
@@ -306,6 +306,7 @@ def replay(fx, at=None):
             outputs = ngc.OutputOptions(
                 edge_flows=e, residual=r, saturated_boundary_edges=b, min_cut=m
             )
+        outputs = result_outputs(outputs, by_source=True)
         if op["error"]:
             before = policy_json(pol)
             with pytest.raises((ValueError, TypeError)):

@@ -17,6 +17,7 @@ from helpers import (
     build,
     exact,
     full_ledger_state,
+    result_outputs,
     shortest,
     sweep_python_allocation,
 )
@@ -172,7 +173,7 @@ def test_global_export():
     # B1, CentralizedTE optimized and equal, place(12).
     g = graph(4, B1)
     p = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, global_())
-    r = p.place(12)
+    r = p.place(12, outputs=ngc.OutputOptions(program=True))
     prog = r.program
     assert listing(prog) == [(0, [0], 2), (1, [1, 2], 10)]
     assert [t.entry_id for t in prog.tunnels] == [0, 1]
@@ -186,7 +187,7 @@ def test_global_export():
     assert p.program.tunnels == prog.tunnels or listing(p.program) == listing(prog)
     eq = ngc.FlowPolicy(
         ngc.FlowLedger(g), [0, 1], 3, global_(ngc.SourceAllocation.EQUAL)
-    ).place(12)
+    ).place(12, outputs=ngc.OutputOptions(program=True))
     assert eq.call_delivered == 4
     assert listing(eq.program) == [(0, [0], 2), (1, [1, 2], 2)]
     assert eq.program.source_weights is None
@@ -195,13 +196,17 @@ def test_global_export():
 def test_single_source_decomposed():
     # One source is decomposed too; ShortestPaths OPTIMIZED.
     g = graph(4, ES)
-    r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, global_()).place(12)
+    r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, global_()).place(
+        12, outputs=ngc.OutputOptions(program=True)
+    )
     assert listing(r.program) == [(0, [0, 2], 2), (0, [1, 3], 10)]
     assert [t.local_index for t in r.program.tunnels] == [0, 1]
     assert [t.path_cost for t in r.program.tunnels] == [2, 3]
     assert r.total_cost == 34
     assert r.program.source_weights == ((0, 12),)
-    mf = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, shortest_paths(MF)).place(12)
+    mf = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, shortest_paths(MF)).place(
+        12, outputs=ngc.OutputOptions(program=True)
+    )
     assert mf.call_delivered == 2
     assert listing(mf.program) == [(0, [0, 2], 2)]
     assert mf.program.source_weights == ((0, 2),)
@@ -210,7 +215,9 @@ def test_single_source_decomposed():
 def test_shortest_paths_split_program():
     # A ShortestPaths split program lists no tunnel.
     g = graph(4, POOL2)
-    r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, shortest_paths()).place(2)
+    r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, shortest_paths()).place(
+        2, outputs=ngc.OutputOptions(program=True)
+    )
     assert r.program.tunnels == ()
     assert r.program.source_weights is None
     assert r.program.sources == (0, 1) and r.program.destinations == (3,)
@@ -220,37 +227,58 @@ def test_shortest_paths_split_program():
 def test_zero_supply_kept_and_lifecycle():
     # Every roster source has a source weight, zero included.
     g = graph(3, [(0, 2, 5), (1, 2, 5)])
-    r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, global_()).place(1)
+    r = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, global_()).place(
+        1, outputs=ngc.OutputOptions(program=True)
+    )
     assert listing(r.program) == [(0, [0], 1)]
     assert r.program.source_weights == ((0, 1), (1, 0))
     # None before the first positive call and after remove().
     p = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, global_())
     assert p.program is None
-    z = p.place(0)
+    z = p.place(0, outputs=ngc.OutputOptions(program=True))
     assert z.program is None and z.by_tunnel == ()
-    p.place(3)
+    p.place(3, outputs=ngc.OutputOptions(program=True))
     assert p.program is not None
     p.remove()
-    assert p.program is None and p.place(0).program is None
+    assert (
+        p.program is None
+        and p.place(0, outputs=ngc.OutputOptions(program=True)).program is None
+    )
 
 
 def test_replay_reproduces_the_solve_and_keeps_the_mask():
     # B1's optimized program forwarded by Pinned reproduces the solve.
     g = graph(4, B1)
-    prog = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, global_()).place(12).program
+    prog = (
+        ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, global_())
+        .place(12, outputs=ngc.OutputOptions(program=True, by_source=True))
+        .program
+    )
     p = pinned(g, prog)
-    r = p.place(12, ngc.OutputOptions(edge_flows=True))
+    r = p.place(
+        12,
+        result_outputs(
+            ngc.OutputOptions(edge_flows=True), program=True, by_source=True
+        ),
+    )
     assert (r.call_delivered, r.termination) == (12, T.COMPLETE)
     assert r.edge_flows.tolist() == [2, 10, 10]
-    assert pinned(g, prog).place(INF).call_delivered == 12
+    assert (
+        pinned(g, prog)
+        .place(INF, outputs=ngc.OutputOptions(program=True, by_source=True))
+        .call_delivered
+        == 12
+    )
     # The policy's program is the configured one.
     assert listing(p.program) == listing(prog) and listing(r.program) == listing(prog)
     # The producer's mask is saved: no replay brings source 1 back.
     masked = ngc.FlowPolicy(
         ngc.FlowLedger(g), [0, 1], 3, global_(), g.eligibility(excluded_nodes=[1])
-    ).place(12)
+    ).place(12, outputs=ngc.OutputOptions(program=True, by_source=True))
     assert masked.call_delivered == 2 and listing(masked.program) == [(0, [0], 2)]
-    lossy = pinned(g, masked.program, LOSSY).replace(12)
+    lossy = pinned(g, masked.program, LOSSY).replace(
+        12, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     assert lossy.call_delivered == 2 and [row.offered for row in lossy.by_source] == [
         12,
         0,
@@ -263,7 +291,7 @@ def test_empty_roster_program():
     p = ngc.FlowPolicy(
         ngc.FlowLedger(g), 0, 1, shortest_paths(), g.eligibility(excluded_nodes=[0])
     )
-    r = p.place(1)
+    r = p.place(1, outputs=ngc.OutputOptions(program=True))
     assert r.termination == T.NO_ROUTE
     assert r.program is not None and r.program.tunnels == ()
     assert r.program.sources == (0,) and not r.routes_changed and not r.weights_changed
@@ -276,18 +304,20 @@ def test_global_support():
     # Only the trimmed support carries traffic.
     g = graph(4, ES)
     r = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, global_(support=dag(g, [1, 3]))).place(
-        12, ngc.OutputOptions(min_cut=True)
+        12, result_outputs(ngc.OutputOptions(min_cut=True), program=True)
     )
     assert (r.call_delivered, r.total_cost) == (10, 30)
     assert r.min_cut is None and r.marginal_cost_curve is None
     assert listing(r.program) == [(0, [1, 3], 10)]
     assert (
-        ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, global_()).place(12).call_delivered
+        ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, global_())
+        .place(12, outputs=ngc.OutputOptions(program=True))
+        .call_delivered
         == 12
     )
     r2 = ngc.FlowPolicy(
         ngc.FlowLedger(g), 0, 3, global_(support=dag(g, [0, 1, 3]))
-    ).place(12, ngc.OutputOptions(edge_flows=True))
+    ).place(12, result_outputs(ngc.OutputOptions(edge_flows=True), program=True))
     assert r2.call_delivered == 10 and r2.edge_flows.tolist() == [0, 10, 0, 10]
     # The mask removes the support: an empty roster.
     r3 = ngc.FlowPolicy(
@@ -296,7 +326,7 @@ def test_global_support():
         3,
         global_(support=dag(g, [1, 3])),
         g.eligibility(excluded_edges=[3]),
-    ).place(12)
+    ).place(12, outputs=ngc.OutputOptions(program=True))
     assert (r3.termination, r3.call_delivered, r3.program.tunnels) == (
         T.NO_ROUTE,
         0,
@@ -309,7 +339,7 @@ def test_global_support():
         [0, 1],
         2,
         global_(ngc.SourceAllocation.EQUAL, dag(b2, [1, 2])),
-    ).place(12)
+    ).place(12, outputs=ngc.OutputOptions(program=True))
     assert (r4.call_delivered, r4.total_cost) == (4, 4)
 
 
@@ -479,9 +509,11 @@ def test_supported_tunnel_replay_basis():
         )
     )
     p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, t2)
-    p.replace(INF)
+    p.replace(INF, outputs=ngc.OutputOptions(program=True, by_source=True))
     prog = p.program
-    r = pinned(g, prog, eligibility=g.eligibility(excluded_edges=[0])).replace(INF)
+    r = pinned(g, prog, eligibility=g.eligibility(excluded_edges=[0])).replace(
+        INF, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     assert [t.status for t in r.by_tunnel] == [
         ngc.TunnelStatus.FAILED,
         ngc.TunnelStatus.UP,
@@ -489,7 +521,7 @@ def test_supported_tunnel_replay_basis():
     assert r.call_delivered == 6
     r = pinned(
         g, prog, LOSSY, eligibility=g.eligibility(excluded_edges=[0, 1])
-    ).replace(4)
+    ).replace(4, outputs=ngc.OutputOptions(program=True, by_source=True))
     assert (r.termination, r.call_delivered, r.call_source_drops) == (
         ngc.Termination.NO_ROUTE,
         0,
@@ -755,7 +787,7 @@ def test_from_dag_attribution():
     # = (2, 0), so source 0 loses the dropped unit.
     g = graph(4, DP)
     p = pinned(g, from_dag(g, [0, 1, 2, 3]), LOSSY)
-    r = p.place(3)
+    r = p.place(3, outputs=ngc.OutputOptions(by_source=True))
     assert (r.call_delivered, r.call_edge_drops) == (2, [(2, 1)])
     assert [
         (s.source, s.offered, s.delivered, s.total_edge_drops) for s in r.by_source
@@ -794,8 +826,13 @@ def test_from_dag_roster():
     # (a graph roster would keep source 1's share and lose it: Lossless 1).
     g = graph(4, DP)
     p = from_dag(g, [0, 2, 3])
-    assert pinned(g, p).place(INF).call_delivered == 2
-    r = pinned(g, p, LOSSY).place(2)
+    assert (
+        pinned(g, p)
+        .place(INF, outputs=ngc.OutputOptions(by_source=True))
+        .call_delivered
+        == 2
+    )
+    r = pinned(g, p, LOSSY).place(2, outputs=ngc.OutputOptions(by_source=True))
     assert r.call_delivered == 2
     assert [
         (s.source, s.offered, s.delivered, s.source_drops) for s in r.by_source
@@ -810,12 +847,17 @@ def test_from_dag_empty_roster():
     # the demand's source drops, Lossless's is undelivered, a zero offer completes.
     g = graph(4, DP)
     p = from_dag(g, [2, 3])
-    r = pinned(g, p, LOSSY).place(2)
+    r = pinned(g, p, LOSSY).place(2, outputs=ngc.OutputOptions(by_source=True))
     assert (r.termination, r.call_delivered, r.call_source_drops) == (T.NO_ROUTE, 0, 2)
     assert [(s.offered, s.source_drops) for s in r.by_source] == [(0, 0), (0, 0)]
-    r = pinned(g, p).place(2)
+    r = pinned(g, p).place(2, outputs=ngc.OutputOptions(by_source=True))
     assert (r.termination, r.call_delivered, r.call_undelivered) == (T.NO_ROUTE, 0, 2)
-    assert pinned(g, p, LOSSY).place(0).termination == T.COMPLETE
+    assert (
+        pinned(g, p, LOSSY)
+        .place(0, outputs=ngc.OutputOptions(by_source=True))
+        .termination
+        == T.COMPLETE
+    )
 
 
 def test_from_dag_trimming():
@@ -996,8 +1038,15 @@ def test_from_dag_replay_basis():
     )
     p = from_dag(gx, [0, 1, 3, 4])
     mask = gx.eligibility(excluded_edges=[1])
-    assert pinned(gx, p, eligibility=mask).place(INF).call_delivered == 2
-    r = pinned(gx, p, LOSSY, eligibility=mask).place(2)
+    assert (
+        pinned(gx, p, eligibility=mask)
+        .place(INF, outputs=ngc.OutputOptions(by_source=True))
+        .call_delivered
+        == 2
+    )
+    r = pinned(gx, p, LOSSY, eligibility=mask).place(
+        2, outputs=ngc.OutputOptions(by_source=True)
+    )
     assert [(s.source, s.offered, s.delivered) for s in r.by_source] == [
         (0, 2, 2),
         (1, 0, 0),
@@ -1039,15 +1088,19 @@ def _sp_against_dag(g, edges, allocation=EB, mask=None):
             3,
             ngc.FlowPolicyConfig(routing=sp, admission=LOSSY),
             mask,
-        ).place(offer)
-        b = pinned(g, program, LOSSY, eligibility=mask).place(offer)
+        ).place(offer, outputs=ngc.OutputOptions(by_source=True))
+        b = pinned(g, program, LOSSY, eligibility=mask).place(
+            offer, outputs=ngc.OutputOptions(by_source=True)
+        )
         assert rows_of(a) == rows_of(b), offer
     a = ngc.FlowPolicy(
         ngc.FlowLedger(g), [0, 1], 3, ngc.FlowPolicyConfig(routing=sp), mask
-    ).place(INF)
+    ).place(INF, outputs=ngc.OutputOptions(by_source=True))
     assert (
         a.call_delivered
-        == pinned(g, program, eligibility=mask).place(INF).call_delivered
+        == pinned(g, program, eligibility=mask)
+        .place(INF, outputs=ngc.OutputOptions(by_source=True))
+        .call_delivered
     )
     return a.call_delivered
 
@@ -1057,7 +1110,9 @@ def test_from_dag_equals_shortest_paths():
     # WCMP by capacity on DP3.
     g = graph(4, DP)
     assert _sp_against_dag(g, [0, 1, 2, 3]) == 2
-    r = pinned(g, from_dag(g, [0, 1, 2, 3]), LOSSY).place(3)
+    r = pinned(g, from_dag(g, [0, 1, 2, 3]), LOSSY).place(
+        3, outputs=ngc.OutputOptions(by_source=True)
+    )
     assert (r.call_delivered, r.call_edge_drops) == (2, [(2, 1)])
     assert _sp_against_dag(g, [0, 1, 2, 3], mask=g.eligibility(excluded_edges=[3])) == 1
     assert _sp_against_dag(graph(4, DP3), [0, 1, 2, 3], allocation=W) == 4
@@ -1101,14 +1156,16 @@ def test_from_dag_equals_shortest_paths_random(seed):
         ),
         mask,
     )
-    a = sp.place(offer)
+    a = sp.place(offer, outputs=ngc.OutputOptions(by_source=True))
     union = sorted({e for rec in sp.records() for e in rec.route.via_edges().tolist()})
     if not union:
         return
     program = ngc.ForwardingProgram.from_dag(
         g, sources, n - 1, dag(g, union), allocation=allocation
     )
-    b = pinned(g, program, admission, eligibility=mask).place(offer)
+    b = pinned(g, program, admission, eligibility=mask).place(
+        offer, outputs=ngc.OutputOptions(by_source=True)
+    )
 
     def rows_of(r):
         return (
@@ -1542,11 +1599,21 @@ def test_black_holes_add_no_barrier():
         stale.replace(39)
     assert ledger.records() == [] and ledger.carried().tolist() == [0] * len(rows)
     assert stale.program is None
-    settled = stale.evaluate(4)
+    settled = stale.evaluate(4, outputs=ngc.OutputOptions(program=True))
     assert [t.status for t in settled.by_tunnel] == [BLACKHOLED, UP, UP, BLACKHOLED]
-    assert pinned(g, prog, LOSSY).replace(39).call_delivered > 0
+    assert (
+        pinned(g, prog, LOSSY)
+        .replace(39, outputs=ngc.OutputOptions(program=True))
+        .call_delivered
+        > 0
+    )
     lossless = pinned(g, prog, LOSSLESS, black_holes=black)
-    assert lossless.evaluate(float("inf")).call_delivered == 0
+    assert (
+        lossless.evaluate(
+            float("inf"), outputs=ngc.OutputOptions(program=True)
+        ).call_delivered
+        == 0
+    )
 
 
 def test_cycle_subdivision():
@@ -1583,31 +1650,46 @@ def test_cycle_subdivision():
 def test_replay():
     # A CentralizedTE program replayed with its first path failed.
     g = graph(4, G1U)
-    prog = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, global_()).replace(12).program
+    prog = (
+        ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, global_())
+        .replace(12, outputs=ngc.OutputOptions(program=True, by_source=True))
+        .program
+    )
     assert listing(prog) == [(0, [0, 2], 2), (0, [1, 3], 10)]
     fail = g.eligibility(excluded_edges=[2])
     p = pinned(g, prog, LOSSY, fail)
-    r = p.replace(12)
+    r = p.replace(12, outputs=ngc.OutputOptions(program=True, by_source=True))
     assert (r.call_delivered, rows(r)) == (
         10,
         [(0, 0, FAILED, 0, 0, 0), (1, 0, UP, 12, 10, 2)],
     )
     recs = p.records()
     assert recs[0].min_route_cost is None and recs[0].route.via_edges().tolist() == []
-    assert pinned(g, prog, LOSSLESS, fail).place(INF).call_delivered == 10
+    assert (
+        pinned(g, prog, LOSSLESS, fail)
+        .place(INF, outputs=ngc.OutputOptions(program=True, by_source=True))
+        .call_delivered
+        == 10
+    )
     zero = ngc.FlowLedger(g, [2, 0, 2, 10])
-    r = pinned(g, prog, LOSSY, ledger=zero).replace(12)
+    r = pinned(g, prog, LOSSY, ledger=zero).replace(
+        12, outputs=ngc.OutputOptions(program=True, by_source=True)
+    )
     assert r.call_delivered == 2 and [t.status for t in r.by_tunnel] == [UP, UP]
     # The surviving sources' captured weights.
     s = graph(4, SURV)
-    surv = ngc.FlowPolicy(ngc.FlowLedger(s), [0, 1, 2], 3, global_()).place(9).program
+    surv = (
+        ngc.FlowPolicy(ngc.FlowLedger(s), [0, 1, 2], 3, global_())
+        .place(9, outputs=ngc.OutputOptions(program=True, by_source=True))
+        .program
+    )
     assert surv.source_weights == ((0, 3), (1, 1), (2, 5))
     q = pinned(s, surv, LOSSY, s.eligibility(excluded_nodes=[2]))
-    r = q.replace(16)
+    r = q.replace(16, outputs=ngc.OutputOptions(program=True, by_source=True))
     assert r.call_delivered == 4 and [row.offered for row in r.by_source] == [12, 4, 0]
     assert (
         pinned(s, surv, LOSSLESS, s.eligibility(excluded_nodes=[2]))
-        .place(INF)
+        .place(INF, outputs=ngc.OutputOptions(program=True, by_source=True))
         .call_delivered
         == 4
     )
@@ -1616,27 +1698,47 @@ def test_replay():
 def test_replay_basis():
     # The topology basis keeps head 1; the supplied basis drops it.
     g = graph(3, RB)
-    prog = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, global_()).place(10).program
+    prog = (
+        ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, global_())
+        .place(10, outputs=ngc.OutputOptions(program=True))
+        .program
+    )
     assert listing(prog) == [(0, [0], 5), (1, [1], 5)]
     mask = g.eligibility(excluded_edges=[1])
-    r = pinned(g, prog, LOSSY, mask).replace(10)
+    r = pinned(g, prog, LOSSY, mask).replace(
+        10, outputs=ngc.OutputOptions(program=True)
+    )
     assert (r.call_delivered, r.source_drops) == (5, 5)
-    assert pinned(g, prog, LOSSLESS, mask).place(INF).call_delivered == 1
+    assert (
+        pinned(g, prog, LOSSLESS, mask)
+        .place(INF, outputs=ngc.OutputOptions(program=True))
+        .call_delivered
+        == 1
+    )
     sup = tunnels(g, [0, 1], [2], [(0, [0], 1), (1, [1], 1)])
-    r = pinned(g, sup, LOSSY, mask).replace(10)
+    r = pinned(g, sup, LOSSY, mask).replace(10, outputs=ngc.OutputOptions(program=True))
     assert (r.call_delivered, r.call_edge_drops) == (5, [(0, 5)])
-    assert pinned(g, sup, LOSSLESS, mask).place(INF).call_delivered == 5
+    assert (
+        pinned(g, sup, LOSSLESS, mask)
+        .place(INF, outputs=ngc.OutputOptions(program=True))
+        .call_delivered
+        == 5
+    )
     # Every remaining weight 0.
     z = graph(3, [(0, 2, 5), (1, 2, 5)])
-    zp = ngc.FlowPolicy(ngc.FlowLedger(z), [0, 1], 2, global_()).place(1).program
+    zp = (
+        ngc.FlowPolicy(ngc.FlowLedger(z), [0, 1], 2, global_())
+        .place(1, outputs=ngc.OutputOptions(program=True))
+        .program
+    )
     m = z.eligibility(excluded_nodes=[0])
-    r = pinned(z, zp, LOSSY, m).replace(4)
+    r = pinned(z, zp, LOSSY, m).replace(4, outputs=ngc.OutputOptions(program=True))
     assert (r.termination, r.source_drops, r.call_delivered) == (
         T.NO_ACTIVE_WEIGHT,
         4,
         0,
     )
-    r = pinned(z, zp, LOSSLESS, m).replace(4)
+    r = pinned(z, zp, LOSSLESS, m).replace(4, outputs=ngc.OutputOptions(program=True))
     assert (r.termination, r.call_delivered) == (T.NO_ACTIVE_WEIGHT, 0)
 
 
@@ -1645,26 +1747,35 @@ def test_replay_split_routes():
     g = graph(4, DIAM)
     prog = (
         ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, shortest_paths(admission=LOSSY))
-        .place(1)
+        .place(1, outputs=ngc.OutputOptions(program=True))
         .program
     )
-    r = pinned(g, prog, LOSSY, g.eligibility(excluded_edges=[3])).replace(100)
+    r = pinned(g, prog, LOSSY, g.eligibility(excluded_edges=[3])).replace(
+        100, outputs=ngc.OutputOptions(program=True)
+    )
     assert r.call_delivered == 100
     t = graph(4, TUN)
     tp = tunnels(t, [0], [3], [(0, [0, 2], 1), (0, [1, 3], 1)])
     m = t.eligibility(excluded_nodes=[2])
-    r = pinned(t, tp, LOSSY, m).replace(10)
+    r = pinned(t, tp, LOSSY, m).replace(10, outputs=ngc.OutputOptions(program=True))
     assert [s.status for s in r.by_tunnel] == [UP, FAILED] and r.call_delivered == 10
     assert [s.assigned for s in r.by_tunnel] == [10, 0]
-    assert pinned(t, tp, LOSSLESS, m).place(INF).call_delivered == 10
+    assert (
+        pinned(t, tp, LOSSLESS, m)
+        .place(INF, outputs=ngc.OutputOptions(program=True))
+        .call_delivered
+        == 10
+    )
     z = par2(0, 10)
     wp = (
         ngc.FlowPolicy(ngc.FlowLedger(z), 0, 1, shortest_paths(W, LOSSY))
-        .place(1)
+        .place(1, outputs=ngc.OutputOptions(program=True))
         .program
     )
     fresh = par2(10, 10)
-    r = pinned(z, wp, LOSSY, ledger=ngc.FlowLedger(z)).replace(5)
+    r = pinned(z, wp, LOSSY, ledger=ngc.FlowLedger(z)).replace(
+        5, outputs=ngc.OutputOptions(program=True)
+    )
     assert (r.call_delivered, r.call_edge_drops) == (5, [])
     del fresh
 
@@ -1675,34 +1786,44 @@ def test_replay_split_routes():
 def test_stale_examples():
     g = graph(4, DIAM)
     p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, shortest_paths(admission=LOSSY))
-    p.replace(100)
+    p.replace(100, outputs=ngc.OutputOptions(program=True))
     installed = p.program
-    r = p.forward(100, black_holes=g.eligibility(excluded_edges=[3]))
+    r = p.forward(
+        100,
+        black_holes=g.eligibility(excluded_edges=[3]),
+        outputs=ngc.OutputOptions(program=True),
+    )
     assert (r.call_delivered, r.call_edge_drops) == (
         50,
         [(3, 50)],
     )  # a stale remote tail
     assert p.program is installed and not r.routes_changed and not r.weights_changed
-    assert p.replace(100).call_delivered == 100
+    assert p.replace(100, outputs=ngc.OutputOptions(program=True)).call_delivered == 100
     w = graph(2, [(0, 1, 10), (0, 1, 40)])
     q = ngc.FlowPolicy(ngc.FlowLedger(w), 0, 1, shortest_paths(W, LOSSY))
-    q.replace(40)
-    r = q.forward(40, black_holes=w.eligibility(excluded_edges=[0]))
+    q.replace(40, outputs=ngc.OutputOptions(program=True))
+    r = q.forward(
+        40,
+        black_holes=w.eligibility(excluded_edges=[0]),
+        outputs=ngc.OutputOptions(program=True),
+    )
     assert (r.call_delivered, r.call_edge_drops) == (
         32,
         [(0, 8)],
     )  # a stale WCMP member
     wz = graph(2, [(0, 1, 0), (0, 1, 40)])
     q = ngc.FlowPolicy(ngc.FlowLedger(wz), 0, 1, shortest_paths(W, LOSSY))
-    q.replace(1)
-    assert q.forward(40).call_delivered == 40  # a stale WCMP member of capacity 0
+    q.replace(1, outputs=ngc.OutputOptions(program=True))
+    assert (
+        q.forward(40, outputs=ngc.OutputOptions(program=True)).call_delivered == 40
+    )  # a stale WCMP member of capacity 0
     rel = graph(4, REL)
     prog = tunnels(rel, [0, 1], [3], [(0, [0, 2], 1), (1, [1, 2], 1)])
-    r = pinned(rel, prog, LOSSY).replace(20)
+    r = pinned(rel, prog, LOSSY).replace(20, outputs=ngc.OutputOptions(program=True))
     assert [t.delivered for t in r.by_tunnel] == [5, 5]  # the relief's original program
     r = pinned(
         rel, prog, LOSSY, black_holes=rel.eligibility(excluded_edges=[0])
-    ).replace(20)
+    ).replace(20, outputs=ngc.OutputOptions(program=True))
     assert rows(r) == [
         (0, 0, BLACKHOLED, 10, 0, 10),
         (1, 1, UP, 10, 10, 0),
@@ -1753,21 +1874,36 @@ def test_stale_with_mask_and_global():
         LOSSY,
         m.eligibility(excluded_edges=[3]),
         m.eligibility(excluded_edges=[3, 4]),
-    ).replace(10)
+    ).replace(10, outputs=ngc.OutputOptions(program=True))
     assert rows(r) == [
         (0, 0, FAILED, 0, 0, 0),
         (1, 0, BLACKHOLED, 5, 0, 5),
         (2, 0, UP, 5, 5, 0),
     ]
     g = graph(4, G1U)
-    prog = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, global_()).replace(12).program
+    prog = (
+        ngc.FlowPolicy(ngc.FlowLedger(g), 0, 3, global_())
+        .replace(12, outputs=ngc.OutputOptions(program=True))
+        .program
+    )
     bh = g.eligibility(excluded_edges=[2])
-    r = pinned(g, prog, LOSSY, black_holes=bh).replace(12)
+    r = pinned(g, prog, LOSSY, black_holes=bh).replace(
+        12, outputs=ngc.OutputOptions(program=True)
+    )
     assert rows(r) == [(0, 0, BLACKHOLED, 2, 0, 2), (1, 0, UP, 10, 10, 0)]
-    assert pinned(g, prog, LOSSLESS, black_holes=bh).replace(12).call_delivered == 4
+    assert (
+        pinned(g, prog, LOSSLESS, black_holes=bh)
+        .replace(12, outputs=ngc.OutputOptions(program=True))
+        .call_delivered
+        == 4
+    )
     allowed = g.eligibility()
-    assert rows(pinned(g, prog, LOSSY, black_holes=allowed).replace(12)) == rows(
-        pinned(g, prog, LOSSY).replace(12)
+    assert rows(
+        pinned(g, prog, LOSSY, black_holes=allowed).replace(
+            12, outputs=ngc.OutputOptions(program=True)
+        )
+    ) == rows(
+        pinned(g, prog, LOSSY).replace(12, outputs=ngc.OutputOptions(program=True))
     )
 
 
@@ -1778,7 +1914,7 @@ def test_evaluate_publishes_nothing():
     g = par2(10, 10)
     ledger = ngc.FlowLedger(g)
     p = ngc.FlowPolicy(ledger, 0, 1, shortest_paths())
-    p.replace(6)
+    p.replace(6, outputs=ngc.OutputOptions(program=True))
 
     def state():
         return ledger.residual().tolist(), [
@@ -1786,14 +1922,14 @@ def test_evaluate_publishes_nothing():
         ]
 
     before = state()
-    r = p.evaluate(12)
+    r = p.evaluate(12, outputs=ngc.OutputOptions(program=True))
     assert (r.call_delivered, r.delivery_delta) == (12, 6) and r.program is not None
     assert state() == before
-    assert p.place(0).requested == 6
+    assert p.place(0, outputs=ngc.OutputOptions(program=True)).requested == 6
     gl = ngc.FlowPolicy(ngc.FlowLedger(graph(4, B1)), [0, 1], 3, global_())
-    gl.place(2)
+    gl.place(2, outputs=ngc.OutputOptions(program=True))
     out = ngc.OutputOptions(edge_flows=True, residual=True, min_cut=True)
-    r = gl.evaluate(12, outputs=out)
+    r = gl.evaluate(12, outputs=result_outputs(out, program=True))
     assert r.edge_flows.tolist() == [2, 10, 10] and r.residual.tolist() == [0, 0, 0]
     assert r.min_cut == [0, 1] and gl.delivered() == 2
 
@@ -1909,16 +2045,18 @@ def test_controller_flags():
     # A controller's increment changes the weights; an offer-only change sets no flag.
     g = graph(2, [(0, 1, 20)])
     p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, global_())
-    r1 = p.place(5)
+    r1 = p.place(5, outputs=ngc.OutputOptions(program=True))
     assert (r1.routes_changed, r1.weights_changed) == (True, True)
-    r2 = p.place(5)
+    r2 = p.place(5, outputs=ngc.OutputOptions(program=True))
     assert (r2.routes_changed, r2.weights_changed) == (False, True)
-    r3 = p.replace(10)
+    r3 = p.replace(10, outputs=ngc.OutputOptions(program=True))
     assert (r3.routes_changed, r3.weights_changed) == (False, False)
     b1 = graph(4, B1)
     q = ngc.FlowPolicy(ngc.FlowLedger(b1), [0, 1], 3, global_())
-    assert listing(q.place(2).program) == [(0, [0], 2)]
-    r = q.place(10)
+    assert listing(q.place(2, outputs=ngc.OutputOptions(program=True)).program) == [
+        (0, [0], 2)
+    ]
+    r = q.place(10, outputs=ngc.OutputOptions(program=True))
     assert listing(r.program) == [(0, [0], 2), (1, [1, 2], 10)] and r.routes_changed
     pin = pinned(g, tunnels(g, [0], [1], [(0, [0], 1)]))
     flags = [
@@ -1928,13 +2066,16 @@ def test_controller_flags():
     cost = ngc.FlowPolicy(
         ngc.FlowLedger(par2(10, 10)), 0, 1, shortest_paths(admission=LOSSY)
     )
-    cost.place(1)
-    assert [cost.forward(x).routes_changed for x in (5, 7)] == [False, False]
+    cost.place(1, outputs=ngc.OutputOptions(program=True))
+    assert [
+        cost.forward(x, outputs=ngc.OutputOptions(program=True)).routes_changed
+        for x in (5, 7)
+    ] == [False, False]
     gu = graph(4, G1U)
     c = ngc.FlowPolicy(ngc.FlowLedger(gu), 0, 3, global_())
-    c.replace(12)
-    assert c.forward(12).call_delivered == 12
-    r = c.forward(20)
+    c.replace(12, outputs=ngc.OutputOptions(program=True))
+    assert c.forward(12, outputs=ngc.OutputOptions(program=True)).call_delivered == 12
+    r = c.forward(20, outputs=ngc.OutputOptions(program=True))
     assert (r.call_delivered, r.termination) == (12, T.EXHAUSTED)
 
 
@@ -1947,11 +2088,11 @@ def test_pooled_records_in_pinned():
     g = graph(4, POOL2)
     prog = (
         ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 3, shortest_paths(admission=LOSSY))
-        .place(2)
+        .place(2, outputs=ngc.OutputOptions(program=True))
         .program
     )
     p = pinned(g, prog, LOSSY)
-    p.replace(2)
+    p.replace(2, outputs=ngc.OutputOptions(program=True))
     assert [(rec.entry_id, rec.edge_flows) for rec in p.records()] == [
         (0, [(0, 1), (2, 1)]),
         (1, [(1, 1), (3, 1)]),
@@ -2219,12 +2360,13 @@ def test_export_replay_property():
         offer = rng.randint(1, 30)
         r = ngc.FlowPolicy(
             ngc.FlowLedger(g), sources, n - 1, global_(source_allocation)
-        ).place(offer, ngc.OutputOptions(edge_flows=True))
+        ).place(offer, result_outputs(ngc.OutputOptions(edge_flows=True), program=True))
         if r.call_delivered == 0:
             continue
         prog = r.program
         replay = pinned(g, prog).place(
-            r.call_delivered, ngc.OutputOptions(edge_flows=True)
+            r.call_delivered,
+            result_outputs(ngc.OutputOptions(edge_flows=True), program=True),
         )
         assert (replay.call_delivered, replay.termination) == (
             r.call_delivered,
@@ -2475,7 +2617,7 @@ def test_operations_are_all_or_nothing(case):
     def make():
         ledger = ngc.FlowLedger(g)
         policy = ngc.FlowPolicy(ledger, 0, 3, cfg)
-        policy.replace(2)
+        policy.replace(2, outputs=ngc.OutputOptions(program=True))
 
         def snapshot():
             return [
@@ -2502,7 +2644,9 @@ def test_from_routes_and_getters_survive_python_allocation_failures():
     ]
     prog = ngc.ForwardingProgram.from_routes(g, [0], [1], routes)
     # A CentralizedTE result: its program has no Python object yet, so the getter makes one.
-    result = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, global_()).place(3)
+    result = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, global_()).place(
+        3, outputs=ngc.OutputOptions(program=True)
+    )
     calls = [
         (ngc.ForwardingProgram.from_routes, (g, [0], [1], routes)),
         (ngc.ForwardingProgram.from_dag, (g, [0], [1], dag(g, [0, 1]))),
@@ -2596,8 +2740,8 @@ def test_full_zero_offer_is_complete(method, case, admission):
     eligibility = g.eligibility(excluded_edges=[0]) if case == "no-route" else None
     p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, cfg, eligibility)
     if method == "forward":
-        p.replace(1)
-    r = getattr(p, method)(0)
+        p.replace(1, outputs=ngc.OutputOptions(program=True))
+    r = getattr(p, method)(0, outputs=ngc.OutputOptions(program=True, by_source=True))
     assert r.termination == T.COMPLETE and r.call_delivered == 0
     assert r.program is not None  # prepared
 
@@ -2681,7 +2825,7 @@ def test_oracle_witnesses():
         tunnels(g, [0, 1], [5], specs),
         LOSSY,
         eligibility=g.eligibility(excluded_edges=excluded),
-    ).replace(2)
+    ).replace(2, outputs=ngc.OutputOptions(program=True))
     native = ([t.assigned for t in r.by_tunnel], r.source_drops)
     # Head 0's tunnels both fail, but its basis keeps 1, 3, 5: it stays in the equal pool and
     # loses its unit; head 1 carries the other.
@@ -2693,8 +2837,14 @@ def test_oracle_witnesses():
     # Captured weights all 0 (place(1)'s CentralizedTE program, whose source 1 weighs 0, with source 0
     # masked): the whole offer is lost.
     g = graph(3, [(0, 2, 5), (1, 2, 5)])
-    prog = ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, global_()).place(1).program
-    r = pinned(g, prog, LOSSY, eligibility=g.eligibility(excluded_nodes=[0])).replace(4)
+    prog = (
+        ngc.FlowPolicy(ngc.FlowLedger(g), [0, 1], 2, global_())
+        .place(1, outputs=ngc.OutputOptions(program=True))
+        .program
+    )
+    r = pinned(g, prog, LOSSY, eligibility=g.eligibility(excluded_nodes=[0])).replace(
+        4, outputs=ngc.OutputOptions(program=True)
+    )
     gspecs = [(t.head, list(t.edges), t.weight) for t in prog.tunnels]
     galive = [t.head != 0 for t in prog.tunnels]
     got = orc.entry_amounts(
@@ -2733,13 +2883,13 @@ def test_change_flags_of_empty_programs_and_place_zero():
     # nothing, while the full zero offer replace(0) installs the program and follows the rows.
     g = graph(3, [(0, 1, 10), (2, 1, 10)])  # source 0 reaches 1; nothing reaches 2
     empty = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 2, shortest_paths())
-    r = empty.replace(0)
+    r = empty.replace(0, outputs=ngc.OutputOptions(program=True))
     assert r.program is not None and r.program.tunnels == ()
     assert (r.routes_changed, r.weights_changed) == (False, False)
     p = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, shortest_paths())
-    r = p.place(0)
+    r = p.place(0, outputs=ngc.OutputOptions(program=True))
     assert r.program is None and p.program is None
     assert (r.routes_changed, r.weights_changed) == (False, False)
-    r = p.replace(0)
+    r = p.replace(0, outputs=ngc.OutputOptions(program=True))
     assert r.program is not None and p.program is not None
     assert (r.routes_changed, r.weights_changed) == (True, True)

@@ -38,6 +38,7 @@ from helpers import (
     build,
     full_ledger_state,
     plain,
+    result_outputs,
     stats_of,
 )
 
@@ -117,7 +118,11 @@ def placement(cfg, traced, sources=0):
 
 def exported(g, cfg=None, sources=0):
     """A model's program on g (a CentralizedTE optimized one by default), for Pinned."""
-    return ngc.FlowPolicy(ngc.FlowLedger(g), sources, 4, cfg or GLOBAL).place(6).program
+    return (
+        ngc.FlowPolicy(ngc.FlowLedger(g), sources, 4, cfg or GLOBAL)
+        .place(6, outputs=ngc.OutputOptions(program=True))
+        .program
+    )
 
 
 def operation(cfg_of, method, sources=0, prepare="place", **kw):
@@ -131,9 +136,14 @@ def operation(cfg_of, method, sources=0, prepare="place", **kw):
         policy = ngc.FlowPolicy(ledger, sources, 4, cfg_of(g))
         getattr(policy, prepare)(2)
         extra = {name: value(g) for name, value in kw.items()}
+        outputs = result_outputs(ALL_OUT, program=True, by_source=True)
 
         def call(offer):
-            return getattr(policy, method)(offer, outputs=ALL_OUT, **extra)
+            return getattr(policy, method)(
+                offer,
+                outputs=outputs,
+                **extra,
+            )
 
         def snap():
             records = [(r.flow_id[1], r.delivered) for r in policy.records()]
@@ -427,7 +437,9 @@ SCENARIOS = {
     ),
     # The getters of shared values (a failed wrapper registration once freed the value twice).
     "PlacementResult.program": getter(
-        lambda g: ngc.FlowPolicy(ngc.FlowLedger(g), 0, 4, GLOBAL).place(6),
+        lambda g: ngc.FlowPolicy(ngc.FlowLedger(g), 0, 4, GLOBAL).place(
+            6, outputs=ngc.OutputOptions(program=True)
+        ),
         lambda r: r.program,
     ),
     "FlowRecord.route": getter(

@@ -11,7 +11,16 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from helpers import build, config, dag_of, exact, ledger_state, plain
+from helpers import (
+    build,
+    config,
+    dag_of,
+    evaluation_outputs,
+    exact,
+    ledger_state,
+    plain,
+    result_outputs,
+)
 
 import netgraph_core as n
 
@@ -143,7 +152,11 @@ def run_case(case):
                 g,
                 data["sources"],
                 data["destinations"],
-                n.EvaluationOptions(cfg, offer=data["offer"], outputs=OUT),
+                evaluation_outputs(
+                    n.EvaluationOptions(cfg, offer=data["offer"], outputs=OUT),
+                    program=True,
+                    by_source=True,
+                ),
             )
             out[name] = dict(
                 delivered=r.delivered,
@@ -164,9 +177,11 @@ def run_case(case):
     )
     offer = data.get("offer", math.inf)
     before = ledger_state(ledger)
-    evaluated = p.evaluate(offer, outputs=OUT)
+    evaluated = p.evaluate(
+        offer, outputs=result_outputs(OUT, program=True, by_source=True)
+    )
     assert ledger_state(ledger) == before and p.program is None
-    r = p.replace(offer, outputs=OUT)
+    r = p.replace(offer, outputs=result_outputs(OUT, program=True, by_source=True))
     if r.delivered:
         assert r.routes_changed and r.weights_changed and not r.reservations_changed
     assert plain(evaluated) == plain(r)
@@ -210,7 +225,9 @@ def run_case(case):
                     config(n.Pinned(r.program), admission=admission),
                     eligibility=mask,
                 )
-                runs[admission] = q.replace(x, outputs=OUT)
+                runs[admission] = q.replace(
+                    x, outputs=result_outputs(OUT, program=True, by_source=True)
+                )
             a, b = runs[n.Admission.LOSSY], runs[n.Admission.LOSSLESS]
             rows = {s.source: s for s in a.by_source}
             out["replays"].append(
@@ -231,7 +248,9 @@ def run_case(case):
             config(n.Pinned(r.program)),
             eligibility=mask,
         )
-        out["lossless_bound"] = q.replace(math.inf).delivered
+        out["lossless_bound"] = q.replace(
+            math.inf, outputs=n.OutputOptions(program=True, by_source=True)
+        ).delivered
     return out
 
 
@@ -287,19 +306,21 @@ def test_refused_traffic_is_not_retried_after_relief(ordered):
     ledger = n.FlowLedger(g)
     other = n.FlowPolicy(ledger, 2, 3, config(n.ShortestPaths()))
     p = n.FlowPolicy(ledger, [0, 1], 3, weighted([2, 1, 0, 0]))
-    other.replace(8)
+    other.replace(8, outputs=n.OutputOptions(by_source=True))
 
     def call(v):
         return (
-            n.apply_actions(ledger, [n.Place(p, v)], outputs=OUT)[0]
+            n.apply_actions(
+                ledger, [n.Place(p, v)], outputs=result_outputs(OUT, by_source=True)
+            )[0]
             if ordered
-            else p.place(v, outputs=OUT)
+            else p.place(v, outputs=result_outputs(OUT, by_source=True))
         )
 
     initial = call(5)
     assert initial.delivered == 2
     check_live_rows(initial, [[0, 0, "UP", 2, 2, 0]], 3)
-    other.replace(5)
+    other.replace(5, outputs=n.OutputOptions(by_source=True))
     r = call(1)
     assert (r.call_delivered, r.delivered, r.total_cost, r.requested, r.unadmitted) == (
         1,
@@ -316,17 +337,24 @@ def test_refused_traffic_is_not_retried_after_relief(ordered):
 def test_exact_replay_paths_and_all_zero_termination():
     g = build(3, [(0, 2, 10, 1), (1, 2, 10, 1)])
     live = n.FlowPolicy(n.FlowLedger(g), [0, 1], 2, weighted([0, 0, 0]))
-    saved = live.replace(6)
+    saved = live.replace(6, outputs=n.OutputOptions(program=True, by_source=True))
     assert saved.termination == n.Termination.NO_ACTIVE_WEIGHT
     for support in (None, dag_of(g, [0, 1])):
         q = n.FlowPolicy(
             n.FlowLedger(g), [0, 1], 2, weighted([0, 0, 0], support=support)
         )
-        unlimited = q.evaluate(math.inf)
+        unlimited = q.evaluate(
+            math.inf, outputs=n.OutputOptions(program=True, by_source=True)
+        )
         assert unlimited.termination == n.Termination.NO_ACTIVE_WEIGHT
         assert unlimited.requested == unlimited.call_undelivered == math.inf
         assert unlimited.unadmitted is None and unlimited.delivered == 0
-    assert live.forward(6).termination == n.Termination.EXHAUSTED
+    assert (
+        live.forward(
+            6, outputs=n.OutputOptions(program=True, by_source=True)
+        ).termination
+        == n.Termination.EXHAUSTED
+    )
     for admission in (n.Admission.LOSSY, n.Admission.LOSSLESS):
         q = n.FlowPolicy(
             n.FlowLedger(g),
@@ -338,7 +366,7 @@ def test_exact_replay_paths_and_all_zero_termination():
             q.forward(6)
         for method in (q.replace, q.evaluate, q.place):
             q.remove()
-            r = method(6)
+            r = method(6, outputs=n.OutputOptions(by_source=True))
             assert r.termination == (
                 n.Termination.COMPLETE
                 if admission == n.Admission.LOSSY
@@ -354,7 +382,7 @@ def test_exact_replay_paths_and_all_zero_termination():
 def test_simultaneous_ties_follow_creation_not_action_order(reverse, reverse_creation):
     g = build(2, [(0, 1, 3, 1)])
     p = n.FlowPolicy(n.FlowLedger(g), 0, 1, weighted([1, 0]))
-    program = p.replace(3).program
+    program = p.replace(3, outputs=n.OutputOptions(program=True)).program
     ledger = n.FlowLedger(g)
     first = n.FlowPolicy(
         ledger, 0, 1, config(n.Pinned(program), admission=n.Admission.LOSSY)
@@ -365,13 +393,18 @@ def test_simultaneous_ties_follow_creation_not_action_order(reverse, reverse_cre
     a, b = (second, first) if reverse_creation else (first, second)
     owners = [b, a] if reverse else [a, b]
     r = n.apply_actions(
-        ledger, [n.Replace(q, 3) for q in owners], mode=n.BatchMode.SIMULTANEOUS
+        ledger,
+        [n.Replace(q, 3) for q in owners],
+        mode=n.BatchMode.SIMULTANEOUS,
+        outputs=n.OutputOptions(program=True),
     )
     assert [x.delivered for x in r] == [2 if q is first else 1 for q in owners]
     assert first.delivered() == 2 and second.delivered() == 1
     first.remove()
     second.remove()
-    r = n.apply_actions(ledger, [n.Replace(q, 3) for q in owners])
+    r = n.apply_actions(
+        ledger, [n.Replace(q, 3) for q in owners], outputs=n.OutputOptions(program=True)
+    )
     assert [x.delivered for x in r] == [3, 0]
 
 
@@ -383,7 +416,9 @@ def test_cumulative_captured_weights_cross_sixty_four_bits(count, unequal):
     p = n.FlowPolicy(
         n.FlowLedger(g), list(range(count)), count, weighted(weights + [0])
     )
-    program = p.replace(count).program
+    program = p.replace(
+        count, outputs=n.OutputOptions(program=True, by_source=True)
+    ).program
     q = n.FlowPolicy(
         n.FlowLedger(g),
         list(range(count)),
@@ -393,7 +428,7 @@ def test_cumulative_captured_weights_cross_sixty_four_bits(count, unequal):
     total = 0
     for x in [M, M, M, 7, M, 5, 17, 0, 1]:
         try:
-            r = q.place(x)
+            r = q.place(x, outputs=n.OutputOptions(program=True, by_source=True))
         except RuntimeError as error:
             raise AssertionError("a valid cumulative offer must succeed") from error
         total += x
@@ -412,25 +447,48 @@ def test_owned_weights_and_all_evaluator_readers():
     with pytest.raises(AttributeError):
         cfg.routing.source_weights = (0,) * 6
     opts = n.EvaluationOptions(cfg, offer=15, outputs=OUT)
-    want = n.evaluate_demand(g, [1, 0, 1], 5, opts)
+    want = n.evaluate_demand(
+        g, [1, 0, 1], 5, evaluation_outputs(opts, program=True, by_source=True)
+    )
     assert [s.delivered for s in want.by_source] == [10, 5]
     for workers in (1, 2, 4):
         results = n.evaluate_pairs(
-            g, [([0, 1], [5]), ([1, 0, 1], [5])], opts, workers=workers
+            g,
+            [([0, 1], [5]), ([1, 0, 1], [5])],
+            evaluation_outputs(opts, program=True, by_source=True),
+            workers=workers,
         )
         assert all(plain(r) == plain(want) for r in results)
-        failures = n.evaluate_edge_failures(g, [0, 1], 5, opts, workers=workers)
+        failures = n.evaluate_edge_failures(
+            g,
+            [0, 1],
+            5,
+            evaluation_outputs(opts, program=True, by_source=True),
+            workers=workers,
+        )
         for entry in failures.entries:
             deleted = g.eligibility(excluded_edges=[entry.edge])
             r = n.evaluate_demand(
-                g, [0, 1], 5, n.EvaluationOptions(cfg, eligibility=deleted, offer=15)
+                g,
+                [0, 1],
+                5,
+                evaluation_outputs(
+                    n.EvaluationOptions(cfg, eligibility=deleted, offer=15),
+                    program=True,
+                    by_source=True,
+                ),
             )
             assert entry.delivery_reduction == want.delivered - r.delivered
     program = want.program
     del opts, want, weights, cfg, results, failures
     gc.collect()
     q = n.FlowPolicy(n.FlowLedger(g), [0, 1], 5, config(n.Pinned(program)))
-    assert [s.delivered for s in q.replace(15).by_source] == [10, 5]
+    assert [
+        s.delivered
+        for s in q.replace(
+            15, outputs=n.OutputOptions(program=True, by_source=True)
+        ).by_source
+    ] == [10, 5]
 
 
 def test_edge_failures_recompute_unused_zero_capacity_roster_edge():
@@ -501,8 +559,11 @@ def test_small_integer_objective_with_masks_and_support():
                 g,
                 [0, 1],
                 3,
-                n.EvaluationOptions(
-                    cfg, offer=None if offer == math.inf else offer, outputs=OUT
+                evaluation_outputs(
+                    n.EvaluationOptions(
+                        cfg, offer=None if offer == math.inf else offer, outputs=OUT
+                    ),
+                    by_source=True,
                 ),
             )
             t = top if offer == math.inf else min(top, offer)
@@ -559,12 +620,14 @@ def test_support_black_holes_zero_calls_and_list_refusals():
     g = build(3, [(0, 2, 10, 1), (1, 2, 10, 1)])
     ledger = n.FlowLedger(g)
     p = n.FlowPolicy(ledger, [0, 1], 2, weighted([2, 1, 0]))
-    zero = p.place(0)
+    zero = p.place(0, outputs=n.OutputOptions(program=True, by_source=True))
     assert zero.program is None and zero.termination == n.Termination.COMPLETE
     assert not (
         zero.routes_changed or zero.weights_changed or zero.reservations_changed
     )
-    program = p.replace(3).program
+    program = p.replace(
+        3, outputs=n.OutputOptions(program=True, by_source=True)
+    ).program
     mask = g.eligibility(excluded_nodes=[0])
     repaired = n.FlowPolicy(
         n.FlowLedger(g),
@@ -579,7 +642,10 @@ def test_support_black_holes_zero_calls_and_list_refusals():
         2,
         config(n.Pinned(program, black_holes=mask), admission=n.Admission.LOSSY),
     )
-    a, b = repaired.replace(3), stale.replace(3)
+    a, b = (
+        repaired.replace(3, outputs=n.OutputOptions(program=True, by_source=True)),
+        stale.replace(3, outputs=n.OutputOptions(program=True, by_source=True)),
+    )
     assert [r.delivered for r in a.by_source] == [0, 3]
     assert [r.delivered for r in b.by_source] == [0, 1]
     assert b.source_drops + sum(x for _, x in b.edge_drops) == 2
@@ -595,13 +661,20 @@ def test_support_black_holes_zero_calls_and_list_refusals():
     with pytest.raises(ValueError, match=exact("SIMULTANEOUS does not accept Place")):
         n.apply_actions(ledger, [n.Place(p, 0)], mode=n.BatchMode.SIMULTANEOUS)
     assert ledger_state(ledger) == saved
-    r = p.replace(0)
+    r = p.replace(0, outputs=n.OutputOptions(program=True, by_source=True))
     assert r.termination == n.Termination.COMPLETE and r.program.source_weights == (
         (0, 2),
         (1, 1),
     )
     supported = weighted([2, 1, 0], support=dag_of(g, [1]))
-    r = n.evaluate_demand(g, [0, 1], 2, n.EvaluationOptions(supported, outputs=OUT))
+    r = n.evaluate_demand(
+        g,
+        [0, 1],
+        2,
+        evaluation_outputs(
+            n.EvaluationOptions(supported, outputs=OUT), program=True, by_source=True
+        ),
+    )
     assert r.edge_flows.tolist() == [0, 10] and [s.delivered for s in r.by_source] == [
         0,
         10,
@@ -610,15 +683,36 @@ def test_support_black_holes_zero_calls_and_list_refusals():
 
 def test_wide_cost_and_zero_effect_participants_across_program_forms():
     g = build(2, [(0, 1, M, M)])
-    r = n.evaluate_demand(g, 0, 1, n.EvaluationOptions(weighted([M, 0]), outputs=OUT))
+    r = n.evaluate_demand(
+        g,
+        0,
+        1,
+        evaluation_outputs(
+            n.EvaluationOptions(weighted([M, 0]), outputs=OUT),
+            program=True,
+            by_source=True,
+        ),
+    )
     assert type(r.total_cost) is int and r.total_cost == M * M
     data = CASES[0]["input"]
     g = build(6, data["edges"])
     empty = n.evaluate_demand(
-        g, [0, 1], 5, n.EvaluationOptions(weighted([0] * 6))
+        g,
+        [0, 1],
+        5,
+        evaluation_outputs(
+            n.EvaluationOptions(weighted([0] * 6)), program=True, by_source=True
+        ),
     ).program
     positive = n.evaluate_demand(
-        g, [0, 1], 5, n.EvaluationOptions(weighted([2, 1, 0, 0, 0, 0]))
+        g,
+        [0, 1],
+        5,
+        evaluation_outputs(
+            n.EvaluationOptions(weighted([2, 1, 0, 0, 0, 0])),
+            program=True,
+            by_source=True,
+        ),
     ).program
     dag = dag_of(g, range(g.num_edges()))
     models = [
@@ -641,14 +735,17 @@ def test_wide_cost_and_zero_effect_participants_across_program_forms():
                 ledger, [0, 1], 5, config(n.Pinned(empty), admission=n.Admission.LOSSY)
             )
             base = n.apply_actions(
-                ledger, [n.Replace(p, 19)], mode=n.BatchMode.SIMULTANEOUS, outputs=OUT
+                ledger,
+                [n.Replace(p, 19)],
+                mode=n.BatchMode.SIMULTANEOUS,
+                outputs=result_outputs(OUT, program=True, by_source=True),
             )[0]
             p.remove()
             got = n.apply_actions(
                 ledger,
                 [n.Replace(zero, offer), n.Replace(p, 19)],
                 mode=n.BatchMode.SIMULTANEOUS,
-                outputs=OUT,
+                outputs=result_outputs(OUT, program=True, by_source=True),
             )[1]
             assert plain(got) == plain(base)
 
@@ -657,7 +754,7 @@ def test_transit_through_another_source_and_installed_flags():
     g = build(3, [(0, 1, 5, 1), (1, 2, 10, 1)])
     ledger = n.FlowLedger(g)
     p = n.FlowPolicy(ledger, [0, 1], 2, weighted([1, 1, 0]))
-    first = p.replace(math.inf, outputs=OUT)
+    first = p.replace(math.inf, outputs=result_outputs(OUT, by_source=True))
     assert first.delivered == 10 and first.total_cost == 15
     assert [r.delivered for r in first.by_source] == [5, 5]
     assert first.edge_flows.tolist() == [5, 10]
@@ -667,10 +764,10 @@ def test_transit_through_another_source_and_installed_flags():
         and first.weights_changed
         and not first.reservations_changed
     )
-    r = p.forward(8)
+    r = p.forward(8, outputs=n.OutputOptions(by_source=True))
     assert r.delivered == 8
     assert not (r.routes_changed or r.weights_changed or r.reservations_changed)
-    zero = p.place(0)
+    zero = p.place(0, outputs=n.OutputOptions(by_source=True))
     assert not (
         zero.routes_changed or zero.weights_changed or zero.reservations_changed
     )
@@ -706,17 +803,40 @@ def test_live_tunnel_rows_and_undelivered_across_readers(offer):
                 action = (
                     n.Place(p, offer) if operation == "place" else n.Replace(p, offer)
                 )
-                r = n.apply_actions(ledger, [action], outputs=OUT)[0]
+                r = n.apply_actions(
+                    ledger,
+                    [action],
+                    outputs=result_outputs(OUT, program=True, by_source=True),
+                )[0]
             else:
-                r = getattr(p, operation)(offer, outputs=OUT)
+                r = getattr(p, operation)(
+                    offer, outputs=result_outputs(OUT, program=True, by_source=True)
+                )
             check_single_edge_result(r, offer)
     options = n.EvaluationOptions(cfg, offer=offer, outputs=OUT)
-    check_single_edge_result(n.evaluate_demand(g, 0, 1, options), offer)
+    check_single_edge_result(
+        n.evaluate_demand(
+            g, 0, 1, evaluation_outputs(options, program=True, by_source=True)
+        ),
+        offer,
+    )
     for workers in (1, 2, 4):
-        for r in n.evaluate_pairs(g, [([0], [1])] * 5, options, workers=workers):
+        for r in n.evaluate_pairs(
+            g,
+            [([0], [1])] * 5,
+            evaluation_outputs(options, program=True, by_source=True),
+            workers=workers,
+        ):
             check_single_edge_result(r, offer)
         check_single_edge_result(
-            n.evaluate_edge_failures(g, 0, 1, options, workers=workers).baseline, offer
+            n.evaluate_edge_failures(
+                g,
+                0,
+                1,
+                evaluation_outputs(options, program=True, by_source=True),
+                workers=workers,
+            ).baseline,
+            offer,
         )
 
 
@@ -773,7 +893,14 @@ def test_live_tunnel_row_schema_rejects_missing_null_and_wrong_distribution():
 def test_remaining_zero_captured_weights_with_a_program_path(admission):
     g = build(3, [(0, 2, 10, 1), (1, 2, 10, 1)])
     program = n.evaluate_demand(
-        g, [0, 1], 2, n.EvaluationOptions(weighted([2, 0, 0]), offer=5)
+        g,
+        [0, 1],
+        2,
+        evaluation_outputs(
+            n.EvaluationOptions(weighted([2, 0, 0]), offer=5),
+            program=True,
+            by_source=True,
+        ),
     ).program
     assert len(program.tunnels) == 1 and program.source_weights == ((0, 2), (1, 0))
     mask = g.eligibility(excluded_nodes=[0])
@@ -786,7 +913,7 @@ def test_remaining_zero_captured_weights_with_a_program_path(admission):
     )
     for method in (p.replace, p.evaluate, p.place):
         p.remove()
-        r = method(4, outputs=OUT)
+        r = method(4, outputs=result_outputs(OUT, by_source=True))
         assert r.termination == n.Termination.NO_ACTIVE_WEIGHT
         assert r.delivered == 0 and r.call_undelivered == 4
         assert r.source_drops == (4 if admission == n.Admission.LOSSY else 0)
