@@ -65,6 +65,80 @@ TEST(FlowCore, ConstructAndSolve) {
   expect_certified(g, {0}, {2}, std::nullopt, r);
 }
 
+TEST(FlowCore, InputMasksResetReusedScratch) {
+  // The chain carries 7 at cost 30; the direct edge carries another 5 at cost 100.
+  // Removing the middle EdgeId (the direct edge) moves the chain's second edge to a
+  // different local index, retaining its capacity 7 and cost 20. Removing every edge
+  // must clear the old input, and allowing them again must restore the complete payload.
+  const auto g = make_graph(3, {{0, 1, 10, 10}, {1, 2, 7, 20}, {0, 2, 5, 100}});
+  const auto inv = id_of_input(g);
+  const auto full = solve(g, {0}, {2}, std::nullopt);
+  EXPECT_EQ(full.flow_value, 12);
+  EXPECT_EQ(full.marginal_cost_curve, curve({{30, 7}, {100, 5}}));
+  EXPECT_EQ(to_input(g, full.edge_flows), (std::vector<Amount>{7, 7, 5}));
+  expect_certified(g, {0}, {2}, std::nullopt, full);
+
+  const std::vector<EdgeId> one = {inv[2]};
+  const auto partial = g.eligibility({}, one);
+  const auto chain = solve(g, {0}, {2}, std::nullopt, nullptr, &partial);
+  EXPECT_EQ(chain.flow_value, 7);
+  EXPECT_EQ(chain.marginal_cost_curve, curve({{30, 7}}));
+  EXPECT_EQ(to_input(g, chain.edge_flows), (std::vector<Amount>{7, 7, 0}));
+  expect_certified(g, {0}, {2}, std::nullopt, chain, nullptr, &partial);
+
+  const auto excluded = g.eligibility({}, inv);
+  const auto empty = solve(g, {0}, {2}, std::nullopt, nullptr, &excluded);
+  EXPECT_EQ(empty.flow_value, 0);
+  EXPECT_TRUE(empty.marginal_cost_curve.empty());
+  EXPECT_EQ(empty.edge_flows, (std::vector<Amount>{0, 0, 0}));
+  ASSERT_TRUE(empty.min_cut.has_value());
+  EXPECT_TRUE(empty.min_cut->empty());
+  EXPECT_EQ(empty.potentials, (std::vector<Cost>{0, kNeverReached, kNeverReached}));
+  expect_certified(g, {0}, {2}, std::nullopt, empty, nullptr, &excluded);
+
+  const auto allowed = g.eligibility({}, {});
+  const auto restored = solve(g, {0}, {2}, std::nullopt, nullptr, &allowed);
+  EXPECT_TRUE(same_payload(restored, full));
+  expect_certified(g, {0}, {2}, std::nullopt, restored, nullptr, &allowed);
+  EXPECT_TRUE(same_payload(solve(g, {0}, {2}, std::nullopt), full));
+}
+
+TEST(FlowCore, SubsetMasksResetReusedScratch) {
+  const auto g = make_graph(3, {{0, 1, 10, 10}, {1, 2, 7, 20}, {0, 2, 5, 100}});
+  const auto inv = id_of_input(g);
+  const std::vector<NodeId> sources = {0}, destinations = {2};
+  const std::vector<EdgeId> middle = {inv[2]};
+  const auto partial = g.eligibility({}, middle);
+  const auto excluded = g.eligibility({}, inv);
+  const auto allowed = g.eligibility({}, {});
+  for (const Eligibility* mask : {static_cast<const Eligibility*>(nullptr), &partial, &excluded, &allowed}) {
+    std::vector<EdgeId> edges;
+    std::vector<Amount> caps;
+    for (EdgeId e = 0; e < g.num_edges(); ++e) {
+      if (mask != nullptr && !mask->allows_edge(e)) continue;
+      edges.push_back(e);
+      caps.push_back(g.edge_capacity_units()[static_cast<std::size_t>(e)]);
+    }
+    const bool empty = mask == &excluded;
+    const bool chain = mask == &partial;
+    const Amount expected = empty ? 0 : chain ? 7 : 12;
+    const auto result = detail::solve_subset(g, edges, caps, sources, destinations, std::nullopt);
+    EXPECT_EQ(result.flow_value, expected);
+    EXPECT_EQ(result.edge_flows, (empty ? std::vector<Amount>{} : chain ? std::vector<Amount>{7, 7}
+                                                                      : std::vector<Amount>{7, 5, 7}));
+    EXPECT_EQ(result.marginal_cost_curve, empty ? curve({}) : chain ? curve({{30, 7}})
+                                                                       : curve({{30, 7}, {100, 5}}));
+    EXPECT_EQ(detail::max_flow_subset(g, edges, caps, sources, destinations, detail::kMaxFlowCap), expected);
+    const std::vector<Amount> supplies = {3};
+    const auto limited = detail::solve_subset(g, edges, caps, sources, destinations, 4, supplies);
+    EXPECT_EQ(limited.flow_value, empty ? 0 : 3);
+    EXPECT_EQ(limited.edge_flows, (empty ? std::vector<Amount>{} : chain ? std::vector<Amount>{3, 3}
+                                                                       : std::vector<Amount>{3, 0, 3}));
+    EXPECT_EQ(limited.marginal_cost_curve, empty ? curve({}) : curve({{30, 3}}));
+    EXPECT_EQ(detail::max_flow_subset(g, edges, caps, sources, destinations, 4, supplies), empty ? 0 : 3);
+  }
+}
+
 TEST(FlowCore, QuantisedCapacitiesFamily) {
   // Physical 2.5q is 3 units and 0.5q is 1 unit (the quantised network).
   const double q = std::ldexp(1.0, -12);

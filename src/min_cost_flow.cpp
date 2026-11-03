@@ -900,22 +900,30 @@ MinCostFlowResult solve_min_cost_flow(const Graph& graph,
   const auto edge_sources = graph.edge_sources();
   const auto edge_destinations = graph.edge_destinations();
   const auto cost = graph.edge_costs();
-  in.edges.clear();
-  in.edge_sources.clear();
-  in.edge_destinations.clear();
-  in.cost.clear();
-  in.edge_capacities.clear();
+  std::size_t eligible_count = num_edges;
+  if (eligibility != nullptr) {
+    eligible_count = 0;
+    for (std::size_t e = 0; e < num_edges; ++e) {
+      if (eligibility->allows_edge(static_cast<EdgeId>(e))) ++eligible_count;
+    }
+  }
+  in.edges.resize(eligible_count);
+  in.edge_sources.resize(eligible_count);
+  in.edge_destinations.resize(eligible_count);
+  in.cost.resize(eligible_count);
+  in.edge_capacities.resize(eligible_count);
   in.sources.clear();
   in.source_capacities.clear();
   in.destinations.clear();
-  in.edges.reserve(num_edges);
+  std::size_t kept = 0;
   for (std::size_t e = 0; e < num_edges; ++e) {
     if (eligibility != nullptr && !eligibility->allows_edge(static_cast<EdgeId>(e))) continue;
-    in.edges.push_back(static_cast<EdgeId>(e));
-    in.edge_sources.push_back(edge_sources[e]);
-    in.edge_destinations.push_back(edge_destinations[e]);
-    in.cost.push_back(cost[e]);
-    in.edge_capacities.push_back(view[e]);
+    in.edges[kept] = static_cast<EdgeId>(e);
+    in.edge_sources[kept] = edge_sources[e];
+    in.edge_destinations[kept] = edge_destinations[e];
+    in.cost[kept] = cost[e];
+    in.edge_capacities[kept] = view[e];
+    ++kept;
   }
   for (std::size_t i = 0; i < srcs.size(); ++i) {
     if (eligibility != nullptr && !eligibility->allows_node(srcs[i])) continue;
@@ -971,16 +979,16 @@ SubsetFlow subset_flow(const Graph& g, std::span<const EdgeId> edges, std::span<
   MinCostFlowSolver& solver = MinCostFlowSolver::local();
   ResidualNetwork& in = solver.network();
   in.edges.assign(edges.begin(), edges.end());
-  in.edge_sources.clear();
-  in.edge_destinations.clear();
-  in.cost.clear();
+  in.edge_sources.resize(edges.size());
+  in.edge_destinations.resize(edges.size());
+  in.cost.resize(edges.size());
   in.sources.clear();
   in.destinations.clear();
-  for (EdgeId e : edges) {
-    const auto ei = static_cast<std::size_t>(e);
-    in.edge_sources.push_back(map.add(edge_sources[ei]));
-    in.edge_destinations.push_back(map.add(edge_destinations[ei]));
-    in.cost.push_back(by_cost ? cost[ei] : 0);
+  for (std::size_t k = 0; k < edges.size(); ++k) {
+    const auto ei = static_cast<std::size_t>(edges[k]);
+    in.edge_sources[k] = map.add(edge_sources[ei]);
+    in.edge_destinations[k] = map.add(edge_destinations[ei]);
+    in.cost[k] = by_cost ? cost[ei] : 0;
   }
   for (NodeId v : sources) in.sources.push_back(map.add(v));
   in.source_capacities.assign(source_caps.begin(), source_caps.end());
