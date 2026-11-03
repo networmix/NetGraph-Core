@@ -426,6 +426,54 @@ TEST(PolicyFaults, RosterPrimitivesRetryAfterEveryAllocationFailure) {
   }
 }
 
+TEST(PolicyFaults, FusedPreparationRetriesColdAndGrownScratch) {
+  const auto small = chain_graph(3, 1), large = chain_graph(258, 1);
+  const auto small_dag = all_edges(*small), large_dag = all_edges(*large);
+  const std::vector<NodeId> roots {0, 1};
+  for (int mode = 0; mode < 5; ++mode) {
+    const auto call = [&](const Graph& g, const PredecessorDAG& dag) {
+      const std::vector<NodeId> dst {g.num_nodes() - 1};
+      const auto allocation = mode == 4 ? RouteAllocation::Optimized : mode >= 2 ? RouteAllocation::Weighted : RouteAllocation::Equal;
+      const detail::WeightSource weights {mode == 3 ? WeightBasis::ResidualSnapshot : WeightBasis::Explicit, g.edge_capacity_units()};
+      return detail::prepare_shortest_path_routes(g, dag, roots, dst, {RouteTieBreak::FewerHops, mode != 1, true}, {}, allocation, weights,
+          [&](std::span<const EdgeId> edges, std::span<Amount> values) {
+            for (std::size_t i = 0; i < edges.size(); ++i) values[i] = edges[i] == 0 ? 0 : 1;
+          });
+    };
+    const auto want = call(*large, *large_dag);
+    // Chain257 edges: costs257/256 even when snapshot weight0 removes root0's first hop.
+    ASSERT_EQ(want.costs, (std::vector<Cost> {257, 256}));
+    for (bool warmed : {false, true}) {
+      int injected = 0;
+      for (long at = 0;; ++at) {
+        bool failed = false;
+        const long live = g_live.load();
+        std::thread([&] {
+          if (warmed) (void)call(*small, *small_dag);
+          detail::ShortestPathPreparation got;
+          failed = fails_at(at, [&] { got = call(*large, *large_dag); });
+          if (failed) {
+            EXPECT_TRUE(got.costs.empty() && got.plan.support_edges.empty() && got.plan.sources.empty());
+            (void)call(*small, *small_dag);  // expire partial slots before another growth/retry
+            got = call(*large, *large_dag);
+          }
+          EXPECT_EQ(got.costs, want.costs);
+          EXPECT_EQ(plan_differences(got.plan, want.plan), std::vector<std::string> {})
+              << "mode " << mode << " warmed " << warmed << " allocation " << at;
+          const auto again = call(*large, *large_dag);
+          EXPECT_EQ(plan_differences(got.plan, again.plan), std::vector<std::string> {});
+        }).join();
+        EXPECT_EQ(g_live.load(), live) << "mode " << mode << " allocation " << at;
+        if (!failed) break;
+        ++injected;
+        ASSERT_LT(at, 200);
+        if (::testing::Test::HasFailure()) return;
+      }
+      EXPECT_GT(injected, 10) << mode;
+    }
+  }
+}
+
 // Lossy forwarding with links that wait on each other in a cycle: the rounds'
 // scratch, the independent check and the error path. CYC(x, y): tunnel 0 meets X (input edge 0)
 // before Y (input edge 3), tunnel 1 Y before X. With x = y = 1 the rounds settle: every

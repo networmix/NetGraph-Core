@@ -662,12 +662,16 @@ struct CreationScratch {
     std::uint32_t stamp {0};
     std::uint8_t reached {0};
     std::uint8_t target {0};
-    std::int32_t lo {0};     // the node's support out-edges: support[lo, hi)
+    std::int32_t lo {0};     // selector: support[lo, hi); preparation: rank in reached
     std::int32_t hi {0};
   };
   std::uint32_t generation {0};
   std::vector<Node> node;
   std::vector<NodeId> reached;  // the walk's nodes (its queue), then ascending
+  std::vector<std::int32_t> incoming, fill, entries, order, position;
+  std::vector<std::pair<std::int32_t, std::int32_t>> stack;
+  std::vector<std::uint8_t> state, active, forward;
+  std::vector<Cost> distance;
 
   void begin(std::size_t n) {
     if (node.size() < n) node.resize(n);  // strong guarantee; new slots carry stamp 0
@@ -732,6 +736,11 @@ std::size_t lower_bound_from(std::span<const EdgeId> a, std::size_t hint, EdgeId
 
 namespace {
 
+// For non-bottleneck choices with nonempty output, prepare_shortest_path_routes consumes this
+// call's final CreationScratch: reached is sorted and contains every root and returned edge
+// endpoint; reached/target flags belong to the current generation. Preserve that state through
+// the canonical tree's second walk. The kernel then reuses lo for local ranks. The bottleneck
+// path uses the search workspace instead; the kernel reconstructs its CreationScratch state.
 std::vector<EdgeId> select_routes(const Graph& graph, std::span<const EdgeId> sup,
                                        std::span<const NodeId> roots, std::span<const NodeId> destinations,
                                        const RouteChoice& choice, PriorityReader view, std::span<const std::uint64_t> allowed = {}) {
@@ -831,6 +840,176 @@ std::vector<EdgeId> shortest_path_routes(const Graph& graph, const PredecessorDA
                                        std::span<const NodeId> roots, std::span<const NodeId> destinations,
                                        const RouteChoice& choice, PriorityReader view) {
   return select_routes(graph, PredecessorDAGBuilder::ascending(support), roots, destinations, choice, view);
+}
+
+ShortestPathPreparation prepare_shortest_path_routes(const Graph& graph, const PredecessorDAG& support,
+    std::span<const NodeId> roots, std::span<const NodeId> destinations, const RouteChoice& choice,
+    PriorityReader view, RouteAllocation allocation, const WeightSource& weights, const AvailableCapacityFn& snapshot) {
+  check_kernel(allocation, Admission::Lossless);
+  const bool weighted = allocation == RouteAllocation::Weighted;
+  if (weighted && weights.basis == WeightBasis::Explicit &&
+      weights.values.size() != static_cast<std::size_t>(graph.num_edges())) {
+    throw std::logic_error("prepare_shortest_path_routes: the explicit weights are not edge-aligned");
+  }
+  ShortestPathPreparation out;
+  PreparedRoute& plan = out.plan;
+  plan.allocation = allocation;
+  out.costs.assign(roots.size(), kUnreachable);
+  plan.support_edges = shortest_path_routes(graph, support, roots, destinations, choice, view);
+  const auto& edges = plan.support_edges;
+  if (edges.empty()) {
+    if (allocation != RouteAllocation::Optimized) (void)plan.layout(roots, destinations, 0, 0);
+    return out;
+  }
+  const auto tails = graph.edge_sources(), heads = graph.edge_destinations();
+  const auto costs = graph.edge_costs();
+  CreationScratch& s = creation_scratch();
+  // The bottleneck selector uses the search workspace rather than this reached-node walk.
+  // Other route choices leave exactly the selected walk's reached nodes here, already sorted.
+  if (choice.single_path() && choice.prefers_score()) {
+    s.begin(static_cast<std::size_t>(graph.num_nodes()));
+    s.reached.clear();
+    for (NodeId d : destinations) s.touch(d).target = 1;
+    auto reach = [&](NodeId v) {
+      auto& nv = s.touch(v);
+      if (nv.reached != 0) return;
+      nv.reached = 1;
+      s.reached.push_back(v);
+    };
+    for (NodeId root : roots) reach(root);
+    for (EdgeId e : edges) { reach(tails[static_cast<std::size_t>(e)]); reach(heads[static_cast<std::size_t>(e)]); }
+    std::sort(s.reached.begin(), s.reached.end());
+  }
+  const std::size_t n = s.reached.size();
+  // Selection is finished: reuse its range's lo as the local index, keeping graph-sized slots small.
+  for (std::size_t i = 0; i < n; ++i) s.at(s.reached[i]).lo = static_cast<std::int32_t>(i);
+  // One incoming index, shared by the order, cost and membership passes. Entries hold U
+  // positions and ascend within each child because the scatter reads U in ascending order.
+  s.incoming.assign(n + 1, 0);
+  for (EdgeId e : edges) ++s.incoming[static_cast<std::size_t>(s.at(heads[static_cast<std::size_t>(e)]).lo) + 1];
+  for (std::size_t i = 0; i < n; ++i) s.incoming[i + 1] += s.incoming[i];
+  s.fill.assign(s.incoming.begin(), s.incoming.end() - 1);
+  s.entries.resize(edges.size());
+  for (std::size_t k = 0; k < edges.size(); ++k) {
+    const auto v = static_cast<std::size_t>(s.at(heads[static_cast<std::size_t>(edges[k])]).lo);
+    s.entries[static_cast<std::size_t>(s.fill[v]++)] = static_cast<std::int32_t>(k);
+  }
+  s.state.assign(n, 0);
+  s.order.clear();
+  for (NodeId d : destinations) {
+    if (s.at(d).reached == 0) continue;
+    const auto di = s.at(d).lo;
+    if (s.state[static_cast<std::size_t>(di)] != 0) continue;
+    s.state[static_cast<std::size_t>(di)] = 1;
+    s.stack.clear();
+    s.stack.emplace_back(di, s.incoming[static_cast<std::size_t>(di)]);
+    while (!s.stack.empty()) {
+      const auto [v, at] = s.stack.back();
+      if (at == s.incoming[static_cast<std::size_t>(v) + 1]) {
+        s.state[static_cast<std::size_t>(v)] = 2;
+        s.order.push_back(v);
+        s.stack.pop_back();
+        continue;
+      }
+      ++s.stack.back().second;
+      const auto k = static_cast<std::size_t>(s.entries[static_cast<std::size_t>(at)]);
+      const NodeId u = tails[static_cast<std::size_t>(edges[k])];
+      if (s.at(u).target != 0) continue;
+      const auto ui = static_cast<std::size_t>(s.at(u).lo);
+      if (s.state[ui] == 1) throw std::logic_error("kernel plan: the route is cyclic");
+      if (s.state[ui] == 0) {
+        s.state[ui] = 1;
+        s.stack.emplace_back(static_cast<std::int32_t>(ui), s.incoming[ui]);
+      }
+    }
+  }
+  if (weighted) {
+    plan.weights.resize(edges.size());
+    if (weights.basis == WeightBasis::ResidualSnapshot) snapshot(edges, plan.weights);
+    else {
+      const auto capacity = graph.edge_capacity_units();
+      for (std::size_t k = 0; k < edges.size(); ++k) {
+        const auto e = static_cast<std::size_t>(edges[k]);
+        plan.weights[k] = weights.basis == WeightBasis::Explicit && capacity[e] != 0 ? weights.values[e] : capacity[e];
+      }
+    }
+  }
+  auto member = [&](std::size_t k) { return !weighted || plan.weights[k] > 0; };
+  s.distance.assign(n, kUnreachable);
+  s.active.assign(n, 0);
+  for (NodeId d : destinations) {
+    if (s.at(d).reached == 0) continue;
+    const auto v = static_cast<std::size_t>(s.at(d).lo);
+    s.distance[v] = 0;
+    s.active[v] = 1;
+  }
+  // Reverse topological order: each child's cost and member reachability are complete before
+  // they update its parents. Costs use all of U, even when a weight removes the cheapest walk.
+  for (auto it = s.order.rbegin(); it != s.order.rend(); ++it) {
+    const auto v = static_cast<std::size_t>(*it);
+    for (auto at = s.incoming[v]; at < s.incoming[v + 1]; ++at) {
+      const auto k = static_cast<std::size_t>(s.entries[static_cast<std::size_t>(at)]);
+      const auto e = static_cast<std::size_t>(edges[k]);
+      if (s.at(tails[e]).target != 0) continue;
+      const auto u = static_cast<std::size_t>(s.at(tails[e]).lo);
+      if (s.distance[v] != kUnreachable) s.distance[u] = std::min(s.distance[u], costs[e] + s.distance[v]);
+      if (s.active[v] != 0 && member(k)) s.active[u] = 1;
+    }
+  }
+  for (std::size_t i = 0; i < roots.size(); ++i) out.costs[i] = s.distance[static_cast<std::size_t>(s.at(roots[i]).lo)];
+  if (allocation == RouteAllocation::Optimized) return out;
+  s.forward.assign(n, 0);
+  for (NodeId root : roots) {
+    const auto u = static_cast<std::size_t>(s.at(root).lo);
+    s.forward[u] = s.active[u];
+  }
+  for (auto vi : s.order) {
+    const auto v = static_cast<std::size_t>(vi);
+    if (s.active[v] == 0 || s.forward[v] != 0) continue;
+    for (auto at = s.incoming[v]; at < s.incoming[v + 1]; ++at) {
+      const auto k = static_cast<std::size_t>(s.entries[static_cast<std::size_t>(at)]);
+      const auto& nu = s.at(tails[static_cast<std::size_t>(edges[k])]);
+      if (nu.target == 0 && s.forward[static_cast<std::size_t>(nu.lo)] != 0 && member(k)) {
+        s.forward[v] = 1;
+        break;
+      }
+    }
+  }
+  plan.forwarding_edges.resize(edges.size());
+  std::size_t m = 0;
+  for (std::size_t k = 0; k < edges.size(); ++k) {
+    const auto e = static_cast<std::size_t>(edges[k]);
+    const auto& nu = s.at(tails[e]);
+    if (nu.target != 0 || s.forward[static_cast<std::size_t>(nu.lo)] == 0 ||
+        s.active[static_cast<std::size_t>(s.at(heads[e]).lo)] == 0 || !member(k)) continue;
+    plan.forwarding_edges[m] = edges[k];
+    if (weighted) plan.weights[m] = plan.weights[k];
+    ++m;
+  }
+  plan.forwarding_edges.resize(m);
+  if (weighted) plan.weights.resize(m);
+  s.position.assign(n, -1);
+  std::size_t positions = 0;
+  if (m != 0) for (auto v : s.order) if (s.forward[static_cast<std::size_t>(v)] != 0) s.position[static_cast<std::size_t>(v)] = static_cast<std::int32_t>(positions++);
+  const auto layout = plan.layout(roots, destinations, positions, m);
+  for (auto vi : s.order) {
+    const auto v = static_cast<std::size_t>(vi);
+    if (s.position[v] < 0) continue;
+    const auto p = static_cast<std::size_t>(s.position[v]);
+    const auto& nv = s.at(s.reached[v]);
+    layout.topological_order[p] = s.reached[v];
+    layout.is_destination[p] = nv.target;
+  }
+  for (std::size_t k = 0; k < m; ++k) {
+    const auto e = static_cast<std::size_t>(plan.forwarding_edges[k]);
+    const auto p = static_cast<std::size_t>(s.position[static_cast<std::size_t>(s.at(tails[e]).lo)]);
+    if (layout.outgoing_end[p] == 0) layout.outgoing_begin[p] = static_cast<std::int32_t>(k);
+    layout.outgoing_end[p] = static_cast<std::int32_t>(k + 1);
+    layout.edge_destination_positions[k] = s.position[static_cast<std::size_t>(s.at(heads[e]).lo)];
+  }
+  for (std::size_t i = 0; i < roots.size(); ++i) layout.source_positions[i] =
+      s.position[static_cast<std::size_t>(s.at(roots[i]).lo)];
+  return out;
 }
 
 std::vector<EdgeId> reachable_route(const Graph& graph, std::span<const EdgeId> basis,

@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -100,6 +101,10 @@ struct WeightSource {
   std::span<const Amount> values {};
 };
 
+// Gather the free capacity of edges, before black holes (which the forwarding engine applies),
+// into an aligned output, once per evaluation or snapshot.
+using AvailableCapacityFn = std::function<void(std::span<const EdgeId> edges, std::span<Amount> out)>;
+
 struct PreparedRoute {
   RouteAllocation allocation {RouteAllocation::Optimized};
   std::vector<EdgeId> support_edges {};      // ascending: the plan's route (a single flow's record route)
@@ -184,8 +189,9 @@ private:
 [[nodiscard]] PreparedRoute prepare_route(const Graph& graph, RouteAllocation allocation, Admission admission,
                                    const WeightSource& weights, NodeId source, std::span<const NodeId> destinations,
                                    const PredecessorDAG& route, Cost* cost = nullptr);
-// The same plan with several roots (a ShortestPaths demand's pooled program): the members are pruned to
-// the walks from any root to the destination set; `roots` ascending and disjoint from `destinations`.
+// The same plan with several roots (from_dag's pooled program; ShortestPaths builds its own
+// with prepare_shortest_path_routes): members are pruned to walks from any root to the destination
+// set; `roots` ascending and disjoint from `destinations`.
 [[nodiscard]] PreparedRoute prepare_route(const Graph& graph, RouteAllocation allocation, Admission admission,
                                    const WeightSource& weights, std::span<const NodeId> roots,
                                    std::span<const NodeId> destinations, const PredecessorDAG& route);
@@ -224,6 +230,21 @@ private:
 [[nodiscard]] std::vector<EdgeId> shortest_path_routes(const Graph& graph, const PredecessorDAG& support,
                               std::span<const NodeId> roots, std::span<const NodeId> destinations,
                               const RouteChoice& choice, PriorityReader view);
+
+struct ShortestPathPreparation {
+  PreparedRoute plan {};
+  std::vector<Cost> costs {};  // per input root, before weight pruning; unreachable costs stay kUnreachable
+};
+
+// Select U and build its costs and pooled plan without constructing a temporary DAG. Inputs have
+// shortest_path_routes' domain; allocation is Equal, Weighted or Optimized. Static weights follow
+// WeightSource; ResidualSnapshot instead gathers the selected U once through snapshot (values is
+// unused). U stays in plan.support_edges, including zero-weight routes. Optimized needs only U and
+// costs and leaves the split structure empty. All returned arrays are owned, independent of scratch.
+[[nodiscard]] ShortestPathPreparation prepare_shortest_path_routes(const Graph& graph,
+    const PredecessorDAG& support, std::span<const NodeId> roots, std::span<const NodeId> destinations,
+    const RouteChoice& choice, PriorityReader view, RouteAllocation allocation,
+    const WeightSource& weights, const AvailableCapacityFn& snapshot);
 
 // The edges reached from one source in a destination-pruned DAG, in ascending EdgeId.
 // The common basis has no dead ends and no edge leaves a destination. This is the unweighted

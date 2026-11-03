@@ -619,6 +619,8 @@ struct PreparedShortestPaths {
   std::shared_ptr<const std::vector<EdgeId>> support {};
 };
 
+AvailableCapacityFn available_capacity_reader(const ServiceCapacityWorkspace& W);
+
 PreparedShortestPaths prepare_shortest_path_program(PolicyCallContext& c) {
   const auto& pe = c.engine;
   const auto& g = c.graph;
@@ -626,33 +628,24 @@ PreparedShortestPaths prepare_shortest_path_program(PolicyCallContext& c) {
   const RouteAllocation allocation = std::get<ShortestPaths>(pe.config.routing).allocation;
   PreparedShortestPaths out;
   out.program = pe.kept_program;
-  std::vector<Cost> costs;
   if (out.program) {
     const auto& data = ProgramAccess::data(*out.program);
     out.support = data.common_replay_support;
-    costs.reserve(k);
-    for (const auto& entry : data.entries) costs.push_back(entry.min_route_cost);
+    return out;  // only static split programs are kept; their entries already own every cost
+  }
+  const WorkingPriority view {&c.service_capacity, g.edge_capacity_units(), pe.route_choice.tie_break};
+  // The support already excludes masked endpoints; the plan retains every requested destination.
+  auto prepared = prepare_shortest_path_routes(g, *pe.support, pe.reachable_sources, pe.destinations,
+      pe.route_choice, view.as_priority_reader(), allocation, shortest_path_weight_source(pe),
+      available_capacity_reader(c.service_capacity));
+  if (allocation == RouteAllocation::Optimized) {
+    out.support = std::make_shared<const std::vector<EdgeId>>(std::move(prepared.plan.support_edges));
   } else {
-    const WorkingPriority view {&c.service_capacity, g.edge_capacity_units(), pe.route_choice.tie_break};
-    auto edges = shortest_path_routes(g, *pe.support, pe.reachable_sources, pe.allowed_destinations,
-                                     pe.route_choice, view.as_priority_reader());
-    const auto dag = PredecessorDAGBuilder::of_edges(g, edges);
-    costs = min_route_costs(g, dag, pe.reachable_sources, pe.allowed_destinations);
-    if (allocation == RouteAllocation::Optimized) {
-      out.support = std::make_shared<const std::vector<EdgeId>>(std::move(edges));
-    } else {
-      std::vector<Amount> creation;
-      WeightSource weights = shortest_path_weight_source(pe);
-      if (allocation == RouteAllocation::Weighted && weights.basis == WeightBasis::ResidualSnapshot) {
-        c.service_capacity.gather(edges, creation);
-        weights.values = creation;
-      }
-      std::vector<ProgramEntry> entries(k);
-      for (std::size_t i = 0; i < k; ++i) entries[i].min_route_cost = costs[i];
-      out.program = pooled_dag_program(g, pe.sources, pe.destinations, pe.reachable_sources, dag,
-                                      allocation, weights, std::move(entries));
-      out.support = ProgramAccess::data(*out.program).common_replay_support;
-    }
+    std::vector<ProgramEntry> entries(k);
+    for (std::size_t i = 0; i < k; ++i) entries[i].min_route_cost = prepared.costs[i];
+    out.program = shortest_path_program(g, pe.sources, pe.destinations, pe.reachable_sources,
+        std::make_shared<const PreparedRoute>(std::move(prepared.plan)), std::move(entries));
+    out.support = ProgramAccess::data(*out.program).common_replay_support;
   }
   // Optimized keeps stored records. Pooled source routes are built only by explicit record reads.
   if (allocation == RouteAllocation::Optimized) out.flows.resize(k);
@@ -661,7 +654,7 @@ PreparedShortestPaths prepare_shortest_path_program(PolicyCallContext& c) {
     flow.sources = {pe.reachable_sources[i]};
     const auto route = reachable_route(g, *out.support, flow.sources.front(), pe.allowed_destinations);
     flow.route = record_route_of(g, route, pe.support);
-    flow.min_route_cost = costs[i];
+    flow.min_route_cost = prepared.costs[i];
   }
   return out;
 }

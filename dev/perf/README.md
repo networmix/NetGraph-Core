@@ -376,9 +376,9 @@ preflight; its default empty observer does no work in the timed binary.
 
 | Rows | Work and boundary |
 | --- | --- |
-| `pooled.anycast.many`, `.one`, `pooled.single_path.one` | Clos128x32, sources0..95 versus source0, destinations96..111 (single path:96), replace4000; whole-roster and one-root/single-path preparation |
+| `pooled.anycast.many`, `.one`, `.two`, `.four`, `pooled.single_path.one` | Clos128x32 seed22, sources0..95, source0, sources0/1 or0..3; destinations96..111 (single path:96), replace4000; whole-roster, few-root and single-path preparation |
 | `pooled.choice.collapse_available`, `.tree`, `.bottleneck_available` |32 disjoint two-source collapse/tree groups, or one prefix-sensitive bottleneck demand; independent expected deliveries160/192/3. Available-capacity collapse sees2/5 free on capacity10/5; the tree picks the lowest-id qualifying hop; the bottleneck sees1/3 free on capacity5/3 |
-| `pooled.weight.explicit`, `.snapshot` | Clos32x16, eight sources to20/21, replace400. Explicit weights0 or1..7; snapshot reads a half-capacity service view with zero members. U retains the zero-weight route edges |
+| `pooled.weight.explicit`, `.snapshot`, `.explicit.one`, `.snapshot.one` | Clos32x16 seed25, eight sources or source0 to20/21, replace400. Explicit input-edge weights `i%5==0 ? 0 : 1+i%7`; snapshot reads `i%13==0 ? 0 : capacity[i]/2` in the creation service view. U retains the zero-weight route edges |
 | `pooled.from_dag.weighted`, `pooled.from_dag_build.one` |32 non-tight seven-node DAGs with nested roots, dead ends, terminal out-edges and zero alternatives: build and Pinned replace384; or eight one-source builders on the existing Clos64x32 search/trim/plan workload |
 | `pooled.controller.equal`, `global.support.equal` | ShortestPaths Optimized on Clos32x16 with equal sources, or supported CentralizedTE on the non-tight DAG family; preparation, solve, decomposition and default result lifetime |
 | `program.forward.pooled`, `program.repair.pooled`, `program.stale.pooled` | Installed Equal anycast program on Clos32x16;32 full-offer forwards100..3200 or32 fixed three-link states as repair masks/black holes, fresh Lossy Pinned policy per state, replace2400 |
@@ -387,6 +387,14 @@ Capacity/headroom collapse and bottleneck scores share their preparation branch 
 capacity. Static weight variants and memberless roots, and controller source-allocation variants,
 remain semantic controls rather than more timing rows for the same changed branch. Existing
 pooled, program, batch, global and tunnel rows remain controls of the connected readers.
+
+The two/four-root and one-root Weighted rows change only the source roster of their existing
+fixtures. They use the same pooled digest and complete result work on every Core revision.
+The tool's untimed preflight independently enumerates two-hop walks: U has576/640 edges for
+two/four roots and48 edges for either one-root Weighted fixture, with minimum cost2 per root.
+It derives positive membership and weights from the creation view, checks source-local record
+routes and graph/ledger ownership, and verifies that the timed row returns the observed digest.
+Record reads and these checks do not run in timing binaries.
 
 ### Aggregate entries and explicit record reads
 

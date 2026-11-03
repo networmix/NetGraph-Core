@@ -725,25 +725,30 @@ inline void add_storage_rows(std::vector<Row>& r) {
 // branch are semantic controls rather than additional permanent timing rows.
 inline abaapi::PooledSpec pooled_fixture(const std::string& name) {
   using K = abaapi::PooledKind;
-  if (name == "pooled.anycast.many" || name == "pooled.anycast.one" || name == "pooled.single_path.one") {
+  if (name == "pooled.anycast.many" || name == "pooled.anycast.one" || name == "pooled.anycast.two" ||
+      name == "pooled.anycast.four" || name == "pooled.single_path.one") {
     std::vector<int> sources, destinations;
-    for (int i = 0; i < (name == "pooled.anycast.many" ? 96 : 1); ++i) sources.push_back(i);
+    const int roots = name == "pooled.anycast.many" ? 96 : name == "pooled.anycast.four" ? 4 :
+                      name == "pooled.anycast.two" ? 2 : 1;
+    for (int i = 0; i < roots; ++i) sources.push_back(i);
     for (int i = 96; i < (name == "pooled.single_path.one" ? 97 : 112); ++i) destinations.push_back(i);
     return abaapi::pooled_prepare(gen_clos(128, 32, 22), sources, destinations,
                                   name == "pooled.single_path.one" ? K::Tree : K::Equal, 4000);
   }
-  if (name == "pooled.weight.explicit" || name == "pooled.weight.snapshot" || name == "pooled.controller.equal" ||
+  if (name == "pooled.weight.explicit" || name == "pooled.weight.snapshot" ||
+      name == "pooled.weight.explicit.one" || name == "pooled.weight.snapshot.one" || name == "pooled.controller.equal" ||
       name == "program.forward.pooled" || name == "program.repair.pooled" || name == "program.stale.pooled") {
     auto a = gen_clos(32, 16, 25);
     std::vector<double> free = a.cap;
     std::vector<std::int64_t> weights(a.src.size());
     for (std::size_t i = 0; i < weights.size(); ++i) {
       weights[i] = i % 5 == 0 ? 0 : 1 + static_cast<std::int64_t>(i % 7);
-      if (name == "pooled.weight.snapshot") free[i] = i % 13 == 0 ? 0 : a.cap[i] / 2;
+      if (name.starts_with("pooled.weight.snapshot")) free[i] = i % 13 == 0 ? 0 : a.cap[i] / 2;
     }
-    K kind = name == "pooled.weight.explicit" ? K::Explicit : name == "pooled.weight.snapshot" ? K::Snapshot :
+    K kind = name.starts_with("pooled.weight.explicit") ? K::Explicit : name.starts_with("pooled.weight.snapshot") ? K::Snapshot :
              name == "pooled.controller.equal" ? K::Controller : K::Equal;
-    return abaapi::pooled_prepare(a, {0,1,2,3,4,5,6,7}, {20,21}, kind,
+    const std::vector<int> sources = name.ends_with(".one") ? std::vector<int>{0} : std::vector<int>{0,1,2,3,4,5,6,7};
+    return abaapi::pooled_prepare(a, sources, {20,21}, kind,
                                   name.starts_with("program.") ? 2400 : 400, free, weights);
   }
   Arrays a;
@@ -1202,12 +1207,16 @@ inline std::vector<Row> rows() {
   for (const auto& [name, desc] : std::vector<std::pair<std::string, std::string>> {
       {"pooled.anycast.many", "ShortestPaths Equal, Clos128x32 seed22, sources0..95 to leaves96..111, replace4000; full policy/result lifetime"},
       {"pooled.anycast.one", "same anycast graph/offer with source0; one-root preparation"},
+      {"pooled.anycast.two", "same anycast graph/offer with sources0/1; two-root preparation"},
+      {"pooled.anycast.four", "same anycast graph/offer with sources0..3; four-root preparation"},
       {"pooled.single_path.one", "same graph, source0 to96, canonical single path, replace4000"},
       {"pooled.choice.collapse_available", "32 disjoint two-source parallel-edge groups, capacities10/5 and creation view2/5, replace640; one selected edge per pair"},
       {"pooled.choice.tree", "32 disjoint canonical-tree groups, source0 chooses cap3 next hop while source1 has cap100, replace320"},
       {"pooled.choice.bottleneck_available", "one source on a six-node prefix-sensitive graph; available1/3 versus capacity5/3, replace10"},
       {"pooled.weight.explicit", "Weighted Explicit, Clos32x16 seed25, eight sources to20/21, weights0 or1..7, replace400; route basis includes zero-weight edges"},
       {"pooled.weight.snapshot", "Weighted ResidualSnapshot on the same Clos; creation view half-capacity with zero members, replace400; snapshot gathered once over U"},
+      {"pooled.weight.explicit.one", "same Explicit graph/weights/offer with source0; zero-weight edges retained in the route basis"},
+      {"pooled.weight.snapshot.one", "same ResidualSnapshot graph/creation view/offer with source0; one-root weighted preparation"},
       {"pooled.from_dag.weighted", "32 non-tight supplied DAGs, nested roots, dead ends and terminal out-edges, Weighted Explicit with zero alternatives, build and Pinned replace384"},
       {"pooled.controller.equal", "ShortestPaths Optimized with equal sources, Clos32x16 seed25, eight sources to20/21, replace400; shared U, solve, decomposition, default results"},
       {"global.support.equal", "CentralizedTE Equal with32 non-tight supplied DAGs and nested roots; constructor trim/reverse roster plus solve and replace384"}}) {

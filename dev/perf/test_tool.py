@@ -2979,6 +2979,7 @@ class BuildScript(unittest.TestCase):
 # same durations.
 HARNESS_TEST = r"""
 #include "aba_rows.hpp"
+#include "netgraph/core/detail/program_data.hpp"
 
 #include <memory>
 #include <random>
@@ -3156,6 +3157,103 @@ int test_pooled_preparation() {
   return 0;
 }
 
+int test_few_root_preparation() {
+  namespace nc = netgraph::core;
+  const auto listed = rows();
+  for (const auto& [name, count] : std::vector<std::pair<std::string, int>> {
+      {"pooled.anycast.two", 2}, {"pooled.anycast.four", 4},
+      {"pooled.weight.explicit.one", 1}, {"pooled.weight.snapshot.one", 1}}) {
+    const bool weighted = name.starts_with("pooled.weight.");
+    const bool snapshot = name == "pooled.weight.snapshot.one";
+    const int leaves = weighted ? 32 : 128, spines = weighted ? 16 : 32;
+    const auto spec = pooled_fixture(name);
+    const auto& g = spec.graph.ref();
+    auto require = [&](bool ok, const char* why) { if (!ok) throw std::runtime_error(name + ": " + why); };
+    std::vector<nc::NodeId> roots, targets;
+    for (int s = 0; s < count; ++s) roots.push_back(s);
+    for (int t = weighted ? 20 : 96; t < (weighted ? 22 : 112); ++t) targets.push_back(t);
+    require(spec.sources == roots && spec.destinations == targets, "wrong fixture roster/endpoints");
+    require(g.num_nodes() == leaves + spines && spec.offer == nc::to_units(weighted ? 400 : 4000, abaapi::kResolution), "wrong graph/offer");
+    const auto& config = std::get<nc::ShortestPaths>(spec.config.routing);
+    require(config.allocation == (weighted ? nc::RouteAllocation::Weighted : nc::RouteAllocation::Equal), "wrong allocation");
+    std::vector<nc::Amount> weights(g.num_edges(), 1);
+    std::vector<std::vector<nc::EdgeId>> next(g.num_nodes());
+    for (nc::EdgeId e = 0; e < g.num_edges(); ++e) {
+      next[g.edge_sources()[e]].push_back(e);
+      require(g.edge_costs()[e] == 1, "fixture must have unit costs");
+    }
+    for (std::size_t i = 0; i < spec.graph.edge_of_input.size(); ++i) {
+      const auto e = spec.graph.edge_of_input[i];
+      const auto cap = g.edge_capacity_units()[e];
+      const auto available = snapshot ? (i % 13 == 0 ? 0 : cap / 2) : cap;
+      require(spec.baseline[e] == available, "wrong creation service view");
+      if (weighted) weights[e] = snapshot ? available : i % 5 == 0 ? 0 : 1 + static_cast<nc::Amount>(i % 7);
+      if (weighted && !snapshot) require(config.edge_weights && config.edge_weights->at(e) == weights[e], "wrong explicit input alignment");
+    }
+    if (weighted) require(config.weight_basis == (snapshot ? nc::WeightBasis::ResidualSnapshot : nc::WeightBasis::Explicit), "wrong weight basis");
+    std::set<nc::EdgeId> support, members;
+    std::vector<std::set<nc::EdgeId>> by_root(count);
+    for (int root = 0; root < count; ++root) {
+      for (auto first : next[root]) {
+        const auto spine = g.edge_destinations()[first];
+        require(spine >= leaves, "first hop must reach a spine");
+        for (auto second : next[spine]) {
+          if (!std::binary_search(targets.begin(), targets.end(), g.edge_destinations()[second])) continue;
+          support.insert(first); support.insert(second);
+          by_root[root].insert(first); by_root[root].insert(second);
+          if (weights[first] > 0 && weights[second] > 0) { members.insert(first); members.insert(second); }
+        }
+      }
+    }
+    require(support.size() == (weighted ? 48U : count == 2 ? 576U : 640U), "wrong independent support size");
+    if (weighted) require(members.size() < support.size(), "zero weights must prune members, not U");
+    bool observed = false;
+    const auto digest = abaapi::pooled_trial(spec, [&](const auto& result, const auto& policy, const auto& ledger) {
+      observed = true;
+      require(result.program && result.program == policy.program(), "missing/foreign installed program");
+      const auto& data = nc::detail::ProgramAccess::data(*result.program);
+      require(data.graph_uid == g.uid() && data.entries.size() == roots.size() && data.split_contexts.size() == 1, "wrong program ownership/shape");
+      const auto& plan = *data.split_contexts.front().prepared_route;
+      require(std::ranges::equal(plan.sources, roots) && std::ranges::equal(plan.destinations, targets), "wrong plan endpoints");
+      require(plan.support_edges == std::vector<nc::EdgeId>(support.begin(), support.end()), "lost unweighted route support");
+      require(std::ranges::equal(plan.forwarding_edges, members), "wrong positive two-hop membership");
+      std::vector<nc::Amount> member_weights;
+      if (weighted) for (auto e : plan.forwarding_edges) member_weights.push_back(weights[e]);
+      require(std::ranges::equal(plan.weights, member_weights), "wrong captured weights");
+      const auto records = policy.records();
+      require(records.size() == roots.size() && ledger.records().size() == roots.size(), "missing source records");
+      for (int i = 0; i < count; ++i) {
+        const auto& entry = data.entries[i]; const auto& record = records[i];
+        require(entry.head == i && entry.min_route_cost == 2 && record.min_route_cost == 2, "wrong per-root cost");
+        require(record.sources == std::vector<nc::NodeId>{i} && record.destinations == targets, "wrong record endpoints");
+        require(record.flow_id.first == ledger.uid() && record.route && record.route->graph_uid() == g.uid(), "wrong record ownership");
+        auto route = std::vector<nc::EdgeId>(record.route->via_edges().begin(), record.route->via_edges().end());
+        std::sort(route.begin(), route.end());
+        require(route == std::vector<nc::EdgeId>(by_root[i].begin(), by_root[i].end()), "wrong source-local unweighted record route");
+      }
+    });
+    const auto row = std::find_if(listed.begin(), listed.end(), [&](const auto& r) { return r.name == name; });
+    require(observed && row != listed.end() && row->setup()() == digest, "timed row differs from semantic preflight");
+    std::printf("few-root %s: U=%zu members=%zu roots=%d digest=%016llx\n", name.c_str(), support.size(), members.size(), count, static_cast<unsigned long long>(digest));
+  }
+  const abaapi::Arrays hand {7, {0,1,2,2}, {2,2,5,6}, {10,10,7,11}, {1,3,2,2}};
+  for (int count : {2, 1}) {
+    const auto spec = abaapi::pooled_prepare(hand, count == 2 ? std::vector<int>{0,1} : std::vector<int>{0},
+                                            {5,6}, abaapi::PooledKind::Explicit, 7, {}, {1,1,0,3});
+    abaapi::pooled_trial(spec, [&](const auto& result, const auto&, const auto&) {
+      const auto& data = nc::detail::ProgramAccess::data(*result.program);
+      const auto& plan = *data.split_contexts.front().prepared_route;
+      if (plan.support_edges.size() != static_cast<std::size_t>(count + 2) ||
+          plan.forwarding_edges.size() != static_cast<std::size_t>(count + 1) ||
+          data.entries.front().min_route_cost != 3 || (count == 2 && data.entries.back().min_route_cost != 5) ||
+          result.delivered != nc::to_units(7, abaapi::kResolution))
+        throw std::runtime_error("few-root nonuniform-cost/zero-weight hand control");
+    });
+  }
+  std::puts("few-root preparation: four rosters, costs, unweighted U, positive membership, captured weights and timed digests checked");
+  return 0;
+}
+
 int test_entry_histories() {
   namespace nc = netgraph::core;
   const abaapi::Arrays a {2, {0}, {1}, {10 * abaapi::kResolution}, {3}};
@@ -3197,6 +3295,7 @@ int test_entry_histories() {
 int main(int argc, char** argv) {
   if (argc == 2 && std::string(argv[1]) == "test-entry-histories") return test_entry_histories();
   if (argc == 2 && std::string(argv[1]) == "test-pooled-preparation") return test_pooled_preparation();
+  if (argc == 2 && std::string(argv[1]) == "test-few-root-preparation") return test_few_root_preparation();
   if (argc == 2 && std::string(argv[1]) == "test-captured-sources") return test_captured_sources();
   if (argc == 2 && std::string(argv[1]) == "test-times") return test_times();
   if (argc == 2 && std::string(argv[1]) == "test-msd-epochs") return test_msd_epochs();
@@ -3306,6 +3405,12 @@ class Harness(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("cyclic fixed point checked", proc.stdout)
 
+    def test_few_root_rows_keep_support_membership_and_creation_weights(self):
+        proc = self.harness("test-few-root-preparation")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.count("few-root pooled."), 4)
+        self.assertIn("captured weights and timed digests checked", proc.stdout)
+
     def test_compiles_without_a_diagnostic(self):
         self.assertEqual(self.compiled.returncode, 0, self.compiled.stderr[-2000:])
         self.assertEqual(self.compiled.stderr, "")
@@ -3315,7 +3420,7 @@ class Harness(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = aba.row_list(proc.stdout.encode(), "aba-list")
         real = {k: v for k, v in rows.items() if not k.startswith("test.")}
-        self.assertEqual(len(real), 133)
+        self.assertEqual(len(real), 137)
         sums = sha256sums(HERE / "queries")
         lists = {}
         for name in sums:
@@ -3349,7 +3454,7 @@ class Harness(unittest.TestCase):
         real = [row for row in listed if not row.startswith("test.")]
         with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 1) as pool:
             procs = list(pool.map(lambda row: self.harness("aba-run", row, "1"), real))
-        self.assertEqual(len(procs), 133)
+        self.assertEqual(len(procs), 137)
         for row, proc in zip(real, procs, strict=True):
             self.assertEqual(proc.returncode, 0, (row, proc.stderr))
             self.assertEqual(

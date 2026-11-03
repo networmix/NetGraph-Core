@@ -2388,6 +2388,33 @@ TEST(SharedPreparation, PooledProgramsOwnOneBasisAndNoSourceDag) {
   }
 }
 
+TEST(SharedPreparation, MaskedDestinationStaysInPlanAndProgramEndpoints) {
+  const auto g = std::make_shared<const Graph>(make_graph(7, {
+      {0, 2, 30, 1}, {1, 2, 30, 3}, {2, 5, 30, 2}, {2, 6, 30, 2}}));
+  const auto mask = g->eligibility(std::vector<NodeId> {6}, {});
+  const auto sources = v({0, 1}), destinations = v({5, 6});
+  for (const auto allocation : {EB, W}) for (const auto admission : {LOSSLESS, LOSSY}) {
+    FlowLedger ledger(g);
+    FlowPolicy policy(ledger, sources, destinations, shortest_paths_policy(allocation, admission), &mask);
+    const auto placed = policy.place(11);
+    const auto& data = detail::ProgramAccess::data(*placed.program);
+    const auto& plan = *data.split_contexts.front().prepared_route;
+    // The immutable program/plan retain the requested endpoints, including masked6. The entry's
+    // records instead own the call's allowed destinations [5]. Its source costs remain3/5.
+    EXPECT_EQ(vec(data.destinations), destinations);
+    EXPECT_EQ(vec(plan.destinations), destinations);
+    const auto records = policy.records();
+    ASSERT_EQ(records.size(), 2U);
+    EXPECT_EQ(records[0].destinations, v({5}));
+    EXPECT_EQ(records[1].destinations, v({5}));
+    EXPECT_EQ(records[0].min_route_cost, 3);
+    EXPECT_EQ(records[1].min_route_cost, 5);
+    const auto replaced = policy.replace(7);
+    EXPECT_EQ(replaced.program.get(), placed.program.get());
+    EXPECT_EQ(vec(detail::ProgramAccess::data(*replaced.program).split_contexts.front().prepared_route->destinations), destinations);
+  }
+}
+
 namespace {
 // An explicit lazy read of a view's record values, with no forwarding needed for route checks.
 detail::LedgerEntry entry_from_view(const Graph& graph, const detail::ForwardingView& view, std::span<const NodeId> destinations) {

@@ -192,10 +192,6 @@ using HeadLabelOffset = std::size_t;
 enum class ForwardingCounter { Entry, Occurrence, Router, Event, Dependency };
 void check_forwarding_count(ForwardingCounter counter, std::int64_t n);
 
-// The free capacity of each of `edges` in the forwarding, into `out` (aligned; before black
-// holes, which the engine applies): one call per evaluation, not per edge.
-using AvailableCapacityFn = std::function<void(std::span<const EdgeId> edges, std::span<Amount> out)>;
-
 // The heads' injections of a total x: round robin over the heads, or highest averages over the
 // captured weights.
 void source_shares(const ForwardingView& view, Amount x, std::span<Amount> out);

@@ -610,3 +610,216 @@ TEST(RosterRoutes, ConcurrentCallsKeepTheirScratchIndependent) {
   a.join();
   b.join();
 }
+
+namespace {
+
+// Enumerated walks supply U, per-root costs and positive-weight walks independently. Check every
+// plan array by NodeId/EdgeId: internal topological positions are not part of the routing rule.
+void expect_preparation(const Graph& g, const ShortestPathPreparation& got,
+    const std::vector<EdgeId>& route, const std::vector<NodeId>& roots, const std::vector<NodeId>& dsts,
+    RouteAllocation allocation, const std::vector<Amount>& edge_weights) {
+  const auto& p = got.plan;
+  ASSERT_EQ(p.allocation, allocation);
+  ASSERT_EQ(p.support_edges, route);
+  ASSERT_EQ(got.costs, walk_costs(g, flags_of(g, route), roots, dsts));
+  if (allocation == RouteAllocation::Optimized) {
+    EXPECT_TRUE(p.forwarding_edges.empty() && p.weights.empty() && p.sources.empty() &&
+        p.source_positions.empty() && p.destinations.empty() && p.topological_order.empty() &&
+        p.outgoing_begin.empty() && p.outgoing_end.empty() && p.edge_destination_positions.empty() && p.is_destination.empty());
+    return;
+  }
+  auto positive = flags_of(g, route);
+  if (allocation == RouteAllocation::Weighted) {
+    for (EdgeId e : route) if (edge_weights[static_cast<std::size_t>(e)] == 0) positive[static_cast<std::size_t>(e)] = 0;
+  }
+  const auto members = walk_union(g, positive, roots, dsts);
+  ASSERT_EQ(p.forwarding_edges, members);
+  std::vector<Amount> weights;
+  std::set<NodeId> nodes;
+  for (EdgeId e : members) {
+    nodes.insert(g.edge_sources()[static_cast<std::size_t>(e)]);
+    nodes.insert(g.edge_destinations()[static_cast<std::size_t>(e)]);
+    if (allocation == RouteAllocation::Weighted) weights.push_back(edge_weights[static_cast<std::size_t>(e)]);
+  }
+  ASSERT_EQ(p.weights, weights);
+  ASSERT_EQ(vec(p.sources), roots);
+  ASSERT_EQ(vec(p.destinations), dsts);
+  ASSERT_EQ(p.source_positions.size(), roots.size());
+  ASSERT_EQ(p.topological_order.size(), nodes.size());
+  ASSERT_EQ(p.outgoing_begin.size(), nodes.size());
+  ASSERT_EQ(p.outgoing_end.size(), nodes.size());
+  ASSERT_EQ(p.is_destination.size(), nodes.size());
+  ASSERT_EQ(p.edge_destination_positions.size(), members.size());
+  ASSERT_EQ((std::set<NodeId>(p.topological_order.begin(), p.topological_order.end())), nodes);
+  std::map<NodeId, std::int32_t> position;
+  for (std::size_t i = 0; i < p.topological_order.size(); ++i) {
+    const NodeId u = p.topological_order[i];
+    position[u] = static_cast<std::int32_t>(i);
+    EXPECT_EQ(p.is_destination[i], std::binary_search(dsts.begin(), dsts.end(), u));
+    std::vector<EdgeId> outgoing;
+    for (EdgeId e : members) if (g.edge_sources()[static_cast<std::size_t>(e)] == u) outgoing.push_back(e);
+    const auto lo = p.outgoing_begin[i], hi = p.outgoing_end[i];
+    ASSERT_GE(lo, 0);
+    ASSERT_GE(hi, lo);
+    ASSERT_LE(static_cast<std::size_t>(hi), members.size());
+    EXPECT_EQ((std::vector<EdgeId>(members.begin() + lo, members.begin() + hi)), outgoing);
+    if (outgoing.empty()) EXPECT_EQ(lo, 0);
+  }
+  for (std::size_t i = 0; i < roots.size(); ++i) {
+    const auto it = position.find(roots[i]);
+    EXPECT_EQ(p.source_positions[i], it == position.end() ? -1 : it->second);
+  }
+  for (std::size_t k = 0; k < members.size(); ++k) {
+    const auto e = static_cast<std::size_t>(members[k]);
+    EXPECT_EQ(p.edge_destination_positions[k], position.at(g.edge_destinations()[e]));
+    EXPECT_LT(position.at(g.edge_sources()[e]), p.edge_destination_positions[k]);
+  }
+}
+
+} // namespace
+
+TEST(ShortestPathsPreparation, IndependentWalksCheckEveryChoiceWeightAndRootShape) {
+  std::mt19937 rng(20261103);
+  int compared = 0, pruned = 0, nested = 0, memberless = 0, snapshot_calls = 0;
+  for (int trial = 0; trial < 160; ++trial) {
+    const int n = 3 + static_cast<int>(rng() % 5);
+    const auto g = tied_graph(rng, n, 3 * n);
+    const auto mask = g.eligibility(trial % 3 == 0 ? std::vector<NodeId> {static_cast<NodeId>(rng() % n)} : std::vector<NodeId> {},
+        std::vector<EdgeId> {static_cast<EdgeId>(rng() % g.num_edges())});
+    std::vector<NodeId> roots, dsts;
+    for (NodeId v = 0; v < n; ++v) {
+      if (!mask.allows_node(v)) continue;
+      if (v == n - 1 || rng() % 4 == 0) dsts.push_back(v);
+      else if (trial % 4 != 0 || roots.empty()) roots.push_back(v);
+    }
+    const auto allowed = ref::members(ref::Query {&g, &mask});
+    const auto dist = ref::distances(g, allowed, dsts, true);
+    const auto tight = ref::full_dag(g, allowed, dist, true);
+    const std::vector<EdgeId> support(tight.begin(), tight.end());
+    const auto dag = PredecessorDAGBuilder::of_edges(g, support);
+    std::vector<Amount> W(static_cast<std::size_t>(g.num_edges())), explicit_weights(W.size());
+    for (std::size_t e = 0; e < W.size(); ++e) {
+      W[e] = static_cast<Amount>(rng() % (g.edge_capacity_units()[e] + 1));
+      explicit_weights[e] = static_cast<Amount>(rng() % 7);
+    }
+    for (const auto& choice : choices()) {
+      auto selected = roots;
+      if (choice.single_path() && choice.prefers_score() && selected.size() > 1) selected.resize(1);
+      const auto want = shortest_union_reference(g, support, selected, dsts, choice, W);
+      const PriorityValues priorities {&g, choice.tie_break, W};
+      for (int mode = 0; mode < 5; ++mode) {
+        const auto allocation = mode == 0 ? RouteAllocation::Equal : mode == 1 ? RouteAllocation::Optimized : RouteAllocation::Weighted;
+        const auto basis = mode == 3 ? WeightBasis::Explicit : mode == 4 ? WeightBasis::ResidualSnapshot : WeightBasis::Capacity;
+        const WeightSource weights {basis, mode == 3 ? std::span<const Amount>(explicit_weights) : std::span<const Amount> {}};
+        int gathered = 0;
+        const auto got = prepare_shortest_path_routes(g, dag, selected, dsts, choice, PriorityReader::of(priorities), allocation, weights,
+            [&](std::span<const EdgeId> edges, std::span<Amount> values) {
+              ++gathered;
+              EXPECT_EQ(vec(edges), want);
+              for (std::size_t k = 0; k < edges.size(); ++k) values[k] = W[static_cast<std::size_t>(edges[k])];
+            });
+        std::vector<Amount> expected_weights(g.edge_capacity_units().begin(), g.edge_capacity_units().end());
+        if (mode == 3) for (std::size_t e = 0; e < W.size(); ++e) expected_weights[e] = g.edge_capacity_units()[e] == 0 ? 0 : explicit_weights[e];
+        if (mode == 4) expected_weights = W;
+        SCOPED_TRACE("trial " + std::to_string(trial) + " choice " + std::to_string(static_cast<int>(choice.tie_break)) +
+            " multipath " + std::to_string(choice.multipath) + " parallel " + std::to_string(choice.parallel_edges) + " mode " + std::to_string(mode));
+        expect_preparation(g, got, want, selected, dsts, allocation, expected_weights);
+        ASSERT_FALSE(::testing::Test::HasFailure());
+        EXPECT_EQ(gathered, mode == 4 && !want.empty() ? 1 : 0);
+        snapshot_calls += gathered;
+        ++compared;
+        pruned += allocation == RouteAllocation::Weighted && got.plan.forwarding_edges != want;
+        if (allocation == RouteAllocation::Optimized) continue;
+        for (auto p : got.plan.source_positions) memberless += p < 0;
+        for (EdgeId e : want) nested += std::binary_search(selected.begin(), selected.end(), g.edge_destinations()[static_cast<std::size_t>(e)]);
+      }
+    }
+  }
+  EXPECT_EQ(compared, 10400);
+  EXPECT_GT(pruned, 100);
+  EXPECT_GT(memberless, 100);
+  EXPECT_GT(nested, 100);
+  EXPECT_GT(snapshot_calls, 100);
+}
+
+TEST(ShortestPathsPreparation, HandCostsPoolingWidthsAndOwnership) {
+  // Prefixes1/3 + suffix2 give3/5 before weighting; zero-weight source1 stays in the roster.
+  const auto g = make_graph(5, {{0, 2, 30, 1}, {1, 2, 30, 3}, {2, 3, 30, 2}});
+  const auto dag = all_edges(g);
+  const std::vector<NodeId> roots {0, 1, 2}, dsts {3, 4};
+  std::vector<Amount> weights {1, 0, 1};
+  auto got = prepare_shortest_path_routes(g, *dag, roots, dsts, {}, {}, RouteAllocation::Weighted,
+      {WeightBasis::Explicit, weights}, {});
+  EXPECT_EQ(got.costs, (std::vector<Cost> {3, 5, 2}));
+  expect_preparation(g, got, all_ids(g), roots, dsts, RouteAllocation::Weighted, weights);
+  EXPECT_EQ(got.plan.source_positions[1], -1);
+  PreparedRoute copy = got.plan;
+  const auto before = PreparedRoute(copy);
+  got = {};
+  for (int i = 0; i < 20; ++i) {
+    const auto other = prepare_shortest_path_routes(g, *dag, std::vector<NodeId> {1}, dsts, {}, {}, RouteAllocation::Equal, {}, {});
+    EXPECT_EQ(other.costs, (std::vector<Cost> {5}));
+  }
+  expect_same_plan(copy, before, "copy owns all arrays after donor and scratch reuse");
+  auto equal = prepare_shortest_path_routes(g, *dag, std::vector<NodeId> {0, 2}, dsts, {}, {}, RouteAllocation::Equal, {}, {});
+  std::vector<Amount> load(equal.plan.forwarding_edges.size());
+  ASSERT_TRUE(allocate(equal.plan, 11, load));
+  EXPECT_EQ(load, (std::vector<Amount> {6, 11}));  // root0 injects6, nested root2 adds5
+  std::vector<NodeId> input_roots {0}, input_dsts {3, 4};
+  auto owned = prepare_shortest_path_routes(g, *dag, input_roots, input_dsts, {}, {}, RouteAllocation::Equal, {}, {});
+  input_roots[0] = 1;
+  input_dsts[0] = 2;
+  EXPECT_EQ(vec(owned.plan.sources), (std::vector<NodeId> {0}));
+  EXPECT_EQ(vec(owned.plan.destinations), dsts);
+  const auto wide = make_graph(3, {{0, 1, 1, Cost {1} << 61}, {1, 2, 1, (Cost {1} << 61) - 1}});
+  const auto wide_got = prepare_shortest_path_routes(wide, *all_edges(wide), std::vector<NodeId> {0, 1},
+      std::vector<NodeId> {2}, {}, {}, RouteAllocation::Equal, {}, {});
+  EXPECT_EQ(wide_got.costs, (std::vector<Cost> {(Cost {1} << 62) - 1, (Cost {1} << 61) - 1}));
+}
+
+TEST(ShortestPathsPreparation, ManyRootsKeepIndividualCostsAndOrderedShares) {
+  std::vector<InEdge> edges;
+  std::vector<NodeId> roots;
+  std::vector<Cost> costs;
+  for (NodeId i = 0; i < 65; ++i) {
+    edges.push_back({i, 65, 3, i + 1});
+    roots.push_back(i);
+    costs.push_back(i + 2);
+  }
+  edges.push_back({65, 66, 200, 1});
+  const auto g = make_graph(67, edges);
+  const auto got = prepare_shortest_path_routes(g, *all_edges(g), roots, std::vector<NodeId> {66}, {}, {}, RouteAllocation::Equal, {}, {});
+  EXPECT_EQ(got.costs, costs);
+  expect_preparation(g, got, all_ids(g), roots, {66}, RouteAllocation::Equal, {});
+  // RR(67,65) gives2 to the first two heads,1 to every other head, then pools67 at65.
+  std::vector<Amount> load(got.plan.forwarding_edges.size());
+  ASSERT_TRUE(allocate(got.plan, 67, load));
+  ASSERT_EQ(load.size(), 66U);
+  EXPECT_EQ(load[0], 2);
+  EXPECT_EQ(load[1], 2);
+  EXPECT_EQ(load[64], 1);
+  EXPECT_EQ(load[65], 67);
+}
+
+TEST(ShortestPathsPreparation, EmptyAndConcurrentCallsKeepReturnedArraysIndependent) {
+  const auto g = make_graph(4, {{0, 2, 8, 1}, {1, 2, 8, 3}, {2, 3, 8, 2}});
+  const auto dag = all_edges(g);
+  for (const auto& roots : {std::vector<NodeId> {}, std::vector<NodeId> {0, 1}}) {
+    for (const auto& dsts : {std::vector<NodeId> {}, std::vector<NodeId> {3}}) {
+      if (!roots.empty() && !dsts.empty()) continue;
+      const auto got = prepare_shortest_path_routes(g, *dag, roots, dsts, {}, {}, RouteAllocation::Equal, {}, {});
+      expect_preparation(g, got, {}, roots, dsts, RouteAllocation::Equal, {});
+    }
+  }
+  auto run = [&](const std::vector<NodeId>& roots, const std::vector<Cost>& costs) {
+    for (int i = 0; i < 100; ++i) {
+      const auto got = prepare_shortest_path_routes(g, *dag, roots, std::vector<NodeId> {3}, {}, {}, RouteAllocation::Equal, {}, {});
+      EXPECT_EQ(got.costs, costs);
+      expect_preparation(g, got, roots.size() == 1 ? std::vector<EdgeId> {1, 2} : all_ids(g), roots,
+          std::vector<NodeId> {3}, RouteAllocation::Equal, {});
+    }
+  };
+  std::thread a([&] { run({0, 1}, {3, 5}); }), b([&] { run({1}, {5}); });
+  a.join();
+  b.join();
+}

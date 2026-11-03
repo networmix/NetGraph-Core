@@ -200,11 +200,12 @@ struct ReplayBasis {
     const Graph& graph, std::span<const NodeId> sources, std::span<const NodeId> destinations,
     std::span<const NodeId> reachable_sources, std::shared_ptr<const PreparedRoute> plan, std::vector<ProgramEntry> entries);
 
-// The one pooled DAG builder, shared by ShortestPaths Equal/Weighted and from_dag: the plan of
+// The pooled DAG builder of from_dag: the plan of
 // `dag` rooted at the roster (the allocation, Equal or Weighted, and the weight source: explicit
 // weights edge-aligned, a snapshot aligned with the DAG's ascending edges), then the program of
 // shortest_path_program. A plan does not depend on the admission. One root is the same builder's
-// degenerate case.
+// degenerate case. ShortestPaths Equal and Weighted build with prepare_shortest_path_routes,
+// which must keep the same membership rule.
 [[nodiscard]] std::shared_ptr<const ForwardingProgram> pooled_dag_program(
     const Graph& graph, std::span<const NodeId> sources, std::span<const NodeId> destinations,
     std::span<const NodeId> roster, const PredecessorDAG& dag, RouteAllocation allocation,
