@@ -721,8 +721,9 @@ class FlowRecord:
     @property
     def route(self) -> PredecessorDAG:
         """
-        the flow's immutable PredecessorDAG; pooled ShortestPaths and from_dag records build it
-        when the record is read. Repeated record reads of one state have equal route values
+        the flow's immutable PredecessorDAG; a pooled record (ShortestPaths Equal or Weighted,
+        a ForwardingProgram.from_dag program, or a Pinned replay of either) builds it when
+        the record is read. Repeated record reads of one state have equal route values
         in distinct objects
         """
 

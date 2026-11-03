@@ -69,8 +69,8 @@ inline LedgerState ledger_state(const FlowLedger& fg) {
   const auto gate = LedgerAccess::lock(fg);
   for (const auto owner : owners) {
     if (const auto* entry = LedgerAccess::entry(fg, owner)) {
-      s.entries.push_back({owner, entry->first_counter, entry->record_inventory().size(), entry->carried,
-                           entry->holds, entry->delivered, entry->drops});
+      s.entries.push_back({owner, entry->first_counter, entry->record_inventory().size(), entry->aggregate_carried(),
+                           entry->aggregate_holds(), entry->delivered, entry->aggregate_drops()});
       auto& values = s.entries.back().derived_values;
       values.push_back(entry->derived.has_value());
       if (entry->derived) {

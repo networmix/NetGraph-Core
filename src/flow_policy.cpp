@@ -17,8 +17,9 @@
     free capacity read then and frozen).
     Lossless admits the largest total of the equal source allocation whose no-drop forwarding fits V = W +
     own; Lossy forwards the round-robin increments of the offer on W. Lossless keeps the admitted
-    aggregate; Lossy also keeps source-row totals and the forwarding history needed for record
-    reads. Per-source edge data is derived when records are read.
+    aggregate and, with several sources, its latest forwarding; Lossy also keeps source-row
+    totals and, with several sources, every call's forwarding. Per-source edge data is derived
+    when records are read.
   * The controllers (place_optimized_flow): unrestricted CentralizedTE over every eligible edge, CentralizedTE with a
     support over that support trimmed, ShortestPaths Optimized over the union of the roster's routes
     (prepared as above). A minimum-cost flow of the cumulative value on V = W + own, from one
@@ -257,18 +258,18 @@ void prepare_outputs(const PolicyEngine& pe, const LedgerTotals* totals, const O
   const auto m = static_cast<std::size_t>(pe.graph->num_edges());
   if (outputs.edge_reservations) {
     std::vector<Amount> held(m, 0);
-    for (const auto& [e, x] : after.holds) held[static_cast<std::size_t>(e)] = x;
+    for (const auto& [e, x] : after.aggregate_holds()) held[static_cast<std::size_t>(e)] = x;
     out.edge_reservations = std::move(held);
   }
   if (!outputs.edge_flows && !outputs.residual && !outputs.saturated_boundary_edges) return;
   std::vector<Amount> own(m, 0);
-  for (const auto& [e, x] : after.carried) own[static_cast<std::size_t>(e)] = x;
+  for (const auto& [e, x] : after.aggregate_carried()) own[static_cast<std::size_t>(e)] = x;
   if (outputs.residual || outputs.saturated_boundary_edges) {
     const LedgerTotals t = totals != nullptr ? *totals : totals_of(pe.ledger);
     std::vector<Amount> res(m);
     for (std::size_t e = 0; e < m; ++e) res[e] = t.service_baseline[e] - t.carried[e] - own[e];
     if (const auto* old = LedgerAccess::entry(pe.ledger, pe.policy_id)) {
-      for (const auto& [e, x] : old->carried) res[static_cast<std::size_t>(e)] += x;
+      for (const auto& [e, x] : old->aggregate_carried()) res[static_cast<std::size_t>(e)] += x;
     }
     if (outputs.saturated_boundary_edges) out.saturated_boundary_edges = saturated_boundary_edges_of(*pe.graph, res, pe.sources, pe.eligibility);
     if (outputs.residual) out.residual = std::move(res);
@@ -346,9 +347,9 @@ void fill_state(const PolicyEngine& pe, const LedgerEntry& after, const Counter1
     row.admitted = *row.offered;
     row.source_drops = minus(minus(*row.offered, c128(row.delivered)), row.total_edge_drops);
   }
-  out.edge_drops = after.drops;
+  out.edge_drops = after.aggregate_drops();
   Counter128 dropped {};
-  for (const auto& [e, x] : after.drops) accumulate_counter(dropped, x, "drops");
+  for (const auto& [e, x] : after.aggregate_drops()) accumulate_counter(dropped, x, "drops");
   out.offered = offered;
   out.admitted = offered;
   out.unadmitted = Counter128 {};
@@ -360,7 +361,7 @@ void fill_state(const PolicyEngine& pe, const LedgerEntry& after, const Counter1
 Counter128 total_cost_of(const Graph& graph, const LedgerEntry& after) {
   const auto cost = graph.edge_costs();
   U128 sum {};
-  for (const auto& [e, x] : after.carried) {
+  for (const auto& [e, x] : after.aggregate_carried()) {
     const U128 p = mul_u64(static_cast<std::uint64_t>(cost[static_cast<std::size_t>(e)]), static_cast<std::uint64_t>(x));
     const std::uint64_t lo = sum.lo + p.lo;
     sum = U128 {sum.hi + p.hi + (lo < sum.lo ? 1U : 0U), lo};
@@ -788,7 +789,7 @@ PendingPolicyUpdate place_pooled(const PolicyEngine& pe, const PolicyEpoch& cur,
   Amount before = old ? old->delivered : 0;
   if (!lossy) {
     std::vector<Amount> own(plan.forwarding_edges.size(), 0);
-    if (old) align(plan.forwarding_edges, old->carried, own);
+    if (old) align(plan.forwarding_edges, old->aggregate_carried(), own);
     for (std::size_t m = 0; m < own.size(); ++m) capacity[m] += own[m];
     auto step = lossless_step(plan, before, capacity, own, v);
     flow.admitted = flow.delivered = step.admitted;
@@ -979,7 +980,7 @@ PendingPolicyUpdate place_optimized_flow(const PolicyEngine& pe, const PolicyEpo
   const Amount P = own != nullptr ? own->delivered : 0;
   if (own != nullptr) {
     std::size_t p = 0;
-    for (const auto& [e, x] : own->carried) {
+    for (const auto& [e, x] : own->aggregate_carried()) {
       if (dense) { V[static_cast<std::size_t>(e)] += x; continue; }
       while (p < support.size() && support[p] < e) ++p;
       if (p == support.size() || support[p] != e) throw std::logic_error("controller: a record edge outside the support");
@@ -1167,7 +1168,7 @@ PendingPolicyUpdate forward_entries(const PolicyEngine& pe, const PolicyEpoch& c
   if (!lossy) {
     // The largest total in [admitted, admitted + v] on the residual plus the policy's own load.
     const Amount admitted = own != nullptr ? own->delivered : 0;
-    if (own != nullptr) W.release(own->carried);
+    if (own != nullptr) W.release(own->aggregate_carried());
     const std::optional<Amount> hi = v.has_value() ? std::optional<Amount>(admitted + *v) : std::nullopt;
     flow = detail::lossless(view, available_capacity_reader(W), admitted, hi);
     call_delivered = flow.admitted - admitted;
@@ -1295,7 +1296,7 @@ std::vector<Amount> reservation_view(const PolicyEngine& pe, const LedgerTotals&
   if (!held.empty()) {
     for (std::size_t e = 0; e < U.size(); ++e) U[e] -= held[e];
   }
-  for (const auto& [e, x] : own_entry(pe).holds) U[static_cast<std::size_t>(e)] += x;
+  for (const auto& [e, x] : own_entry(pe).aggregate_holds()) U[static_cast<std::size_t>(e)] += x;
   return U;
 }
 
@@ -2037,7 +2038,7 @@ void check_call_state(const PolicyEngine& pe, const PolicyCall& rq) {
 PendingPolicyUpdate compute(const PolicyEngine& pe, const PolicyCall& rq) {
   const LedgerTotals totals = totals_of(pe, rq);
   ServiceCapacityWorkspace W(totals);
-  if (rq.is_full_offer()) W.release(own_entry(pe).carried);
+  if (rq.is_full_offer()) W.release(own_entry(pe).aggregate_carried());
   const PolicyEpoch fresh = rq.is_full_offer() ? fresh_epoch(pe, rq.operation == PolicyOperation::Forward) : PolicyEpoch {};
   const PolicyEpoch& cur = rq.is_full_offer() ? fresh : pe.epoch;
   // The flags compare the program the policy has installed now.
@@ -2212,10 +2213,10 @@ std::vector<PlacementResult> run_ordered(FlowLedger& ledger, std::span<ListActio
     publishes[i] = 1;
     // The old and new entry projections are exchanged once per owner.
     auto exchange = [&](const LedgerEntry& entry, Amount sign) {
-      for (const auto& [e, x] : entry.carried) carried[static_cast<std::size_t>(e)] += sign * x;
-      if (entry.holds.empty()) return;
+      for (const auto& [e, x] : entry.aggregate_carried()) carried[static_cast<std::size_t>(e)] += sign * x;
+      if (entry.aggregate_holds().empty()) return;
       if (held.empty()) { held.assign(carried.size(), 0); totals.held = held; }
-      for (const auto& [e, x] : entry.holds) held[static_cast<std::size_t>(e)] += sign * x;
+      for (const auto& [e, x] : entry.aggregate_holds()) held[static_cast<std::size_t>(e)] += sign * x;
     };
     exchange(own_entry(pe), -1);
     exchange(pending[i].entry, 1);
@@ -2233,7 +2234,7 @@ std::vector<PlacementResult> run_simultaneous(FlowLedger& ledger, std::span<List
   const auto c = LedgerAccess::carried(ledger);
   std::vector<Amount> carried(c.begin(), c.end());
   for (const auto& x : list) {
-    for (const auto& [e, a] : own_entry(*x.engine).carried) carried[static_cast<std::size_t>(e)] -= a;
+    for (const auto& [e, a] : own_entry(*x.engine).aggregate_carried()) carried[static_cast<std::size_t>(e)] -= a;
   }
   const LedgerTotals totals {LedgerAccess::baseline(ledger), carried, LedgerAccess::reservation_baseline(ledger), LedgerAccess::reserved(ledger)};
   // One workspace for the whole computation: a second one on this thread would void its deltas.
@@ -2320,7 +2321,7 @@ std::vector<PlacementResult> run_simultaneous(FlowLedger& ledger, std::span<List
   if (any_output(outputs)) {
     std::vector<Amount> after(carried);
     for (const auto& s : pending) {
-      for (const auto& [e, x] : s.entry.carried) after[static_cast<std::size_t>(e)] += x;
+      for (const auto& [e, x] : s.entry.aggregate_carried()) after[static_cast<std::size_t>(e)] += x;
     }
     const auto baseline = LedgerAccess::baseline(ledger);
     std::vector<Amount> residual(after.size());
@@ -2331,12 +2332,12 @@ std::vector<PlacementResult> run_simultaneous(FlowLedger& ledger, std::span<List
       const auto m = residual.size();
       if (outputs.edge_reservations) {
         std::vector<Amount> held(m, 0);
-        for (const auto& [e, x] : pending[i].entry.holds) held[static_cast<std::size_t>(e)] = x;
+        for (const auto& [e, x] : pending[i].entry.aggregate_holds()) held[static_cast<std::size_t>(e)] = x;
         out.edge_reservations = std::move(held);
       }
       if (outputs.edge_flows) {
         std::vector<Amount> own(m, 0);
-        for (const auto& [e, x] : pending[i].entry.carried) own[static_cast<std::size_t>(e)] = x;
+        for (const auto& [e, x] : pending[i].entry.aggregate_carried()) own[static_cast<std::size_t>(e)] = x;
         out.edge_flows = std::move(own);
       }
       if (outputs.saturated_boundary_edges) out.saturated_boundary_edges = saturated_boundary_edges_of(*pe.graph, residual, pe.sources, pe.eligibility);

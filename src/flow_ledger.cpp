@@ -534,13 +534,13 @@ LedgerEntry stored_entry(const Graph& graph, std::int64_t owner, std::span<FlowR
   out.owner = owner;
   if (records.empty()) return out;
   out.admission = records.front().admission;
-  out.destinations = records.front().destinations;
   out.inventory.reserve(records.size());
   out.stored.reserve(records.size());
   std::optional<DeltaScratch<0>> carried;
   if (records.size() > 1) carried.emplace(static_cast<std::size_t>(graph.num_edges()));
   std::optional<DeltaScratch<1>> held;
-  std::map<EdgeId, Counter128> drops;
+  std::optional<std::map<EdgeId, Counter128>> drops;
+  if (carried) drops.emplace();
   auto compact = [](auto& pairs, const char* label, auto add) {
     EdgeId previous = -1;
     std::size_t n = 0;
@@ -558,20 +558,16 @@ LedgerEntry stored_entry(const Graph& graph, std::int64_t owner, std::span<FlowR
     pairs.resize(n);
   };
   for (auto& r : records) {
-    if (r.sources.size() != 1 || r.destinations != out.destinations || r.admission != out.admission) {
+    if (r.sources.size() != 1 || (&r != records.data() &&
+        (r.destinations != records.front().destinations || r.admission != out.admission))) {
       throw std::logic_error("ledger: inconsistent record inventory");
     }
     compact(r.edge_flows, "allocation", [&](EdgeId e, Amount x) { if (carried) carried->add(e, x); });
     if (carried && !r.edge_reservations.empty() && !held) held.emplace(static_cast<std::size_t>(graph.num_edges()));
     compact(r.edge_reservations, "hold", [&](EdgeId e, Amount x) { if (held) held->add(e, x); });
-    compact(r.edge_drops, "drops", [&](EdgeId e, Counter128 x) { if (carried) accumulate_counter(drops[e], x, "drops"); });
+    compact(r.edge_drops, "drops", [&](EdgeId e, Counter128 x) { if (drops) accumulate_counter((*drops)[e], x, "drops"); });
     out.delivered += r.delivered;
     out.inventory.push_back({r.sources.front(), r.entry_id});
-    if (!carried) {
-      out.carried = r.edge_flows;
-      out.holds = r.edge_reservations;
-      out.drops = r.edge_drops;
-    }
     out.stored.push_back({std::move(r.route), r.min_route_cost, r.offered, r.delivered,
                           std::move(r.edge_flows), std::move(r.edge_drops), std::move(r.edge_reservations)});
   }
@@ -583,7 +579,8 @@ LedgerEntry stored_entry(const Graph& graph, std::int64_t owner, std::span<FlowR
   };
   if (carried) finish(*carried, out.carried);
   if (held) finish(*held, out.holds);
-  for (const auto& [e, x] : drops) if (!x.is_zero()) out.drops.emplace_back(e, x);
+  if (drops) for (const auto& [e, x] : *drops) if (!x.is_zero()) out.drops.emplace_back(e, x);
+  out.destinations = std::move(records.front().destinations);
   return out;
 }
 
@@ -637,8 +634,8 @@ void LedgerAccess::detach(FlowLedger& ledger, std::int64_t owner) {
   const auto it = ledger.policy_bindings_.find(owner);
   if (it->second.first_counter < 0) return;
   const auto current = ledger.entries_.find(it->second.first_counter);
-  for (const auto& [e, x] : current->second->carried) ledger.carried_[static_cast<std::size_t>(e)] -= x;
-  for (const auto& [e, x] : current->second->holds) ledger.reserved_[static_cast<std::size_t>(e)] -= x;
+  for (const auto& [e, x] : current->second->aggregate_carried()) ledger.carried_[static_cast<std::size_t>(e)] -= x;
+  for (const auto& [e, x] : current->second->aggregate_holds()) ledger.reserved_[static_cast<std::size_t>(e)] -= x;
   ledger.entries_.erase(current);
   it->second.first_counter = -1;
 }
@@ -693,15 +690,15 @@ void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners
   }
   bool holds = false;
   for (const auto& s : prepared) {
-    holds = holds || !s.value->holds.empty() || (s.old != ledger.entries_.end() && !s.old->second->holds.empty());
+    holds = holds || !s.value->aggregate_holds().empty() || (s.old != ledger.entries_.end() && !s.old->second->aggregate_holds().empty());
   }
   const bool direct = prepared.size() == 1 && !holds;
   std::optional<DeltaScratch<0>> delta;
   if (!direct) delta.emplace(ledger.carried_.size());
   bool negative = false;
   for (const auto& s : prepared) {
-    if (delta && s.old != ledger.entries_.end()) for (const auto& [e, x] : s.old->second->carried) delta->add(e, -x);
-    for (const auto& [e, x] : s.value->carried) { negative = negative || x < 0; if (delta) delta->add(e, x); }
+    if (delta && s.old != ledger.entries_.end()) for (const auto& [e, x] : s.old->second->aggregate_carried()) delta->add(e, -x);
+    for (const auto& [e, x] : s.value->aggregate_carried()) { negative = negative || x < 0; if (delta) delta->add(e, x); }
   }
   if (negative) throw std::logic_error("ledger: a negative allocation in a commit");
   // Canonical C is strictly sorted and nonzero. A scalar without holds streams its
@@ -713,8 +710,8 @@ void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners
     }
     const auto& s = prepared.front();
     const std::span<const std::pair<EdgeId, Amount>> old = s.old == ledger.entries_.end() ?
-        std::span<const std::pair<EdgeId, Amount>> {} : s.old->second->carried;
-    const auto& now = s.value->carried;
+        std::span<const std::pair<EdgeId, Amount>> {} : s.old->second->aggregate_carried();
+    const auto& now = s.value->aggregate_carried();
     std::size_t i = 0, j = 0;
     while (i < old.size() || j < now.size()) {
       const bool was = i < old.size() && (j == now.size() || old[i].first <= now[j].first);
@@ -744,8 +741,8 @@ void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners
     bool negative_hold = false;
     for (const auto& s : prepared) {
       const auto& o = *s.update;
-      if (s.old != ledger.entries_.end()) for (const auto& [e, x] : s.old->second->holds) held->add(e, -x);
-      for (const auto& [e, x] : o.entry->holds) { negative_hold = negative_hold || x < 0; held->add(e, x); }
+      if (s.old != ledger.entries_.end()) for (const auto& [e, x] : s.old->second->aggregate_holds()) held->add(e, -x);
+      for (const auto& [e, x] : o.entry->aggregate_holds()) { negative_hold = negative_hold || x < 0; held->add(e, x); }
     }
     if (negative_hold) throw std::logic_error("ledger: a negative hold in a commit");
     for (EdgeId e : held->touched()) {

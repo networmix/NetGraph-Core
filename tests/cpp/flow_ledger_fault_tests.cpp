@@ -895,6 +895,23 @@ TEST(LedgerFaults, WarmEntryContinuationAndReplacementDoNotAllocate) {
   LedgerAccess::release(ledger, owner);
 }
 
+TEST(LedgerFaults, SingletonStoredBuilderOnlyAllocatesItsTwoRecordContainers) {
+  const auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  FlowRecord r;
+  r.sources = {0}; r.destinations = {1}; r.route = all_edges(*g);
+  r.edge_flows = {{0, 4}}; r.edge_reservations = {{0, 2}}; r.edge_drops = {{0, {1, 3}}};
+  const auto* carried = r.edge_flows.data();
+  const auto* holds = r.edge_reservations.data();
+  const auto* drops = r.edge_drops.data();
+  const auto* destinations = r.destinations.data();
+  detail::LedgerEntry entry;
+  EXPECT_FALSE(fails_at(2, [&] { entry = detail::stored_entry(*g, 0, std::span<FlowRecord>(&r, 1)); }));
+  EXPECT_EQ(entry.aggregate_carried().data(), carried);
+  EXPECT_EQ(entry.aggregate_holds().data(), holds);
+  EXPECT_EQ(entry.aggregate_drops().data(), drops);
+  EXPECT_EQ(entry.destinations.data(), destinations);
+}
+
 TEST(LedgerFaults, ColdThreadScalarPublicationNeedsOnlyItsNewEntryNode) {
   const auto g = shared(make_graph(3, {{0, 1, 20, 1}, {1, 2, 20, 1}, {0, 2, 20, 2}}));
   for (int mode : {0, 1, 2}) {  // new, continuation, replacement

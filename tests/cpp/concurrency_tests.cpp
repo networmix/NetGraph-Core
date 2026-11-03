@@ -23,6 +23,7 @@
 #include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/evaluators.hpp"
 #include "netgraph/core/flow_policy.hpp"
+#include "state_comparators.hpp"
 
 namespace netgraph::core::test {
 namespace {
@@ -720,6 +721,66 @@ TEST(Concurrency, TunnelPreflightJoinsAfterPartialLaunchFailure) {
 #else
   GTEST_SKIP() << "requires native rendezvous hooks";
 #endif
+}
+
+TEST(Concurrency, StoredSingletonCopiesOwnTheirAggregatesDuringDestructionAndReplacement) {
+  const auto graph = one_link();
+  const std::vector<NodeId> sources {0}, destinations {1};
+  auto original = std::make_unique<FlowLedger>(graph);
+  {
+    FlowPolicy policy(*original, sources, destinations, {ShortestPaths {RouteAllocation::Optimized}, Admission::Lossless});
+    (void)policy.replace(4);
+  }
+  const auto want = original->records().front();
+  auto first = std::make_unique<FlowLedger>(*original), second = std::make_unique<FlowLedger>(*original);
+  std::atomic<int> wrong {0};
+  auto same = [&](const FlowLedger& copy) {
+    const auto records = copy.records();
+    auto expected = want; expected.flow_id.first = copy.uid();
+    return records.size() == 1 && same_record(records.front(), expected) &&
+        copy.carried() == std::vector<Amount> {4} && copy.residual() == std::vector<Amount> {6};
+  };
+  std::barrier start(4);
+  std::vector<std::thread> threads;
+  for (const auto* copy : {first.get(), second.get()}) threads.emplace_back([&, copy] {
+    start.arrive_and_wait();
+    for (int i = 0; i < 40; ++i) {
+      try { if (!same(*copy)) ++wrong; } catch (...) { ++wrong; }
+    }
+  });
+  threads.emplace_back([&] {
+    start.arrive_and_wait();
+    for (int i = 0; i < 20; ++i) {
+      try { FlowLedger copy(*first); if (!same(copy)) ++wrong; } catch (...) { ++wrong; }
+    }
+  });
+  start.arrive_and_wait(); original.reset();
+  for (auto& thread : threads) thread.join();
+  EXPECT_EQ(wrong.load(), 0);
+  EXPECT_TRUE(same(*first));
+  FlowLedger live(graph);
+  FlowPolicy policy(live, sources, destinations, {ShortestPaths {RouteAllocation::Optimized}, Admission::Lossless});
+  (void)policy.replace(4);
+  const auto retained = policy.records().front();
+  std::barrier phase(2);
+  std::thread reader([&] {
+    for (int i = 0; i < 40; ++i) {
+      phase.arrive_and_wait();
+      const auto records = live.records();
+      if (records.size() > 1) ++wrong;
+      for (const auto& record : records) {
+        auto expected = retained; expected.flow_id = record.flow_id;
+        if (record.flow_id.first != live.uid() || !same_record(record, expected)) ++wrong;
+      }
+      phase.arrive_and_wait();
+    }
+  });
+  for (int i = 0; i < 40; ++i) {
+    phase.arrive_and_wait(); policy.remove(); (void)policy.replace(4); phase.arrive_and_wait();
+  }
+  reader.join();
+  EXPECT_EQ(wrong.load(), 0);
+  EXPECT_EQ(retained.edge_flows, (std::vector<std::pair<EdgeId, Amount>> {{0, 4}}));
 }
 
 TEST(Concurrency, DerivedCopiesOwnEveryRecordFieldDuringDestructionAndReplacement) {

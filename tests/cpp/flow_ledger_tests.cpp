@@ -1002,7 +1002,7 @@ TEST(FlowLedger, EntryRangesKeepIdentitiesAndExchangeBothProjections) {
   const auto* entry = LedgerAccess::entry(ledger, owner);
   ASSERT_NE(entry, nullptr);
   EXPECT_EQ(entry->record_inventory().size(), 2U);
-  EXPECT_EQ(entry->carried, (std::vector<std::pair<EdgeId, Amount>> {{0, 3}}));
+  EXPECT_EQ(entry->aggregate_carried(), (std::vector<std::pair<EdgeId, Amount>> {{0, 3}}));
   EXPECT_EQ(entry->delivered, 3);
   auto next = entry_on(ledger, owner, {2, 2}, {3, 3});
   LedgerAccess::commit(ledger, owner, next);
@@ -1214,13 +1214,16 @@ TEST(FlowLedger, SingleAndMultipleStoredRecordsKeepCanonicalIndependentAggregate
       r.edge_reservations = {{0, 0}, {1, 3}};
       r.edge_drops = {{0, {}}, {1, {1, 3}}};
     }
+    const auto* destinations = rows.front().destinations.data();
     auto entry = detail::stored_entry(*g, owner, rows);
-    EXPECT_EQ(entry.carried, (std::vector<std::pair<EdgeId, Amount>> {{0, 2 * count}}));
-    EXPECT_EQ(entry.holds, (std::vector<std::pair<EdgeId, Amount>> {{1, 3 * count}}));
-    EXPECT_EQ(entry.drops, (std::vector<std::pair<EdgeId, Counter128>> {{1, {static_cast<std::uint64_t>(count), static_cast<std::uint64_t>(3 * count)}}}));
+    EXPECT_EQ(entry.destinations.data(), destinations);
+    EXPECT_EQ(entry.aggregate_carried(), (std::vector<std::pair<EdgeId, Amount>> {{0, 2 * count}}));
+    EXPECT_EQ(entry.aggregate_holds(), (std::vector<std::pair<EdgeId, Amount>> {{1, 3 * count}}));
+    EXPECT_EQ(entry.aggregate_drops(), (std::vector<std::pair<EdgeId, Counter128>> {{1, {static_cast<std::uint64_t>(count), static_cast<std::uint64_t>(3 * count)}}}));
     ASSERT_EQ(entry.stored.size(), static_cast<std::size_t>(count));
-    EXPECT_NE(entry.carried.data(), entry.stored.front().edge_flows.data());
-    EXPECT_NE(entry.holds.data(), entry.stored.front().edge_reservations.data());
+    EXPECT_EQ(entry.aggregate_carried().data() == entry.stored.front().edge_flows.data(), count == 1);
+    EXPECT_EQ(entry.aggregate_holds().data() == entry.stored.front().edge_reservations.data(), count == 1);
+    EXPECT_EQ(entry.aggregate_drops().data() == entry.stored.front().edge_drops.data(), count == 1);
     LedgerAccess::commit(ledger, owner, entry);
     const auto records = ledger.records();
     for (const auto& r : records) {
@@ -1235,6 +1238,46 @@ TEST(FlowLedger, SingleAndMultipleStoredRecordsKeepCanonicalIndependentAggregate
     }
     LedgerAccess::release(ledger, owner);
   }
+}
+
+TEST(FlowLedger, EmptyCarriedStoredEntryOwnsHoldsDropsAndDestinationsAcrossMoves) {
+  const auto g = shared(make_graph(2, {{0, 1, 20, 3}}));
+  FlowLedger ledger(g);
+  const auto owner = LedgerAccess::bind(ledger);
+  auto empty = detail::stored_entry(*g, owner, {});
+  EXPECT_TRUE(empty.aggregate_carried().empty());
+  EXPECT_TRUE(empty.aggregate_holds().empty());
+  EXPECT_TRUE(empty.aggregate_drops().empty());
+  FlowRecord r;
+  r.sources = {0}; r.destinations = {1}; r.admission = Admission::Lossy;
+  r.route = all_edges(*g); r.min_route_cost = 3; r.entry_id = 7;
+  r.offered = Counter128 {1, 3};
+  r.edge_flows = {{0, 0}}; r.edge_reservations = {{0, 3}}; r.edge_drops = {{0, {1, 3}}};
+  const auto* destinations = r.destinations.data();
+  const auto* holds = r.edge_reservations.data();
+  auto entry = detail::stored_entry(*g, owner, std::span<FlowRecord>(&r, 1));
+  EXPECT_EQ(entry.destination_nodes().data(), destinations);
+  EXPECT_EQ(entry.aggregate_holds().data(), holds);
+  EXPECT_TRUE(entry.carried.empty()); EXPECT_TRUE(entry.holds.empty()); EXPECT_TRUE(entry.drops.empty());
+  auto copied = entry;
+  EXPECT_NE(copied.aggregate_holds().data(), holds);
+  auto moved = std::move(copied);
+  std::swap(moved, empty);
+  entry = {}; r = {};
+  LedgerAccess::commit(ledger, owner, empty);
+  FlowRecord expected;
+  expected.flow_id = {ledger.uid(), 0}; expected.policy_id = owner;
+  expected.sources = {0}; expected.destinations = {1}; expected.admission = Admission::Lossy;
+  expected.entry_id = 7; expected.route = all_edges(*g); expected.min_route_cost = 3;
+  expected.offered = Counter128 {1, 3}; expected.edge_reservations = {{0, 3}}; expected.edge_drops = {{0, {1, 3}}};
+  const auto snapshot = ledger.record(expected.flow_id);
+  EXPECT_TRUE(same_record(snapshot, expected));
+  EXPECT_EQ(ledger.carried(), (std::vector<Amount> {0}));
+  EXPECT_EQ(ledger.reserved(), (std::vector<Amount> {3}));
+  LedgerAccess::detach(ledger, owner);
+  EXPECT_EQ(ledger.reserved(), (std::vector<Amount> {0}));
+  EXPECT_TRUE(same_record(snapshot, expected));
+  LedgerAccess::release(ledger, owner);
 }
 
 TEST(FlowLedger, StoredEntryRejectsNoncanonicalSparseFieldsBeforePublication) {
@@ -1335,7 +1378,7 @@ TEST(FlowLedger, ScalarMergePreservesFirstTouchErrorsAndReleasesOldOnlyEdges) {
   // though a sorted merge visits the new-only edge 0 first.
   EXPECT_EQ(logic_error_of([&] { LedgerAccess::commit(ledger, a, bad); }), "ledger: infeasible commit on edge 2 (11 of 10)");
   expect_same(ledger_state(ledger), before, "old edge failure first");
-  bad.carried = {{0, -1}, {2, 11}};
+  bad.stored.front().edge_flows = {{0, -1}, {2, 11}};
   EXPECT_EQ(logic_error_of([&] { LedgerAccess::commit(ledger, a, bad); }), "ledger: a negative allocation in a commit");
   expect_same(ledger_state(ledger), before, "negative before feasibility");
   bad = pending(a, {{0, 1}});

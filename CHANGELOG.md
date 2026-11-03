@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Records**: `ShortestPaths` with Equal or Weighted allocation and programs built by `ForwardingProgram.from_dag` derive source records when read. Repeated record reads of a fixed state produce equal route values in distinct immutable `PredecessorDAG` objects; carried traffic and delivery values are unchanged.
+- **Records**: `ShortestPaths` with Equal or Weighted allocation, programs built by `ForwardingProgram.from_dag`, and `Pinned` replays of either derive source records when read. Repeated record reads of a fixed state produce equal route values in distinct immutable `PredecessorDAG` objects; carried traffic and delivery values are unchanged.
 
 ## [0.12.0] - 2026-10-27
 

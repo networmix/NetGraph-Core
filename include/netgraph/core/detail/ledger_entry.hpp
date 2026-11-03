@@ -81,6 +81,15 @@ struct LedgerEntry {
   std::vector<StoredRecord> stored {};
   std::optional<DerivedRecords> derived {};
 
+  [[nodiscard]] const auto& aggregate_carried() const noexcept {
+    return stored.size() == 1 ? stored.front().edge_flows : carried;
+  }
+  [[nodiscard]] const auto& aggregate_holds() const noexcept {
+    return stored.size() == 1 ? stored.front().edge_reservations : holds;
+  }
+  [[nodiscard]] const auto& aggregate_drops() const noexcept {
+    return stored.size() == 1 ? stored.front().edge_drops : drops;
+  }
   [[nodiscard]] const std::vector<NodeId>& destination_nodes() const noexcept {
     return derived ? derived->inputs->destinations : destinations;
   }
