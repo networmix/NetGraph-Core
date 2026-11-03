@@ -155,7 +155,10 @@ assert r.residual.tolist() == [7] and r.edge_flows.tolist() == [3]
 
 @GIL_ONLY
 def test_native_phase_allows_heartbeat():
-    run("""
+    run_python(
+        SETUP
+        + """
+import time
 assert getattr(sys, "_is_gil_enabled", lambda: True)()
 sys.setswitchinterval(0.000001)
 network = ngc.Graph(2, [0]*3000, [1]*3000, [1000]*3000, [1]*3000, 1.0)
@@ -170,18 +173,22 @@ operations = [lambda: p.place(1, outputs=ngc.OutputOptions(program=True)), lambd
 observations = {}
 for name, operation in zip(('place', 'evaluate', 'replace', 'forward', 'ordered_list', 'weighted_place'), operations, strict=True):
     overlaps = 0
-    for _ in range(50):
-        task = start(lambda: [operation() for _ in range(60)], probe)
-        while task[0].is_alive():
-            counts = probe.counts()
-            if counts['native_begin'] > counts['native_complete']:
-                # A snapshot can become stale while counts() reacquires the GIL.
-                second = probe.counts()
-                overlaps += (counts['native_begin'], counts['native_complete']) == (second['native_begin'], second['native_complete'])
-        finish(task)
-        if overlaps:
-            break
+    deadline = time.monotonic() + 5
+    def repeat():
+        while not overlaps and time.monotonic() < deadline:
+            operation()
+    task = start(repeat, probe)
+    while task[0].is_alive() and time.monotonic() < deadline:
+        counts = probe.counts()
+        if counts['native_begin'] > counts['native_complete']:
+            # counts() can snapshot before the worker finishes and return after it.
+            second = probe.counts()
+            same = (counts['native_begin'], counts['native_complete']) == (second['native_begin'], second['native_complete'])
+            if same and time.monotonic() < deadline:
+                overlaps += 1
+    finish(task)
     observations[name] = overlaps
+    assert overlaps > 0, (name, 'no stable native overlap before deadline', probe.counts())
 
 # Each lock-wait entry has a finite native pause, so a retained-GIL plant
 # terminates with zero overlap rather than stranding the Python controller.
@@ -317,7 +324,9 @@ program = finish(task)
 assert overlap > 0, 'supplied route first-pass walk held the GIL'
 assert program.sources == (0,) and program.destinations == (side*side-1,)
 assert probe.counts()['route_walk'] == probe.counts()['route_definition_check'] == 1
-""")
+""",
+        seconds=120,
+    )
 
 
 def test_cache_before_gate_order():
@@ -836,7 +845,10 @@ assert p.place(0, outputs=ngc.OutputOptions(program=True)).program is before.pro
 
 @GIL_ONLY
 def test_immutable_native_operations_overlap_heartbeat():
-    run("""
+    run_python(
+        SETUP
+        + """
+import time
 assert getattr(sys, "_is_gil_enabled", lambda: True)()
 sys.setswitchinterval(0.000001)
 big = ngc.Graph(2, [0]*30000, [1]*30000, [10]*30000, [1]*30000, 1.0)
@@ -864,15 +876,27 @@ operations = [lambda: ngc.Graph(2, [0]*30000, [1]*30000, [10]*30000, [1]*30000, 
 observations = {}
 names = ('graph', 'eligibility', 'intersect', 'csr', 'path', 'path_to_dag', 'program_dag', 'program_routes', 'spf', 'ksp', 'resolve', 'to_units', 'as_float')
 for name, operation in zip(names, operations, strict=True):
-    task = start(lambda: [operation() for _ in range(8)], probe)
-    overlap = 0
-    while task[0].is_alive():
+    overlaps = 0
+    deadline = time.monotonic() + 5
+    def repeat():
+        while not overlaps and time.monotonic() < deadline:
+            operation()
+    task = start(repeat, probe)
+    while task[0].is_alive() and time.monotonic() < deadline:
         counts = probe.counts()
-        overlap += counts['native_begin'] > counts['native_complete']
+        if counts['native_begin'] > counts['native_complete']:
+            # counts() can snapshot before the worker finishes and return after it.
+            second = probe.counts()
+            same = (counts['native_begin'], counts['native_complete']) == (second['native_begin'], second['native_complete'])
+            if same and time.monotonic() < deadline:
+                overlaps += 1
     finish(task)
-    observations[name] = overlap
+    observations[name] = overlaps
+    assert overlaps > 0, (name, 'no stable native overlap before deadline', probe.counts())
 assert all(value > 0 for value in observations.values()), observations
-""")
+""",
+        seconds=120,
+    )
 
 
 def test_trace_conversion_is_separate_read():

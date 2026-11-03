@@ -55,6 +55,9 @@ jobs:
     name: CentOS Stream 9 (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     container: quay.io/centos/centos:stream9
+    env:
+      # Pin pyright's nodeenv runtime instead of resolving the latest Node release.
+      PYRIGHT_PYTHON_NODE_VERSION: "24.14.1"
     strategy:
       fail-fast: false
       matrix:
