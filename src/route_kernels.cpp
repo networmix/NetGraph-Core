@@ -409,14 +409,19 @@ void build_split(const Graph& graph, const PredecessorDAG& dag, std::span<const 
   for (NodeId v : s.order) {
     if (s.at(v).fwd != 0) s.at(v).position = num_pos++;
   }
-  for (std::size_t m = 0; m < num_members; ++m) {
-    auto& nt = s.at(s.member_tail[m]);
-    if (nt.count == 0) {
-      nt.first = static_cast<std::int32_t>(m);
-    } else if (static_cast<std::size_t>(nt.first + nt.count) != m) {
+  // Members ascend by EdgeId, so a tail's members form one run: each run sets its tail's first member
+  // and count at once. A tail met again after its run ended is not grouped.
+  for (std::size_t b = 0; b < num_members;) {
+    const NodeId u = s.member_tail[b];
+    std::size_t e = b + 1;
+    while (e < num_members && s.member_tail[e] == u) ++e;
+    auto& nt = s.at(u);
+    if (nt.count != 0) {
       throw std::logic_error("kernel plan: the members of a node are not consecutive (member EdgeIds not grouped by source node)");
     }
-    ++nt.count;
+    nt.first = static_cast<std::int32_t>(b);
+    nt.count = static_cast<std::int32_t>(e - b);
+    b = e;
   }
   const auto P = static_cast<std::size_t>(num_pos);
   const PreparedRoute::Layout w = plan.layout(roots, destinations, P, num_members);
@@ -577,8 +582,8 @@ PreparedRoute plan_of(const Graph& graph, RouteAllocation allocation, Admission 
   // The route's cost is the members' only when every route edge is a member.
   if (cost != nullptr && plan.forwarding_edges.size() != plan.support_edges.size()) *cost = min_route_cost(graph, route, roots[0], destinations);
   if (weighted) {
-    plan.weights.reserve(plan.forwarding_edges.size());
-    for (EdgeId e : plan.forwarding_edges) plan.weights.push_back(weight(e));
+    plan.weights.resize(plan.forwarding_edges.size());
+    for (std::size_t m = 0; m < plan.forwarding_edges.size(); ++m) plan.weights[m] = weight(plan.forwarding_edges[m]);
   }
   return plan;
 }
@@ -616,16 +621,16 @@ PreparedRoute prepare_supplied_route(const Graph& graph, RouteAllocation allocat
   // When every route edge has a positive weight the members are the route itself; otherwise a
   // second pass keeps the walks over the positive ones (the route and its cost stay).
   if (std::all_of(plan.support_edges.begin(), plan.support_edges.end(), [&](EdgeId e) { return weight(e) >= 1; })) {
-    plan.weights.reserve(plan.forwarding_edges.size());
-    for (EdgeId e : plan.forwarding_edges) plan.weights.push_back(weight(e));
+    plan.weights.resize(plan.forwarding_edges.size());
+    for (std::size_t m = 0; m < plan.forwarding_edges.size(); ++m) plan.weights[m] = weight(plan.forwarding_edges[m]);
     return plan;
   }
   PreparedRoute weighted;
   build_split(graph, dag, {&source, 1}, destinations, [&](EdgeId e) { return weight(e) >= 1; }, &weighted, nullptr);
   weighted.allocation = allocation;
   weighted.support_edges = std::move(plan.support_edges);
-  weighted.weights.reserve(weighted.forwarding_edges.size());
-  for (EdgeId e : weighted.forwarding_edges) weighted.weights.push_back(weight(e));
+  weighted.weights.resize(weighted.forwarding_edges.size());
+  for (std::size_t m = 0; m < weighted.forwarding_edges.size(); ++m) weighted.weights[m] = weight(weighted.forwarding_edges[m]);
   return weighted;
 }
 
