@@ -69,3 +69,7 @@ Not scheduled. One entry per item: what it is, and why it is not scheduled or wh
 - **Small native fixed costs**: profile small SPF, residual SPF, path-resolution or capacity-weighted placement calls
   only when a real application profile shows their fixed costs affecting user time; old microsecond comparisons predate
   the current implementation and do not justify an optimization by themselves.
+- **Free-threaded allocation fault flake**: `test_native_allocation_failure_raises_and_changes_nothing[spf.full]` in
+  `tests/py/test_native_allocation.py` sometimes fails on Linux with free-threaded Python 3.14 (ten native allocations
+  still live after the failed call) and passes when the same commit is run again; find what else allocates while the
+  fault hook counts before reading a red run of this test as a product defect, and make the test deterministic.
