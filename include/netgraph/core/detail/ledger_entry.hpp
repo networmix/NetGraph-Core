@@ -68,17 +68,24 @@ struct StoredRecord {
   std::vector<std::pair<EdgeId, Amount>> edge_reservations {};
 };
 
+// One policy epoch. Use the accessors for identity and aggregate data: their storage
+// depends on the record kind and count.
 struct LedgerEntry {
   std::int64_t owner {0};
   Admission admission {Admission::Lossless};
+  // Stored-record identities; derived entries keep these in derived->inputs instead.
   std::vector<NodeId> destinations {};
   std::int64_t first_counter {0};
   std::vector<RecordInventory> inventory {};
+  // Carried, held and dropped vectors stay empty when one stored record owns
+  // these aggregates in its edge_* fields.
   std::vector<std::pair<EdgeId, Amount>> carried {};
   std::vector<std::pair<EdgeId, Amount>> holds {};
   Amount delivered {0};
   std::vector<std::pair<EdgeId, Counter128>> drops {};
   std::vector<StoredRecord> stored {};
+  // Source records are materialized from derived inputs. With one root, the
+  // aggregate is its only record's traffic, so no forwarding history is needed.
   std::optional<DerivedRecords> derived {};
 
   [[nodiscard]] const auto& aggregate_carried() const noexcept {

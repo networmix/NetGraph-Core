@@ -19,7 +19,7 @@ none of this directory.
 - Git, which Lake (Lean's build tool) uses to fetch mathlib, the mathematics library the proofs
   use. `lakefile.toml` pins mathlib to one Git revision and `lake-manifest.json` pins every
   dependency of it, so every check uses the same sources.
-- Python 3.11 or newer, for the inventory checker `Checks/audit.py` (standard library only).
+- Python 3.11 or newer, for the source and axiom checker `Checks/audit.py` (standard library only).
 
 No native build and no Git history of this repository are needed.
 
@@ -40,13 +40,12 @@ lake env leanchecker --fresh Checks
 - `lake exe cache get` downloads mathlib's prebuilt files for the pinned revision, so the build
   does not recompile mathlib; it only saves time.
 - `lake --wfail build` checks every proof, treating warnings as errors.
-- `lake exe proof-audit` compares each theorem in the built project with its record in
-  `theorems.json`: the exact statement, the definitions it depends on, the axioms it rests on
-  (only `propext`, `Classical.choice` and `Quot.sound` are accepted), its explanation, the
-  sections of `docs/semantics.md` and the native source files it describes, and the pinned
-  toolchain and dependencies. It also runs the examples against the expected results in
-  `cases.json`. Any difference fails the check. `Checks/audit.py --verify-report` checks that the
-  report is complete and matches these inputs.
+- `lake exe proof-audit` discovers the project declarations in the built Lean modules and
+  checks their actual transitive axioms. Only `propext`, `Classical.choice` and `Quot.sound` are
+  accepted; project axioms are refused. The source preflight also refuses unfinished proofs,
+  unsafe code, `native_decide` and kernel-bypass commands in the model and executable examples.
+  The model's executable cases must equal the independently derived inputs and exact outputs
+  in `cases.json`. `Checks/audit.py --verify-report` rejects missing or incomplete evidence.
 - `lake env leanchecker --fresh Checks` checks every declaration again in a fresh environment
   with Lean's kernel, the small core that accepts proofs.
 
@@ -61,6 +60,7 @@ source archive). From the repository root, after `cd proofs && lake exe cache ge
 bash dev/proofs/run.sh check     # build, audit and examples; writes build/proofs/check.json
 PROOFS_DEPENDENCY_ORIGIN=cache+local bash dev/proofs/run.sh replay   # check, then the fresh replay
 bash dev/proofs/run.sh test      # the gate refuses planted errors, in a disposable copy
+bash dev/proofs/run.sh test --preflight-only  # source/comparison controls without Lean
 ```
 
 `PROOFS_DEPENDENCY_ORIGIN` records where mathlib's built files came from: `cache+local` for the
@@ -83,7 +83,7 @@ total. The report is `build/proofs/bridge.json`.
 
 ## Changing a theorem
 
-`theorems.json` is a reviewed record, not a list of whatever compiles: a changed statement,
-definition, explanation or mapped input fails the audit until the change is reviewed and its
-digests are recorded again. The rules for adding or changing a theorem are in the Git
-repository's `dev/proofs/README.md`.
+Review the contract, Lean statement, its assumptions and the native implementation together;
+Lean checks the statement written in the model, so its correspondence with the intended rule
+needs human review. The bridge establishes native/model agreement on its stated finite inputs.
+The rules for adding or changing a theorem are in the Git repository's `dev/proofs/README.md`.

@@ -1027,7 +1027,7 @@ inline std::vector<Row> rows() {
   // Eight demands of eight source leaves each to one destination leaf on a Clos 64x32 (unit costs,
   // links of 10..80): demand j has the leaves 8j..8j+7 and the leaf (8j + 36) mod 64. Every source
   // splits over its 32 spines and the eight sources share each spine's one link into the
-  // destination: the pooled program, its attribution and (Lossless) its bisection. One ledger.
+  // destination: the pooled program and (Lossless) its bisection, or (Lossy) its attributed forwarding. One ledger.
   auto pooled_row = [](double offer, bool lossy) {
     auto g = std::make_shared<Graph>(abaapi::build(gen_clos(64, 32, 22)));
     std::vector<std::pair<std::vector<int>, int>> demands;
@@ -1040,15 +1040,14 @@ inline std::vector<Row> rows() {
   };
   r.push_back({"pooled.ecmp.clos", "pooled",
                "pooled ShortestPaths Equal Lossless placement, Clos 64x32, 8 demands of 8 source leaves to one leaf, "
-               "400 each on one ledger (the program, attribution and bisection over 8 x 32 + 32 links per demand)",
+               "400 each on one ledger (the pooled program and its bisection over 8 x 32 + 32 links per demand)",
                [=] { return pooled_row(400.0, false); }});
   r.push_back({"pooled.lossy.clos", "pooled",
                "pooled ShortestPaths Equal Lossy placement, the same Clos and demands, 4,000 each (above capacity: "
                "drops attributed by highest averages on every shared spine link)",
                [=] { return pooled_row(4000.0, true); }});
   // The same demands forwarded by Pinned over from_dag programs of their reverse shortest-path DAGs
-  // (built once, before timing: the one pooled builder ShortestPaths Equal uses), and the building
-  // of those programs alone.
+  // (built once, before timing), and the building of those programs alone.
   auto pooled_dag_row = [](double offer) {
     auto g = std::make_shared<Graph>(abaapi::build(gen_clos(64, 32, 22)));
     std::vector<std::pair<std::vector<int>, int>> demands;

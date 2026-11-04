@@ -24,10 +24,6 @@ check() {
 
 case "$proof_mode" in
     check) check ;;
-    record)
-        [[ -z ${CI:-} ]] || { echo 'Do not record reviewed bindings in CI.' >&2; exit 1; }
-        (cd proofs && lake --wfail build && PROOFS_RECORD=1 lake exe proof-audit --record)
-        ;;
     replay)
         check
         (cd proofs && lake env leanchecker --fresh Checks) > "$proof_output/replay.log" 2>&1 \
@@ -36,7 +32,7 @@ case "$proof_mode" in
         "$proof_python" -I -B dev/proofs/replay_report.py "$proof_output"
         ;;
     test)
-        "$proof_python" -I -B dev/proofs/test_tool.py
+        "$proof_python" -I -B dev/proofs/test_tool.py "${@:2}"
         ;;
     bridge)
         : "${PROOFS_NATIVE_PYTHON:?Set PROOFS_NATIVE_PYTHON to the interpreter with the selected wheel installed}"
@@ -46,5 +42,5 @@ case "$proof_mode" in
             --proof-report "$proof_output/check.json" --wheel "$PROOFS_WHEEL" \
             --output "$proof_output/bridge.json"
         ;;
-    *) echo 'Usage: bash dev/proofs/run.sh check|record|replay|test|bridge' >&2; exit 2 ;;
+    *) echo 'Usage: bash dev/proofs/run.sh check|replay|test [--preflight-only]|bridge' >&2; exit 2 ;;
 esac

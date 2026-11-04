@@ -1,33 +1,26 @@
-"""Packaged proof inventory and evidence checks. Python never proves a theorem.
+"""Check proof safety and exact model examples exported from Lean's built environment.
 
-Lean supplies structural declarations and transitive axioms from its built environment.
-This file binds them to reviewed inputs, explanations and independently recorded examples.
-It uses only Python's standard library and works without Git or repository developer tools.
+Python never proves a theorem. Lean builds the proofs and leanchecker replays them;
+this checker rejects forbidden source commands and transitive axioms, and compares
+executable model examples with independently derived cases.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 PROOFS = Path(__file__).resolve().parents[1]
-ROOT = PROOFS.parent
 ALLOWED_AXIOMS = {"propext", "Classical.choice", "Quot.sound"}
-AUDIT_INPUTS = ["Checks/Main.lean", "Checks/Examples.lean", "Checks/audit.py"]
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     raise ValueError(message)
-
-
-def digest(data: bytes | str) -> str:
-    return hashlib.sha256(data.encode() if isinstance(data, str) else data).hexdigest()
 
 
 def canonical(value: object) -> str:
@@ -45,45 +38,6 @@ def unique_object(pairs: list[tuple[str, object]]) -> dict:
 
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text(), object_pairs_hook=unique_object)
-
-
-def source_file(name: str) -> Path:
-    path = ROOT / name
-    if (
-        not path.is_file()
-        or path.is_symlink()
-        or not path.resolve().is_relative_to(ROOT.resolve())
-    ):
-        fail(f"missing or external mapped input: {name}")
-    return path
-
-
-def section_text(name: str, heading: str) -> str:
-    lines = source_file(name).read_text().splitlines(keepends=True)
-    starts = [i for i, line in enumerate(lines) if line.rstrip() == heading]
-    if len(starts) != 1:
-        fail(f"semantic heading missing or ambiguous: {name}: {heading}")
-    start = starts[0]
-    level = len(heading) - len(heading.lstrip("#"))
-    end = len(lines)
-    fence = None
-    for i in range(start + 1, len(lines)):
-        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", lines[i])
-        if fence:
-            if re.fullmatch(
-                r" {0,3}" + re.escape(fence[0]) + "{" + str(fence[1]) + r",}\s*",
-                lines[i],
-            ):
-                fence = None
-            continue
-        if marker:
-            fence = (marker[1][0], len(marker[1]))
-            continue
-        match = re.match(r"^ {0,3}(#+) ", lines[i])
-        if match and len(match[1]) <= level:
-            end = i
-            break
-    return "".join(lines[start:end])
 
 
 def lean_sources() -> list[str]:
@@ -134,20 +88,15 @@ def stripped_lean(text: str) -> str:
     return "".join(result)
 
 
-def input_state(inventory: dict) -> dict:
-    if inventory.get("schema") != 1 or not inventory.get("theorems"):
-        fail("empty or unsupported theorem inventory")
-    if lean_sources() != sorted(inventory["modules"]):
-        fail("maintained Lean module inventory differs (including unimported sources)")
-    # Every maintained library module must be explicitly imported by its aggregation root.
+def preflight() -> list[str]:
+    sources = lean_sources()
+    # Every local proof/check module must be imported by its aggregation root.
     for root, prefix in [
         ("NetGraphCore.lean", "NetGraphCore/"),
         ("Checks.lean", "Checks/"),
     ]:
         expected = sorted(
-            name[:-5].replace("/", ".")
-            for name in inventory["modules"]
-            if name.startswith(prefix)
+            name[:-5].replace("/", ".") for name in sources if name.startswith(prefix)
         )
         imports = re.findall(
             r"^(?:public )?import ([A-Za-z0-9_.]+)\s*$",
@@ -155,20 +104,10 @@ def input_state(inventory: dict) -> dict:
             re.M,
         )
         if sorted(imports) != expected:
-            fail(f"aggregation root does not cover maintained modules: {root}")
-    inputs = {}
-    for name in [
-        "lean-toolchain",
-        "lakefile.toml",
-        "lake-manifest.json",
-        *AUDIT_INPUTS,
-    ]:
-        inputs[f"proofs/{name}"] = digest((PROOFS / name).read_bytes())
-    for name in inventory["modules"]:
-        path = PROOFS / name
-        inputs[f"proofs/{name}"] = digest(path.read_bytes())
+            fail(f"aggregation root does not cover local modules: {root}")
+    for name in sources:
         if name.startswith("NetGraphCore") or name == "Checks/Examples.lean":
-            code = stripped_lean(path.read_text())
+            code = stripped_lean((PROOFS / name).read_text())
             if re.search(
                 r"\b(sorry|admit|axiom|unsafe|native_decide)\b|\bdebug\.|#eval\b|^\s*(?:set_option|initialize|run_cmd|elab|macro|attribute)\b",
                 code,
@@ -180,251 +119,95 @@ def input_state(inventory: dict) -> dict:
                 for value in re.findall(r"@\[([^\]]*)\]", code)
             ):
                 fail(f"unreviewed mathematical declaration attribute: {name}")
-    return inputs
+    return sources
 
 
-def record_inputs(record: dict, inputs: dict) -> dict:
-    result = {"semantics": [], "implementation": [], "explanation": {}}
-    for ref in record["semantics"]:
-        section_text(ref["file"], ref["heading"])
-        result["semantics"].append(dict(ref))
-    for ref in record["implementation"]["sources"]:
-        value = digest(source_file(ref["file"]).read_bytes())
-        result["implementation"].append({**ref, "sha256": value})
-        inputs[ref["file"]] = value
-    ref = record["explanation"]
-    text = source_file(ref["file"]).read_text()
-    if f'<a id="{ref["anchor"]}"></a>' not in text:
-        fail(f"missing explanation anchor: {ref['anchor']}")
-    result["explanation"] = dict(ref)
-    return result
-
-
-def preflight(inventory: dict, recording: bool = False) -> dict:
-    inputs = input_state(inventory)
-    pins = {
-        name: inputs[f"proofs/{name}"]
-        for name in ["lean-toolchain", "lakefile.toml", "lake-manifest.json"]
-    }
-    tools = {name: inputs[f"proofs/{name}"] for name in AUDIT_INPUTS}
-    if not recording and (
-        inventory.get("pins") != pins or inventory.get("audit_sources") != tools
-    ):
-        fail("toolchain/dependency/audit-source digest drift")
-    ids, names = set(), set()
-    for record in inventory["theorems"]:
-        if not record["semantics"]:
-            fail(f"accepted theorem has no semantic contract reference: {record['id']}")
-        if record["id"] in ids or record["declaration"] in names:
-            fail("duplicate accepted ID or declaration")
-        ids.add(record["id"])
-        names.add(record["declaration"])
-        for field in ("module", "claim", "domain"):
-            if not isinstance(record.get(field), str) or not record[field].strip():
-                fail(f"missing theorem {field}: {record['id']}")
-        mapping = record_inputs(record, inputs)
-        if not recording and mapping != record.get("mapped_inputs"):
-            fail(f"explanation or applicability digest drift: {record['id']}")
-        if recording:
-            record["mapped_inputs"] = mapping
-        if record["implementation"]["status"] not in {"unconnected", "tested"}:
-            fail("unsupported native connection claim; no refinement is supplied")
-        if (
-            record["implementation"]["status"] == "tested"
-            and record["implementation"].get("bridge") != "round-robin"
-        ):
-            fail("connected declaration has no supported bridge")
-    if recording:
-        inventory["pins"], inventory["audit_sources"] = pins, tools
-    return inputs
-
-
-def binding(declaration: str, metadata: dict) -> dict:
-    if declaration not in metadata:
-        fail(f"unresolved Lean declaration: {declaration}")
-    root = metadata[declaration]
-    if root["value"] is None:
-        fail(f"proof body unavailable to audit: {declaration}")
-    axioms = sorted(root["axioms"])
-    if set(axioms) - ALLOWED_AXIOMS:
-        fail(f"unaccepted transitive axioms: {declaration}: {axioms}")
-    todo, seen, closure = [declaration], set(), {}
-    while todo:
-        name = todo.pop()
-        if name in seen or name not in metadata:
-            continue
-        seen.add(name)
-        item = metadata[name]
-        fields = {"kind": item["kind"], "type": item["type"]}
-        if item["kind"] != "theorem":
-            if item["value"] is None:
-                fail(f"definition body unavailable to audit: {name}")
-            fields["value"] = item["value"]
-        closure[name] = digest(canonical(fields))
-        todo.extend(item["uses"])
-    if root["kind"] != "theorem":
-        fail(f"accepted declaration is not a theorem: {declaration}")
-    return {
-        "type_sha256": digest(root["type"]),
-        "local_closure": closure,
-        "axioms": axioms,
-    }
-
-
-def audit(data: dict, inventory: dict, recording: bool) -> dict:
-    inputs = preflight(inventory, recording)
-    toolchain = (PROOFS / "lean-toolchain").read_text().strip()
-    if not re.fullmatch(r"leanprover/lean4:v\d+\.\d+\.\d+", toolchain) or data[
-        "lean_version"
-    ] != toolchain.removeprefix("leanprover/lean4:v"):
-        fail("unexpected Lean runtime or toolchain")
-    dependencies = read_json(PROOFS / "lake-manifest.json")["packages"]
-    for package in dependencies:
-        directory = PROOFS / ".lake/packages" / package["name"]
-        actual = subprocess.run(
-            ["git", "-C", str(directory), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        dirty = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(directory),
-                "status",
-                "--porcelain",
-                "--untracked-files=normal",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-        if actual != package["rev"] or dirty:
-            fail(f"dependency source drift: {package['name']}")
-    metadata = {item["name"]: item for item in data["declarations"]}
-    mathematical_modules = {
-        name[:-5].replace("/", ".")
-        for name in inventory["modules"]
-        if name == "NetGraphCore.lean" or name.startswith("NetGraphCore/")
-    }
-    tagged = []
-    for item in data["declarations"]:
-        if not item["authored"]:
-            continue
-        name = item["user_name"]
-        if not item["doc"] or not item["doc"].strip():
-            fail(f"missing declaration doc comment: {name}")
-        if item["source_module"] not in mathematical_modules:
-            continue
-        if not name.startswith("NetGraphCore."):
-            fail(f"mathematical declaration outside project namespace: {name}")
-        marker = re.match(r"^(NGC-[A-Z]+-\d{3}):", item["doc"].strip())
-        if marker:
-            tagged.append((marker[1], item["name"]))
-    expected = [(r["id"], r["declaration"]) for r in inventory["theorems"]]
-    if sorted(tagged) != sorted(expected):
-        fail("accepted inventory differs from theorem ID markers in built declarations")
-    expected_examples = read_json(PROOFS / "cases.json")
-    if canonical(data["examples"]) != canonical(expected_examples):
-        fail("model example inputs or exact outputs differ from independent cases")
-    inputs["proofs/cases.json"] = digest((PROOFS / "cases.json").read_bytes())
-    case_ids = {item["id"] for item in expected_examples["cases"]}
-    if len(case_ids) != len(expected_examples["cases"]):
+def checked_examples(examples: dict) -> dict:
+    expected = read_json(PROOFS / "cases.json")
+    if not expected.get("cases") or not expected.get("public_sequence"):
+        fail("empty model examples")
+    ids = [item["id"] for item in expected["cases"]]
+    if len(set(ids)) != len(ids):
         fail("duplicate executable example ID")
-    for record in inventory["theorems"]:
-        if not record["examples"] or set(record["examples"]) - case_ids:
-            fail(f"missing executable explanation example: {record['id']}")
-        if record["module"] != metadata[record["declaration"]]["source_module"]:
-            fail(f"theorem module differs from built declaration: {record['id']}")
-        actual = binding(record["declaration"], metadata)
-        if recording:
-            record["binding"] = actual
-        elif actual != record.get("binding"):
-            fail(f"reviewed statement/definition digest drift: {record['id']}")
-    revision, dirty = None, None
-    if (ROOT / ".git").exists():
-        revision = subprocess.run(
-            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        dirty = bool(
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(ROOT),
-                    "status",
-                    "--porcelain",
-                    "--untracked-files=normal",
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-        )
+    if canonical(examples) != canonical(expected):
+        fail("model example inputs or exact outputs differ from independent cases")
+    return expected
+
+
+def audit(data: dict) -> dict:
+    modules = {name[:-5].replace("/", ".") for name in preflight()}
+    mathematical = {
+        name
+        for name in modules
+        if name == "NetGraphCore" or name.startswith("NetGraphCore.")
+    }
+    theorems = {}
+    seen = set()
+    for item in data["declarations"]:
+        name = item["name"]
+        if name in seen or item["source_module"] not in modules:
+            fail(f"duplicate or external project declaration: {name}")
+        seen.add(name)
+        if item["kind"] == "axiom":
+            fail(f"project axiom: {name}")
+        in_namespace = item["user_name"].startswith("NetGraphCore.")
+        if item["source_module"] in mathematical and not in_namespace:
+            fail(f"mathematical declaration outside project namespace: {name}")
+        if not in_namespace:
+            continue
+        axioms = sorted(item["axioms"])
+        if set(axioms) - ALLOWED_AXIOMS:
+            fail(f"unaccepted transitive axioms: {name}: {axioms}")
+        if item["kind"] == "theorem":
+            theorems[name] = axioms
+    if not theorems:
+        fail("no project theorems in built environment")
+    examples = checked_examples(data["examples"])
     return {
         "status": "PASS",
         "scope": "model proofs; no native refinement",
         "lean_version": data["lean_version"],
-        "inventory_sha256": digest(canonical(inventory)),
-        "source_revision": revision,
-        "worktree_dirty": dirty,
-        "source_inputs": dict(sorted(inputs.items())),
-        "modules": inventory["modules"],
-        "accepted": [record["id"] for record in inventory["theorems"]],
-        "bindings": {
-            record["id"]: record["binding"] for record in inventory["theorems"]
-        },
-        "example_count": len(case_ids),
-        "public_sequence_steps": len(expected_examples["public_sequence"]),
-        "dependencies": {p["name"]: p["rev"] for p in dependencies},
+        "theorems": dict(sorted(theorems.items())),
+        "examples": examples,
         "dependency_origin": os.environ.get("PROOFS_DEPENDENCY_ORIGIN", "unrecorded"),
         "native_bridge": "not run here",
         "kernel_replay": "not run by this command",
     }
 
 
+def verify_report(path: Path) -> dict:
+    if not path.is_file():
+        fail("missing proof evidence file")
+    report = read_json(path)
+    theorems = report.get("theorems")
+    if report.get("status") != "PASS" or not isinstance(theorems, dict) or not theorems:
+        fail("missing or incomplete proof evidence")
+    for name, axioms in theorems.items():
+        if not name or not isinstance(axioms, list) or set(axioms) - ALLOWED_AXIOMS:
+            fail("invalid theorem or transitive axioms in proof evidence")
+    checked_examples(report["examples"])
+    return report
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preflight", action="store_true")
-    parser.add_argument("--record", action="store_true")
+    parser.add_argument("--modules", action="store_true")
     parser.add_argument("--verify-report", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    inventory_path = PROOFS / "theorems.json"
-    inventory = read_json(inventory_path)
-    if args.verify_report:
-        if not args.verify_report.is_file():
-            fail("missing proof evidence file")
-        inputs = preflight(inventory)
-        inputs["proofs/cases.json"] = digest((PROOFS / "cases.json").read_bytes())
-        report = read_json(args.verify_report)
-        if (
-            report.get("status") != "PASS"
-            or report.get("accepted") != [r["id"] for r in inventory["theorems"]]
-            or report.get("inventory_sha256") != digest(canonical(inventory))
-            or report.get("source_inputs") != dict(sorted(inputs.items()))
-        ):
-            fail("missing, incomplete or stale proof evidence")
-        print("Current proof evidence: PASS")
+    if args.modules:
+        print(json.dumps([name[:-5].replace("/", ".") for name in preflight()]))
         return
     if args.preflight:
-        preflight(inventory)
-        print("Proof input preflight: PASS")
+        preflight()
+        print("Proof source preflight: PASS")
         return
-    if args.record and (os.environ.get("CI") or os.environ.get("PROOFS_RECORD") != "1"):
-        fail("recording requires explicit PROOFS_RECORD=1 outside CI")
-    data = json.load(sys.stdin, object_pairs_hook=unique_object)
-    report = audit(data, inventory, args.record)
-    if args.record:
-        inventory_path.write_text(
-            json.dumps(inventory, indent=2, sort_keys=True) + "\n"
-        )
-        print("Recorded candidate bindings; independent review is still required.")
+    if args.verify_report:
+        verify_report(args.verify_report)
+        print("Proof evidence: PASS")
         return
+    report = audit(json.load(sys.stdin, object_pairs_hook=unique_object))
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

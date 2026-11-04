@@ -43,7 +43,7 @@ jobs:
           lint: "false"
           use-github-cache: "false"
           use-mathlib-cache: "true"
-      - name: Model proofs, fingerprints and fresh kernel replay
+      - name: Model proofs, axiom checks and fresh kernel replay
         run: bash dev/proofs/run.sh replay
       - name: Real-discovery negative controls
         run: bash dev/proofs/run.sh test

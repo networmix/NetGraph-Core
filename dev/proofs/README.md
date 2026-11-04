@@ -37,11 +37,10 @@ proofs/lake-manifest.json            every transitive dependency revision
 proofs/NetGraphCore.lean             imports every model and proof module
 proofs/NetGraphCore/Apportionment/   the round-robin model and its theorems
 proofs/Checks.lean                   imports every check module
-proofs/Checks/                       audit program, examples, Python inventory checker (audit.py)
-proofs/theorems.json                 accepted theorems and their pinned digests
+proofs/Checks/                       axiom audit, examples, Python source-safety checker (audit.py)
 proofs/cases.json                    example inputs and expected outputs, derived independently
 docs/formal/theorems/                plain explanation of each theorem and its proof
-dev/proofs/run.sh                    entry point: check, replay, test, bridge, record
+dev/proofs/run.sh                    entry point: check, replay, test, bridge
 dev/proofs/test_tool.py              negative controls of the gate
 dev/proofs/bridge.py                 exact comparisons with an installed native wheel
 dev/proofs/replay_report.py          evidence file of the kernel replay
@@ -69,9 +68,9 @@ explicit, the `/proofs/.lake/` line in `.gitignore` alone does not keep Lake's d
 build products out: the sdist exclusion does. Reports go to `build/proofs/`, which neither git
 nor the archive takes.
 
-The archive holds every local file its proof audit reads (the Lean sources, `proofs/Checks/`,
-the inventory, the explanations and the mapped semantic and native files) and needs nothing
-from `dev/`, `.git` or a sibling checkout. Lean and the pinned dependencies are downloaded.
+The archive holds every local file its proof checks read: the Lean sources, the checker and
+`proofs/cases.json`. It needs nothing from `dev/`, `.git` or a sibling checkout. Lean and the
+dependencies selected by Lake are downloaded.
 
 ## Adding or changing a theorem
 
@@ -85,38 +84,36 @@ from `dev/`, `.git` or a sibling checkout. Lean and the pinned dependencies are 
 3. Write the simple model, then the supporting lemmas, then the theorem. Keep the definitions
    that state what is computed separate from any faster evaluator and from the proof itself.
    No unfinished proof enters the project.
-4. Add the theorem to `proofs/theorems.json`, import its module from its root file, and add its
-   examples to `proofs/cases.json` with expected values derived by hand, never generated from
-   Lean or from the native code. A comparison with the native code gets a plausible wrong variant
-   that the comparison rejects.
+4. Import the theorem's module from its aggregation root and add executable examples with
+   expected values derived by hand in `proofs/cases.json`, never generated from Lean or from the
+   native code. A comparison with the native code gets a plausible wrong variant that the
+   comparison rejects. The audit discovers project theorems from the built Lean modules.
 5. Run `bash dev/proofs/run.sh check`, `replay` and `test`, and `bridge` for a connected theorem.
    A change to native code still runs its own checks under `AGENTS.md`; a proof replaces none.
 6. Get an independent review of the statement, definitions, domain and evidence, by a reviewer
    able to check the mathematical argument, and the readability review described below. The
    review keeps what is proved about the model apart from evidence about the implementation.
-7. Land the definitions, proofs, inventory, explanations, cases and any contract change together.
+7. Land the definitions, proofs, explanations, cases and any contract change together.
 
 A theorem is accepted when it has all of the following:
 
-- a statement reviewed against `docs/semantics.md`, with its domain written in `theorems.json`;
+- a statement reviewed against `docs/semantics.md`, with its domain stated in the explanation;
 - a Lean proof that builds with warnings as errors and depends only on the standard axioms;
 - a plain explanation of the statement and the proof, with a worked example and a boundary
   example, and a failing case for every assumption that can fail;
 - doc comments on every project declaration, private helpers included;
-- its pins recorded in `theorems.json` and the gate passing (`check`, `replay`, `test`, and
-  `bridge` when it is connected to native code).
+- the gate passing (`check`, `replay`, `test`, and `bridge` for native comparisons).
 
-Changing native code can leave a theorem true but break its link to the implementation;
-changing the model or a dependency can invalidate the proof evidence. In either case review the
-affected records; a green report from older inputs does not carry over.
+A proof checks the statement actually written in Lean. Review changes to the contract, statement,
+assumptions and native implementation together: a true theorem can describe the wrong rule, and
+finite native comparisons do not establish equivalence on every supported input.
 
 ## Plain explanations
 
 Every theorem and its proof, supporting lemmas included, is explained so that an engineer who
 knows the library, has no mathematical training and does not read Lean can follow it. This is a
 condition of acceptance, not documentation added afterwards. Each theorem has its own section in
-a page under `docs/formal/theorems/`, marked by an anchor named after its ID
-(`<a id="NGC-AP-001"></a>`). [round-robin.md](../../docs/formal/theorems/round-robin.md) shows
+a page under `docs/formal/theorems/`. [round-robin.md](../../docs/formal/theorems/round-robin.md) shows
 the expected form. A section explains:
 
 - the practical question and the result in ordinary words: what is split, carried, bounded or
@@ -145,8 +142,9 @@ and each substantive proof block has a comment naming its reasoning step. Explan
 comments follow the actual proof; they never state a different rule or hide an assumption behind
 an analogy.
 
-The checker enforces doc comments, explanation anchors and the examples. A human reviewer checks
-the rest: an independent reader restates the result, its conditions and why it holds without
+Executable examples are checked against `proofs/cases.json`. A human reviewer checks the text,
+doc comments and correspondence with the model: an independent reader restates the result, its
+conditions and why it holds without
 reading Lean, recalculates the examples and says what each one shows. Missing, misleading or
 unexplained examples block acceptance even when Lean accepts the proof.
 
@@ -160,44 +158,39 @@ unexplained examples block acceptance even when Lean accepts the proof.
   difference between an edge of capacity 0 and an excluded edge.
 - Do not add theorems that hold only because of the choice of a type.
 
-## The checker's pins
+## Proof checks
 
-`proofs/theorems.json` lists accepted theorems only, each with a stable ID (`NGC-AP-001`), its
-module and declaration, a short claim, its domain, the semantic sections it rests on (by
-heading), its explanation and anchor, its example IDs, and its implementation status: `tested`
-(compared with native code by a named bridge) or `unconnected`. Planned work is not listed.
+`bash dev/proofs/run.sh check` builds every proof with warnings as errors, then runs the axiom
+and example audit. Local modules are discovered from the Lean source files, and each must be
+imported by its aggregation root. The audit loads those built modules and checks the actual
+transitive axioms of every mathematical declaration, including helpers and generated declarations.
+It refuses project axioms and dependencies on any axiom except `propext`, `Classical.choice` and
+`Quot.sound`. No hand-maintained list selects which theorems receive these checks.
 
-The audit (`lake exe proof-audit` with `proofs/Checks/audit.py`) builds digests from the built
-Lean environment and compares them with the recorded ones: the elaborated statement, the type and
-body of every project definition it depends on, the explanation page, the cited semantic
-sections, the cited native source files, the toolchain and dependency pins, and the checker's own
-sources. Any change fails the check until the record is reviewed and recorded again. The native
-digests cover whole files, so even an edit that keeps behaviour needs a review of the mapping.
+The source preflight refuses `sorry`, `admit`, project axioms, `native_decide`, unsafe code,
+kernel-skip options and commands that add declarations unchecked in the mathematical modules
+and executable examples. Audit metaprogramming lives only in `proofs/Checks/`. The source checks
+supplement Lean's build and replay; they do not establish kernel validity on their own.
 
-The check also fails on a missing or duplicate ID, an unresolved declaration, an empty inventory,
-a Lean source not listed or not imported, a missing explanation or anchor, a missing doc comment,
-a declaration outside the project namespace, examples that differ from `cases.json`, and missing
-evidence. A proof may depend only on the axioms `propext`, `Classical.choice` and `Quot.sound`;
-`sorry`, project axioms, `native_decide`, `unsafe` code, options that skip the kernel and
-commands that add declarations unchecked are refused. Audit metaprogramming lives only in
-`proofs/Checks/`.
+The executable model cases must equal the independently derived inputs and exact outputs in
+`proofs/cases.json`. The generated report names the discovered theorems and their transitive
+axioms and contains the model's actual examples. The command refuses a missing or incomplete
+report, so disabling the audit cannot make the check pass.
 
 `bash dev/proofs/run.sh replay` also replays every declaration in a fresh environment with
 `leanchecker --fresh`, which reuses Lean's own kernel (it is not an independent kernel); the
-release requires it. Set `PROOFS_DEPENDENCY_ORIGIN` truthfully (`cache+local`, `source` or
-`mixed`).
+release requires it. Set `PROOFS_DEPENDENCY_ORIGIN` truthfully (`cache+local`, `source` or `mixed`).
 
-`bash dev/proofs/run.sh test` runs the gate's negative controls on a disposable copy: a weakened
-definition or statement, a weakened definition imported from another module, an imported
-`sorry` or axiom, a kernel-skip option, an unimported module, an empty inventory, a missing
-theorem, changed semantic or native inputs, a missing anchor or doc comment (private and root
-helpers included), a declaration outside the namespace and a disabled audit must each fail with
-the expected message; a false theorem added with kernel checking skipped inside a check module
-passes the audit and must fail the replay. They test the gate, not the mathematics.
+`bash dev/proofs/run.sh test` runs negative controls in a disposable project: forbidden source
+commands, an imported axiom, an imported unfinished proof and a disabled audit must fail. A false
+theorem inserted with kernel checking skipped inside a checker module must fail the fresh replay.
+The controls also exercise exact bridge comparisons and the publication artifact identity check.
+`bash dev/proofs/run.sh test --preflight-only` runs the source, comparison and artifact controls
+without Lean; it does not run the build, transitive-axiom or replay controls.
 
-`bash dev/proofs/run.sh record` rewrites the recorded digests after an intended change. It
-approves nothing: inspect the diff, get the mathematical and readability reviews, then run the
-checks. Never use it to make a drift failure go away; CI refuses it.
+Review establishes that the proved statements express the intended rules. The bridge compares
+the model with the selected native wheel on the stated finite cases; these comparisons establish
+agreement on those inputs only.
 
 ## Pins
 

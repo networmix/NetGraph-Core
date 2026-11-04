@@ -33,7 +33,6 @@ Examples are checked by Lean in `Checks/Examples.lean` and compared with indepen
 exact inputs and outputs in `proofs/cases.json`. The sequence example is also used by the native
 bridge on both `ShortestPaths` and replay through `Pinned`.
 
-<a id="NGC-AP-001"></a>
 ## NGC-AP-001: the formula describes the actual circle
 
 Claim (`sequential_eq_roundRobin`): for any number of units and any valid recipient, distributing
@@ -68,7 +67,6 @@ Why order matters: `[3, 3, 4]` also sums to ten and is almost equal, but puts th
 on the last recipient. Conservation alone would accept it; the circle-equivalence claim rejects
 that rule. Reordering recipients changes who owns each turn, so membership and order are fixed.
 
-<a id="NGC-AP-002"></a>
 ## NGC-AP-002: adding traffic cannot take a unit away
 
 Claim (`roundRobin_mono`): increasing the total by a nonnegative amount never decreases a valid
@@ -83,7 +81,6 @@ This is the arithmetic monotonicity needed for later no-drop load arguments. It 
 about a roster change: five units over two members give `[3, 2]`, while five over three give
 `[2, 2, 1]`, reducing the first member's share. It also does not by itself prove admission search.
 
-<a id="NGC-AP-003"></a>
 ## NGC-AP-003: all input units are accounted for
 
 Claim (`roundRobin_conservation`): adding the shares of all valid recipients gives the original
@@ -99,7 +96,6 @@ by an equality. They do not impose a traffic model. This result rules out droppe
 units in the model, but permits a wrong allocation such as `[10, 0, 0]` if used alone; use it with
 NGC-AP-001. A positive offer with no recipients is outside the theorem's stated domain.
 
-<a id="NGC-AP-004"></a>
 ## NGC-AP-004: continue from the previous call using only its remainder
 
 Claim (`increments_eq_difference`): the signed increment formula equals the new cumulative share
@@ -139,7 +135,6 @@ The total still adds up, so this example exposes a mistake that conservation can
 The identity applies to equal round robin. It does not justify replacing weighted allocation
 with equal allocation or forgetting the high word when computing a large total's remainder.
 
-<a id="NGC-AP-005"></a>
 ## NGC-AP-005: an increment is a real part of the new offer
 
 Claim (`increments_bounds`): a valid recipient's increment is between zero and the extra offer,
@@ -159,7 +154,6 @@ For example, the `inc-wrap` addition raises source 0's count from one to two. It
 which is no more than the two added units. Source 1 gains zero and source 2 gains one; neither
 can gain more than the whole offer. With a single source, its gain equals the offer.
 
-<a id="NGC-AP-006"></a>
 ## NGC-AP-006: the remainder calculation has room in the native amount domain
 
 Claim (`native_increment_bounds`): if there are fewer than `2^31` recipients and an offer smaller

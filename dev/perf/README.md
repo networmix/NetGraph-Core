@@ -331,14 +331,14 @@ failed.
 | `msd` | `msd.loop`, `msd.loop.epochs` | the same maximum-supported-demand bracket, bisection, 64 demands and offers with a per-series DAG cache; `loop` creates a fresh ledger and policies per probe, `loop.epochs` keeps one ledger and its policies and removes every policy before each probe |
 | `ksp` | `ksp.fabric3_k8` | k = 8 shortest paths for 8 pairs |
 | `ksp` | `ksp.longprefix_k64` | 96-edge common prefix and 64 branches, k = 64; all prefix and result work timed |
-| `ksp` | `ksp.weighted_k32` | random 128 x6, seed64, four pairs, k = 32 |
+| `ksp` | `ksp.weighted_k32` | random 128 x6, seed 64, four pairs, k = 32 |
 | `ksp` | `ksp.collapse` | 12-hop parallel prefix, 32 branches, HIGHER_CAPACITY Collapse |
 | `ksp` | `ksp.ties` | 64 equal-cost branches, each of the four tie rules |
 | `ksp` | `ksp.k1` | the long-prefix population with k = 1 |
 | `cache` | `cache.cold`, `cache.warm`, `cache.frozen.reads` | 64 direct lookups from a cleared, prepopulated building, or prepopulated frozen cache |
 | `concurrency` | `concurrency.place_zero`, `delivered`, `program`, `config` | 10,000 calls of one operation on a prepared one-link policy (capacity 16, cost 3, q=1, replace(4)); place_zero requests program and source rows; config is the immutable control |
 | `concurrency` | `concurrency.two_ledgers_serial`, `concurrency.two_ledgers_parallel` | 32 evaluate(32) calls with aggregate-default outputs on each independent ledger, reading the static preparation installed during setup; 384-node/2816-edge layered graph, q=1, capacity 64, two thread launches and joins in both modes |
-| `concurrency` | `concurrency.two_ledgers_serial.scaled`, `concurrency.two_ledgers_parallel.scaled` | Same graph, preparation and two thread launches; 512 evaluate(32) calls per ledger with aggregate-default outputs amortize launch cost. Both serial/parallel modes request neither program nor source rows; earlier APIs still retain those details. |
+| `concurrency` | `concurrency.two_ledgers_serial.scaled`, `concurrency.two_ledgers_parallel.scaled` | Same graph, preparation and two thread launches; 512 evaluate(32) calls per ledger with aggregate-default outputs amortize launch cost. Both serial/parallel modes request neither program nor source rows; Core 0.12.0 still retains those details. |
 | `eligibility` | `eligibility.build_intersect` | 64 failure states built and intersected |
 | `construct` | the fourteen storage construction rows (`construct.wgrid256`, `fanout_clos`, `random1m_nat`, `random1m_scat`, `wide65k`, `k65536`, `k65537`, `star1m`, `sparse1m`, `empty1m`, `random65k_bprime`, `random65k_reversed`, `star1m_smallk`, `instar1m_smallk`) | the constructor on prepared input: many short rows, the sort fallback above 65,536 distinct costs and both sides of that limit, very long rows, mostly isolated nodes, an empty graph, input already in or reversed from edge-id order |
 | `spf` | the six storage search rows (`spf.to.{wgrid256,random1m,wide_fallback16k,width65536,width65537}`, `spf.full.random1m`) | 8 full searches each: the bucket queue, a large scattered graph, the heap, and both sides of the bucket-width limit 65,536 |
@@ -371,19 +371,19 @@ roots must be the rule's `(i * 997 + 1) mod N`. A sampled digest is not correctn
 
 The additional pooled rows keep graph construction and fixed inputs outside timing. Each detailed trial
 includes its policy, ledger, explicitly requested program/source result fields and teardown.
-Aggregate-default rows leave those two flags false; earlier APIs retain them intrinsically.
+Aggregate-default rows leave those two flags false; Core 0.12.0 retains them intrinsically.
 `pooled_fixture` fixes the inputs for both the timed driver and a separate semantic preflight.
 The adapter's optional compile-time observer reads complete results/records only in that
 preflight; its default empty observer does no work in the timed binary.
 
 | Rows | Work and boundary |
 | --- | --- |
-| `pooled.anycast.many`, `.one`, `.two`, `.four`, `pooled.single_path.one` | Clos128x32 seed22, sources0..95, source0, sources0/1 or0..3; destinations96..111 (single path:96), replace4000; whole-roster, few-root and single-path preparation |
-| `pooled.choice.collapse_available`, `.tree`, `.bottleneck_available` |32 disjoint two-source collapse/tree groups, or one prefix-sensitive bottleneck demand; independent expected deliveries160/192/3. Available-capacity collapse sees2/5 free on capacity10/5; the tree picks the lowest-id qualifying hop; the bottleneck sees1/3 free on capacity5/3 |
-| `pooled.weight.explicit`, `.snapshot`, `.explicit.one`, `.snapshot.one` | Clos32x16 seed25, eight sources or source0 to20/21, replace400. Explicit input-edge weights `i%5==0 ? 0 : 1+i%7`; snapshot reads `i%13==0 ? 0 : capacity[i]/2` in the creation service view. U retains the zero-weight route edges |
-| `pooled.from_dag.weighted`, `pooled.from_dag_build.one` |32 non-tight seven-node DAGs with nested roots, dead ends, terminal out-edges and zero alternatives: build and Pinned replace384; or eight one-source builders on the existing Clos64x32 search/trim/plan workload |
+| `pooled.anycast.many`, `.one`, `.two`, `.four`, `pooled.single_path.one` | Clos128x32 seed 22, sources 0..95, source 0, sources 0/1 or 0..3; destinations 96..111 (single path: 96), replace 4000; whole-roster, few-root and single-path preparation |
+| `pooled.choice.collapse_available`, `.tree`, `.bottleneck_available` | 32 disjoint two-source collapse/tree groups, or one prefix-sensitive bottleneck demand; independent expected deliveries 160/192/3. Available-capacity collapse sees 2/5 free on capacity 10/5; the tree picks the lowest-id qualifying hop; the bottleneck sees 1/3 free on capacity 5/3 |
+| `pooled.weight.explicit`, `.snapshot`, `.explicit.one`, `.snapshot.one` | Clos32x16 seed 25, eight sources or source 0 to 20/21, replace 400. Explicit input-edge weights `i%5==0 ? 0 : 1+i%7`; snapshot reads `i%13==0 ? 0 : capacity[i]/2` in the creation service view. U retains the zero-weight route edges |
+| `pooled.from_dag.weighted`, `pooled.from_dag_build.one` | 32 non-tight seven-node DAGs with nested roots, dead ends, terminal out-edges and zero alternatives: build and Pinned replace 384; or eight one-source builders on the existing Clos64x32 search/trim/plan workload |
 | `pooled.controller.equal`, `global.support.equal` | ShortestPaths Optimized on Clos32x16 with equal sources, or supported CentralizedTE on the non-tight DAG family; preparation, solve, decomposition and default result lifetime |
-| `program.forward.pooled`, `program.repair.pooled`, `program.stale.pooled` | Installed Equal anycast program on Clos32x16;32 full-offer forwards100..3200 or32 fixed three-link states as repair masks/black holes, fresh Lossy Pinned policy per state, replace2400 |
+| `program.forward.pooled`, `program.repair.pooled`, `program.stale.pooled` | Installed Equal anycast program on Clos32x16; 32 full-offer forwards 100..3200 or 32 fixed three-link states as repair masks/black holes, fresh Lossy Pinned policy per state, replace 2400 |
 
 Capacity/headroom collapse and bottleneck scores share their preparation branch with available
 capacity. Static weight variants and memberless roots, and controller source-allocation variants,
@@ -392,27 +392,27 @@ pooled, program, batch, global and tunnel rows remain controls of the connected 
 
 The two/four-root and one-root Weighted rows change only the source roster of their existing
 fixtures. They use the same pooled digest and complete result work on every Core revision.
-The tool's untimed preflight independently enumerates two-hop walks: U has576/640 edges for
-two/four roots and48 edges for either one-root Weighted fixture, with minimum cost2 per root.
+The tool's untimed preflight independently enumerates two-hop walks: U has 576/640 edges for
+two/four roots and 48 edges for either one-root Weighted fixture, with minimum cost 2 per root.
 It derives positive membership and weights from the creation view, checks source-local record
 routes and graph/ledger ownership, and verifies that the timed row returns the observed digest.
 Record reads and these checks do not run in timing binaries.
 
 ### Aggregate entries and explicit record reads
 
-These fifteen rows use the same public operations on both revisions. Graphs, fixed masks and
+These fifteen rows use the same public operations on both builds. Graphs, fixed masks and
 prepared read/copy states are outside timing. Detailed placement rows retain explicitly requested program/source fields and teardown; they do
 not read records. Aggregate-default rows request neither of those fields.
 
 | Rows | Work per iteration |
 | --- | --- |
-| `ledger.aggregate_default.many`, `.one`, `.edges` | The existing Clos128x32 anycast fixture, 96 sources or one, Lossless replace4000. `.edges` also requests edge flows, residual, holds and boundary on both sides. |
+| `ledger.aggregate_default.many`, `.one`, `.edges` | The existing Clos128x32 anycast fixture, 96 sources or one, Lossless replace 4000. `.edges` also requests edge flows, residual, holds and boundary on both sides. |
 | `ledger.record_read.many`, `.one`, `.orphan`, `.repair` | `records()` plus `record(last_id)`, folding all thirteen record fields and destroying snapshots. The first three use the anycast fixture; `.orphan` destroys its policy in setup. `.repair` uses the non-tight Weighted supplied-DAG fixture, excludes its first input edge and destroys the policy and mask in setup. Descriptive rows, with no old-speed budget. |
-| `pooled.lossy.repeat`, `.one` | Clos32x16, eight sources or one; place5, place7, place infinity twice, remove. Infinity uses the remaining first-hop view; a repeated call may inject zero. |
-| `program.stale_then_place.pooled`, `.one` | The same Lossy fixture: replace4, forward4 with the first head black-holed, place2, place0, remove. The later place uses its ordinary view. |
+| `pooled.lossy.repeat`, `.one` | Clos32x16, eight sources or one; place 5, place 7, place infinity twice, remove. Infinity uses the remaining first-hop view; a repeated call may inject zero. |
+| `program.stale_then_place.pooled`, `.one` | The same Lossy fixture: replace 4, forward 4 with the first head black-holed, place 2, place 0, remove. The later place uses its ordinary view. |
 | `ledger.copy.many`, `.one` | Copy/destruct an orphaned anycast ledger; fold carried, residual, reserved and unreserved vectors without reading records. |
-| `ledger.lifecycle.one` | One source and one edge of capacity10/cost3: replace4, zero, evaluate6, forward3, remove and reset. |
-| `ledger.joint.pooled_cycle` | Two demands with two sources each cross links of capacities5 and6 in opposite order. One SIMULTANEOUS replace21/15 list, complete results and ledger lifetime; the independently derived fixed point delivers1 to each demand. |
+| `ledger.lifecycle.one` | One source and one edge of capacity 10/cost 3: replace 4, zero, evaluate 6, forward 3, remove and reset. |
+| `ledger.joint.pooled_cycle` | Two demands with two sources each cross links of capacities 5 and 6 in opposite order. One SIMULTANEOUS replace 21/15 list, complete results and ledger lifetime; the independently derived fixed point delivers 1 to each demand. |
 
 The history/lifecycle/cycle offers and capacities above are integer Core units. Other fixtures
 keep their existing `kResolution` conversion. A record digest normalizes the opaque ledger uid;
@@ -428,8 +428,8 @@ All ordinary new rows keep the 3% time budget and existing fresh-process RSS rul
 gated call rows retain their 0.1-microsecond added-per-call allowance; config keeps the ordinary
 budget. Two-ledger serial/parallel uses identical work and thread-launch counts with the 1.5
 speedup target. Record-read rows and the existing `pooled.from_dag_build.clos` remain descriptive.
-Compare the full mapped selection with both the released Core base and the preceding accepted
-head. Short plan-only calibrations estimate a requested window; they provide no performance
+Compare the mapped rows of the candidate with the base release. Short plan-only calibrations
+estimate a requested window; they provide no performance
 verdict and do not replace fresh full warm-ups or A/A controls in the granted window.
 
 ### Frozen inputs
@@ -496,13 +496,13 @@ all source quotas and complete row digests against independent ordinary/wide his
 ### Completed-result output selection
 
 Detailed rows explicitly request `program` and `by_source` before folding them. The adapter
-maps that request to intrinsically present fields on older APIs; optional source rows are
+maps that request to intrinsically present fields on Core 0.12.0; optional source rows are
 checked before reading, never replaced with an empty vector. Both sides use the same driver
 and row definitions. A missing requested field fails the semantic preflight.
 
 `ledger.aggregate_default.{many,one,edges,lossy,lossy_one,lossy_repeat}` folds the common
 aggregate/call values, with the requested edge-output control. It requests neither program nor
-source rows on the new API; the old API still constructs and retains its intrinsic details.
+source rows on this Core; Core 0.12.0 still constructs and retains its intrinsic details.
 `result.options.{none,program,by_source,both}` uses the same many-source Lossy replacement
 with each independent output selection. Setup and teardown are included as in the other call
 rows. An untimed observer checks field presence and full semantic values; timing contains no
@@ -516,6 +516,6 @@ read live policy getters and create no completed result.
 The aggregate-default list also includes `concurrency.two_ledgers_serial`,
 `concurrency.two_ledgers_parallel` and their `.scaled` variants. These rows evaluate with aggregate defaults. Their untimed preparation
 checks each source's unit delivery using explicit source outputs; timed calls check and fold
-aggregate answers. The `.scaled` pair uses 512 evaluations per ledger and is descriptive for
-this output-selection change; report both the candidate/base ratios and the serial/parallel
+aggregate answers. The `.scaled` pair uses 512 evaluations per ledger and is descriptive;
+report both the candidate/base ratios and the serial/parallel
 ratio without assigning it a new performance bar.

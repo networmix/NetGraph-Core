@@ -2309,7 +2309,7 @@ setup uses its setup view, with its own holds given back).
 
 | Call | What it does | Routings |
 | --- | --- | --- |
-| `evaluate(offer, *, design_demand=None, outputs=None)` | computes and forwards `offer` from the released view as a fresh epoch would (T1: sets up on its setup view), and reports it, the computed program included; publishes nothing: no record, no hold, and the policy's program and epoch stay as they were | all |
+| `evaluate(offer, *, design_demand=None, outputs=None)` | computes and forwards `offer` from the released view as a fresh epoch would (T1: sets up on its setup view), and reports it (the computed program only with `OutputOptions(program=True)`); publishes nothing: no record, no hold, and the policy's program and epoch stay as they were | all |
 | `replace(offer, *, design_demand=None, outputs=None)` | the same computation, then published at once: the old records and holds are retired, new ones created, the new program installed, a new epoch begun with `requested = offer`; delivery may go down | all |
 | `forward(offer, *, black_holes=None, outputs=None)` | forwards a full new offer over the installed program with no route computation and no setup (weights stay frozen, a controller does not re-solve, T1 keeps its tunnels and holds, T2 its tunnels and plan), on the released view, then publishes like `replace`; `black_holes` forwards it stale for this call | every computing model with an installed program; `Pinned` uses `replace` |
 

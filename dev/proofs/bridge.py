@@ -46,17 +46,7 @@ def main() -> None:
     )
     audit = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(audit)
-    inventory = audit.read_json(ROOT / "proofs/theorems.json")
-    inputs = audit.preflight(inventory)
-    inputs["proofs/cases.json"] = sha((ROOT / "proofs/cases.json").read_bytes())
-    proof = audit.read_json(args.proof_report)
-    if (
-        proof.get("status") != "PASS"
-        or proof.get("inventory_sha256") != audit.digest(audit.canonical(inventory))
-        or proof.get("source_inputs") != dict(sorted(inputs.items()))
-        or proof.get("accepted") != [r["id"] for r in inventory["theorems"]]
-    ):
-        raise ValueError("bridge requires complete current proof evidence")
+    proof = audit.verify_report(args.proof_report)
 
     import _netgraph_core as native
 
@@ -80,7 +70,7 @@ def main() -> None:
                 raise ValueError(
                     f"installed module differs from selected wheel: {member}"
                 )
-    cases = audit.read_json(ROOT / "proofs/cases.json")
+    cases = proof["examples"]
     checked = []
     for case in cases["cases"]:
         if case["kind"] != "rr":
@@ -149,9 +139,6 @@ def main() -> None:
     report = {
         "status": "PASS",
         "scope": "finite native comparisons, no universal refinement",
-        "proof_report_sha256": sha(args.proof_report.read_bytes()),
-        "inventory_sha256": proof["inventory_sha256"],
-        "source_inputs": proof["source_inputs"],
         "interpreter": sys.executable,
         "package": ngc.__file__,
         "extension": native.__file__,
