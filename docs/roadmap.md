@@ -73,3 +73,16 @@ Not scheduled. One entry per item: what it is, and why it is not scheduled or wh
   `tests/py/test_native_allocation.py` sometimes fails on Linux with free-threaded Python 3.14 (ten native allocations
   still live after the failed call) and passes when the same commit is run again; find what else allocates while the
   fault hook counts before reading a red run of this test as a product defect, and make the test deterministic.
+- **Concurrency model controls**: `include/netgraph/core/detail/concurrency_models.hpp`, exposed through
+  `bindings/python/concurrency_hooks.cpp`, runs finite-state models of the publication and phase protocols, and the
+  tests that use it (`tests/cpp/contract_examples_tests.cpp` and the Python hook tests) check those models, never the
+  library's own locks and atomics; `tests/cpp/concurrency_tests.cpp`, `tests/cpp/graph_concurrency_tests.cpp` and the
+  ThreadSanitizer job exercise the real code. Remove the models, their bindings and their examples, unless one is shown
+  to catch a defect of the real synchronization; a check that cannot fail on the product guards nothing.
+- **C++ tests once per system**: every unit-test job (three systems, four Python versions and free-threaded 3.14) runs
+  `make check-ci`, which rebuilds and reruns the whole C++ suite with and without the private hooks, although that suite
+  does not depend on the Python version. Running it once per system, and the Python suite per version, would cut the
+  runner time of a CI run; worth doing when CI time or runner queues slow the work.
+- **Coverage on demand**: the coverage job (`make cov`, about 35 minutes) is the longest job of every CI run, about
+  twice the next one, so it sets when a run finishes. Running it on demand or on a schedule would end a run in about 15
+  minutes; keep it on every push only if a coverage drop must block a merge.
