@@ -25,8 +25,10 @@ available until its row says so.
   table. A need in another repository is written `<repository>:<ID>`.
 - A row changes in the commit that changes its item: its scope, its needs, its contract or its implementation. Its
   evidence names in-repository witnesses (tests, documents, reports); a row never names the commit that changes it.
-- An implemented row may leave the table once a release has shipped it and no row needs it; the changelog keeps it.
-- Status words live only on this page. Designs state requirements; the changelog says what each release shipped.
+- An implemented row may leave the table once a release has shipped it and no row needs it; the repository's changelog
+  or its dated history reports keep it.
+- Status words live only on this page. Designs state requirements; the changelog or the dated history reports say what
+  shipped.
   When this page and a design disagree on order or needs, this page wins; on behaviour, the design wins.
 - The page records product facts, not how the work is run: an effort's plans, reviews and CI results stay in its own
   records.
