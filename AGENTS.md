@@ -20,3 +20,6 @@ contents and typed clients). Performance claims need correctness checks and
 A/B/A on one quiet machine (`dev/perf/README.md`; `make perf-tool-test` after
 changing that tool; CI runs it on one macOS job, as a library change can break
 it). Local checks do not replace CI.
+
+Planned and deferred work lives in `docs/roadmap.md`; a change that delivers or changes an item updates its
+row in the same commit.
