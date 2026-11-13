@@ -2173,7 +2173,8 @@ std::vector<ListAction> validate_list(FlowLedger& ledger, std::span<const Action
 
 // The list's one publication: one atomic exchange of every publishing policy's records (new ids in
 // list order, then draft order), then their epochs (nothing after the exchange throws).
-void publish_list(FlowLedger& ledger, std::span<ListAction> list, std::span<PendingPolicyUpdate> pending, const std::vector<std::uint8_t>& publishes) {
+void publish_list(FlowLedger& ledger, std::span<ListAction> list, std::span<PendingPolicyUpdate> pending, const std::vector<std::uint8_t>& publishes,
+                  std::vector<Amount>* carried = nullptr, std::vector<Amount>* held = nullptr) {
   std::vector<OwnerEntry> owners;
   std::vector<std::size_t> which;
   for (std::size_t i = 0; i < list.size(); ++i) {
@@ -2182,7 +2183,7 @@ void publish_list(FlowLedger& ledger, std::span<ListAction> list, std::span<Pend
     which.push_back(i);
   }
   concurrent_event(ConcurrentStage::BeforePublication, &ledger);
-  LedgerAccess::commit_batch(ledger, owners);
+  LedgerAccess::commit_batch(ledger, owners, carried, held);
   publication_event(ConcurrentStage::AfterLedgerExchange, &ledger);
   for (std::size_t k = 0; k < which.size(); ++k) {
     PendingPolicyUpdate& s = pending[which[k]];
@@ -2222,7 +2223,7 @@ std::vector<PlacementResult> run_ordered(FlowLedger& ledger, std::span<ListActio
     exchange(pending[i].entry, 1);
     results[i] = std::move(pending[i].result);
   }
-  publish_list(ledger, list, pending, publishes);
+  publish_list(ledger, list, pending, publishes, &carried, &held);
   return results;
 }
 

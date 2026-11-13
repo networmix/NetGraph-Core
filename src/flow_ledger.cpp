@@ -650,7 +650,8 @@ void LedgerAccess::exchange(FlowLedger& ledger, std::int64_t owner, LedgerEntry&
   commit_batch(ledger, std::span<OwnerEntry>(&one, 1));
 }
 
-void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners) {
+void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners,
+                                std::vector<Amount>* carried, std::vector<Amount>* reserved) {
   ledger.check_usable();
   for (const auto& o : owners) {
     if (!is_bound(ledger.policy_bindings_, o.owner)) throw std::logic_error("ledger: commit by an unbound owner");
@@ -694,7 +695,7 @@ void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners
   }
   const bool direct = prepared.size() == 1 && !holds;
   std::optional<DeltaScratch<0>> delta;
-  if (!direct) delta.emplace(ledger.carried_.size());
+  if (!carried && !direct) delta.emplace(ledger.carried_.size());
   bool negative = false;
   for (const auto& s : prepared) {
     if (delta && s.old != ledger.entries_.end()) for (const auto& [e, x] : s.old->second->aggregate_carried()) delta->add(e, -x);
@@ -704,6 +705,20 @@ void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners
   // Canonical C is strictly sorted and nonzero. A scalar without holds streams its
   // old/new merge directly; batches and holds keep the shared first-touch scratch.
   auto changes = [&](auto visit) {
+    if (carried) {
+      // Preserve first-touch validation order; a repeated edge has the same final total.
+      for (const auto& s : prepared) {
+        auto check = [&](const auto& entries, bool was) {
+          for (const auto& [e, x] : entries) {
+            (void)x;
+            visit(e, (*carried)[static_cast<std::size_t>(e)] - ledger.carried_[static_cast<std::size_t>(e)], was);
+          }
+        };
+        if (s.old != ledger.entries_.end()) check(s.old->second->aggregate_carried(), true);
+        check(s.value->aggregate_carried(), false);
+      }
+      return;
+    }
     if (delta) {
       for (EdgeId e : delta->touched()) visit(e, delta->at(e), false);
       return;
@@ -737,21 +752,27 @@ void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners
   if (first_new_failure) infeasible(first_new_failure->first, first_new_failure->second);
   std::optional<DeltaScratch<1>> held;
   if (holds) {
-    held.emplace(ledger.carried_.size());
+    if (!reserved) held.emplace(ledger.carried_.size());
     bool negative_hold = false;
     for (const auto& s : prepared) {
       const auto& o = *s.update;
-      if (s.old != ledger.entries_.end()) for (const auto& [e, x] : s.old->second->aggregate_holds()) held->add(e, -x);
-      for (const auto& [e, x] : o.entry->aggregate_holds()) { negative_hold = negative_hold || x < 0; held->add(e, x); }
+      if (held && s.old != ledger.entries_.end()) for (const auto& [e, x] : s.old->second->aggregate_holds()) held->add(e, -x);
+      for (const auto& [e, x] : o.entry->aggregate_holds()) { negative_hold = negative_hold || x < 0; if (held) held->add(e, x); }
     }
     if (negative_hold) throw std::logic_error("ledger: a negative hold in a commit");
-    for (EdgeId e : held->touched()) {
+    auto check_hold = [&](EdgeId e) {
       const auto ei = static_cast<std::size_t>(e);
-      const Amount next = ledger.reserved_at(ei) + held->at(e);
+      const Amount next = reserved ? (reserved->empty() ? 0 : (*reserved)[ei]) : ledger.reserved_at(ei) + held->at(e);
       if (next < 0 || next > ledger.reservation_at(ei)) {
         throw std::logic_error("ledger: infeasible reservation on edge " + std::to_string(e) + " (" + std::to_string(next) + " of " + std::to_string(ledger.reservation_at(ei)) + ")");
       }
-    }
+    };
+    if (reserved) {
+      for (const auto& s : prepared) {
+        if (s.old != ledger.entries_.end()) for (const auto& [e, x] : s.old->second->aggregate_holds()) { (void)x; check_hold(e); }
+        for (const auto& [e, x] : s.value->aggregate_holds()) { (void)x; check_hold(e); }
+      }
+    } else for (EdgeId e : held->touched()) check_hold(e);
   }
   // All fallible preparation precedes publication; scalar insertion allocates before linking its node.
   if (held && ledger.reserved_.empty()) ledger.reserved_.assign(ledger.carried_.size(), 0);
@@ -774,8 +795,13 @@ void LedgerAccess::commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners
   }
   // No allocation or validation remains. Existing entry nodes and values are reused;
   // a full replacement rekeys its node to the newly reserved identity range.
-  changes([&](EdgeId e, Amount x, bool) { ledger.carried_[static_cast<std::size_t>(e)] += x; });
-  if (held) for (EdgeId e : held->touched()) ledger.reserved_[static_cast<std::size_t>(e)] += held->at(e);
+  if (carried) {
+    ledger.carried_.swap(*carried);
+    ledger.reserved_.swap(*reserved);
+  } else {
+    changes([&](EdgeId e, Amount x, bool) { ledger.carried_[static_cast<std::size_t>(e)] += x; });
+    if (held) for (EdgeId e : held->touched()) ledger.reserved_[static_cast<std::size_t>(e)] += held->at(e);
+  }
   for (auto& s : prepared) {
     if (s.old != ledger.entries_.end()) {
       if (s.key < 0) ledger.entries_.erase(s.old);

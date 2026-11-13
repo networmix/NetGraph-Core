@@ -63,7 +63,9 @@ struct LedgerAccess {
   // aggregate changes on failure. Existing nodes and values are reused only after staging.
   static void commit(FlowLedger& ledger, std::int64_t owner, LedgerEntry& entry);
   static void exchange(FlowLedger& ledger, std::int64_t owner, LedgerEntry& entry);
-  static void commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners);
+  // ORDERED may supply its owned final totals; both vectors remain private until publication.
+  static void commit_batch(FlowLedger& ledger, std::span<OwnerEntry> owners,
+                           std::vector<Amount>* carried = nullptr, std::vector<Amount>* reserved = nullptr);
   // The working residual service baseline - carried() into `out` (resized to E).
   static void residual_into(const FlowLedger& ledger, std::vector<Amount>& out);
   [[nodiscard]] static std::span<const Amount> baseline(const FlowLedger& ledger);
