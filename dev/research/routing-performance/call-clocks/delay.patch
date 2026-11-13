@@ -1,0 +1,45 @@
+--- a/bindings/python/module.cpp
++++ b/bindings/python/module.cpp
+@@ -1,3 +1,7 @@
++#include <chrono>
++#include <thread>
++#include <ctime>
++#include <cstdint>
+ /*
+   Pybind11 module `_netgraph_core`: the graph on integer units with Eligibility and the unit
+   conversions, the route structures (PredecessorDAG, Path), the route choice and placement axes, the
+@@ -72,4 +76,34 @@
+ #if NETGRAPH_CORE_PRIVATE_HOOKS
+   bindings::register_private_hooks(m);
+ #endif
++  m.def("_clocks_delay", [](std::uint64_t ns) {
++    std::uint64_t elapsed;
++    {
++      const py::gil_scoped_release release;
++      const auto start = std::chrono::steady_clock::now();
++      if (ns != 0) std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
++      elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
++          std::chrono::steady_clock::now() - start).count();
++    }
++    return elapsed;
++  });
++  m.def("_clocks_native_cpu", [](std::uint64_t ns) {
++    std::uint64_t consumed = 0;
++    {
++      const py::gil_scoped_release release;
++      std::thread worker([&] {
++        auto cpu = [] {
++          timespec value{};
++          if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) != 0)
++            throw std::runtime_error("thread CPU clock failed");
++          return std::uint64_t(value.tv_sec) * 1000000000ULL + value.tv_nsec;
++        };
++        const auto start = cpu();
++        while ((consumed = cpu() - start) < ns) {}
++      });
++      worker.join();
++    }
++    return consumed;
++  });
++
+ }

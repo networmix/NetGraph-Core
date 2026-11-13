@@ -1,0 +1,107 @@
+--- a/bindings/python/native_call.hpp
++++ b/bindings/python/native_call.hpp
+@@ -4,12 +4,26 @@
+ 
+ #include <pybind11/pybind11.h>
+ #include <chrono>
++#include <array>
++#include <cstdint>
++#include <ctime>
+ #include <thread>
+ #include <utility>
+ #include <type_traits>
+ #include "netgraph/core/detail/concurrency.hpp"
+ 
+ namespace netgraph::core::bindings {
++// Experiment-only cumulative counters; no allocation or cross-thread writes.
++inline thread_local std::array<std::uint64_t, 7> split_totals{};
++inline std::uint64_t split_wall() noexcept {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(
++      std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++inline std::uint64_t split_cpu() noexcept {
++  timespec value{};
++  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) != 0) split_totals[6] = 1;
++  return std::uint64_t(value.tv_sec) * 1000000000ULL + value.tv_nsec;
++}
+ // The GIL released for native work: every native_call, and a FlowPolicy's destructor (its holder's
+ // deleter, which waits for the ledger gate); made with the GIL held. A thread whose call began
+ // while Python was initialized and that ends it after finalization began (a daemon thread) never
+@@ -20,10 +34,22 @@
+ // retake surfaces as a forced unwind from PyEval_RestoreThread, which parks the thread the same way.
+ class Detached {
+  public:
+-  Detached() : initialized_(Py_IsInitialized() != 0), state_(PyEval_SaveThread()) {}
++  explicit Detached(bool deletion = true)
++      : initialized_(Py_IsInitialized() != 0), state_(PyEval_SaveThread()),
++        wall_(split_wall()), cpu_(split_cpu()), deletion_(deletion) {}
+   ~Detached() {
+     if (initialized_ && Py_IsInitialized() == 0) park();
++    const auto c1 = split_cpu();
++    const auto w1 = split_wall();
+     attach(state_);
++    const auto w2 = split_wall();
++    const auto c2 = split_cpu();
++    split_totals[0] += w1 - wall_;
++    split_totals[1] += c1 - cpu_;
++    split_totals[2] += w2 - w1;
++    split_totals[3] += c2 - c1;
++    ++split_totals[4];
++    split_totals[5] += deletion_;
+   }
+   Detached(const Detached&) = delete;
+   Detached& operator=(const Detached&) = delete;
+@@ -41,13 +67,15 @@
+   }
+   bool initialized_;
+   PyThreadState* state_;
++  std::uint64_t wall_, cpu_;
++  bool deletion_;
+ };
+ 
+ // Native argument work can precede computation. It uses the same detach scope,
+ // without announcing that the computation or its publication has begun.
+ template<bool Computation = true, class Body>
+ decltype(auto) native_call(Body&& body) {
+-  const Detached detached;
++  const Detached detached(false);
+   if constexpr (Computation) detail::concurrent_event(detail::ConcurrentStage::NativeBegin, nullptr);
+   else detail::concurrent_event(detail::ConcurrentStage::ArgumentBegin, nullptr);
+   if constexpr (std::is_void_v<std::invoke_result_t<Body>>) {
+--- a/bindings/python/module.cpp
++++ b/bindings/python/module.cpp
+@@ -26,6 +26,8 @@
+ #include <pybind11/pybind11.h>
+ 
+ #include "registration.hpp"
++#include "native_call.hpp"
++#include <pybind11/stl.h>
+ 
+ namespace py = pybind11;
+ using namespace netgraph::core;
+@@ -72,4 +74,25 @@
+ #if NETGRAPH_CORE_PRIVATE_HOOKS
+   bindings::register_private_hooks(m);
+ #endif
++  m.def("_split_snapshot", [] { return bindings::split_totals; });
++  m.def("_split_probe", [](int count, bool fail) {
++    for (int i = 0; i < count; ++i) bindings::native_call([&] {
++      if (fail) throw std::invalid_argument("split exception control");
++    });
++  });
++  m.def("_split_clock_reads", [](int count) {
++    std::array<std::uint64_t, 6> out{};
++    const auto begin_w = bindings::split_wall(), begin_c = bindings::split_cpu();
++    for (int i = 0; i < count; ++i) {
++      const auto w0 = bindings::split_wall(), c0 = bindings::split_cpu();
++      const auto c1 = bindings::split_cpu(), w1 = bindings::split_wall();
++      const auto w2 = bindings::split_wall(), c2 = bindings::split_cpu();
++      out[0] += w1-w0; out[1] += c1-c0;
++      out[2] += w2-w1; out[3] += c2-c1;
++    }
++    out[5] = bindings::split_cpu()-begin_c;
++    out[4] = bindings::split_wall()-begin_w;
++    return out;
++  });
++
+ }

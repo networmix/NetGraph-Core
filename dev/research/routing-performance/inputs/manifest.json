@@ -1,0 +1,20 @@
+{
+  "backbone": {
+    "source": "/Users/networmix/ws/work/2026-11-core-routing-research.noindex/worktrees/netgraph-orient/scenarios/backbone_clos.yml",
+    "path": "/Users/networmix/ws/work/2026-11-core-routing-research.noindex/scratch/orient-add/workloads/backbone.yml",
+    "changes": "none",
+    "sha256": "5fbadce0c78f6d9d2fc0117ed2578c50be0dafc7d9a4dd7b130d8f1304c598a7"
+  },
+  "nsfnet": {
+    "source": "/Users/networmix/ws/work/2026-11-core-routing-research.noindex/scratch/orient-consumers/workloads/nsfnet.yml",
+    "path": "/Users/networmix/ws/work/2026-11-core-routing-research.noindex/scratch/orient-add/workloads/nsfnet.yml",
+    "changes": "none",
+    "sha256": "64f19e3a1577f9fcaae83f9118722129de49e6fe72715509328e5d72c41a6f04"
+  },
+  "dcbb96": {
+    "source": "/Users/networmix/ws/work/2026-11-core-routing-research.noindex/scratch/orient-consumers/workloads/dcbb96.yml",
+    "path": "/Users/networmix/ws/work/2026-11-core-routing-research.noindex/scratch/orient-add/workloads/dcbb96.yml",
+    "changes": "none",
+    "sha256": "cd81a0f81d8227ffc2d688ca24df287410f991500023ecde83fbca301fa7a8c3"
+  }
+}
