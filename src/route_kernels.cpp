@@ -634,6 +634,15 @@ PreparedRoute prepare_supplied_route(const Graph& graph, RouteAllocation allocat
   return weighted;
 }
 
+PreparedRoute restrict_shortest_path_route(const Graph& graph, const PredecessorDAG& members,
+    std::span<const NodeId> roots, std::span<const NodeId> destinations, const Eligibility* eligibility) {
+  PreparedRoute out;
+  out.allocation = RouteAllocation::Equal;
+  build_split(graph, members, roots, destinations, [&](EdgeId e) { return eligibility == nullptr || eligibility->allows_edge(e); }, &out, nullptr);
+  out.support_edges = out.forwarding_edges;
+  return out;
+}
+
 PreparedRoute restrict_prepared_route(const Graph& graph, const PreparedRoute& plan, std::span<const NodeId> roots,
                          std::span<const NodeId> destinations, const Eligibility* eligibility) {
   PreparedRoute out;

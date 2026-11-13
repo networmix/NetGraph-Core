@@ -24,6 +24,7 @@ cfg = ng.FlowPolicyConfig(routing=ng.CentralizedTE(source_allocation=opt))
 ng.Eligibility()  # expect: reportCallIssue
 ng.PredecessorDAG()  # expect: reportCallIssue
 ng.FlowRecord()  # expect: reportCallIssue
+ng.ShortestPathsPreparation()  # expect: reportCallIssue
 ng.PlacementResult()  # expect: reportCallIssue
 ng.SourceFlow()  # expect: reportCallIssue
 ng.ShortestPathCacheStats()  # expect: reportCallIssue

@@ -75,6 +75,7 @@ add_library(netgraph_core STATIC
   src/route_kernels.cpp
   src/flow_ledger.cpp
   src/shortest_path_cache.cpp
+  src/shortest_paths_reuse.cpp
   src/flow_policy.cpp
   src/evaluators.cpp
   src/forwarding_program.cpp
@@ -165,6 +166,7 @@ if(NETGRAPH_CORE_BUILD_TESTS)
     tests/cpp/flow_policy_fixture_tests.cpp
     tests/cpp/flow_policy_tests.cpp
     tests/cpp/epoch_static_tests.cpp
+    tests/cpp/shortest_paths_reuse_tests.cpp
     tests/cpp/weighted_source_tests.cpp
     tests/cpp/zero_capacity_tests.cpp
     tests/cpp/pooled_source_allocation_tests.cpp
@@ -182,6 +184,7 @@ if(NETGRAPH_CORE_BUILD_TESTS)
     tests/cpp/fault_injection.cpp
     tests/cpp/flow_ledger_fault_tests.cpp
     tests/cpp/flow_policy_fault_tests.cpp
+    tests/cpp/shortest_paths_reuse_fault_tests.cpp
     tests/cpp/apply_actions_fault_tests.cpp
     tests/cpp/min_cost_flow_deletion_fault_tests.cpp
     tests/cpp/search_fault_tests.cpp

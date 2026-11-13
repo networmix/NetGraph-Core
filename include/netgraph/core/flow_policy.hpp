@@ -22,6 +22,8 @@
 
 namespace netgraph::core {
 
+class ShortestPathsPreparation;
+
 namespace detail {
 struct TunnelRoster;
 struct PolicyEngine;
@@ -377,7 +379,8 @@ struct PlacementResult {
 class FlowPolicy {
 public:
   FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
-             FlowPolicyConfig config, const Eligibility* eligibility = nullptr, ShortestPathCache* cache = nullptr);
+             FlowPolicyConfig config, const Eligibility* eligibility = nullptr, ShortestPathCache* cache = nullptr,
+             const ShortestPathsPreparation* preparation = nullptr);
   FlowPolicy(const FlowPolicy&) = delete;
   FlowPolicy& operator=(const FlowPolicy&) = delete;
   FlowPolicy(FlowPolicy&&) = delete;

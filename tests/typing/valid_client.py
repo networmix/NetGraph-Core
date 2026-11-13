@@ -343,3 +343,23 @@ ng.CentralizedTE(
     source_allocation=ng.SourceAllocation.WEIGHTED,
     source_weights=np.zeros(g.num_nodes(), dtype=np.int64),
 )
+
+# A captured default split produces optional case preparations.
+reuse_graph = ng.Graph(2, [0, 0], [1, 1], [10, 10], [1, 1], 1.0)
+reuse_ledger = ng.FlowLedger(reuse_graph)
+reuse_config = ng.FlowPolicyConfig(routing=ng.ShortestPaths())
+reuse_base = ng.FlowPolicy(reuse_ledger, 0, 1, reuse_config)
+reuse_base.replace(100)
+reuse_capture = ng.ShortestPathsReuse((reuse_base,))
+reuse_mask = reuse_graph.eligibility(excluded_edges=[0])
+reuse_hints = reuse_capture.prepare(reuse_mask)
+assert_type(reuse_hints, tuple[ng.ShortestPathsPreparation | None, ...])
+reuse_case = ng.FlowPolicy(
+    ng.FlowLedger(reuse_graph),
+    0,
+    1,
+    reuse_config,
+    reuse_mask,
+    preparation=reuse_hints[0],
+)
+assert reuse_case.replace(100).delivered == 10

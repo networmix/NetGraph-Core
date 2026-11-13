@@ -213,6 +213,11 @@ private:
 [[nodiscard]] PreparedRoute restrict_prepared_route(const Graph& graph, const PreparedRoute& plan, std::span<const NodeId> roots,
                                        std::span<const NodeId> destinations, const Eligibility* eligibility);
 
+// Equal ShortestPaths restriction with a retained member DAG. Unlike Pinned
+// replay, its route and replay basis are the newly pruned case support.
+[[nodiscard]] PreparedRoute restrict_shortest_path_route(const Graph& graph, const PredecessorDAG& members,
+    std::span<const NodeId> roots, std::span<const NodeId> destinations, const Eligibility* eligibility);
+
 // ---------------------------------------------------------------- ShortestPaths creation
 
 // std::lower_bound(a, x) on an ascending `a`, found from position `hint` (the creation walk's

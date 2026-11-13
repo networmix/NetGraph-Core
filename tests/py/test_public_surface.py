@@ -34,6 +34,8 @@ PUBLIC = {
     "CostStretch",
     "TunnelCount",
     "ShortestPaths",
+    "ShortestPathsReuse",
+    "ShortestPathsPreparation",
     "DistributedTE",
     "CentralizedTE",
     "Pinned",
@@ -93,7 +95,13 @@ HOOK_FUNCTIONS = {
 }
 HOOK_MEMBERS = {
     "FlowLedger": {"_state"},
-    "FlowPolicy": {"_place_traced", "_state", "_owner", "_seed_requested"},
+    "FlowPolicy": {
+        "_place_traced",
+        "_state",
+        "_owner",
+        "_seed_requested",
+        "_reuse_consumed",
+    },
 }
 
 
@@ -108,8 +116,7 @@ def test_public_surface():
     for name in PUBLIC:
         assert getattr(ngc, name) is getattr(_netgraph_core, name), name
     assert isinstance(ngc.__version__, str)
-    # 55 entries with __version__ (RouteTieBreak replaces the three earlier route-choice types).
-    assert len(ngc.__all__) == 55
+    assert len(ngc.__all__) == 57
 
 
 def test_enum_values_are_pinned():

@@ -18,6 +18,7 @@
 #include "netgraph/core/detail/policy_engine.hpp"
 #include "netgraph/core/flow_policy.hpp"
 #include "netgraph/core/forwarding_program.hpp"
+#include "netgraph/core/shortest_paths_reuse.hpp"
 #include "integers.hpp"
 #include "publication.hpp"
 #include "values.hpp"
@@ -151,6 +152,36 @@ struct DetachedDelete {
 };
 
 void register_flow_policy(py::module_& m) {
+  py::class_<ShortestPathsPreparation, std::shared_ptr<ShortestPathsPreparation>>(m, "ShortestPathsPreparation", py::is_final(),
+      "Immutable default ShortestPaths case preparation; created by ShortestPathsReuse.prepare.");
+  py::class_<ShortestPathsReuse>(m, "ShortestPathsReuse", py::is_final(),
+      "Immutable baseline route capture; owns the graph and route data, never policies, ledgers or placed amounts.")
+      .def(py::init([](const py::sequence& policies) {
+        std::vector<FlowPolicy*> owners;
+        std::vector<py::object> keep;
+        owners.reserve(policies.size());
+        keep.reserve(policies.size());
+        for (const auto& item : policies) {
+          owners.push_back(&policy_value(item));
+          keep.push_back(py::reinterpret_borrow<py::object>(item));
+        }
+        return native_call([&] { return ShortestPathsReuse(owners); });
+      }), py::arg("policies"),
+      "Capture installed default EQUAL LOSSLESS multipath/parallel ShortestPaths programs on one ledger and mask.\n"
+      "Unsupported configurations yield None hints. Eligible policies must have an installed program.\n"
+      "Checks: element types, nonempty sequence, constructed policies, common ledger, effective mask, then installed programs.")
+      .def("prepare", [](const ShortestPathsReuse& self, const std::shared_ptr<Eligibility>& mask) {
+        auto hints = native_call([&] { return self.prepare(mask.get()); });
+        auto result = py::reinterpret_steal<py::tuple>(checked(PyTuple_New(static_cast<Py_ssize_t>(hints.size()))).release());
+        for (std::size_t i = 0; i < hints.size(); ++i) {
+          auto value = optional_shared(hints[i]);
+          PyTuple_SET_ITEM(result.ptr(), static_cast<Py_ssize_t>(i), value.release().ptr());
+        }
+        return result;
+      }, py::arg("eligibility") = nullptr,
+      "Derive one hint per baseline policy under eligibility (None: all allowed).\n"
+      "Return None for unsupported configurations, noncontained masks or changed surviving-source distances.\n"
+      "Containment reads effective node and edge flags. All native work is detached; no ledger is touched.");
   [[maybe_unused]] auto flow_policy = py::class_<FlowPolicy, std::unique_ptr<FlowPolicy, DetachedDelete>>(
       m, "FlowPolicy", py::is_final(),
       "The placement engine for one demand, bound to its ledger at construction. A final Python class.\n"
@@ -167,12 +198,20 @@ void register_flow_policy(py::module_& m) {
       "string) and an unknown keyword.")
       .def("__init__", [](py::detail::value_and_holder& instance, const std::shared_ptr<FlowLedger>& ledger,
                        const py::object& sources, const py::object& destinations, const FlowPolicyConfig& config,
-                       const std::shared_ptr<Eligibility>& elig, const std::shared_ptr<ShortestPathCache>& cache) {
+                       const std::shared_ptr<Eligibility>& elig, const std::shared_ptr<ShortestPathCache>& cache,
+                       const std::shared_ptr<ShortestPathsPreparation>& preparation) {
              if (!ledger) throw py::type_error("ledger must be a FlowLedger");
              const auto n = detail::LedgerAccess::graph(*ledger)->num_nodes();
              const auto s = node_ids(sources, n, "sources");
              const auto d = node_ids(destinations, n, "destinations");
-             auto prepared = detail::PolicyAccess::prepare(*ledger, s, d, config, elig.get(), cache.get(), nullptr, detached_argument_work);
+             auto prepared = [&] {
+               if (preparation) {
+                 return native_call([&] {
+                   return detail::PolicyAccess::prepare(*ledger, s, d, config, elig.get(), cache.get(), nullptr, nullptr, preparation.get());
+                 });
+               }
+               return detail::PolicyAccess::prepare(*ledger, s, d, config, elig.get(), cache.get(), nullptr, detached_argument_work);
+             }();
              // Registration and holder construction can allocate. Complete them while the
              // shell is unbound; no Python work remains after native construction publishes.
              std::unique_ptr<FlowPolicy, DetachedDelete> holder(detail::PolicyAccess::shell().release());
@@ -205,6 +244,7 @@ void register_flow_policy(py::module_& m) {
            py::arg("ledger"),
            py::arg("sources"), py::arg("destinations"), py::arg("config"), py::arg("eligibility") = nullptr,
            py::arg("cache") = nullptr,
+           py::kw_only(), py::arg("preparation") = nullptr,
            "Bind a policy to ledger. eligibility (None: everything allowed) and cache (None: none; only ShortestPaths\n"
            "routing reads it, another model rejects it) belong to the ledger's graph; the policy keeps the\n"
            "ledger, eligibility and cache alive (a Pinned policy shares its program and black holes). The roster\n"
@@ -217,7 +257,10 @@ void register_flow_policy(py::module_& m) {
            "configuration (FlowPolicyConfig's order, the pooled single-path rule and T2's several-sources rule\n"
            "included), the tunnel limit (`tunnel limit exceeded:\n"
            "<H> heads x <N> tunnels > 1073741823`) and a Pinned program's endpoints (`program endpoints do not\n"
-           "match policy endpoints`).")
+           "match policy endpoints`).\n"
+           "preparation is an optional ShortestPathsReuse hint: graph ownership is checked after other ownerships,\n"
+           "then config/roster, hint mask/endpoints/config matches, then mutable state. A supplied cache always\n"
+           "uses ordinary construction, preserving its statistics and frozen-miss behaviour.")
       .def(
           "place",
           [](const py::object& self, const py::object& offer, const py::object& outputs) {
@@ -343,6 +386,9 @@ void register_flow_policy(py::module_& m) {
       .def("as_dict", [](const detail::Trace& trace) { return trace_obj(trace); },
            "private: convert the completed native trace to Python values");
   flow_policy
+      .def("_reuse_consumed", [](const py::object& self) {
+        return detail::PolicyAccess::engine(policy_value(self)).preparation_consumed;
+      }, "private: whether construction consumed a ShortestPaths preparation")
       .def("_seed_requested", [](const py::object& self, std::uint64_t hi, std::uint64_t lo) {
             auto& p = policy_value(self);
         if (hi >= (std::uint64_t{1} << 63)) throw py::value_error("requested seed reaches 2^127");

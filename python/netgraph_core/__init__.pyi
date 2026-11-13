@@ -65,6 +65,8 @@ __all__: list[str] = [
     "CostStretch",
     "TunnelCount",
     "ShortestPaths",
+    "ShortestPathsPreparation",
+    "ShortestPathsReuse",
     "DistributedTE",
     "CentralizedTE",
     "Pinned",
@@ -2084,6 +2086,36 @@ class ShortestPathCache:
         """
 
 @typing.final
+class ShortestPathsPreparation:
+    """
+    Immutable default ShortestPaths case preparation; created by ShortestPathsReuse.prepare.
+    """
+
+    def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
+
+@typing.final
+class ShortestPathsReuse:
+    """
+    Immutable baseline route capture; owns the graph and route data, never policies, ledgers or placed amounts.
+    """
+
+    def __init__(self, policies: collections.abc.Sequence[FlowPolicy]) -> None:
+        """
+        Capture installed default EQUAL LOSSLESS multipath/parallel ShortestPaths programs on one ledger and mask.
+        Unsupported configurations yield None hints. Eligible policies must have an installed program.
+        Checks: element types, nonempty sequence, constructed policies, common ledger, effective mask, then installed programs.
+        """
+
+    def prepare(
+        self, eligibility: Eligibility | None = None
+    ) -> tuple[ShortestPathsPreparation | None, ...]:
+        """
+        Derive one hint per baseline policy under eligibility (None: all allowed).
+        Return None for unsupported configurations, noncontained masks or changed surviving-source distances.
+        Containment reads effective node and edge flags. All native work is detached; no ledger is touched.
+        """
+
+@typing.final
 class FlowPolicy:
     """
     The placement engine for one demand, bound to its ledger at construction. A final Python class.
@@ -2112,6 +2144,8 @@ class FlowPolicy:
         config: FlowPolicyConfig,
         eligibility: Eligibility | None = None,
         cache: ShortestPathCache | None = None,
+        *,
+        preparation: ShortestPathsPreparation | None = None,
     ) -> None:
         """
         Bind a policy to ledger. eligibility (None: everything allowed) and cache (None: none; only ShortestPaths
@@ -2127,6 +2161,9 @@ class FlowPolicy:
         included), the tunnel limit (`tunnel limit exceeded:
         <H> heads x <N> tunnels > 1073741823`) and a Pinned program's endpoints (`program endpoints do not
         match policy endpoints`).
+        preparation is an optional ShortestPathsReuse hint: graph ownership is checked after other ownerships,
+        then config/roster, hint mask/endpoints/config matches, then mutable state. A supplied cache always
+        uses ordinary construction, preserving its statistics and frozen-miss behaviour.
         """
 
     def delivered(self) -> int:

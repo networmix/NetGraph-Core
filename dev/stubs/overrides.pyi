@@ -518,9 +518,24 @@ class ShortestPathCacheStats:
     # generated: (none)
     def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
 
+class ShortestPathsPreparation:
+    # reason: no public constructor: created by ShortestPathsReuse.prepare
+    # generated: (none)
+    def __init__(self, _no_public_constructor: typing.Never, /) -> None: ...
+
+class ShortestPathsReuse:
+    # reason: the sequence contains constructed FlowPolicy objects
+    # generated: def __init__(self, policies: collections.abc.Sequence) -> None:
+    def __init__(self, policies: collections.abc.Sequence[FlowPolicy]) -> None: ...
+    # reason: one optional immutable preparation per baseline policy; None is the all-allowed mask
+    # generated: def prepare(self, eligibility: Eligibility = None) -> tuple:
+    def prepare(
+        self, eligibility: Eligibility | None = None
+    ) -> tuple[ShortestPathsPreparation | None, ...]: ...
+
 class FlowPolicy:
     # reason: sources and destinations are node sets; eligibility and cache may be None
-    # generated: def __init__(self, ledger: FlowLedger, sources: typing.Any, destinations: typing.Any, config: FlowPolicyConfig, eligibility: Eligibility = None, cache: ShortestPathCache = None) -> None:
+    # generated: def __init__(self, ledger: FlowLedger, sources: typing.Any, destinations: typing.Any, config: FlowPolicyConfig, eligibility: Eligibility = None, cache: ShortestPathCache = None, *, preparation: ShortestPathsPreparation = None) -> None:
     def __init__(
         self,
         ledger: FlowLedger,
@@ -533,6 +548,8 @@ class FlowPolicy:
         config: FlowPolicyConfig,
         eligibility: Eligibility | None = None,
         cache: ShortestPathCache | None = None,
+        *,
+        preparation: ShortestPathsPreparation | None = None,
     ) -> None: ...
     # reason: offer is integer units or float('inf') (a NumPy floating +inf too); outputs may be None; the result is a PlacementResult
     # generated: def place(self, offer: typing.Any, outputs: typing.Any = None) -> typing.Any:

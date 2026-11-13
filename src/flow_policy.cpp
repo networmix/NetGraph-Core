@@ -57,6 +57,7 @@
   trace block is guarded by kTraced and is compile-time dead without them.
 */
 #include "netgraph/core/flow_policy.hpp"
+#include "netgraph/core/shortest_paths_reuse.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -629,6 +630,11 @@ PreparedShortestPaths prepare_shortest_path_program(PolicyCallContext& c) {
   const RouteAllocation allocation = std::get<ShortestPaths>(pe.config.routing).allocation;
   PreparedShortestPaths out;
   out.program = pe.kept_program;
+  if (!out.program && pe.prepared_program) {
+    const auto& data = ProgramAccess::data(*pe.prepared_program);
+    out.program = shortest_path_program(g, pe.sources, pe.destinations, pe.reachable_sources,
+        data.split_contexts.front().prepared_route, data.entries);
+  }
   if (out.program) {
     const auto& data = ProgramAccess::data(*out.program);
     out.support = data.common_replay_support;
@@ -1678,7 +1684,8 @@ struct ConstructionInputs {
 template<class Prepared>
 void prepare_arguments(Prepared& pe, const Graph& g, std::span<const NodeId> sources,
     std::span<const NodeId> destinations, const Eligibility* eligibility, const ShortestPathCache* cache,
-    const detail::TunnelRoster* roster = nullptr, detail::ArgumentWork search = nullptr) {
+    const detail::TunnelRoster* roster = nullptr, detail::ArgumentWork search = nullptr,
+    const ShortestPathsPreparation* preparation = nullptr) {
   // The endpoints, then the ownership of the mask, the program, the support, the cache and the
   // black holes, then the configuration.
   pe.sources = detail::node_set(sources, g.num_nodes(), "sources");
@@ -1701,6 +1708,9 @@ void prepare_arguments(Prepared& pe, const Graph& g, std::span<const NodeId> sou
   }
   if (pinned != nullptr && pinned->black_holes && pinned->black_holes->graph_uid() != g.uid()) {
     throw std::invalid_argument("black_holes belongs to another graph");
+  }
+  if (preparation != nullptr && detail::ShortestPathsReuseAccess::graph_uid(*preparation) != g.uid()) {
+    throw std::invalid_argument("preparation belongs to another graph");
   }
   pe.eligibility = eligibility;
   detail::check_config(pe.config, cache != nullptr, g.num_nodes(), g.num_edges(), pe.sources.size());
@@ -1789,7 +1799,10 @@ std::unique_ptr<PolicyEngine> finish_engine(std::unique_ptr<PolicyEngine> pe, Sh
     pe->policy_id = LedgerAccess::bind(ledger);
     return pe;
   }
-  if (detail::is<ShortestPaths>(*pe)) {
+  if (detail::is<ShortestPaths>(*pe) && pe->preparation_consumed) {
+    // The default static split program already supplies the roster and U'.
+    // No later reader on this branch uses the full reverse support.
+  } else if (detail::is<ShortestPaths>(*pe)) {
     pe->support = cache != nullptr
                       ? detail::DagCacheAccess::lookup(*cache, g, pe->destinations, Direction::Reverse, eligibility, tally)
                       : std::make_shared<const PredecessorDAG>(detail::static_support(g, pe->destinations, Direction::Reverse, eligibility));
@@ -1857,10 +1870,16 @@ std::optional<detail::TunnelRoster> detail::check_policy_construction(const Grap
 }
 
 std::unique_ptr<PolicyEngine> detail::PolicyAccess::prepare(FlowLedger& ledger, std::span<const NodeId> sources,
-    std::span<const NodeId> destinations, FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache, const detail::TunnelRoster* roster, detail::ArgumentWork search) {
+    std::span<const NodeId> destinations, FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache,
+    const detail::TunnelRoster* roster, detail::ArgumentWork search, const ShortestPathsPreparation* preparation) {
   auto pe = std::make_unique<PolicyEngine>(ledger, std::move(config));
   pe->graph = LedgerAccess::graph(ledger);
-  prepare_arguments(*pe, *pe->graph, sources, destinations, eligibility, cache, roster, search);
+  prepare_arguments(*pe, *pe->graph, sources, destinations, eligibility, cache, roster, search, preparation);
+  if (preparation != nullptr) {
+    detail::ShortestPathsReuseAccess::check(*preparation, *pe);
+    // A supplied cache retains its exact uid-keyed lookup and failure contract.
+    if (cache == nullptr) detail::ShortestPathsReuseAccess::install(*preparation, *pe);
+  }
   if (const auto* sp = std::get_if<ShortestPaths>(&pe->config.routing)) {
     pe->static_preparation = sp->allocation != RouteAllocation::Optimized &&
         (sp->tie_break == RouteTieBreak::FewerHops || sp->tie_break == RouteTieBreak::HigherCapacity) &&
@@ -1883,8 +1902,9 @@ void detail::PolicyAccess::construct(FlowPolicy& policy, std::unique_ptr<PolicyE
 }
 
 FlowPolicy::FlowPolicy(FlowLedger& ledger, std::span<const NodeId> sources, std::span<const NodeId> destinations,
-                       FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache) {
-  auto prepared = detail::PolicyAccess::prepare(ledger, sources, destinations, std::move(config), eligibility, cache);
+                       FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache,
+                       const ShortestPathsPreparation* preparation) {
+  auto prepared = detail::PolicyAccess::prepare(ledger, sources, destinations, std::move(config), eligibility, cache, nullptr, nullptr, preparation);
   detail::PolicyAccess::construct(*this, std::move(prepared), cache);
 }
 

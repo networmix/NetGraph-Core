@@ -1120,9 +1120,60 @@ raises `ValueError`:
 `weight_basis=None` to `CAPACITY` for `WEIGHTED`; a policy's `config` is the configuration it was
 built with, these two fields resolved (the model value itself never changes).
 
-`FlowPolicy(ledger, sources, destinations, config, eligibility=None, cache=None)` binds the policy
+`FlowPolicy(ledger, sources, destinations, config, eligibility=None, cache=None, *, preparation=None)` binds the policy
 to its ledger. `sources` and `destinations` are one node id or a sequence; the two sets must not
 overlap. Construction validates everything before the policy binds.
+
+### Preparing deletion cases
+
+`ShortestPathsReuse(policies)` captures the installed programs of a nonempty sequence of policies on one ledger
+and one effective Eligibility. Eligible policies use `ShortestPaths` with EQUAL allocation, LOSSLESS admission,
+FEWER_HOPS, multipath and parallel edges. Each eligible policy must already have installed a program, including
+an empty program after a replacing call with an empty roster. Other configurations retain their position but
+produce no preparation. The capture owns immutable graph/route data and keeps no ledger, policy or placed amount.
+Original policies may be removed and destroyed after capture; their objects are owned while capture is running.
+
+`capture.prepare(eligibility=None)` returns one optional `ShortestPathsPreparation` per captured policy. It compares
+effective node and edge flags once for the group. A mask allowing any element absent in the baseline gives all None.
+For a contained mask a demand gets a preparation exactly when every surviving baseline roster source keeps its
+shortest distance. Failed sources leave the roster; failed destinations are removed. Empty rosters are valid.
+The retained routes are restricted and pruned to the surviving source-to-destination walks. Every parallel member
+and capacity-zero member participates. Admission and ledger publication always run again on the case ledger.
+
+Pass a preparation through the keyword-only `FlowPolicy(..., preparation=hint)`. Graph ownership is checked after
+the other ownership checks and before configuration checks. After configuration/roster validation, the effective
+mask, normalized endpoints and resolved configuration must match, in that order. Mismatches raise ValueError:
+`preparation belongs to another graph`, `preparation Eligibility does not match policy Eligibility`,
+`preparation endpoints do not match policy endpoints`, `preparation configuration does not match policy configuration`.
+Mutable cache/ledger checks come last. A supplied cache always uses its ordinary lookup path and statistics,
+including a frozen miss. A None preparation preserves ordinary construction.
+
+The capture rejects, in order, non-policy/unconstructed elements, an empty sequence (`baseline policies must not
+be empty`), different ledgers (`baseline policies must share one ledger`), different effective masks (`baseline
+policies must share one Eligibility`), and an eligible policy without a program (`baseline policy <i> has no
+prepared program`). A prepare mask from another graph raises `foreign Eligibility: built for another graph`.
+All preparation work is immutable and may run concurrently; a failed call returns no partial group and changes
+no ledger, policy or capture. Native work releases the GIL. Keep a capture for the intended series, then drop it;
+case policies own the arrays they need independently of the capture and hint wrappers.
+
+Programs are private to each policy. Before the first successful publication, separate evaluate calls create
+distinct program objects; evaluate does not populate the retained program. Successful publication retains its
+program for subsequent static epochs, just as ordinary ShortestPaths does.
+
+```python
+g = graph(2, [(0, 1, 10, 1), (0, 1, 10, 1)])
+base = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, config(ngc.ShortestPaths()))
+before = base.replace(100)
+capture = ngc.ShortestPathsReuse([base])
+mask = g.eligibility(excluded_edges=[0])
+hint = capture.prepare(mask)[0]
+case = ngc.FlowPolicy(ngc.FlowLedger(g), 0, 1, base.config, mask, preparation=hint)
+print(before.delivered, case.replace(100).delivered, hint is not None)
+```
+
+```text
+20 10 True
+```
 
 ### The source roster
 

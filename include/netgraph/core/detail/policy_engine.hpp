@@ -89,6 +89,11 @@ struct PolicyEngine {
   // preparation is owned across epochs, separately from the visible installed program.
   bool static_preparation {false};
   std::shared_ptr<const ForwardingProgram> kept_program {};
+  // An invisible immutable preparation template. Before publication each
+  // computation receives a fresh program value; only publish_epoch retains it.
+  std::shared_ptr<const ForwardingProgram> prepared_program {};
+  // Immutable after construction; the private observer verifies hint consumption.
+  bool preparation_consumed {false};
   // CentralizedTE: a capture request for the next solve's final state (the exact sensitivity model's
   // baseline); set and cleared by the evaluator.
   DeletionCapture* capture {nullptr};
@@ -103,7 +108,7 @@ struct PolicyAccess {
   // Argument-only construction work, performed before a cache lease or ledger gate.
   [[nodiscard]] static std::unique_ptr<PolicyEngine> prepare(FlowLedger& ledger, std::span<const NodeId> sources,
       std::span<const NodeId> destinations, FlowPolicyConfig config, const Eligibility* eligibility, ShortestPathCache* cache,
-      const TunnelRoster* roster = nullptr, ArgumentWork search = nullptr);
+      const TunnelRoster* roster = nullptr, ArgumentWork search = nullptr, const ShortestPathsPreparation* preparation = nullptr);
   // An unbound, destructible shell; installation is the only publishing step.
   [[nodiscard]] static std::unique_ptr<FlowPolicy> shell();
   static void construct(FlowPolicy& policy, std::unique_ptr<PolicyEngine> prepared, ShortestPathCache* cache);

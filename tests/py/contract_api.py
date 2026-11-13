@@ -95,6 +95,11 @@ CONTRACT_API = {
         "uid": "declared",
         "unreserved": [[]],
     },
+    "ShortestPathsPreparation": {},
+    "ShortestPathsReuse": {
+        "__init__": [[("policies", "pos", None)]],
+        "prepare": [[("eligibility", "pos", "None")]],
+    },
     "FlowPolicy": {
         "__init__": [
             [
@@ -104,6 +109,7 @@ CONTRACT_API = {
                 ("config", "pos", None),
                 ("eligibility", "pos", "None"),
                 ("cache", "pos", "None"),
+                ("preparation", "kw", "None"),
             ]
         ],
         "config": "attribute",
